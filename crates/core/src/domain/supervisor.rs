@@ -482,14 +482,16 @@ pub fn reduce(run: &mut SupervisorRun, event: &SupervisorEvent) -> Result<(), Su
             generation,
             passed,
             result_digest,
-        } => verification_result(
-            &mut next,
-            task_id,
-            *generation,
-            *passed,
-            result_digest,
-            event,
-        )?,
+        } => {
+            verification_result(
+                &mut next,
+                task_id,
+                *generation,
+                *passed,
+                result_digest,
+                event,
+            )?;
+        }
         SupervisorEventKind::Cancel { task_id, reason } => {
             cancel(&mut next, task_id.as_ref(), reason, event.observed_at)?;
         }
@@ -558,20 +560,16 @@ fn dispatch(
     provenance: RunProvenance,
     now: DateTime<Utc>,
 ) -> Result<(), SupervisorError> {
-    match admit_dispatch(run, task_id, &provenance) {
-        Err(SupervisorError::PolicyDenied(reason)) => {
-            escalate(
-                run,
-                Some(task_id.clone()),
-                reason,
-                "policy limits are evaluated from the durable run snapshot".into(),
-                vec!["resume".into(), "cancel".into()],
-                now,
-            );
-            return Ok(());
-        }
-        Err(error) => return Err(error),
-        Ok(()) => {}
+    if let Err(SupervisorError::PolicyDenied(reason)) = admit_dispatch(run, task_id, &provenance) {
+        escalate(
+            run,
+            Some(task_id.clone()),
+            reason,
+            "policy limits are evaluated from the durable run snapshot".into(),
+            vec!["resume".into(), "cancel".into()],
+            now,
+        );
+        return Ok(());
     }
     let task = run.tasks.get(task_id).ok_or(SupervisorError::MissingTask)?;
     if task.generation != generation {
@@ -1379,6 +1377,111 @@ mod tests {
         .unwrap();
         assert_eq!(run.state, SupervisorRunState::Escalated);
         assert_eq!(run.escalation.as_ref().unwrap().safe_evidence, "mismatch");
+    }
+
+    #[test]
+    fn policy_and_reducer_error_edges_are_explicit() {
+        let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
+        let id = TaskId::new("task").unwrap();
+        let provenance = RunProvenance {
+            supervisor_run_id: run.supervisor_run_id,
+            task_id: id.clone(),
+            parent_task_id: None,
+            parent_dispatch_run: None,
+            dispatch_run_id: OperationId::new(),
+            worker_session_id: SessionId::new(),
+            worker_agent_id: AgentRuntimeId::new(),
+            worker_worktree_id: WorktreeId::new(),
+            generation: 1,
+        };
+        assert!(matches!(
+            dispatch(&mut run, &id, 1, provenance.clone(), now()),
+            Err(SupervisorError::MissingTask)
+        ));
+        run.state = SupervisorRunState::WaitingForDecision;
+        assert!(matches!(
+            admit_dispatch(&run, &id, &provenance),
+            Err(SupervisorError::PolicyDenied(reason)) if reason == "human decision required"
+        ));
+        run.state = SupervisorRunState::Planning;
+        let mut dispatched_task = task(run.supervisor_run_id, "task", &[]);
+        dispatched_task.state = TaskState::Dispatched;
+        run.tasks.insert(id.clone(), dispatched_task);
+        run.policy.max_concurrency = 1;
+        assert!(matches!(
+            admit_dispatch(&run, &id, &provenance),
+            Err(SupervisorError::PolicyDenied(reason)) if reason == "concurrency limit reached"
+        ));
+        run.policy.max_concurrency = 2;
+        let parent = TaskId::new("parent").unwrap();
+        let parent_task = task(run.supervisor_run_id, "parent", &[]);
+        run.tasks.insert(parent.clone(), parent_task);
+        run.tasks.get_mut(&id).unwrap().parent_task_id = Some(parent);
+        run.policy.max_depth = 0;
+        assert!(matches!(
+            admit_dispatch(&run, &id, &provenance),
+            Err(SupervisorError::PolicyDenied(reason)) if reason == "maximum task depth exceeded"
+        ));
+        assert_eq!(
+            retry_ready(&mut run, &id, 2, now()),
+            Err(SupervisorError::StaleGeneration)
+        );
+        assert_eq!(
+            verification_result(
+                &mut run,
+                &id,
+                1,
+                true,
+                "digest",
+                &event(
+                    1,
+                    SupervisorEventKind::SetRunState {
+                        state: SupervisorRunState::Running,
+                        terminal_reason: None
+                    }
+                )
+            ),
+            Err(SupervisorError::InvalidTransition)
+        );
+        assert_eq!(
+            verification_result(
+                &mut run,
+                &id,
+                2,
+                true,
+                "digest",
+                &event(
+                    1,
+                    SupervisorEventKind::SetRunState {
+                        state: SupervisorRunState::Running,
+                        terminal_reason: None,
+                    },
+                ),
+            ),
+            Err(SupervisorError::StaleGeneration)
+        );
+        run.tasks.get_mut(&id).unwrap().state = TaskState::Ready;
+        cancel(&mut run, None, "cancel", now()).unwrap();
+        assert_eq!(run.tasks[&id].state, TaskState::Cancelled);
+    }
+
+    #[test]
+    fn explicit_escalation_event_is_durable() {
+        let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
+        reduce(
+            &mut run,
+            &event(
+                1,
+                SupervisorEventKind::Escalate {
+                    task_id: None,
+                    reason: "ambiguous provenance".into(),
+                    safe_evidence: "fence mismatch".into(),
+                    choices: vec!["cancel".into()],
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(run.state, SupervisorRunState::Escalated);
     }
 
     #[test]
