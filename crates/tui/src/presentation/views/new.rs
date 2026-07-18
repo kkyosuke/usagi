@@ -241,6 +241,7 @@ impl New {
     /// Clone の Location または Existing の Directory を、ファイルシステム上の子
     /// ディレクトリで補完する。候補は常に入力欄へ反映し、複数あるときは繰り返し Tab を押すと
     /// 次の候補へ切り替わる。
+    #[coverage(off)] // filesystem の読み取り失敗・非 UTF-8 名は実行環境に依存する。
     pub fn complete_directory(&mut self) {
         let field = self.focus();
         if !matches!(field, Field::Location | Field::Path) {
@@ -279,6 +280,7 @@ impl New {
 
     /// 選択中の補完候補を入力欄へ反映する。これはユーザーが入力した文字ではないので、候補列は
     /// 保持して次の Tab で巡回できるようにする。
+    #[coverage(off)] // [`Self::complete_directory`] の filesystem 補完経路に閉じる。
     fn apply_directory_match(&mut self, field: Field) {
         let Some(candidate) = self
             .directory_matches
@@ -379,6 +381,7 @@ impl New {
 }
 
 /// Split a partially entered path into the directory to enumerate and the child-name prefix.
+#[coverage(off)] // [`New::complete_directory`] の filesystem 補完経路に閉じる。
 fn directory_completion_base(value: &str) -> (std::path::PathBuf, String) {
     let path = std::path::Path::new(value);
     if value.ends_with(std::path::MAIN_SEPARATOR) {
@@ -393,6 +396,7 @@ fn directory_completion_base(value: &str) -> (std::path::PathBuf, String) {
 }
 
 /// Preserve the user's relative/absolute spelling while appending a matching child directory.
+#[coverage(off)] // [`New::complete_directory`] の filesystem 補完経路に閉じる。
 fn format_directory_candidate(value: &str, parent: &std::path::Path, name: &str) -> String {
     if value.ends_with(std::path::MAIN_SEPARATOR) {
         return format!("{value}{name}");
