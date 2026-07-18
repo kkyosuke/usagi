@@ -1,13 +1,13 @@
 ---
 number: 258
 title: fix(tui): Home の root-first row contract を runtime まで一元化する
-status: in-progress
+status: done
 priority: high
 labels: [tui, bug, triage]
 dependson: []
 related: [238, 245]
 created_at: 2026-07-12T23:37:34.688708+00:00
-updated_at: 2026-07-12T23:52:22.101056+00:00
+updated_at: 2026-07-18T05:57:33.991683+00:00
 ---
 
 ## 目的
