@@ -623,6 +623,7 @@ pub fn render(raw_height: usize, raw_width: usize, state: &New) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[coverage(off)] // テスト本体は計測対象ではなく、実装コードの実行だけを集計する。
 mod tests {
     use super::{
         Field, Mode, New, directory_completion_base, format_directory_candidate, render,
