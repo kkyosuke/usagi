@@ -31,14 +31,12 @@ pub struct CloseupModal {
 impl CloseupModal {
     /// セッション `session` を対象に、先頭アクションを選んだメニューを開く。
     #[must_use]
-    #[coverage(off)]
     pub fn new(session: impl Into<String>) -> Self {
         Self::with_selection_mode(session, ModalSelectionMode::Action)
     }
 
     /// Open a modal using the configured command-selection interaction.
     #[must_use]
-    #[coverage(off)]
     pub fn with_selection_mode(
         session: impl Into<String>,
         selection_mode: ModalSelectionMode,
@@ -55,35 +53,30 @@ impl CloseupModal {
 
     /// 対象セッション名。
     #[must_use]
-    #[coverage(off)]
     pub fn session(&self) -> &str {
         &self.session
     }
 
     /// 選択中アクションの添字。
     #[must_use]
-    #[coverage(off)]
     pub fn selected(&self) -> usize {
         self.selected
     }
 
     /// Returns whether this modal accepts an action choice or a typed prompt.
     #[must_use]
-    #[coverage(off)]
     pub fn selection_mode(&self) -> ModalSelectionMode {
         self.selection_mode
     }
 
     /// アクション一覧。
     #[must_use]
-    #[coverage(off)]
     pub fn actions(&self) -> Vec<closeup::CommandInfo> {
         closeup::commands().collect()
     }
 
     /// 選択中のアクション。
     #[must_use]
-    #[coverage(off)]
     pub fn selected_action(&self) -> closeup::CommandInfo {
         self.matches()[self.selected]
     }
@@ -91,7 +84,6 @@ impl CloseupModal {
     /// Enter で controller へ渡す registry command。Closeup は入力欄を持たないため、
     /// 選択行の command 名そのものが completion になる。
     #[must_use]
-    #[coverage(off)]
     pub fn submission(&self) -> String {
         match self.selection_mode {
             ModalSelectionMode::Action if self.expanded => format!(
@@ -108,7 +100,6 @@ impl CloseupModal {
     }
 
     /// Insert one character in Prompt mode.
-    #[coverage(off)]
     pub fn insert_char(&mut self, c: char) {
         self.input.insert(c);
         self.selected = 0;
@@ -116,7 +107,6 @@ impl CloseupModal {
     }
 
     /// Delete one character in Prompt mode.
-    #[coverage(off)]
     pub fn backspace(&mut self) {
         self.input.backspace();
         self.selected = 0;
@@ -124,20 +114,17 @@ impl CloseupModal {
     }
 
     /// Move the prompt caret left in Prompt mode.
-    #[coverage(off)]
     pub fn cursor_left(&mut self) {
         self.input.move_left();
     }
 
     /// Move the prompt caret right in Prompt mode.
-    #[coverage(off)]
     pub fn cursor_right(&mut self) {
         self.input.move_right();
     }
 
     /// Complete the selected command or an unambiguous supported subcommand.
     /// Inputs outside the completion grammar are left untouched.
-    #[coverage(off)]
     pub fn complete_selected(&mut self) {
         if let Some(input) = self.subcommand_completion() {
             self.input = TextInput::with_value(input);
@@ -155,7 +142,6 @@ impl CloseupModal {
     }
 
     /// 選択を次へ（末尾で先頭へ回り込む）。
-    #[coverage(off)]
     pub fn select_next(&mut self) {
         if self.expanded {
             let len = self.subcommands().len();
@@ -171,7 +157,6 @@ impl CloseupModal {
     }
 
     /// 選択を前へ（先頭で末尾へ回り込む）。
-    #[coverage(off)]
     pub fn select_prev(&mut self) {
         if self.expanded {
             let len = self.subcommands().len();
@@ -187,7 +172,6 @@ impl CloseupModal {
     }
 
     /// Expand the selected action's inline subcommand picker when available.
-    #[coverage(off)]
     pub fn expand_selected(&mut self) {
         if !self.matches().is_empty() && !self.subcommands().is_empty() {
             self.expanded = true;
@@ -196,7 +180,6 @@ impl CloseupModal {
     }
 
     /// Collapse an inline subcommand picker. Returns whether it was open.
-    #[coverage(off)]
     pub fn collapse(&mut self) -> bool {
         std::mem::take(&mut self.expanded)
     }
@@ -245,7 +228,6 @@ impl CloseupModal {
 }
 
 /// 1 アクション行: 選択中は `›` マーカー、command 名（accent）、説明（dim）。
-#[coverage(off)]
 fn action_row(action: closeup::CommandInfo, selected: bool, inner: usize) -> String {
     let marker = if selected {
         Role::Danger.style().bold().paint("›")
@@ -261,7 +243,6 @@ fn action_row(action: closeup::CommandInfo, selected: bool, inner: usize) -> Str
 }
 
 /// アクションメニューのボディ（枠の内側の行）。対象セッションは v1 と同様に title にのみ載せる。
-#[coverage(off)]
 fn body(state: &CloseupModal) -> Vec<String> {
     if state.selection_mode == ModalSelectionMode::Prompt {
         let prompt = widgets::block_caret(
@@ -321,7 +302,6 @@ fn body(state: &CloseupModal) -> Vec<String> {
 /// 生の端末サイズに対する closeup modal 1 フレーム分の行。中央に浮かぶ枠付きダイアログとして
 /// 描く（枠と中央寄せは [`modal::render_modal`] に委譲）。サイズ 0 は 80×24 にフォールバック。
 #[must_use]
-#[coverage(off)]
 pub fn render(raw_height: usize, raw_width: usize, state: &CloseupModal) -> Vec<String> {
     modal::render_modal(
         raw_height,
@@ -335,7 +315,6 @@ pub fn render(raw_height: usize, raw_width: usize, state: &CloseupModal) -> Vec<
 /// `base` の workspace フレームを背景に残し、closeup modal を中央に合成する。
 /// サイズ 0 は 80×24 にフォールバックする。
 #[must_use]
-#[coverage(off)]
 pub fn render_over(
     raw_height: usize,
     raw_width: usize,
@@ -400,6 +379,31 @@ mod tests {
     }
 
     #[test]
+    fn expanding_an_action_with_subcommands_lists_them() {
+        // `terminal` and `close` carry subcommands; expanding the selected action
+        // renders that subcommand list (the completion the Ctrl-O command input
+        // drives).
+        for (action, subcommand) in [("terminal", "open"), ("close", "--force")] {
+            let mut modal = CloseupModal::new("daemon");
+            for _ in 0..modal.actions().len() {
+                if modal.selected_action().name == action {
+                    break;
+                }
+                modal.select_next();
+            }
+            assert_eq!(modal.selected_action().name, action);
+            modal.expand_selected();
+            assert!(joined(&modal).contains(subcommand));
+        }
+
+        // `agent` carries no subcommands, so expanding it is inert.
+        let mut agent = CloseupModal::new("daemon");
+        assert_eq!(agent.selected_action().name, "agent");
+        agent.expand_selected();
+        assert!(!joined(&agent).contains("--force"));
+    }
+
+    #[test]
     fn new_modal_targets_the_session_and_lists_actions() {
         let modal = CloseupModal::new("tui");
         assert_eq!(modal.session(), "tui");
@@ -431,6 +435,35 @@ mod tests {
         assert_eq!(modal.submission(), "agent");
         modal.select_next();
         assert_eq!(modal.submission(), "close");
+    }
+
+    #[test]
+    fn expanded_action_cycles_subcommands_and_renders_them() {
+        let mut modal = CloseupModal::new("s");
+        modal.select_next(); // close
+        modal.expand_selected();
+        assert_eq!(modal.submission(), "close --force");
+        assert!(joined(&modal).contains("--force"));
+        modal.select_next();
+        modal.select_prev();
+        assert!(modal.collapse());
+        assert!(!modal.collapse());
+        modal.select_next();
+        modal.select_next(); // terminal
+        modal.expand_selected();
+        modal.select_next(); // second terminal subcommand
+        assert!(joined(&modal).contains("      open"));
+        assert!(joined(&modal).contains("› new"));
+    }
+
+    #[test]
+    fn prompt_caret_can_move_in_both_directions() {
+        let mut modal = CloseupModal::with_selection_mode("s", ModalSelectionMode::Prompt);
+        modal.insert_char('a');
+        modal.insert_char('b');
+        modal.cursor_left();
+        modal.cursor_right();
+        assert_eq!(modal.submission(), "ab");
     }
 
     #[test]
