@@ -273,4 +273,64 @@ mod tests {
             .unwrap();
         assert!(store.events().unwrap().is_empty());
     }
+
+    #[test]
+    fn store_lists_pending_and_rejects_conflicting_key_and_terminal_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let decision = item();
+        let workspace = decision.owner.workspace_id;
+        assert!(
+            store
+                .get(workspace, decision.decision_id)
+                .unwrap()
+                .is_none()
+        );
+        store.create(decision.clone()).unwrap().unwrap();
+        assert_eq!(store.pending(workspace).unwrap(), vec![decision.clone()]);
+        assert!(store.pending(WorkspaceId::new()).unwrap().is_empty());
+
+        let mut conflict = decision.clone();
+        conflict.title = "other".into();
+        assert_eq!(
+            store.create(conflict).unwrap(),
+            Err(UserDecisionError::IdempotencyConflict)
+        );
+        let expired = store
+            .terminal(
+                workspace,
+                decision.decision_id,
+                UserDecisionStatus::Expired,
+                Utc::now(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(expired.status, UserDecisionStatus::Expired);
+        assert!(store.pending(workspace).unwrap().is_empty());
+        assert_eq!(
+            store
+                .terminal(
+                    workspace,
+                    decision.decision_id,
+                    UserDecisionStatus::Cancelled,
+                    Utc::now(),
+                )
+                .unwrap(),
+            Err(UserDecisionError::Terminal)
+        );
+    }
+
+    #[test]
+    fn distinct_requests_without_an_idempotency_key_are_created() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let mut first = item();
+        first.idempotency_key = None;
+        let mut second = first.clone();
+        second.decision_id = UserDecisionId::new();
+        let workspace = second.owner.workspace_id;
+        assert_eq!(store.create(first).unwrap().unwrap().title, "t");
+        assert_eq!(store.create(second).unwrap().unwrap().title, "t");
+        assert_eq!(store.pending(workspace).unwrap().len(), 2);
+    }
 }

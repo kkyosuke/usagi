@@ -168,4 +168,39 @@ mod tests {
             Err(UserDecisionError::Terminal)
         );
     }
+
+    #[test]
+    fn answer_validation_allows_nonempty_freeform_only_when_enabled_and_before_deadline() {
+        let mut item = decision();
+        let now = Utc::now();
+        item.allow_freeform = true;
+        assert!(
+            item.validate_answer(
+                &UserDecisionAnswer::Freeform {
+                    text: "because".into()
+                },
+                now
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            item.validate_answer(
+                &UserDecisionAnswer::Freeform {
+                    text: String::new()
+                },
+                now
+            ),
+            Err(UserDecisionError::FreeformNotAllowed)
+        );
+        item.expires_at = Some(now);
+        assert_eq!(
+            item.validate_answer(
+                &UserDecisionAnswer::Option {
+                    option_id: "yes".into()
+                },
+                now
+            ),
+            Err(UserDecisionError::Expired)
+        );
+    }
 }
