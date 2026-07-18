@@ -22,7 +22,6 @@ pub const USAGI_GITIGNORE: &str = "/*\n!/.gitignore\n!/issues/\n/issues/index.js
 ///
 /// Returns an error when a metadata or root ignore file cannot be read, created,
 /// or written.
-#[coverage(off)]
 pub fn migrate_usagi_ignore_rules(repo: &Path) -> Result<()> {
     let dir = repo.join(STATE_DIR);
     fs::create_dir_all(&dir).context(format!("failed to create {}", dir.display()))?;

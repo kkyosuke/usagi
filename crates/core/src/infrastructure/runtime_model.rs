@@ -22,7 +22,6 @@ pub trait ExecutableLocator {
 pub struct PathExecutableLocator;
 
 impl ExecutableLocator for PathExecutableLocator {
-    #[coverage(off)] // Production PATH boundary; tests inject a fake locator.
     fn is_available(&self, executable: &str) -> bool {
         env::var_os("PATH")
             .is_some_and(|paths| env::split_paths(&paths).any(|dir| dir.join(executable).is_file()))
@@ -105,7 +104,7 @@ fn valid_models(models: Vec<String>) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::WorkspaceAgentConfig;
+    use super::{ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig};
     use tempfile::tempdir;
 
     #[test]
@@ -121,5 +120,37 @@ mod tests {
         assert!(config.allows("claude", "sonnet"));
         assert!(!config.allows("claude", "opus"));
         assert!(config.models("codex").is_empty());
+
+        assert!(
+            WorkspaceAgentConfig::read(workspace.path().join("missing").as_path())
+                .models("claude")
+                .is_empty()
+        );
+        std::fs::write(workspace.path().join(".usagi/config.toml"), "not = [toml").unwrap();
+        assert!(
+            WorkspaceAgentConfig::read(workspace.path())
+                .models("claude")
+                .is_empty()
+        );
+        assert!(config.models("unknown").is_empty());
+    }
+
+    #[test]
+    fn path_locator_finds_files_on_path_and_rejects_missing_names() {
+        let _guard = crate::test_support::process_env_guard();
+        let bin = tempdir().unwrap();
+        std::fs::write(bin.path().join("usagi-test-runtime"), "").unwrap();
+        let previous_path = std::env::var_os("PATH").expect("test process has PATH");
+        unsafe {
+            std::env::set_var("PATH", bin.path());
+        }
+
+        let locator = PathExecutableLocator;
+        assert!(locator.is_available("usagi-test-runtime"));
+        assert!(!locator.is_available("absent-runtime"));
+
+        unsafe {
+            std::env::set_var("PATH", previous_path);
+        }
     }
 }

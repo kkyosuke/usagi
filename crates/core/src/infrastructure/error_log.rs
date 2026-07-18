@@ -45,20 +45,17 @@ impl ErrorLog {
     /// # Errors
     ///
     /// Returns an error when the data directory cannot be determined.
-    #[coverage(off)]
     pub fn open_default() -> Result<Self> {
         Ok(Self::new(data_dir()?.join(LOGS_DIR_NAME)))
     }
 
     /// Open the log rooted at an explicit directory (mainly for tests).
     #[must_use]
-    #[coverage(off)]
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -71,7 +68,6 @@ impl ErrorLog {
     /// This is the entry point for code paths that cannot surface a `Result` to
     /// `main`, such as the markdown stores' lenient scan skipping a corrupt file:
     /// routing those here keeps every failure inspectable in `<data dir>/logs/`.
-    #[coverage(off)]
     pub fn record(message: &str) {
         // `if let` (not `let … else { return }`) so the data-dir-not-found case
         // is just "skip the block" rather than its own statement: there is no
@@ -87,14 +83,12 @@ impl ErrorLog {
     /// Prune old log files at most once per process. Pruning scans the whole
     /// `logs/` directory, so an error burst would otherwise re-scan it on every
     /// line; the first call wins the swap and prunes, later calls skip.
-    #[coverage(off)]
     fn prune_once(&self, today: NaiveDate) {
         if !PRUNED.swap(true, Ordering::Relaxed) {
             let _ = self.prune(today, RETENTION_DAYS);
         }
     }
 
-    #[coverage(off)]
     fn file_for(&self, date: NaiveDate) -> PathBuf {
         self.dir.join(format!(
             "{FILE_PREFIX}{}{FILE_SUFFIX}",
@@ -110,7 +104,6 @@ impl ErrorLog {
     ///
     /// Returns an error when the log directory cannot be created or the day's log
     /// file cannot be opened or appended to.
-    #[coverage(off)]
     pub fn append(&self, now: DateTime<Local>, message: &str) -> Result<()> {
         fs::create_dir_all(&self.dir).context(format!(
             "failed to create log directory {}",
@@ -143,7 +136,6 @@ impl ErrorLog {
     ///
     /// Returns an error when the log directory exists but cannot be read, or a
     /// stale file cannot be removed.
-    #[coverage(off)]
     pub fn prune(&self, today: NaiveDate, retention_days: i64) -> Result<usize> {
         if !self.dir.exists() {
             return Ok(0);
@@ -174,7 +166,6 @@ impl ErrorLog {
 
 /// Parse the date out of an `error-YYYY-MM-DD.log` file name, ignoring any
 /// other file the directory may contain.
-#[coverage(off)]
 fn parse_date(name: &str) -> Option<NaiveDate> {
     let core = name.strip_prefix(FILE_PREFIX)?.strip_suffix(FILE_SUFFIX)?;
     NaiveDate::parse_from_str(core, DATE_FORMAT).ok()

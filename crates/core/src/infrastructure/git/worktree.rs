@@ -30,7 +30,6 @@ pub struct WorktreeInfo {
 ///
 /// Returns an error when the path is not valid UTF-8, the `git` process cannot be
 /// spawned, or `git worktree add` exits non-zero.
-#[coverage(off)]
 pub fn add_worktree(
     runner: &dyn GitRunner,
     repo: &Path,
@@ -63,7 +62,6 @@ pub fn add_worktree(
 /// Returns an error when the path is not valid UTF-8, the `git` process cannot be
 /// spawned, or `git worktree remove` fails for any reason other than the path not
 /// being a worktree.
-#[coverage(off)]
 pub fn remove_worktree(
     runner: &dyn GitRunner,
     repo: &Path,
@@ -91,7 +89,6 @@ pub fn remove_worktree(
 ///
 /// Returns an error when the `git` process cannot be spawned or
 /// `git worktree list` exits non-zero.
-#[coverage(off)]
 pub fn list_worktrees(runner: &dyn GitRunner, repo: &Path) -> Result<Vec<WorktreeInfo>> {
     let output = runner.run(repo, &["worktree", "list", "--porcelain"])?;
     if !output.success {
@@ -103,7 +100,6 @@ pub fn list_worktrees(runner: &dyn GitRunner, repo: &Path) -> Result<Vec<Worktre
 /// Parse the `git worktree list --porcelain` output: a blank-line-separated block
 /// per worktree, each with a `worktree <path>` line and optional `HEAD <sha>` /
 /// `branch <ref>` (absent when the worktree is on a detached HEAD).
-#[coverage(off)]
 fn parse_porcelain(text: &str) -> Vec<WorktreeInfo> {
     let mut out = Vec::new();
     let mut current: Option<WorktreeInfo> = None;
