@@ -18,6 +18,7 @@ pub mod client;
 pub mod issue;
 pub mod memory;
 pub mod note;
+pub mod pr_inventory;
 pub mod session;
 pub mod settings;
 pub mod workspace;
