@@ -5931,6 +5931,28 @@ mod tests {
     }
 
     #[test]
+    fn inline_new_session_shows_a_format_error_before_submission() {
+        let workspace = WorkspaceView::new(ws("alpha"), state("alpha"));
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(UnavailableSessionCommandPort),
+            ModalSelectionMode::Action,
+        );
+        while !ui.workspace.new_session_selected() {
+            let _ = step_workspace(&mut ui, Key::Down);
+        }
+
+        let _ = step_workspace(&mut ui, Key::Char('/'));
+        assert!(ui.workspace.creating_session_inline());
+        assert!(
+            render_workspace(40, 80, &ui)
+                .join("\n")
+                .contains("session name may contain")
+        );
+    }
+
+    #[test]
     fn empty_inline_new_session_name_stays_open_with_a_safe_error() {
         let workspace = WorkspaceView::new(ws("alpha"), state("alpha"));
         let mut ui = WorkspaceUi::with_ports_and_selection_mode(
