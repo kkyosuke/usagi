@@ -1,14 +1,14 @@
 ---
 number: 329
 title: feat(daemon): agent の user decision request を durable state と inbox 配送へ接続する
-status: todo
+status: done
 priority: high
 labels: [daemon, mcp, cli, supervisor, durable]
 dependson: [323, 326, 327]
 related: [328, 330, 219, 268, 271]
 parent: 324
 created_at: 2026-07-18T00:00:00+00:00
-updated_at: 2026-07-18T00:00:00+00:00
+updated_at: 2026-07-18T01:18:58.522322+00:00
 ---
 
 ## 目的
