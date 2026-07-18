@@ -30,7 +30,7 @@ use usagi_daemon::infrastructure::unix_transport::connect_current;
 // Starting it can take longer than the normal test-runner budget on a loaded
 // CI worker, even though it is healthy. Keep the readiness deadline above
 // that startup variance; connection failures still fail deterministically.
-const DAEMON_READINESS_TIMEOUT: Duration = Duration::from_secs(15);
+const DAEMON_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn short_dir(prefix: &str) -> tempfile::TempDir {
     tempfile::Builder::new()

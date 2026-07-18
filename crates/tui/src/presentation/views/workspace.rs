@@ -825,7 +825,7 @@ impl Workspace {
             input.insert(character);
         }
         self.create_input = Some(input);
-        self.create_error = None;
+        self.revalidate_inline_session_create();
     }
 
     #[coverage(off)]
@@ -838,7 +838,7 @@ impl Workspace {
     pub fn inline_create_insert(&mut self, character: char) {
         if let Some(input) = &mut self.create_input {
             input.insert(character);
-            self.create_error = None;
+            self.revalidate_inline_session_create();
         }
     }
 
@@ -846,7 +846,7 @@ impl Workspace {
     pub fn inline_create_backspace(&mut self) {
         if let Some(input) = &mut self.create_input {
             input.backspace();
-            self.create_error = None;
+            self.revalidate_inline_session_create();
         }
     }
 
@@ -862,13 +862,58 @@ impl Workspace {
     }
 
     pub fn inline_create_name(&mut self) -> Option<String> {
-        let name = self.create_input.as_ref()?.value().trim();
+        let name = self.create_input.as_ref()?.value().trim().to_owned();
         if name.is_empty() {
             self.create_error = Some("session name is required".to_owned());
             None
+        } else if let Some(error) = self.inline_session_name_error(&name) {
+            self.create_error = Some(error);
+            None
         } else {
-            Some(name.to_owned())
+            Some(name)
         }
+    }
+
+    /// Refresh the inline error after each edit. An empty draft is intentionally
+    /// quiet; Enter supplies the required-name message instead.
+    fn revalidate_inline_session_create(&mut self) {
+        let error = self
+            .create_input
+            .as_ref()
+            .and_then(|input| self.inline_session_name_error(input.value()));
+        self.create_error = error;
+    }
+
+    /// The daemon accepts only a short, filesystem-safe session identifier.
+    /// Keep the local feedback in lockstep with that request schema, and use the
+    /// current sidebar snapshot to catch duplicate managed sessions before a
+    /// request is sent. Stale branches/worktrees remain daemon-authoritative.
+    fn inline_session_name_error(&self, value: &str) -> Option<String> {
+        let name = value.trim();
+        if name.is_empty() {
+            return None;
+        }
+        if name.len() > 64 {
+            return Some("session name must be 64 characters or fewer".to_owned());
+        }
+        if !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+        {
+            return Some(
+                "session name may contain only letters, numbers, hyphens, and underscores"
+                    .to_owned(),
+            );
+        }
+        if self
+            .state
+            .sessions
+            .iter()
+            .any(|session| session.name == name)
+        {
+            return Some(format!("session \"{name}\" already exists"));
+        }
+        None
     }
 
     #[coverage(off)]
@@ -3442,6 +3487,37 @@ mod tests {
         assert!(ws.root_selected());
         ws.select_prev();
         assert!(ws.new_session_selected());
+    }
+
+    #[test]
+    fn inline_session_create_validates_format_length_and_duplicates_while_typing() {
+        let mut ws = workspace();
+
+        ws.begin_inline_session_create(Some('/'));
+        assert_eq!(
+            ws.create_error.as_deref(),
+            Some("session name may contain only letters, numbers, hyphens, and underscores")
+        );
+
+        ws.cancel_inline_session_create();
+        ws.begin_inline_session_create(Some('t'));
+        ws.inline_create_insert('u');
+        ws.inline_create_insert('i');
+        assert_eq!(
+            ws.create_error.as_deref(),
+            Some("session \"tui\" already exists")
+        );
+        assert!(ws.inline_create_name().is_none());
+
+        ws.cancel_inline_session_create();
+        ws.begin_inline_session_create(Some('a'));
+        for _ in 0..64 {
+            ws.inline_create_insert('a');
+        }
+        assert_eq!(
+            ws.create_error.as_deref(),
+            Some("session name must be 64 characters or fewer")
+        );
     }
 
     #[test]
