@@ -68,6 +68,14 @@ pub enum DaemonRequest {
         operation_id: String,
         payload: Value,
     },
+    /// MCP control and observation for a daemon-owned supervisor aggregate.
+    /// Caller provenance is derived by the daemon from the IPC context; it is
+    /// intentionally not a client-supplied field in this request.
+    SupervisorTool {
+        action: SupervisorToolAction,
+        operation_id: String,
+        payload: Value,
+    },
 }
 
 /// Control vocabulary for the dedicated PR snapshot subscription.
@@ -138,6 +146,19 @@ pub enum DispatchToolAction {
     AgentComplete,
     AgentFail,
     AgentInbox,
+}
+
+/// The opt-in supervisor MCP surface.  It is separate from dispatch so adding
+/// it cannot change the existing session/agent tool contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisorToolAction {
+    Start,
+    Get,
+    List,
+    Cancel,
+    ResolveEscalation,
+    Events,
 }
 
 /// Control vocabulary for the daemon metrics stream.

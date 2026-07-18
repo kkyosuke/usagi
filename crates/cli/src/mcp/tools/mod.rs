@@ -11,6 +11,7 @@
 pub mod issue;
 pub mod memory;
 pub mod session;
+pub mod supervisor;
 
 use super::tool::Tool;
 
@@ -20,6 +21,7 @@ pub fn registry() -> Vec<Box<dyn Tool>> {
     let mut tools = issue::tools();
     tools.extend(memory::tools());
     tools.extend(session::tools());
+    tools.extend(supervisor::tools());
     tools
 }
 
@@ -34,7 +36,7 @@ mod tests {
     #[test]
     fn every_tool_has_valid_metadata() {
         let reg = registry();
-        assert_eq!(reg.len(), 34); // issue 6 + memory 4 + session 24
+        assert_eq!(reg.len(), 40); // issue 6 + memory 4 + session 24 + supervisor 6
 
         let mut seen = std::collections::HashSet::new();
         for tool in &reg {
@@ -56,5 +58,6 @@ mod tests {
         assert_eq!(super::issue::tools().len(), 6);
         assert_eq!(super::memory::tools().len(), 4);
         assert_eq!(super::session::tools().len(), 24);
+        assert_eq!(super::supervisor::tools().len(), 6);
     }
 }
