@@ -4245,6 +4245,66 @@ mod tests {
         );
     }
 
+    #[test]
+    #[coverage(off)]
+    fn controller_loop_opens_the_create_form_from_the_new_session_row() {
+        // An empty workspace shows only root and `+ new session`, so one Down
+        // reaches the create entry deterministically.
+        let snapshot = WorkspaceSnapshot::new(
+            ws("empty"),
+            WorkspaceState {
+                sessions: Vec::new(),
+                root_notes: Scratchpad::default(),
+                updated_at: now(),
+            },
+        );
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: snapshot.workspace_id,
+            session_id: None,
+            worktree_id: WorktreeId::new(),
+        };
+        // Down → + new session, Enter opens the create form, type a name, Esc
+        // closes it, then Ctrl-Q + y detaches.
+        let keys = [
+            Key::Down,
+            Key::Enter,
+            Key::Char('a'),
+            Key::Char('p'),
+            Key::Char('i'),
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ];
+        let mut term = FakeTerminal::with_keys(&keys);
+        let result = run_workspace_controller(
+            &mut term,
+            snapshot,
+            Box::new(UnavailableSessionCommandPort),
+            ModalSelectionMode::Action,
+            DefaultModel::default(),
+            Box::new(SuccessfulAgentPort(terminal)),
+            Box::new(NoMetrics),
+            Box::new(UnavailablePrSnapshotPort),
+            Box::new(UnavailableBrowserOpener),
+        );
+
+        assert!(matches!(result, Ok(Exit::Quit)));
+        // The Overlay::CreateSession form rendered with the typed name, confirming
+        // the `+ new session` create-entry seam works through the controller loop.
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("New session"))
+        );
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("api"))
+        );
+    }
+
     /// テスト用 Terminal。キー列を順に返し、描いたフレームを記録する。
     #[derive(Default)]
     struct FakeTerminal {
