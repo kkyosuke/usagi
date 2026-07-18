@@ -1,13 +1,13 @@
 ---
 number: 346
 title: feat(daemon): PR refresh と revision 付き IPC snapshot を提供する
-status: todo
+status: done
 priority: high
 labels: [daemon, ipc, pr]
 dependson: [345]
 related: [198]
 created_at: 2026-07-17T23:44:47.737212+00:00
-updated_at: 2026-07-17T23:44:47.737212+00:00
+updated_at: 2026-07-18T00:44:47.842395+00:00
 ---
 
 ## 目的

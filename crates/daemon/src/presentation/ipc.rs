@@ -346,7 +346,11 @@ pub fn server_protocol(
             min_revision: 0,
             max_revision: 1,
         }],
-        capabilities: vec!["request.correlation.v1".into()],
+        capabilities: vec![
+            "request.correlation.v1".into(),
+            "pr.snapshot.v1".into(),
+            "pr.subscription.v1".into(),
+        ],
         build,
         limits: usagi_core::infrastructure::ipc::ProtocolLimits::default(),
     }
