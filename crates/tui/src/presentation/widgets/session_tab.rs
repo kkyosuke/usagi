@@ -21,18 +21,23 @@ pub struct Tab<'a> {
 
 /// The coloured runner for an in-flight pane launch.
 ///
-/// Only the rabbit carries colour. Its leading padding advances with `frame`,
-/// so it runs through the loading chip while the tab label stays dim.
+/// Only the rabbit carries colour. Its three-cell track stays fixed while the
+/// rabbit advances, so the tab label and active marker never jump sideways.
 const RUNNING_RABBIT: &str = "\u{f0907}";
+
+/// Keep each wave position visible for roughly 200 ms at the runtime's 60 Hz
+/// redraw cadence. This is deliberately slower than the sidebar mascot.
+const WAVE_TICKS_PER_POSITION: u64 = 12;
+const WAVE_WIDTH: usize = 3;
 
 #[must_use]
 pub fn pending_indicator(frame: u64) -> String {
+    let position = ((frame / WAVE_TICKS_PER_POSITION) as usize) % WAVE_WIDTH;
     format!(
-        "{}{}",
-        // Keep the runner within one extra cell so a pending chip retains its
-        // meaningful label even beside a long session name in a narrow pane.
-        " ".repeat((frame % 2) as usize),
-        Role::Feature.style().bold().paint(RUNNING_RABBIT)
+        "{}{}{}",
+        " ".repeat(position),
+        Role::Feature.style().bold().paint(RUNNING_RABBIT),
+        " ".repeat(WAVE_WIDTH - position - 1)
     )
 }
 
@@ -139,7 +144,8 @@ pub fn empty_pane_with_detail(
 #[cfg(test)]
 mod tests {
     use super::{
-        RUNNING_RABBIT, Tab, empty_pane, empty_pane_with_detail, pending_indicator, render,
+        RUNNING_RABBIT, Tab, WAVE_TICKS_PER_POSITION, WAVE_WIDTH, empty_pane,
+        empty_pane_with_detail, pending_indicator, render,
     };
     use crate::presentation::widgets::display_width;
 
@@ -188,7 +194,7 @@ mod tests {
         let rows = render(
             6,
             &[Tab {
-                label: "Terminal (resolving)",
+                label: "Terminal",
                 selected: true,
                 pending_indicator: None,
             }],
@@ -200,16 +206,16 @@ mod tests {
     #[test]
     fn pending_indicator_is_a_coloured_rabbit_that_runs_across_frames() {
         let indicator = pending_indicator(0);
-        let later = pending_indicator(3);
+        let later = pending_indicator(WAVE_TICKS_PER_POSITION);
         assert!(indicator.contains(RUNNING_RABBIT));
-        assert_eq!(display_width(&indicator), 1);
+        assert_eq!(display_width(&indicator), WAVE_WIDTH);
         assert_ne!(indicator, later);
-        assert_eq!(display_width(&later), 2);
-        assert!(indicator.ends_with("\u{1b}[0m"));
+        assert_eq!(display_width(&later), WAVE_WIDTH);
+        assert!(indicator.contains("\u{1b}[0m"));
         let tab = render(
             40,
             &[Tab {
-                label: "Agent (starting)",
+                label: "Agent",
                 selected: true,
                 pending_indicator: Some(&indicator),
             }],

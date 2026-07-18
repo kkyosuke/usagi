@@ -320,9 +320,9 @@ impl HomeProjection {
 fn pane_tab_label(tab: &PaneTab) -> String {
     match tab {
         PaneTab::Pending(pending) => match pending.kind {
-            PaneKind::Terminal => "Terminal (resolving)".to_owned(),
-            PaneKind::Agent => "Agent (starting)".to_owned(),
-            PaneKind::Diff => "Diff (loading)".to_owned(),
+            PaneKind::Terminal => "Terminal".to_owned(),
+            PaneKind::Agent => "Agent".to_owned(),
+            PaneKind::Diff => "Diff".to_owned(),
         },
         PaneTab::Live(live) => match live.kind {
             PaneKind::Terminal => "Terminal".to_owned(),
@@ -2937,7 +2937,7 @@ mod tests {
         .with_pane(&pane);
 
         let text = joined_home(&home);
-        assert!(text.contains("Agent (starting)"));
+        assert!(text.contains("Agent"));
         assert!(text.contains('▔'));
         assert!(!text.contains("No tabs stirring yet"));
         assert!(!text.contains("/work/session"));
@@ -2945,7 +2945,7 @@ mod tests {
         let frame = render_home(30, 100, &home);
         let right_header = strip(&frame[CHROME_ROWS]);
         let name = right_header.find("session").expect("session name");
-        let tab = right_header.find("Agent (starting)").expect("agent tab");
+        let tab = right_header.find("Agent").expect("agent tab");
         assert!(name < tab);
     }
 
@@ -3014,7 +3014,9 @@ mod tests {
             .with_pane(&pane),
         )
         .join("\n");
-        let _ = update(&mut state, AppEvent::Tick);
+        for _ in 0..12 {
+            let _ = update(&mut state, AppEvent::Tick);
+        }
         let after = render_home(
             18,
             100,
@@ -3092,7 +3094,7 @@ mod tests {
         let over = modal::render_over(18, 100, &base, "Action", 20, &["modal".to_string()]);
 
         let plain = over.iter().map(|line| strip(line)).collect::<Vec<_>>();
-        assert!(plain[2].contains("Agent (starting)"));
+        assert!(plain[2].contains("Agent"));
         assert!(plain[3].contains('▔'));
         assert!(plain.iter().any(|line| line.contains("┌─ Action")));
         assert!(over.iter().all(|line| display_width(line) == 100));
@@ -3218,8 +3220,8 @@ mod tests {
         ws.tab_prev();
         assert!(matches!(ws.pane().selected(), PaneSelection::Tab(_)));
         ws.tab_next();
-        assert!(joined(&ws).contains("Terminal (resolving)"));
-        assert!(joined(&ws).contains("Agent (starting)"));
+        assert!(joined(&ws).contains("Terminal"));
+        assert!(joined(&ws).contains("Agent"));
         ws.close_pane();
         ws.close_pane();
         assert!(!ws.has_panes());
@@ -3343,7 +3345,7 @@ mod tests {
         assert!(closeup.contains("←→/hl tab"));
         assert!(!closeup.contains("Esc switch"));
         assert!(closeup.contains("↑↓/jk action"));
-        assert!(closeup.contains("Terminal (resolving)"));
+        assert!(closeup.contains("Terminal"));
         assert!(closeup.contains('\u{f0907}'));
         assert!(
             !closeup.contains('▔'),
@@ -3670,8 +3672,8 @@ mod tests {
         let operation = ws.open_pane(PaneKind::Terminal);
 
         let early = render_with_skeleton_frame(30, 100, &ws, 0).join("\n");
-        let later = render_with_skeleton_frame(30, 100, &ws, 3).join("\n");
-        assert!(early.contains("Terminal (resolving)"));
+        let later = render_with_skeleton_frame(30, 100, &ws, 12).join("\n");
+        assert!(early.contains("Terminal"));
         assert!(early.contains('\u{f0907}'));
         assert_ne!(early, later, "the pending tab uses the shared loading wave");
 
@@ -4167,9 +4169,7 @@ mod tests {
         let frame = render(30, 100, &ws);
         let right_header = strip(&frame[CHROME_ROWS]);
         let name = right_header.find("UI work").expect("session name");
-        let tab = right_header
-            .find("Terminal (resolving)")
-            .expect("terminal tab");
+        let tab = right_header.find("Terminal").expect("terminal tab");
         assert!(name < tab);
         assert!(!frame.iter().any(|line| strip(line).contains("/tmp/actual")));
         ws.close_pane();

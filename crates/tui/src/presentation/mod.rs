@@ -4527,15 +4527,11 @@ mod tests {
             .iter()
             .map(|frame| frame.join("\n"))
             .collect::<Vec<_>>();
-        assert!(
-            agent_frames
-                .iter()
-                .any(|frame| frame.contains("Agent (starting"))
-        );
+        assert!(agent_frames.iter().any(|frame| frame.contains("Agent")));
         assert!(
             terminal_frames
                 .iter()
-                .any(|frame| frame.contains("Terminal ("))
+                .any(|frame| frame.contains("Terminal"))
         );
         assert!(
             agent_frames.iter().all(|frame| !frame.contains('▔')),
@@ -5145,7 +5141,7 @@ mod tests {
         let frame = |index: usize| term.frames[index].join("\n");
 
         assert!(frame(2).contains("Run a command:"));
-        assert!(frame(3).contains("Agent (starting)"));
+        assert!(frame(3).contains("Agent"));
         assert!(!frame(3).contains("Run a command:"));
     }
 
