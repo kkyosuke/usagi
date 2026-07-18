@@ -15,7 +15,6 @@ const RESET: &str = "\u{1b}[0m";
 /// `lines` を角丸の枠に収め、`title` を上辺に埋め込んだ行を返す。各行は左右 1 桁の余白を
 /// 付けて `inner_width` に揃える。返す行はまだ配置されていない（[`render_modal`] が中央寄せする）。
 #[must_use]
-#[coverage(off)]
 pub fn boxed(title: &str, inner_width: usize, lines: &[String]) -> Vec<String> {
     // 両角の間の桁数: 内容領域 + 左右 1 桁ずつの余白。
     let span = inner_width + 2;
@@ -46,7 +45,6 @@ pub fn boxed(title: &str, inner_width: usize, lines: &[String]) -> Vec<String> {
 /// 余白 2 桁 = 4 桁）が画面を溢れないよう詰める。呼び出し側はこの幅で本文を組むと、枠の中に
 /// 行が揃う。
 #[must_use]
-#[coverage(off)]
 pub fn modal_inner_width(width: usize, desired: usize) -> usize {
     desired.min(width.saturating_sub(4))
 }
@@ -73,7 +71,6 @@ pub struct ConfirmationModal {
 impl ConfirmationModal {
     /// Create a modal focused on the affirmative choice.
     #[must_use]
-    #[coverage(off)]
     pub const fn new() -> Self {
         Self {
             confirm_selected: true,
@@ -82,32 +79,27 @@ impl ConfirmationModal {
 
     /// Whether Yes is selected.
     #[must_use]
-    #[coverage(off)]
     pub const fn is_confirm_selected(self) -> bool {
         self.confirm_selected
     }
 
     /// Select Yes.
-    #[coverage(off)]
     pub fn select_confirm(&mut self) {
         self.confirm_selected = true;
     }
 
     /// Select No.
-    #[coverage(off)]
     pub fn select_cancel(&mut self) {
         self.confirm_selected = false;
     }
 
     /// Move focus between Yes and No.
-    #[coverage(off)]
     pub fn toggle(&mut self) {
         self.confirm_selected = !self.confirm_selected;
     }
 }
 
 impl Default for ConfirmationModal {
-    #[coverage(off)]
     fn default() -> Self {
         Self::new()
     }
@@ -126,7 +118,6 @@ pub struct ConfirmationView<'a> {
 /// uses role-coloured text and bold weight; focus never changes the bracket
 /// geometry.
 #[must_use]
-#[coverage(off)]
 pub fn confirmation_buttons(confirm_selected: bool, confirm_role: Role) -> String {
     let selected = |role: Role| role.style().bold();
     // `dim` alone inherits the terminal's current foreground colour. Give idle
@@ -149,7 +140,6 @@ pub fn confirmation_buttons(confirm_selected: bool, confirm_role: Role) -> Strin
 
 /// Render a standard Yes/No confirmation over an existing frame.
 #[must_use]
-#[coverage(off)]
 pub fn render_confirmation_over(
     raw_height: usize,
     raw_width: usize,
@@ -179,7 +169,6 @@ pub fn render_confirmation_over(
 /// 残りは空行で埋めるので、イベントループはフルスクリーン画面と同じ手順で描き直せる。
 /// サイズ 0 は [`normalize_size`] で 80×24 にフォールバックする。
 #[must_use]
-#[coverage(off)]
 pub fn render_modal(
     raw_height: usize,
     raw_width: usize,
@@ -217,7 +206,6 @@ pub fn render_modal(
 }
 
 /// ANSI escape の終端かどうか。CSI 導入子 `[` は final byte ではない。
-#[coverage(off)]
 fn is_escape_final(ch: char) -> bool {
     ('\u{40}'..='\u{7e}').contains(&ch) && ch != '['
 }
@@ -225,7 +213,6 @@ fn is_escape_final(ch: char) -> bool {
 /// `text` から表示列 `start..start + width` を取り出し、ちょうど `width` 桁に
 /// そろえる。ANSI escape は 0 桁として保存する。境界が全角文字の 2 桁の中間に
 /// 入った場合は、片側だけを描けないため重なる列を空白にする。
-#[coverage(off)]
 fn columns(text: &str, start: usize, width: usize) -> String {
     if width == 0 {
         return String::new();
@@ -308,7 +295,6 @@ fn columns(text: &str, start: usize, width: usize) -> String {
 /// 行数不足の場合は空白で埋める。幅 4 桁未満では枠自体が収まらないため、
 /// modal は描かず正規化した背景だけを返す。
 #[must_use]
-#[coverage(off)]
 pub fn render_over(
     raw_height: usize,
     raw_width: usize,
