@@ -400,6 +400,31 @@ mod tests {
     }
 
     #[test]
+    fn expanding_an_action_with_subcommands_lists_them() {
+        // `terminal` and `close` carry subcommands; expanding the selected action
+        // renders that subcommand list (the completion the Ctrl-O command input
+        // drives).
+        for (action, subcommand) in [("terminal", "open"), ("close", "--force")] {
+            let mut modal = CloseupModal::new("daemon");
+            for _ in 0..modal.actions().len() {
+                if modal.selected_action().name == action {
+                    break;
+                }
+                modal.select_next();
+            }
+            assert_eq!(modal.selected_action().name, action);
+            modal.expand_selected();
+            assert!(joined(&modal).contains(subcommand));
+        }
+
+        // `agent` carries no subcommands, so expanding it is inert.
+        let mut agent = CloseupModal::new("daemon");
+        assert_eq!(agent.selected_action().name, "agent");
+        agent.expand_selected();
+        assert!(!joined(&agent).contains("--force"));
+    }
+
+    #[test]
     fn new_modal_targets_the_session_and_lists_actions() {
         let modal = CloseupModal::new("tui");
         assert_eq!(modal.session(), "tui");
