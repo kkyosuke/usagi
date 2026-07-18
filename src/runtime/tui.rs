@@ -1247,7 +1247,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
         let global_settings = settings.read(SettingsScope::Global)?;
         run_with_metrics_hook(|| {
             run_in_terminal(|terminal| {
-                presentation::run_workspace_with_agent_pr_ports_and_selection_mode(
+                presentation::run_workspace_controller(
                     terminal,
                     snapshot,
                     Box::new(DaemonSessionCommandPort::default()),

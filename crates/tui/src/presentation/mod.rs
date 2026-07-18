@@ -3498,7 +3498,7 @@ fn run_with_settings_inner(
                     welcome.record_opened(&snapshot.workspace);
                     open.record_opened(&snapshot.workspace);
                     let workspace_step = if let Some(factory) = agent_commands.as_deref_mut() {
-                        drive_workspace_with_agent_port_and_selection_mode(
+                        drive_workspace_controller(
                             term,
                             snapshot,
                             session_commands.create(),
@@ -3536,7 +3536,7 @@ fn run_with_settings_inner(
                         welcome.record_opened(&snapshot.workspace);
                         open.record_opened(&snapshot.workspace);
                         let workspace_step = if let Some(factory) = agent_commands.as_deref_mut() {
-                            drive_workspace_with_agent_port_and_selection_mode(
+                            drive_workspace_controller(
                                 term,
                                 snapshot,
                                 session_commands.create(),
@@ -6125,7 +6125,9 @@ mod tests {
         };
         let mut agents = IdleAgentPortFactory;
         let mut metrics = StaticMetricsFactory;
-        let keys = [Key::Char('o'), Key::Enter, Key::Char('q'), Key::Enter];
+        // Open the workspace, then quit it through the controller's quit chord
+        // (Ctrl-Q opens the confirmation, `y` detaches); `q` alone is inert now.
+        let keys = [Key::Char('o'), Key::Enter, Key::CtrlQ, Key::Char('y')];
         let mut term = FakeTerminal::with_keys(&keys);
         let mut loader = FakeLoader::default();
         let mut settings = DefaultSettingsPort;
