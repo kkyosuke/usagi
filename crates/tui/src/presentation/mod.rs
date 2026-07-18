@@ -3160,6 +3160,7 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 }
 
 #[cfg(test)]
+#[coverage(off)] // Test assertion branches are not product coverage targets.
 mod tests {
     use super::{
         AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Config, ConfigStep,
