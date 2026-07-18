@@ -109,6 +109,28 @@ impl SupervisorRuntime {
         let Some(mut run) = self.supervisor.load(id)? else {
             return Ok(());
         };
+        // Retry eligibility is a persisted deadline, not an in-memory timer.
+        // Reconciliation therefore cannot dispatch a retry before its deadline
+        // and can resume one after a daemon restart without polling.
+        let due_retries: Vec<_> = run
+            .tasks
+            .iter()
+            .filter(|(_, task)| {
+                task.state == TaskState::Retrying && task.retry_at.is_some_and(|at| at <= now)
+            })
+            .map(|(id, task)| (id.clone(), task.generation))
+            .collect();
+        for (task_id, generation) in due_retries {
+            run = self.apply(
+                &run,
+                now,
+                SupervisorEventSource::Timer,
+                SupervisorEventKind::RetryReady {
+                    task_id,
+                    generation,
+                },
+            )?;
+        }
         for (task_id, provenance) in run.provenance.clone() {
             let Some(dispatch_run) = self.dispatch_run(provenance.dispatch_run_id)? else {
                 continue;
@@ -129,6 +151,9 @@ impl SupervisorRuntime {
                 run = self.apply(&run, now, SupervisorEventSource::DispatchCompletion, event)?;
             }
             let current = run.tasks.get(&task_id).expect("task retained");
+            if !matches!(current.state, TaskState::Dispatched | TaskState::Running) {
+                continue;
+            }
             if !current.state.terminal() {
                 let event = SupervisorEventKind::SetTaskState {
                     task_id: task_id.clone(),
@@ -307,6 +332,8 @@ mod tests {
             attempt: 1,
             generation: 1,
             assigned_dispatch_run: None,
+            retry_at: None,
+            verification_digest: None,
             state: TaskState::Pending,
         }
     }

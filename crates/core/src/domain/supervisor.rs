@@ -136,7 +136,49 @@ pub struct TaskNode {
     pub attempt: u64,
     pub generation: u64,
     pub assigned_dispatch_run: Option<OperationId>,
+    /// The deterministic retry deadline.  It is part of the aggregate rather
+    /// than scheduler memory so a restart cannot make a retry run early.
+    pub retry_at: Option<DateTime<Utc>>,
+    /// A worker report is not evidence.  Tasks with a non-`none` contract are
+    /// held in `Verifying` until an independently recorded result is accepted.
+    pub verification_digest: Option<String>,
     pub state: TaskState,
+}
+
+/// Immutable limits copied into every supervisor run at creation time.
+/// Workspace configuration is deliberately represented by this one value;
+/// callers do not get per-request limit overrides.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionPolicy {
+    pub max_dispatches: u64,
+    pub max_concurrency: usize,
+    pub max_depth: usize,
+    pub max_attempts: u64,
+    pub retry_backoff_seconds: i64,
+}
+impl Default for ExecutionPolicy {
+    fn default() -> Self {
+        Self {
+            max_dispatches: 16,
+            max_concurrency: 4,
+            max_depth: 8,
+            // The workspace default is deliberately fail-closed: retry is
+            // enabled only by an explicit immutable run snapshot.
+            max_attempts: 1,
+            retry_backoff_seconds: 30,
+        }
+    }
+}
+
+/// Durable, redaction-safe record which prevents autonomous progress until a
+/// separate authorized-decision feature resolves it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EscalationRecord {
+    pub reason: String,
+    pub blocking_task_id: Option<TaskId>,
+    pub safe_evidence: String,
+    pub choices: Vec<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 /// One-to-one fence between a task generation and the concrete worker
@@ -192,6 +234,31 @@ pub enum SupervisorEventKind {
         state: SupervisorRunState,
         terminal_reason: Option<String>,
     },
+    /// Makes a retry eligible only at its persisted deadline.
+    RetryReady {
+        task_id: TaskId,
+        generation: u64,
+    },
+    /// Records an independent verification result.  A worker completion
+    /// cannot produce this event by itself.
+    VerificationResult {
+        task_id: TaskId,
+        generation: u64,
+        passed: bool,
+        result_digest: String,
+    },
+    /// Cancelling is a reducer fact so late dispatch completion cannot revive
+    /// the task or run.
+    Cancel {
+        task_id: Option<TaskId>,
+        reason: String,
+    },
+    Escalate {
+        task_id: Option<TaskId>,
+        reason: String,
+        safe_evidence: String,
+        choices: Vec<String>,
+    },
 }
 
 /// Append-only event envelope.  `event_id` is the idempotency key.
@@ -215,6 +282,11 @@ pub struct SupervisorRun {
     pub root_task_digest: String,
     pub root_input_digest: String,
     pub policy_revision: String,
+    pub policy: ExecutionPolicy,
+    /// Dispatch reservations are committed by the same reducer event as the
+    /// dispatch transition.  They make duplicate/replayed admission harmless.
+    pub dispatch_reservations: BTreeSet<OperationId>,
+    pub escalation: Option<EscalationRecord>,
     pub state_revision: u64,
     pub state: SupervisorRunState,
     pub created_at: DateTime<Utc>,
@@ -244,6 +316,9 @@ impl SupervisorRun {
             root_task_digest,
             root_input_digest,
             policy_revision,
+            policy: ExecutionPolicy::default(),
+            dispatch_reservations: BTreeSet::new(),
+            escalation: None,
             state_revision: 0,
             state: SupervisorRunState::Planning,
             created_at: now,
@@ -254,6 +329,13 @@ impl SupervisorRun {
             provenance: BTreeMap::new(),
             applied_events: BTreeSet::new(),
         }
+    }
+
+    #[must_use]
+    #[coverage(off)]
+    pub fn with_policy(mut self, policy: ExecutionPolicy) -> Self {
+        self.policy = policy;
+        self
     }
 
     /// Returns a redaction-safe projection for callers.
@@ -320,6 +402,7 @@ pub enum SupervisorError {
     MissingDependency(TaskId),
     SelfDependency,
     Cycle,
+    PolicyDenied(String),
     ParentMismatch,
     ProvenanceMismatch,
     DependencyIncomplete,
@@ -364,7 +447,13 @@ pub fn reduce(run: &mut SupervisorRun, event: &SupervisorEvent) -> Result<(), Su
             task_id,
             generation,
             provenance,
-        } => dispatch(&mut next, task_id, *generation, provenance.clone())?,
+        } => dispatch(
+            &mut next,
+            task_id,
+            *generation,
+            provenance.clone(),
+            event.observed_at,
+        )?,
         SupervisorEventKind::Running {
             task_id,
             generation,
@@ -384,6 +473,41 @@ pub fn reduce(run: &mut SupervisorRun, event: &SupervisorEvent) -> Result<(), Su
                 next.terminal_reason.clone_from(terminal_reason);
             }
         }
+        SupervisorEventKind::RetryReady {
+            task_id,
+            generation,
+        } => retry_ready(&mut next, task_id, *generation, event.observed_at)?,
+        SupervisorEventKind::VerificationResult {
+            task_id,
+            generation,
+            passed,
+            result_digest,
+        } => {
+            verification_result(
+                &mut next,
+                task_id,
+                *generation,
+                *passed,
+                result_digest,
+                event,
+            )?;
+        }
+        SupervisorEventKind::Cancel { task_id, reason } => {
+            cancel(&mut next, task_id.as_ref(), reason, event.observed_at)?;
+        }
+        SupervisorEventKind::Escalate {
+            task_id,
+            reason,
+            safe_evidence,
+            choices,
+        } => escalate(
+            &mut next,
+            task_id.clone(),
+            reason.clone(),
+            safe_evidence.clone(),
+            choices.clone(),
+            event.observed_at,
+        ),
     }
     next.state_revision = event.sequence;
     next.updated_at = event.observed_at;
@@ -434,7 +558,19 @@ fn dispatch(
     task_id: &TaskId,
     generation: u64,
     provenance: RunProvenance,
+    now: DateTime<Utc>,
 ) -> Result<(), SupervisorError> {
+    if let Err(SupervisorError::PolicyDenied(reason)) = admit_dispatch(run, task_id, &provenance) {
+        escalate(
+            run,
+            Some(task_id.clone()),
+            reason,
+            "policy limits are evaluated from the durable run snapshot".into(),
+            vec!["resume".into(), "cancel".into()],
+            now,
+        );
+        return Ok(());
+    }
     let task = run.tasks.get(task_id).ok_or(SupervisorError::MissingTask)?;
     if task.generation != generation {
         return Err(SupervisorError::StaleGeneration);
@@ -466,6 +602,56 @@ fn dispatch(
     task.assigned_dispatch_run = Some(provenance.dispatch_run_id);
     task.state = TaskState::Dispatched;
     run.provenance.insert(task_id.clone(), provenance);
+    run.dispatch_reservations
+        .insert(task.assigned_dispatch_run.expect("assigned above"));
+    Ok(())
+}
+fn admit_dispatch(
+    run: &SupervisorRun,
+    task_id: &TaskId,
+    provenance: &RunProvenance,
+) -> Result<(), SupervisorError> {
+    if run.escalation.is_some() || run.state == SupervisorRunState::WaitingForDecision {
+        return Err(SupervisorError::PolicyDenied(
+            "human decision required".into(),
+        ));
+    }
+    if run.dispatch_reservations.len() as u64 >= run.policy.max_dispatches
+        && !run
+            .dispatch_reservations
+            .contains(&provenance.dispatch_run_id)
+    {
+        return Err(SupervisorError::PolicyDenied(
+            "dispatch budget exhausted".into(),
+        ));
+    }
+    let active = run
+        .tasks
+        .values()
+        .filter(|task| matches!(task.state, TaskState::Dispatched | TaskState::Running))
+        .count();
+    if active >= run.policy.max_concurrency {
+        return Err(SupervisorError::PolicyDenied(
+            "concurrency limit reached".into(),
+        ));
+    }
+    let mut depth = 0;
+    let mut parent = run
+        .tasks
+        .get(task_id)
+        .and_then(|task| task.parent_task_id.clone());
+    while let Some(id) = parent {
+        depth += 1;
+        parent = run
+            .tasks
+            .get(&id)
+            .and_then(|task| task.parent_task_id.clone());
+    }
+    if depth > run.policy.max_depth {
+        return Err(SupervisorError::PolicyDenied(
+            "maximum task depth exceeded".into(),
+        ));
+    }
     Ok(())
 }
 fn set_task(
@@ -504,11 +690,121 @@ fn set_task(
     if !valid {
         return Err(SupervisorError::InvalidTransition);
     }
+    if state == TaskState::Failed && task.attempt < run.policy.max_attempts {
+        task.attempt += 1;
+        task.generation += 1;
+        let delay = run
+            .policy
+            .retry_backoff_seconds
+            .saturating_mul(1_i64 << (task.attempt - 2).min(30));
+        task.retry_at = Some(run.updated_at + chrono::Duration::seconds(delay));
+        task.assigned_dispatch_run = None;
+        task.state = TaskState::Retrying;
+        return Ok(());
+    }
+    if state == TaskState::Succeeded && task.required_artifact_contract != "none" {
+        task.state = TaskState::Verifying;
+        return Ok(());
+    }
     task.state = state;
     if state == TaskState::Succeeded {
         project_ready(&mut run.tasks);
     }
     Ok(())
+}
+fn retry_ready(
+    run: &mut SupervisorRun,
+    task_id: &TaskId,
+    generation: u64,
+    now: DateTime<Utc>,
+) -> Result<(), SupervisorError> {
+    let task = run
+        .tasks
+        .get_mut(task_id)
+        .ok_or(SupervisorError::MissingTask)?;
+    if task.generation != generation {
+        return Err(SupervisorError::StaleGeneration);
+    }
+    if task.state != TaskState::Retrying || task.retry_at.is_none_or(|deadline| deadline > now) {
+        return Err(SupervisorError::InvalidTransition);
+    }
+    task.retry_at = None;
+    task.state = TaskState::Ready;
+    Ok(())
+}
+fn verification_result(
+    run: &mut SupervisorRun,
+    task_id: &TaskId,
+    generation: u64,
+    passed: bool,
+    digest: &str,
+    event: &SupervisorEvent,
+) -> Result<(), SupervisorError> {
+    let task = run
+        .tasks
+        .get_mut(task_id)
+        .ok_or(SupervisorError::MissingTask)?;
+    if task.generation != generation {
+        return Err(SupervisorError::StaleGeneration);
+    }
+    if task.state != TaskState::Verifying {
+        return Err(SupervisorError::InvalidTransition);
+    }
+    task.verification_digest = Some(digest.into());
+    if passed {
+        task.state = TaskState::Succeeded;
+        project_ready(&mut run.tasks);
+    } else {
+        escalate(
+            run,
+            Some(task_id.clone()),
+            "artifact verification failed".into(),
+            digest.into(),
+            vec!["resume".into(), "cancel".into()],
+            event.observed_at,
+        );
+    }
+    Ok(())
+}
+fn cancel(
+    run: &mut SupervisorRun,
+    task_id: Option<&TaskId>,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<(), SupervisorError> {
+    if let Some(id) = task_id {
+        let task = run.tasks.get_mut(id).ok_or(SupervisorError::MissingTask)?;
+        if !task.state.terminal() {
+            task.state = TaskState::Cancelled;
+        }
+    } else {
+        for task in run.tasks.values_mut().filter(|task| !task.state.terminal()) {
+            task.state = TaskState::Cancelled;
+        }
+        run.state = SupervisorRunState::Cancelled;
+        run.terminal_at = Some(now);
+        run.terminal_reason = Some(reason.into());
+    }
+    Ok(())
+}
+fn escalate(
+    run: &mut SupervisorRun,
+    task_id: Option<TaskId>,
+    reason: String,
+    safe_evidence: String,
+    choices: Vec<String>,
+    now: DateTime<Utc>,
+) {
+    run.escalation = Some(EscalationRecord {
+        reason: reason.clone(),
+        blocking_task_id: task_id,
+        safe_evidence,
+        choices,
+        created_at: now,
+    });
+    run.state = SupervisorRunState::Escalated;
+    run.terminal_at = Some(now);
+    run.terminal_reason = Some(reason);
 }
 fn project_ready(tasks: &mut BTreeMap<TaskId, TaskNode>) {
     let ready: Vec<_> = tasks
@@ -540,10 +836,12 @@ mod tests {
             dependencies: deps.iter().map(|v| TaskId::new(*v).unwrap()).collect(),
             instruction_digest: "digest".into(),
             instruction_body: "secret prompt".into(),
-            required_artifact_contract: "contract".into(),
+            required_artifact_contract: "none".into(),
             attempt: 1,
             generation: 1,
             assigned_dispatch_run: None,
+            retry_at: None,
+            verification_digest: None,
             state: TaskState::Pending,
         }
     }
@@ -775,6 +1073,441 @@ mod tests {
             ),
             Err(SupervisorError::InvalidTransition)
         );
+    }
+
+    #[test]
+    fn policy_reserves_dispatch_once_and_escalates_before_an_over_limit_effect() {
+        let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now())
+            .with_policy(ExecutionPolicy {
+                max_dispatches: 1,
+                max_concurrency: 1,
+                max_depth: 0,
+                max_attempts: 1,
+                retry_backoff_seconds: 1,
+            });
+        let first = task(run.supervisor_run_id, "first", &[]);
+        let second = task(run.supervisor_run_id, "second", &[]);
+        reduce(
+            &mut run,
+            &event(1, SupervisorEventKind::AddTask { task: first }),
+        )
+        .unwrap();
+        reduce(
+            &mut run,
+            &event(2, SupervisorEventKind::AddTask { task: second }),
+        )
+        .unwrap();
+        let id = TaskId::new("first").unwrap();
+        let dispatch = OperationId::new();
+        let provenance = RunProvenance {
+            supervisor_run_id: run.supervisor_run_id,
+            task_id: id.clone(),
+            parent_task_id: None,
+            parent_dispatch_run: None,
+            dispatch_run_id: dispatch,
+            worker_session_id: SessionId::new(),
+            worker_agent_id: AgentRuntimeId::new(),
+            worker_worktree_id: WorktreeId::new(),
+            generation: 1,
+        };
+        reduce(
+            &mut run,
+            &event(
+                3,
+                SupervisorEventKind::Dispatch {
+                    task_id: id.clone(),
+                    generation: 1,
+                    provenance,
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(run.dispatch_reservations.len(), 1);
+        let second_id = TaskId::new("second").unwrap();
+        let second_provenance = RunProvenance {
+            task_id: second_id.clone(),
+            dispatch_run_id: OperationId::new(),
+            generation: 1,
+            ..run.provenance[&TaskId::new("first").unwrap()].clone()
+        };
+        reduce(
+            &mut run,
+            &event(
+                4,
+                SupervisorEventKind::Dispatch {
+                    task_id: second_id,
+                    generation: 1,
+                    provenance: second_provenance,
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(run.state, SupervisorRunState::Escalated);
+        assert_eq!(
+            run.escalation.as_ref().unwrap().reason,
+            "dispatch budget exhausted"
+        );
+    }
+
+    #[test]
+    fn verification_and_retry_are_durable_gates() {
+        let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now())
+            .with_policy(ExecutionPolicy {
+                max_dispatches: 3,
+                max_concurrency: 1,
+                max_depth: 1,
+                max_attempts: 2,
+                retry_backoff_seconds: 30,
+            });
+        let mut artifact = task(run.supervisor_run_id, "artifact", &[]);
+        artifact.required_artifact_contract = "commit-fence".into();
+        reduce(
+            &mut run,
+            &event(1, SupervisorEventKind::AddTask { task: artifact }),
+        )
+        .unwrap();
+        let id = TaskId::new("artifact").unwrap();
+        let provenance = RunProvenance {
+            supervisor_run_id: run.supervisor_run_id,
+            task_id: id.clone(),
+            parent_task_id: None,
+            parent_dispatch_run: None,
+            dispatch_run_id: OperationId::new(),
+            worker_session_id: SessionId::new(),
+            worker_agent_id: AgentRuntimeId::new(),
+            worker_worktree_id: WorktreeId::new(),
+            generation: 1,
+        };
+        reduce(
+            &mut run,
+            &event(
+                2,
+                SupervisorEventKind::Dispatch {
+                    task_id: id.clone(),
+                    generation: 1,
+                    provenance,
+                },
+            ),
+        )
+        .unwrap();
+        reduce(
+            &mut run,
+            &event(
+                3,
+                SupervisorEventKind::Running {
+                    task_id: id.clone(),
+                    generation: 1,
+                },
+            ),
+        )
+        .unwrap();
+        reduce(
+            &mut run,
+            &event(
+                4,
+                SupervisorEventKind::SetTaskState {
+                    task_id: id.clone(),
+                    generation: 1,
+                    state: TaskState::Succeeded,
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(run.tasks[&id].state, TaskState::Verifying);
+        reduce(
+            &mut run,
+            &event(
+                5,
+                SupervisorEventKind::VerificationResult {
+                    task_id: id.clone(),
+                    generation: 1,
+                    passed: true,
+                    result_digest: "verified".into(),
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(run.tasks[&id].state, TaskState::Succeeded);
+    }
+
+    #[test]
+    fn retry_cancel_and_failed_verification_cannot_resume_work() {
+        let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now())
+            .with_policy(ExecutionPolicy {
+                max_dispatches: 3,
+                max_concurrency: 1,
+                max_depth: 1,
+                max_attempts: 2,
+                retry_backoff_seconds: 30,
+            });
+        let mut retry_task = task(run.supervisor_run_id, "retry", &[]);
+        retry_task.required_artifact_contract = "commit-fence".into();
+        reduce(
+            &mut run,
+            &event(1, SupervisorEventKind::AddTask { task: retry_task }),
+        )
+        .unwrap();
+        let id = TaskId::new("retry").unwrap();
+        let provenance = RunProvenance {
+            supervisor_run_id: run.supervisor_run_id,
+            task_id: id.clone(),
+            parent_task_id: None,
+            parent_dispatch_run: None,
+            dispatch_run_id: OperationId::new(),
+            worker_session_id: SessionId::new(),
+            worker_agent_id: AgentRuntimeId::new(),
+            worker_worktree_id: WorktreeId::new(),
+            generation: 1,
+        };
+        reduce(
+            &mut run,
+            &event(
+                2,
+                SupervisorEventKind::Dispatch {
+                    task_id: id.clone(),
+                    generation: 1,
+                    provenance,
+                },
+            ),
+        )
+        .unwrap();
+        reduce(
+            &mut run,
+            &event(
+                3,
+                SupervisorEventKind::Running {
+                    task_id: id.clone(),
+                    generation: 1,
+                },
+            ),
+        )
+        .unwrap();
+        reduce(
+            &mut run,
+            &event(
+                4,
+                SupervisorEventKind::SetTaskState {
+                    task_id: id.clone(),
+                    generation: 1,
+                    state: TaskState::Failed,
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(run.tasks[&id].state, TaskState::Retrying);
+        let generation = run.tasks[&id].generation;
+        assert!(matches!(
+            reduce(
+                &mut run,
+                &event(
+                    5,
+                    SupervisorEventKind::RetryReady {
+                        task_id: id.clone(),
+                        generation,
+                    },
+                )
+            ),
+            Err(SupervisorError::InvalidTransition)
+        ));
+        let mut due = event(
+            5,
+            SupervisorEventKind::RetryReady {
+                task_id: id.clone(),
+                generation,
+            },
+        );
+        due.observed_at += chrono::Duration::seconds(30);
+        reduce(&mut run, &due).unwrap();
+        assert_eq!(run.tasks[&id].state, TaskState::Ready);
+    }
+
+    #[test]
+    fn cancellation_converges_tasks_and_run_to_terminal_state() {
+        let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
+        let mut task = task(run.supervisor_run_id, "cancel", &[]);
+        task.state = TaskState::Ready;
+        let id = task.task_id.clone();
+        run.tasks.insert(id.clone(), task);
+        reduce(
+            &mut run,
+            &event(
+                1,
+                SupervisorEventKind::Cancel {
+                    task_id: Some(id.clone()),
+                    reason: "task cancelled".into(),
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(run.tasks[&id].state, TaskState::Cancelled);
+        reduce(
+            &mut run,
+            &event(
+                2,
+                SupervisorEventKind::Cancel {
+                    task_id: None,
+                    reason: "run cancelled".into(),
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(run.state, SupervisorRunState::Cancelled);
+        assert!(run.terminal_at.is_some());
+    }
+
+    #[test]
+    fn failed_verification_escalates_and_records_safe_evidence() {
+        let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
+        let mut task = task(run.supervisor_run_id, "verify", &[]);
+        task.state = TaskState::Verifying;
+        run.tasks.insert(task.task_id.clone(), task);
+        let id = TaskId::new("verify").unwrap();
+        reduce(
+            &mut run,
+            &event(
+                1,
+                SupervisorEventKind::VerificationResult {
+                    task_id: id,
+                    generation: 1,
+                    passed: false,
+                    result_digest: "mismatch".into(),
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(run.state, SupervisorRunState::Escalated);
+        assert_eq!(run.escalation.as_ref().unwrap().safe_evidence, "mismatch");
+    }
+
+    #[test]
+    fn policy_and_reducer_error_edges_are_explicit() {
+        let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
+        let id = TaskId::new("task").unwrap();
+        let provenance = RunProvenance {
+            supervisor_run_id: run.supervisor_run_id,
+            task_id: id.clone(),
+            parent_task_id: None,
+            parent_dispatch_run: None,
+            dispatch_run_id: OperationId::new(),
+            worker_session_id: SessionId::new(),
+            worker_agent_id: AgentRuntimeId::new(),
+            worker_worktree_id: WorktreeId::new(),
+            generation: 1,
+        };
+        assert!(matches!(
+            dispatch(&mut run, &id, 1, provenance.clone(), now()),
+            Err(SupervisorError::MissingTask)
+        ));
+        run.state = SupervisorRunState::WaitingForDecision;
+        assert!(matches!(
+            admit_dispatch(&run, &id, &provenance),
+            Err(SupervisorError::PolicyDenied(reason)) if reason == "human decision required"
+        ));
+        run.state = SupervisorRunState::Planning;
+        let mut dispatched_task = task(run.supervisor_run_id, "task", &[]);
+        dispatched_task.state = TaskState::Dispatched;
+        run.tasks.insert(id.clone(), dispatched_task);
+        run.policy.max_concurrency = 1;
+        assert!(matches!(
+            admit_dispatch(&run, &id, &provenance),
+            Err(SupervisorError::PolicyDenied(reason)) if reason == "concurrency limit reached"
+        ));
+        run.policy.max_concurrency = 2;
+        let parent = TaskId::new("parent").unwrap();
+        let parent_task = task(run.supervisor_run_id, "parent", &[]);
+        run.tasks.insert(parent.clone(), parent_task);
+        run.tasks.get_mut(&id).unwrap().parent_task_id = Some(parent);
+        run.policy.max_depth = 0;
+        assert!(matches!(
+            admit_dispatch(&run, &id, &provenance),
+            Err(SupervisorError::PolicyDenied(reason)) if reason == "maximum task depth exceeded"
+        ));
+        assert_eq!(
+            retry_ready(&mut run, &id, 2, now()),
+            Err(SupervisorError::StaleGeneration)
+        );
+        assert_eq!(
+            verification_result(
+                &mut run,
+                &id,
+                1,
+                true,
+                "digest",
+                &event(
+                    1,
+                    SupervisorEventKind::SetRunState {
+                        state: SupervisorRunState::Running,
+                        terminal_reason: None
+                    }
+                )
+            ),
+            Err(SupervisorError::InvalidTransition)
+        );
+        assert_eq!(
+            verification_result(
+                &mut run,
+                &id,
+                2,
+                true,
+                "digest",
+                &event(
+                    1,
+                    SupervisorEventKind::SetRunState {
+                        state: SupervisorRunState::Running,
+                        terminal_reason: None,
+                    },
+                ),
+            ),
+            Err(SupervisorError::StaleGeneration)
+        );
+        run.tasks.get_mut(&id).unwrap().state = TaskState::Ready;
+        cancel(&mut run, None, "cancel", now()).unwrap();
+        assert_eq!(run.tasks[&id].state, TaskState::Cancelled);
+    }
+
+    #[test]
+    fn explicit_escalation_event_is_durable() {
+        let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
+        reduce(
+            &mut run,
+            &event(
+                1,
+                SupervisorEventKind::Escalate {
+                    task_id: None,
+                    reason: "ambiguous provenance".into(),
+                    safe_evidence: "fence mismatch".into(),
+                    choices: vec!["cancel".into()],
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(run.state, SupervisorRunState::Escalated);
+    }
+
+    #[test]
+    fn verification_reducer_propagates_an_invalid_gate_without_mutation() {
+        let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
+        let mut task = task(run.supervisor_run_id, "task", &[]);
+        task.state = TaskState::Ready;
+        let id = task.task_id.clone();
+        run.tasks.insert(id.clone(), task);
+        let before = run.clone();
+        assert_eq!(
+            reduce(
+                &mut run,
+                &event(
+                    1,
+                    SupervisorEventKind::VerificationResult {
+                        task_id: id,
+                        generation: 1,
+                        passed: true,
+                        result_digest: "untrusted".into(),
+                    },
+                ),
+            ),
+            Err(SupervisorError::InvalidTransition)
+        );
+        assert_eq!(run, before);
     }
 
     #[test]
