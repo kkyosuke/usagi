@@ -616,6 +616,12 @@ mod tests {
         assert_eq!(modal.input(), "issue list");
         assert!(modal.recall_next());
         assert_eq!(modal.input(), "");
+        // Past the newest entry there is nothing to recall forward to.
+        assert!(!modal.recall_next());
+        // A non-empty draft with no active recall keeps Up as candidate
+        // navigation rather than history recall.
+        type_str(&mut modal, "x");
+        assert!(!modal.recall_previous());
     }
 
     #[test]
