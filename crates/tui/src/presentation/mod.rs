@@ -12,6 +12,7 @@ pub mod layouts;
 pub mod theme;
 pub mod views;
 pub mod widgets;
+pub mod workspace_runtime;
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
