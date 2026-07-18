@@ -122,6 +122,16 @@ impl DispatchStore {
         Ok(self.load_registry()?.agents)
     }
 
+    /// Returns every durable dispatch run for daemon-side reconciliation.
+    /// Callers must still use the run ID and binding fence before acting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be read.
+    pub fn runs(&self) -> Result<Vec<DispatchRun>> {
+        Ok(self.load_registry()?.runs)
+    }
+
     /// Adds or replaces a run by `run_id`.
     ///
     /// # Errors
