@@ -12,6 +12,7 @@ pub mod new;
 pub mod open;
 pub mod overview_modal;
 pub mod pr_modal;
+pub mod quit_modal;
 pub mod remove_modal;
 pub mod scratchpad_modal;
 pub mod splash;
