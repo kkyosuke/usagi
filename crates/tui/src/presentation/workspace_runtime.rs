@@ -176,6 +176,26 @@ impl WorkspaceRuntime {
         effects
     }
 
+    /// Focus the live tab attached to `terminal` for `target`. The shell calls
+    /// this after it opens a pane the user initiated, so the completed tab becomes
+    /// the input owner and its viewport renders (completion alone never steals
+    /// focus).
+    pub fn focus_terminal(
+        &mut self,
+        target: Target,
+        terminal: TerminalRef,
+    ) -> Vec<PaneRegistryEffect> {
+        let effects = reduce_registry(
+            &mut self.panes,
+            PaneRegistryEvent::Pane {
+                target,
+                event: PaneEvent::Select(PaneSelection::Tab(TabSelection::Live(terminal))),
+            },
+        );
+        self.sync_live_pane();
+        effects
+    }
+
     /// Remove a live tab the daemon reports as exited.
     pub fn exit_pane(&mut self, target: Target, terminal: TerminalRef) -> Vec<PaneRegistryEffect> {
         let effects = reduce_registry(
@@ -444,8 +464,10 @@ mod tests {
         assert_eq!(runtime.focused_terminal(), None); // pending, not live
 
         let _ = runtime.complete_pane(target, operation, terminal.clone());
-        // Completion promotes the tab but does not steal focus; selecting it does.
-        let _ = runtime.select_tab(TabDirection::Next);
+        assert_eq!(runtime.focused_terminal(), None); // promoted, not yet focused
+
+        // Completion promotes the tab but does not steal focus; focusing it does.
+        let _ = runtime.focus_terminal(target, terminal.clone());
         assert_eq!(runtime.focused_terminal(), Some(terminal));
     }
 
