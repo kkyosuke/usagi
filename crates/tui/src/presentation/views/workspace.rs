@@ -37,6 +37,11 @@ use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId};
 const LEFT_WIDTH: usize = 36;
 /// header・rule の 2 行を除いた本文（ペイン）領域の先頭からのオフセット。
 const CHROME_ROWS: usize = 2;
+// The controller reducer owns the pointer hit-test and must resolve rows with
+// the same sidebar geometry this view renders. Keep its mirrored constants in
+// lock-step with the render so a click never lands on the wrong row.
+const _: () = assert!(LEFT_WIDTH == crate::usecase::application::controller::SIDEBAR_LEFT_WIDTH);
+const _: () = assert!(CHROME_ROWS == crate::usecase::application::controller::SIDEBAR_CHROME_ROWS);
 /// v1 と同じ Nerd Font glyph: processor and resident-memory server.
 const CPU_ICON: char = '\u{f2db}';
 const MEMORY_ICON: char = '\u{f233}';
@@ -305,67 +310,6 @@ impl HomeProjection {
         );
         rows.push(Selection::NewSession);
         rows
-    }
-
-    /// Hit-test a pointer at `(column, row)` against the sidebar and return the
-    /// `Selection` it lands on, or `None` for the header, the divider under the
-    /// Root row, the mascot sidecar, the footer, or a click outside the sidebar.
-    ///
-    /// This mirrors the `home_left_pane` layout (chrome rows, mascot reservation,
-    /// viewport start, and the divider inserted after Root) so pointer selection
-    /// shares the exact geometry the frame is drawn with. It is the controller
-    /// replacement for the legacy `sidebar_row_at` index arithmetic.
-    #[must_use]
-    pub fn row_at(
-        &self,
-        raw_height: usize,
-        raw_width: usize,
-        column: u16,
-        row: u16,
-    ) -> Option<Selection> {
-        let (height, width) = widgets::normalize_size(raw_height, raw_width);
-        let split = panes::split(width, LEFT_WIDTH);
-        if usize::from(column) >= split.left
-            || usize::from(row) < CHROME_ROWS
-            || height <= CHROME_ROWS
-        {
-            return None;
-        }
-        let rows = self.rows();
-        let body_height = height - CHROME_ROWS;
-        if body_height == 1 {
-            return (usize::from(row) == CHROME_ROWS).then(|| rows[0]);
-        }
-        let body_capacity = body_height - 1;
-        let content_capacity =
-            body_capacity.saturating_sub(home_mascot_rows(self, split.left, body_capacity));
-        let clicked = usize::from(row) - CHROME_ROWS;
-        if clicked >= content_capacity {
-            return None;
-        }
-        let selected_index = rows
-            .iter()
-            .position(|entry| *entry == self.selected)
-            .unwrap_or(0);
-        let start = home_viewport_start(&rows, selected_index, content_capacity);
-        let mut offset = 0;
-        for entry in &rows[start..] {
-            let lines = home_row_content_lines(*entry);
-            if offset + lines > content_capacity {
-                break;
-            }
-            if (offset..offset + lines).contains(&clicked) {
-                return Some(*entry);
-            }
-            offset += lines;
-            if matches!(entry, Selection::Target(Target::Root(_))) && offset < content_capacity {
-                if clicked == offset {
-                    return None;
-                }
-                offset += 1;
-            }
-        }
-        None
     }
 
     #[coverage(off)]
@@ -2298,38 +2242,6 @@ fn home_row_height(row: Selection) -> usize {
     }
 }
 
-/// Number of sidebar body lines `home_row_lines_at` renders for `row`, excluding
-/// the divider that `home_left_pane` inserts after the Root row. Root and the
-/// action row are single-line; a session identity row carries a metadata row.
-/// `home_row_height` weights Root as 2 for scroll math (its line plus divider);
-/// this returns the drawn line count so pointer hit-tests match the frame.
-fn home_row_content_lines(row: Selection) -> usize {
-    match row {
-        Selection::Target(Target::Session(_)) => 2,
-        Selection::Target(Target::Root(_)) | Selection::NewSession => 1,
-    }
-}
-
-/// Rows the mascot sidecar reserves at the foot of the sidebar for a given body
-/// capacity. This mirrors the reservation `home_left_pane` computes inline while
-/// rendering; `HomeProjection::row_at` calls it so the hit-test agrees with the
-/// frame on how much room the session list actually has.
-fn home_mascot_rows(home: &HomeProjection, width: usize, body_capacity: usize) -> usize {
-    let metric_labels = home
-        .metrics
-        .as_ref()
-        .map(|metrics| mascot_metrics(Some(metrics), 0))
-        .unwrap_or_default();
-    widgets::mascot::sidebar_block_with_sidecar(
-        width,
-        home.mascot_tick,
-        home.mascot_speech.as_ref(),
-        &metric_labels,
-    )
-    .as_ref()
-    .filter(|block| body_capacity >= block.reserved_rows() + 2)
-    .map_or(0, widgets::mascot::MascotBlock::reserved_rows)
-}
 #[coverage(off)]
 fn home_row_lines_at(
     width: usize,
@@ -2800,69 +2712,20 @@ mod tests {
     }
 
     #[test]
-    fn row_at_maps_pointer_clicks_to_sidebar_selections() {
-        let workspace = WorkspaceId::new();
-        let session = SessionId::new();
-        let state = AppState::home(workspace, vec![session]);
-        let snapshot = vec![projected_session(session, "alpha", "/work/alpha")];
-        let home = HomeProjection::from_state(&state, "work", "/work", &snapshot);
-
-        // Content begins after the two chrome rows: the Root identity line (row 2),
-        // the divider (row 3), the session's two lines (rows 4-5), then the action
-        // row. A click below every rendered row resolves to nothing.
-        assert_eq!(
-            home.row_at(30, 100, 5, 2),
-            Some(Selection::Target(Target::Root(workspace)))
-        );
-        assert_eq!(home.row_at(30, 100, 5, 3), None);
-        assert_eq!(
-            home.row_at(30, 100, 5, 4),
-            Some(Selection::Target(Target::Session(session)))
-        );
-        assert_eq!(
-            home.row_at(30, 100, 5, 5),
-            Some(Selection::Target(Target::Session(session)))
-        );
-        assert_eq!(home.row_at(30, 100, 5, 6), Some(Selection::NewSession));
-        assert_eq!(home.row_at(30, 100, 5, 8), None);
-    }
-
-    #[test]
-    fn row_at_rejects_clicks_outside_the_sidebar_body() {
-        let workspace = WorkspaceId::new();
-        let state = AppState::home(workspace, Vec::new());
-        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
-        assert_eq!(home.row_at(30, 100, 90, 4), None); // right pane column
-        assert_eq!(home.row_at(30, 100, 5, 0), None); // header row
-        assert_eq!(home.row_at(30, 100, 5, 1), None); // spacer row
-        assert_eq!(home.row_at(2, 100, 5, 2), None); // height at/under the chrome
-        assert_eq!(home.row_at(8, 100, 5, 7), None); // click past content capacity
-    }
-
-    #[test]
-    fn row_at_handles_single_body_line_and_overflowing_rows() {
-        let workspace = WorkspaceId::new();
-        let session = SessionId::new();
-        let state = AppState::home(workspace, vec![session]);
-        let snapshot = vec![projected_session(session, "alpha", "/work/alpha")];
-        let home = HomeProjection::from_state(&state, "work", "/work", &snapshot);
-        // body_height == 1: only the first row is addressable.
-        assert_eq!(
-            home.row_at(3, 100, 5, 2),
-            Some(Selection::Target(Target::Root(workspace)))
-        );
-        assert_eq!(home.row_at(3, 100, 5, 5), None);
-        // At height 6 the content capacity is 3, so the session's two lines
-        // overflow after the Root row and divider and cannot be hit.
-        assert_eq!(home.row_at(6, 100, 5, 4), None);
-    }
-
-    #[test]
-    fn row_at_shares_the_mascot_reservation_with_the_metrics_sidecar() {
-        let workspace = WorkspaceId::new();
-        let session = SessionId::new();
-        let state = AppState::home(workspace, vec![session]);
-        let snapshot = vec![projected_session(session, "alpha", "/work/alpha")];
+    fn controller_mascot_reservation_matches_the_hit_test_constants() {
+        // The controller pointer hit-test mirrors this view's foot-of-sidebar
+        // mascot reservation with plain constants. The controller Home renders the
+        // rabbit without a speech bubble, so pin those constants to what the mascot
+        // widget actually reserves and where it drops out for width.
+        use crate::presentation::widgets::mascot::sidebar_block_with_sidecar;
+        use crate::usecase::application::controller::{
+            SIDEBAR_MASCOT_MIN_LEFT, SIDEBAR_MASCOT_ROWS,
+        };
+        let block = sidebar_block_with_sidecar(LEFT_WIDTH, 0, None, &[])
+            .expect("the rabbit fits the sidebar width");
+        assert_eq!(block.reserved_rows(), SIDEBAR_MASCOT_ROWS);
+        // Daemon metrics feed the sidecar beside the rabbit without adding rows, so
+        // the reservation the hit-test assumes stays constant.
         let metrics = usagi_core::usecase::client::DaemonMetrics {
             schema_version: 1,
             sampled_at_ms: 42,
@@ -2871,47 +2734,13 @@ mod tests {
             active_subscribers: 3,
             dropped_updates: 5,
         };
-        let home = HomeProjection::from_state(&state, "work", "/work", &snapshot)
-            .with_metrics(Some(metrics));
-        // The mascot sidecar (fed by daemon metrics) reserves rows at the foot of
-        // the sidebar; the session list above it still hit-tests to the same rows.
-        assert_eq!(
-            home.row_at(30, 100, 5, 2),
-            Some(Selection::Target(Target::Root(workspace)))
-        );
-        assert_eq!(
-            home.row_at(30, 100, 5, 4),
-            Some(Selection::Target(Target::Session(session)))
-        );
-    }
-
-    #[test]
-    fn pointer_select_row_moves_the_cursor_through_the_reducer() {
-        let workspace = WorkspaceId::new();
-        let session = SessionId::new();
-        let mut state = AppState::home(workspace, vec![session]);
-        let snapshot = vec![projected_session(session, "alpha", "/work/alpha")];
-        let home = HomeProjection::from_state(&state, "work", "/work", &snapshot);
-
-        let hit = home
-            .row_at(30, 100, 5, 4)
-            .expect("session row is addressable");
-        assert_eq!(hit, Selection::Target(Target::Session(session)));
-        let effects = update(&mut state, AppEvent::Key(AppKey::SelectRow(hit)));
-        assert!(effects.is_empty());
-        assert_eq!(
-            state.selected(),
-            Selection::Target(Target::Session(session))
-        );
-
-        // A stale click naming a session that no longer exists leaves the cursor
-        // where it is rather than pointing at a vanished row.
-        let ghost = Selection::Target(Target::Session(SessionId::new()));
-        let _ = update(&mut state, AppEvent::Key(AppKey::SelectRow(ghost)));
-        assert_eq!(
-            state.selected(),
-            Selection::Target(Target::Session(session))
-        );
+        let sidecar = super::mascot_metrics(Some(&metrics), 0);
+        let with_metrics = sidebar_block_with_sidecar(LEFT_WIDTH, 0, None, &sidecar)
+            .expect("the rabbit fits the sidebar width");
+        assert_eq!(with_metrics.reserved_rows(), SIDEBAR_MASCOT_ROWS);
+        // Just under the rabbit's footprint the mascot drops out entirely.
+        assert!(sidebar_block_with_sidecar(SIDEBAR_MASCOT_MIN_LEFT - 1, 0, None, &[]).is_none());
+        assert!(sidebar_block_with_sidecar(SIDEBAR_MASCOT_MIN_LEFT, 0, None, &[]).is_some());
     }
 
     #[test]

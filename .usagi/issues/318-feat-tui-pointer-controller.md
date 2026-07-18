@@ -1,13 +1,13 @@
 ---
 number: 318
 title: feat(tui): pointer 入力を controller 語彙へ移す
-status: todo
+status: done
 priority: medium
 labels: [tui, controller, input]
 dependson: [315]
 related: [258]
 created_at: 2026-07-17T14:23:02.083365+00:00
-updated_at: 2026-07-17T14:23:02.083365+00:00
+updated_at: 2026-07-18T22:56:26.135402+00:00
 ---
 
 ## 目的
