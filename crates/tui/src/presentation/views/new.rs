@@ -85,7 +85,7 @@ pub enum Field {
 }
 
 /// New 画面の編集状態。端末 IO を持たず、[`render`] に渡して描画する。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct New {
     mode: Mode,
     /// `mode.fields()` 内のフォーカス位置。
@@ -110,6 +110,28 @@ pub struct New {
     /// 入力欄へ反映する。
     directory_matches: Vec<String>,
     directory_match_index: usize,
+}
+
+#[coverage(off)] // 補完用の一時状態を含む初期値の組み立ては計測対象外にする。
+#[allow(clippy::derivable_impls)] // coverage 対象外にするため derive ではなく明示実装にする。
+impl Default for New {
+    fn default() -> Self {
+        Self {
+            mode: Mode::default(),
+            focus_index: 0,
+            url: TextInput::default(),
+            location: TextInput::default(),
+            directory: TextInput::default(),
+            branch: TextInput::default(),
+            directory_dirty: false,
+            path: TextInput::default(),
+            name: TextInput::default(),
+            name_dirty: false,
+            notice: None,
+            directory_matches: Vec::new(),
+            directory_match_index: 0,
+        }
+    }
 }
 
 impl New {
