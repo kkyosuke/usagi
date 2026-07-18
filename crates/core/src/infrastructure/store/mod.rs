@@ -16,4 +16,5 @@ pub mod memory;
 pub mod pr_inventory;
 pub mod state;
 pub mod supervisor;
+pub mod user_decision;
 pub mod workspace;

@@ -19,6 +19,7 @@ pub mod settings;
 pub mod supervisor;
 pub mod terminal_launch;
 pub mod trace;
+pub mod user_decision;
 pub mod workspace;
 pub mod workspace_state;
 

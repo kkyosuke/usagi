@@ -33,7 +33,33 @@ pub fn tools() -> Vec<Box<dyn Tool>> {
         Box::new(AgentComplete),
         Box::new(AgentFail),
         Box::new(AgentInbox),
+        Box::new(UserDecisionRequest),
+        Box::new(UserDecisionGet),
     ]
+}
+pub struct UserDecisionRequest;
+impl Tool for UserDecisionRequest {
+    fn name(&self) -> &'static str {
+        "user_decision_request"
+    }
+    fn description(&self) -> &'static str {
+        "現在の agent run に人間の判断を durable に要求し、待たずに decision ID を返す"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"title":{"type":"string"},"prompt":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"label":{"type":"string"},"description":{"type":"string"}},"required":["id","label"],"additionalProperties":false}},"allow_freeform":{"type":"boolean"},"expires_at":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["title","prompt","options"],"additionalProperties":false}"#
+    }
+}
+pub struct UserDecisionGet;
+impl Tool for UserDecisionGet {
+    fn name(&self) -> &'static str {
+        "user_decision_get"
+    }
+    fn description(&self) -> &'static str {
+        "recovery/debug のため現在の agent が所有する decision を取得する。回答 polling の主経路には使わない"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"decision_id":{"type":"string"}},"required":["decision_id"],"additionalProperties":false}"#
+    }
 }
 
 /// `session_dispatch` — session を upsert して agent に prompt を即時 dispatch する。

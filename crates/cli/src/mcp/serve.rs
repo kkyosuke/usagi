@@ -350,6 +350,8 @@ fn dispatch_tool_action(name: &str) -> Option<DispatchToolAction> {
         "agent_complete" => Some(DispatchToolAction::AgentComplete),
         "agent_fail" => Some(DispatchToolAction::AgentFail),
         "agent_inbox" => Some(DispatchToolAction::AgentInbox),
+        "user_decision_request" => Some(DispatchToolAction::UserDecisionRequest),
+        "user_decision_get" => Some(DispatchToolAction::UserDecisionGet),
         _ => None,
     }
 }
@@ -428,7 +430,7 @@ mod tests {
     fn tools_list_returns_every_tool_with_schema() {
         let v = call(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 40);
+        assert_eq!(tools.len(), 42);
         // 各要素が name / description / inputSchema(object) を持つ。
         for tool in tools {
             assert!(tool["name"].as_str().is_some());

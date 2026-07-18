@@ -146,6 +146,12 @@ pub enum DispatchToolAction {
     AgentComplete,
     AgentFail,
     AgentInbox,
+    UserDecisionRequest,
+    UserDecisionGet,
+    UserDecisionList,
+    UserDecisionResolve,
+    UserDecisionCancel,
+    UserDecisionExpire,
 }
 
 /// The opt-in supervisor MCP surface.  It is separate from dispatch so adding

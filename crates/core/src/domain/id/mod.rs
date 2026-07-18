@@ -134,6 +134,10 @@ resource_id!(
     DaemonGeneration,
     "Identity of one daemon process generation."
 );
+resource_id!(
+    UserDecisionId,
+    "Identity of one durable user-decision request."
+);
 
 /// Identity of one durable mutation.  It is `UUIDv7` so a producer may use its
 /// timestamp only for admission expiry of a new mutation.
