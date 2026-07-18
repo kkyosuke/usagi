@@ -140,13 +140,27 @@ pub enum PrState {
     Dismissed,
 }
 
+/// Refresh lifecycle exposed as safe, credential-free snapshot metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrRefreshState {
+    #[default]
+    Idle,
+    Pending,
+    BackingOff,
+}
+
 /// One durable inventory entry. `pinned` and `Dismissed` are user-owned.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrEntry {
     pub identity: PrIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub state: PrState,
     #[serde(default)]
     pub pinned: bool,
+    #[serde(default)]
+    pub refresh: PrRefreshState,
 }
 
 /// Revisioned inventory for one stable session identity.
@@ -166,8 +180,10 @@ impl PrInventory {
                     identity.clone(),
                     PrEntry {
                         identity,
+                        title: None,
                         state: PrState::Open,
                         pinned: false,
+                        refresh: PrRefreshState::Pending,
                     },
                 );
                 changed = true;
@@ -177,6 +193,41 @@ impl PrInventory {
             self.revision += 1;
         }
         changed
+    }
+
+    /// Applies the safe subset returned by `gh pr view`. User-owned entries
+    /// are deliberately left untouched by automatic refreshes.
+    pub fn apply_refresh(
+        &mut self,
+        identity: &PrIdentity,
+        title: Option<String>,
+        state: PrState,
+    ) -> bool {
+        let Some(entry) = self.entries.get_mut(identity) else {
+            return false;
+        };
+        if entry.pinned || entry.state == PrState::Dismissed {
+            return false;
+        }
+        if entry.title == title && entry.state == state && entry.refresh == PrRefreshState::Idle {
+            return false;
+        }
+        entry.title = title;
+        entry.state = state;
+        entry.refresh = PrRefreshState::Idle;
+        self.revision += 1;
+        true
+    }
+
+    /// Records a retryable refresh failure without discarding the last known
+    /// title or state. This is observational metadata, not an inventory revision.
+    pub fn mark_refresh_backoff(&mut self, identity: &PrIdentity) {
+        if let Some(entry) = self.entries.get_mut(identity)
+            && !entry.pinned
+            && entry.state != PrState::Dismissed
+        {
+            entry.refresh = PrRefreshState::BackingOff;
+        }
     }
     /// Applies a user-owned state change.
     pub fn set_user_state(&mut self, identity: &PrIdentity, state: PrState, pinned: bool) -> bool {
@@ -268,5 +319,42 @@ mod tests {
         inventory.discover([id.clone()]);
         assert!(inventory.set_user_state(&id, PrState::Merged, true));
         assert!(!inventory.set_user_state(&id, PrState::Merged, true));
+    }
+    #[test]
+    fn refresh_updates_once_and_never_overwrites_user_owned_entries() {
+        let id = canonicalize("https://github.com/o/r/pull/9").unwrap();
+        let mut inventory = PrInventory::default();
+        inventory.discover([id.clone()]);
+        assert!(inventory.apply_refresh(&id, Some("closed work".into()), PrState::Closed));
+        assert_eq!(inventory.revision, 2);
+        assert!(!inventory.apply_refresh(&id, Some("closed work".into()), PrState::Closed));
+        assert!(inventory.set_user_state(&id, PrState::Dismissed, true));
+        assert!(!inventory.apply_refresh(&id, Some("merged work".into()), PrState::Merged));
+        assert_eq!(inventory.entries[&id].title.as_deref(), Some("closed work"));
+    }
+    #[test]
+    fn refresh_rejects_unknown_or_pinned_entries_and_backoff_keeps_user_entries() {
+        let known = canonicalize("https://github.com/o/r/pull/10").unwrap();
+        let missing = canonicalize("https://github.com/o/r/pull/11").unwrap();
+        let mut inventory = PrInventory::default();
+        assert!(!inventory.apply_refresh(&missing, None, PrState::Open));
+        inventory.discover([known.clone()]);
+        assert!(inventory.set_user_state(&known, PrState::Open, true));
+        assert!(!inventory.apply_refresh(&known, Some("ignored".into()), PrState::Closed));
+        inventory.mark_refresh_backoff(&known);
+        assert_eq!(inventory.entries[&known].refresh, PrRefreshState::Pending);
+        assert!(inventory.set_user_state(&known, PrState::Dismissed, false));
+        inventory.mark_refresh_backoff(&known);
+        assert_eq!(inventory.entries[&known].refresh, PrRefreshState::Pending);
+    }
+    #[test]
+    fn refresh_failure_marks_non_user_entry_without_revising_inventory() {
+        let id = canonicalize("https://github.com/o/r/pull/12").unwrap();
+        let mut inventory = PrInventory::default();
+        inventory.discover([id.clone()]);
+        let revision = inventory.revision;
+        inventory.mark_refresh_backoff(&id);
+        assert_eq!(inventory.entries[&id].refresh, PrRefreshState::BackingOff);
+        assert_eq!(inventory.revision, revision);
     }
 }

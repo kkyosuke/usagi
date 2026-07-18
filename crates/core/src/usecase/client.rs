@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use crate::domain::agent::{AgentProfileId, CallerRef, ModelSelector};
 use crate::domain::id::{AgentId, SessionId, TerminalRef, WorkspaceId};
+use crate::domain::pr_inventory::{PrEntry, PrInventory};
 use crate::domain::terminal_launch::{TerminalLaunchRequest, TerminalProfileId};
 use crate::infrastructure::ipc::{
     Bootstrap, BuildIdentity, ClientHello, ClientId, DaemonGeneration, Envelope, EnvelopeKind,
@@ -25,6 +26,12 @@ use crate::infrastructure::ipc::{
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DaemonRequest {
+    /// Revisioned daemon-owned PR inventory. Events are only hints; clients
+    /// always converge by reading this snapshot.
+    Pr {
+        action: PrAction,
+        payload: PrRequest,
+    },
     /// Manage a daemon-owned periodic metrics subscription.  Metrics are
     /// observational only: they never authorize a client-side fallback.
     Metrics { action: MetricsAction },
@@ -61,6 +68,63 @@ pub enum DaemonRequest {
         operation_id: String,
         payload: Value,
     },
+}
+
+/// Control vocabulary for the dedicated PR snapshot subscription.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrAction {
+    Snapshot,
+    Subscribe,
+    Unsubscribe,
+}
+
+/// A PR request names only a stable session and optional last known revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrRequest {
+    pub session_id: SessionId,
+    pub revision: Option<u64>,
+}
+
+/// Source-of-truth PR snapshot. `entries` contains only safe presentation data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrSnapshot {
+    pub session_id: SessionId,
+    pub revision: u64,
+    pub entries: Vec<PrEntry>,
+}
+
+impl From<(SessionId, PrInventory)> for PrSnapshot {
+    fn from((session_id, inventory): (SessionId, PrInventory)) -> Self {
+        Self {
+            session_id,
+            revision: inventory.revision,
+            entries: inventory.entries.into_values().collect(),
+        }
+    }
+}
+
+/// A lossy subscription hint. A duplicate, gap, or reorder is resolved by a
+/// `PrAction::Snapshot` request using the revision in this payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrUpdated {
+    pub session_id: SessionId,
+    pub revision: u64,
+}
+
+/// Decodes the source-of-truth PR projection received after a hint or reconnect.
+/// A malformed payload is a protocol error rather than a partially applied UI state.
+///
+/// # Errors
+///
+/// Returns `invalid_argument` when the response does not contain a complete snapshot.
+pub fn decode_pr_snapshot(value: Value) -> Result<PrSnapshot, ClientError> {
+    serde_json::from_value(value).map_err(|_| {
+        ClientError::Protocol(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "invalid PR snapshot response",
+        ))
+    })
 }
 
 /// The MCP operations backed by the daemon-owned dispatch registry.
@@ -334,7 +398,7 @@ impl<S: Read + Write> IpcClient<S> {
                 max_revision: 1,
             }],
             capabilities: vec![],
-            required_capabilities: vec!["request.correlation.v1".into()],
+            required_capabilities: vec!["request.correlation.v1".into(), "pr.snapshot.v1".into()],
             build: BuildIdentity {
                 version: env!("CARGO_PKG_VERSION").into(),
                 commit: "unknown".into(),
@@ -638,6 +702,24 @@ mod tests {
     fn policies_are_surface_specific() {
         assert!(ClientPolicy::tui().timeout_ms < ClientPolicy::cli().timeout_ms);
         assert!(ClientPolicy::mcp().timeout_ms > ClientPolicy::cli().timeout_ms);
+    }
+
+    #[test]
+    fn pr_snapshot_decoder_accepts_only_complete_source_of_truth_payloads() {
+        let session = SessionId::new();
+        let snapshot = PrSnapshot {
+            session_id: session,
+            revision: 4,
+            entries: vec![],
+        };
+        assert_eq!(
+            decode_pr_snapshot(serde_json::to_value(&snapshot).unwrap()).unwrap(),
+            snapshot
+        );
+        assert!(matches!(
+            decode_pr_snapshot(serde_json::json!({"revision": 4})),
+            Err(ClientError::Protocol(_))
+        ));
     }
 
     #[test]

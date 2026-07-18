@@ -753,13 +753,18 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         agent_pty,
         mcp_command,
     );
-    start_agent_observer(Arc::clone(&agent), agent_observations, pr_inventory)?;
+    start_agent_observer(
+        Arc::clone(&agent),
+        agent_observations,
+        Arc::clone(&pr_inventory),
+    )?;
     start_ipc_accept_loop(
         listener,
         server,
         runtime,
         terminal,
         agent,
+        pr_inventory,
         Arc::new(Mutex::new(ProcessMetrics { previous: None })),
     )
 }
@@ -914,6 +919,7 @@ fn start_ipc_accept_loop(
     runtime: SharedSessionRuntime,
     terminal: SharedTerminalRuntime,
     agent: SharedAgentRuntime,
+    pr_inventory: SharedPrInventory,
     metrics: SharedProcessMetrics,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
@@ -928,6 +934,7 @@ fn start_ipc_accept_loop(
                         let terminal = Arc::clone(&terminal);
                         let agent_owner = Arc::clone(&agent);
                         let agent_launch = Arc::clone(&agent);
+                        let pr_inventory = Arc::clone(&pr_inventory);
                         let metrics = Arc::clone(&metrics);
                         let _ = std::thread::Builder::new()
                             .name("usagi-ipc-client".to_string())
@@ -954,6 +961,7 @@ fn start_ipc_accept_loop(
                                         Some("agent") => dispatch_agent(&agent_launch, &scope_sessions, request_id, &body, hello),
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &scope_sessions, request_id, &body, hello),
                                         Some("metrics") => dispatch_metrics(&metrics, request_id, &body, hello),
+                                        Some("pr") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
                                         _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
                                     },
                                 );
@@ -967,6 +975,52 @@ fn start_ipc_accept_loop(
             }
         })
         .map(|_| ())
+}
+
+/// PR events are deliberately only hints; the IPC request always returns this
+/// durable snapshot so reconnects and dropped events converge without replay.
+fn dispatch_pr_snapshot(
+    inventory: &SharedPrInventory,
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    body: &serde_json::Value,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
+    use usagi_core::usecase::client::{DaemonRequest, PrAction};
+    let result = serde_json::from_value::<DaemonRequest>(body.clone())
+        .ok()
+        .and_then(|request| match request {
+            DaemonRequest::Pr {
+                action: PrAction::Snapshot,
+                payload,
+            } => inventory
+                .lock()
+                .ok()
+                .and_then(|projector| projector.snapshot(payload.session_id).ok())
+                .and_then(|snapshot| serde_json::to_value(snapshot).ok()),
+            _ => None,
+        });
+    let (outcome, body) = result.map_or_else(
+        || {
+            (
+                ResponseOutcome::Error(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "invalid PR snapshot request",
+                )),
+                serde_json::json!(null),
+            )
+        },
+        |snapshot| (ResponseOutcome::Ok, snapshot),
+    );
+    usagi_core::infrastructure::ipc::Envelope {
+        protocol: hello.protocol,
+        daemon_generation: hello.daemon_generation.clone(),
+        kind: usagi_core::infrastructure::ipc::EnvelopeKind::Response {
+            request_id,
+            outcome,
+            body,
+        },
+    }
 }
 
 fn dispatch_dispatch(

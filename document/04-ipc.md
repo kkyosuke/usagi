@@ -14,6 +14,7 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 - [client の失敗処理](#client-の失敗処理)
 - [managed session request](#managed-session-request)
 - [daemon metrics subscription](#daemon-metrics-subscription)
+- [PR inventory snapshot](#pr-inventory-snapshot)
 - [agent launch request](#agent-launch-request)
 - [dispatch request](#dispatch-request)
 - [generic terminal request](#generic-terminal-request)
@@ -89,6 +90,23 @@ session / terminal の所有権や local fallback を判断する根拠にはし
 各 subscriber は容量 1 の queue を持つ。daemon は tick で block せず、queue が埋まった
 observer の中間 sample を落として count する。切断された observer は次の publish で取り除く。
 このため遅い TUI や一つの接続の切断が daemon tick または他 TUI の配信を止めない。
+
+## PR inventory snapshot
+
+`pr` request は stable `SessionId` を対象に daemon-owned inventory の source-of-truth snapshot を返す。
+handshake では `pr.snapshot.v1` capability を必須にし、dedicated subscription を提供する peer は
+`pr.subscription.v1` も advertise する。
+
+| action / event | fields | contract |
+|---|---|---|
+| `snapshot` | `session_id`, `revision?` | canonical URL、optional title、state、pin/dismiss と refresh state を含む current snapshot を返す |
+| `subscribe` / `unsubscribe` | `session_id` | connection-local hint subscription を登録・解除する。disconnect は登録を回収する |
+| `pr.updated` | `session_id`, `revision` | inventory mutation を示す lossy hint。client は snapshot を再取得して収束する |
+
+revision は session ごとに monotonic である。duplicate、欠落、順序逆転した `pr.updated` は client state
+の差分適用根拠にしない。client は最後に見た revision より新しい hint を受けた場合、または reconnect 後に
+snapshot を読み直す。slow subscriber は bounded queue で coalesce/drop され、PR refresh、terminal drain、
+他 client の RPC を停止させない。
 
 ## managed session request
 
