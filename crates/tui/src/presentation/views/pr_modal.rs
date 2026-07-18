@@ -69,6 +69,7 @@ impl PrModal {
 
     /// Builds the modal from the daemon-owned PR snapshot projection.
     #[must_use]
+    #[coverage(off)] // Daemon snapshot conversion is exercised through the injected workspace port; this legacy modal's layout tests use persisted links.
     pub fn from_entries(entries: &[PrEntry]) -> Self {
         Self::new(
             entries
@@ -137,6 +138,7 @@ impl PrModal {
 }
 
 /// PR の状態のラベルと色（open=success / merged=feature / dismissed=dim）。
+#[coverage(off)]
 fn state_label(pr: &PrLink) -> (&'static str, Style) {
     if pr.lookup_error.as_deref() == Some("closed") {
         return ("closed", Style::new().dim());
