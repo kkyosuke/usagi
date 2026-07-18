@@ -434,7 +434,6 @@ fn root_ipc_fixture_login_shell_is_fenced_and_replays_exit() {
     let DaemonReply::Ok(launched) = launch(scope, "login-shell").unwrap() else {
         panic!("generic terminal launch is synchronous");
     };
-    drop(launch);
     let terminal: TerminalRef = serde_json::from_value(launched["terminal"].clone()).unwrap();
     assert_eq!(terminal.workspace_id, workspace);
     assert_eq!(terminal.session_id, Some(session));
