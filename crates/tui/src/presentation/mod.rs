@@ -9,6 +9,7 @@
 
 pub mod frame;
 pub mod layouts;
+pub mod metrics;
 pub mod theme;
 pub mod views;
 pub mod widgets;
@@ -31,6 +32,7 @@ use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::usecase::client::DaemonMetrics;
 
+use crate::presentation::metrics::{MetricsBackend, MetricsProjection};
 use crate::presentation::theme::{Color, Role, Style};
 use crate::presentation::views::closeup_modal::{self, CloseupModal};
 use crate::presentation::views::config::{self, AvailableAgentModels, Config};
@@ -3181,15 +3183,15 @@ fn drive_workspace_controller(
         modal_selection_mode,
     )
     .with_agent_context(workspace_id, session_ids.clone(), agent_port, default_model)
-    .with_metrics_port(metrics_port)
     .with_pr_ports(pr_port, browser);
     let mut runtime = WorkspaceRuntime::new(workspace_id, session_ids);
+    let mut metrics_backend = MetricsBackend::new(metrics_port);
+    let mut metrics_projection = MetricsProjection::default();
     let mut pending_targets: std::collections::HashMap<OperationId, Target> =
         std::collections::HashMap::new();
     loop {
         drain_session_completions(&mut ui);
         sync_runtime_sessions(&mut runtime, &ui);
-        refresh_metrics(&mut ui);
         let (height, width) = term.size()?;
         ui.set_terminal_size(height, width);
         let geometry = terminal_geometry(height, width);
@@ -3197,7 +3199,17 @@ fn drive_workspace_controller(
         ui.resize_terminals(geometry);
         let terminal_view = controller_terminal_view(&mut ui, &runtime);
         let sessions = project_controller_sessions(&ui);
-        let metrics = ui.workspace.metrics();
+        // Reflux daemon metrics / git diffs through the backend drain instead of
+        // polling the port inline: the shell folds the updates into its own
+        // projection cache, so the material no longer rides on the legacy view.
+        let metrics_sessions = sessions
+            .iter()
+            .map(|session| (session.id, session.cwd.clone()))
+            .collect::<Vec<_>>();
+        metrics_backend.poll(&metrics_sessions);
+        for update in metrics_backend.drain_events() {
+            metrics_projection.apply(update);
+        }
         let frame = render_controller_frame(
             height,
             width,
@@ -3205,8 +3217,8 @@ fn drive_workspace_controller(
             &workspace_name,
             &root_cwd,
             &sessions,
-            metrics,
-            ui.workspace.git_diffs(),
+            metrics_projection.metrics(),
+            metrics_projection.git_diffs(),
             terminal_view,
         );
         term.draw(&frame)?;

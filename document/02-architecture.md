@@ -150,7 +150,10 @@ target-scoped `PaneRegistry`）が所有し、入力は `presentation::app_event
 pointer クリックは `HomeProjection::row_at`（描画と同じ viewport 幾何を共有）で
 `Selection` へ hit-test し、`AppKey::SelectRow` で reducer に届く。daemon IO（session
 worker・pane 起動・terminal stream・metrics）は既存の runtime shell が transport として
-担い、Home の state には触れない。
+担い、Home の state には触れない。daemon metrics と session ごとの git diff は描画専用素材
+なので `AppState` に載せず、shell が `MetricsBackend` で port を poll して各観測を drain し、
+`MetricsProjection` キャッシュへ畳み込んでから `render_home` に渡す（`poll → drain → 反映
+→ 描画` の単方向）。
 
 **TUI の実装は core に吸収されない。** `usagi-core` が持つのは面をまたいで共有する
 data（`domain/`）・IPC プロトコル型の定義・永続化・git（`infrastructure/`）と、
