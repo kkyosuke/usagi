@@ -484,6 +484,8 @@ struct WorkspaceUi {
     session_commands: Option<Box<dyn SessionCommandPort>>,
     session_completions: Receiver<SessionCommandCompletion>,
     session_completion_sender: Sender<SessionCommandCompletion>,
+    /// Session displayed as a removal skeleton until its daemon command returns.
+    removing_session: Option<SessionId>,
     agent: Option<AgentContext>,
     pane_launches: Vec<PaneLaunch>,
     pane_completions: Receiver<PaneLaunchCompletion>,
@@ -551,6 +553,7 @@ impl WorkspaceUi {
             session_commands: Some(session_commands),
             session_completions,
             session_completion_sender,
+            removing_session: None,
             agent: None,
             pane_launches: Vec::new(),
             pane_completions,
@@ -1000,6 +1003,7 @@ fn apply_session_projection(
 fn drain_session_completions(ui: &mut WorkspaceUi) {
     while let Ok(completion) = ui.session_completions.try_recv() {
         ui.session_commands = Some(completion.port);
+        ui.removing_session = None;
         if let Ok(result) = completion.result {
             apply_session_projection(ui, result.sessions, result.session_ids);
         }
@@ -1203,7 +1207,11 @@ fn project_controller_sessions(ui: &WorkspaceUi) -> Vec<ProjectedSession> {
         .sessions()
         .iter()
         .zip(ui.workspace.session_ids())
-        .map(|(record, id)| ProjectedSession::from_record(*id, record))
+        .map(|(record, id)| {
+            let mut projected = ProjectedSession::from_record(*id, record);
+            projected.removing = ui.removing_session == Some(*id);
+            projected
+        })
         .collect()
 }
 
@@ -1468,7 +1476,10 @@ fn dispatch_controller_effect(
             );
         }
         Effect::RemoveSession { session, force, .. } => {
-            if let Some(name) = session_name_for(ui, *session) {
+            if let Some(name) = session_name_for(ui, *session)
+                && ui.session_commands.is_some()
+            {
+                ui.removing_session = Some(*session);
                 begin_session_command(
                     ui,
                     SessionCommand::Remove {
@@ -2578,6 +2589,7 @@ mod tests {
             last_modified: now(),
             has_notes: false,
             pr_summary: None,
+            removing: false,
         };
         let sessions = std::slice::from_ref(&projected);
         let git = std::collections::BTreeMap::new();
