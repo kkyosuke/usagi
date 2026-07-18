@@ -332,4 +332,29 @@ mod tests {
         assert!(!inventory.apply_refresh(&id, Some("merged work".into()), PrState::Merged));
         assert_eq!(inventory.entries[&id].title.as_deref(), Some("closed work"));
     }
+    #[test]
+    fn refresh_rejects_unknown_or_pinned_entries_and_backoff_keeps_user_entries() {
+        let known = canonicalize("https://github.com/o/r/pull/10").unwrap();
+        let missing = canonicalize("https://github.com/o/r/pull/11").unwrap();
+        let mut inventory = PrInventory::default();
+        assert!(!inventory.apply_refresh(&missing, None, PrState::Open));
+        inventory.discover([known.clone()]);
+        assert!(inventory.set_user_state(&known, PrState::Open, true));
+        assert!(!inventory.apply_refresh(&known, Some("ignored".into()), PrState::Closed));
+        inventory.mark_refresh_backoff(&known);
+        assert_eq!(inventory.entries[&known].refresh, PrRefreshState::Pending);
+        assert!(inventory.set_user_state(&known, PrState::Dismissed, false));
+        inventory.mark_refresh_backoff(&known);
+        assert_eq!(inventory.entries[&known].refresh, PrRefreshState::Pending);
+    }
+    #[test]
+    fn refresh_failure_marks_non_user_entry_without_revising_inventory() {
+        let id = canonicalize("https://github.com/o/r/pull/12").unwrap();
+        let mut inventory = PrInventory::default();
+        inventory.discover([id.clone()]);
+        let revision = inventory.revision;
+        inventory.mark_refresh_backoff(&id);
+        assert_eq!(inventory.entries[&id].refresh, PrRefreshState::BackingOff);
+        assert_eq!(inventory.revision, revision);
+    }
 }
