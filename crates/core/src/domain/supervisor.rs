@@ -1485,6 +1485,32 @@ mod tests {
     }
 
     #[test]
+    fn verification_reducer_propagates_an_invalid_gate_without_mutation() {
+        let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
+        let mut task = task(run.supervisor_run_id, "task", &[]);
+        task.state = TaskState::Ready;
+        let id = task.task_id.clone();
+        run.tasks.insert(id.clone(), task);
+        let before = run.clone();
+        assert_eq!(
+            reduce(
+                &mut run,
+                &event(
+                    1,
+                    SupervisorEventKind::VerificationResult {
+                        task_id: id,
+                        generation: 1,
+                        passed: true,
+                        result_digest: "untrusted".into(),
+                    },
+                ),
+            ),
+            Err(SupervisorError::InvalidTransition)
+        );
+        assert_eq!(run, before);
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)]
     fn rejects_duplicate_parent_and_dispatch_fences() {
         let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
