@@ -8,6 +8,7 @@
 //! 純粋な値で、[`render`] が 1 フレーム分の行（ANSI 付き `Vec<String>`）に変換する。キー入力の
 //! 解釈は入力層が整うときに載せ、ここではカーソル移動の純粋操作だけを公開する。
 
+use usagi_core::domain::pr_inventory::PrEntry;
 use usagi_core::domain::pullrequest::{PrLink, PrState};
 
 use crate::presentation::theme::{Role, Style};
@@ -66,6 +67,36 @@ impl PrModal {
         Self { prs, selected: 0 }
     }
 
+    /// Builds the modal from the daemon-owned PR snapshot projection.
+    #[must_use]
+    pub fn from_entries(entries: &[PrEntry]) -> Self {
+        Self::new(
+            entries
+                .iter()
+                .map(|entry| {
+                    let number = entry
+                        .identity
+                        .as_url()
+                        .rsplit('/')
+                        .next()
+                        .and_then(|part| part.parse().ok())
+                        .unwrap_or(0);
+                    let mut pr = PrLink::new(number, entry.identity.as_url());
+                    pr.title.clone_from(&entry.title);
+                    pr.state = match entry.state {
+                        usagi_core::domain::pr_inventory::PrState::Open => PrState::Open,
+                        usagi_core::domain::pr_inventory::PrState::Closed => PrState::Closed,
+                        usagi_core::domain::pr_inventory::PrState::Merged => PrState::Merged,
+                        usagi_core::domain::pr_inventory::PrState::Dismissed => PrState::Dismissed,
+                    };
+                    pr.refreshing =
+                        entry.refresh == usagi_core::domain::pr_inventory::PrRefreshState::Pending;
+                    pr
+                })
+                .collect(),
+        )
+    }
+
     /// PR 一覧。
     #[must_use]
     pub fn prs(&self) -> &[PrLink] {
@@ -103,6 +134,7 @@ impl PrModal {
 fn state_label(state: PrState) -> (&'static str, Style) {
     match state {
         PrState::Open => ("open", Role::Success.style()),
+        PrState::Closed => ("closed", Style::new().dim()),
         PrState::Merged => ("merged", Role::Feature.style()),
         PrState::Dismissed => ("dismissed", Style::new().dim()),
     }
@@ -178,7 +210,11 @@ fn body(state: &PrModal) -> Vec<String> {
         lines.push(Style::new().dim().paint("  no pull requests"));
     }
     lines.push(String::new());
-    lines.push(Style::new().dim().paint("  ↑↓ select   Esc: close"));
+    lines.push(
+        Style::new()
+            .dim()
+            .paint("  ↑↓ select   Enter: open   Esc: close"),
+    );
     modal::fixed_body(lines, BODY_HEIGHT)
 }
 

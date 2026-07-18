@@ -31,6 +31,8 @@ pub mod lifecycle_adapter;
 pub mod pane;
 /// daemon terminal inventory/stream と pane reducer を結合する client-side state machine。
 pub mod pane_runtime;
+/// Daemon-backed PR projection and browser effect ports.
+pub mod pr;
 /// daemon-owned generic terminal launch / attach adapter for Closeup panes.
 pub mod terminal_launch;
 /// Minimal VT screen grid turning raw daemon PTY output into renderable rows.
