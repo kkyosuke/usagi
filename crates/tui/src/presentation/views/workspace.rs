@@ -1747,25 +1747,15 @@ fn tab_menu(width: usize, header: &str, ws: &Workspace, frame: usize) -> [String
         .iter()
         .map(pane_tab_label)
         .collect::<Vec<_>>();
-    let indicators = ws
-        .pane()
-        .tabs()
-        .iter()
-        .map(|tab| {
-            matches!(tab, PaneTab::Pending(_))
-                .then(|| widgets::session_tab::pending_indicator(frame as u64))
-        })
-        .collect::<Vec<_>>();
     let tabs = ws
         .pane()
         .tabs()
         .iter()
         .zip(&labels)
-        .zip(&indicators)
-        .map(|((tab, label), indicator)| widgets::session_tab::Tab {
+        .map(|(tab, label)| widgets::session_tab::Tab {
             label,
             selected: pane_tab_selected(tab, ws.pane().selected()),
-            pending_indicator: indicator.as_deref(),
+            pending_frame: matches!(tab, PaneTab::Pending(_)).then_some(frame as u64),
         })
         .collect::<Vec<_>>();
     widgets::session_tab::render_with_prefix(width, header, &tabs)
@@ -2322,22 +2312,13 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         return with_footer_gap(rows, height, footer);
     }
 
-    let indicators = home
-        .pane_tabs
-        .iter()
-        .map(|tab| {
-            tab.pending
-                .then(|| widgets::session_tab::pending_indicator(home.mascot_tick))
-        })
-        .collect::<Vec<_>>();
     let tabs = home
         .pane_tabs
         .iter()
-        .zip(&indicators)
-        .map(|(tab, indicator)| widgets::session_tab::Tab {
+        .map(|tab| widgets::session_tab::Tab {
             label: &tab.label,
             selected: tab.selected,
-            pending_indicator: indicator.as_deref(),
+            pending_frame: tab.pending.then_some(home.mascot_tick),
         })
         .collect::<Vec<_>>();
     let chrome = widgets::session_tab::render_with_prefix(width, &header, &tabs);
@@ -3346,7 +3327,6 @@ mod tests {
         assert!(!closeup.contains("Esc switch"));
         assert!(closeup.contains("↑↓/jk action"));
         assert!(closeup.contains("Terminal"));
-        assert!(closeup.contains('\u{f0907}'));
         assert!(
             !closeup.contains('▔'),
             "a pending tab remains listed but does not take focus before completion"
@@ -3673,8 +3653,7 @@ mod tests {
 
         let early = render_with_skeleton_frame(30, 100, &ws, 0).join("\n");
         let later = render_with_skeleton_frame(30, 100, &ws, 12).join("\n");
-        assert!(early.contains("Terminal"));
-        assert!(early.contains('\u{f0907}'));
+        assert!(strip(&early).contains("Terminal"));
         assert_ne!(early, later, "the pending tab uses the shared loading wave");
 
         let terminal = terminal_ref(workspace_id, session_id);

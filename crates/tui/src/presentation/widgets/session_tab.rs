@@ -14,31 +14,34 @@ pub struct Tab<'a> {
     pub label: &'a str,
     /// reducer が stable identity から決めた選択状態。
     pub selected: bool,
-    /// Pending launch indicator. Only this one-cell glyph is coloured so a
-    /// loading tab does not turn its whole label into a moving colour band.
-    pub pending_indicator: Option<&'a str>,
+    /// Pending launch animation frame. The label itself carries the wave while
+    /// retaining its original display width.
+    pub pending_frame: Option<u64>,
 }
-
-/// The coloured runner for an in-flight pane launch.
-///
-/// Only the rabbit carries colour. Its three-cell track stays fixed while the
-/// rabbit advances, so the tab label and active marker never jump sideways.
-const RUNNING_RABBIT: &str = "\u{f0907}";
 
 /// Keep each wave position visible for roughly 200 ms at the runtime's 60 Hz
 /// redraw cadence. This is deliberately slower than the sidebar mascot.
 const WAVE_TICKS_PER_POSITION: u64 = 12;
-const WAVE_WIDTH: usize = 3;
 
+/// Paint a slow, fixed-width highlight wave across a pending tab label.
 #[must_use]
-pub fn pending_indicator(frame: u64) -> String {
-    let position = ((frame / WAVE_TICKS_PER_POSITION) as usize) % WAVE_WIDTH;
-    format!(
-        "{}{}{}",
-        " ".repeat(position),
-        Role::Feature.style().bold().paint(RUNNING_RABBIT),
-        " ".repeat(WAVE_WIDTH - position - 1)
-    )
+pub fn pending_label(label: &str, frame: u64) -> String {
+    let length = label.chars().count();
+    if length == 0 {
+        return String::new();
+    }
+    let position = ((frame / WAVE_TICKS_PER_POSITION) as usize) % length;
+    label
+        .chars()
+        .enumerate()
+        .map(|(index, ch)| {
+            if index == position {
+                Role::Feature.style().bold().paint(&ch.to_string())
+            } else {
+                Style::new().dim().paint(&ch.to_string())
+            }
+        })
+        .collect()
 }
 
 /// Chrome 風 tab strip を上段の chip と下段の active marker として描く。
@@ -63,13 +66,15 @@ pub fn render_with_prefix(width: usize, prefix: &str, tabs: &[Tab<'_>]) -> [Stri
             chips.push(' ');
             marker.push(' ');
         }
-        let text = format!(" {}{} ", tab.pending_indicator.unwrap_or(""), tab.label);
+        let label = tab.pending_frame.map_or_else(
+            || tab.label.to_owned(),
+            |frame| pending_label(tab.label, frame),
+        );
+        let text = format!(" {label} ");
         let chip_width = super::display_width(&text);
         if tab.selected {
-            // The running rabbit owns its colour. Keep its label neutral so
-            // loading looks like a rabbit crossing the chip, not a colour band.
-            let chip = if tab.pending_indicator.is_some() {
-                Style::new().dim().paint(&text)
+            let chip = if tab.pending_frame.is_some() {
+                text
             } else {
                 Role::Accent.style().bold().paint(&text)
             };
@@ -144,8 +149,7 @@ pub fn empty_pane_with_detail(
 #[cfg(test)]
 mod tests {
     use super::{
-        RUNNING_RABBIT, Tab, WAVE_TICKS_PER_POSITION, WAVE_WIDTH, empty_pane,
-        empty_pane_with_detail, pending_indicator, render,
+        Tab, WAVE_TICKS_PER_POSITION, empty_pane, empty_pane_with_detail, pending_label, render,
     };
     use crate::presentation::widgets::display_width;
 
@@ -174,12 +178,12 @@ mod tests {
                 Tab {
                     label: "Terminal",
                     selected: false,
-                    pending_indicator: None,
+                    pending_frame: None,
                 },
                 Tab {
                     label: "Agent",
                     selected: true,
-                    pending_indicator: None,
+                    pending_frame: None,
                 },
             ],
         );
@@ -196,7 +200,7 @@ mod tests {
             &[Tab {
                 label: "Terminal",
                 selected: true,
-                pending_indicator: None,
+                pending_frame: None,
             }],
         );
         assert!(rows.iter().all(|row| display_width(row) == 6));
@@ -204,24 +208,22 @@ mod tests {
     }
 
     #[test]
-    fn pending_indicator_is_a_coloured_rabbit_that_runs_across_frames() {
-        let indicator = pending_indicator(0);
-        let later = pending_indicator(WAVE_TICKS_PER_POSITION);
-        assert!(indicator.contains(RUNNING_RABBIT));
-        assert_eq!(display_width(&indicator), WAVE_WIDTH);
-        assert_ne!(indicator, later);
-        assert_eq!(display_width(&later), WAVE_WIDTH);
-        assert!(indicator.contains("\u{1b}[0m"));
+    fn pending_label_has_a_slow_fixed_width_wave() {
+        let label = pending_label("Agent", 0);
+        let later = pending_label("Agent", WAVE_TICKS_PER_POSITION);
+        assert_eq!(display_width(&label), display_width("Agent"));
+        assert_ne!(label, later);
+        assert_eq!(display_width(&later), display_width("Agent"));
+        assert!(label.contains("\u{1b}[0m"));
         let tab = render(
             40,
             &[Tab {
                 label: "Agent",
                 selected: true,
-                pending_indicator: Some(&indicator),
+                pending_frame: Some(0),
             }],
         );
-        assert!(tab[0].contains(RUNNING_RABBIT));
-        assert!(tab[0].contains("\u{1b}[2m"));
+        assert!(tab[0].contains("\u{1b}[1;38;5;211mA"));
     }
 
     #[test]

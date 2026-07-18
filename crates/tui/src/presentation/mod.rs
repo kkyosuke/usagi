@@ -3211,6 +3211,23 @@ mod tests {
             .with_timezone(&Utc)
     }
 
+    fn strip_ansi(text: &str) -> String {
+        let mut plain = String::new();
+        let mut chars = text.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
+                        break;
+                    }
+                }
+            } else {
+                plain.push(ch);
+            }
+        }
+        plain
+    }
+
     fn ws(name: &str) -> Workspace {
         Workspace::new(name, format!("/tmp/{name}"))
     }
@@ -4527,11 +4544,15 @@ mod tests {
             .iter()
             .map(|frame| frame.join("\n"))
             .collect::<Vec<_>>();
-        assert!(agent_frames.iter().any(|frame| frame.contains("Agent")));
+        assert!(
+            agent_frames
+                .iter()
+                .any(|frame| strip_ansi(frame).contains("Agent"))
+        );
         assert!(
             terminal_frames
                 .iter()
-                .any(|frame| frame.contains("Terminal"))
+                .any(|frame| strip_ansi(frame).contains("Terminal"))
         );
         assert!(
             agent_frames.iter().all(|frame| !frame.contains('▔')),
@@ -5141,7 +5162,7 @@ mod tests {
         let frame = |index: usize| term.frames[index].join("\n");
 
         assert!(frame(2).contains("Run a command:"));
-        assert!(frame(3).contains("Agent"));
+        assert!(strip_ansi(&frame(3)).contains("Agent"));
         assert!(!frame(3).contains("Run a command:"));
     }
 
@@ -5762,7 +5783,7 @@ mod tests {
         assert!(frame(2).contains("Preview"));
         assert!(frame(2).contains("session: overlays-session"));
         assert!(frame(2).contains("overlays-session")); // Home background remains visible.
-        assert!(frame(5).contains("Diff"));
+        assert!(strip_ansi(&frame(5)).contains("Diff"));
         assert!(frame(6).contains("Notes"));
         assert!(frame(6).contains("No notes are available"));
         assert!(frame(9).contains("Pull Request"));
