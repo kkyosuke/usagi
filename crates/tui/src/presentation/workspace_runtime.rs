@@ -102,6 +102,18 @@ impl WorkspaceRuntime {
             && matches!(self.panes.input_owner(), PaneInputOwner::Tab)
     }
 
+    /// The terminal the active pane's selected tab attaches to, if the selection
+    /// is a live tab. The shell polls this terminal for the viewport and forwards
+    /// passthrough bytes to it.
+    #[must_use]
+    pub fn focused_terminal(&self) -> Option<TerminalRef> {
+        match self.panes.active_pane().selected() {
+            PaneSelection::Tab(TabSelection::Live(terminal)) => Some(terminal.clone()),
+            PaneSelection::Tab(TabSelection::Pending(_) | TabSelection::Ready(_))
+            | PaneSelection::Target(_) => None,
+        }
+    }
+
     /// Record a pane open request as a pending placeholder for `target`.
     pub fn request_pane(
         &mut self,
@@ -416,6 +428,25 @@ mod tests {
         let _ = runtime.exit_pane(target, terminal);
         assert!(runtime.active_pane().tabs().is_empty());
         assert!(!runtime.state().has_live_pane());
+    }
+
+    #[test]
+    fn focused_terminal_follows_the_selected_live_tab() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut runtime = closeup_on(workspace, session);
+        assert_eq!(runtime.focused_terminal(), None); // no tabs yet
+
+        let operation = OperationId::new();
+        let terminal = terminal_ref(workspace, session);
+        let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
+        assert_eq!(runtime.focused_terminal(), None); // pending, not live
+
+        let _ = runtime.complete_pane(target, operation, terminal.clone());
+        // Completion promotes the tab but does not steal focus; selecting it does.
+        let _ = runtime.select_tab(TabDirection::Next);
+        assert_eq!(runtime.focused_terminal(), Some(terminal));
     }
 
     #[test]
