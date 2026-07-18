@@ -1294,8 +1294,11 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
         }
         Key::Escape => NewStep::Back,
         Key::Quit | Key::CtrlQ => NewStep::Quit,
+        Key::Tab => {
+            form.complete_directory();
+            NewStep::Stay
+        }
         Key::Enter
-        | Key::Tab
         | Key::CtrlD
         | Key::Live(_)
         | Key::Click { .. }
