@@ -46,14 +46,12 @@ pub enum PaletteResult {
 impl OverviewModal {
     /// 空の入力で開いたパレット。
     #[must_use]
-    #[coverage(off)]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Open a palette using the configured command-selection interaction.
     #[must_use]
-    #[coverage(off)]
     pub fn with_selection_mode(selection_mode: ModalSelectionMode) -> Self {
         Self {
             selection_mode,
@@ -63,56 +61,48 @@ impl OverviewModal {
 
     /// Returns whether candidates are chosen as actions or submitted as a prompt.
     #[must_use]
-    #[coverage(off)]
     pub fn selection_mode(&self) -> ModalSelectionMode {
         self.selection_mode
     }
 
     /// 現在の入力文字列。
     #[must_use]
-    #[coverage(off)]
     pub fn input(&self) -> &str {
         self.input.value()
     }
 
     /// 入力欄のキャレット位置（バイトオフセット）。
     #[must_use]
-    #[coverage(off)]
     pub fn cursor(&self) -> usize {
         self.input.cursor()
     }
 
     /// 選択中候補の添字（[`OverviewModal::matches`] 内）。
     #[must_use]
-    #[coverage(off)]
     pub fn selected(&self) -> usize {
         self.selected
     }
 
     /// この palette を開いてから実行した command history。
     #[must_use]
-    #[coverage(off)]
     pub fn history(&self) -> &[String] {
         &self.history
     }
 
     /// 直前の command 実行結果。
     #[must_use]
-    #[coverage(off)]
     pub fn result(&self) -> Option<&PaletteResult> {
         self.result.as_ref()
     }
 
     /// 入力の前方一致で絞り込んだコマンド候補。入力が空なら全件。
     #[must_use]
-    #[coverage(off)]
     pub fn matches(&self) -> Vec<overview::CommandInfo> {
         overview::complete(&overview::DefaultRegistry, self.input.value())
     }
 
     /// 選択中のトップレベル command、または一意な `session` subcommand を入力欄へ補完する。
     /// 候補が無ければ no-op。
-    #[coverage(off)]
     pub fn complete_selected(&mut self) {
         if let Some(input) = overview::completion(self.input.value()) {
             self.input = TextInput::with_value(&input);
