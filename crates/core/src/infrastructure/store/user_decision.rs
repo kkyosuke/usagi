@@ -318,6 +318,17 @@ mod tests {
                 .unwrap(),
             Err(UserDecisionError::Terminal)
         );
+        assert_eq!(
+            store
+                .terminal(
+                    WorkspaceId::new(),
+                    decision.decision_id,
+                    UserDecisionStatus::Cancelled,
+                    Utc::now(),
+                )
+                .unwrap(),
+            Err(UserDecisionError::Terminal)
+        );
     }
 
     #[test]
@@ -332,5 +343,32 @@ mod tests {
         assert_eq!(store.create(first).unwrap().unwrap().title, "t");
         assert_eq!(store.create(second).unwrap().unwrap().title, "t");
         assert_eq!(store.pending(workspace).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn idempotency_comparison_checks_every_request_field() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let decision = item();
+        store.create(decision.clone()).unwrap().unwrap();
+        let mut variants = Vec::new();
+        let mut prompt = decision.clone();
+        prompt.prompt = "changed".into();
+        variants.push(prompt);
+        let mut options = decision.clone();
+        options.options[0].label = "changed".into();
+        variants.push(options);
+        let mut freeform = decision.clone();
+        freeform.allow_freeform = true;
+        variants.push(freeform);
+        let mut expiry = decision.clone();
+        expiry.expires_at = Some(Utc::now());
+        variants.push(expiry);
+        for changed in variants {
+            assert_eq!(
+                store.create(changed).unwrap(),
+                Err(UserDecisionError::IdempotencyConflict)
+            );
+        }
     }
 }
