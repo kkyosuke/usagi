@@ -14,11 +14,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use usagi_core::domain::agent::AgentProfileId;
-use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId};
+use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId, WorktreeId};
+use usagi_core::domain::terminal_launch::{
+    TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
+};
 use usagi_core::infrastructure::ipc::ErrorCode;
 use usagi_core::usecase::client::{
     AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest,
-    IpcClient, SessionAction, TerminalAction, TerminalRequest,
+    IpcClient, SessionAction, TerminalAction, TerminalGeometry, TerminalLaunchIntent,
+    TerminalRequest,
 };
 use usagi_daemon::infrastructure::unix_transport::connect_current;
 
@@ -83,6 +87,12 @@ fn write_codex(bin: &Path, ready_status: i32) {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+fn write_shell(path: &Path) {
+    let script = "#!/bin/sh\nprintf '%s\\n' spawn >> \"$USAGI_FIXTURE_COUNT\"\nprintf 'shell-ready\\n'\nIFS= read line || exit 0\nprintf 'shell-input:%s\\n' \"$line\"\nexit 0\n";
+    fs::write(path, script).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 struct Daemon {
     child: Child,
 }
@@ -94,12 +104,19 @@ impl Drop for Daemon {
     }
 }
 
-fn start_daemon(repo: &Path, home: &Path, path: &Path, count: &Path) -> Daemon {
+fn start_daemon(
+    repo: &Path,
+    home: &Path,
+    path: &Path,
+    count: &Path,
+    shell: Option<&Path>,
+) -> Daemon {
     let data_dir = channel_data_dir(home);
     fs::create_dir(&data_dir).expect("daemon data directory exists before serve");
     fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap();
     let fixture_path = format!("{}:/usr/bin:/bin", path.display());
-    let child = Command::new(env!("CARGO_BIN_EXE_usagi"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_usagi"));
+    command
         .args(["daemon", "serve"])
         .current_dir(repo)
         .env("USAGI_HOME", home)
@@ -108,7 +125,11 @@ fn start_daemon(repo: &Path, home: &Path, path: &Path, count: &Path) -> Daemon {
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_INDEX_FILE");
+    if let Some(shell) = shell {
+        command.env("SHELL", shell);
+    }
+    let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -137,7 +158,7 @@ fn client(data_dir: &Path) -> IpcClient<std::os::unix::net::UnixStream> {
     }
 }
 
-fn available_scope(client: &mut impl DaemonClient) -> (WorkspaceId, SessionId) {
+fn available_scope(client: &mut impl DaemonClient) -> (WorkspaceId, SessionId, WorktreeId) {
     let reply = client
         .request(DaemonRequest::Session {
             action: SessionAction::Create,
@@ -157,6 +178,7 @@ fn available_scope(client: &mut impl DaemonClient) -> (WorkspaceId, SessionId) {
     (
         workspace,
         serde_json::from_value(session["session_id"].clone()).unwrap(),
+        serde_json::from_value(session["worktree_id"].clone()).unwrap(),
     )
 }
 
@@ -177,9 +199,18 @@ fn launch(
             },
         })
         .expect("fixture Codex is admitted");
-    let DaemonReply::Accepted { body, .. } = reply else {
+    let DaemonReply::Accepted {
+        operation_id: accepted,
+        body,
+        ..
+    } = reply
+    else {
         panic!("launch must be accepted before its PTY exits: {reply:?}");
     };
+    assert_eq!(
+        accepted, operation,
+        "admission preserves the client operation ID"
+    );
     (
         operation,
         serde_json::from_value(body["terminal"].clone()).unwrap(),
@@ -223,10 +254,10 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
     let bin = home.path().join("bin");
     let count = home.path().join("spawn-count");
     write_codex(&bin, 0);
-    let _daemon = start_daemon(repo.path(), home.path(), &bin, &count);
+    let _daemon = start_daemon(repo.path(), home.path(), &bin, &count, None);
     let data_dir = channel_data_dir(home.path());
     let mut first = client(&data_dir);
-    let (workspace, session) = available_scope(&mut first);
+    let (workspace, session, _) = available_scope(&mut first);
 
     // Omitted profile and explicit `codex` both resolve through the root's
     // Codex default/registry path.  The omitted launch drives the full stream.
@@ -331,10 +362,10 @@ fn root_ipc_missing_or_not_authenticated_codex_is_safe_and_redacted() {
         if let Some(status) = ready_status {
             write_codex(&bin, status);
         }
-        let _daemon = start_daemon(repo.path(), home.path(), &bin, &count);
+        let _daemon = start_daemon(repo.path(), home.path(), &bin, &count, None);
         let data_dir = channel_data_dir(home.path());
         let mut client = client(&data_dir);
-        let (workspace, session) = available_scope(&mut client);
+        let (workspace, session, _) = available_scope(&mut client);
         let operation = OperationId::new().to_string();
         let request = || DaemonRequest::Agent {
             operation_id: operation.clone(),
@@ -348,4 +379,109 @@ fn root_ipc_missing_or_not_authenticated_codex_is_safe_and_redacted() {
         safe_readiness_error(client.request(request()).unwrap_err());
         assert!(!count.exists(), "readiness failure must not spawn the PTY");
     }
+}
+
+#[test]
+fn root_ipc_fixture_login_shell_is_fenced_and_replays_exit() {
+    let repo = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let count = home.path().join("shell-spawn-count");
+    let shell = bin.join("fixture-shell");
+    write_shell(&shell);
+    let _daemon = start_daemon(repo.path(), home.path(), &bin, &count, Some(&shell));
+    let data_dir = channel_data_dir(home.path());
+    let mut client = client(&data_dir);
+    let (workspace, session, worktree) = available_scope(&mut client);
+
+    let mut launch = |scope: TerminalLaunchScope, profile: &str| {
+        client.request(DaemonRequest::Terminal {
+            action: TerminalAction::Launch,
+            payload: serde_json::to_value(TerminalRequest::Launch {
+                intent: TerminalLaunchIntent {
+                    request: TerminalLaunchRequest {
+                        profile_id: TerminalProfileId::new(profile).unwrap(),
+                        scope,
+                    },
+                    geometry: TerminalGeometry { cols: 80, rows: 24 },
+                },
+            })
+            .unwrap(),
+        })
+    };
+    let scope = TerminalLaunchScope {
+        workspace_id: workspace,
+        session_id: Some(session),
+        worktree_id: worktree,
+    };
+
+    let unknown = launch(scope.clone(), "untrusted-profile").unwrap_err();
+    assert_eq!(unknown.code(), ErrorCode::InvalidArgument);
+    assert!(!count.exists(), "unknown profile must not spawn a shell");
+
+    let stale = launch(
+        TerminalLaunchScope {
+            worktree_id: WorktreeId::new(),
+            ..scope.clone()
+        },
+        "login-shell",
+    )
+    .unwrap_err();
+    assert_eq!(stale.code(), ErrorCode::InvalidArgument);
+    assert!(!count.exists(), "stale scope must not spawn a shell");
+
+    let DaemonReply::Ok(launched) = launch(scope, "login-shell").unwrap() else {
+        panic!("generic terminal launch is synchronous");
+    };
+    let terminal: TerminalRef = serde_json::from_value(launched["terminal"].clone()).unwrap();
+    assert_eq!(terminal.workspace_id, workspace);
+    assert_eq!(terminal.session_id, Some(session));
+    assert_eq!(terminal.worktree_id, worktree);
+    let subscription = attach(&mut client, &terminal);
+    client
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Input,
+            payload: serde_json::to_value(TerminalRequest::Input {
+                terminal: terminal.clone(),
+                subscription,
+                input_seq: 0,
+                bytes: b"go\n".to_vec(),
+            })
+            .unwrap(),
+        })
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let DaemonReply::Ok(snapshot) = client
+            .request(DaemonRequest::Terminal {
+                action: TerminalAction::Resync,
+                payload: serde_json::to_value(TerminalRequest::Resync {
+                    terminal: terminal.clone(),
+                })
+                .unwrap(),
+            })
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        if snapshot["exited"] == 0 {
+            let replay: Vec<u8> = serde_json::from_value(snapshot["replay"].clone()).unwrap();
+            assert!(
+                replay
+                    .windows(b"shell-ready\r\n".len())
+                    .any(|v| v == b"shell-ready\r\n")
+            );
+            assert!(
+                replay
+                    .windows(b"shell-input:go\r\n".len())
+                    .any(|v| v == b"shell-input:go\r\n")
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "fixture shell did not exit");
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(fs::read_to_string(count).unwrap().lines().count(), 1);
 }
