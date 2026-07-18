@@ -106,9 +106,10 @@ pub struct New {
     name_dirty: bool,
 
     notice: Option<String>,
-    /// Directory-path fields に対して Tab が見つけた候補。複数候補だけを表示し、入力値は
-    /// そのまま保つので、続きを打って絞り込める。
+    /// Directory-path fields に対して Tab が見つけた候補。繰り返し Tab を押すとこの順に
+    /// 入力欄へ反映する。
     directory_matches: Vec<String>,
+    directory_match_index: usize,
 }
 
 impl New {
@@ -208,6 +209,8 @@ impl New {
     pub fn toggle_mode(&mut self) {
         self.mode = self.mode.other();
         self.focus_index = 0;
+        self.directory_matches.clear();
+        self.directory_match_index = 0;
     }
 
     /// フォーカスを次のフィールドへ（末尾で先頭へ回り込む）。
@@ -215,6 +218,7 @@ impl New {
         let len = self.mode.fields().len();
         self.focus_index = (self.focus_index + 1) % len;
         self.directory_matches.clear();
+        self.directory_match_index = 0;
     }
 
     /// フォーカスを前のフィールドへ（先頭で末尾へ回り込む）。
@@ -222,6 +226,7 @@ impl New {
         let len = self.mode.fields().len();
         self.focus_index = (self.focus_index + len - 1) % len;
         self.directory_matches.clear();
+        self.directory_match_index = 0;
     }
 
     /// フォーカス中フィールドのキャレット位置に 1 文字挿入する。モード選択では何もしない。
@@ -234,8 +239,8 @@ impl New {
     }
 
     /// Clone の Location または Existing の Directory を、ファイルシステム上の子
-    /// ディレクトリで補完する。候補が 1 件ならその値を入力欄へ反映し、複数なら候補を画面に
-    /// 表示して続きを入力できるようにする。
+    /// ディレクトリで補完する。候補は常に入力欄へ反映し、複数あるときは繰り返し Tab を押すと
+    /// 次の候補へ切り替わる。
     pub fn complete_directory(&mut self) {
         let field = self.focus();
         if !matches!(field, Field::Location | Field::Path) {
@@ -243,10 +248,18 @@ impl New {
             return;
         }
 
+        if !self.directory_matches.is_empty() {
+            self.directory_match_index =
+                (self.directory_match_index + 1) % self.directory_matches.len();
+            self.apply_directory_match(field);
+            return;
+        }
+
         let value = self.focused_input().map_or("", TextInput::value);
         let (parent, prefix) = directory_completion_base(value);
         let Ok(entries) = std::fs::read_dir(&parent) else {
             self.directory_matches.clear();
+            self.directory_match_index = 0;
             return;
         };
 
@@ -259,14 +272,27 @@ impl New {
             .collect::<Vec<_>>();
         matches.sort();
 
-        if matches.len() == 1 {
-            let completed = format!("{}/", matches[0]);
-            if let Some(input) = self.field_mut(field) {
-                input.set_value(completed);
-                self.after_edit(field);
-            }
-        }
         self.directory_matches = matches;
+        self.directory_match_index = 0;
+        self.apply_directory_match(field);
+    }
+
+    /// 選択中の補完候補を入力欄へ反映する。これはユーザーが入力した文字ではないので、候補列は
+    /// 保持して次の Tab で巡回できるようにする。
+    fn apply_directory_match(&mut self, field: Field) {
+        let Some(candidate) = self
+            .directory_matches
+            .get(self.directory_match_index)
+            .cloned()
+        else {
+            return;
+        };
+        if let Some(input) = self.field_mut(field) {
+            input.set_value(format!("{candidate}/"));
+        }
+        if field == Field::Path {
+            self.sync_name();
+        }
     }
 
     /// フォーカス中フィールドのキャレット手前の 1 文字を削除する。
@@ -324,6 +350,7 @@ impl New {
     /// 戻る（エディタが候補を復活させる挙動に合わせる）。
     fn after_edit(&mut self, field: Field) {
         self.directory_matches.clear();
+        self.directory_match_index = 0;
         match field {
             Field::Url => self.sync_directory(),
             Field::Directory => self.directory_dirty = !self.directory.is_empty(),
@@ -557,25 +584,6 @@ fn notice_lines(block_pad: &str, notice: Option<&str>) -> Vec<String> {
     vec![String::new(), slot]
 }
 
-/// Tab による複数のディレクトリ候補。候補がない場合も同じ高さを確保する。
-fn directory_match_lines(block_pad: &str, matches: &[String]) -> Vec<String> {
-    let value = if matches.len() > 1 {
-        let label = format!(
-            "Matches: {}",
-            matches
-                .iter()
-                .take(5)
-                .map(|candidate| format!("{candidate}/"))
-                .collect::<Vec<_>>()
-                .join("  ")
-        );
-        format!("{block_pad}{}", Style::new().dim().paint(&label))
-    } else {
-        String::new()
-    };
-    vec![value]
-}
-
 /// フォーカス中フィールドに応じたフッタのヒント。モード選択では ←→ が種類切替、テキスト欄では
 /// キャレット移動を意味するので、現在のフィールドがすることだけを書く。
 fn footer_hint(state: &New) -> &'static str {
@@ -605,7 +613,6 @@ pub fn render(raw_height: usize, raw_width: usize, state: &New) -> Vec<String> {
         ));
         body.push(String::new());
         body.extend(fields_lines(&block_pad, state));
-        body.extend(directory_match_lines(&block_pad, &state.directory_matches));
         body.extend(notice_lines(&block_pad, state.notice()));
         body
     })
@@ -833,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_completion_completes_one_directory_and_displays_multiple_matches() {
+    fn tab_completion_inserts_one_directory_and_cycles_multiple_matches() {
         let temporary = tempfile::tempdir().unwrap();
         std::fs::create_dir(temporary.path().join("alpha")).unwrap();
 
@@ -853,10 +860,20 @@ mod tests {
         state.focus_next(); // Path
         type_str(&mut state, &temporary.path().join("al").to_string_lossy());
         state.complete_directory();
-        let text = joined(&state);
-        assert!(text.contains("Matches:"));
-        assert!(text.contains("alpha/"));
-        assert!(text.contains("alpine/"));
+        assert_eq!(
+            state.path(),
+            format!("{}/", temporary.path().join("alpha").display())
+        );
+        state.complete_directory();
+        assert_eq!(
+            state.path(),
+            format!("{}/", temporary.path().join("alpine").display())
+        );
+        state.complete_directory();
+        assert_eq!(
+            state.path(),
+            format!("{}/", temporary.path().join("alpha").display())
+        );
     }
 
     #[test]
@@ -875,14 +892,17 @@ mod tests {
             &temporary.path().join("alpha").to_string_lossy(),
         );
         state.complete_directory();
-        assert!(!joined(&state).contains("Matches:"));
+        assert_eq!(
+            state.path(),
+            temporary.path().join("alpha").display().to_string()
+        );
 
         state = New::default();
         state.toggle_mode();
         state.focus_next(); // Path
         type_str(&mut state, "/path/that/does/not/exist/");
         state.complete_directory();
-        assert!(!joined(&state).contains("Matches:"));
+        assert_eq!(state.path(), "/path/that/does/not/exist/");
     }
 
     #[test]
