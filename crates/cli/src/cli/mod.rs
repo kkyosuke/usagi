@@ -136,10 +136,26 @@ pub enum Command {
 /// The session mutations exposed by the human CLI.
 #[derive(Debug, Subcommand)]
 pub enum SessionCommand {
-    Create { name: String },
-    Remove { name: String },
-    Setup { name: String, command: String },
-    Prompt { name: String, prompt: String },
+    Create {
+        name: String,
+    },
+    Remove {
+        name: String,
+    },
+    /// Validate legacy sessions without changing state unless `--apply` is set.
+    RecoverLegacy {
+        /// Persist the fully validated adoption plan.
+        #[arg(long)]
+        apply: bool,
+    },
+    Setup {
+        name: String,
+        command: String,
+    },
+    Prompt {
+        name: String,
+        prompt: String,
+    },
 }
 
 impl Command {
@@ -183,6 +199,10 @@ impl Run for Session {
             SessionCommand::Remove { name } => {
                 (SessionAction::Remove, serde_json::json!({"name": name}))
             }
+            SessionCommand::RecoverLegacy { apply } => (
+                SessionAction::RecoverLegacy,
+                serde_json::json!({"apply": apply}),
+            ),
             SessionCommand::Setup { name, command } => (
                 SessionAction::Setup,
                 serde_json::json!({"name": name, "command": command}),
@@ -345,6 +365,10 @@ mod tests {
             (
                 ["usagi", "session", "remove", "a"].as_slice(),
                 usagi_core::usecase::client::SessionAction::Remove,
+            ),
+            (
+                ["usagi", "session", "recover-legacy", "--apply"].as_slice(),
+                usagi_core::usecase::client::SessionAction::RecoverLegacy,
             ),
             (
                 ["usagi", "session", "setup", "a", "echo ok"].as_slice(),

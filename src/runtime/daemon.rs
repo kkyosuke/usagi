@@ -1166,14 +1166,19 @@ fn dispatch_session(
         .and_then(|mut session| session.handle(action, &operation_id, &payload));
     match result {
         Ok(reply) => {
-            let outcome = match action {
-                SessionAction::Create | SessionAction::Remove => ResponseOutcome::Accepted {
+            let recovery_apply =
+                payload.get("apply").and_then(serde_json::Value::as_bool) == Some(true);
+            let outcome = if matches!(action, SessionAction::Create | SessionAction::Remove)
+                || (action == SessionAction::RecoverLegacy && recovery_apply)
+            {
+                ResponseOutcome::Accepted {
                     operation_id: usagi_core::infrastructure::ipc::OperationId(
                         reply.operation_id.clone(),
                     ),
                     operation_revision: reply.revision,
-                },
-                _ => ResponseOutcome::Ok,
+                }
+            } else {
+                ResponseOutcome::Ok
             };
             // A mutation is synchronously finalized by the lifecycle runtime,
             // but its wire outcome remains Accepted so retries retain the
@@ -1184,7 +1189,9 @@ fn dispatch_session(
             if let Some(kind) = match action {
                 SessionAction::Create => Some("session.created"),
                 SessionAction::Remove => Some("session.removed"),
-                SessionAction::List
+                SessionAction::RecoverLegacy if recovery_apply => Some("session.legacy_recovered"),
+                SessionAction::RecoverLegacy
+                | SessionAction::List
                 | SessionAction::Overview
                 | SessionAction::Setup
                 | SessionAction::Prompt => None,

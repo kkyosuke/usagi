@@ -233,6 +233,9 @@ pub struct DispatchIntent {
 pub enum SessionAction {
     Create,
     Remove,
+    /// Explicitly validate and adopt legacy `state.json` sessions. This action
+    /// is never part of daemon startup or a normal session refresh.
+    RecoverLegacy,
     List,
     Overview,
     Setup,

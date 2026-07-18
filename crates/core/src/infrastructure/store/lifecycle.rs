@@ -100,6 +100,38 @@ impl DaemonLifecycleStore {
         )
     }
 
+    /// Atomically replaces a state only when the revision observed by a caller
+    /// is still current.  Recovery uses this instead of the lifecycle reducer:
+    /// it has no worktree effect, but must preserve every existing record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the state is absent, changed concurrently, or
+    /// cannot be written.
+    #[coverage(off)]
+    pub fn replace_if_revision(
+        &self,
+        expected_revision: u64,
+        state: &WorkspaceLifecycleState,
+    ) -> Result<()> {
+        state.validate().map_err(anyhow::Error::msg)?;
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let persisted = self
+            .load_persisted()?
+            .ok_or_else(|| anyhow::anyhow!("lifecycle state has not been initialized"))?;
+        if persisted.state.state_revision != expected_revision {
+            bail!("lifecycle state changed during recovery");
+        }
+        json_file::write_atomic(
+            &self.dir,
+            &self.state_path(),
+            &PersistedLifecycle {
+                repository_root: persisted.repository_root,
+                state: state.clone(),
+            },
+        )
+    }
+
     #[coverage(off)]
     fn load_persisted(&self) -> Result<Option<PersistedLifecycle>> {
         json_file::read(&self.state_path())

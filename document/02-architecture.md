@@ -180,7 +180,7 @@ presentation 主体の実クレートになる。
   `infrastructure::store::lifecycle::DaemonLifecycleStore` に分ける。後者を保持して reducer 結果を永続化するのは daemon の command handler
   だけであり、TUI / CLI / MCP は IPC command を通じて要求する。legacy `state.json` は incarnation を持たないため、通常運用では
   managed state として解釈しない。ただし shared lifecycle state の初期化時だけ、daemon が worktree と repository binding を検証した全 record を
-  stable ID 付き available session として一回だけ採用する。UI-only metadata は legacy store に残し、TUI が同名 record へ読み取り結合する。
+  stable ID 付き available session として一回だけ採用する。既存 shared state に対する adoption は daemon IPC の明示 recovery action だけが実行し、restart や UI refresh は実行しない。UI-only metadata は legacy store に残し、TUI が同名 record へ読み取り結合する。
 - supervisor run の durable state は `usagi-core::domain::supervisor` の pure reducer と
   `infrastructure::store::supervisor::SupervisorStore` に分ける。store は daemon state dir に atomic snapshot と append-only event journal を保持し、
   lock と state revision CAS で書き手を fence する。query は task instruction 本文、secret、raw runtime argv を返さない。scheduler と policy はこの state の
