@@ -1,14 +1,14 @@
 ---
 number: 330
 title: feat(tui): workspace の user decision modal と pending decision 一覧を追加する
-status: todo
+status: done
 priority: high
 labels: [tui, daemon, supervisor, ux]
 dependson: [329]
 related: [303, 314, 317, 328]
 parent: 324
 created_at: 2026-07-18T00:00:00+00:00
-updated_at: 2026-07-18T00:00:00+00:00
+updated_at: 2026-07-18T02:05:27.725061+00:00
 ---
 
 ## 目的

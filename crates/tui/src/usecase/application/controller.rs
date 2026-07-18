@@ -9,9 +9,12 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use usagi_core::domain::agent::{AgentProfileId, ModelSelector};
-use usagi_core::domain::id::{AgentRuntimeRef, OperationId, SessionId, WorkspaceId};
+use usagi_core::domain::id::{
+    AgentRuntimeRef, OperationId, SessionId, UserDecisionId, WorkspaceId,
+};
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::session_lifecycle::AgentPhase;
+use usagi_core::domain::user_decision::{UserDecision, UserDecisionAnswer, UserDecisionStatus};
 
 use crate::usecase::terminal_input::{KeyCode, KeyEventKind, LiveInput, RuntimeEvent};
 use crate::usecase::{closeup, overview};
@@ -48,6 +51,8 @@ pub enum Overlay {
     Environment,
     /// Home 左ペインの `+ new session` に対する入力。常駐 route ではない。
     CreateSession,
+    /// Workspace-scoped pending user decisions and their answer editor.
+    Decisions,
 }
 
 /// 新規 session 入力で編集する項目。
@@ -248,6 +253,68 @@ pub struct EnvironmentEditor {
     target: Target,
     entries: Vec<EnvironmentEntry>,
     error: Option<SafeError>,
+}
+
+/// Local navigation and draft state for a durable user decision.  The durable
+/// record itself remains daemon-owned; dismissing this state never mutates it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionEditor {
+    decision: UserDecision,
+    selected_option: usize,
+    freeform: String,
+    error: Option<SafeError>,
+}
+
+impl DecisionEditor {
+    fn new(decision: UserDecision) -> Self {
+        Self {
+            decision,
+            selected_option: 0,
+            freeform: String::new(),
+            error: None,
+        }
+    }
+    #[must_use]
+    #[coverage(off)]
+    pub fn decision(&self) -> &UserDecision {
+        &self.decision
+    }
+    #[must_use]
+    #[coverage(off)]
+    pub const fn selected_option(&self) -> usize {
+        self.selected_option
+    }
+    #[must_use]
+    #[coverage(off)]
+    pub fn freeform(&self) -> &str {
+        &self.freeform
+    }
+    #[must_use]
+    #[coverage(off)]
+    pub fn error(&self) -> Option<&SafeError> {
+        self.error.as_ref()
+    }
+}
+
+/// The decisions overlay is either its persistent pending list or one answer
+/// editor.  Returning from the editor keeps the list available for re-display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionOverlayState {
+    selected: usize,
+    editor: Option<DecisionEditor>,
+}
+
+impl DecisionOverlayState {
+    #[must_use]
+    #[coverage(off)]
+    pub const fn selected(&self) -> usize {
+        self.selected
+    }
+    #[must_use]
+    #[coverage(off)]
+    pub fn editor(&self) -> Option<&DecisionEditor> {
+        self.editor.as_ref()
+    }
 }
 
 impl EnvironmentEditor {
@@ -451,6 +518,8 @@ pub struct AppState {
     overlay: Option<Overlay>,
     note_editor: Option<NoteEditor>,
     environment_editor: Option<EnvironmentEditor>,
+    decisions: Vec<UserDecision>,
+    decision_overlay: Option<DecisionOverlayState>,
     create_session: Option<CreateSessionForm>,
     workspace: WorkspaceId,
     sessions: Vec<SessionId>,
@@ -480,6 +549,8 @@ impl AppState {
             overlay: None,
             note_editor: None,
             environment_editor: None,
+            decisions: Vec::new(),
+            decision_overlay: None,
             create_session: None,
             workspace,
             sessions,
@@ -533,6 +604,18 @@ impl AppState {
     #[coverage(off)]
     pub fn environment_editor(&self) -> Option<&EnvironmentEditor> {
         self.environment_editor.as_ref()
+    }
+    /// Pending decisions from the current workspace only.
+    #[must_use]
+    #[coverage(off)]
+    pub fn decisions(&self) -> &[UserDecision] {
+        &self.decisions
+    }
+    /// Open decision list/editor state, if its overlay is visible.
+    #[must_use]
+    #[coverage(off)]
+    pub fn decision_overlay(&self) -> Option<&DecisionOverlayState> {
+        self.decision_overlay.as_ref()
     }
     /// navigation cursor。
     #[must_use]
@@ -720,6 +803,16 @@ pub enum AppKey {
     OpenNotes,
     /// Open the active target's environment editor.
     OpenEnvironment,
+    /// Open the current workspace's durable pending decision list.
+    OpenDecisions,
+    /// Move within the pending list or current decision options.
+    DecisionPrevious,
+    /// Move within the pending list or current decision options.
+    DecisionNext,
+    /// Replace the permitted freeform answer draft.
+    SetDecisionFreeform(String),
+    /// Submit the selected stable option or nonempty permitted freeform text.
+    SubmitDecision,
     /// Choose which scratchpad section the overlay displays.
     SelectNoteSection(NoteSection),
     /// Replace the note editor draft.
@@ -857,6 +950,22 @@ pub enum BackendEvent {
     },
     /// A safe environment read/save failure.
     EnvironmentError { target: Target, error: SafeError },
+    /// Atomic daemon snapshot; records outside `workspace` are rejected by the reducer.
+    Decisions {
+        workspace: WorkspaceId,
+        decisions: Vec<UserDecision>,
+    },
+    /// Daemon confirmation after resolve.  The item remains visible until this arrives.
+    DecisionResolved {
+        workspace: WorkspaceId,
+        decision_id: UserDecisionId,
+    },
+    /// A safe resolve failure; the draft and pending item stay retryable.
+    DecisionError {
+        workspace: WorkspaceId,
+        decision_id: UserDecisionId,
+        error: SafeError,
+    },
 }
 
 /// 非同期 request の成否。
@@ -912,6 +1021,14 @@ pub enum Effect {
     SaveEnvironment {
         target: Target,
         entries: Vec<EnvironmentEntry>,
+    },
+    /// Fetch the daemon-authoritative pending snapshot for one workspace.
+    RefreshDecisions { workspace: WorkspaceId },
+    /// Resolve one pending decision using only a locally validated answer.
+    ResolveDecision {
+        workspace: WorkspaceId,
+        decision_id: UserDecisionId,
+        answer: UserDecisionAnswer,
     },
     /// target の terminal を開くか再利用する。
     OpenTerminal {
@@ -1573,8 +1690,55 @@ impl BackendPort for FakeBackend {
 /// event を state へ還元し、必要な外部 effect を返す。
 #[must_use]
 #[coverage(off)]
+#[allow(clippy::too_many_lines)]
 pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
     match event {
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions,
+        }) => {
+            if workspace != state.workspace {
+                return Vec::new();
+            }
+            state.decisions = decisions
+                .into_iter()
+                .filter(|decision| {
+                    decision.owner.workspace_id == workspace
+                        && decision.status == UserDecisionStatus::Pending
+                })
+                .collect();
+            reconcile_decision_overlay(state);
+            Vec::new()
+        }
+        AppEvent::Backend(BackendEvent::DecisionResolved {
+            workspace,
+            decision_id,
+        }) => {
+            if workspace != state.workspace {
+                return Vec::new();
+            }
+            state
+                .decisions
+                .retain(|decision| decision.decision_id != decision_id);
+            reconcile_decision_overlay(state);
+            Vec::new()
+        }
+        AppEvent::Backend(BackendEvent::DecisionError {
+            workspace,
+            decision_id,
+            error,
+        }) => {
+            if workspace == state.workspace
+                && let Some(editor) = state
+                    .decision_overlay
+                    .as_mut()
+                    .and_then(|overlay| overlay.editor.as_mut())
+                    .filter(|editor| editor.decision.decision_id == decision_id)
+            {
+                editor.error = Some(error);
+            }
+            Vec::new()
+        }
         AppEvent::Backend(event) if update_editor_backend(state, &event) => Vec::new(),
         AppEvent::Key(key) => update_key(state, key),
         AppEvent::LivePaneAvailability(has_live_pane) => {
@@ -1756,6 +1920,7 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
         return Vec::new();
     }
     match overlay {
+        Overlay::Decisions => update_decisions_overlay(state, key),
         Overlay::QuitConfirmation => match key {
             AppKey::Char('y' | 'Y') | AppKey::Enter => {
                 state.overlay = None;
@@ -1791,9 +1956,128 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
     }
 }
 
+#[coverage(off)] // Snapshot reconciliation is exercised through update's deterministic decision scenarios.
+fn reconcile_decision_overlay(state: &mut AppState) {
+    let Some(overlay) = state.decision_overlay.as_mut() else {
+        return;
+    };
+    if let Some(editor) = &overlay.editor
+        && !state
+            .decisions
+            .iter()
+            .any(|item| item.decision_id == editor.decision.decision_id)
+    {
+        overlay.editor = None;
+    }
+    overlay.selected = overlay
+        .selected
+        .min(state.decisions.len().saturating_sub(1));
+}
+
+#[coverage(off)] // Modal input is covered through update; keeping this helper uninstrumented avoids duplicating reducer accounting.
+fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
+    let Some(overlay) = state.decision_overlay.as_mut() else {
+        return Vec::new();
+    };
+    if let Some(editor) = overlay.editor.as_mut() {
+        match key {
+            AppKey::Escape => {
+                overlay.editor = None;
+            }
+            AppKey::DecisionPrevious | AppKey::Up => {
+                editor.selected_option = editor.selected_option.saturating_sub(1);
+            }
+            AppKey::DecisionNext | AppKey::Down => {
+                editor.selected_option = (editor.selected_option + 1)
+                    .min(editor.decision.options.len().saturating_sub(1));
+            }
+            AppKey::SetDecisionFreeform(text) => {
+                if editor.decision.allow_freeform {
+                    editor.freeform = text;
+                    editor.error = None;
+                }
+            }
+            AppKey::Char(ch) if editor.decision.allow_freeform => {
+                editor.freeform.push(ch);
+                editor.error = None;
+            }
+            AppKey::Backspace if editor.decision.allow_freeform => {
+                editor.freeform.pop();
+                editor.error = None;
+            }
+            AppKey::SubmitDecision | AppKey::Enter => {
+                let answer = if editor.decision.allow_freeform && !editor.freeform.trim().is_empty()
+                {
+                    UserDecisionAnswer::Freeform {
+                        text: editor.freeform.trim().to_owned(),
+                    }
+                } else if let Some(option) = editor.decision.options.get(editor.selected_option) {
+                    UserDecisionAnswer::Option {
+                        option_id: option.id.clone(),
+                    }
+                } else {
+                    editor.error = Some(SafeError {
+                        message: SafeMessage::new("select a valid answer"),
+                        error_id: "decision-invalid-answer".to_owned(),
+                    });
+                    return Vec::new();
+                };
+                if editor
+                    .decision
+                    .validate_answer(&answer, chrono::Utc::now())
+                    .is_err()
+                {
+                    editor.error = Some(SafeError {
+                        message: SafeMessage::new("select a valid answer"),
+                        error_id: "decision-invalid-answer".to_owned(),
+                    });
+                    return Vec::new();
+                }
+                return vec![Effect::ResolveDecision {
+                    workspace: state.workspace,
+                    decision_id: editor.decision.decision_id,
+                    answer,
+                }];
+            }
+            _ => {}
+        }
+    } else {
+        match key {
+            AppKey::Escape => {
+                state.overlay = None;
+                state.decision_overlay = None;
+            }
+            AppKey::DecisionPrevious | AppKey::Up => {
+                overlay.selected = overlay.selected.saturating_sub(1);
+            }
+            AppKey::DecisionNext | AppKey::Down => {
+                overlay.selected =
+                    (overlay.selected + 1).min(state.decisions.len().saturating_sub(1));
+            }
+            AppKey::Enter => {
+                if let Some(decision) = state.decisions.get(overlay.selected).cloned() {
+                    overlay.editor = Some(DecisionEditor::new(decision));
+                }
+            }
+            _ => {}
+        }
+    }
+    Vec::new()
+}
+
 #[coverage(off)]
 fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     match key {
+        AppKey::OpenDecisions => {
+            state.overlay = Some(Overlay::Decisions);
+            state.decision_overlay = Some(DecisionOverlayState {
+                selected: 0,
+                editor: None,
+            });
+            vec![Effect::RefreshDecisions {
+                workspace: state.workspace,
+            }]
+        }
         AppKey::Up => {
             state.move_selection(-1);
             Vec::new()
@@ -1866,7 +2150,11 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         | AppKey::ToggleTodo(_)
         | AppKey::SaveNotes
         | AppKey::SetEnvironment { .. }
-        | AppKey::SaveEnvironment => Vec::new(),
+        | AppKey::SaveEnvironment
+        | AppKey::DecisionPrevious
+        | AppKey::DecisionNext
+        | AppKey::SetDecisionFreeform(_)
+        | AppKey::SubmitDecision => Vec::new(),
     }
 }
 
@@ -3487,5 +3775,93 @@ mod tests {
             environment.error().unwrap().message.as_str(),
             "Could not save environment"
         );
+    }
+
+    fn pending_decision(workspace: WorkspaceId) -> UserDecision {
+        UserDecision {
+            decision_id: UserDecisionId::new(),
+            owner: usagi_core::domain::user_decision::UserDecisionOwner {
+                workspace_id: workspace,
+                session_id: SessionId::new(),
+                caller: usagi_core::domain::agent::CallerRef {
+                    session_id: SessionId::new(),
+                    agent_id: usagi_core::domain::id::AgentId::new(),
+                },
+                run_id: OperationId::new(),
+            },
+            title: "Choose a path".into(),
+            prompt: "Which path?".into(),
+            options: vec![usagi_core::domain::user_decision::UserDecisionOption {
+                id: "safe".into(),
+                label: "Safe".into(),
+                description: Some("Keeps current state".into()),
+            }],
+            allow_freeform: false,
+            expires_at: None,
+            idempotency_key: None,
+            status: UserDecisionStatus::Pending,
+            answer: None,
+            created_at: chrono::Utc::now(),
+            resolved_at: None,
+        }
+    }
+
+    #[test]
+    fn decisions_are_workspace_fenced_retryable_and_removed_only_on_confirmation() {
+        let workspace = WorkspaceId::new();
+        let foreign = WorkspaceId::new();
+        let decision = pending_decision(workspace);
+        let mut state = AppState::home(workspace, Vec::new());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::OpenDecisions)),
+            vec![Effect::RefreshDecisions { workspace }]
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace: foreign,
+                decisions: vec![pending_decision(foreign)],
+            }),
+        );
+        assert!(state.decisions().is_empty());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![decision.clone()],
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::SubmitDecision)),
+            vec![Effect::ResolveDecision {
+                workspace,
+                decision_id: decision.decision_id,
+                answer: UserDecisionAnswer::Option {
+                    option_id: "safe".into()
+                }
+            }]
+        );
+        assert_eq!(state.decisions(), std::slice::from_ref(&decision));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::DecisionError {
+                workspace,
+                decision_id: decision.decision_id,
+                error: SafeError {
+                    message: SafeMessage::new("try again"),
+                    error_id: "resolve".into(),
+                },
+            }),
+        );
+        assert_eq!(state.decisions(), std::slice::from_ref(&decision));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::DecisionResolved {
+                workspace,
+                decision_id: decision.decision_id,
+            }),
+        );
+        assert!(state.decisions().is_empty());
     }
 }

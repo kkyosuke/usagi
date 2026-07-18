@@ -6,6 +6,7 @@
 
 pub mod closeup_modal;
 pub mod config;
+pub mod decision_modal;
 pub mod new;
 pub mod open;
 pub mod overview_modal;
