@@ -1,7 +1,7 @@
 ---
 number: 328
 title: feat(mcp): supervisor の control・観測 API と既存 session MCP の移行境界を実装する
-status: todo
+status: done
 priority: high
 labels: [mcp, cli, orchestration, supervisor, docs]
 dependson: [323, 327]

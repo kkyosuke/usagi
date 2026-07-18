@@ -12,6 +12,7 @@ use std::io::{self, BufRead, Write};
 use serde_json::{Value, json};
 use usagi_core::usecase::client::{
     ClientError, DaemonClient, DaemonReply, DaemonRequest, DispatchToolAction, SessionAction,
+    SupervisorToolAction,
 };
 
 use super::protocol::{self, error_code};
@@ -276,6 +277,26 @@ fn tools_call(
             Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
         };
     }
+    if let Some(action) = supervisor_tool_action(name) {
+        let operation_id = arguments
+            .get("idempotency_key")
+            .and_then(Value::as_str)
+            .map_or_else(
+                || usagi_core::domain::id::OperationId::new().as_str(),
+                ToOwned::to_owned,
+            );
+        return match client.request(DaemonRequest::SupervisorTool {
+            action,
+            operation_id,
+            payload: arguments,
+        }) {
+            Ok(DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body)) => protocol::success(
+                id,
+                json!({"content":[{"type":"text","text":body.to_string()}]}),
+            ),
+            Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
+        };
+    }
     match dispatch(name, &arguments.to_string()) {
         Err(ToolError::UnknownTool(tool)) => protocol::error(
             id,
@@ -329,6 +350,18 @@ fn dispatch_tool_action(name: &str) -> Option<DispatchToolAction> {
         "agent_complete" => Some(DispatchToolAction::AgentComplete),
         "agent_fail" => Some(DispatchToolAction::AgentFail),
         "agent_inbox" => Some(DispatchToolAction::AgentInbox),
+        _ => None,
+    }
+}
+
+fn supervisor_tool_action(name: &str) -> Option<SupervisorToolAction> {
+    match name {
+        "supervisor_start" => Some(SupervisorToolAction::Start),
+        "supervisor_get" => Some(SupervisorToolAction::Get),
+        "supervisor_list" => Some(SupervisorToolAction::List),
+        "supervisor_cancel" => Some(SupervisorToolAction::Cancel),
+        "supervisor_resolve_escalation" => Some(SupervisorToolAction::ResolveEscalation),
+        "supervisor_events" => Some(SupervisorToolAction::Events),
         _ => None,
     }
 }
@@ -395,7 +428,7 @@ mod tests {
     fn tools_list_returns_every_tool_with_schema() {
         let v = call(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 34);
+        assert_eq!(tools.len(), 40);
         // 各要素が name / description / inputSchema(object) を持つ。
         for tool in tools {
             assert!(tool["name"].as_str().is_some());
