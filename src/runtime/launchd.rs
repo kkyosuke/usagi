@@ -10,6 +10,7 @@ use std::process::Command;
 
 const LABEL: &str = "com.usagi.daemon";
 
+#[coverage(off)] // Real per-user LaunchAgent filesystem and launchctl boundary.
 pub(crate) fn install(executable: &Path, data_dir: &Path) -> std::io::Result<PathBuf> {
     let path = plist_path()?;
     let log = data_dir.join("logs").join("launchd-daemon.stderr.log");
@@ -21,6 +22,7 @@ pub(crate) fn install(executable: &Path, data_dir: &Path) -> std::io::Result<Pat
     Ok(path)
 }
 
+#[coverage(off)] // Real per-user LaunchAgent filesystem and launchctl boundary.
 pub(crate) fn uninstall() -> std::io::Result<PathBuf> {
     let path = plist_path()?;
     if path.exists() {
@@ -32,6 +34,7 @@ pub(crate) fn uninstall() -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
+#[coverage(off)] // Reads the real user's home directory.
 fn plist_path() -> std::io::Result<PathBuf> {
     let home = dirs::home_dir()
         .ok_or_else(|| std::io::Error::other("could not determine the home directory"))?;
@@ -40,6 +43,7 @@ fn plist_path() -> std::io::Result<PathBuf> {
         .join(format!("{LABEL}.plist")))
 }
 
+#[coverage(off)] // Executes the platform service manager.
 fn launchctl(verb: &str, plist: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
