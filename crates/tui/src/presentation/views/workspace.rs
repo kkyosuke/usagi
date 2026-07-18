@@ -2744,6 +2744,34 @@ mod tests {
     }
 
     #[test]
+    fn row_at_shares_the_mascot_reservation_with_the_metrics_sidecar() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let state = AppState::home(workspace, vec![session]);
+        let snapshot = vec![projected_session(session, "alpha", "/work/alpha")];
+        let metrics = usagi_core::usecase::client::DaemonMetrics {
+            schema_version: 1,
+            sampled_at_ms: 42,
+            cpu_percent_hundredths: 123,
+            resident_memory_bytes: 45 * 1_048_576,
+            active_subscribers: 3,
+            dropped_updates: 5,
+        };
+        let home = HomeProjection::from_state(&state, "work", "/work", &snapshot)
+            .with_metrics(Some(metrics));
+        // The mascot sidecar (fed by daemon metrics) reserves rows at the foot of
+        // the sidebar; the session list above it still hit-tests to the same rows.
+        assert_eq!(
+            home.row_at(30, 100, 5, 2),
+            Some(Selection::Target(Target::Root(workspace)))
+        );
+        assert_eq!(
+            home.row_at(30, 100, 5, 4),
+            Some(Selection::Target(Target::Session(session)))
+        );
+    }
+
+    #[test]
     fn pointer_select_row_moves_the_cursor_through_the_reducer() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
