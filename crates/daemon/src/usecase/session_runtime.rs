@@ -20,11 +20,13 @@ use usagi_core::domain::session_lifecycle::{
     DeletePlan, Failure, FailureStage, LifecycleEvent, OperationJournal, OperationStatus,
     WorkspaceLifecycleState,
 };
+use usagi_core::infrastructure::git::list_worktrees;
 use usagi_core::infrastructure::git::{GitOutput, GitRunner, add_worktree, remove_worktree};
 use usagi_core::infrastructure::gitignore::migrate_usagi_ignore_rules;
 use usagi_core::infrastructure::paths::{SESSIONS_DIR, STATE_DIR};
 use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore;
+use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::usecase::client::SessionAction;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -139,12 +141,17 @@ impl<G: GitRunner> SessionRuntime<G> {
         {
             repository_root
         } else {
-            let legacy = candidate_repo_root
+            let legacy_lifecycle = candidate_repo_root
                 .join(STATE_DIR)
                 .join("lifecycle-state.json");
-            let state = json_file::read(&legacy)
-                .map_err(|_| SessionRuntimeError::Storage)?
-                .unwrap_or_else(|| WorkspaceLifecycleState::new(WorkspaceId::new(), Utc::now()));
+            let state = if let Some(state) =
+                json_file::read(&legacy_lifecycle).map_err(|_| SessionRuntimeError::Storage)?
+            {
+                state
+            } else {
+                adopt_legacy_workspace_sessions(&candidate_repo_root, &git)?
+                    .unwrap_or_else(|| WorkspaceLifecycleState::new(WorkspaceId::new(), Utc::now()))
+            };
             store
                 .initialize(&state, &candidate_repo_root)
                 .map_err(|_| SessionRuntimeError::Storage)?;
@@ -152,7 +159,7 @@ impl<G: GitRunner> SessionRuntime<G> {
             // on the `Some(..)` branch wins and the legacy file is never read
             // again. Removing it is best-effort cleanup, so a failure here must
             // not fail daemon startup over an otherwise-ignored stale file.
-            let _ = std::fs::remove_file(&legacy);
+            let _ = std::fs::remove_file(&legacy_lifecycle);
             candidate_repo_root
         };
         let mut runtime = Self {
@@ -484,6 +491,67 @@ impl<G: GitRunner> SessionRuntime<G> {
     }
 }
 
+/// Adopt repository-local records only while creating the first shared daemon
+/// state.  We validate the complete legacy set before writing `sessions.json`;
+/// a malformed, duplicate, missing, or differently-bound record leaves no
+/// partial v2 state for a later start to guess from.
+fn adopt_legacy_workspace_sessions<G: GitRunner>(
+    repository_root: &Path,
+    git: &G,
+) -> Result<Option<WorkspaceLifecycleState>, SessionRuntimeError> {
+    let Some(legacy) = WorkspaceStateStore::new(repository_root)
+        .load()
+        .map_err(|_| SessionRuntimeError::Storage)?
+    else {
+        return Ok(None);
+    };
+    if legacy.sessions.is_empty() {
+        return Ok(None);
+    }
+
+    let expected_parent = repository_root.join(STATE_DIR).join(SESSIONS_DIR);
+    let worktrees =
+        list_worktrees(git, repository_root).map_err(|_| SessionRuntimeError::Storage)?;
+    let mut adopted = WorkspaceLifecycleState::new(WorkspaceId::new(), Utc::now());
+    for record in legacy.sessions {
+        let expected = expected_parent.join(&record.name);
+        let expected_branch = format!("usagi/{}", record.name);
+        if !valid_legacy_name(&record.name)
+            || adopted
+                .sessions
+                .iter()
+                .any(|session| session.name == record.name)
+            || !is_linked_worktree(&expected)
+            || canonical_path(&record.root) != canonical_path(&expected)
+            || !worktrees.iter().any(|worktree| {
+                canonical_path(&worktree.path) == canonical_path(&expected)
+                    && worktree.branch.as_deref() == Some(expected_branch.as_str())
+            })
+        {
+            return Err(SessionRuntimeError::Storage);
+        }
+        adopted.sessions.push(
+            usagi_core::domain::session_lifecycle::ManagedSession::adopt_available(
+                record.name,
+                record.created_at,
+            ),
+        );
+    }
+    Ok(Some(adopted))
+}
+
+fn valid_legacy_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
+fn canonical_path(path: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(path).ok()
+}
+
 /// Mirror the v1 session layout: a repository at the workspace root becomes a
 /// worktree at the session root; otherwise every repository found below the
 /// workspace is checked out at the matching relative path and plain entries are
@@ -704,7 +772,8 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use tempfile::TempDir;
-    use usagi_core::domain::session_lifecycle::ManagedSession;
+    use usagi_core::domain::note::Scratchpad;
+    use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycle};
 
     struct FakeGit(bool);
     impl FakeGit {
@@ -743,6 +812,20 @@ mod tests {
                 success: self.0,
                 stdout: String::new(),
                 stderr: "no".into(),
+            })
+        }
+    }
+
+    struct WorktreeListingGit {
+        porcelain: String,
+    }
+    impl GitRunner for WorktreeListingGit {
+        fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+            assert_eq!(args, ["worktree", "list", "--porcelain"]);
+            Ok(GitOutput {
+                success: true,
+                stdout: self.porcelain.clone(),
+                stderr: String::new(),
             })
         }
     }
@@ -801,6 +884,90 @@ mod tests {
     }
     fn operation() -> String {
         OperationId::new().to_string()
+    }
+
+    fn legacy_record(name: &str, root: PathBuf) -> usagi_core::domain::session::SessionRecord {
+        usagi_core::domain::session::SessionRecord {
+            name: name.into(),
+            display_name: Some("preserved label".into()),
+            origin: usagi_core::domain::session::SessionOrigin::Mcp,
+            started_from: Some("parent".into()),
+            root,
+            created_at: Utc::now(),
+            last_active: None,
+            notes: Scratchpad::default(),
+            prs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn adopts_valid_legacy_sessions_once_and_preserves_stable_ids_after_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repository = tmp.path().join("repository");
+        let worktree = repository.join(STATE_DIR).join(SESSIONS_DIR).join("legacy");
+        std::fs::create_dir_all(&repository).unwrap();
+        std::fs::create_dir(repository.join(".git")).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: /safe/worktree").unwrap();
+        WorkspaceStateStore::new(&repository)
+            .save(&usagi_core::domain::workspace_state::WorkspaceState {
+                sessions: vec![legacy_record("legacy", worktree.clone())],
+                root_notes: Scratchpad::default(),
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        let porcelain = format!(
+            "worktree {}\nHEAD abc\nbranch refs/heads/usagi/legacy\n\n",
+            worktree.display()
+        );
+        let state_dir = tmp.path().join("daemon");
+        let first = SessionRuntime::open(
+            repository.clone(),
+            &state_dir,
+            DaemonGeneration::new(),
+            WorktreeListingGit { porcelain },
+        )
+        .unwrap();
+        let session = first.state().unwrap().sessions[0].clone();
+        assert_eq!(session.lifecycle, SessionLifecycle::Available);
+        assert_eq!(first.snapshot().unwrap()["sessions"][0]["name"], "legacy");
+        drop(first);
+
+        let restarted = SessionRuntime::open(
+            tmp.path().join("wrong-candidate"),
+            &state_dir,
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+        )
+        .unwrap();
+        let restored = restarted.state().unwrap().sessions[0].clone();
+        assert_eq!(restored.session_id, session.session_id);
+        assert_eq!(restored.worktree_id, session.worktree_id);
+    }
+
+    #[test]
+    fn refuses_invalid_legacy_records_without_creating_shared_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repository = tmp.path().join("repository");
+        std::fs::create_dir_all(&repository).unwrap();
+        std::fs::create_dir(repository.join(".git")).unwrap();
+        WorkspaceStateStore::new(&repository)
+            .save(&usagi_core::domain::workspace_state::WorkspaceState {
+                sessions: vec![legacy_record("missing", repository.join("elsewhere"))],
+                root_notes: Scratchpad::default(),
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        let state_dir = tmp.path().join("daemon");
+
+        let result = SessionRuntime::open(
+            repository,
+            &state_dir,
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+        );
+        assert!(matches!(result, Err(SessionRuntimeError::Storage)));
+        assert!(!state_dir.join("sessions.json").exists());
     }
     #[test]
     fn create_lists_overview_and_removes_a_durable_session() {

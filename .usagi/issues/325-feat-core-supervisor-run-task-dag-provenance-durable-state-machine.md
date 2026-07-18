@@ -1,14 +1,14 @@
 ---
 number: 325
 title: feat(core): supervisor run・task DAG・provenance の durable state machine を追加する
-status: todo
+status: done
 priority: high
 labels: [core, orchestration, supervisor, durable, dag]
 dependson: [321]
 related: [183, 219, 322, 323]
 parent: 324
 created_at: 2026-07-17T21:11:47.376995+00:00
-updated_at: 2026-07-17T21:11:47.376995+00:00
+updated_at: 2026-07-17T21:50:05.960480+00:00
 ---
 
 ## 目的

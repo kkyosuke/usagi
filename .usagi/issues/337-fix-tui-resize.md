@@ -1,5 +1,5 @@
 ---
-number: 166
+number: 337
 title: fix(tui): ターミナル resize 時に画面が再描画されず表示が崩れたままになる
 status: done
 priority: medium

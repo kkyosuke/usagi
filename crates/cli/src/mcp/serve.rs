@@ -1,5 +1,6 @@
 //! `usagi mcp` の stdio serve ループ。1 行 = 1 JSON-RPC 2.0 メッセージを読み、
-//! `initialize` / `tools/list` / `tools/call` を処理して 1 行の応答を返す。
+//! `initialize` / `tools/list` / `tools/call` / `resources/list` / `resources/read` を
+//! 処理して 1 行の応答を返す。
 //!
 //! `handle_line`（str → 応答文字列 or なし）に純粋なルーティングを閉じ込め、`serve` は
 //! 実 IO（stdin/stdout）の反復だけを担う。実 IO は合成ルートが注入するため、ルーティングは
@@ -10,12 +11,13 @@ use std::io::{self, BufRead, Write};
 
 use serde_json::{Value, json};
 use usagi_core::usecase::client::{
-    ClientError, DaemonClient, DaemonReply, DaemonRequest, SessionAction,
+    ClientError, DaemonClient, DaemonReply, DaemonRequest, DispatchToolAction, SessionAction,
 };
 
 use super::protocol::{self, error_code};
+use super::runtime_model::{PathExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig};
 use super::tool::ToolError;
-use super::{dispatch, tools};
+use super::{dispatch, resources, tools};
 
 /// サーバが宣言する MCP プロトコルバージョン。クライアントが `initialize` で別の版を
 /// 要求したらそれをエコーし、無ければこの既定を返す。
@@ -50,10 +52,32 @@ pub fn serve(input: impl BufRead, out: &mut dyn Write, version: &str) -> io::Res
 /// JSON-RPC responses so one failed tool call does not stop the server.
 #[coverage(off)]
 pub fn serve_with_client(
+    input: impl BufRead,
+    out: &mut dyn Write,
+    version: &str,
+    client: &mut dyn DaemonClient,
+) -> io::Result<()> {
+    let workspace = std::env::current_dir()?;
+    let locator = PathExecutableLocator;
+    let config = WorkspaceAgentConfig::read(&workspace);
+    let snapshot = RuntimeModelSnapshot::capture(&config, &locator);
+    serve_with_client_and_snapshot(input, out, version, client, &snapshot)
+}
+
+/// As [`serve_with_client`], with a pre-captured runtime/model snapshot.
+/// This is the injection seam for embeddings and deterministic tests.
+///
+/// # Errors
+///
+/// Returns stdin/stdout IO errors; protocol and validation errors remain MCP
+/// responses so serving continues.
+#[coverage(off)]
+pub fn serve_with_client_and_snapshot(
     mut input: impl BufRead,
     out: &mut dyn Write,
     version: &str,
     client: &mut dyn DaemonClient,
+    snapshot: &RuntimeModelSnapshot,
 ) -> io::Result<()> {
     let mut buf = Vec::new();
     loop {
@@ -68,7 +92,7 @@ pub fn serve_with_client(
         if line.is_empty() {
             continue;
         }
-        if let Some(response) = handle_line_with_client(line, version, client) {
+        if let Some(response) = handle_line_with_client(line, version, client, snapshot) {
             writeln!(out, "{response}")?;
         }
     }
@@ -89,7 +113,12 @@ impl DaemonClient for UnavailableClient {
 #[coverage(off)]
 fn handle_line(line: &str, version: &str) -> Option<String> {
     let mut unavailable = UnavailableClient;
-    handle_line_with_client(line, version, &mut unavailable)
+    handle_line_with_client(
+        line,
+        version,
+        &mut unavailable,
+        &RuntimeModelSnapshot::default(),
+    )
 }
 
 #[coverage(off)]
@@ -97,6 +126,7 @@ fn handle_line_with_client(
     line: &str,
     version: &str,
     client: &mut dyn DaemonClient,
+    snapshot: &RuntimeModelSnapshot,
 ) -> Option<String> {
     let Ok(request) = serde_json::from_str::<Value>(line) else {
         return Some(
@@ -108,7 +138,7 @@ fn handle_line_with_client(
     match (method, id) {
         // 通常のリクエスト（method ＋ id）。
         (Some(method), Some(id)) => {
-            Some(respond(method, id, request.get("params"), version, client).to_string())
+            Some(respond(method, id, request.get("params"), version, client, snapshot).to_string())
         }
         // method が無いのに id がある＝不正リクエスト。
         (None, Some(id)) => {
@@ -127,12 +157,15 @@ fn respond(
     params: Option<&Value>,
     version: &str,
     client: &mut dyn DaemonClient,
+    snapshot: &RuntimeModelSnapshot,
 ) -> Value {
     match method {
         "initialize" => protocol::success(id, initialize_result(params, version)),
         "ping" => protocol::success(id, json!({})),
-        "tools/list" => protocol::success(id, tools_list_result()),
-        "tools/call" => tools_call(id, params, client),
+        "tools/list" => protocol::success(id, tools_list_result(snapshot)),
+        "tools/call" => tools_call(id, params, client, snapshot),
+        "resources/list" => protocol::success(id, resources::list_result()),
+        "resources/read" => resources_read(id, params),
         other => protocol::error(
             id,
             error_code::METHOD_NOT_FOUND,
@@ -150,19 +183,22 @@ fn initialize_result(params: Option<&Value>, version: &str) -> Value {
         .unwrap_or(DEFAULT_PROTOCOL_VERSION);
     json!({
         "protocolVersion": protocol_version,
-        "capabilities": { "tools": {} },
+        "capabilities": { "tools": {}, "resources": {} },
         "serverInfo": { "name": "usagi", "version": version },
     })
 }
 
 /// `tools/list` の結果（全 tool の name / description / inputSchema）。
 #[coverage(off)]
-fn tools_list_result() -> Value {
+fn tools_list_result(snapshot: &RuntimeModelSnapshot) -> Value {
     let tools: Vec<Value> = tools::registry()
         .iter()
         .map(|tool| {
             // 各 tool の input_schema は妥当な JSON（tools のテストで検証済み）。
-            let schema: Value = serde_json::from_str(tool.input_schema()).unwrap();
+            let mut schema: Value = serde_json::from_str(tool.input_schema()).unwrap();
+            if tool.name() == "session_dispatch" {
+                schema["properties"]["agent"] = snapshot.agent_schema();
+            }
             json!({
                 "name": tool.name(),
                 "description": tool.description(),
@@ -176,14 +212,34 @@ fn tools_list_result() -> Value {
 /// `tools/call` を処理する。現状は全 tool が未実装スタブのため、存在すれば「未実装」、
 /// 無ければ「method not found」を返す。
 #[coverage(off)]
-fn tools_call(id: Value, params: Option<&Value>, client: &mut dyn DaemonClient) -> Value {
+fn tools_call(
+    id: Value,
+    params: Option<&Value>,
+    client: &mut dyn DaemonClient,
+    snapshot: &RuntimeModelSnapshot,
+) -> Value {
     let Some(name) = params.and_then(|p| p.get("name")).and_then(Value::as_str) else {
         return protocol::error(id, error_code::INVALID_PARAMS, "missing tool name");
     };
-    let arguments = params
+    let mut arguments = params
         .and_then(|p| p.get("arguments"))
         .cloned()
         .unwrap_or_else(|| json!({}));
+    if name == "session_dispatch" {
+        let Some(agent) = arguments.get("agent") else {
+            return protocol::error(id, error_code::INVALID_PARAMS, "missing agent");
+        };
+        if let Err(message) = snapshot.validate_agent(agent) {
+            return protocol::error(id, error_code::INVALID_PARAMS, &message);
+        }
+    }
+    if matches!(
+        name,
+        "session_create" | "session_delegate_issue" | "session_delegate_brief"
+    ) && let Err(message) = snapshot.normalize_legacy_agent(&mut arguments)
+    {
+        return protocol::error(id, error_code::INVALID_PARAMS, &message);
+    }
     if let Some(action) = session_action(name) {
         let operation_id = usagi_core::domain::id::OperationId::new().as_str();
         return match client.request(DaemonRequest::Session {
@@ -206,6 +262,20 @@ fn tools_call(id: Value, params: Option<&Value>, client: &mut dyn DaemonClient) 
             Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
         };
     }
+    if let Some(action) = dispatch_tool_action(name) {
+        let operation_id = usagi_core::domain::id::OperationId::new().as_str();
+        return match client.request(DaemonRequest::DispatchTool {
+            action,
+            operation_id,
+            payload: arguments,
+        }) {
+            Ok(DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body)) => protocol::success(
+                id,
+                json!({"content":[{"type":"text","text":body.to_string()}]}),
+            ),
+            Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
+        };
+    }
     match dispatch(name, &arguments.to_string()) {
         Err(ToolError::UnknownTool(tool)) => protocol::error(
             id,
@@ -221,6 +291,24 @@ fn tools_call(id: Value, params: Option<&Value>, client: &mut dyn DaemonClient) 
     }
 }
 
+/// `resources/read` を処理する。`uri` を取り出して resource レジストリを引き、本文を
+/// `contents` に包んで返す。`uri` 欠落は `INVALID_PARAMS`、未知 URI は resource が無い旨の
+/// `INVALID_PARAMS` を返す。
+#[coverage(off)]
+fn resources_read(id: Value, params: Option<&Value>) -> Value {
+    let Some(uri) = params.and_then(|p| p.get("uri")).and_then(Value::as_str) else {
+        return protocol::error(id, error_code::INVALID_PARAMS, "missing resource uri");
+    };
+    match resources::read_result(uri) {
+        Some(result) => protocol::success(id, result),
+        None => protocol::error(
+            id,
+            error_code::INVALID_PARAMS,
+            &format!("unknown resource: {uri}"),
+        ),
+    }
+}
+
 #[coverage(off)]
 fn session_action(name: &str) -> Option<SessionAction> {
     match name {
@@ -232,15 +320,41 @@ fn session_action(name: &str) -> Option<SessionAction> {
     }
 }
 
+fn dispatch_tool_action(name: &str) -> Option<DispatchToolAction> {
+    match name {
+        "session_dispatch" => Some(DispatchToolAction::Dispatch),
+        "session_get" => Some(DispatchToolAction::SessionGet),
+        "agent_list" => Some(DispatchToolAction::AgentList),
+        "agent_get" => Some(DispatchToolAction::AgentGet),
+        "agent_complete" => Some(DispatchToolAction::AgentComplete),
+        "agent_fail" => Some(DispatchToolAction::AgentFail),
+        "agent_inbox" => Some(DispatchToolAction::AgentInbox),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_PROTOCOL_VERSION, handle_line, serve, serve_with_client};
+    use super::{
+        DEFAULT_PROTOCOL_VERSION, handle_line, serve, serve_with_client,
+        serve_with_client_and_snapshot,
+    };
+    use crate::mcp::runtime_model::{
+        ExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig,
+    };
     use serde_json::Value;
     use usagi_core::usecase::client::{ClientError, DaemonClient, DaemonReply, DaemonRequest};
 
     struct RecordingClient {
         reply: Result<DaemonReply, ClientError>,
         requests: Vec<DaemonRequest>,
+    }
+
+    struct FakeLocator(&'static [&'static str]);
+    impl ExecutableLocator for FakeLocator {
+        fn is_available(&self, executable: &str) -> bool {
+            self.0.contains(&executable)
+        }
     }
     impl DaemonClient for RecordingClient {
         fn request(&mut self, request: DaemonRequest) -> Result<DaemonReply, ClientError> {
@@ -261,6 +375,7 @@ mod tests {
         assert_eq!(v["result"]["serverInfo"]["name"], "usagi");
         assert_eq!(v["result"]["serverInfo"]["version"], "9.9.9");
         assert!(v["result"]["capabilities"]["tools"].is_object());
+        assert!(v["result"]["capabilities"]["resources"].is_object());
     }
 
     #[test]
@@ -280,7 +395,7 @@ mod tests {
     fn tools_list_returns_every_tool_with_schema() {
         let v = call(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 27);
+        assert_eq!(tools.len(), 34);
         // 各要素が name / description / inputSchema(object) を持つ。
         for tool in tools {
             assert!(tool["name"].as_str().is_some());
@@ -316,8 +431,50 @@ mod tests {
 
     #[test]
     fn unknown_method_is_method_not_found() {
-        let v = call(r#"{"jsonrpc":"2.0","id":7,"method":"resources/list"}"#).unwrap();
+        let v = call(r#"{"jsonrpc":"2.0","id":7,"method":"resources/subscribe"}"#).unwrap();
         assert_eq!(v["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn resources_list_returns_the_orchestration_guide() {
+        let v = call(r#"{"jsonrpc":"2.0","id":10,"method":"resources/list"}"#).unwrap();
+        let resources = v["result"]["resources"].as_array().unwrap();
+        assert!(
+            resources
+                .iter()
+                .any(|r| r["uri"] == "usagi://guides/orchestration")
+        );
+        for resource in resources {
+            assert!(resource["uri"].as_str().is_some());
+            assert!(resource["name"].as_str().is_some());
+            assert!(resource["mimeType"].as_str().is_some());
+        }
+    }
+
+    #[test]
+    fn resources_read_returns_the_guide_body_for_a_known_uri() {
+        let v = call(r#"{"jsonrpc":"2.0","id":11,"method":"resources/read","params":{"uri":"usagi://guides/orchestration"}}"#).unwrap();
+        let contents = v["result"]["contents"].as_array().unwrap();
+        assert_eq!(contents[0]["uri"], "usagi://guides/orchestration");
+        assert_eq!(contents[0]["mimeType"], "text/markdown");
+        assert!(
+            contents[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("orchestration")
+        );
+    }
+
+    #[test]
+    fn resources_read_unknown_uri_is_invalid_params() {
+        let v = call(r#"{"jsonrpc":"2.0","id":12,"method":"resources/read","params":{"uri":"usagi://guides/nope"}}"#).unwrap();
+        assert_eq!(v["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn resources_read_without_uri_is_invalid_params() {
+        let v = call(r#"{"jsonrpc":"2.0","id":13,"method":"resources/read","params":{}}"#).unwrap();
+        assert_eq!(v["error"]["code"], -32602);
     }
 
     #[test]
@@ -422,6 +579,111 @@ mod tests {
                     })
             );
         }
+    }
+
+    #[test]
+    fn dispatch_tools_use_the_injected_daemon_client() {
+        for (name, action) in [
+            (
+                "session_dispatch",
+                usagi_core::usecase::client::DispatchToolAction::Dispatch,
+            ),
+            (
+                "session_get",
+                usagi_core::usecase::client::DispatchToolAction::SessionGet,
+            ),
+            (
+                "agent_list",
+                usagi_core::usecase::client::DispatchToolAction::AgentList,
+            ),
+            (
+                "agent_get",
+                usagi_core::usecase::client::DispatchToolAction::AgentGet,
+            ),
+            (
+                "agent_complete",
+                usagi_core::usecase::client::DispatchToolAction::AgentComplete,
+            ),
+            (
+                "agent_fail",
+                usagi_core::usecase::client::DispatchToolAction::AgentFail,
+            ),
+            (
+                "agent_inbox",
+                usagi_core::usecase::client::DispatchToolAction::AgentInbox,
+            ),
+        ] {
+            let arguments = if name == "session_dispatch" {
+                r#"{"session":{"name":"a"},"agent":{"runtime":"claude","model":"sonnet"},"prompt":"ok"}"#
+            } else {
+                r#"{"summary":"ok"}"#
+            };
+            let input = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#
+            ) + "\n";
+            let mut out = Vec::new();
+            let mut client = RecordingClient {
+                reply: Ok(DaemonReply::Ok(serde_json::json!({"ok":true}))),
+                requests: vec![],
+            };
+            let snapshot = RuntimeModelSnapshot::capture(
+                &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
+                &FakeLocator(&["claude"]),
+            );
+            serve_with_client_and_snapshot(
+                input.as_bytes(),
+                &mut out,
+                "9.9.9",
+                &mut client,
+                &snapshot,
+            )
+            .unwrap();
+            assert!(String::from_utf8(out).unwrap().contains("ok"));
+            assert!(
+                matches!(&client.requests[0], DaemonRequest::DispatchTool { action: actual, payload, .. } if *actual == action && (payload["summary"] == "ok" || payload["prompt"] == "ok"))
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_schema_and_parser_use_the_captured_snapshot() {
+        let snapshot = RuntimeModelSnapshot::capture(
+            &WorkspaceAgentConfig::default(),
+            &FakeLocator(&["claude"]),
+        );
+        // An empty config never publishes a runtime even when its executable exists.
+        let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n";
+        let mut out = Vec::new();
+        let mut client = RecordingClient {
+            reply: Ok(DaemonReply::Ok(serde_json::json!({}))),
+            requests: vec![],
+        };
+        serve_with_client_and_snapshot(&input[..], &mut out, "9.9.9", &mut client, &snapshot)
+            .unwrap();
+        let listed: Value = serde_json::from_slice(&out).unwrap();
+        let dispatch = listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "session_dispatch")
+            .unwrap();
+        assert_eq!(
+            dispatch["inputSchema"]["properties"]["agent"]["oneOf"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let snapshot = RuntimeModelSnapshot::capture(
+            &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
+            &FakeLocator(&["claude"]),
+        );
+        let input = b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"session_dispatch\",\"arguments\":{\"agent\":{\"runtime\":\"claude\",\"model\":\"opus\"}}}}\n";
+        let mut out = Vec::new();
+        serve_with_client_and_snapshot(&input[..], &mut out, "9.9.9", &mut client, &snapshot)
+            .unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("not allowed"));
     }
 
     #[test]

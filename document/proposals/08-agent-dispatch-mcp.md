@@ -261,7 +261,9 @@ worktree 内で子プロセスとして起動する**ため、実行コンテキ
 
 ## 9. runtime/model allowlist、schema snapshot と再検証
 
-`session_dispatch` の新規 agent branch は、workspace 設定の runtime ごとの model allowlist を正本とする。
+`session_dispatch` の新規 agent branch は、workspace の `.usagi/config.toml` に置く runtime ごとの
+model allowlist を正本とする。実装済みの MCP schema snapshot と `agent_cli` 移行 parser の契約は
+[02-architecture.md の入口面 MCP の tool dispatch](../02-architecture.md#入口面-mcp-の-tool-dispatch) を正本とする。
 
 ```toml
 [agents.claude]

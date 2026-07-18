@@ -1,5 +1,5 @@
 ---
-number: 201
+number: 339
 title: fix(daemon): attach ハンドシェイク中にバッファされた Screen スナップショットが描画されない
 status: done
 priority: high

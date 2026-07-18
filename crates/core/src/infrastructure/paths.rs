@@ -6,7 +6,7 @@
 //!   memory stores and the `.gitignore` writer join it. Lives next to the code
 //!   it describes and is committed with it.
 //! - **The global per-user data directory** ([`data_dir`]): the production
-//!   `$USAGI_HOME` / `~/.usagi`, or its `development/` child for a debug build.
+//!   `$USAGI_HOME` / `~/.usagi`, or its `develop/` child for a debug build.
 //!   The channel split prevents `cargo run` from touching a released daemon's
 //!   endpoint, record, or owned state.
 //!
@@ -52,7 +52,7 @@ pub const fn build_channel() -> BuildChannel {
 /// Resolve the directory where usagi stores its per-user data.
 ///
 /// `$USAGI_HOME` takes precedence; otherwise `~/.usagi` is used as the base.
-/// Debug builds append `development/` to that base while release builds retain
+/// Debug builds append `develop/` to that base while release builds retain
 /// the base itself, preserving the established production location.
 ///
 /// # Errors
@@ -70,7 +70,7 @@ pub fn data_dir() -> Result<PathBuf> {
     };
     Ok(match build_channel() {
         BuildChannel::Production => base,
-        BuildChannel::Development => base.join("development"),
+        BuildChannel::Development => base.join("develop"),
     })
 }
 
@@ -88,7 +88,7 @@ mod tests {
         }
         let expected = match build_channel() {
             BuildChannel::Production => PathBuf::from("/tmp/usagi-unit-home"),
-            BuildChannel::Development => PathBuf::from("/tmp/usagi-unit-home/development"),
+            BuildChannel::Development => PathBuf::from("/tmp/usagi-unit-home/develop"),
         };
         assert_eq!(data_dir().unwrap(), expected);
 

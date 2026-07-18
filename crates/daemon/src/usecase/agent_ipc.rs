@@ -19,13 +19,17 @@
 )] // Injected runtime ports make these boundary signatures part of the contract.
 #![coverage(off)] // Generic injected ports (scope resolver, store, journal, PTY) are monomorphized at the composition root; the fake-based tests below exercise every safety outcome without double-counting those instantiations.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use chrono::Utc;
 use serde_json::{Value, json};
 use usagi_core::{
     domain::{
-        agent::{AgentProfileId, LaunchMode, LaunchRequest, LaunchScope},
+        agent::{
+            AgentCapability, AgentProfileId, AgentStatus, CallerRef, DispatchBinding, DispatchRun,
+            InboxKind, InboxMessage, LaunchMode, LaunchRequest, LaunchScope, RunStatus, WorkerRef,
+        },
         id::{
             AgentRuntimeId, AgentRuntimeRef, ClientId, CompletionFence, ConnectionId,
             DaemonGeneration, OperationId, RequestId, SessionId, TerminalId, TerminalRef,
@@ -33,7 +37,13 @@ use usagi_core::{
         },
     },
     infrastructure::ipc::{ErrorCode, ProtocolError},
-    usecase::client::{AgentLaunchIntent, TerminalAction, TerminalRequest},
+    infrastructure::runtime_model::{
+        ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig,
+    },
+    infrastructure::store::dispatch::DispatchStore,
+    usecase::client::{
+        AgentLaunchIntent, DispatchAgentIntent, DispatchIntent, TerminalAction, TerminalRequest,
+    },
 };
 
 use crate::presentation::ipc::TerminalOwner;
@@ -127,7 +137,7 @@ pub trait AgentTerminalActor {
 /// The daemon's single Agent owner.  It holds the durable runtime coordinator,
 /// orchestrator, adapter registry, runtime store, output journal, and PTY
 /// spawner/writer, plus the producer-issued operation ledger for idempotency.
-pub struct AgentRuntime<S, P, J> {
+pub struct AgentRuntime<S, P, J, L = PathExecutableLocator> {
     generation: DaemonGeneration,
     coordinator: RuntimeCoordinator,
     orchestrator: Orchestrator,
@@ -137,10 +147,12 @@ pub struct AgentRuntime<S, P, J> {
     pty: P,
     default_profile: AgentProfileId,
     geometry: Geometry,
+    dispatch: DispatchStore,
+    locator: L,
     operations: BTreeMap<String, AgentOperation>,
 }
 
-impl<S, P, J> AgentRuntime<S, P, J> {
+impl<S, P, J> AgentRuntime<S, P, J, PathExecutableLocator> {
     #[must_use]
     pub fn new(
         generation: DaemonGeneration,
@@ -150,6 +162,59 @@ impl<S, P, J> AgentRuntime<S, P, J> {
         pty: P,
         default_profile: AgentProfileId,
         geometry: Geometry,
+    ) -> Self {
+        Self::with_dispatch(
+            generation,
+            registry,
+            store,
+            journal,
+            pty,
+            default_profile,
+            geometry,
+            DispatchStore::new(
+                std::env::temp_dir().join(format!("usagi-dispatch-{}", AgentRuntimeId::new())),
+            ),
+        )
+    }
+
+    #[must_use]
+    pub fn with_dispatch(
+        generation: DaemonGeneration,
+        registry: AdapterRegistry,
+        store: S,
+        journal: J,
+        pty: P,
+        default_profile: AgentProfileId,
+        geometry: Geometry,
+        dispatch: DispatchStore,
+    ) -> Self {
+        Self::with_dispatch_and_locator(
+            generation,
+            registry,
+            store,
+            journal,
+            pty,
+            default_profile,
+            geometry,
+            dispatch,
+            PathExecutableLocator,
+        )
+    }
+}
+
+impl<S, P, J, L> AgentRuntime<S, P, J, L> {
+    /// Constructs an Agent runtime with an injected current executable locator.
+    #[must_use]
+    pub fn with_dispatch_and_locator(
+        generation: DaemonGeneration,
+        registry: AdapterRegistry,
+        store: S,
+        journal: J,
+        pty: P,
+        default_profile: AgentProfileId,
+        geometry: Geometry,
+        dispatch: DispatchStore,
+        locator: L,
     ) -> Self {
         Self {
             generation,
@@ -161,6 +226,8 @@ impl<S, P, J> AgentRuntime<S, P, J> {
             pty,
             default_profile,
             geometry,
+            dispatch,
+            locator,
             operations: BTreeMap::new(),
         }
     }
@@ -176,10 +243,19 @@ impl<S, P, J> AgentRuntime<S, P, J> {
             .get(operation_id)
             .map(|operation| operation.outcome.clone())
     }
+
+    #[must_use]
+    pub fn dispatch_store(&self) -> &DispatchStore {
+        &self.dispatch
+    }
 }
 
-impl<S: super::runtime::RuntimeStore, P: PtySpawner + PtyWriter, J: OutputJournal>
-    AgentRuntime<S, P, J>
+impl<
+    S: super::runtime::RuntimeStore,
+    P: PtySpawner + PtyWriter,
+    J: OutputJournal,
+    L: ExecutableLocator,
+> AgentRuntime<S, P, J, L>
 {
     /// Admits one Agent launch.  The same producer `operation_id` with the same
     /// intent returns the same admission (no second spawn); the same id with a
@@ -209,6 +285,196 @@ impl<S: super::runtime::RuntimeStore, P: PtySpawner + PtyWriter, J: OutputJourna
             },
         );
         outcome
+    }
+
+    /// Launches a dispatch-selected worker through the same fenced Agent
+    /// runtime used by ordinary Agent launch, then records its durable run and
+    /// caller binding.  The caller is captured now and never accepted from a
+    /// later completion request.
+    pub fn dispatch<R: SessionScopeResolver>(
+        &mut self,
+        operation_id: &str,
+        intent: &DispatchIntent,
+        session: SessionId,
+        scope: &R,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let operation = OperationId::parse(operation_id).map_err(|_| {
+            ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "dispatch operation id must be canonical",
+            )
+        })?;
+        if intent.prompt.is_empty() {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "dispatch prompt must not be empty",
+            ));
+        }
+        let worker = match &intent.agent {
+            DispatchAgentIntent::Existing { agent_id } => self
+                .dispatch
+                .agent(*agent_id)
+                .map_err(|_| dispatch_storage_error())?
+                .ok_or_else(|| {
+                    ProtocolError::new(ErrorCode::InvalidArgument, "dispatch agent was not found")
+                })?,
+            DispatchAgentIntent::New { runtime, model } => self
+                .dispatch
+                .upsert_agent_by_runtime_model(session, runtime.clone(), model.clone())
+                .map_err(|_| dispatch_storage_error())?,
+        };
+        if worker.session_id != session {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "dispatch agent does not belong to session",
+            ));
+        }
+        if matches!(intent.agent, DispatchAgentIntent::New { .. }) {
+            let config = WorkspaceAgentConfig::read(
+                &scope
+                    .resolve_available_scope(intent.workspace, session)
+                    .map_err(map_scope_error)?
+                    .working_directory,
+            );
+            if !config.allows(worker.runtime.as_str(), worker.model.as_str()) {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "dispatch runtime/model is not allowed by the current workspace configuration",
+                ));
+            }
+            if !self.locator.is_available(worker.runtime.as_str()) {
+                return Err(ProtocolError::new(
+                    ErrorCode::Unavailable,
+                    "dispatch runtime executable is unavailable",
+                ));
+            }
+        }
+        let launch = AgentLaunchIntent {
+            workspace: intent.workspace,
+            session,
+            profile: Some(worker.runtime.clone()),
+        };
+        let semantic = format!(
+            "dispatch:{}:{}:{}",
+            intent.session_name, worker.agent_id, intent.prompt
+        );
+        if let Some(existing) = self.operations.get(operation_id) {
+            if existing.semantic_key != semantic {
+                return Err(ProtocolError::new(
+                    ErrorCode::IdempotencyConflict,
+                    "operation id was reused with a different dispatch",
+                ));
+            }
+            return existing.outcome.clone();
+        }
+        let outcome = self.admit_dispatch(
+            operation,
+            &launch,
+            &intent.prompt,
+            &worker,
+            &intent.caller,
+            scope,
+        );
+        self.operations.insert(
+            operation_id.to_owned(),
+            AgentOperation {
+                semantic_key: semantic,
+                outcome: outcome.clone(),
+            },
+        );
+        outcome
+    }
+
+    fn admit_dispatch<R: SessionScopeResolver>(
+        &mut self,
+        operation: OperationId,
+        launch: &AgentLaunchIntent,
+        prompt: &str,
+        worker: &usagi_core::domain::agent::Agent,
+        caller: &CallerRef,
+        scope: &R,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let resolved = scope
+            .resolve_available_scope(launch.workspace, launch.session)
+            .map_err(map_scope_error)?;
+        let terminal = TerminalRef {
+            daemon_generation: self.generation,
+            terminal_id: TerminalId::new(),
+            workspace_id: launch.workspace,
+            session_id: Some(launch.session),
+            worktree_id: resolved.worktree_id,
+        };
+        let runtime = AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), launch.session)
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Internal, "agent runtime scope is inconsistent")
+            })?;
+        let fence = CompletionFence {
+            workspace_id: launch.workspace,
+            session_id: launch.session,
+            operation_id: operation,
+            owner_daemon_generation: self.generation,
+            execution_attempt: 1,
+            lifecycle_attempt: 1,
+            expected_revision: 0,
+        };
+        let request = LaunchRequest {
+            profile_id: worker.runtime.clone(),
+            mode: LaunchMode::Interactive,
+            model: Some(worker.model.clone()),
+            resume: false,
+            initial_prompt: Some(prompt.to_owned()),
+            scope: LaunchScope {
+                workspace_id: launch.workspace,
+                session_id: launch.session,
+                worktree_id: resolved.worktree_id,
+            },
+            required_capabilities: [AgentCapability::McpWiring].into_iter().collect(),
+        };
+        let authorization = RuntimeAuthorization {
+            runtime,
+            operation: fence,
+            mcp_allowed: true,
+        };
+        self.orchestrator
+            .launch(
+                &mut self.coordinator,
+                &mut self.registry,
+                &authorization,
+                &request,
+                self.geometry,
+                &mut self.store,
+                &mut self.pty,
+            )
+            .map_err(map_orchestration_error)?;
+        self.dispatch
+            .upsert_run(DispatchRun {
+                run_id: operation,
+                agent_id: worker.agent_id,
+                prompt: prompt.to_owned(),
+                started_at: Utc::now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .map_err(|_| dispatch_storage_error())?;
+        self.dispatch
+            .upsert_binding(DispatchBinding {
+                run_id: operation,
+                caller: caller.clone(),
+                worker: WorkerRef {
+                    session_id: worker.session_id,
+                    agent_id: worker.agent_id,
+                },
+            })
+            .map_err(|_| dispatch_storage_error())?;
+        self.dispatch
+            .transition_agent(worker.agent_id, AgentStatus::Running, Some(operation))
+            .map_err(|_| dispatch_storage_error())?;
+        Ok(AgentAdmission {
+            operation_id: operation.to_string(),
+            revision: 1,
+            terminal,
+            completed: false,
+        })
     }
 
     fn admit<R: SessionScopeResolver>(
@@ -264,12 +530,12 @@ impl<S: super::runtime::RuntimeStore, P: PtySpawner + PtyWriter, J: OutputJourna
                 session_id: intent.session,
                 worktree_id: resolved.worktree_id,
             },
-            required_capabilities: BTreeSet::new(),
+            required_capabilities: [AgentCapability::McpWiring].into_iter().collect(),
         };
         let authorization = RuntimeAuthorization {
             runtime,
             operation: fence,
-            mcp_allowed: false,
+            mcp_allowed: true,
         };
         self.orchestrator
             .launch(
@@ -340,6 +606,124 @@ impl<S: super::runtime::RuntimeStore, P: PtySpawner + PtyWriter, J: OutputJourna
                 Err(error) => Err(error.clone()),
             };
         }
+        self.synthesize_no_report(&runtime)?;
+        Ok(())
+    }
+
+    fn synthesize_no_report(&mut self, runtime: &AgentRuntimeRef) -> Result<(), ProtocolError> {
+        let fence = self
+            .coordinator
+            .record_for(runtime)
+            .map_err(map_runtime_error)?
+            .operation
+            .clone();
+        let run_id = fence.operation_id;
+        let Some(binding) = self
+            .dispatch
+            .binding(run_id)
+            .map_err(|_| dispatch_storage_error())?
+        else {
+            return Ok(());
+        };
+        // A dispatch run only accepts a report for the exact runtime fence.
+        // This exit is itself reached through the fenced terminal lookup above.
+        let inbox = self
+            .dispatch
+            .inbox(&binding.caller)
+            .map_err(|_| dispatch_storage_error())?;
+        if inbox.iter().any(|message| {
+            message.run_id == run_id
+                && matches!(
+                    message.kind,
+                    InboxKind::Completed | InboxKind::Failed | InboxKind::NoReport
+                )
+        }) {
+            return Ok(());
+        }
+        self.dispatch
+            .append_inbox(
+                &binding.caller,
+                InboxMessage {
+                    run_id,
+                    from: binding.worker.clone(),
+                    kind: InboxKind::NoReport,
+                    summary: "worker exited without a completion report".into(),
+                    result: None,
+                    created_at: Utc::now(),
+                    read: false,
+                },
+            )
+            .map_err(|_| dispatch_storage_error())?;
+        self.dispatch
+            .transition_run(run_id, RunStatus::NoReport, Some(Utc::now()))
+            .map_err(|_| dispatch_storage_error())?;
+        self.dispatch
+            .transition_agent(binding.worker.agent_id, AgentStatus::Exited, None)
+            .map_err(|_| dispatch_storage_error())?;
+        Ok(())
+    }
+
+    /// Delivers a worker report only when the supplied completion fence is the
+    /// exact current runtime fence.  Late, duplicate, or wrong-generation
+    /// reports are safe no-ops, preserving the single inbox delivery.
+    pub fn report(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        candidate: &CompletionFence,
+        kind: InboxKind,
+        summary: String,
+    ) -> Result<(), ProtocolError> {
+        let record = self
+            .coordinator
+            .record_for(runtime)
+            .map_err(map_runtime_error)?;
+        if !record.operation.fences(candidate)
+            || !matches!(kind, InboxKind::Completed | InboxKind::Failed)
+        {
+            return Ok(());
+        }
+        let Some(binding) = self
+            .dispatch
+            .binding(candidate.operation_id)
+            .map_err(|_| dispatch_storage_error())?
+        else {
+            return Ok(());
+        };
+        let inbox = self
+            .dispatch
+            .inbox(&binding.caller)
+            .map_err(|_| dispatch_storage_error())?;
+        if inbox.iter().any(|message| {
+            message.run_id == candidate.operation_id
+                && matches!(
+                    message.kind,
+                    InboxKind::Completed | InboxKind::Failed | InboxKind::NoReport
+                )
+        }) {
+            return Ok(());
+        }
+        self.dispatch
+            .append_inbox(
+                &binding.caller,
+                InboxMessage {
+                    run_id: candidate.operation_id,
+                    from: binding.worker.clone(),
+                    kind,
+                    summary,
+                    result: None,
+                    created_at: Utc::now(),
+                    read: false,
+                },
+            )
+            .map_err(|_| dispatch_storage_error())?;
+        let status = if kind == InboxKind::Completed {
+            RunStatus::Completed
+        } else {
+            RunStatus::Failed
+        };
+        self.dispatch
+            .transition_run(candidate.operation_id, status, Some(Utc::now()))
+            .map_err(|_| dispatch_storage_error())?;
         Ok(())
     }
 
@@ -531,6 +915,13 @@ fn stale_terminal() -> ProtocolError {
     ProtocolError::new(ErrorCode::StaleTarget, "agent terminal reference is stale")
 }
 
+fn dispatch_storage_error() -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::Unavailable,
+        "daemon could not persist dispatch state",
+    )
+}
+
 fn map_scope_error(error: ScopeResolveError) -> ProtocolError {
     match error {
         ScopeResolveError::Unavailable => ProtocolError::new(
@@ -600,6 +991,8 @@ fn map_runtime_error(error: RuntimeError) -> ProtocolError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::usecase::{
         claude::{ClaudeAdapter, ClaudeProvision, ClaudeProvisionFailure, ClaudeProvisioner},
@@ -711,6 +1104,13 @@ mod tests {
         }
     }
 
+    struct FixtureLocator(PathBuf);
+    impl ExecutableLocator for FixtureLocator {
+        fn is_available(&self, executable: &str) -> bool {
+            self.0.join(executable).is_file()
+        }
+    }
+
     /// A minimal generic terminal owner double so the shared owner can be tested
     /// without a real PTY. It records the requests it receives.
     #[derive(Default)]
@@ -763,6 +1163,35 @@ mod tests {
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
         )
+    }
+
+    fn runtime_with_fixture(
+        locator: FixtureLocator,
+    ) -> AgentRuntime<Store, Pty, Journal, FixtureLocator> {
+        AgentRuntime::with_dispatch_and_locator(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty::default(),
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+            locator,
+        )
+    }
+
+    fn configured_scope(workspace: &std::path::Path) -> ResolvedAgentScope {
+        std::fs::create_dir_all(workspace.join(".usagi")).unwrap();
+        std::fs::write(
+            workspace.join(".usagi/config.toml"),
+            "[agents.claude]\nmodels = [\"test\"]\n",
+        )
+        .unwrap();
+        ResolvedAgentScope {
+            worktree_id: WorktreeId::new(),
+            working_directory: workspace.to_path_buf(),
+        }
     }
 
     fn intent(profile: Option<&str>) -> AgentLaunchIntent {
@@ -987,6 +1416,184 @@ mod tests {
                 .code,
             ErrorCode::InvalidArgument
         );
+    }
+
+    #[test]
+    fn dispatch_launches_once_persists_binding_and_synthesizes_no_report_on_exit() {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let caller = CallerRef {
+            session_id: SessionId::new(),
+            agent_id: usagi_core::domain::id::AgentId::new(),
+        };
+        let operation = OperationId::new().to_string();
+        let dispatch = DispatchIntent {
+            workspace,
+            session_name: "worker".into(),
+            caller: caller.clone(),
+            agent: DispatchAgentIntent::New {
+                runtime: AgentProfileId::new("claude").unwrap(),
+                model: usagi_core::domain::agent::ModelSelector::new("test").unwrap(),
+            },
+            prompt: "finish the task".into(),
+        };
+        let admission = runtime
+            .dispatch(
+                &operation,
+                &dispatch,
+                session,
+                &FakeScope(Ok(configured_scope(worktree.path()))),
+            )
+            .unwrap();
+        let run_id = OperationId::parse(&operation).unwrap();
+        assert_eq!(
+            runtime
+                .dispatch_store()
+                .binding(run_id)
+                .unwrap()
+                .unwrap()
+                .caller,
+            caller
+        );
+        assert_eq!(runtime.dispatch_store().inbox(&caller).unwrap(), Vec::new());
+        assert_eq!(
+            runtime
+                .dispatch(
+                    &operation,
+                    &dispatch,
+                    session,
+                    &FakeScope(Ok(configured_scope(worktree.path())))
+                )
+                .unwrap(),
+            admission
+        );
+        runtime.exit(&admission.terminal, 0).unwrap();
+        let inbox = runtime.dispatch_store().inbox(&caller).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].kind, InboxKind::NoReport);
+    }
+
+    #[test]
+    fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let caller = CallerRef {
+            session_id: SessionId::new(),
+            agent_id: usagi_core::domain::id::AgentId::new(),
+        };
+        let operation = OperationId::new().to_string();
+        let dispatch = DispatchIntent {
+            workspace,
+            session_name: "worker".into(),
+            caller: caller.clone(),
+            agent: DispatchAgentIntent::New {
+                runtime: AgentProfileId::new("claude").unwrap(),
+                model: usagi_core::domain::agent::ModelSelector::new("test").unwrap(),
+            },
+            prompt: "finish".into(),
+        };
+        let admission = runtime
+            .dispatch(
+                &operation,
+                &dispatch,
+                session,
+                &FakeScope(Ok(configured_scope(worktree.path()))),
+            )
+            .unwrap();
+        let runtime_ref = runtime
+            .coordinator
+            .runtime_for_terminal(&admission.terminal)
+            .unwrap();
+        let fence = runtime
+            .coordinator
+            .record_for(&runtime_ref)
+            .unwrap()
+            .operation
+            .clone();
+        let mut wrong = fence.clone();
+        wrong.owner_daemon_generation = DaemonGeneration::new();
+        runtime
+            .report(&runtime_ref, &wrong, InboxKind::Completed, "wrong".into())
+            .unwrap();
+        assert!(runtime.dispatch_store().inbox(&caller).unwrap().is_empty());
+        runtime
+            .report(&runtime_ref, &fence, InboxKind::Completed, "done".into())
+            .unwrap();
+        runtime.exit(&admission.terminal, 0).unwrap();
+        let inbox = runtime.dispatch_store().inbox(&caller).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].kind, InboxKind::Completed);
+    }
+
+    #[test]
+    fn dispatch_revalidates_current_allowlist_and_fixture_executable_before_spawn() {
+        let fixture = tempfile::tempdir().unwrap();
+        let executable = fixture.path().join("claude");
+        std::fs::write(&executable, "fixture").unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let scope = configured_scope(worktree.path());
+        let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+        let session = SessionId::new();
+        let dispatch = |model: &str| DispatchIntent {
+            workspace: WorkspaceId::new(),
+            session_name: "worker".into(),
+            caller: CallerRef {
+                session_id: SessionId::new(),
+                agent_id: usagi_core::domain::id::AgentId::new(),
+            },
+            agent: DispatchAgentIntent::New {
+                runtime: AgentProfileId::new("claude").unwrap(),
+                model: usagi_core::domain::agent::ModelSelector::new(model).unwrap(),
+            },
+            prompt: "finish".into(),
+        };
+        let accepted = runtime
+            .dispatch(
+                &OperationId::new().to_string(),
+                &dispatch("test"),
+                session,
+                &FakeScope(Ok(scope.clone())),
+            )
+            .unwrap();
+        assert_eq!(accepted.terminal.session_id, Some(session));
+        assert_eq!(runtime.coordinator.occupied_slots(), 1);
+
+        std::fs::remove_file(&executable).unwrap();
+        let unavailable = runtime
+            .dispatch(
+                &OperationId::new().to_string(),
+                &dispatch("test"),
+                session,
+                &FakeScope(Ok(scope.clone())),
+            )
+            .unwrap_err();
+        assert_eq!(unavailable.code, ErrorCode::Unavailable);
+        assert_eq!(runtime.coordinator.occupied_slots(), 1);
+
+        std::fs::write(&executable, "fixture").unwrap();
+        std::fs::write(
+            worktree.path().join(".usagi/config.toml"),
+            "[agents.claude]\nmodels = [\"other\"]\n",
+        )
+        .unwrap();
+        let rejected = runtime
+            .dispatch(
+                &OperationId::new().to_string(),
+                &dispatch("test"),
+                session,
+                &FakeScope(Ok(scope)),
+            )
+            .unwrap_err();
+        assert_eq!(rejected.code, ErrorCode::InvalidArgument);
+        assert_eq!(runtime.coordinator.occupied_slots(), 1);
     }
 
     #[test]

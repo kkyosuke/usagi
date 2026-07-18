@@ -14,7 +14,9 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 - [client の失敗処理](#client-の失敗処理)
 - [managed session request](#managed-session-request)
 - [daemon metrics subscription](#daemon-metrics-subscription)
+- [PR inventory snapshot](#pr-inventory-snapshot)
 - [agent launch request](#agent-launch-request)
+- [dispatch request](#dispatch-request)
 - [generic terminal request](#generic-terminal-request)
 
 ## identity と fence
@@ -89,6 +91,23 @@ session / terminal の所有権や local fallback を判断する根拠にはし
 observer の中間 sample を落として count する。切断された observer は次の publish で取り除く。
 このため遅い TUI や一つの接続の切断が daemon tick または他 TUI の配信を止めない。
 
+## PR inventory snapshot
+
+`pr` request は stable `SessionId` を対象に daemon-owned inventory の source-of-truth snapshot を返す。
+handshake では `pr.snapshot.v1` capability を必須にし、dedicated subscription を提供する peer は
+`pr.subscription.v1` も advertise する。
+
+| action / event | fields | contract |
+|---|---|---|
+| `snapshot` | `session_id`, `revision?` | canonical URL、optional title、state、pin/dismiss と refresh state を含む current snapshot を返す |
+| `subscribe` / `unsubscribe` | `session_id` | connection-local hint subscription を登録・解除する。disconnect は登録を回収する |
+| `pr.updated` | `session_id`, `revision` | inventory mutation を示す lossy hint。client は snapshot を再取得して収束する |
+
+revision は session ごとに monotonic である。duplicate、欠落、順序逆転した `pr.updated` は client state
+の差分適用根拠にしない。client は最後に見た revision より新しい hint を受けた場合、または reconnect 後に
+snapshot を読み直す。slow subscriber は bounded queue で coalesce/drop され、PR refresh、terminal drain、
+他 client の RPC を停止させない。
+
 ## managed session request
 
 `session` kind の `create`、`remove`、`list`、`overview` は daemon が所有する durable lifecycle runtime に届く。create / remove は producer-issued `OperationId` を accepted response に返し、list / overview は同じ revision 付き workspace snapshot を返す。create / remove の accepted response は snapshot とともに safe final hook を返す。hook は `kind`（`session.created` または `session.removed`）、`operation_id`、`revision` を持ち、TUI は create skeleton を同じ operation の `session.created` hook でだけ終了する。`OperationId` の再送は action と canonical session target が一致するときだけ同じ operation を返し、異なれば `idempotency_conflict` で拒否する。
@@ -104,6 +123,12 @@ daemon は intent の `(WorkspaceId, SessionId)` を [available managed session]
 成功した launch は accepted response に producer `OperationId` と durable revision を返し、body に完全な `TerminalRef` を載せる。この `TerminalRef` は operation・workspace・session・worktree・daemon generation・terminal incarnation を fence する。PTY exit を daemon が一度だけ記録すると、同じ semantic intent の再送は成功時に `completed: true` と同じ `TerminalRef` を持つ final response を返す。non-zero exit は安全な `unavailable` final として replay される。同じ `OperationId` を異なる intent で送ると `idempotency_conflict` になる。spawn failure・ambiguous・persist-after-spawn は fenced safe failure（`unavailable` / `ownership_unknown`）として durable に記録され、resend は同じ安全な失敗を replay する。replacement spawn や terminal の推測は行わない。
 
 Agent の pending pane は、同じ `OperationId` の成功 final が返した `TerminalRef` にだけ attach する。attach 以降の stream（`attach` / `resume` / `resync` / `input` / `resize` / `detach`）は [generic terminal request](#generic-terminal-request) と同じ vocabulary を共有し、daemon は `TerminalRef` の所有元（agent または generic）へ透過的に routing する。この pending pane の attach policy は [3. TUI](03-tui.md) を正本とする。
+
+## dispatch request
+
+`dispatch` は managed session の既存 create lifecycle と Agent launch を合成する即時実行 request である。payload は producer-issued `operation_id`、workspace、session name、execution context から得た caller、排他的な worker selector（既存 `agent_id` または `runtime` と `model`）、prompt を持つ。daemon は session を reuse/create して available scope を確認してから、prompt を `initial_prompt` として launch する。成功 reply は Accepted outcome と `run_id`（operation ID）および fenced terminal を返す。同じ operation の再送は同じ outcome を返し、異なる intent は idempotency conflict である。
+
+client は path、argv、queue/live mode、completion destination を指定しない。available でない session scope、agent selector の不整合、または未知 agent は safe typed error となり PTY を spawn しない。新規 agent の runtime/model は daemon が launch 直前に current workspace allowlist と current executable availability で再検証する。allowlist 外は `invalid_argument`、executable 不在は `unavailable` とし、どちらも PTY を spawn しない。
 
 ## generic terminal request
 
@@ -136,3 +161,8 @@ protocol error、ownership unknown は local managed PTY や local session mutat
 retry は `ProtocolError` の retry mode に従う。mutation を再送するときは元の request / operation identity
 を保持する。TUI は stream sequence、resource revision、terminal output offset を別々に保持し、gap や
 epoch の不一致では output を継ぎ足さず、snapshot resync を要求する。
+
+MCP の dispatch request は `DispatchTool` action として送る。daemon が session upsert、agent/run/binding
+の解決、inbox の読み書きを行い、MCP は durable state を直接読んだり書いたりしない。完了・失敗は worker
+の current run と binding が一意に一致するときだけ配送し、不一致は completion fence と同じ fail-closed
+方針で no-op にする。

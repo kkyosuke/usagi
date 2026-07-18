@@ -1,14 +1,14 @@
 ---
 number: 331
 title: "feat(mcp): workspace allowlist から runtime/model schema snapshot を生成する"
-status: todo
+status: done
 priority: high
 labels: [mcp, agent, config]
 dependson: [323]
 related: [322, 332]
 parent: 105
 created_at: 2026-07-18T00:30:00+00:00
-updated_at: 2026-07-18T00:30:00+00:00
+updated_at: 2026-07-17T23:11:27.684162+00:00
 ---
 
 ## 目的

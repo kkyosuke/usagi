@@ -4,7 +4,7 @@ title: fix(daemon): client build 世代に daemon lifecycle を自動追随さ�
 status: done
 priority: high
 labels: [daemon, ipc, lifecycle, cli, tui, mcp]
-dependson: [270]
+dependson: [341]
 related: [268]
 created_at: 2026-07-13T02:00:47.537577+00:00
 updated_at: 2026-07-13T02:14:41.673199+00:00

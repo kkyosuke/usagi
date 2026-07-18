@@ -17,7 +17,7 @@ fn short_home() -> tempfile::TempDir {
 
 fn channel_data_dir(home: &Path) -> PathBuf {
     if cfg!(debug_assertions) {
-        home.join("development")
+        home.join("develop")
     } else {
         home.to_path_buf()
     }

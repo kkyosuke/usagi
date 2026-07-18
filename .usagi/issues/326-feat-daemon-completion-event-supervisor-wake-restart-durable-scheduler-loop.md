@@ -1,14 +1,14 @@
 ---
 number: 326
 title: feat(daemon): completion event で supervisor を wake/restart する durable scheduler loop を実装する
-status: todo
+status: done
 priority: high
 labels: [daemon, orchestration, supervisor, scheduler, agent]
 dependson: [322, 325]
 related: [219, 268, 283, 323]
 parent: 324
 created_at: 2026-07-17T21:12:03.425066+00:00
-updated_at: 2026-07-17T21:12:03.425066+00:00
+updated_at: 2026-07-17T23:08:21.243228+00:00
 ---
 
 ## 目的

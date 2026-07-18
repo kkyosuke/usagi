@@ -9,11 +9,13 @@
 //! 委譲する方針で、CLI のコマンドハンドラと同じ core usecase を呼ぶ兄弟。
 
 pub mod protocol;
+pub mod resources;
+pub mod runtime_model;
 pub mod serve;
 pub mod tool;
 pub mod tools;
 
-pub use serve::{serve, serve_with_client};
+pub use serve::{serve, serve_with_client, serve_with_client_and_snapshot};
 use tool::ToolError;
 
 /// tool 名でレジストリを引いて実行する（`tools/call` の実体）。

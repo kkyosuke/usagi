@@ -79,7 +79,7 @@ pub fn dispatch(
     let outcome = body
         .get("kind")
         .and_then(serde_json::Value::as_str)
-        .filter(|kind| matches!(*kind, "session" | "agent"))
+        .filter(|kind| matches!(*kind, "session" | "agent" | "dispatch"))
         .and_then(|_| body.get("operation_id"))
         .and_then(serde_json::Value::as_str)
         .map_or(ResponseOutcome::Ok, |operation_id| {
@@ -346,7 +346,11 @@ pub fn server_protocol(
             min_revision: 0,
             max_revision: 1,
         }],
-        capabilities: vec!["request.correlation.v1".into()],
+        capabilities: vec![
+            "request.correlation.v1".into(),
+            "pr.snapshot.v1".into(),
+            "pr.subscription.v1".into(),
+        ],
         build,
         limits: usagi_core::infrastructure::ipc::ProtocolLimits::default(),
     }

@@ -1,5 +1,5 @@
 ---
-number: 303
+number: 344
 title: feat(tui): Closeup terminal の出力表示と入力送信を daemon PTY へ双方向接続する
 status: done
 priority: high
