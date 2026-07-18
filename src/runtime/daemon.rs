@@ -104,6 +104,25 @@ impl RuntimeStore for FileRuntimeStore {
     }
 }
 
+impl FileRuntimeStore {
+    /// Reconcile a snapshot which outlived the daemon that owned its PTYs.
+    /// Missing snapshots are normal on a first launch.  Parse/write failures
+    /// deliberately leave the old bytes untouched so a later recovery can
+    /// inspect the last known-good durable snapshot.
+    fn reconcile_after_restart(&mut self) -> std::io::Result<usize> {
+        let Some(snapshot) =
+            json_file::read::<RuntimeStoreSnapshot>(&self.0).map_err(std::io::Error::other)?
+        else {
+            return Ok(0);
+        };
+        let (snapshot, interrupted) = snapshot.reconcile_after_daemon_restart();
+        if interrupted != 0 {
+            self.save(snapshot)?;
+        }
+        Ok(interrupted)
+    }
+}
+
 /// Returns the durable snapshot's data directory.
 fn snapshot_directory(path: &Path) -> std::io::Result<&Path> {
     path.parent().ok_or_else(|| {
@@ -701,6 +720,7 @@ impl usagi_daemon::presentation::ipc::TerminalOwner for SharedTerminal {
 }
 
 use super::bootstrap;
+use super::launchd;
 
 #[allow(clippy::too_many_lines)] // IPC request routing remains in the composition adapter.
 #[coverage(off)]
@@ -776,6 +796,16 @@ fn open_agent_runtime(
     pty: AgentPty,
     mcp_command: PathBuf,
 ) -> SharedAgentRuntime {
+    let mut store = FileRuntimeStore(data_dir.join("daemon").join("agents.json"));
+    match store.reconcile_after_restart() {
+        Ok(0) => {}
+        Ok(interrupted) => ErrorLog::record(&format!(
+            "daemon startup reconciled {interrupted} agent runtime(s) as interrupted (identity_unknown)"
+        )),
+        Err(error) => ErrorLog::record(&format!(
+            "daemon startup could not reconcile durable agent runtimes: {error}"
+        )),
+    }
     let mut registry = AdapterRegistry::new();
     let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness);
     // Duplicate registration cannot happen for the two literal profiles; a
@@ -796,7 +826,7 @@ fn open_agent_runtime(
     Arc::new(Mutex::new(AgentRuntime::with_dispatch(
         generation,
         registry,
-        FileRuntimeStore(data_dir.join("daemon").join("agents.json")),
+        store,
         DiscardJournal,
         pty,
         AgentProfileId::new("codex").expect("literal profile id is canonical"),
@@ -1548,6 +1578,27 @@ fn run_inner<W: Write>(out: &mut W, command: Option<&str>, info: &AppInfo) -> st
             )
         })?
         .to_path_buf();
+    match command {
+        Some("install-service") => {
+            let path = launchd::install(&std::env::current_exe()?, &data_dir)?;
+            return writeln!(
+                out,
+                "{}: launchd service installed ({})",
+                info.describe(),
+                path.display()
+            );
+        }
+        Some("uninstall-service") => {
+            let path = launchd::uninstall()?;
+            return writeln!(
+                out,
+                "{}: launchd service uninstalled ({})",
+                info.describe(),
+                path.display()
+            );
+        }
+        _ => {}
+    }
     let store = DaemonRecordStore::new(FsRecordFile {
         path: daemon_dir.join("daemon.json"),
     });

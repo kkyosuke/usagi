@@ -1,13 +1,13 @@
 ---
 number: 350
 title: feat(daemon): daemon/agent を restart・crash・macOS 再起動後も durable に復旧する
-status: todo
+status: done
 priority: high
 labels: [daemon, launchd, session, agent, recovery, resilience, security]
 dependson: [349]
 related: [209, 221, 254, 310, 311, 348, 253, 252, 250]
 created_at: 2026-07-18T01:53:34.283021+00:00
-updated_at: 2026-07-18T01:53:34.283021+00:00
+updated_at: 2026-07-18T02:34:22.214801+00:00
 ---
 
 ## 背景・根拠

@@ -271,6 +271,7 @@ v1 から機能を再実装するときの置き場所の指針。
 | CLI サブコマンドの引数解析・dispatch・結果整形 | `crates/cli/` の `cli/`（ハンドラは `cli/commands/`） |
 | MCP サーバ（JSON-RPC の解釈・dispatch・tool アダプタ） | `crates/cli/` の `mcp/`（アダプタは `mcp/tools/`） |
 | 各面への dispatch と実 IO の注入 | ルート `src/`（実 IO の注入のみ。テスト可能なロジックは crates へ） |
+| macOS LaunchAgent の plist 供給・load / unload | ルート `src/runtime/launchd.rs`。launchd は前景 `daemon serve` の process supervision のみを担い、daemon lock や session state の権威を持たない |
 
 ### Agent launch boundary
 

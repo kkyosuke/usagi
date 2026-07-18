@@ -1000,6 +1000,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "crossterm",
+ "dirs",
  "fs2",
  "libc",
  "serde_json",
