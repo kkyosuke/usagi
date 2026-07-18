@@ -335,6 +335,7 @@ fn session_action(name: &str) -> Option<SessionAction> {
     match name {
         "session_create" => Some(SessionAction::Create),
         "session_remove" => Some(SessionAction::Remove),
+        "session_recover_legacy" => Some(SessionAction::RecoverLegacy),
         "session_setup" => Some(SessionAction::Setup),
         "session_prompt" => Some(SessionAction::Prompt),
         _ => None,
@@ -430,7 +431,7 @@ mod tests {
     fn tools_list_returns_every_tool_with_schema() {
         let v = call(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 42);
+        assert_eq!(tools.len(), 43);
         // 各要素が name / description / inputSchema(object) を持つ。
         for tool in tools {
             assert!(tool["name"].as_str().is_some());

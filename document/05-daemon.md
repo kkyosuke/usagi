@@ -107,6 +107,10 @@ state が無い場合は、検証済みの `<repository>/.usagi/state.json` sess
 `state.json` に残る display name、origin、notes、PR、last-active は UI-only metadata であり、TUI は同名 managed session へ読み取り結合する。
 以後の restart は起動 cwd に関係なく、同じ file に保存された trusted root を session runtime と generic terminal の `login-shell` profile の両方に使う。
 
+既存の `sessions.json` に legacy session を追加する必要がある場合だけ、operator は `usagi session recover-legacy` を実行する。これは dry-run で candidate 名と検証結果だけを表示し、`--apply` を付けた明示操作だけが adoption を永続化する。daemon restart、TUI sidebar refresh、通常の MCP session tool は recovery を呼ばない。MCP の `session_recover_legacy` も同じく `apply: true` がなければ dry-run である。
+
+apply は legacy record 全件の name、期待 path、linked worktree、canonical path、`git worktree list --porcelain` の `usagi/<name>` branch binding を検証する。legacy 内の重複、欠損・不正 record、Git 検証失敗、既存 v2 session との同名（available / creating / deleting / failed を問わない）、または revision 競合は fail-closed となり、`sessions.json` を変更しない。成功時は既存 v2 record と stable ID を保持したまま、検証済み全 record を fresh stable IDs の available session として単一 atomic write で追加する。legacy UI metadata は read-only のままである。
+
 `daemon.json` は `pid` と `started_at` を持つ。`current.json` は generation、daemon directory からの
 相対 endpoint、`active` または `draining` の state を持つ。socket endpoint は永続データではなく、
 daemon generation の終了とともに消える。

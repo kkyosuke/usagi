@@ -36,7 +36,7 @@ mod tests {
     #[test]
     fn every_tool_has_valid_metadata() {
         let reg = registry();
-        assert_eq!(reg.len(), 42); // issue 6 + memory 4 + session 26 + supervisor 6
+        assert_eq!(reg.len(), 43); // issue 6 + memory 4 + session 27 + supervisor 6
 
         let mut seen = std::collections::HashSet::new();
         for tool in &reg {
@@ -57,7 +57,7 @@ mod tests {
     fn each_category_contributes_its_tools() {
         assert_eq!(super::issue::tools().len(), 6);
         assert_eq!(super::memory::tools().len(), 4);
-        assert_eq!(super::session::tools().len(), 26);
+        assert_eq!(super::session::tools().len(), 27);
         assert_eq!(super::supervisor::tools().len(), 6);
     }
 }
