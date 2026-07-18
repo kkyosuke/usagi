@@ -672,10 +672,24 @@ impl Workspace {
         self.metrics = metrics;
     }
 
+    /// The daemon metrics observation last stored by the runtime, for the
+    /// controller `HomeProjection::with_metrics` projection.
+    #[must_use]
+    pub fn metrics(&self) -> Option<DaemonMetrics> {
+        self.metrics.clone()
+    }
+
     /// Replace the completed Git observations without blocking the renderer.
     #[coverage(off)]
     pub fn set_git_diffs(&mut self, diffs: BTreeMap<SessionId, GitDiff>) {
         self.git_diffs = diffs;
+    }
+
+    /// The completed Git observations keyed by session, for the controller
+    /// `HomeProjection::with_git_diffs` projection.
+    #[must_use]
+    pub fn git_diffs(&self) -> &BTreeMap<SessionId, GitDiff> {
+        &self.git_diffs
     }
 
     fn git_diff(&self, index: usize) -> Option<&GitDiff> {
@@ -3025,6 +3039,35 @@ mod tests {
         assert!(left_rows[bottom + 5].contains("[switch]"));
         assert_eq!(home.selected, state.selected());
         assert_eq!(home.active, state.active());
+    }
+
+    #[test]
+    fn metrics_and_git_diff_getters_return_the_stored_projections() {
+        let mut ws = workspace();
+        assert!(ws.metrics().is_none());
+        assert!(ws.git_diffs().is_empty());
+
+        let metrics = usagi_core::usecase::client::DaemonMetrics {
+            schema_version: 1,
+            sampled_at_ms: 1,
+            cpu_percent_hundredths: 0,
+            resident_memory_bytes: 0,
+            active_subscribers: 1,
+            dropped_updates: 0,
+        };
+        ws.set_metrics(Some(metrics.clone()));
+        assert_eq!(ws.metrics(), Some(metrics));
+
+        let session = SessionId::new();
+        let diff = GitDiff {
+            base: "origin/main".into(),
+            ahead: 1,
+            behind: 0,
+            added: 2,
+            removed: 1,
+        };
+        ws.set_git_diffs(BTreeMap::from([(session, diff.clone())]));
+        assert_eq!(ws.git_diffs().get(&session), Some(&diff));
     }
 
     #[test]
