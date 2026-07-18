@@ -7,4 +7,5 @@ pub(crate) mod bootstrap;
 pub(crate) mod cli;
 pub(crate) mod clipboard;
 pub(crate) mod daemon;
+pub(crate) mod launchd;
 pub(crate) mod tui;

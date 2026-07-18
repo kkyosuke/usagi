@@ -41,6 +41,31 @@ pub struct RuntimeStoreSnapshot {
     pub records: Vec<DurableRuntimeRecord>,
 }
 
+impl RuntimeStoreSnapshot {
+    /// Reconcile a snapshot recovered after its daemon process died.
+    ///
+    /// The PTY master belongs to the dead daemon, so even a PID which still
+    /// exists is not enough authority to attach, write to, kill, or replace a
+    /// runtime.  Keep terminal records durable and make their lack of a
+    /// provable live owner explicit instead.  A later, explicit recovery path
+    /// may inspect the record, but startup itself never spawns a replacement.
+    #[must_use]
+    #[coverage(off)]
+    pub fn reconcile_after_daemon_restart(mut self) -> (Self, usize) {
+        let mut interrupted = 0;
+        for record in &mut self.records {
+            if matches!(
+                record.state,
+                RuntimeState::Reserved | RuntimeState::Running | RuntimeState::ReconcileRequired(_)
+            ) {
+                record.state = RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown);
+                interrupted += 1;
+            }
+        }
+        (self, interrupted)
+    }
+}
+
 pub trait RuntimeStore {
     type Error;
     fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), Self::Error>;
@@ -606,6 +631,40 @@ mod tests {
             start_identity: "start".into(),
             process_group: 7,
         }
+    }
+
+    #[test]
+    fn restart_reconcile_marks_only_unfinished_runtimes_identity_unknown() {
+        let request = request();
+        let (runtime, operation) = refs(&request);
+        let launch = Resolver { calls: 0 }.resolve(&request).unwrap().snapshot;
+        let snapshot = RuntimeStoreSnapshot {
+            records: vec![
+                DurableRuntimeRecord {
+                    runtime: runtime.clone(),
+                    operation: operation.clone(),
+                    launch: launch.clone(),
+                    state: RuntimeState::Running,
+                    process: Some(process()),
+                },
+                DurableRuntimeRecord {
+                    runtime,
+                    operation,
+                    launch,
+                    state: RuntimeState::Exited,
+                    process: Some(process()),
+                },
+            ],
+        };
+
+        let (reconciled, interrupted) = snapshot.reconcile_after_daemon_restart();
+
+        assert_eq!(interrupted, 1);
+        assert_eq!(
+            reconciled.records[0].state,
+            RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown)
+        );
+        assert_eq!(reconciled.records[1].state, RuntimeState::Exited);
     }
     fn launch<S: RuntimeStore>(
         coordinator: &mut RuntimeCoordinator,
