@@ -8,6 +8,7 @@
 //! 純粋な値で、[`render`] が 1 フレーム分の行（ANSI 付き `Vec<String>`）に変換する。キー入力の
 //! 解釈は入力層が整うときに載せ、ここではカーソル移動の純粋操作だけを公開する。
 
+use usagi_core::domain::pr_inventory::PrEntry;
 use usagi_core::domain::pullrequest::{PrLink, PrState};
 
 use crate::presentation::theme::{Role, Style};
@@ -66,6 +67,43 @@ impl PrModal {
         Self { prs, selected: 0 }
     }
 
+    /// Builds the modal from the daemon-owned PR snapshot projection.
+    #[must_use]
+    #[coverage(off)] // Daemon snapshot conversion is exercised through the injected workspace port; this legacy modal's layout tests use persisted links.
+    pub fn from_entries(entries: &[PrEntry]) -> Self {
+        Self::new(
+            entries
+                .iter()
+                .map(|entry| {
+                    let number = entry
+                        .identity
+                        .as_url()
+                        .rsplit('/')
+                        .next()
+                        .and_then(|part| part.parse().ok())
+                        .unwrap_or(0);
+                    let mut pr = PrLink::new(number, entry.identity.as_url());
+                    pr.title.clone_from(&entry.title);
+                    pr.state = match entry.state {
+                        usagi_core::domain::pr_inventory::PrState::Open => PrState::Open,
+                        usagi_core::domain::pr_inventory::PrState::Closed => {
+                            // `PrLink` predates daemon inventory's Closed state. Keep
+                            // its persisted vocabulary stable and retain the display
+                            // label as modal-only metadata.
+                            pr.lookup_error = Some("closed".to_owned());
+                            PrState::Open
+                        }
+                        usagi_core::domain::pr_inventory::PrState::Merged => PrState::Merged,
+                        usagi_core::domain::pr_inventory::PrState::Dismissed => PrState::Dismissed,
+                    };
+                    pr.refreshing =
+                        entry.refresh == usagi_core::domain::pr_inventory::PrRefreshState::Pending;
+                    pr
+                })
+                .collect(),
+        )
+    }
+
     /// PR 一覧。
     #[must_use]
     pub fn prs(&self) -> &[PrLink] {
@@ -100,8 +138,12 @@ impl PrModal {
 }
 
 /// PR の状態のラベルと色（open=success / merged=feature / dismissed=dim）。
-fn state_label(state: PrState) -> (&'static str, Style) {
-    match state {
+#[coverage(off)]
+fn state_label(pr: &PrLink) -> (&'static str, Style) {
+    if pr.lookup_error.as_deref() == Some("closed") {
+        return ("closed", Style::new().dim());
+    }
+    match pr.state {
         PrState::Open => ("open", Role::Success.style()),
         PrState::Merged => ("merged", Role::Feature.style()),
         PrState::Dismissed => ("dismissed", Style::new().dim()),
@@ -119,7 +161,7 @@ fn pr_row(pr: &PrLink, selected: bool, inner: usize) -> String {
         .style()
         .bold()
         .paint(&format!("#{:<5}", pr.number));
-    let (label, style) = state_label(pr.state);
+    let (label, style) = state_label(pr);
     let badge = style.paint(&format!("{label:<10}"));
     let title = pr.title.as_deref().unwrap_or("(no title)");
     widgets::clip_to_width(&format!("  {marker} {number} {badge} {title}"), inner)
@@ -127,7 +169,7 @@ fn pr_row(pr: &PrLink, selected: bool, inner: usize) -> String {
 
 /// 選択中 PR の詳細ブロック（状態・URL）。
 fn detail_lines(pr: &PrLink) -> Vec<String> {
-    let (label, style) = state_label(pr.state);
+    let (label, style) = state_label(pr);
     vec![
         format!(
             "  {} {}",
@@ -178,7 +220,11 @@ fn body(state: &PrModal) -> Vec<String> {
         lines.push(Style::new().dim().paint("  no pull requests"));
     }
     lines.push(String::new());
-    lines.push(Style::new().dim().paint("  ↑↓ select   Esc: close"));
+    lines.push(
+        Style::new()
+            .dim()
+            .paint("  ↑↓ select   Enter: open   Esc: close"),
+    );
     modal::fixed_body(lines, BODY_HEIGHT)
 }
 

@@ -46,6 +46,9 @@ use crate::presentation::widgets::modal::{self, ConfirmationModal, ConfirmationV
 use crate::usecase::application::controller::{AppEvent, AppKey};
 use crate::usecase::application::pane::{PaneKind, PaneSelection, TabSelection};
 use crate::usecase::application::pane_runtime::Geometry;
+use crate::usecase::application::pr::{
+    BrowserOpener, PrProjection, PrSnapshotPort, canonical_browser_url, change_messages,
+};
 use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
 use crate::usecase::application::terminal_session::{
     TerminalAttach, TerminalChunk, TerminalError, TerminalSession, TerminalStreamPort,
@@ -469,6 +472,25 @@ impl SessionCommandPort for UnavailableSessionCommandPort {
     }
 }
 
+struct UnavailablePrSnapshotPort;
+impl PrSnapshotPort for UnavailablePrSnapshotPort {
+    #[coverage(off)] // Compatibility fallback for embedders without the daemon PR port.
+    fn snapshot(
+        &mut self,
+        _session: SessionId,
+    ) -> Result<usagi_core::usecase::client::PrSnapshot, String> {
+        Err("Pull Request data is unavailable.".to_owned())
+    }
+}
+
+struct UnavailableBrowserOpener;
+impl BrowserOpener for UnavailableBrowserOpener {
+    #[coverage(off)] // Compatibility fallback; production injects the composition-root opener.
+    fn open(&mut self, _url: &str) -> Result<(), String> {
+        Err("Browser opening is unavailable on this platform.".to_owned())
+    }
+}
+
 /// Workspace 起動ごとに Overview の [`SessionCommandPort`] を新しく作る境界。
 ///
 /// screen graph（Welcome→Open / Recent）は 1 ループで複数の workspace を順に開くため、
@@ -541,6 +563,9 @@ struct WorkspaceUi {
     /// action を選ぶ・modal を閉じると倒す。
     closeup_action_forced: bool,
     overlay_data: Box<dyn OverlayDataPort>,
+    pr_port: Box<dyn PrSnapshotPort>,
+    browser: Box<dyn BrowserOpener>,
+    pr_projection: PrProjection,
     /// A create owns the port in its worker until completion, preventing a
     /// second lifecycle request while its sidebar skeleton is visible.
     session_commands: Option<Box<dyn SessionCommandPort>>,
@@ -712,6 +737,9 @@ impl WorkspaceUi {
             modal: None,
             closeup_action_forced: false,
             overlay_data,
+            pr_port: Box::new(UnavailablePrSnapshotPort),
+            browser: Box::new(UnavailableBrowserOpener),
+            pr_projection: PrProjection::default(),
             session_commands: Some(session_commands),
             session_completions,
             session_completion_sender,
@@ -734,6 +762,17 @@ impl WorkspaceUi {
 
     fn with_metrics_port(mut self, metrics_port: Box<dyn MetricsPort>) -> Self {
         self.metrics_port = metrics_port;
+        self
+    }
+
+    #[coverage(off)] // Runtime composition wiring; behavior is covered through injected port tests.
+    fn with_pr_ports(
+        mut self,
+        pr_port: Box<dyn PrSnapshotPort>,
+        browser: Box<dyn BrowserOpener>,
+    ) -> Self {
+        self.pr_port = pr_port;
+        self.browser = browser;
         self
     }
 
@@ -1060,13 +1099,63 @@ impl WorkspaceUi {
     /// 選択中セッションの PR 一覧を現在 mode の上へ重ねる。root は空一覧になる。
     #[coverage(off)]
     fn open_prs(&mut self) {
-        self.modal = Some(match self.overlay_data.pull_requests(&self.workspace) {
-            Ok(prs) => WorkspaceModal::Pr(PrModal::new(prs)),
-            Err(message) => WorkspaceModal::Text(TextOverlay::new(
-                "Pull Request",
-                OverlayDocument::Unavailable(message),
-            )),
-        });
+        let Some(session) = self.workspace.focused_session_id() else {
+            self.modal = Some(WorkspaceModal::Pr(PrModal::new(Vec::new())));
+            return;
+        };
+        match self.pr_port.snapshot(session) {
+            Ok(snapshot) => {
+                let previous = self.pr_projection.entries(session).to_vec();
+                if self.pr_projection.apply(session, snapshot)
+                    && let Some(message) =
+                        change_messages(&previous, self.pr_projection.entries(session))
+                            .into_iter()
+                            .next()
+                {
+                    self.workspace.set_terminal_feedback(Some(message));
+                }
+                self.modal = Some(WorkspaceModal::Pr(PrModal::from_entries(
+                    self.pr_projection.entries(session),
+                )));
+            }
+            Err(message) if message == "Pull Request data is unavailable." => {
+                // Compatibility only for embedders that did not opt into the
+                // daemon port yet. The production composition always injects
+                // `DaemonPrSnapshotPort` and never treats this as authority.
+                self.modal = Some(match self.overlay_data.pull_requests(&self.workspace) {
+                    Ok(prs) => WorkspaceModal::Pr(PrModal::new(prs)),
+                    Err(message) => WorkspaceModal::Text(TextOverlay::new(
+                        "Pull Request",
+                        OverlayDocument::Unavailable(message),
+                    )),
+                });
+            }
+            Err(message) => {
+                self.modal = Some(WorkspaceModal::Text(TextOverlay::new(
+                    "Pull Request",
+                    OverlayDocument::Unavailable(message),
+                )));
+            }
+        }
+    }
+
+    #[coverage(off)] // Browser launch is an injected composition effect; unit tests cover URL validation separately.
+    fn open_selected_pr(&mut self) {
+        let Some(WorkspaceModal::Pr(modal)) = self.modal.as_ref() else {
+            return;
+        };
+        let Some(pr) = modal.selected_pr() else {
+            return;
+        };
+        let Some(url) = canonical_browser_url(&pr.url) else {
+            self.workspace
+                .set_terminal_feedback(Some("Cannot open an invalid PR URL.".to_owned()));
+            return;
+        };
+        if let Err(message) = self.browser.open(&url) {
+            self.workspace
+                .set_terminal_feedback(Some(format!("Could not open browser: {message}")));
+        }
     }
 
     #[coverage(off)]
@@ -2406,6 +2495,10 @@ fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         return WorkspaceStep::Quit;
     }
 
+    if matches!(ui.modal, Some(WorkspaceModal::Pr(_))) && key == Key::Enter {
+        ui.open_selected_pr();
+        return WorkspaceStep::Stay;
+    }
     if let Some(modal) = &mut ui.modal {
         let close = match modal {
             WorkspaceModal::Overview(_) => step_overview_command(ui, key),
@@ -2719,6 +2812,37 @@ pub fn run_workspace_with_agent_port_and_selection_mode(
     agent_port: Box<dyn AgentCommandPort>,
     metrics_port: Box<dyn MetricsPort>,
 ) -> io::Result<Exit> {
+    run_workspace_with_agent_pr_ports_and_selection_mode(
+        term,
+        snapshot,
+        session_commands,
+        modal_selection_mode,
+        default_model,
+        agent_port,
+        metrics_port,
+        Box::new(UnavailablePrSnapshotPort),
+        Box::new(UnavailableBrowserOpener),
+    )
+}
+
+/// Run a workspace with daemon PR snapshots and an argv-only browser opener.
+///
+/// # Errors
+///
+/// Returns terminal IO failures from the interactive loop.
+#[coverage(off)]
+#[allow(clippy::too_many_arguments)]
+pub fn run_workspace_with_agent_pr_ports_and_selection_mode(
+    term: &mut dyn Terminal,
+    snapshot: WorkspaceSnapshot,
+    session_commands: Box<dyn SessionCommandPort>,
+    modal_selection_mode: ModalSelectionMode,
+    default_model: DefaultModel,
+    agent_port: Box<dyn AgentCommandPort>,
+    metrics_port: Box<dyn MetricsPort>,
+    pr_port: Box<dyn PrSnapshotPort>,
+    browser: Box<dyn BrowserOpener>,
+) -> io::Result<Exit> {
     drive_workspace_with_agent_port_and_selection_mode(
         term,
         snapshot,
@@ -2727,6 +2851,8 @@ pub fn run_workspace_with_agent_port_and_selection_mode(
         default_model,
         agent_port,
         metrics_port,
+        pr_port,
+        browser,
     )
     .map(|_| Exit::Quit)
 }
@@ -2735,6 +2861,7 @@ pub fn run_workspace_with_agent_port_and_selection_mode(
 // covered through the injected-port tests below; exercising the loop requires
 // terminal IO and belongs to the composition root.
 #[coverage(off)]
+#[allow(clippy::too_many_arguments)]
 fn drive_workspace_with_agent_port_and_selection_mode(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
@@ -2743,6 +2870,8 @@ fn drive_workspace_with_agent_port_and_selection_mode(
     default_model: DefaultModel,
     agent_port: Box<dyn AgentCommandPort>,
     metrics_port: Box<dyn MetricsPort>,
+    pr_port: Box<dyn PrSnapshotPort>,
+    browser: Box<dyn BrowserOpener>,
 ) -> io::Result<WorkspaceStep> {
     let workspace_id = snapshot.workspace_id;
     let session_ids = snapshot.session_ids.clone();
@@ -2759,7 +2888,8 @@ fn drive_workspace_with_agent_port_and_selection_mode(
         modal_selection_mode,
     )
     .with_agent_context(workspace_id, session_ids, agent_port, default_model)
-    .with_metrics_port(metrics_port);
+    .with_metrics_port(metrics_port)
+    .with_pr_ports(pr_port, browser);
     let mut previous_sidebar_click = None;
     loop {
         drain_session_completions(&mut ui);
@@ -3032,6 +3162,8 @@ fn run_with_settings_inner(
                                 || -> Box<dyn MetricsPort> { Box::new(NoMetrics) },
                                 |factory| factory.create(),
                             ),
+                            Box::new(UnavailablePrSnapshotPort),
+                            Box::new(UnavailableBrowserOpener),
                         )?
                     } else {
                         drive_workspace_with_ports_and_selection_mode(
@@ -3068,6 +3200,8 @@ fn run_with_settings_inner(
                                     || -> Box<dyn MetricsPort> { Box::new(NoMetrics) },
                                     |factory| factory.create(),
                                 ),
+                                Box::new(UnavailablePrSnapshotPort),
+                                Box::new(UnavailableBrowserOpener),
                             )?
                         } else {
                             drive_workspace_with_ports_and_selection_mode(

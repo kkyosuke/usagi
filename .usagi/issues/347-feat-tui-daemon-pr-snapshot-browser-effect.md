@@ -1,13 +1,13 @@
 ---
 number: 347
 title: feat(tui): daemon PR snapshot・通知・安全な browser effect を接続する
-status: todo
+status: done
 priority: high
 labels: [tui, pr, ux]
 dependson: [346]
 related: [175, 198]
 created_at: 2026-07-17T23:45:09.406330+00:00
-updated_at: 2026-07-17T23:45:09.406330+00:00
+updated_at: 2026-07-18T01:04:32.136149+00:00
 ---
 
 ## 目的

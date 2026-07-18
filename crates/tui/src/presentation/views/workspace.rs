@@ -693,6 +693,15 @@ impl Workspace {
         self.focused_session()
     }
 
+    /// Stable daemon identity of the focused session, if a session is selected.
+    #[must_use]
+    #[coverage(off)]
+    pub fn focused_session_id(&self) -> Option<SessionId> {
+        self.selected
+            .checked_sub(1)
+            .and_then(|index| self.session_ids.get(index).copied())
+    }
+
     /// 現在の操作 mode。
     #[must_use]
     #[coverage(off)]
