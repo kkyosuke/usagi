@@ -46,8 +46,8 @@ use crate::presentation::views::{create_session_modal, quit_modal};
 use crate::presentation::widgets::modal::{self, ConfirmationView};
 use crate::presentation::workspace_runtime::WorkspaceRuntime;
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, BackendEvent, Effect, Notice, Overlay, PointerAction, SafeError,
-    SafeMessage, Target,
+    AppEvent, AppKey, AppState, BackendEvent, Effect, NewRequest, Notice, Overlay, PointerAction,
+    SafeError, SafeMessage, Target,
 };
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort, canonical_browser_url};
@@ -326,6 +326,8 @@ enum NewStep {
     Quit,
     /// welcome へ戻る。
     Back,
+    /// 検証済みの入力で workspace 作成を実行する。screen graph が backend を 1 回呼ぶ。
+    Create(NewRequest),
 }
 
 /// Open 画面のキー処理結果。
@@ -819,13 +821,40 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
             form.complete_directory();
             NewStep::Stay
         }
-        Key::Enter
-        | Key::CtrlD
+        // Enter は入力を検証して作成へ進む。必須項目が欠けていれば安全なメッセージを
+        // notice に出し、同画面に留まって draft を保つ。
+        Key::Enter => match form.to_request() {
+            Ok(request) => NewStep::Create(request),
+            Err(error) => {
+                form.set_notice(Some(error.message().to_owned()));
+                NewStep::Stay
+            }
+        },
+        Key::CtrlD
         | Key::Live(_)
         | Key::Click { .. }
         | Key::Pointer(_)
         | Key::Passthrough(_)
         | Key::Other => NewStep::Stay,
+    }
+}
+
+/// 作成失敗の io error を、New フォームの 1 行 notice slot に収まる安全なメッセージへ縮める。
+/// git の stderr は複数行になりうるので先頭行だけを取り、長すぎる場合は切り詰める。
+fn new_project_notice(error: &io::Error) -> String {
+    const MAX: usize = 72;
+    let message = error.to_string();
+    let first = message.lines().next().unwrap_or("").trim();
+    let detail = if first.is_empty() {
+        "could not create the project"
+    } else {
+        first
+    };
+    if detail.chars().count() > MAX {
+        let truncated: String = detail.chars().take(MAX - 1).collect();
+        format!("{truncated}…")
+    } else {
+        detail.to_owned()
     }
 }
 
@@ -2170,6 +2199,28 @@ fn run_with_settings_inner(
                 NewStep::Stay => {}
                 NewStep::Quit => return Ok(Exit::Quit),
                 NewStep::Back => screen = Screen::Welcome,
+                NewStep::Create(request) => match loader.create_workspace(&request) {
+                    Ok(snapshot) => {
+                        new_form.set_notice(None);
+                        welcome.record_opened(&snapshot.workspace);
+                        open.record_opened(&snapshot.workspace);
+                        let workspace_step = open_snapshot_via_controller(
+                            term,
+                            snapshot,
+                            session_commands,
+                            agent_commands.as_deref_mut(),
+                            metrics.as_deref_mut(),
+                        )?;
+                        if workspace_step == WorkspaceStep::Quit {
+                            return Ok(Exit::Quit);
+                        }
+                        // 作成した workspace を離れたら、フォームを白紙に戻して Welcome へ帰す。
+                        new_form = New::default();
+                        screen = Screen::Welcome;
+                    }
+                    // 失敗時は入力中の draft を保持したまま notice を出して同画面に留まる。
+                    Err(error) => new_form.set_notice(Some(new_project_notice(&error))),
+                },
             },
             Screen::Config => match step_config(&mut config_form, key, settings) {
                 ConfigStep::Stay => {}
@@ -2307,8 +2358,8 @@ mod tests {
         UnavailablePrSnapshotPort, UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader,
         WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
         close_exited_panes, controller_terminal_view, handle_terminal_pointer,
-        key_to_terminal_bytes, play_startup_splash, render_controller_frame, render_home_snapshot,
-        run as run_from_start, run_with_settings,
+        key_to_terminal_bytes, new_project_notice, play_startup_splash, render_controller_frame,
+        render_home_snapshot, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_controller, step_config, step_new, terminal_geometry, welcome_action,
         write_banner,
@@ -2317,7 +2368,9 @@ mod tests {
     use crate::presentation::views::config::AvailableAgentModels;
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
-    use crate::usecase::application::controller::{AppEvent, AppKey, PointerAction, Target};
+    use crate::usecase::application::controller::{
+        AppEvent, AppKey, NewRequest, PointerAction, Target,
+    };
     use crate::usecase::application::pane::PaneKind;
     use crate::usecase::application::run as dispatch;
     use crate::usecase::application::{EntryScreen, Key, Terminal};
@@ -3079,6 +3132,7 @@ mod tests {
         cleanup_calls: usize,
         unregistered: Vec<PathBuf>,
         unregister_calls: usize,
+        created: Vec<NewRequest>,
         fail: bool,
         opened_at: Option<DateTime<Utc>>,
     }
@@ -3109,6 +3163,17 @@ mod tests {
             self.unregister_calls += 1;
             self.unregistered.extend_from_slice(paths);
             Ok(paths.to_vec())
+        }
+
+        fn create_workspace(&mut self, request: &NewRequest) -> io::Result<WorkspaceSnapshot> {
+            self.created.push(request.clone());
+            // Both modes resolve to a directory that is then opened like any
+            // other workspace, mirroring the real loader.
+            let path = match request {
+                NewRequest::Clone { destination, .. } => destination.clone(),
+                NewRequest::Existing { path, .. } => path.clone(),
+            };
+            self.open(&path)
         }
     }
 
@@ -3330,10 +3395,46 @@ mod tests {
         step_new(&mut form, Key::Right);
         step_new(&mut form, Key::Backspace);
         assert_eq!(form.url(), "a");
+        // Enter with a still-incomplete Clone form (no Location) validates,
+        // surfaces the field error as a notice, and stays on the form.
         assert!(matches!(step_new(&mut form, Key::Enter), NewStep::Stay));
+        assert_eq!(form.notice(), Some("clone location is required"));
         assert!(matches!(step_new(&mut form, Key::Other), NewStep::Stay));
         assert!(matches!(step_new(&mut form, Key::Escape), NewStep::Back));
         assert!(matches!(step_new(&mut form, Key::Quit), NewStep::Quit));
+    }
+
+    #[test]
+    fn step_new_enter_creates_once_every_required_field_is_present() {
+        let mut form = New::default();
+        step_new(&mut form, Key::Down); // Url
+        for ch in "https://example.com/owner/repo.git".chars() {
+            step_new(&mut form, Key::Char(ch));
+        }
+        step_new(&mut form, Key::Down); // Location
+        for ch in "/projects".chars() {
+            step_new(&mut form, Key::Char(ch));
+        }
+        // Directory は URL から導出済み。Enter で検証済みの Create を返す。
+        let step = step_new(&mut form, Key::Enter);
+        assert!(matches!(step, NewStep::Create(NewRequest::Clone { .. })));
+    }
+
+    #[test]
+    fn new_project_notice_collapses_git_stderr_to_one_safe_line() {
+        // 空メッセージは汎用の一行へフォールバックする。
+        assert_eq!(
+            new_project_notice(&io::Error::other(String::new())),
+            "could not create the project"
+        );
+        // 複数行の stderr は先頭行だけを trim して残す。
+        let multi = io::Error::other("fatal: repository not found\nhint: check the URL");
+        assert_eq!(new_project_notice(&multi), "fatal: repository not found");
+        // 長い行は省略記号付きで切り詰める。
+        let long = io::Error::other("x".repeat(200));
+        let notice = new_project_notice(&long);
+        assert_eq!(notice.chars().count(), 72);
+        assert!(notice.ends_with('…'));
     }
 
     #[test]
@@ -3358,6 +3459,98 @@ mod tests {
         )
         .unwrap();
         assert!(term.frames[1].join("\n").contains("New Project"));
+    }
+
+    #[test]
+    fn new_form_enter_creates_a_workspace_and_opens_it() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('e'), // Welcome → New
+            Key::Right,     // Clone → Existing
+            Key::Down,      // focus the directory path
+            Key::Char('x'), // path "x"; the name derives "x"
+            Key::Enter,     // valid → create and open the workspace
+            Key::CtrlQ,     // leave the workspace…
+            Key::Char('y'), // …confirm
+        ]);
+        let mut loader = FakeLoader::default();
+        assert_eq!(
+            run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap(),
+            Exit::Quit
+        );
+        // Enter dispatched exactly one create carrying the validated request.
+        assert_eq!(
+            loader.created,
+            vec![NewRequest::Existing {
+                path: PathBuf::from("x"),
+                name: "x".to_owned(),
+            }]
+        );
+        // The freshly created workspace opened on the same terminal.
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("x-session"))
+        );
+    }
+
+    #[test]
+    fn new_form_enter_keeps_the_draft_and_shows_a_notice_when_creation_fails() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('e'),
+            Key::Right,
+            Key::Down,
+            Key::Char('x'),
+            Key::Enter, // create fails
+            Key::Quit,  // then quit from the still-open New form
+        ]);
+        let mut loader = FakeLoader {
+            fail: true,
+            ..FakeLoader::default()
+        };
+        assert_eq!(
+            run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap(),
+            Exit::Quit
+        );
+        // The create was attempted once and the runtime stayed on the New form.
+        assert_eq!(loader.created.len(), 1);
+        let last_new = term
+            .frames
+            .iter()
+            .rev()
+            .find(|frame| frame.join("\n").contains("New Project"))
+            .expect("still on the New screen after a failed create");
+        let text = last_new.join("\n");
+        assert!(text.contains("open failed")); // the failure notice
+        assert!(text.contains('x')); // the draft path is retained
+    }
+
+    #[test]
+    fn new_form_enter_clones_and_opens_the_workspace() {
+        let mut keys = vec![Key::Char('e'), Key::Down]; // New → focus Url
+        keys.extend("https://example.com/o/repo.git".chars().map(Key::Char));
+        keys.push(Key::Down); // focus Location
+        keys.extend("/tmp".chars().map(Key::Char));
+        // Directory は URL から "repo" が導出済み。
+        keys.extend([Key::Enter, Key::CtrlQ, Key::Char('y')]);
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut loader = FakeLoader::default();
+        assert_eq!(
+            run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(
+            loader.created,
+            vec![NewRequest::Clone {
+                repository: "https://example.com/o/repo.git".to_owned(),
+                destination: PathBuf::from("/tmp").join("repo"),
+                branch: None,
+            }]
+        );
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("repo-session"))
+        );
     }
 
     #[test]

@@ -3405,6 +3405,25 @@ mod tests {
     }
 
     #[test]
+    fn new_submit_while_pending_ignores_the_duplicate_operation() {
+        let mut state = NewState::new(NewMode::Clone, clone_form());
+        let first = update_new(&mut state, NewEvent::Submit);
+        assert_eq!(first.len(), 1);
+        assert_eq!(state.pending(), Some(PendingToken(1)));
+
+        // A second Submit before the backend completes is a no-op: it produces
+        // no new effect and does not advance the pending token, so a fast double
+        // Enter cannot start two clones.
+        let second = update_new(&mut state, NewEvent::Submit);
+        assert!(second.is_empty());
+        assert_eq!(state.pending(), Some(PendingToken(1)));
+
+        // Retry is guarded the same way while an operation is in flight.
+        assert!(update_new(&mut state, NewEvent::Retry).is_empty());
+        assert_eq!(state.pending(), Some(PendingToken(1)));
+    }
+
+    #[test]
     fn new_existing_failure_retains_form_and_retry_reuses_the_request() {
         let mut state = NewState::new(NewMode::Existing, existing_form());
         let effects = update_new(&mut state, NewEvent::Submit);

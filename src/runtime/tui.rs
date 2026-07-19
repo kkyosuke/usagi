@@ -26,7 +26,7 @@ use usagi_core::domain::terminal_launch::{
 };
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::error_log::ErrorLog;
-use usagi_core::infrastructure::git::diff_status;
+use usagi_core::infrastructure::git::{clone as git_clone, diff_status};
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
@@ -47,6 +47,7 @@ use usagi_tui::presentation::{
     MetricsPortFactory, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, Start,
     WorkspaceLoader, WorkspaceSnapshot,
 };
+use usagi_tui::usecase::application::controller::NewRequest;
 use usagi_tui::usecase::application::pane_runtime::Geometry;
 use usagi_tui::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
 use usagi_tui::usecase::application::terminal_session::{
@@ -1042,6 +1043,37 @@ impl WorkspaceLoader for FsWorkspaceLoader {
             .into_iter()
             .map(|workspace| workspace.path)
             .collect())
+    }
+
+    #[coverage(off)]
+    fn create_workspace(&mut self, request: &NewRequest) -> std::io::Result<WorkspaceSnapshot> {
+        let path = match request {
+            NewRequest::Clone {
+                repository,
+                destination,
+                branch,
+            } => {
+                let parent = destination
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+                let directory = destination
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| io_error("clone destination is not a valid directory name"))?;
+                std::fs::create_dir_all(parent)?;
+                git_clone(&SystemGit, parent, repository, directory, branch.as_deref())
+                    .map_err(io_error)?
+            }
+            NewRequest::Existing { path, name } => {
+                validate_workspace_directory(path)?;
+                workspace_usecase::register(&self.storage, path, name, Utc::now())
+                    .map_err(io_error)?;
+                path.clone()
+            }
+        };
+        // Clone / Existing どちらも、作成後は他の workspace と同じ open 経路で snapshot を得る。
+        self.open(&path)
     }
 }
 
