@@ -89,8 +89,9 @@ modal と inline 作成中は背景の sidebar click を受け取らない。
 Closeup の入力所有者は tab の有無で決まる。tab が無い Closeup は management input が所有し、action modal を
 前面に出す。tab が 1 つ以上ある Closeup は `LiveInputClassifier` の `Ctrl-O` prefix（leader）が所有し、非
 prefix の打鍵は live terminal への passthrough として扱う。TUI が予約するのは `Ctrl-O` prefix だけであり、
-leader ではないすべてのキー入力は、修飾キーを含めて PTY へ送る。leader の follow-up は `Ctrl-O`、`Ctrl-A`、`Ctrl-N`、`Ctrl-P` だけを
-下表のアクションに解決し、それ以外は消費する。
+leader ではないすべてのキー入力は、修飾キーを含めて PTY へ送る。leader の follow-up は下表のアクションに解決し、それ以外は
+消費する。tab 切替（`Ctrl-O` / `Ctrl-A` / `Ctrl-N` / `Ctrl-P`）は reducer が所有するが、scroll・tab close・copy は
+reducer に持ち込まず shell と `TerminalSession` が所有する（scroll offset・選択・feedback は shell 側の状態）。
 
 controller reducer path も同じ投影を使う。`LivePaneAvailability` が無い Closeup への遷移は action overlay を
 自動で開き、pane が到着すると通常の tab surface へ戻る。adapter は prefix の next / previous 結果を
@@ -103,7 +104,11 @@ identity は保持しない。
 | `Ctrl-O` `Ctrl-A` | OpenCloseupModal | Switch では選択 target の Closeup action を開く。Closeup では tab があっても action modal を前面に出す |
 | `Ctrl-O` `Ctrl-N` | NextTab | 次の tab を選ぶ |
 | `Ctrl-O` `Ctrl-P` | PreviousTab | 前の tab を選ぶ |
+| `Ctrl-O` `x` | CloseTab | 選択中の tab を閉じる（live なら subscription を detach、pending なら起動待ちを取消） |
+| `Ctrl-O` `u` / `↑` | ScrollUp | 右ペインの scrollback を 1 行古い方向へ |
+| `Ctrl-O` `d` / `↓` | ScrollDown | 右ペインの scrollback を 1 行 live bottom 方向へ |
 
+follow-up の `x` / `u` / `d` / `↑` / `↓` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
 leader は 1 秒で失効し、未知の follow-up は 1 打鍵だけ握って捨てる。leader 待機中の次の入力は prefix の
 follow-up として扱う。
 
@@ -223,10 +228,13 @@ Closeup action で `agent`、`terminal`、または `diff` を確定すると、
 入力がなければ completion はその tab を選択して live / document tab に置換し、入力があれば自動選択を取り消す。diff は terminal identity を持たない
 document tab として完了し、安全な document 本文を tab の content area に描画する。session の `terminal` は daemon が stable session / worktree scope を解決して起動する
 `login-shell` であり、TUI はローカル PTY を生成しない。session が利用可能でない、または daemon が応答しない場合は
-pending tab を安全な feedback に置き換える。`←` / `→`（または `h` / `l`）と `Ctrl-O Ctrl-N` / `Ctrl-O Ctrl-P` は tab を巡回し、`x` は
+pending tab を安全な feedback に置き換える。`←` / `→`（または `h` / `l`）と `Ctrl-O Ctrl-N` / `Ctrl-O Ctrl-P` は tab を巡回し、`Ctrl-O x` は
 選択 tab を閉じる。close 後は次の tab（末尾なら直前）を stable identity で選択し、最後の tab を閉じたときだけ
 target selection と Closeup action の空状態へ戻る。close は client-side selection を外すだけであり、daemon-owned
-terminal を停止しない。
+terminal を停止しない。live tab の close は subscription を detach し、pending tab の close は起動待ちの launch を取り消す。
+
+shell は毎フレーム全 attached terminal を poll し、daemon が exit を報告した terminal の tab を自動で閉じて
+subscription を detach する。最後の live tab が exit すると `has_live_pane` が落ちて Closeup の action 空状態へ戻る。
 
 Agent / terminal の launch は session create と同じく worker で実行し、daemon port は completion とともに UI へ返す。したがって
 request を受け付けたフレームから completion まで pending chip は既存の共有 shimmer wave を表示し続け、入力は block されない。

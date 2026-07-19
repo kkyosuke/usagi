@@ -388,6 +388,9 @@ mod tests {
         assert_eq!(runtime.host().port().launches.len(), 1);
         assert_eq!(runtime.host().port().launches[0].1.profile, None);
 
+        // A successful submit closes the action modal, so re-open it before the
+        // next launch. (The live resample no longer re-forces it; see #352.)
+        let _ = runtime.update(AppEvent::Key(controller::AppKey::OpenCloseupOverlay));
         let effects = runtime.update(AppEvent::Key(controller::AppKey::SubmitCloseup(
             "agent codex".to_owned(),
         )));

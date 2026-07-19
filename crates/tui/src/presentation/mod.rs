@@ -9,6 +9,7 @@
 
 pub mod frame;
 pub mod layouts;
+pub mod live_terminal;
 pub mod metrics;
 pub mod theme;
 pub mod views;
@@ -28,6 +29,7 @@ use usagi_core::domain::recent::Recent;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::usecase::client::DaemonMetrics;
 
+use crate::presentation::live_terminal::LiveTerminalControls;
 use crate::presentation::metrics::{MetricsBackend, MetricsProjection};
 use crate::presentation::theme::{Color, Role, Style};
 use crate::presentation::views::config::{self, AvailableAgentModels, Config};
@@ -38,7 +40,7 @@ use crate::presentation::views::splash;
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{
     self, GitDiff, HomeProjection, ProjectedSession, TerminalViewProjection,
-    Workspace as WorkspaceView, render_home,
+    Workspace as WorkspaceView, render_home, terminal_point_at,
 };
 use crate::presentation::views::{create_session_modal, quit_modal};
 use crate::presentation::widgets::modal::{self, ConfirmationView};
@@ -49,12 +51,13 @@ use crate::usecase::application::controller::{
 };
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort, canonical_browser_url};
+use crate::usecase::application::terminal_selection::TerminalSelection;
 use crate::usecase::application::terminal_session::{
-    TerminalAttach, TerminalChunk, TerminalError, TerminalSession, TerminalStreamPort,
+    SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalSession, TerminalStreamPort,
 };
 use crate::usecase::application::{Key, ScreenRunner, Terminal};
 use crate::usecase::overview::SessionCommand;
-use crate::usecase::terminal_input::LiveTerminalAction;
+use crate::usecase::terminal_input::{LiveTerminalAction, PointerEvent, PointerKind};
 use usagi_core::usecase::settings::SettingsPort;
 
 pub use crate::usecase::application::{WorkspaceLoader, WorkspaceSnapshot};
@@ -606,24 +609,6 @@ impl WorkspaceUi {
         }
     }
 
-    /// Poll the live terminal `terminal` once and return its rendered rows, or
-    /// `None` when no attached session matches. The controller runtime picks the
-    /// focused terminal, so this takes the ref explicitly instead of reading the
-    /// legacy view's focus.
-    #[coverage(off)]
-    fn poll_terminal_rows(&mut self, terminal: &TerminalRef) -> Option<Vec<String>> {
-        let port = self
-            .agent
-            .as_mut()
-            .and_then(|agent| agent.port.as_deref_mut())?;
-        let session = self
-            .terminals
-            .iter_mut()
-            .find(|session| session.terminal().fences(terminal))?;
-        session.poll(&mut AgentStreamPort(port));
-        Some(session.display_rows_with_scrollback())
-    }
-
     /// Forward raw passthrough bytes to the live terminal `terminal`. Returns
     /// `false` when no attached session matches.
     #[coverage(off)]
@@ -644,6 +629,74 @@ impl WorkspaceUi {
         };
         session.send_input(&mut AgentStreamPort(port), bytes);
         true
+    }
+
+    /// Poll every attached terminal once and return the refs of those the daemon
+    /// reports as exited. Polling all of them (not just the focused pane) is what
+    /// lets a background tab whose shell ran `exit` be detected and closed.
+    #[coverage(off)]
+    fn poll_all_terminals(&mut self) -> Vec<TerminalRef> {
+        let Some(agent) = self.agent.as_mut() else {
+            return Vec::new();
+        };
+        let Some(port) = agent.port.as_deref_mut() else {
+            return Vec::new();
+        };
+        self.terminals
+            .iter_mut()
+            .filter_map(|session| {
+                session.poll(&mut AgentStreamPort(port));
+                (session.state() == SessionState::Exited).then(|| session.terminal().clone())
+            })
+            .collect()
+    }
+
+    /// Release a terminal's client subscription and drop its coordinator. The
+    /// daemon keeps the process; only this TUI detaches. Safe when no session
+    /// matches (already pruned).
+    #[coverage(off)]
+    fn close_terminal(&mut self, terminal: &TerminalRef) {
+        if let Some(port) = self
+            .agent
+            .as_mut()
+            .and_then(|agent| agent.port.as_deref_mut())
+            && let Some(session) = self
+                .terminals
+                .iter_mut()
+                .find(|session| session.terminal().fences(terminal))
+        {
+            session.detach(&mut AgentStreamPort(port));
+        }
+        self.terminals
+            .retain(|session| !session.terminal().fences(terminal));
+    }
+
+    /// Project the already-polled rows for `terminal`, optionally highlighting an
+    /// in-progress selection. Returns `None` when no attached session matches.
+    #[coverage(off)]
+    fn terminal_rows(
+        &self,
+        terminal: &TerminalRef,
+        selection: Option<&TerminalSelection>,
+    ) -> Option<Vec<String>> {
+        let session = self
+            .terminals
+            .iter()
+            .find(|session| session.terminal().fences(terminal))?;
+        Some(match selection {
+            Some(selection) => session.display_rows_with_scrollback_selection(selection),
+            None => session.display_rows_with_scrollback(),
+        })
+    }
+
+    /// The stable visible cells for `terminal`, snapshotted so a drag selection
+    /// stays fixed while later output arrives. `None` when no session matches.
+    #[coverage(off)]
+    fn terminal_cells(&self, terminal: &TerminalRef) -> Option<Vec<String>> {
+        self.terminals
+            .iter()
+            .find(|session| session.terminal().fences(terminal))
+            .map(TerminalSession::cells)
     }
 }
 
@@ -1197,19 +1250,168 @@ fn sync_runtime_sessions(runtime: &mut WorkspaceRuntime, ui: &WorkspaceUi) {
     }
 }
 
-/// Poll the focused live terminal and project its rows for `with_terminal_view`.
+/// Project the focused live terminal's already-polled rows for
+/// `with_terminal_view`, folding in the shell-owned scroll offset, selection
+/// highlight, and copy feedback tracked by `controls`. Focus changes reset those
+/// controls so nothing leaks between panes.
 #[coverage(off)]
 fn controller_terminal_view(
-    ui: &mut WorkspaceUi,
+    ui: &WorkspaceUi,
     runtime: &WorkspaceRuntime,
+    controls: &mut LiveTerminalControls,
+    viewport_rows: usize,
 ) -> Option<TerminalViewProjection> {
-    let terminal = runtime.focused_terminal()?;
-    let rows = ui.poll_terminal_rows(&terminal)?;
-    Some(TerminalViewProjection {
-        rows,
-        scroll: 0,
-        feedback: None,
-    })
+    let terminal = runtime.focused_terminal();
+    controls.sync_focus(terminal.as_ref());
+    let terminal = terminal?;
+    let rows = ui.terminal_rows(&terminal, controls.selection())?;
+    Some(controls.project(rows, viewport_rows))
+}
+
+/// Run the per-frame terminal sweep: poll every terminal, auto-close any that
+/// exited, then project the focused viewport from the freshly polled rows. Returns
+/// the projection plus its `(rows_len, scroll)` so a later pointer drag maps back
+/// to the exact retained cell.
+#[coverage(off)]
+fn poll_and_project_terminals(
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+    controls: &mut LiveTerminalControls,
+    geometry: Geometry,
+) -> (Option<TerminalViewProjection>, usize, usize) {
+    close_exited_panes(ui, runtime);
+    let terminal_view = controller_terminal_view(ui, runtime, controls, usize::from(geometry.rows));
+    let (rows_len, scroll) = terminal_view
+        .as_ref()
+        .map_or((0, 0), |view| (view.rows.len(), view.scroll));
+    (terminal_view, rows_len, scroll)
+}
+
+/// Poll every attached terminal and auto-close any the daemon reports as exited:
+/// the runtime drops the tab (clearing `has_live_pane` when it was the last) and
+/// the shell detaches the client subscription. This restores the pre-migration
+/// `close_exited_terminal` sweep so an `exit` in a live shell no longer strands a
+/// Live tab.
+#[coverage(off)]
+fn close_exited_panes(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime) {
+    for terminal in ui.poll_all_terminals() {
+        let _ = runtime.exit_pane(shell_target_for_terminal(&terminal), terminal.clone());
+        ui.close_terminal(&terminal);
+    }
+}
+
+/// The pane target a terminal ref belongs to. Mirrors the pane reducer's own
+/// mapping so the shell routes an exit to the same registry entry.
+#[coverage(off)]
+fn shell_target_for_terminal(terminal: &TerminalRef) -> Target {
+    terminal
+        .session_id
+        .map_or(Target::Root(terminal.workspace_id), Target::Session)
+}
+
+/// Close the focused pane tab (Ctrl-O x) and perform the daemon transport work
+/// the runtime reports: detach a live subscription, or drop a still-pending
+/// launch (both its queued work and its completion routing) so it cannot spawn a
+/// detached daemon terminal behind the vanished placeholder.
+#[coverage(off)]
+fn close_focused_terminal_pane(
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+    pending_targets: &mut std::collections::HashMap<OperationId, Target>,
+) {
+    let outcome = runtime.close_focused_pane();
+    if let Some(terminal) = outcome.detach {
+        ui.close_terminal(&terminal);
+    }
+    if let Some(operation) = outcome.cancel {
+        pending_targets.remove(&operation);
+        ui.pane_launches
+            .retain(|launch| pane_launch_operation(launch) != operation);
+    }
+}
+
+/// The operation id a queued pane launch will complete.
+#[coverage(off)]
+fn pane_launch_operation(launch: &PaneLaunch) -> OperationId {
+    match launch {
+        PaneLaunch::Agent { operation, .. } | PaneLaunch::Terminal { operation, .. } => *operation,
+    }
+}
+
+/// Drive a terminal-output pointer gesture: a drag begins or extends a selection
+/// against the visible cells, and a release copies it to the OS clipboard with
+/// safe feedback. `rows_len` / `scroll` describe the frame's projected viewport so
+/// the pointer maps back to the exact retained cell.
+#[coverage(off)]
+#[allow(clippy::too_many_arguments)]
+fn handle_terminal_pointer(
+    ui: &WorkspaceUi,
+    runtime: &WorkspaceRuntime,
+    controls: &mut LiveTerminalControls,
+    term: &mut dyn Terminal,
+    height: usize,
+    width: usize,
+    rows_len: usize,
+    scroll: usize,
+    pointer: PointerEvent,
+) {
+    match pointer.kind {
+        PointerKind::Drag => {
+            let Some(terminal) = runtime.focused_terminal() else {
+                return;
+            };
+            let Some(point) =
+                terminal_point_at(height, width, rows_len, scroll, pointer.column, pointer.row)
+            else {
+                return;
+            };
+            if controls.has_selection() {
+                controls.extend_selection(point);
+            } else if let Some(cells) = ui.terminal_cells(&terminal) {
+                controls.begin_selection(TerminalSelection::begin(cells, point));
+            }
+        }
+        PointerKind::Up => {
+            if let Some(text) = controls.take_copy_text() {
+                let result = term.copy_text(&text);
+                controls.record_copy(&text, result);
+            }
+        }
+    }
+}
+
+/// Intercept the live-terminal view controls the Home reducer does not own —
+/// scroll, tab close, and pointer drag / copy — returning `true` when the key was
+/// consumed here so the shell loop skips reducer dispatch. `rows_len` / `scroll`
+/// describe the frame's projected viewport for pointer mapping.
+#[coverage(off)]
+#[allow(clippy::too_many_arguments)]
+fn intercept_live_terminal_control(
+    key: &Key,
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+    controls: &mut LiveTerminalControls,
+    term: &mut dyn Terminal,
+    pending_targets: &mut std::collections::HashMap<OperationId, Target>,
+    height: usize,
+    width: usize,
+    rows_len: usize,
+    scroll: usize,
+) -> bool {
+    match key {
+        Key::Live(LiveTerminalAction::ScrollUp) => controls.scroll_up(),
+        Key::Live(LiveTerminalAction::ScrollDown) => controls.scroll_down(),
+        Key::Live(LiveTerminalAction::CloseTab) => {
+            close_focused_terminal_pane(ui, runtime, pending_targets);
+        }
+        Key::Pointer(pointer) => {
+            handle_terminal_pointer(
+                ui, runtime, controls, term, height, width, rows_len, scroll, *pointer,
+            );
+        }
+        _ => return false,
+    }
+    true
 }
 
 /// Compose the controller Home frame: `render_home` plus the shell overlays that
@@ -1231,7 +1433,11 @@ fn render_controller_frame(
             .with_pane(runtime.active_pane())
             .with_metrics(metrics)
             .with_git_diffs(git_diffs)
-            .with_terminal_view(terminal_view);
+            .with_terminal_view(terminal_view)
+            .with_overlay_modals(
+                runtime.overview_modal().cloned(),
+                runtime.closeup_modal().cloned(),
+            );
     let frame = render_home(height, width, &projection);
     // The create form exists exactly when its overlay is open, so keying off it
     // avoids an unreachable "create overlay without a form" branch.
@@ -1515,7 +1721,7 @@ fn sidebar_pointer_event(
 /// `drive_workspace_with_agent_port_and_selection_mode`; the composition root
 /// switches to it separately.
 #[coverage(off)]
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn drive_workspace_controller(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
@@ -1545,6 +1751,9 @@ fn drive_workspace_controller(
     // the shell only tracks the double-click window that promotes a Select to an
     // Activate, never the row itself.
     let mut last_click: Option<(u16, u16, std::time::Instant)> = None;
+    // Live-terminal scroll offset, drag selection, and copy feedback the reducer
+    // does not own (design §4.2).
+    let mut controls = LiveTerminalControls::default();
     loop {
         drain_session_completions(&mut ui);
         sync_runtime_sessions(&mut runtime, &ui);
@@ -1557,7 +1766,8 @@ fn drive_workspace_controller(
         let geometry = terminal_geometry(height, width);
         drain_pane_completions_into_runtime(&mut ui, &mut runtime, &mut pending_targets, geometry);
         ui.resize_terminals(geometry);
-        let terminal_view = controller_terminal_view(&mut ui, &runtime);
+        let (terminal_view, terminal_rows_len, terminal_scroll) =
+            poll_and_project_terminals(&mut ui, &mut runtime, &mut controls, geometry);
         let sessions = project_controller_sessions(&ui);
         // Reflux daemon metrics / git diffs through the backend drain instead of
         // polling the port inline: the shell folds the updates into its own
@@ -1588,7 +1798,28 @@ fn drive_workspace_controller(
             && let Some(terminal) = runtime.focused_terminal()
             && let Some(bytes) = key_to_terminal_bytes(key.clone())
         {
-            ui.send_terminal_bytes(&terminal, &bytes);
+            // A launch worker temporarily owns the port; surface the dropped
+            // keystroke instead of swallowing it silently.
+            if !ui.send_terminal_bytes(&terminal, &bytes) {
+                controls.set_feedback("terminal is busy; keystroke dropped");
+            }
+            continue;
+        }
+        // Live-terminal view controls the reducer does not own (scroll, tab close,
+        // pointer drag / copy — design §4.2) are handled before the key reaches
+        // the Home reducer.
+        if intercept_live_terminal_control(
+            &key,
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            term,
+            &mut pending_targets,
+            height,
+            width,
+            terminal_rows_len,
+            terminal_scroll,
+        ) {
             continue;
         }
         // A second click on the same cell within the window activates the row the
@@ -2072,22 +2303,26 @@ mod tests {
         AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Config, ConfigStep,
         DefaultSettingsPort, Exit, Geometry, MetricsPort, MetricsPortFactory, NewStep, NoMetrics,
         NoMetricsFactory, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult,
-        Start, TerminalError, UnavailableBrowserOpener, UnavailablePrSnapshotPort,
-        UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceSnapshot,
-        app_event_from_key, key_to_terminal_bytes, play_startup_splash, render_controller_frame,
-        render_home_snapshot, run as run_from_start, run_with_settings,
+        Start, TerminalAttach, TerminalChunk, TerminalError, UnavailableBrowserOpener,
+        UnavailablePrSnapshotPort, UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader,
+        WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
+        close_exited_panes, controller_terminal_view, handle_terminal_pointer,
+        key_to_terminal_bytes, play_startup_splash, render_controller_frame, render_home_snapshot,
+        run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_controller, step_config, step_new, terminal_geometry, welcome_action,
         write_banner,
     };
+    use crate::presentation::live_terminal::LiveTerminalControls;
     use crate::presentation::views::config::AvailableAgentModels;
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
-    use crate::usecase::application::controller::{AppEvent, AppKey, PointerAction};
+    use crate::usecase::application::controller::{AppEvent, AppKey, PointerAction, Target};
+    use crate::usecase::application::pane::PaneKind;
     use crate::usecase::application::run as dispatch;
     use crate::usecase::application::{EntryScreen, Key, Terminal};
     use crate::usecase::overview::SessionCommand;
-    use crate::usecase::terminal_input::LiveTerminalAction;
+    use crate::usecase::terminal_input::{LiveTerminalAction, PointerEvent, PointerKind};
     use chrono::{DateTime, Duration, Utc};
     use std::collections::VecDeque;
     use std::io::{self, Write};
@@ -2096,7 +2331,7 @@ mod tests {
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::agent::AgentProfileId;
     use usagi_core::domain::id::{
-        DaemonGeneration, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
+        DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
     };
     use usagi_core::domain::note::Scratchpad;
 
@@ -2369,6 +2604,13 @@ mod tests {
         let quit =
             render_controller_frame(20, 80, &quitting, "atlas", root, sessions, None, &git, None);
         assert!(quit.join("\n").contains("Detach from this workspace?"));
+
+        // The runtime's persisted Overview palette renders through this path.
+        let mut palette = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = palette.handle_key(Key::Char(':'));
+        let overview =
+            render_controller_frame(20, 80, &palette, "atlas", root, sessions, None, &git, None);
+        assert!(overview.join("\n").contains("Overview"));
     }
 
     #[test]
@@ -2467,12 +2709,255 @@ mod tests {
         );
     }
 
+    /// A streaming agent port whose PTY attaches live from `replay`, then reports
+    /// exit on the next poll when `exit_on_poll` is set. It records each detach so
+    /// the auto-close path can be asserted end to end.
+    struct ScriptedAgentPort {
+        terminal: TerminalRef,
+        subscription: u64,
+        replay: Vec<u8>,
+        exit_on_poll: bool,
+        detaches: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl AgentCommandPort for ScriptedAgentPort {
+        fn launch(
+            &mut self,
+            _workspace: WorkspaceId,
+            _session: SessionId,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<TerminalRef, String> {
+            Ok(self.terminal.clone())
+        }
+
+        fn attach_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            _geometry: Geometry,
+        ) -> Result<TerminalAttach, TerminalError> {
+            Ok(TerminalAttach {
+                subscription: self.subscription,
+                output_offset: self.replay.len() as u64,
+                replay: self.replay.clone(),
+                exited: false,
+            })
+        }
+
+        fn poll_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            _after_offset: u64,
+        ) -> Result<Vec<TerminalChunk>, TerminalError> {
+            if self.exit_on_poll {
+                Err(TerminalError::Exited)
+            } else {
+                Ok(Vec::new())
+            }
+        }
+
+        fn input_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            _subscription: u64,
+            _input_seq: u64,
+            _bytes: &[u8],
+        ) -> Result<(), TerminalError> {
+            Ok(())
+        }
+
+        fn detach_terminal(&mut self, _terminal: &TerminalRef, subscription: u64) {
+            self.detaches.lock().unwrap().push(subscription);
+        }
+    }
+
+    fn live_terminal_ref(workspace: WorkspaceId, session: SessionId) -> TerminalRef {
+        TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: Some(session),
+            worktree_id: WorktreeId::new(),
+        }
+    }
+
+    /// Build a `WorkspaceUi` + `WorkspaceRuntime` with `port` as the daemon
+    /// transport, driven into Closeup with a focused live tab attached to
+    /// `terminal`. Mirrors the shell's launch → complete → focus → attach path.
+    fn focused_live_pane(
+        workspace: WorkspaceId,
+        session: SessionId,
+        terminal: TerminalRef,
+        port: Box<dyn AgentCommandPort>,
+    ) -> (WorkspaceUi, WorkspaceRuntime) {
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(workspace, vec![session], port);
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        // Down selects the session row; Enter activates it into Closeup.
+        let _ = runtime.handle_key(Key::Down);
+        let _ = runtime.handle_key(Key::Enter);
+        let operation = OperationId::new();
+        let _ = runtime.request_pane(Target::Session(session), operation, PaneKind::Agent);
+        let _ = runtime.complete_pane(Target::Session(session), operation, terminal.clone());
+        let _ = runtime.focus_terminal(Target::Session(session), terminal.clone());
+        ui.start_terminal_session(terminal, terminal_geometry(20, 80));
+        (ui, runtime)
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn an_exited_terminal_auto_closes_its_pane_and_detaches_through_the_runtime() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let detaches = Arc::new(Mutex::new(Vec::new()));
+        let (mut ui, mut runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(ScriptedAgentPort {
+                terminal: terminal.clone(),
+                subscription: 5,
+                replay: b"live!".to_vec(),
+                exit_on_poll: true,
+                detaches: Arc::clone(&detaches),
+            }),
+        );
+        assert!(runtime.state().has_live_pane());
+
+        // The per-frame poll sweep observes the exit, drops the tab, and detaches
+        // the client subscription — the #1011 behavior lost in the migration.
+        close_exited_panes(&mut ui, &mut runtime);
+
+        assert!(runtime.active_pane().tabs().is_empty());
+        assert!(!runtime.state().has_live_pane());
+        assert_eq!(*detaches.lock().unwrap(), vec![5]);
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn a_live_terminal_drag_selects_and_release_copies_to_the_clipboard() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let (ui, runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(ScriptedAgentPort {
+                terminal: terminal.clone(),
+                subscription: 9,
+                replay: b"hello".to_vec(),
+                exit_on_poll: false,
+                detaches: Arc::new(Mutex::new(Vec::new())),
+            }),
+        );
+        let rows_len = ui
+            .terminal_rows(&terminal, None)
+            .expect("attached live rows")
+            .len();
+        let mut term = FakeTerminal::default();
+        let mut controls = LiveTerminalControls::default();
+        controls.sync_focus(Some(&terminal));
+
+        // The right pane starts at column 37 (36-wide sidebar + divider) and its
+        // content begins at frame row 5. Drag across "hello" and release.
+        let drag = |column| PointerEvent {
+            kind: PointerKind::Drag,
+            column,
+            row: 5,
+        };
+        handle_terminal_pointer(
+            &ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            20,
+            80,
+            rows_len,
+            0,
+            drag(37),
+        );
+        assert!(controls.has_selection());
+        handle_terminal_pointer(
+            &ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            20,
+            80,
+            rows_len,
+            0,
+            drag(41),
+        );
+        handle_terminal_pointer(
+            &ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            20,
+            80,
+            rows_len,
+            0,
+            PointerEvent {
+                kind: PointerKind::Up,
+                column: 41,
+                row: 5,
+            },
+        );
+
+        assert_eq!(term.copied, vec!["hello".to_owned()]);
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn scrolling_a_live_terminal_offsets_its_projected_viewport() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        // Enough output to overflow the viewport so scrolling has headroom.
+        let replay: Vec<u8> = (0..40)
+            .flat_map(|line| format!("line {line}\r\n").into_bytes())
+            .collect();
+        let (ui, runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(ScriptedAgentPort {
+                terminal: terminal.clone(),
+                subscription: 3,
+                replay,
+                exit_on_poll: false,
+                detaches: Arc::new(Mutex::new(Vec::new())),
+            }),
+        );
+        let mut controls = LiveTerminalControls::default();
+        let viewport_rows = usize::from(terminal_geometry(20, 80).rows);
+
+        // The first projection anchors at the live bottom (scroll 0).
+        assert_eq!(
+            controller_terminal_view(&ui, &runtime, &mut controls, viewport_rows)
+                .expect("live view")
+                .scroll,
+            0
+        );
+        controls.scroll_up();
+        controls.scroll_up();
+        assert_eq!(
+            controller_terminal_view(&ui, &runtime, &mut controls, viewport_rows)
+                .expect("live view")
+                .scroll,
+            2
+        );
+    }
+
     /// テスト用 Terminal。キー列を順に返し、描いたフレームを記録する。
     #[derive(Default)]
     struct FakeTerminal {
         keys: VecDeque<Key>,
         frames: Vec<Vec<String>>,
         waits: Vec<std::time::Duration>,
+        copied: Vec<String>,
         fail_size: bool,
         fail_draw: bool,
     }
@@ -2511,6 +2996,11 @@ mod tests {
             self.keys
                 .pop_front()
                 .ok_or_else(|| io::Error::other("no more keys"))
+        }
+
+        fn copy_text(&mut self, text: &str) -> Result<(), String> {
+            self.copied.push(text.to_owned());
+            Ok(())
         }
     }
 

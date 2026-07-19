@@ -1152,8 +1152,13 @@ pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
 pub enum AppEvent {
     /// live terminal input。現行 Home reducer は接続 seam を提供し、pane routing は runtime 合成側が担う。
     Input(LiveInput),
-    /// A runtime pane became available or left the projection. A transition
-    /// from live to non-live arms the one-shot Ctrl-C grace reducer.
+    /// The runtime's current live-pane availability, sampled on every event.
+    /// The reducer treats it as a *level* and reacts only on the edge: a
+    /// live→non-live transition arms the one-shot Ctrl-C grace and restores the
+    /// forced Closeup action modal, while a non-live→live transition drops it. A
+    /// re-sampled level that has not changed is inert, so an overlay opened in
+    /// the same event batch (quit confirmation, PR / Preview, notes) and the
+    /// Ctrl-C grace both survive the next sample.
     LivePaneAvailability(bool),
     /// キー入力。
     Key(AppKey),
@@ -2037,6 +2042,13 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         AppEvent::Backend(event) if update_editor_backend(state, &event) => Vec::new(),
         AppEvent::Key(key) => update_key(state, key),
         AppEvent::LivePaneAvailability(has_live_pane) => {
+            // The runtime samples this level on every event; only an actual edge
+            // may move the grace one-shot or the Closeup overlay. A repeated
+            // level is inert so an overlay opened in the same batch (quit
+            // confirmation, PR / Preview, notes) and the Ctrl-C grace persist.
+            if has_live_pane == state.has_live_pane {
+                return Vec::new();
+            }
             state.ctrl_c_grace = state.has_live_pane && !has_live_pane;
             state.has_live_pane = has_live_pane;
             if matches!(state.route, Route::Home(HomeMode::Closeup)) {
@@ -3614,6 +3626,32 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         assert!(!state.ctrl_c_grace());
         assert!(update(&mut state, AppEvent::Key(AppKey::CtrlC)).is_empty());
+    }
+
+    #[test]
+    fn live_pane_availability_reacts_on_the_edge_not_the_level() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+        assert!(state.has_live_pane());
+        assert_eq!(state.overlay(), None);
+
+        // A quit confirmation over the live pane survives a re-sampled, unchanged
+        // live level (the runtime resamples on every event).
+        let _ = update(&mut state, AppEvent::Key(AppKey::CtrlC));
+        assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+        assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
+
+        // Leaving the pane arms the grace once; a repeated non-live level keeps it.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('n')));
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(false));
+        assert!(state.ctrl_c_grace());
+        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(false));
+        assert!(state.ctrl_c_grace());
     }
 
     #[test]

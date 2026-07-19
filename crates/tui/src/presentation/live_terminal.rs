@@ -1,0 +1,279 @@
+//! Shell-owned live-terminal view controls.
+//!
+//! The controller reducer owns Home rows, overlays, and markers, but deliberately
+//! *not* the live-terminal viewport's scrollback offset, in-progress selection, or
+//! copy feedback: the migration design (`258-controller-runtime-migration.md`
+//! §4.2) keeps terminal scroll / drag / copy a shell + [`TerminalSession`] concern
+//! so they never round-trip through Home state. `LiveTerminalControls` holds that
+//! per-frame state for the currently focused terminal.
+//!
+//! It is pure: the shell polls the [`TerminalSession`] for rows and cells and
+//! drives the OS clipboard; this type only tracks scroll, an in-progress
+//! [`TerminalSelection`], and the presentation-safe feedback line, and folds them
+//! into the [`TerminalViewProjection`] the right pane renders.
+//!
+//! [`TerminalSession`]: crate::usecase::application::terminal_session::TerminalSession
+
+use usagi_core::domain::id::TerminalRef;
+
+use crate::presentation::views::workspace::TerminalViewProjection;
+use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
+
+/// Scroll, selection, and feedback for the focused live terminal, owned by the
+/// runtime shell rather than the controller reducer.
+#[derive(Debug, Default)]
+pub struct LiveTerminalControls {
+    /// The terminal these controls currently track. Changing focus resets them
+    /// so scroll and selection never leak between panes.
+    focused: Option<TerminalRef>,
+    /// Rows scrolled up from the live bottom.
+    scroll: usize,
+    /// The furthest the current viewport can scroll, recomputed each frame from
+    /// the retained rows so `scroll_up` cannot run past the top.
+    max_scroll: usize,
+    /// The in-progress drag selection, snapshotted at its anchor.
+    selection: Option<TerminalSelection>,
+    /// The presentation-safe feedback line shown in the right-pane footer.
+    feedback: Option<String>,
+}
+
+impl LiveTerminalControls {
+    /// Track `terminal` as the focused pane, resetting scroll, selection, and
+    /// feedback whenever the focused identity changes (including to `None`). The
+    /// shell calls this once per frame before projecting the viewport.
+    pub fn sync_focus(&mut self, terminal: Option<&TerminalRef>) {
+        if self.focused.as_ref() == terminal {
+            return;
+        }
+        self.focused = terminal.cloned();
+        self.scroll = 0;
+        self.max_scroll = 0;
+        self.selection = None;
+        self.feedback = None;
+    }
+
+    /// Scroll one line toward older output, clamped to the last projected extent.
+    pub fn scroll_up(&mut self) {
+        self.scroll = self.scroll.saturating_add(1).min(self.max_scroll);
+    }
+
+    /// Scroll one line back toward the live bottom.
+    pub fn scroll_down(&mut self) {
+        self.scroll = self.scroll.saturating_sub(1);
+    }
+
+    /// Begin a drag selection, replacing any earlier one, and surface that a
+    /// selection has started.
+    pub fn begin_selection(&mut self, selection: TerminalSelection) {
+        self.selection = Some(selection);
+        self.feedback = Some("terminal selection started".to_owned());
+    }
+
+    /// Extend the in-progress selection to `focus`; a no-op without a selection.
+    pub fn extend_selection(&mut self, focus: TerminalPoint) {
+        if let Some(selection) = &mut self.selection {
+            selection.extend(focus);
+        }
+    }
+
+    /// Whether a drag selection is in progress.
+    #[must_use]
+    pub const fn has_selection(&self) -> bool {
+        self.selection.is_some()
+    }
+
+    /// The in-progress selection, so the shell renders the highlighted rows.
+    #[must_use]
+    pub const fn selection(&self) -> Option<&TerminalSelection> {
+        self.selection.as_ref()
+    }
+
+    /// Finish the selection and return the text to copy, or `None` (with safe
+    /// feedback) when nothing is selected — a stale release must never clear the
+    /// user's clipboard.
+    pub fn take_copy_text(&mut self) -> Option<String> {
+        let selection = self.selection.take()?;
+        let text = selection.text();
+        if text.is_empty() {
+            self.feedback = Some("no terminal text is selected".to_owned());
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    /// Record the outcome of writing `text` to the OS clipboard as feedback.
+    pub fn record_copy(&mut self, text: &str, result: Result<(), String>) {
+        self.feedback = Some(match result {
+            Ok(()) => {
+                let lines = text.lines().count().max(1);
+                let suffix = if lines == 1 { "" } else { "s" };
+                format!("copied {lines} line{suffix}")
+            }
+            Err(message) => message,
+        });
+    }
+
+    /// Replace the feedback line with a presentation-safe message.
+    pub fn set_feedback(&mut self, message: impl Into<String>) {
+        self.feedback = Some(message.into());
+    }
+
+    /// Project `rows` into the right-pane viewport at the current scroll offset,
+    /// recomputing the scroll extent from the row count and `viewport_rows` so a
+    /// shrunk history re-clamps the offset.
+    pub fn project(&mut self, rows: Vec<String>, viewport_rows: usize) -> TerminalViewProjection {
+        self.max_scroll = rows.len().saturating_sub(viewport_rows);
+        self.scroll = self.scroll.min(self.max_scroll);
+        TerminalViewProjection {
+            rows,
+            scroll: self.scroll,
+            feedback: self.feedback.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LiveTerminalControls;
+    use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
+    use usagi_core::domain::id::{
+        DaemonGeneration, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
+    };
+
+    fn terminal() -> TerminalRef {
+        TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+        }
+    }
+
+    fn rows(count: usize) -> Vec<String> {
+        (0..count).map(|index| format!("row {index}")).collect()
+    }
+
+    #[test]
+    fn scroll_is_clamped_to_the_projected_extent() {
+        let mut controls = LiveTerminalControls::default();
+        // Ten rows into a five-row viewport can scroll five lines up.
+        let _ = controls.project(rows(10), 5);
+        for _ in 0..8 {
+            controls.scroll_up();
+        }
+        assert_eq!(controls.project(rows(10), 5).scroll, 5);
+        controls.scroll_down();
+        assert_eq!(controls.project(rows(10), 5).scroll, 4);
+    }
+
+    #[test]
+    fn a_shrunk_history_re_clamps_the_stored_offset() {
+        let mut controls = LiveTerminalControls::default();
+        let _ = controls.project(rows(20), 5);
+        for _ in 0..10 {
+            controls.scroll_up();
+        }
+        assert_eq!(controls.project(rows(20), 5).scroll, 10);
+        // The history collapsed to fit the viewport; the offset clamps to zero.
+        assert_eq!(controls.project(rows(4), 5).scroll, 0);
+    }
+
+    #[test]
+    fn changing_focus_resets_scroll_selection_and_feedback() {
+        let mut controls = LiveTerminalControls::default();
+        let first = terminal();
+        controls.sync_focus(Some(&first));
+        let _ = controls.project(rows(10), 3);
+        controls.scroll_up();
+        controls.begin_selection(TerminalSelection::begin(
+            vec!["hi".to_owned()],
+            TerminalPoint { row: 0, column: 0 },
+        ));
+        assert!(controls.has_selection());
+
+        // Re-syncing the same terminal keeps the state.
+        controls.sync_focus(Some(&first));
+        assert!(controls.has_selection());
+
+        // Focusing a different terminal (or none) clears everything.
+        controls.sync_focus(Some(&terminal()));
+        assert!(!controls.has_selection());
+        assert_eq!(controls.project(rows(10), 3).scroll, 0);
+        assert_eq!(controls.project(rows(10), 3).feedback, None);
+        controls.sync_focus(None);
+        assert!(!controls.has_selection());
+    }
+
+    #[test]
+    fn begin_and_extend_build_the_copy_text() {
+        let mut controls = LiveTerminalControls::default();
+        controls.begin_selection(TerminalSelection::begin(
+            vec!["hello".to_owned(), "world".to_owned()],
+            TerminalPoint { row: 0, column: 0 },
+        ));
+        assert_eq!(
+            controls.project(rows(1), 1).feedback.as_deref(),
+            Some("terminal selection started")
+        );
+        controls.extend_selection(TerminalPoint { row: 1, column: 4 });
+        // Extending without dropping the selection keeps it live for the shell to
+        // render the highlighted rows.
+        assert!(controls.selection().is_some());
+        let text = controls.take_copy_text().expect("non-empty selection");
+        assert_eq!(text, "hello\nworld");
+        assert!(!controls.has_selection());
+    }
+
+    #[test]
+    fn extend_without_a_selection_is_inert() {
+        let mut controls = LiveTerminalControls::default();
+        controls.extend_selection(TerminalPoint { row: 0, column: 0 });
+        assert!(controls.take_copy_text().is_none());
+    }
+
+    #[test]
+    fn an_empty_selection_reports_feedback_without_clearing_the_clipboard() {
+        let mut controls = LiveTerminalControls::default();
+        controls.begin_selection(TerminalSelection::begin(
+            vec!["text".to_owned()],
+            TerminalPoint { row: 0, column: 9 },
+        ));
+        assert!(controls.take_copy_text().is_none());
+        assert_eq!(
+            controls.project(rows(1), 1).feedback.as_deref(),
+            Some("no terminal text is selected")
+        );
+    }
+
+    #[test]
+    fn record_copy_reports_line_counts_and_clipboard_errors() {
+        let mut controls = LiveTerminalControls::default();
+        controls.record_copy("only", Ok(()));
+        assert_eq!(
+            controls.project(rows(1), 1).feedback.as_deref(),
+            Some("copied 1 line")
+        );
+        controls.record_copy("a\nb\nc", Ok(()));
+        assert_eq!(
+            controls.project(rows(1), 1).feedback.as_deref(),
+            Some("copied 3 lines")
+        );
+        controls.record_copy("x", Err("clipboard is unavailable".to_owned()));
+        assert_eq!(
+            controls.project(rows(1), 1).feedback.as_deref(),
+            Some("clipboard is unavailable")
+        );
+    }
+
+    #[test]
+    fn set_feedback_surfaces_a_safe_message() {
+        let mut controls = LiveTerminalControls::default();
+        controls.set_feedback("terminal is busy");
+        assert_eq!(
+            controls.project(rows(1), 1).feedback.as_deref(),
+            Some("terminal is busy")
+        );
+    }
+}
