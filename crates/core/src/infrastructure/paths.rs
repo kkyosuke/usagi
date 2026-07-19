@@ -80,8 +80,11 @@ pub fn data_dir() -> Result<PathBuf> {
 /// cannot drift.
 #[must_use]
 pub fn channel_data_dir(base: impl AsRef<Path>) -> PathBuf {
-    let base = base.as_ref();
-    match build_channel() {
+    channel_data_dir_for(base.as_ref(), build_channel())
+}
+
+fn channel_data_dir_for(base: &Path, channel: BuildChannel) -> PathBuf {
+    match channel {
         BuildChannel::Production => base.to_path_buf(),
         BuildChannel::Development => base.join(DEV_DIR),
     }
@@ -132,6 +135,19 @@ mod tests {
             BuildChannel::Development => PathBuf::from("/project/.usagi/dev"),
         };
         assert_eq!(project_data_dir("/project"), expected);
+    }
+
+    #[test]
+    fn channel_data_dir_for_separates_both_build_channels() {
+        let base = Path::new("/data");
+        assert_eq!(
+            channel_data_dir_for(base, BuildChannel::Production),
+            PathBuf::from("/data")
+        );
+        assert_eq!(
+            channel_data_dir_for(base, BuildChannel::Development),
+            PathBuf::from("/data/dev")
+        );
     }
 
     #[test]
