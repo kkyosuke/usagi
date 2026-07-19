@@ -30,7 +30,7 @@ use usagi_core::infrastructure::store::dispatch::DispatchStore;
 use usagi_core::infrastructure::store::pr_inventory::PrInventoryStore;
 use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
 use usagi_daemon::infrastructure::pty::PtyTerminal;
-use usagi_daemon::infrastructure::unix_transport::SecureUnixListener;
+use usagi_daemon::infrastructure::unix_transport::{SecureUnixListener, ensure_private_dir};
 use usagi_daemon::presentation::DaemonEnv;
 use usagi_daemon::usecase::agent_ipc::{
     AgentRuntime, AgentTerminalActor, ResolvedAgentScope, ScopeResolveError, SessionScopeResolver,
@@ -1599,6 +1599,12 @@ fn run_inner<W: Write>(out: &mut W, command: Option<&str>, info: &AppInfo) -> st
         }
         _ => {}
     }
+    // The lifecycle lock is acquired before the listener binds. Prepare the
+    // endpoint directory with the same private-mode invariant that the
+    // listener enforces, so a first launch cannot leave it at create_dir_all's
+    // process-dependent default mode.
+    std::fs::create_dir_all(&data_dir)?;
+    ensure_private_dir(&daemon_dir)?;
     let store = DaemonRecordStore::new(FsRecordFile {
         path: daemon_dir.join("daemon.json"),
     });

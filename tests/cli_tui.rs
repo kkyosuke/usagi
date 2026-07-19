@@ -103,6 +103,27 @@ fn daemon_status_reports_not_running_with_a_fresh_data_dir() {
 }
 
 #[test]
+fn daemon_restart_initializes_a_private_endpoint_from_an_empty_data_dir() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let output = Command::new(env!("CARGO_BIN_EXE_usagi"))
+        .args([OsStr::new("daemon"), OsStr::new("restart")])
+        .env("USAGI_HOME", home.path())
+        .output()
+        .expect("usagi daemon restart を起動できる");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout(&output).contains("daemon restarted"));
+    assert_daemon_running(home.path());
+    stop_daemon(home.path());
+}
+
+#[test]
 fn cli_daemon_request_autostarts_without_manual_daemon_start() {
     let _guard = DAEMON_LIFECYCLE_LOCK
         .lock()
