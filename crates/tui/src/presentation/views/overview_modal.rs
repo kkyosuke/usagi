@@ -22,7 +22,7 @@ const MAX_MATCHES: usize = 8;
 const BODY_HEIGHT: usize = 16;
 
 /// コマンドパレットの状態。入力欄と、その前方一致で選ばれた候補上のカーソルを持つ。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OverviewModal {
     selection_mode: ModalSelectionMode,
     input: TextInput,
@@ -449,8 +449,12 @@ mod tests {
         assert_eq!(modal.cursor(), 0);
         assert_eq!(modal.selected(), 0);
         assert_eq!(modal.matches().len(), 4);
-        // derive された Clone / Debug も触れる。
+        // derive された Clone / Debug / Eq も触れる。
         assert!(format!("{:?}", modal.clone()).contains("OverviewModal"));
+        assert_eq!(modal.clone(), modal);
+        let mut other = modal.clone();
+        other.insert_char('x');
+        assert_ne!(other, modal);
         // registry metadata の derive も。
         let hint = modal.matches()[0];
         assert_eq!(hint, hint);

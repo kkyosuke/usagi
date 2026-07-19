@@ -18,7 +18,7 @@ const INNER_WIDTH: usize = 50;
 const BODY_HEIGHT: usize = 9;
 
 /// アクションメニューの状態。対象セッション名と、アクション一覧上のカーソルを持つ。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloseupModal {
     session: String,
     selected: usize,
@@ -55,6 +55,15 @@ impl CloseupModal {
     #[must_use]
     pub fn session(&self) -> &str {
         &self.session
+    }
+
+    /// Retitle the modal for the active target without disturbing its input
+    /// state. The runtime persists one modal across frames but does not track the
+    /// session label, so the renderer stamps the current label here.
+    #[must_use]
+    pub fn with_session(mut self, session: impl Into<String>) -> Self {
+        self.session = session.into();
+        self
     }
 
     /// 選択中アクションの添字。
@@ -427,6 +436,19 @@ mod tests {
         assert_eq!(modal.selected(), 0);
         modal.select_next();
         assert_eq!(modal.selected_action().name, "close");
+    }
+
+    #[test]
+    fn with_session_retitles_without_touching_input_state() {
+        let mut modal = CloseupModal::new("old");
+        modal.select_next(); // move off the default action
+        let selected = modal.selected();
+        let modal = modal.with_session("renamed");
+        assert_eq!(modal.session(), "renamed");
+        assert_eq!(modal.selected(), selected);
+        // Exercise the derived structural equality used by the render projection.
+        assert_eq!(modal.clone(), modal);
+        assert_ne!(modal, CloseupModal::new("renamed"));
     }
 
     #[test]

@@ -884,16 +884,14 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
     }
 }
 
-/// Start a create without blocking the terminal event loop. The sidebar gains a
-/// v1-style skeleton immediately; the worker returns the port with its result
-/// so later commands still share the same daemon client state.
+/// Run one daemon-owned session command without blocking the terminal event
+/// loop. A create gains a v1-style skeleton immediately; the worker returns the
+/// port with its result so later commands still share the same daemon client
+/// state, and its authoritative snapshot reconciles the sidebar.
 #[coverage(off)]
-fn begin_session_create(ui: &mut WorkspaceUi, command: SessionCommand) {
-    let SessionCommand::Create { name } = command else {
-        return;
-    };
-    // A create owns the port until its worker returns it; a second request while
-    // one is in flight is a no-op here (the controller create overlay owns the
+fn begin_session_command(ui: &mut WorkspaceUi, command: SessionCommand) {
+    // A command owns the port until its worker returns it; a second request
+    // while one is in flight is a no-op here (the controller overlay owns the
     // user-facing "already running" feedback).
     let Some(mut port) = ui.session_commands.take() else {
         return;
@@ -901,9 +899,21 @@ fn begin_session_create(ui: &mut WorkspaceUi, command: SessionCommand) {
     let workspace = ui.workspace.record().clone();
     let sender = ui.session_completion_sender.clone();
     std::thread::spawn(move || {
-        let result = port.execute(&workspace, None, SessionCommand::Create { name });
+        let result = port.execute(&workspace, None, command);
         let _ = sender.send(SessionCommandCompletion { port, result });
     });
+}
+
+/// The daemon-owned name for the session identified by `session`, if the current
+/// sidebar projection still holds it. A `RemoveSession` effect carries the stable
+/// identity, while the session command port speaks the daemon-facing name.
+#[coverage(off)]
+fn session_name_for(ui: &WorkspaceUi, session: SessionId) -> Option<String> {
+    ui.workspace
+        .session_ids()
+        .iter()
+        .zip(ui.workspace.sessions())
+        .find_map(|(id, record)| (*id == session).then(|| record.name.clone()))
 }
 
 /// Reconcile sidebar rows and the IDs used by Agent/terminal requests as one
@@ -1244,12 +1254,23 @@ fn dispatch_controller_effect(
 ) -> ControllerFlow {
     match effect {
         Effect::CreateSession { intent, .. } => {
-            begin_session_create(
+            begin_session_command(
                 ui,
                 SessionCommand::Create {
                     name: intent.name.clone(),
                 },
             );
+        }
+        Effect::RemoveSession { session, force, .. } => {
+            if let Some(name) = session_name_for(ui, *session) {
+                begin_session_command(
+                    ui,
+                    SessionCommand::Remove {
+                        name,
+                        force: *force,
+                    },
+                );
+            }
         }
         Effect::LaunchAgent {
             workspace,
@@ -1283,13 +1304,14 @@ fn dispatch_controller_effect(
         Effect::Detach => return ControllerFlow::Exit,
         // RefreshSessions is reconciled every frame; SelectTab is mirrored by
         // `on_effect`; the PR/preview overlay effects are refluxed by
-        // `controller_overlay_events` before this executor runs; notes/
-        // environment/workspace-command/remove and the entry effects are not
-        // reachable from the controller Home input yet.
+        // `controller_overlay_events` before this executor runs. Notes /
+        // environment persistence needs a daemon store port this loop does not
+        // yet inject, and the non-session workspace commands and entry-surface
+        // effects have no Home executor, so they surface only as the reducer's
+        // safe notice for now.
         Effect::OpenTerminal { .. }
         | Effect::RefreshSessions { .. }
         | Effect::SelectTab { .. }
-        | Effect::RemoveSession { .. }
         | Effect::WorkspaceCommand { .. }
         | Effect::LoadNotes { .. }
         | Effect::SaveNotes { .. }
@@ -1567,10 +1589,6 @@ fn drive_workspace_controller(
             && let Some(bytes) = key_to_terminal_bytes(key.clone())
         {
             ui.send_terminal_bytes(&terminal, &bytes);
-            continue;
-        }
-        // Overview command palette (`:`) is not yet ported to the controller loop.
-        if key == Key::Char(':') {
             continue;
         }
         // A second click on the same cell within the window activates the row the
