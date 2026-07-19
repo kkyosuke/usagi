@@ -62,7 +62,7 @@ workspace の root へ戻す。これにより、削除済み session を target
 
 Home の mode は Switch と Closeup である。Switch 中の右ペインは tab strip、content、footer を含めて dim
 表示し、左 sidebar が操作対象であることを示す。Closeup では右ペインを active な明度へ戻す。Overview、Closeup action、PR、preview、text、notes、
-environment、pending user decision は Home の背景を残す overlay として開き、最前面の overlay が入力を受け取る。diff は
+environment、pending user decision、session 作成失敗 dialog は Home の背景を残す overlay として開き、最前面の overlay が入力を受け取る。diff は
 Closeup pane の tab として開く。
 
 Pending user decision は workspace ID で fence した daemon snapshot からだけ投影する。overlay は pending
@@ -141,13 +141,21 @@ inline 入力欄へ置き換わる。名前を入力して Enter を押すと通
 request を非同期に開始し、完了まで行の直前に session と同じ 2 行の skeleton を表示する。skeleton の activity glyph と session 名は同じ
 左から右へ流れる低速の wave で描き、静的な点滅にはしない。daemon が同一 `OperationId` と revision を持つ `session.created`
 完了 hook を返したときだけ、skeleton をその response 内の snapshot row に置き換えて loading を終了する。IME に依存しない `Ctrl-A` も
-同じ inline 入力を開く。`Ctrl-A` は選択カーソルも `+ new session` 行へ移動する。Esc は入力を取り消す。作成は名前だけを受け取り、profile / model は指定せず daemon の workspace default policy に委ねる（中央 modal ではなく行内の name-only 入力である）。入力中は英数字・`-`・`_` 以外、64 文字超過、または表示中 session と重複する名前を行の下に error として表示し、空の名前は Enter 時に error を表示する。これらは local validation で daemon へ送る前に弾き、入力（draft）は失わないので、error を直して再送できる。local validation の error（入力に付随）と、daemon 側が作成を拒否したときの安全な notice は別物として扱い、daemon の拒否理由は表示に安全な message だけを notice に出して raw / internal detail は画面に出さない。
+同じ inline 入力を開く。`Ctrl-A` は選択カーソルも `+ new session` 行へ移動する。Esc は入力を取り消す。作成は名前だけを受け取り、profile / model は指定せず daemon の workspace default policy に委ねる（中央 modal ではなく行内の name-only 入力である）。入力中は英数字・`-`・`_` 以外、64 文字超過、または表示中 session と重複する名前を行の下に error として表示し、空の名前は Enter 時に error を表示する。これらは local validation で daemon へ送る前に弾き、入力（draft）は失わないので、error を直して再送できる。local validation の error（入力に付随）と、daemon が受付後に作成を拒否したときの表示は別物として扱う。前者は入力欄の直下に出し、後者は下記の作成失敗 dialog で安全な message だけを提示する。
 作成 request の受付後、完了まで入力がなければ、作成された session を選択して Closeup へ移る。完了前に入力があればこの自動遷移を取り消し、
 作成完了後もその時点の操作 surface を保つ。
 完了 snapshot は sidebar row と daemon-issued session ID を同時に置換するため、`a` のような短い名前も
 表示名ではなく stable ID で後続の Agent / terminal request を送る。snapshot の schema が不正な場合は raw
 IPC body を画面やログへ出さず、安全な error を画面に表示して `<data dir>/logs/error-YYYY-MM-DD.log` に schema
 error を記録する。
+
+daemon が受け付けた作成 request がその後に失敗したときは、Home 背景を残す confirmation/dialog style の
+error modal で安全なメッセージを提示する。表示するのは 1 行に縮めた safe message だけで、raw protocol /
+internal / secret detail は画面に出さない。この dialog は skeleton・pending row を片付けたうえで開くため、
+`Enter` / `Esc` / `Ctrl+C` で閉じると Home（Switch）へ戻り、作成入力や中途半端な作成状態を残さない。作成
+フォームなど別の overlay が前面にある間に失敗が届いた場合は、その overlay を壊さず従来どおり notice へ退避する。
+これは入力段階の inline validation（未受付の名前を行の下に error 表示する挙動）とは別で、dialog は受付後の
+daemon 失敗だけを扱う。
 
 GIF はこの projection に含めない。diff の詳細表示や実行 shortcut は実行可能な daemon command が無いため追加せず、sidebar は read-only の Git summary だけを表示する。既存の Closeup / overlay の入力所有者と操作だけを維持する。
 
