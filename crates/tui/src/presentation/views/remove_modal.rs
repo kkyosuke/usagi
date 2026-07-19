@@ -26,7 +26,6 @@ pub struct RemoveModal {
 
 impl RemoveModal {
     #[must_use]
-    #[coverage(off)]
     pub fn new(entries: Vec<SessionRecord>, force: bool) -> Self {
         Self {
             entries,
@@ -38,25 +37,21 @@ impl RemoveModal {
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn entries(&self) -> &[SessionRecord] {
         &self.entries
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn force(&self) -> bool {
         self.force
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn selected_entries(&self) -> Vec<SessionRecord> {
         self.entries
             .iter()
@@ -65,21 +60,18 @@ impl RemoveModal {
             .collect()
     }
 
-    #[coverage(off)]
     pub fn move_up(&mut self) {
         if !self.entries.is_empty() {
             self.cursor = self.cursor.checked_sub(1).unwrap_or(self.entries.len() - 1);
         }
     }
 
-    #[coverage(off)]
     pub fn move_down(&mut self) {
         if !self.entries.is_empty() {
             self.cursor = (self.cursor + 1) % self.entries.len();
         }
     }
 
-    #[coverage(off)]
     pub fn toggle(&mut self) {
         let Some(entry) = self.entries.get(self.cursor) else {
             return;
@@ -90,12 +82,10 @@ impl RemoveModal {
         self.feedback = None;
     }
 
-    #[coverage(off)]
     pub fn set_feedback(&mut self, message: impl Into<String>) {
         self.feedback = Some(message.into());
     }
 
-    #[coverage(off)]
     pub fn remove_entry(&mut self, entry: &SessionRecord) {
         self.entries
             .retain(|candidate| !same_incarnation(candidate, entry));
@@ -105,7 +95,6 @@ impl RemoveModal {
 
     /// Drop checked entries that no longer denote the same record in a fresh
     /// daemon snapshot. The selector never rebinds a checked entry by name.
-    #[coverage(off)]
     pub fn reconcile(&mut self, current: &[SessionRecord]) {
         self.entries.retain(|entry| {
             current
@@ -122,12 +111,10 @@ impl RemoveModal {
 /// fence prevents a refresh from retargeting a checked row to a same-named new
 /// record until #258 supplies that durable identity end-to-end.
 #[must_use]
-#[coverage(off)]
 pub fn same_incarnation(left: &SessionRecord, right: &SessionRecord) -> bool {
     left.name == right.name && left.root == right.root && left.created_at == right.created_at
 }
 
-#[coverage(off)]
 fn row(entry: &SessionRecord, cursor: bool, selected: bool, width: usize) -> String {
     let marker = if cursor {
         Role::Danger.style().bold().paint("›")
@@ -143,7 +130,6 @@ fn row(entry: &SessionRecord, cursor: bool, selected: bool, width: usize) -> Str
     format!("  {marker} {check} {label}")
 }
 
-#[coverage(off)]
 fn body(state: &RemoveModal) -> Vec<String> {
     let mut lines = vec![
         Style::new()
@@ -172,7 +158,6 @@ fn body(state: &RemoveModal) -> Vec<String> {
 }
 
 #[must_use]
-#[coverage(off)]
 pub fn render_over(
     raw_height: usize,
     raw_width: usize,
@@ -198,7 +183,7 @@ mod tests {
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
 
-    use super::{RemoveModal, same_incarnation};
+    use super::{RemoveModal, render_over, same_incarnation};
 
     fn session(name: &str, created: i64) -> SessionRecord {
         SessionRecord {
@@ -242,5 +227,28 @@ mod tests {
         modal.reconcile(&[new]);
         assert!(modal.is_empty());
         assert!(modal.selected_entries().is_empty());
+    }
+
+    #[test]
+    fn feedback_removal_and_rendering_cover_the_selector_states() {
+        let first = session("a", 1);
+        let second = session("b", 2);
+        assert!(same_incarnation(&first, &first));
+
+        let mut modal = RemoveModal::new(vec![first.clone(), second.clone()], true);
+        assert_eq!(modal.entries().len(), 2);
+        assert!(modal.force());
+        let force = render_over(12, 60, &vec![String::new(); 12], &modal).join("\n");
+        assert!(force.contains("force removal enabled"));
+        modal.toggle();
+        modal.set_feedback("cannot remove");
+        let frame = render_over(12, 60, &vec![String::new(); 12], &modal).join("\n");
+        assert!(frame.contains("cannot remove"));
+        modal.toggle();
+        modal.remove_entry(&first);
+        assert_eq!(modal.entries(), &[second]);
+        modal.reconcile(&[]);
+        let empty = render_over(12, 60, &vec![String::new(); 12], &modal).join("\n");
+        assert!(empty.contains("no sessions to remove"));
     }
 }
