@@ -242,6 +242,9 @@ mod tests {
         assert!(modal.force());
         let force = render_over(12, 60, &vec![String::new(); 12], &modal).join("\n");
         assert!(force.contains("force removal enabled"));
+        let normal = RemoveModal::new(vec![second.clone()], false);
+        let normal_frame = render_over(12, 60, &vec![String::new(); 12], &normal).join("\n");
+        assert!(!normal_frame.contains("force removal enabled"));
         modal.toggle();
         modal.set_feedback("cannot remove");
         let frame = render_over(12, 60, &vec![String::new(); 12], &modal).join("\n");
