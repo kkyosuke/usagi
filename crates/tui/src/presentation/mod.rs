@@ -36,13 +36,13 @@ use crate::presentation::views::config::{self, AvailableAgentModels, Config};
 use crate::presentation::views::new::{self, Field, New};
 use crate::presentation::views::open::{self, Open};
 use crate::presentation::views::pr_modal::PrModal;
+use crate::presentation::views::quit_modal;
 use crate::presentation::views::splash;
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{
     self, GitDiff, HomeProjection, ProjectedSession, TerminalViewProjection,
     Workspace as WorkspaceView, render_home, terminal_point_at,
 };
-use crate::presentation::views::{create_session_modal, quit_modal};
 use crate::presentation::widgets::modal::{self, ConfirmationView};
 use crate::presentation::workspace_runtime::WorkspaceRuntime;
 use crate::usecase::application::controller::{
@@ -1476,11 +1476,8 @@ fn render_controller_frame(
                 runtime.closeup_modal().cloned(),
             );
     let frame = render_home(height, width, &projection);
-    // The create form exists exactly when its overlay is open, so keying off it
-    // avoids an unreachable "create overlay without a form" branch.
-    if let Some(form) = runtime.state().create_session_form() {
-        return create_session_modal::render_over(height, width, &frame, form);
-    }
+    // The create form renders inline in the `+ new session` sidebar row (see
+    // `render_home`), so no overlay composite is needed here.
     if runtime.state().overlay() == Some(Overlay::QuitConfirmation) {
         return quit_modal::render_over(height, width, &frame);
     }
@@ -2662,13 +2659,19 @@ mod tests {
         assert!(base.join("\n").contains("atlas"));
         assert!(base.join("\n").contains("alpha"));
 
-        // Create form overlay: with no sessions a single Down reaches + new session.
+        // Create form: with no sessions a single Down reaches + new session. It
+        // renders inline in the sidebar row (the typed name), not as a centered
+        // "New session" modal.
         let mut creating = WorkspaceRuntime::new(workspace, Vec::new());
         let _ = creating.handle_key(Key::Down);
         let _ = creating.handle_key(Key::Enter);
+        for character in ['b', 'e', 't', 'a'] {
+            let _ = creating.handle_key(Key::Char(character));
+        }
         let create =
             render_controller_frame(20, 80, &creating, "atlas", root, &[], None, &git, None);
-        assert!(create.join("\n").contains("New session"));
+        assert!(create.join("\n").contains("beta"));
+        assert!(!create.join("\n").contains("New session"));
 
         // Quit confirmation overlay.
         let mut quitting = WorkspaceRuntime::new(workspace, vec![session]);
@@ -2767,17 +2770,19 @@ mod tests {
         );
 
         assert!(matches!(result, Ok(Exit::Quit)));
-        // The Overlay::CreateSession form rendered with the typed name, confirming
-        // the `+ new session` create-entry seam works through the controller loop.
-        assert!(
-            term.frames
-                .iter()
-                .any(|frame| frame.join("\n").contains("New session"))
-        );
+        // The inline `+ new session` row rendered the typed name, confirming the
+        // create-entry seam works through the controller loop. It is inline in the
+        // sidebar, not a centered modal, so the old "New session" modal title never
+        // appears.
         assert!(
             term.frames
                 .iter()
                 .any(|frame| frame.join("\n").contains("api"))
+        );
+        assert!(
+            term.frames
+                .iter()
+                .all(|frame| !frame.join("\n").contains("New session"))
         );
     }
 
