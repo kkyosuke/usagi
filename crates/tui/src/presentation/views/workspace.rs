@@ -197,6 +197,21 @@ pub struct HomeProjection {
     overview_modal: Option<OverviewModal>,
     /// Persisted Closeup action-modal input, when its overlay is open.
     closeup_modal: Option<CloseupModal>,
+    /// Inline `+ new session` name draft, present exactly when the create form
+    /// owns input. The sidebar row renders it as a name-only caret in place of the
+    /// static `+ new session` label; profile/model are never part of this flow.
+    create_draft: Option<CreateDraft>,
+}
+
+/// Left-sidebar draft for the inline new-session input.
+///
+/// A projection of the controller's `CreateSessionForm`: just the typed name and
+/// any validation message the reducer attached. It replaces the former centered
+/// three-field modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CreateDraft {
+    name: String,
+    error: Option<String>,
 }
 
 /// Home の右ペインに投影する tab strip の 1 項目。
@@ -266,6 +281,10 @@ impl HomeProjection {
             preview_overlay: state.preview_overlay().cloned(),
             overview_modal: None,
             closeup_modal: None,
+            create_draft: state.create_session_form().map(|form| CreateDraft {
+                name: form.name().to_owned(),
+                error: form.error().map(|notice| notice.message.clone()),
+            }),
         }
     }
 
@@ -1147,6 +1166,12 @@ fn home_row_lines_at(
     columns: SidebarDiffColumns,
     now: DateTime<Utc>,
 ) -> Vec<String> {
+    // When the create form owns input, the `+ new session` row becomes an inline
+    // name-only caret in place of its static label. This single-line surface keeps
+    // the row height at 1 so the viewport math is unchanged.
+    if let (Selection::NewSession, Some(draft)) = (row, home.create_draft.as_ref()) {
+        return vec![new_session_input_line(width, draft)];
+    }
     let target = match row {
         Selection::Target(target) => Some(target),
         Selection::NewSession => None,
@@ -1249,6 +1274,24 @@ fn home_row_lines_at(
     } else {
         vec![first]
     }
+}
+
+/// Render the inline `+ new session` name input on a single sidebar line.
+///
+/// The active row shows the accent cursor, a `+` affordance, and a block caret on
+/// the typed name. Any reducer validation message trails the caret in the danger
+/// style. profile / model never appear here.
+#[coverage(off)]
+fn new_session_input_line(width: usize, draft: &CreateDraft) -> String {
+    let accent = Role::Accent.style().bold();
+    let caret = widgets::block_caret(&draft.name, draft.name.chars().count(), &accent);
+    // Documented shape (03-tui.md): the row becomes `+ new: <name>` under the `>`
+    // cursor while the create form owns input.
+    let mut line = format!("{} + new: {caret}", accent.paint(">"));
+    if let Some(error) = &draft.error {
+        line = format!("{line}  {}", Role::Danger.style().bold().paint(error));
+    }
+    widgets::pad_to_width(&widgets::clip_to_width(&line, width), width)
 }
 
 /// v1-compatible sidebar marker with explicit precedence.
@@ -1580,6 +1623,38 @@ mod tests {
         assert!(text.contains("+ new session"));
         assert!(!text.contains("+ new session  action"));
         assert!(text.contains("No tabs stirring yet. Enter starts one."));
+    }
+
+    #[test]
+    fn render_home_draws_the_new_session_row_as_an_inline_name_input() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        // Reach `+ new session` and open its inline create form, then type a name.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        for character in "feature-x".chars() {
+            let _ = update(&mut state, AppEvent::Key(AppKey::Char(character)));
+        }
+        let text = joined_home(&HomeProjection::from_state(&state, "work", "/work", &[]));
+        // The row renders the typed name inline while the form owns input; the
+        // static label and the former centered "New session" modal are both gone.
+        assert!(text.contains("feature-x"));
+        assert!(!text.contains("+ new session"));
+        assert!(!text.contains("New session"));
+    }
+
+    #[test]
+    fn render_home_draws_a_create_validation_error_inline_on_the_new_session_row() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        // Submitting an empty name keeps the form open and attaches a reducer error,
+        // which the inline row surfaces without a modal.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let text = joined_home(&HomeProjection::from_state(&state, "work", "/work", &[]));
+        assert!(text.contains("session name is required"));
+        assert!(!text.contains("New session"));
     }
 
     fn pr_error() -> SafeError {
