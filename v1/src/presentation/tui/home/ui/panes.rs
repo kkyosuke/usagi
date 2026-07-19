@@ -15,7 +15,7 @@ use super::super::terminal::tabs::TabStrip;
 use super::super::terminal::view::TerminalView;
 use super::diff_render::diff_pane;
 use super::markdown_render::markdown_row;
-use super::sidebar::{dim_row, sync_status_label, AgentLifecycle};
+use super::sidebar::{create_label_style, dim_row, sync_status_label, AgentLifecycle};
 use super::tabs_hit::header_tab_rows;
 use super::{clip_to_width, pad_to_width, DETACHED, ROOT_DETAIL, STATUS_COL, TERMINAL_STARTING};
 use crate::domain::settings::Sidebar;
@@ -725,9 +725,8 @@ fn idle_rabbit_body(quip: &str, width: usize, rows: usize) -> Vec<String> {
 pub(super) fn overview_preview(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     if state.list().create_row_selected() {
         let mut lines = vec![
-            style(clip_to_width("+ new session", width))
-                .green()
-                .bold()
+            create_label_style(true)
+                .apply_to(clip_to_width("+ new session", width))
                 .to_string(),
             style(clip_to_width(
                 "Type a name here, or press Enter, to create a session.",
