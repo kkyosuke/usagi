@@ -116,6 +116,26 @@ pub trait WorkspaceLoader {
     ///
     /// Returns an error when the registry cannot be mutated.
     fn unregister(&mut self, paths: &[PathBuf]) -> io::Result<Vec<PathBuf>>;
+
+    /// Create a new workspace from a validated New-project request and return
+    /// the snapshot used to open it.
+    ///
+    /// A [`Clone`](controller::NewRequest::Clone) request fetches the repository
+    /// into the destination directory; an
+    /// [`Existing`](controller::NewRequest::Existing) request registers the
+    /// chosen directory under its name. Either way the resulting path is then
+    /// opened like any other workspace, so success lands on the same Home
+    /// snapshot as [`open`](Self::open).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when cloning, registration, or opening the resulting
+    /// workspace fails. Callers keep the user's form draft so the operation can
+    /// be corrected and retried.
+    fn create_workspace(
+        &mut self,
+        request: &controller::NewRequest,
+    ) -> io::Result<WorkspaceSnapshot>;
 }
 
 /// TUI をどの画面から開始するかを表す。

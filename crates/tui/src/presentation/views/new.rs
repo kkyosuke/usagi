@@ -18,6 +18,9 @@
 use crate::presentation::layouts::mascot_screen;
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::{self, TextInput};
+use crate::usecase::application::controller::{
+    NewForm, NewMode, NewRequest, NewValidationError, validate_new_form,
+};
 
 /// 画面上部に置くタイトル。
 const TITLE: &str = "New Project";
@@ -176,6 +179,32 @@ impl New {
     /// 通知を差し替える。
     pub fn set_notice(&mut self, notice: Option<String>) {
         self.notice = notice;
+    }
+
+    /// フォームを検証し、必須項目が揃っていれば workspace を作る backend request を返す。
+    ///
+    /// 検証は controller reducer の [`validate_new_form`] を通し、実端末経路（この view）と
+    /// controller runtime が同じ規則を共有する（SSoT）。フィールドは controller の [`NewForm`]
+    /// へ写して渡す。
+    ///
+    /// # Errors
+    ///
+    /// 最初に見つかった空の必須フィールドに対応する [`NewValidationError`] を返す。その
+    /// メッセージは notice として安全に描画できる。
+    pub fn to_request(&self) -> Result<NewRequest, NewValidationError> {
+        let mode = match self.mode {
+            Mode::Clone => NewMode::Clone,
+            Mode::Existing => NewMode::Existing,
+        };
+        let form = NewForm {
+            repository: self.url.value().to_owned(),
+            location: self.location.value().to_owned(),
+            directory: self.directory.value().to_owned(),
+            branch: self.branch.value().to_owned(),
+            path: self.path.value().to_owned(),
+            name: self.name.value().to_owned(),
+        };
+        validate_new_form(mode, &form)
     }
 
     /// フォーカス中フィールドの [`TextInput`]、モード選択なら `None`。編集・キャレット移動は
@@ -798,6 +827,62 @@ mod tests {
         state.cursor_home();
         state.cursor_end();
         assert_eq!(state.focus_cursor(), 0);
+    }
+
+    #[test]
+    fn to_request_builds_a_clone_request_from_a_complete_form() {
+        use crate::usecase::application::controller::NewRequest;
+        let mut state = New::default();
+        state.focus_next(); // Url
+        type_str(&mut state, "https://github.com/owner/repo.git");
+        state.focus_next(); // Location
+        type_str(&mut state, "/projects");
+        // Directory は URL から "repo" が導出済み。Branch は任意で空のまま。
+        let request = state.to_request().unwrap();
+        assert_eq!(
+            request,
+            NewRequest::Clone {
+                repository: "https://github.com/owner/repo.git".to_owned(),
+                destination: std::path::PathBuf::from("/projects").join("repo"),
+                branch: None,
+            }
+        );
+    }
+
+    #[test]
+    fn to_request_builds_an_existing_request_and_keeps_the_edited_name() {
+        use crate::usecase::application::controller::NewRequest;
+        let mut state = New::default();
+        state.toggle_mode();
+        state.focus_next(); // Path
+        type_str(&mut state, "/home/user/my-app");
+        state.focus_next(); // Name（導出済みの "my-app" を編集）
+        type_str(&mut state, "-fork");
+        let request = state.to_request().unwrap();
+        assert_eq!(
+            request,
+            NewRequest::Existing {
+                path: std::path::PathBuf::from("/home/user/my-app"),
+                name: "my-app-fork".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn to_request_reports_the_first_missing_required_field() {
+        use crate::usecase::application::controller::NewValidationError;
+        // 既定の Clone フォームは URL 未入力。
+        assert_eq!(
+            New::default().to_request().unwrap_err(),
+            NewValidationError::RepositoryRequired
+        );
+        // Existing で Path 未入力。
+        let mut existing = New::default();
+        existing.toggle_mode();
+        assert_eq!(
+            existing.to_request().unwrap_err(),
+            NewValidationError::PathRequired
+        );
     }
 
     #[test]

@@ -51,9 +51,48 @@ use crate::infrastructure::store::workspace::Storage;
 /// cannot be read or written.
 #[coverage(off)]
 pub fn open(storage: &Storage, path: &Path, now: DateTime<Utc>) -> Result<Workspace> {
+    register_resolved(storage, path, None, now)
+}
+
+/// Register `path` under an explicit display `name`, stamping `updated_at` with
+/// `now`.
+///
+/// This is the New-project entry point: the caller has just cloned or picked a
+/// directory and knows the name the user chose. It behaves like [`open`] but
+/// seeds the registry entry's display name from `name` (trimmed) instead of the
+/// directory's final component, still appending `-2`, `-3`, and so on when a
+/// different path already owns that name. A blank `name` falls back to the
+/// directory-derived name. An existing entry for the same path is reused and
+/// touched without renaming, exactly as [`open`] does.
+///
+/// The registry lock is held across load, resolution, and save.
+///
+/// # Errors
+///
+/// Returns an error when the registry lock cannot be acquired or the registry
+/// cannot be read or written.
+#[coverage(off)]
+pub fn register(
+    storage: &Storage,
+    path: &Path,
+    name: &str,
+    now: DateTime<Utc>,
+) -> Result<Workspace> {
+    let name = name.trim();
+    let name = (!name.is_empty()).then_some(name);
+    register_resolved(storage, path, name, now)
+}
+
+#[coverage(off)]
+fn register_resolved(
+    storage: &Storage,
+    path: &Path,
+    name: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<Workspace> {
     let _lock = storage.lock()?;
     let mut workspaces = storage.load_workspaces()?;
-    let (workspace, persist) = resolve_or_register(&mut workspaces, path, now);
+    let (workspace, persist) = resolve_or_register(&mut workspaces, path, name, now);
     if persist {
         storage.save_workspaces(&workspaces)?;
     }
@@ -119,6 +158,7 @@ pub fn recent(storage: &Storage) -> Result<Vec<Recent>> {
 fn resolve_or_register(
     workspaces: &mut Vec<Workspace>,
     path: &Path,
+    name_override: Option<&str>,
     now: DateTime<Utc>,
 ) -> (Workspace, bool) {
     if let Some(workspace) = workspaces
@@ -129,11 +169,15 @@ fn resolve_or_register(
         return (workspace.clone(), true);
     }
 
-    let base_name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "workspace".to_string());
+    let base_name = name_override.map_or_else(
+        || {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "workspace".to_string())
+        },
+        str::to_owned,
+    );
     let name = available_name(workspaces, &base_name);
     let workspace = Workspace {
         name,
@@ -204,7 +248,7 @@ mod tests {
 
     use chrono::{DateTime, TimeZone, Utc};
 
-    use super::{open, recent, remove};
+    use super::{open, recent, register, remove};
     use crate::domain::issue::{Issue, IssuePriority, IssueStatus};
     use crate::domain::note::Scratchpad;
     use crate::domain::pullrequest::PrLink;
@@ -278,6 +322,61 @@ mod tests {
         assert_eq!(opened.created_at, ts(10));
         assert_eq!(opened.updated_at, ts(10));
         assert_eq!(storage.load_workspaces().unwrap(), vec![opened]);
+    }
+
+    #[test]
+    fn register_seeds_the_entry_name_from_the_supplied_name() {
+        let (tmp, storage) = storage();
+        let path = tmp.path().join("checkout");
+
+        let registered = register(&storage, &path, "My App", ts(10)).unwrap();
+
+        // The display name comes from the supplied name, not the directory.
+        assert_eq!(registered.name, "My App");
+        assert_eq!(registered.path, path);
+        assert_eq!(registered.updated_at, ts(10));
+        assert_eq!(storage.load_workspaces().unwrap(), vec![registered]);
+    }
+
+    #[test]
+    fn register_falls_back_to_the_directory_name_when_blank() {
+        let (tmp, storage) = storage();
+        let path = tmp.path().join("beta");
+
+        let registered = register(&storage, &path, "   ", ts(10)).unwrap();
+
+        assert_eq!(registered.name, "beta");
+    }
+
+    #[test]
+    fn register_resolves_a_name_collision_with_a_suffix() {
+        let (tmp, storage) = storage();
+        let existing = workspace("app", tmp.path().join("one"), ts(3));
+        storage
+            .save_workspaces(std::slice::from_ref(&existing))
+            .unwrap();
+
+        let registered = register(&storage, &tmp.path().join("two"), "app", ts(10)).unwrap();
+
+        assert_eq!(registered.name, "app-2");
+        assert_eq!(storage.load_workspaces().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn register_reuses_an_existing_path_without_renaming() {
+        let (tmp, storage) = storage();
+        let path = tmp.path().join("gamma");
+        let existing = workspace("original", &path, ts(3));
+        storage
+            .save_workspaces(std::slice::from_ref(&existing))
+            .unwrap();
+
+        let registered = register(&storage, &path, "ignored", ts(10)).unwrap();
+
+        // The existing entry is reused and touched; its name is not overwritten.
+        assert_eq!(registered.name, "original");
+        assert_eq!(registered.updated_at, ts(10));
+        assert_eq!(storage.load_workspaces().unwrap().len(), 1);
     }
 
     #[test]
