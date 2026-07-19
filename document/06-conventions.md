@@ -86,6 +86,7 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
 - タイトルは Conventional Commits 形式に合わせる。
 - 本文には「目的 / 変更内容 / テスト・確認方法」を含める。
 - ベースブランチは `main`。[CI](#cigithub-actions) が強制する。
+- **PR は Draft で開き、[CI](#cigithub-actions) の必須チェック（fmt / clippy / full test / coverage 100%、該当時は Markdown link check）が green になってから Ready for review にする**。ローカル push では重い full gate を走らせないため（[Git Hooks](#git-hookslefthook)）、最終的な full gate の green は CI で確認する。CI が落ちたら Draft のまま修正して push し直す。
 
 ## ドキュメント規約
 
@@ -141,19 +142,25 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
 
 ## 品質チェック（リスク比例の gate）
 
-検証 gate は「編集中の fast loop」「commit 前」「push / PR 前・CI」に分ける。この節が、開発者・AI
-エージェント双方の品質チェックの正本である。workspace 構成のため、test / clippy / check には
+検証 gate は「編集中の fast loop」「commit 前」「push 前（ローカル）」「PR・CI（最終 full gate）」に分ける。
+この節が、開発者・AI エージェント双方の品質チェックの正本である。workspace 構成のため、test / clippy / check には
 **必ず `--workspace` を付ける**（ルートで実行するとルートパッケージしか対象にならない）。
+
+**Rust の重い full gate（workspace clippy / full test / coverage 100%）はローカル push では強制しない**。
+最終的な full gate は PR CI に一本化し、ローカルは開発中の fast feedback と commit 前の selected tests に軽く保つ。
+[Git Hooks](#git-hookslefthook) の pre-push はこの重い gate を持たない。
 
 | 段階 | 必須 gate | コマンド |
 |---|---|---|
 | 編集中 | フォーマット差分の確認 / コンパイル確認 / 変更 crate・module の test | `cargo fmt --all -- --check` / `cargo check --workspace --all-targets` / 変更箇所に対応する `cargo test -p <crate>` |
 | commit 前 | Lint / risk-based selected tests | `cargo clippy --workspace --all-targets -- -D warnings` / `scripts/recommend-tests.sh origin/main` が示す test（または同等以上の理由付き selected tests） |
-| push / PR 前 | Rust full gate / Markdown link check | Rust 差分あり: `cargo clippy --workspace --all-targets -- -D warnings` と `cargo llvm-cov --workspace --no-clean --fail-under-lines "$COVERAGE_MIN" --fail-under-functions "$COVERAGE_MIN"`。Markdown 差分あり: `lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' 'v1/README.md' 'v1/document/**/*.md' '.agents/**/*.md' '.github/**/*.md'` |
-| CI | PR gate | `.github/workflows/test.yml` が fmt / clippy / `cargo test --workspace --quiet`、`.github/workflows/coverage.yml` が coverage 100%、`.github/workflows/markdown-link-check.yml` が Markdown link check を実行する |
+| push 前（ローカル） | Markdown link check（Markdown 差分あり） | `lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' 'v1/README.md' 'v1/document/**/*.md' '.agents/**/*.md' '.github/**/*.md'` |
+| PR・CI（最終 full gate） | fmt / clippy / full test / coverage 100% / Markdown link check | `.github/workflows/test.yml` が fmt / clippy / `cargo test --workspace --quiet`、`.github/workflows/coverage.yml` が coverage 100%、`.github/workflows/markdown-link-check.yml` が Markdown link check を実行する |
 
-push / PR 前の coverage は次のローカル経路で実行してよい。`cargo llvm-cov` はテスト実行を兼ねるため、この経路では
-同じ差分に対して `cargo test --workspace --quiet` を重複実行しなくてよい。
+PR は Draft で開き、上表の CI 必須チェックが green になってから Ready for review にする（[プルリクエスト](#プルリクエスト)）。
+最終的な full gate（clippy / full test / coverage 100%）の green は CI で確認するのが正であり、ローカルで先取りして
+確認したい場合は次の経路を使ってよい（任意）。`cargo llvm-cov` はテスト実行を兼ねるため、この経路では同じ差分に対して
+`cargo test --workspace --quiet` を重複実行しなくてよい。
 
 ```bash
 . ./scripts/coverage.sh
@@ -163,14 +170,14 @@ coverage_enforce
 docs-only（Rust 差分なし）は Rust gate（`cargo check` / `cargo clippy` / `cargo test` / coverage）を省略できる。ただし
 Markdown 差分を含むため、Markdown link check は必須である。
 
-full test / coverage gate を必須とする条件は次のとおり。
+CI で full test / coverage gate が必須となる条件は次のとおり（この gate は CI が強制する）。
 
-- push / PR 前または CI で Rust 差分（`*.rs`、`Cargo.toml`、`Cargo.lock`、Rust の build / test / coverage に影響する `scripts/`・`.github/workflows/`・hook）を含む。
+- Rust 差分（`*.rs`、`Cargo.toml`、`Cargo.lock`、Rust の build / test / coverage に影響する `scripts/`・`.github/workflows/`・hook）を含む。
 - docs-only を除き、`scripts/recommend-tests.sh` が fail-safe として `cargo test --workspace --quiet` を推奨する（未知の path、空 diff、複数クレートにまたがる変更、共有基盤の変更など）。
 - 変更がクレート境界・層境界、永続化、process / PTY / terminal IO、設定解決、テスト基盤、coverage 除外、CI / hook の gate に影響する。
 - selected tests で対象リスクを説明できない、または直接 consumer を特定できない。
 
-- テストカバレッジ 100% を維持する（CI / lefthook でチェック）。
+- テストカバレッジ 100% を維持する（CI でチェック）。
   - **依存を注入してテスト可能にする**。「テストできないから」とロジックを計測対象外に逃がさない。実 IO（標準入出力・サブプロセス・端末・PTY・スレッド）は引数やジェネリックで注入し、本物の IO は合成ルート（ルートの `src/main.rs`）で束ねる。
   - 計測から外す必要がある item には、ファイル名の正規表現ではなく該当する module または function に `#[coverage(off)]` を付ける（外部 module ファイル全体を外す場合は inner attribute の `#![coverage(off)]`）。使用できるのは、テスト可能なロジックを抜いたあとの「実 IO そのもの」、または LLVM coverage が generic の単相化を重複計上する場合に限る。いずれも振る舞いを検証する fake / integration test を残し、除外理由を同じ変更に記録する。未テストの業務ロジック、到達しにくい error path、短期的な coverage 目標の回避には使わない。
   - `#[coverage(off)]` は nightly の `coverage_attribute` feature を必要とする。通常の build / test と coverage gate は、同じ nightly toolchain で実行する。
@@ -186,9 +193,10 @@ full test / coverage gate を必須とする条件は次のとおり。
 scripts/recommend-tests.sh origin/main
 ```
 
-推奨された selected tests は PR 前の full gate の代替ではない。未知の path、空 diff、複数クレートにまたがる変更、
+推奨された selected tests は CI の full gate の代替ではない。未知の path、空 diff、複数クレートにまたがる変更、
 共有基盤の変更は fail-safe に `cargo test --workspace --quiet` を含める。コミット・push 前には、この節の出力にかかわらず
-[品質チェック](#品質チェックリスク比例の-gate)の該当 gate を実行する。
+[品質チェック](#品質チェックリスク比例の-gate)の該当 gate（commit 前の Lint / selected tests、push 前の Markdown link check）を実行し、
+最終的な full gate は PR CI の green で確認する。
 
 ## Git Hooks（lefthook）
 
@@ -196,7 +204,11 @@ scripts/recommend-tests.sh origin/main
 |---|---|
 | pre-commit | workspace root コミットの拒否（backstop） / ブランチ名チェック / staged な `.rs` を `cargo fmt` |
 | commit-msg | Conventional Commits 形式チェック |
-| pre-push | `cargo clippy --workspace --all-targets -- -D warnings` / テストカバレッジ 100% 確認（`cargo llvm-cov`。テスト実行を兼ねる。`*.rs` 差分が無い push は skip） |
+
+**pre-push フックは持たない**。以前はここで `cargo clippy --workspace` とカバレッジ 100%（`cargo llvm-cov`）を実行していたが、
+push のたびにローカルで重い full gate が走り開発のリズムを損なっていた。clippy / full test / coverage 100% の最終 gate は
+[CI](#cigithub-actions)（`test.yml` / `coverage.yml`）に一本化し、ローカルは commit までの軽い gate に保つ。
+最終的な full gate の green は、Draft PR の [CI](#cigithub-actions) が緑になったことで確認する（[プルリクエスト](#プルリクエスト)）。
 
 ### workspace root コミットの拒否（backstop）
 

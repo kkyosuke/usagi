@@ -11,12 +11,11 @@
 #                 ※ usagi のセッション worktree (.usagi/sessions/<name>/) はブランチ名が usagi/<name> になるため対象外
 #   - コミットメッセージ: Conventional Commits (例: feat: 〇〇を追加 / fix(cli): 〇〇を修正)
 #   - コミット時に staged な .rs ファイルを自動フォーマット
-#   - push 時に clippy とテストカバレッジ100%を確認 (Coverage CI と同条件)
-#     ※ カバレッジ計測 (cargo llvm-cov) はテストも実行するため、push 時のテスト実行を兼ねる
-#     ※ *.rs 差分が無い push では clippy / coverage を skip する。
-#     ※ v1/ は退避された旧実装 (独立した Cargo プロジェクトでルートのビルド対象外) のため、
-#       v1/ 配下の差分は Rust 差分として数えない。v1/ だけの push は clippy / coverage を skip し、
-#       v1 のテスト実行もカバレッジ強制も行わない。
+#
+# push 時のローカル重い full gate (workspace clippy / カバレッジ100%) は持たない。
+# clippy / full test / coverage 100% の最終 gate は PR CI (test.yml / coverage.yml) に一本化する。
+# 開発中は fast feedback (cargo fmt --check / cargo check / 変更箇所の selected tests) を回し、
+# PR は Draft で開いて CI 成功後に Ready for review とする (正本: document/06-conventions.md)。
 
 pre-commit:
   parallel: true
@@ -95,38 +94,7 @@ commit-msg:
           exit 1
         fi
 
-pre-push:
-  parallel: true
-  commands:
-    clippy:
-      run: |
-        rust_diff_base() {
-          git rev-parse --verify --quiet '@{upstream}' 2>/dev/null || \
-            git merge-base HEAD origin/main 2>/dev/null || \
-            true
-        }
-        base=$(rust_diff_base)
-        # v1/ は退避された旧実装でルートのビルド対象外のため、差分判定から除外する。
-        if [ -n "$base" ] && ! git diff --name-only "$base"..HEAD -- '*.rs' ':(exclude)v1/**' | grep -q .; then
-          echo "No Rust (*.rs) changes to push (v1/ excluded); skipping clippy."
-          exit 0
-        fi
-        cargo clippy --workspace --all-targets -- -D warnings
-    coverage:
-      # 除外条件・閾値は SSoT (scripts/coverage.sh) を Coverage CI と共有する。
-      # cargo llvm-cov がテストも実行するため、別途 cargo test は走らせない。
-      run: |
-        rust_diff_base() {
-          git rev-parse --verify --quiet '@{upstream}' 2>/dev/null || \
-            git merge-base HEAD origin/main 2>/dev/null || \
-            true
-        }
-        base=$(rust_diff_base)
-        # v1/ は退避された旧実装でルートのビルド対象外のため、差分判定から除外する。
-        # v1/ だけの push には v2 のカバレッジ 100% を強制しない。
-        if [ -n "$base" ] && ! git diff --name-only "$base"..HEAD -- '*.rs' ':(exclude)v1/**' | grep -q .; then
-          echo "No Rust (*.rs) changes to push (v1/ excluded); skipping coverage."
-          exit 0
-        fi
-        . ./scripts/coverage.sh
-        coverage_enforce
+# pre-push フックは持たない。
+# clippy / full test / coverage 100% の最終 gate は PR CI (test.yml / coverage.yml) に一本化した。
+# ローカルでの検証は開発中の fast feedback と commit 前の selected tests で行う
+# (正本: document/06-conventions.md#品質チェックリスク比例の-gate)。
