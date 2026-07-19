@@ -1,7 +1,7 @@
 ---
 number: 358
 title: fix(tui): pending 中に Closeup action modal が毎フレーム復活する退行を直す
-status: in-progress
+status: done
 priority: high
 labels: [tui, controller, regression]
 dependson: []
