@@ -147,8 +147,11 @@ target-scoped `PaneRegistry`）が所有し、入力は `presentation::app_event
 `Key` を controller の `AppEvent` 語彙へ写して（live prefix を解決済みの `Key::Live` は
 対応する `AppKey` に、resize / backend wakeup の `Key::Other` は mascot を進める `Tick` に）
 `update()` へ通し、描画は `HomeProjection` → `render_home` が生成する。sidebar の
-pointer クリックは `HomeProjection::row_at`（描画と同じ viewport 幾何を共有）で
-`Selection` へ hit-test し、`AppKey::SelectRow` で reducer に届く。前面の Pull Request
+pointer クリックは `Key::Click` を `AppEvent::Pointer`（座標＋種別）へ写し、reducer が
+描画と同じ viewport 幾何で `Selection` へ hit-test して選択（single click）または
+活性化（double click）する。shell は行の hit-test を持たず、double click の判定窓だけを
+追跡する。terminal pane 内の drag / copy は Home 行契約と無関係なので shell +
+`TerminalSession` に残る。前面の Pull Request
 一覧・Markdown preview は controller の `Overlay::Prs` / `Overlay::Preview` が所有し、
 素材は `Effect::LoadPullRequests` / `LoadPreview` で要求して
 `BackendEvent::PullRequestsLoaded` / `PreviewLoaded`（失敗は対応する `*Error`）として

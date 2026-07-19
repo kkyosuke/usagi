@@ -858,14 +858,81 @@ impl AppState {
         self.selected = rows[next];
     }
 
-    /// Move the cursor directly to `selection` when it names a live row. The
-    /// pointer seam relies on `HomeProjection::row_at` to only ever hand back a
-    /// row that exists, but the reducer stays defensive so a stale click can
-    /// never point the cursor at a session that has since disappeared.
+    /// Move the cursor directly to `selection` when it names a live row.
+    /// [`sidebar_selection_at`](Self::sidebar_selection_at) only ever resolves a
+    /// row that exists, but the reducer stays defensive so a stale pointer event
+    /// can never point the cursor at a session that has since disappeared.
     fn select_row(&mut self, selection: Selection) {
         if self.rows().contains(&selection) {
             self.selected = selection;
         }
+    }
+
+    /// Resolve a 0-based terminal cell to the Home sidebar row it lands on, using
+    /// the same viewport geometry the frame is drawn with. Returns `None` for the
+    /// header, the divider under Root, the mascot sidecar, the footer, or a click
+    /// outside the sidebar body.
+    ///
+    /// This is the controller-owned hit-test the pointer reducer shares with the
+    /// `home_left_pane` render: it mirrors the chrome rows, the left/right split,
+    /// the foot-of-sidebar mascot reservation, and the scroll offset so a click
+    /// always lands on the row the user sees. It reads the last terminal geometry
+    /// from [`AppState::size`], so a pointer event before the first resize is
+    /// inert.
+    fn sidebar_selection_at(&self, column: u16, row: u16) -> Option<Selection> {
+        let (raw_width, raw_height) = self.size?;
+        let width = if raw_width == 0 {
+            80
+        } else {
+            usize::from(raw_width)
+        };
+        let height = if raw_height == 0 {
+            24
+        } else {
+            usize::from(raw_height)
+        };
+        let left = SIDEBAR_LEFT_WIDTH.min(width.saturating_sub(2));
+        if usize::from(column) >= left
+            || usize::from(row) < SIDEBAR_CHROME_ROWS
+            || height <= SIDEBAR_CHROME_ROWS
+        {
+            return None;
+        }
+        let rows = self.rows();
+        let body_height = height - SIDEBAR_CHROME_ROWS;
+        if body_height == 1 {
+            return (usize::from(row) == SIDEBAR_CHROME_ROWS).then(|| rows[0]);
+        }
+        let body_capacity = body_height - 1;
+        let content_capacity =
+            body_capacity.saturating_sub(sidebar_mascot_rows(left, body_capacity));
+        let clicked = usize::from(row) - SIDEBAR_CHROME_ROWS;
+        if clicked >= content_capacity {
+            return None;
+        }
+        let selected_index = rows
+            .iter()
+            .position(|entry| *entry == self.selected)
+            .unwrap_or(0);
+        let start = sidebar_viewport_start(&rows, selected_index, content_capacity);
+        let mut offset = 0;
+        for entry in &rows[start..] {
+            let lines = sidebar_row_content_lines(*entry);
+            if offset + lines > content_capacity {
+                break;
+            }
+            if (offset..offset + lines).contains(&clicked) {
+                return Some(*entry);
+            }
+            offset += lines;
+            if matches!(entry, Selection::Target(Target::Root(_))) && offset < content_capacity {
+                if clicked == offset {
+                    return None;
+                }
+                offset += 1;
+            }
+        }
+        None
     }
 
     #[coverage(off)]
@@ -885,6 +952,70 @@ impl AppState {
     }
 }
 
+/// Fixed chrome rows (title + spacer) above the Home sidebar's row body. Mirrors
+/// `views::workspace`'s `CHROME_ROWS`; a compile-time assertion there keeps the
+/// hit-test and the render agreeing on the geometry.
+pub(crate) const SIDEBAR_CHROME_ROWS: usize = 2;
+/// Desired Home sidebar left-pane width. The split clamps it to leave the right
+/// pane at least one column. Mirrors `views::workspace`'s `LEFT_WIDTH`.
+pub(crate) const SIDEBAR_LEFT_WIDTH: usize = 36;
+/// Rows the foot-of-sidebar mascot reserves in the controller Home: three rabbit
+/// lines and one trailing gap. The controller frame never renders a speech
+/// bubble, so the reservation is constant whenever the mascot is shown.
+pub(crate) const SIDEBAR_MASCOT_ROWS: usize = 4;
+/// Minimum left-pane width that fits the mascot rabbit (its nine-cell art plus a
+/// one-column indent). Below this the sidebar drops the mascot for list space.
+pub(crate) const SIDEBAR_MASCOT_MIN_LEFT: usize = 10;
+
+/// Rows the mascot sidecar reserves for a given left-pane width and body
+/// capacity, mirroring `home_left_pane`'s reservation. The rabbit shows only
+/// when the pane is wide enough for its art and the body has room for the
+/// reservation plus two list rows.
+fn sidebar_mascot_rows(left: usize, body_capacity: usize) -> usize {
+    if left >= SIDEBAR_MASCOT_MIN_LEFT && body_capacity >= SIDEBAR_MASCOT_ROWS + 2 {
+        SIDEBAR_MASCOT_ROWS
+    } else {
+        0
+    }
+}
+
+/// Scroll rows the sidebar viewport uses to weight one row: Root spans its
+/// identity line plus the divider beneath it, a session spans its identity and
+/// metadata lines, and the `+ new session` action is a single line.
+fn sidebar_row_height(row: Selection) -> usize {
+    match row {
+        Selection::Target(Target::Root(_) | Target::Session(_)) => 2,
+        Selection::NewSession => 1,
+    }
+}
+
+/// Body lines a row actually draws, excluding the divider `home_left_pane`
+/// inserts after Root: a session identity row carries a metadata row, while Root
+/// and the action row are single lines.
+fn sidebar_row_content_lines(row: Selection) -> usize {
+    match row {
+        Selection::Target(Target::Session(_)) => 2,
+        Selection::Target(Target::Root(_)) | Selection::NewSession => 1,
+    }
+}
+
+/// First visible row so the selected row stays in view, mirroring the render's
+/// scroll math: advance the viewport start until the selected row and everything
+/// above it fits within `capacity`.
+fn sidebar_viewport_start(rows: &[Selection], selected: usize, capacity: usize) -> usize {
+    let mut start = 0;
+    while start < selected
+        && rows[start..=selected]
+            .iter()
+            .map(|row| sidebar_row_height(*row))
+            .sum::<usize>()
+            > capacity
+    {
+        start += 1;
+    }
+    start
+}
+
 /// terminal adapter が将来投影する入力語彙。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppKey {
@@ -892,9 +1023,6 @@ pub enum AppKey {
     Up,
     /// cursor を次の row へ動かす。
     Down,
-    /// pointer の hit-test（`HomeProjection::row_at`）が返した row へ selected を
-    /// 直接移す。mouse クリック専用の暫定 seam で、terminal 内 drag / copy は対象外。
-    SelectRow(Selection),
     /// selected target を active にし Closeup を開く。
     Enter,
     /// Move to the next field in a local form.
@@ -1037,6 +1165,26 @@ pub enum AppEvent {
     Backend(BackendEvent),
     /// request completion。
     OperationResult(OperationResult),
+    /// A pointer gesture over the Home sidebar, in 0-based terminal cells. The
+    /// reducer resolves the row with the same viewport geometry the frame draws
+    /// and either moves the cursor or activates the row. A click outside the
+    /// sidebar body is inert. Terminal-pane drag and copy stay a shell +
+    /// `TerminalSession` concern and never reach this vocabulary.
+    Pointer {
+        column: u16,
+        row: u16,
+        action: PointerAction,
+    },
+}
+
+/// How a resolved sidebar pointer gesture acts on the row it lands on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerAction {
+    /// Move the navigation cursor to the clicked row (a single click).
+    Select,
+    /// Move the cursor to the clicked row and activate it as Enter would (a
+    /// double click): a target opens Closeup, `+ new session` opens the form.
+    Activate,
 }
 
 impl From<RuntimeEvent<BackendEvent>> for AppEvent {
@@ -1906,6 +2054,11 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state.size = Some((width, height));
             Vec::new()
         }
+        AppEvent::Pointer {
+            column,
+            row,
+            action,
+        } => update_pointer(state, column, row, action),
         // A live input is classified by `LiveInputClassifier` before reaching
         // this reducer. It still clears a pending grace, because grace is an
         // event-based one-shot rather than a timeout.
@@ -2276,10 +2429,6 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         }
         AppKey::Down => {
             state.move_selection(1);
-            Vec::new()
-        }
-        AppKey::SelectRow(selection) => {
-            state.select_row(selection);
             Vec::new()
         }
         AppKey::OpenOverview | AppKey::Char(':') => {
@@ -2714,6 +2863,30 @@ fn parse_close_force(arguments: &str) -> Option<bool> {
         .map(|request| request.force)
 }
 
+/// Resolve a Home sidebar pointer gesture and apply it. An open overlay (a modal
+/// or the inline create form) owns the pointer, so a background click is inert; a
+/// click that misses the sidebar body is likewise inert. Otherwise the cursor
+/// moves to the row, and an [`Activate`](PointerAction::Activate) gesture also
+/// activates it exactly as pressing Enter on the row would.
+fn update_pointer(
+    state: &mut AppState,
+    column: u16,
+    row: u16,
+    action: PointerAction,
+) -> Vec<Effect> {
+    if state.overlay.is_some() {
+        return Vec::new();
+    }
+    let Some(selection) = state.sidebar_selection_at(column, row) else {
+        return Vec::new();
+    };
+    state.select_row(selection);
+    match action {
+        PointerAction::Select => Vec::new(),
+        PointerAction::Activate => activate_selected(state),
+    }
+}
+
 #[coverage(off)]
 fn activate_selected(state: &mut AppState) -> Vec<Effect> {
     match state.selected {
@@ -2826,6 +2999,220 @@ mod tests {
 
     fn ids() -> (WorkspaceId, SessionId, SessionId) {
         (WorkspaceId::new(), SessionId::new(), SessionId::new())
+    }
+
+    fn sized_home(
+        workspace: WorkspaceId,
+        sessions: Vec<SessionId>,
+        width: u16,
+        height: u16,
+    ) -> AppState {
+        let mut state = AppState::home(workspace, sessions);
+        let _ = update(&mut state, AppEvent::Resize { width, height });
+        state
+    }
+
+    fn click(state: &mut AppState, column: u16, row: u16) -> Selection {
+        let _ = update(
+            state,
+            AppEvent::Pointer {
+                column,
+                row,
+                action: PointerAction::Select,
+            },
+        );
+        state.selected()
+    }
+
+    #[test]
+    fn pointer_click_resolves_and_selects_each_sidebar_row() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = sized_home(workspace, vec![session], 100, 30);
+
+        // Content begins after the two chrome rows: the Root identity line (row 2),
+        // the divider (row 3), the session's two lines (rows 4-5), then the action
+        // row (row 6). Each click moves the navigation cursor to that row.
+        assert_eq!(
+            click(&mut state, 5, 2),
+            Selection::Target(Target::Root(workspace))
+        );
+        assert_eq!(
+            click(&mut state, 5, 4),
+            Selection::Target(Target::Session(session))
+        );
+        assert_eq!(
+            click(&mut state, 5, 5),
+            Selection::Target(Target::Session(session))
+        );
+        assert_eq!(click(&mut state, 5, 6), Selection::NewSession);
+
+        // The divider under Root and a click below every rendered row select
+        // nothing new: the cursor stays where it last landed.
+        let before = state.selected();
+        let effects = update(
+            &mut state,
+            AppEvent::Pointer {
+                column: 5,
+                row: 3,
+                action: PointerAction::Select,
+            },
+        );
+        assert!(effects.is_empty());
+        assert_eq!(state.selected(), before);
+        let _ = click(&mut state, 5, 8);
+        assert_eq!(state.selected(), before);
+    }
+
+    #[test]
+    fn pointer_click_outside_the_sidebar_body_is_inert() {
+        let workspace = WorkspaceId::new();
+        // A pointer before the first resize has no geometry and cannot resolve.
+        let mut ungeometried = AppState::home(workspace, Vec::new());
+        assert!(
+            update(
+                &mut ungeometried,
+                AppEvent::Pointer {
+                    column: 5,
+                    row: 2,
+                    action: PointerAction::Select,
+                },
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            ungeometried.selected(),
+            Selection::Target(Target::Root(workspace))
+        );
+
+        let mut state = sized_home(workspace, Vec::new(), 100, 30);
+        let root = Selection::Target(Target::Root(workspace));
+        for (column, row) in [
+            (90, 4), // right-pane column
+            (5, 0),  // header row
+            (5, 1),  // spacer row
+        ] {
+            let _ = click(&mut state, column, row);
+            assert_eq!(state.selected(), root);
+        }
+        // Zero dimensions fall back to 80x24, so a mid-sidebar click still lands.
+        let mut zeroed = sized_home(workspace, Vec::new(), 0, 0);
+        assert_eq!(click(&mut zeroed, 5, 2), root);
+        // A viewport at or under the chrome, and a click past the content
+        // capacity, both resolve to nothing.
+        let tiny = sized_home(workspace, Vec::new(), 100, 2);
+        assert!(tiny.sidebar_selection_at(5, 2).is_none());
+        let short = sized_home(workspace, vec![SessionId::new()], 100, 8);
+        assert!(short.sidebar_selection_at(5, 7).is_none());
+    }
+
+    #[test]
+    fn pointer_click_handles_single_body_line_and_overflow() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        // body_height == 1 (height 3): only the first row is addressable.
+        let single = sized_home(workspace, vec![session], 100, 3);
+        assert_eq!(
+            single.sidebar_selection_at(5, 2),
+            Some(Selection::Target(Target::Root(workspace)))
+        );
+        assert_eq!(single.sidebar_selection_at(5, 5), None);
+        // At height 6 the content capacity is 3, so the session's two lines
+        // overflow after the Root row and divider and cannot be hit.
+        let overflow = sized_home(workspace, vec![session], 100, 6);
+        assert_eq!(overflow.sidebar_selection_at(5, 4), None);
+    }
+
+    #[test]
+    fn pointer_click_reaches_the_scrolled_viewport_tail() {
+        let workspace = WorkspaceId::new();
+        let sessions: Vec<SessionId> = (0..6).map(|_| SessionId::new()).collect();
+        // A short viewport cannot show every row at once. Moving the cursor to the
+        // tail (`+ new session`) scrolls the list, and a click on the last body row
+        // still resolves to the row the frame now shows there.
+        let mut state = sized_home(workspace, sessions.clone(), 100, 10);
+        for _ in 0..=sessions.len() {
+            let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        }
+        assert_eq!(state.selected(), Selection::NewSession);
+        // The short viewport scrolled to the tail: the last visible session and the
+        // action row. The mascot reserves the sidebar foot, so only the top three
+        // body rows are clickable and the action sits on the last of them (row 4).
+        let hit = state
+            .sidebar_selection_at(5, 4)
+            .expect("the tail row is addressable once scrolled");
+        assert_eq!(hit, Selection::NewSession);
+        let _ = click(&mut state, 5, 4);
+        assert_eq!(state.selected(), Selection::NewSession);
+    }
+
+    #[test]
+    fn pointer_activate_matches_enter_on_the_resolved_row() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = sized_home(workspace, vec![session], 100, 30);
+
+        // Double-clicking a session activates it into Closeup, as Enter would.
+        let effects = update(
+            &mut state,
+            AppEvent::Pointer {
+                column: 5,
+                row: 4,
+                action: PointerAction::Activate,
+            },
+        );
+        assert!(effects.is_empty());
+        assert_eq!(state.active(), Target::Session(session));
+        assert!(matches!(state.route(), Route::Home(HomeMode::Closeup)));
+
+        // Double-clicking `+ new session` opens the create form. With no sessions
+        // the action row sits below Root (row 2) and its divider (row 3), at row 4.
+        let mut creating = sized_home(workspace, Vec::new(), 100, 30);
+        let _ = update(
+            &mut creating,
+            AppEvent::Pointer {
+                column: 5,
+                row: 4,
+                action: PointerAction::Activate,
+            },
+        );
+        assert_eq!(creating.selected(), Selection::NewSession);
+        assert_eq!(creating.overlay(), Some(Overlay::CreateSession));
+
+        // An activate that misses the sidebar body neither selects nor activates.
+        let mut missed = sized_home(workspace, vec![session], 100, 30);
+        let _ = update(
+            &mut missed,
+            AppEvent::Pointer {
+                column: 90,
+                row: 4,
+                action: PointerAction::Activate,
+            },
+        );
+        assert_eq!(missed.active(), Target::Root(workspace));
+        assert!(matches!(missed.route(), Route::Home(HomeMode::Switch)));
+    }
+
+    #[test]
+    fn pointer_click_is_inert_while_an_overlay_owns_the_surface() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = sized_home(workspace, vec![session], 100, 30);
+        // Open the workspace Overview overlay, then click a background session row.
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+        let before = state.selected();
+        let effects = update(
+            &mut state,
+            AppEvent::Pointer {
+                column: 5,
+                row: 4,
+                action: PointerAction::Activate,
+            },
+        );
+        assert!(effects.is_empty());
+        assert_eq!(state.selected(), before);
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
     }
 
     #[test]

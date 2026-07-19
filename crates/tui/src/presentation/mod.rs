@@ -44,8 +44,8 @@ use crate::presentation::views::{create_session_modal, quit_modal};
 use crate::presentation::widgets::modal::{self, ConfirmationView};
 use crate::presentation::workspace_runtime::WorkspaceRuntime;
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, BackendEvent, Effect, Notice, Overlay, SafeError, SafeMessage,
-    Target,
+    AppEvent, AppKey, AppState, BackendEvent, Effect, Notice, Overlay, PointerAction, SafeError,
+    SafeMessage, Target,
 };
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort, canonical_browser_url};
@@ -1022,17 +1022,24 @@ fn drain_pane_launches(ui: &mut WorkspaceUi, geometry: Geometry) {
 /// mascot via [`AppEvent::Tick`] — real resize dimensions come from `term.size()`
 /// and backend results from `DaemonBackend::drain_events()`, not from a `Key`.
 ///
-/// Returns `None` for input the Home reducer never consumes: raw PTY passthrough,
-/// pointer/click cells (the shell hit-tests those into [`AppKey::SelectRow`] via
-/// [`HomeProjection::row_at`]), and keys with no Home management meaning.
-///
-/// [`HomeProjection::row_at`]: crate::presentation::views::workspace::HomeProjection::row_at
+/// A sidebar [`Key::Click`] becomes an [`AppEvent::Pointer`] the reducer
+/// hit-tests against the live sidebar geometry; the shell no longer resolves the
+/// row. Returns `None` for input the Home reducer never consumes: raw PTY
+/// passthrough, terminal-viewport pointer drags (a shell + `TerminalSession`
+/// concern), and keys with no Home management meaning.
 #[must_use]
 #[allow(clippy::needless_pass_by_value)]
 pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
     let app_key = match key {
         Key::Live(action) => return live_action_to_app_key(action).map(AppEvent::Key),
         Key::Other => return Some(AppEvent::Tick),
+        Key::Click { column, row } => {
+            return Some(AppEvent::Pointer {
+                column,
+                row,
+                action: PointerAction::Select,
+            });
+        }
         Key::Up => AppKey::Up,
         Key::Down => AppKey::Down,
         Key::Enter => AppKey::Enter,
@@ -1042,15 +1049,12 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         Key::Char(character) => AppKey::Char(character),
         Key::Quit => AppKey::CtrlC,
         Key::CtrlQ => AppKey::CtrlQ,
-        // Input the Home reducer never consumes: raw PTY passthrough and pointer
-        // cells (the shell hit-tests pointer/click into `AppKey::SelectRow`),
-        // Left/Right (tab motion is Ctrl-N/P), and Ctrl-D (Open Workspace only).
-        Key::Passthrough(_)
-        | Key::Pointer(_)
-        | Key::Click { .. }
-        | Key::Left
-        | Key::Right
-        | Key::CtrlD => return None,
+        // Input the Home reducer never consumes: raw PTY passthrough, terminal
+        // pointer drags (a shell + `TerminalSession` concern), Left/Right (tab
+        // motion is Ctrl-N/P), and Ctrl-D (Open Workspace only).
+        Key::Passthrough(_) | Key::Pointer(_) | Key::Left | Key::Right | Key::CtrlD => {
+            return None;
+        }
     };
     Some(AppEvent::Key(app_key))
 }
@@ -1451,6 +1455,36 @@ fn drain_pane_completions_into_runtime(
     }
 }
 
+/// The maximum gap between two presses on the same sidebar cell that the shell
+/// promotes from a Select to an Activate pointer gesture.
+const SIDEBAR_DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Build the pointer event for a sidebar click, promoting a second press on the
+/// same cell within [`SIDEBAR_DOUBLE_CLICK`] to an Activate. The shell tracks
+/// only this timing window; the reducer owns the row hit-test.
+#[coverage(off)]
+fn sidebar_pointer_event(
+    last_click: &mut Option<(u16, u16, std::time::Instant)>,
+    column: u16,
+    row: u16,
+) -> AppEvent {
+    let now = std::time::Instant::now();
+    let doubled = last_click.is_some_and(|(last_column, last_row, at)| {
+        last_column == column && last_row == row && now.duration_since(at) <= SIDEBAR_DOUBLE_CLICK
+    });
+    *last_click = (!doubled).then_some((column, row, now));
+    let action = if doubled {
+        PointerAction::Activate
+    } else {
+        PointerAction::Select
+    };
+    AppEvent::Pointer {
+        column,
+        row,
+        action,
+    }
+}
+
 /// Controller-driven real-terminal frame loop (`drain → poll → render → input →
 /// dispatch`). Home row state, live-pane availability, and the Home frame come
 /// from [`WorkspaceRuntime`]/`render_home`; the legacy [`WorkspaceUi`] is kept as
@@ -1485,11 +1519,19 @@ fn drive_workspace_controller(
     let mut metrics_projection = MetricsProjection::default();
     let mut pending_targets: std::collections::HashMap<OperationId, Target> =
         std::collections::HashMap::new();
+    // The reducer hit-tests sidebar clicks against the last terminal geometry;
+    // the shell only tracks the double-click window that promotes a Select to an
+    // Activate, never the row itself.
+    let mut last_click: Option<(u16, u16, std::time::Instant)> = None;
     loop {
         drain_session_completions(&mut ui);
         sync_runtime_sessions(&mut runtime, &ui);
         let (height, width) = term.size()?;
         ui.set_terminal_size(height, width);
+        let _ = runtime.apply_event(AppEvent::Resize {
+            width: u16::try_from(width).unwrap_or(u16::MAX),
+            height: u16::try_from(height).unwrap_or(u16::MAX),
+        });
         let geometry = terminal_geometry(height, width);
         drain_pane_completions_into_runtime(&mut ui, &mut runtime, &mut pending_targets, geometry);
         ui.resize_terminals(geometry);
@@ -1531,7 +1573,14 @@ fn drive_workspace_controller(
         if key == Key::Char(':') {
             continue;
         }
-        for effect in runtime.handle_key(key) {
+        // A second click on the same cell within the window activates the row the
+        // reducer resolves; otherwise the click just moves the cursor.
+        let effects = if let Key::Click { column, row } = key {
+            runtime.apply_event(sidebar_pointer_event(&mut last_click, column, row))
+        } else {
+            runtime.handle_key(key)
+        };
+        for effect in effects {
             runtime.on_effect(&effect);
             for event in controller_overlay_events(
                 pr_port.as_mut(),
@@ -2016,8 +2065,7 @@ mod tests {
     use crate::presentation::views::config::AvailableAgentModels;
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
-
-    use crate::usecase::application::controller::{AppEvent, AppKey};
+    use crate::usecase::application::controller::{AppEvent, AppKey, PointerAction};
     use crate::usecase::application::run as dispatch;
     use crate::usecase::application::{EntryScreen, Key, Terminal};
     use crate::usecase::overview::SessionCommand;
@@ -2116,9 +2164,17 @@ mod tests {
     fn app_event_from_key_ticks_on_wakeups_and_drops_pane_only_input() {
         // Resize / backend wakeups reach the loop as `Other` and advance the mascot.
         assert_eq!(app_event_from_key(Key::Other), Some(AppEvent::Tick));
-        // Raw passthrough, pointer cells, and clicks never reach the Home reducer.
+        // Raw passthrough and terminal pointer drags never reach the Home reducer.
         assert_eq!(app_event_from_key(Key::Passthrough(vec![0x1b])), None);
-        assert_eq!(app_event_from_key(Key::Click { column: 3, row: 4 }), None);
+        // A sidebar click becomes a pointer event the reducer hit-tests.
+        assert_eq!(
+            app_event_from_key(Key::Click { column: 3, row: 4 }),
+            Some(AppEvent::Pointer {
+                column: 3,
+                row: 4,
+                action: PointerAction::Select,
+            })
+        );
         // Left/Right and Ctrl-D carry no Home management meaning.
         assert_eq!(app_event_from_key(Key::Left), None);
         assert_eq!(app_event_from_key(Key::Right), None);
