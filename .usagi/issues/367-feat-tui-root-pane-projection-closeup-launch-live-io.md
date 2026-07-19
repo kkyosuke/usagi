@@ -1,14 +1,14 @@
 ---
 number: 367
 title: feat(tui): root pane projection と closeup/launch・live IO
-status: todo
+status: done
 priority: high
 labels: [tui, workspace-root, agent, terminal]
 dependson: [364, 365, 366]
 related: []
 parent: 363
 created_at: 2026-07-19T21:05:29.225971+00:00
-updated_at: 2026-07-19T21:05:29.225971+00:00
+updated_at: 2026-07-19T22:12:25.381927+00:00
 ---
 
 ## 目的

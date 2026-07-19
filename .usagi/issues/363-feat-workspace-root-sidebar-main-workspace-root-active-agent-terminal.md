@@ -1,13 +1,13 @@
 ---
 number: 363
 title: feat(workspace-root): sidebar の main(workspace root) を active にしたまま Agent/Terminal を作成可能にする
-status: in-progress
+status: done
 priority: high
 labels: [epic, workspace-root, daemon, tui, agent, terminal]
 dependson: []
 related: []
 created_at: 2026-07-19T21:04:31.062133+00:00
-updated_at: 2026-07-19T21:05:47.243686+00:00
+updated_at: 2026-07-19T22:12:36.055742+00:00
 ---
 
 ## 目的（Epic）

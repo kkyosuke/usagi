@@ -1,14 +1,14 @@
 ---
 number: 366
 title: feat(daemon): root agent dispatch を接続する
-status: todo
+status: done
 priority: high
 labels: [daemon, workspace-root, agent, ipc]
 dependson: [364, 365]
 related: []
 parent: 363
 created_at: 2026-07-19T21:05:11.789266+00:00
-updated_at: 2026-07-19T21:05:11.789266+00:00
+updated_at: 2026-07-19T22:12:23.314432+00:00
 ---
 
 ## 目的

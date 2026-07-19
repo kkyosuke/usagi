@@ -1,14 +1,14 @@
 ---
 number: 365
 title: feat(daemon): root terminal の scope 解決・fencing・restart/reconnect
-status: in-progress
+status: done
 priority: high
 labels: [daemon, workspace-root, terminal, ipc]
 dependson: [364]
 related: []
 parent: 363
 created_at: 2026-07-19T21:05:05.343203+00:00
-updated_at: 2026-07-19T21:12:57.471585+00:00
+updated_at: 2026-07-19T22:12:21.320260+00:00
 ---
 
 ## 目的

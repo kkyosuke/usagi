@@ -1,14 +1,14 @@
 ---
 number: 368
 title: docs(workspace-root): 正本ドキュメントを root scope 契約に更新する
-status: todo
+status: done
 priority: medium
 labels: [docs, workspace-root]
 dependson: [364, 365, 366, 367]
 related: []
 parent: 363
 created_at: 2026-07-19T21:05:36.093588+00:00
-updated_at: 2026-07-19T21:05:36.093588+00:00
+updated_at: 2026-07-19T22:12:33.323781+00:00
 ---
 
 ## 目的
