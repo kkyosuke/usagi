@@ -35,6 +35,7 @@ fs2.workspace = true
 # core の GitRunner seam（`fn run(..) -> anyhow::Result<..>`）を合成ルートで実装するため。
 anyhow.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 # macOS LaunchAgent の install path を user home から解決するため。
 dirs.workspace = true
 

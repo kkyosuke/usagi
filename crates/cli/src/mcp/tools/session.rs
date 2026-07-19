@@ -36,6 +36,10 @@ pub fn tools() -> Vec<Box<dyn Tool>> {
         Box::new(AgentInbox),
         Box::new(UserDecisionRequest),
         Box::new(UserDecisionGet),
+        Box::new(UserDecisionList),
+        Box::new(UserDecisionResolve),
+        Box::new(UserDecisionCancel),
+        Box::new(UserDecisionExpire),
     ]
 }
 pub struct UserDecisionRequest;
@@ -57,6 +61,54 @@ impl Tool for UserDecisionGet {
     }
     fn description(&self) -> &'static str {
         "recovery/debug のため現在の agent が所有する decision を取得する。回答 polling の主経路には使わない"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"decision_id":{"type":"string"}},"required":["decision_id"],"additionalProperties":false}"#
+    }
+}
+pub struct UserDecisionList;
+impl Tool for UserDecisionList {
+    fn name(&self) -> &'static str {
+        "user_decision_list"
+    }
+    fn description(&self) -> &'static str {
+        "現在の workspace の pending decision を返す"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{},"additionalProperties":false}"#
+    }
+}
+pub struct UserDecisionResolve;
+impl Tool for UserDecisionResolve {
+    fn name(&self) -> &'static str {
+        "user_decision_resolve"
+    }
+    fn description(&self) -> &'static str {
+        "pending decision に option または許可された freeform を一度だけ記録する"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"decision_id":{"type":"string"},"answer":{"oneOf":[{"type":"object","properties":{"kind":{"const":"option"},"option_id":{"type":"string"}},"required":["kind","option_id"],"additionalProperties":false},{"type":"object","properties":{"kind":{"const":"freeform"},"text":{"type":"string"}},"required":["kind","text"],"additionalProperties":false}]}},"required":["decision_id","answer"],"additionalProperties":false}"#
+    }
+}
+pub struct UserDecisionCancel;
+impl Tool for UserDecisionCancel {
+    fn name(&self) -> &'static str {
+        "user_decision_cancel"
+    }
+    fn description(&self) -> &'static str {
+        "pending decision を回答を配送せず cancel する"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"decision_id":{"type":"string"}},"required":["decision_id"],"additionalProperties":false}"#
+    }
+}
+pub struct UserDecisionExpire;
+impl Tool for UserDecisionExpire {
+    fn name(&self) -> &'static str {
+        "user_decision_expire"
+    }
+    fn description(&self) -> &'static str {
+        "pending decision を回答を配送せず expire する"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"decision_id":{"type":"string"}},"required":["decision_id"],"additionalProperties":false}"#

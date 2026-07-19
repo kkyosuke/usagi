@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use fs2::FileExt;
+use serde::Deserialize;
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::{AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName};
 use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId, WorktreeId};
@@ -28,7 +29,9 @@ use usagi_core::infrastructure::paths;
 use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::infrastructure::store::dispatch::DispatchStore;
 use usagi_core::infrastructure::store::pr_inventory::PrInventoryStore;
+use usagi_core::infrastructure::store::user_decision::UserDecisionStore;
 use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
+use usagi_core::usecase::client::{DaemonRequest, DispatchToolAction};
 use usagi_daemon::infrastructure::pty::PtyTerminal;
 use usagi_daemon::infrastructure::unix_transport::{SecureUnixListener, ensure_private_dir};
 use usagi_daemon::presentation::DaemonEnv;
@@ -822,6 +825,7 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         terminal,
         agent,
         pr_inventory,
+        Arc::new(UserDecisionStore::new(data_dir.join("daemon"))),
         Arc::new(Mutex::new(ProcessMetrics { previous: None })),
     )
 }
@@ -980,6 +984,7 @@ where
         .map(|_| ())
 }
 
+#[allow(clippy::too_many_arguments)] // Composition owns the independently injected daemon services.
 fn start_ipc_accept_loop(
     listener: SecureUnixListener,
     server: usagi_core::infrastructure::ipc::ServerProtocol,
@@ -987,6 +992,7 @@ fn start_ipc_accept_loop(
     terminal: SharedTerminalRuntime,
     agent: SharedAgentRuntime,
     pr_inventory: SharedPrInventory,
+    decisions: Arc<UserDecisionStore>,
     metrics: SharedProcessMetrics,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
@@ -1002,6 +1008,7 @@ fn start_ipc_accept_loop(
                         let agent_owner = Arc::clone(&agent);
                         let agent_launch = Arc::clone(&agent);
                         let pr_inventory = Arc::clone(&pr_inventory);
+                        let decisions = Arc::clone(&decisions);
                         let metrics = Arc::clone(&metrics);
                         let _ = std::thread::Builder::new()
                             .name("usagi-ipc-client".to_string())
@@ -1029,6 +1036,7 @@ fn start_ipc_accept_loop(
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &scope_sessions, request_id, &body, hello),
                                         Some("metrics") => dispatch_metrics(&metrics, request_id, &body, hello),
                                         Some("pr") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
+                                        Some("dispatch_tool") => dispatch_user_decision(&agent_launch, &scope_sessions, &decisions, request_id, &body, hello),
                                         _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
                                     },
                                 );
@@ -1087,6 +1095,200 @@ fn dispatch_pr_snapshot(
             outcome,
             body,
         },
+    }
+}
+
+/// Handles the decision subset of the MCP dispatch registry.  The MCP payload
+/// never carries an owner: it is reconstructed from the one active durable
+/// dispatch binding.  Ambiguity is deliberately fail-closed, preventing an
+/// agent from choosing another workspace, caller, or run.
+#[allow(clippy::too_many_lines)] // The complete wire-to-store error mapping is one atomic routing contract.
+fn dispatch_user_decision(
+    agent: &SharedAgentRuntime,
+    sessions: &SharedSessionRuntime,
+    store: &UserDecisionStore,
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    body: &serde_json::Value,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    use chrono::Utc;
+    use usagi_core::domain::agent::RunStatus;
+    use usagi_core::domain::id::UserDecisionId;
+    use usagi_core::domain::user_decision::{
+        UserDecision, UserDecisionAnswer, UserDecisionError, UserDecisionOwner, UserDecisionStatus,
+    };
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
+
+    #[derive(Deserialize)]
+    struct RequestPayload {
+        title: String,
+        prompt: String,
+        options: Vec<usagi_core::domain::user_decision::UserDecisionOption>,
+        #[serde(default)]
+        allow_freeform: bool,
+        #[serde(default)]
+        expires_at: Option<chrono::DateTime<Utc>>,
+        #[serde(default)]
+        idempotency_key: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct DecisionIdPayload {
+        decision_id: UserDecisionId,
+    }
+    #[derive(Deserialize)]
+    struct ResolvePayload {
+        decision_id: UserDecisionId,
+        answer: UserDecisionAnswer,
+    }
+
+    let parsed = serde_json::from_value::<DaemonRequest>(body.clone())
+        .ok()
+        .and_then(|request| match request {
+            DaemonRequest::DispatchTool {
+                action, payload, ..
+            } => Some((action, payload)),
+            _ => None,
+        });
+    let Some((action, payload)) = parsed else {
+        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+    };
+    if !matches!(
+        action,
+        DispatchToolAction::UserDecisionRequest
+            | DispatchToolAction::UserDecisionGet
+            | DispatchToolAction::UserDecisionList
+            | DispatchToolAction::UserDecisionResolve
+            | DispatchToolAction::UserDecisionCancel
+            | DispatchToolAction::UserDecisionExpire
+    ) {
+        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+    }
+
+    let owner = (|| -> Result<UserDecisionOwner, ProtocolError> {
+        let workspace = sessions
+            .lock()
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
+            })?
+            .snapshot()
+            .map_err(|_| {
+                ProtocolError::new(
+                    ErrorCode::Unavailable,
+                    "daemon could not read managed sessions",
+                )
+            })?
+            .get("workspace_id")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .ok_or_else(|| {
+                ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
+            })?;
+        let runtime = agent.lock().map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+        })?;
+        let dispatch = runtime.dispatch_store();
+        let active: Vec<_> = dispatch
+            .runs()
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "dispatch provenance is unavailable")
+            })?
+            .into_iter()
+            .filter(|run| run.status == RunStatus::Running)
+            .collect();
+        let [run] = active.as_slice() else {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "decision caller provenance is ambiguous",
+            ));
+        };
+        let binding = dispatch
+            .binding(run.run_id)
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "dispatch provenance is unavailable")
+            })?
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::OwnershipUnknown,
+                    "decision caller provenance is unavailable",
+                )
+            })?;
+        let session_id = binding.worker.session_id.ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "decision worker has no session scope",
+            )
+        })?;
+        if binding.worker.agent_id != run.agent_id {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "decision caller provenance is inconsistent",
+            ));
+        }
+        Ok(UserDecisionOwner {
+            workspace_id: workspace,
+            session_id,
+            caller: binding.caller,
+            run_id: run.run_id,
+        })
+    })();
+    let response = owner.and_then(|owner| {
+        let now = Utc::now();
+        let result = (|| -> Result<serde_json::Value, UserDecisionError> { match action {
+            DispatchToolAction::UserDecisionRequest => {
+                let input = serde_json::from_value::<RequestPayload>(payload)
+                    .map_err(|_| UserDecisionError::Terminal)?;
+                store
+                    .create(UserDecision {
+                        decision_id: UserDecisionId::new(), owner, title: input.title, prompt: input.prompt,
+                        options: input.options, allow_freeform: input.allow_freeform, expires_at: input.expires_at,
+                        idempotency_key: input.idempotency_key, status: UserDecisionStatus::Pending, answer: None,
+                        created_at: now, resolved_at: None,
+                    })
+                    .map_err(|_| UserDecisionError::Terminal)?
+                    .map(|decision| serde_json::json!({"decision_id": decision.decision_id, "status": "waiting_for_user"}))
+            }
+            DispatchToolAction::UserDecisionGet => {
+                let input = serde_json::from_value::<DecisionIdPayload>(payload).map_err(|_| UserDecisionError::Terminal)?;
+                store.get(owner.workspace_id, input.decision_id).map_err(|_| UserDecisionError::Terminal)?
+                    .map(|decision| serde_json::json!(decision)).ok_or(UserDecisionError::Terminal)
+            }
+            DispatchToolAction::UserDecisionList => store.pending(owner.workspace_id)
+                .map_err(|_| UserDecisionError::Terminal)
+                .map(|decisions| serde_json::json!({"workspace": owner.workspace_id, "decisions": decisions})),
+            DispatchToolAction::UserDecisionResolve => {
+                let input = serde_json::from_value::<ResolvePayload>(payload).map_err(|_| UserDecisionError::Terminal)?;
+                store.resolve(owner.workspace_id, input.decision_id, input.answer, now)
+                    .map_err(|_| UserDecisionError::Terminal)?
+                    .map(|decision| serde_json::json!(decision))
+            }
+            DispatchToolAction::UserDecisionCancel | DispatchToolAction::UserDecisionExpire => {
+                let input = serde_json::from_value::<DecisionIdPayload>(payload).map_err(|_| UserDecisionError::Terminal)?;
+                let status = if action == DispatchToolAction::UserDecisionCancel { UserDecisionStatus::Cancelled } else { UserDecisionStatus::Expired };
+                store.terminal(owner.workspace_id, input.decision_id, status, now)
+                    .map_err(|_| UserDecisionError::Terminal)?
+                    .map(|decision| serde_json::json!(decision))
+            }
+            _ => unreachable!(),
+        } })();
+        result.map_err(|error| {
+            let (code, message) = match error {
+                UserDecisionError::IdempotencyConflict => (ErrorCode::IdempotencyConflict, "decision idempotency key conflicts"),
+                UserDecisionError::InvalidOption => (ErrorCode::InvalidArgument, "decision option is not allowed"),
+                UserDecisionError::FreeformNotAllowed => (ErrorCode::InvalidArgument, "freeform decision answer is not allowed"),
+                UserDecisionError::Expired => (ErrorCode::DeadlineExceeded, "decision has expired"),
+                UserDecisionError::Terminal => (ErrorCode::RevisionConflict, "decision is not pending or is outside this workspace"),
+            };
+            ProtocolError::new(code, message)
+        })
+    });
+    match response {
+        Ok(value) => envelope(hello, request_id, ResponseOutcome::Ok, value),
+        Err(error) => envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Error(error),
+            serde_json::json!(null),
+        ),
     }
 }
 

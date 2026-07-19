@@ -1,13 +1,13 @@
 ---
 number: 378
 title: fix(daemon): user_decision の MCP dispatch_tool を durable store と workspace-scoped 配送に接続する
-status: todo
+status: done
 priority: high
 labels: [daemon, mcp, cli, supervisor, bug]
 dependson: []
 related: [329, 330, 328, 326, 327]
 created_at: 2026-07-19T22:44:35.043760+00:00
-updated_at: 2026-07-19T22:44:35.043760+00:00
+updated_at: 2026-07-19T22:59:32.505461+00:00
 ---
 
 ## 背景 / 不具合

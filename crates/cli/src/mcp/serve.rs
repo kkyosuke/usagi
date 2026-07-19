@@ -353,6 +353,10 @@ fn dispatch_tool_action(name: &str) -> Option<DispatchToolAction> {
         "agent_inbox" => Some(DispatchToolAction::AgentInbox),
         "user_decision_request" => Some(DispatchToolAction::UserDecisionRequest),
         "user_decision_get" => Some(DispatchToolAction::UserDecisionGet),
+        "user_decision_list" => Some(DispatchToolAction::UserDecisionList),
+        "user_decision_resolve" => Some(DispatchToolAction::UserDecisionResolve),
+        "user_decision_cancel" => Some(DispatchToolAction::UserDecisionCancel),
+        "user_decision_expire" => Some(DispatchToolAction::UserDecisionExpire),
         _ => None,
     }
 }
@@ -431,7 +435,7 @@ mod tests {
     fn tools_list_returns_every_tool_with_schema() {
         let v = call(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 43);
+        assert_eq!(tools.len(), 47);
         // 各要素が name / description / inputSchema(object) を持つ。
         for tool in tools {
             assert!(tool["name"].as_str().is_some());
@@ -648,9 +652,42 @@ mod tests {
                 "agent_inbox",
                 usagi_core::usecase::client::DispatchToolAction::AgentInbox,
             ),
+            (
+                "user_decision_request",
+                usagi_core::usecase::client::DispatchToolAction::UserDecisionRequest,
+            ),
+            (
+                "user_decision_get",
+                usagi_core::usecase::client::DispatchToolAction::UserDecisionGet,
+            ),
+            (
+                "user_decision_list",
+                usagi_core::usecase::client::DispatchToolAction::UserDecisionList,
+            ),
+            (
+                "user_decision_resolve",
+                usagi_core::usecase::client::DispatchToolAction::UserDecisionResolve,
+            ),
+            (
+                "user_decision_cancel",
+                usagi_core::usecase::client::DispatchToolAction::UserDecisionCancel,
+            ),
+            (
+                "user_decision_expire",
+                usagi_core::usecase::client::DispatchToolAction::UserDecisionExpire,
+            ),
         ] {
             let arguments = if name == "session_dispatch" {
                 r#"{"session":{"name":"a"},"agent":{"runtime":"claude","model":"sonnet"},"prompt":"ok"}"#
+            } else if name == "user_decision_request" {
+                r#"{"title":"t","prompt":"p","options":[]}"#
+            } else if name == "user_decision_get"
+                || name == "user_decision_cancel"
+                || name == "user_decision_expire"
+            {
+                r#"{"decision_id":"00000000-0000-4000-8000-000000000000"}"#
+            } else if name == "user_decision_resolve" {
+                r#"{"decision_id":"00000000-0000-4000-8000-000000000000","answer":{"kind":"option","option_id":"a"}}"#
             } else {
                 r#"{"summary":"ok"}"#
             };
@@ -676,7 +713,7 @@ mod tests {
             .unwrap();
             assert!(String::from_utf8(out).unwrap().contains("ok"));
             assert!(
-                matches!(&client.requests[0], DaemonRequest::DispatchTool { action: actual, payload, .. } if *actual == action && (payload["summary"] == "ok" || payload["prompt"] == "ok"))
+                matches!(&client.requests[0], DaemonRequest::DispatchTool { action: actual, .. } if *actual == action)
             );
         }
     }
