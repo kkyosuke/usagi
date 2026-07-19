@@ -896,7 +896,10 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
-        // With no overlay open, a key the Home reducer never consumes is inert.
+        // With no overlay open, a key the Home reducer never consumes (raw
+        // passthrough) is dropped before the reducer, and a key it consumes but
+        // ignores here (Left, which only moves the Yes/No quit focus) is inert.
+        assert!(runtime.handle_key(Key::Passthrough(vec![0x1b])).is_empty());
         assert!(runtime.handle_key(Key::Left).is_empty());
         assert!(runtime.handle_key(Key::Down).is_empty());
         // Down selected the session; Enter now activates it.
