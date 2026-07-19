@@ -29,6 +29,10 @@ pub const SESSIONS_DIR: &str = "sessions";
 pub const DATA_DIR_ENV: &str = "USAGI_HOME";
 /// Directory created under the user's home directory by default.
 const DATA_DIR_NAME: &str = ".usagi";
+/// Directory created under the global data directory for debug builds.
+const DEVELOPMENT_DIR_NAME: &str = "develop";
+/// Debug data directory name used before [`DEVELOPMENT_DIR_NAME`].
+const LEGACY_DEVELOPMENT_DIR_NAME: &str = "development";
 
 /// The build channel used to isolate development runtime state from releases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,7 +57,9 @@ pub const fn build_channel() -> BuildChannel {
 ///
 /// `$USAGI_HOME` takes precedence; otherwise `~/.usagi` is used as the base.
 /// Debug builds append `develop/` to that base while release builds retain
-/// the base itself, preserving the established production location.
+/// the base itself, preserving the established production location.  When
+/// `develop/` does not exist yet, debug builds retain compatibility with the
+/// previous `development/` directory.
 ///
 /// # Errors
 ///
@@ -70,7 +76,15 @@ pub fn data_dir() -> Result<PathBuf> {
     };
     Ok(match build_channel() {
         BuildChannel::Production => base,
-        BuildChannel::Development => base.join("develop"),
+        BuildChannel::Development => {
+            let development = base.join(DEVELOPMENT_DIR_NAME);
+            let legacy = base.join(LEGACY_DEVELOPMENT_DIR_NAME);
+            if !development.exists() && legacy.is_dir() {
+                legacy
+            } else {
+                development
+            }
+        }
     })
 }
 
@@ -83,12 +97,11 @@ mod tests {
     fn data_dir_prefers_env_override_then_falls_back() {
         // Serialize $USAGI_HOME mutation against other globals-mutating tests.
         let _guard = crate::test_support::process_env_guard();
-        unsafe {
-            std::env::set_var(DATA_DIR_ENV, "/tmp/usagi-unit-home");
-        }
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(DATA_DIR_ENV, home.path()) };
         let expected = match build_channel() {
-            BuildChannel::Production => PathBuf::from("/tmp/usagi-unit-home"),
-            BuildChannel::Development => PathBuf::from("/tmp/usagi-unit-home/develop"),
+            BuildChannel::Production => home.path().to_path_buf(),
+            BuildChannel::Development => home.path().join(DEVELOPMENT_DIR_NAME),
         };
         assert_eq!(data_dir().unwrap(), expected);
 
@@ -102,6 +115,39 @@ mod tests {
             std::env::remove_var(DATA_DIR_ENV);
         }
         assert!(data_dir().unwrap().to_string_lossy().contains(".usagi"));
+    }
+
+    #[test]
+    fn data_dir_uses_the_legacy_development_directory_until_develop_exists() {
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(LEGACY_DEVELOPMENT_DIR_NAME)).unwrap();
+        unsafe { std::env::set_var(DATA_DIR_ENV, home.path()) };
+
+        let expected = match build_channel() {
+            BuildChannel::Production => home.path().to_path_buf(),
+            BuildChannel::Development => home.path().join(LEGACY_DEVELOPMENT_DIR_NAME),
+        };
+        assert_eq!(data_dir().unwrap(), expected);
+
+        unsafe { std::env::remove_var(DATA_DIR_ENV) };
+    }
+
+    #[test]
+    fn data_dir_prefers_develop_over_the_legacy_development_directory() {
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(LEGACY_DEVELOPMENT_DIR_NAME)).unwrap();
+        std::fs::create_dir(home.path().join(DEVELOPMENT_DIR_NAME)).unwrap();
+        unsafe { std::env::set_var(DATA_DIR_ENV, home.path()) };
+
+        let expected = match build_channel() {
+            BuildChannel::Production => home.path().to_path_buf(),
+            BuildChannel::Development => home.path().join(DEVELOPMENT_DIR_NAME),
+        };
+        assert_eq!(data_dir().unwrap(), expected);
+
+        unsafe { std::env::remove_var(DATA_DIR_ENV) };
     }
 
     #[test]
