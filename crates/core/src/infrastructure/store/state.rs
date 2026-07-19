@@ -1,7 +1,8 @@
 //! Persistence for a single repository's [`WorkspaceState`] — the sessions
 //! created under it and the workspace-root note scratchpad.
 //!
-//! The state lives inside the repository at `<repo>/.usagi/state.json`, a
+//! The state lives inside the repository's channel-specific runtime directory
+//! (`<repo>/.usagi/dev/state.json` for debug builds), a
 //! versioned JSON file written through a temp file + rename so a crash never
 //! leaves it half-written. `state.json` is read-modify-write (load, edit the
 //! session list, save the whole file), so mutations take the store lock across
@@ -13,13 +14,14 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::domain::workspace_state::WorkspaceState;
-use crate::infrastructure::paths::STATE_DIR;
+use crate::infrastructure::paths::project_data_dir;
 use crate::infrastructure::persistence::json_file;
 use crate::infrastructure::persistence::store_lock::StoreLock;
 
 const STATE_FILE: &str = "state.json";
 
-/// File-based persistence rooted at a repository's `.usagi/` directory.
+/// File-based persistence rooted at a repository's channel-specific runtime
+/// directory (`.usagi/dev/` for debug builds).
 pub struct WorkspaceStateStore {
     dir: PathBuf,
 }
@@ -29,7 +31,7 @@ impl WorkspaceStateStore {
     #[must_use]
     pub fn new(repo_root: impl AsRef<Path>) -> Self {
         Self {
-            dir: repo_root.as_ref().join(STATE_DIR),
+            dir: project_data_dir(repo_root),
         }
     }
 
@@ -110,10 +112,11 @@ mod tests {
     }
 
     #[test]
-    fn dir_and_state_path_point_under_usagi() {
+    fn dir_and_state_path_point_under_the_project_runtime_directory() {
         let store = WorkspaceStateStore::new("/repo");
-        assert_eq!(store.dir(), Path::new("/repo/.usagi"));
-        assert_eq!(store.state_path(), PathBuf::from("/repo/.usagi/state.json"));
+        let expected = crate::infrastructure::paths::project_data_dir("/repo");
+        assert_eq!(store.dir(), expected);
+        assert_eq!(store.state_path(), expected.join("state.json"));
     }
 
     #[test]

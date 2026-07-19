@@ -6,20 +6,22 @@
 //!   memory stores and the `.gitignore` writer join it. Lives next to the code
 //!   it describes and is committed with it.
 //! - **The global per-user data directory** ([`data_dir`]): the production
-//!   `$USAGI_HOME` / `~/.usagi`, or its `develop/` child for a debug build.
+//!   `$USAGI_HOME` / `~/.usagi`, or its `dev/` child for a debug build.
 //!   The channel split prevents `cargo run` from touching a released daemon's
 //!   endpoint, record, or owned state.
 //!
 //! The two share the `.usagi` basename by convention but are independent
 //! directories with different contents and lifetimes.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-/// The repository-relative directory holding usagi's per-project metadata
-/// (`issues/`, `memory/`, `state.json`, …): `<repo>/.usagi`.
+/// The repository-relative directory holding usagi's per-project metadata.
 pub const STATE_DIR: &str = ".usagi";
+
+/// The single directory name used for debug runtime state.
+pub const DEV_DIR: &str = "dev";
 
 /// The directory under [`STATE_DIR`] that holds session worktrees, one per
 /// session: `<repo>/.usagi/sessions/<name>`.
@@ -52,8 +54,8 @@ pub const fn build_channel() -> BuildChannel {
 /// Resolve the directory where usagi stores its per-user data.
 ///
 /// `$USAGI_HOME` takes precedence; otherwise `~/.usagi` is used as the base.
-/// Debug builds append `develop/` to that base while release builds retain
-/// the base itself, preserving the established production location.
+/// Debug builds append [`DEV_DIR`] to that base while release builds retain the
+/// base itself, preserving the established production location.
 ///
 /// # Errors
 ///
@@ -68,10 +70,33 @@ pub fn data_dir() -> Result<PathBuf> {
             .context("could not determine the home directory")?
             .join(DATA_DIR_NAME)
     };
-    Ok(match build_channel() {
-        BuildChannel::Production => base,
-        BuildChannel::Development => base.join("develop"),
-    })
+    Ok(channel_data_dir(base))
+}
+
+/// Resolve the build-channel-specific directory rooted at `base`.
+///
+/// Debug builds use `base/dev`; release builds use `base` unchanged. This is
+/// shared by global and project-local runtime state so their channel split
+/// cannot drift.
+#[must_use]
+pub fn channel_data_dir(base: impl AsRef<Path>) -> PathBuf {
+    channel_data_dir_for(base.as_ref(), build_channel())
+}
+
+fn channel_data_dir_for(base: &Path, channel: BuildChannel) -> PathBuf {
+    match channel {
+        BuildChannel::Production => base.to_path_buf(),
+        BuildChannel::Development => base.join(DEV_DIR),
+    }
+}
+
+/// Resolve the build-channel-specific runtime-state directory for a project.
+///
+/// Debug builds use `<project_root>/.usagi/dev`; release builds use
+/// `<project_root>/.usagi`.
+#[must_use]
+pub fn project_data_dir(project_root: impl AsRef<Path>) -> PathBuf {
+    channel_data_dir(project_root.as_ref().join(STATE_DIR))
 }
 
 #[cfg(test)]
@@ -83,12 +108,11 @@ mod tests {
     fn data_dir_prefers_env_override_then_falls_back() {
         // Serialize $USAGI_HOME mutation against other globals-mutating tests.
         let _guard = crate::test_support::process_env_guard();
-        unsafe {
-            std::env::set_var(DATA_DIR_ENV, "/tmp/usagi-unit-home");
-        }
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(DATA_DIR_ENV, home.path()) };
         let expected = match build_channel() {
-            BuildChannel::Production => PathBuf::from("/tmp/usagi-unit-home"),
-            BuildChannel::Development => PathBuf::from("/tmp/usagi-unit-home/develop"),
+            BuildChannel::Production => home.path().to_path_buf(),
+            BuildChannel::Development => home.path().join(DEV_DIR),
         };
         assert_eq!(data_dir().unwrap(), expected);
 
@@ -102,6 +126,28 @@ mod tests {
             std::env::remove_var(DATA_DIR_ENV);
         }
         assert!(data_dir().unwrap().to_string_lossy().contains(".usagi"));
+    }
+
+    #[test]
+    fn project_data_dir_uses_the_same_dev_directory_definition() {
+        let expected = match build_channel() {
+            BuildChannel::Production => PathBuf::from("/project/.usagi"),
+            BuildChannel::Development => PathBuf::from("/project/.usagi/dev"),
+        };
+        assert_eq!(project_data_dir("/project"), expected);
+    }
+
+    #[test]
+    fn channel_data_dir_for_separates_both_build_channels() {
+        let base = Path::new("/data");
+        assert_eq!(
+            channel_data_dir_for(base, BuildChannel::Production),
+            PathBuf::from("/data")
+        );
+        assert_eq!(
+            channel_data_dir_for(base, BuildChannel::Development),
+            PathBuf::from("/data/dev")
+        );
     }
 
     #[test]

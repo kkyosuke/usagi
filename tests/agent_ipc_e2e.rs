@@ -46,11 +46,7 @@ fn short_dir(prefix: &str) -> tempfile::TempDir {
 }
 
 fn channel_data_dir(home: &Path) -> PathBuf {
-    if cfg!(debug_assertions) {
-        home.join("develop")
-    } else {
-        home.to_path_buf()
-    }
+    usagi_core::infrastructure::paths::channel_data_dir(home)
 }
 
 fn git(repo: &Path, args: &[&str]) {

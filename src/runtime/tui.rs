@@ -1343,6 +1343,7 @@ mod tests {
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
     use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycle};
     use usagi_core::domain::settings::{ModalSelectionMode, Settings};
+    use usagi_core::infrastructure::paths::project_data_dir;
     use usagi_core::infrastructure::store::workspace::Storage;
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
     use usagi_tui::usecase::application::Key;
@@ -1576,8 +1577,8 @@ mod tests {
     #[test]
     fn workspace_state_loader_surfaces_a_malformed_state_file() {
         let workspace = tempfile::tempdir().unwrap();
-        let state_dir = workspace.path().join(".usagi");
-        std::fs::create_dir(&state_dir).unwrap();
+        let state_dir = project_data_dir(workspace.path());
+        std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::write(state_dir.join("state.json"), "{ broken").unwrap();
 
         let error = load_workspace_state(workspace.path()).unwrap_err();

@@ -256,6 +256,7 @@ mod tests {
     use crate::domain::session::{SessionOrigin, SessionRecord};
     use crate::domain::workspace::{Workspace, WorkspaceOverview};
     use crate::domain::workspace_state::WorkspaceState;
+    use crate::infrastructure::paths::project_data_dir;
     use crate::infrastructure::store::issue::IssueStore;
     use crate::infrastructure::store::state::WorkspaceStateStore;
     use crate::infrastructure::store::workspace::Storage;
@@ -540,8 +541,12 @@ mod tests {
                 workspace("broken", &broken_root, ts(9)),
             ])
             .unwrap();
-        fs::create_dir_all(broken_root.join(".usagi")).unwrap();
-        fs::write(broken_root.join(".usagi/state.json"), "{ broken").unwrap();
+        fs::create_dir_all(project_data_dir(&broken_root)).unwrap();
+        fs::write(
+            project_data_dir(&broken_root).join("state.json"),
+            "{ broken",
+        )
+        .unwrap();
         fs::write(broken_root.join(".usagi/issues"), "not a directory").unwrap();
 
         let items = recent(&storage).unwrap();

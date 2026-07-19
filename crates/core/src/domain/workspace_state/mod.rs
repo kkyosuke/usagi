@@ -1,5 +1,6 @@
 //! The `WorkspaceState` aggregate: everything usagi tracks for one workspace,
-//! persisted as `<repo>/.usagi/state.json`.
+//! persisted as build-channel-specific runtime state (`<repo>/.usagi/dev/state.json`
+//! for debug builds).
 //!
 //! A workspace is fully described by the sessions created under it, plus a note
 //! scratchpad attached to the workspace **root** (the `⌂ root` row, which belongs
