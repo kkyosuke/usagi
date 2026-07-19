@@ -45,7 +45,6 @@ pub enum Cell {
 }
 
 impl Cell {
-    #[coverage(off)]
     fn width(&self) -> usize {
         match self {
             Self::Glyph { width, .. } => usize::from(*width),
@@ -69,7 +68,6 @@ impl Frame {
     /// ANSI escape sequences consume no columns.  A glyph which would extend
     /// beyond the right edge is omitted as a whole, never split across cells.
     #[must_use]
-    #[coverage(off)]
     pub fn from_lines<I, S>(width: usize, height: usize, lines: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -89,21 +87,18 @@ impl Frame {
 
     /// Number of display columns.
     #[must_use]
-    #[coverage(off)]
     pub const fn width(&self) -> usize {
         self.width
     }
 
     /// Number of display rows.
     #[must_use]
-    #[coverage(off)]
     pub const fn height(&self) -> usize {
         self.height
     }
 
     /// The cell at `row`, `column`, if it belongs to this frame.
     #[must_use]
-    #[coverage(off)]
     pub fn cell(&self, row: usize, column: usize) -> Option<&Cell> {
         (row < self.height && column < self.width).then(|| &self.cells[row * self.width + column])
     }
@@ -111,12 +106,11 @@ impl Frame {
     /// The requested OS text-input cursor cell, if this frame has an active
     /// editable control.
     #[must_use]
-    #[coverage(off)]
     pub const fn input_cursor(&self) -> Option<(usize, usize)> {
         self.input_cursor
     }
 
-    #[coverage(off)]
+    #[coverage(off)] // Cursor precedence is covered through the terminal integration path.
     fn set_line(&mut self, row: usize, line: &str) {
         if self.width == 0 {
             return;
@@ -187,7 +181,6 @@ impl Frame {
         }
     }
 
-    #[coverage(off)]
     fn glyph_start(&self, row: usize, column: usize) -> usize {
         let mut column = column;
         while column > 0 && matches!(self.cell(row, column), Some(Cell::Continuation)) {
@@ -196,13 +189,12 @@ impl Frame {
         column
     }
 
-    #[coverage(off)]
     fn glyph_end(&self, row: usize, column: usize) -> usize {
         let start = self.glyph_start(row, column);
         start + self.cell(row, start).map_or(1, Cell::width)
     }
 
-    #[coverage(off)]
+    #[coverage(off)] // ANSI style reopening is covered by the renderer integration path.
     fn span_text(&self, row: usize, start: usize, end: usize) -> String {
         // The terminal keeps SGR state across cursor moves and across our
         // incremental writes. A diff span has no reliable knowledge of the
@@ -274,7 +266,6 @@ impl FrameRenderer {
     /// Creates a renderer without a base frame. Its first render clears and
     /// paints the entire supplied frame.
     #[must_use]
-    #[coverage(off)]
     pub const fn new() -> Self {
         Self {
             previous: None,
@@ -284,7 +275,6 @@ impl FrameRenderer {
 
     /// Invalidates the surface while preserving no terminal-specific state.
     /// The next [`Self::render`] clears the surface and repaints every row.
-    #[coverage(off)]
     pub fn reset_surface(&mut self) {
         self.reset_pending = true;
     }
@@ -293,7 +283,6 @@ impl FrameRenderer {
     /// A changed geometry is a resize: it discards the base and returns a full
     /// surface clear followed by complete-row spans.
     #[must_use]
-    #[coverage(off)]
     pub fn render(&mut self, next: Frame) -> FrameDiff {
         let full_repaint = self.reset_pending
             || self.previous.as_ref().is_none_or(|previous| {
@@ -318,7 +307,6 @@ impl FrameRenderer {
     }
 }
 
-#[coverage(off)]
 fn full_spans(frame: &Frame) -> Vec<Span> {
     (0..frame.height)
         .map(|row| Span {
@@ -329,7 +317,6 @@ fn full_spans(frame: &Frame) -> Vec<Span> {
         .collect()
 }
 
-#[coverage(off)]
 fn diff_spans(previous: &Frame, next: &Frame) -> Vec<Span> {
     let mut spans = Vec::new();
     for row in 0..next.height {
@@ -357,7 +344,6 @@ fn diff_spans(previous: &Frame, next: &Frame) -> Vec<Span> {
     spans
 }
 
-#[coverage(off)]
 fn expand_wide_glyph_changes(changed: &mut [bool], previous: &Frame, next: &Frame, row: usize) {
     loop {
         let mut expanded = false;
@@ -382,7 +368,6 @@ fn expand_wide_glyph_changes(changed: &mut [bool], previous: &Frame, next: &Fram
     }
 }
 
-#[coverage(off)]
 fn ansi_sequence(chars: &[char]) -> (String, usize) {
     if chars.len() < 2 || chars[1] != '[' {
         return (chars[0].to_string(), 1);
