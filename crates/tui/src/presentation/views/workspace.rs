@@ -768,7 +768,6 @@ fn git_diff_text(diff: &GitDiff, columns: SidebarDiffColumns, dim: bool) -> Stri
     }
 }
 
-#[coverage(off)]
 fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> {
     metrics.map_or_else(
         || {
@@ -802,7 +801,6 @@ fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> 
     )
 }
 
-#[coverage(off)]
 fn load_style(value: u64, busy: u64, hot: u64) -> Style {
     if value >= hot {
         Style::new().fg(Color::Red)
@@ -815,7 +813,6 @@ fn load_style(value: u64, busy: u64, hot: u64) -> Style {
     }
 }
 
-#[coverage(off)]
 fn format_memory(bytes: u64) -> String {
     if bytes >= GIBIBYTE {
         let gibibytes = bytes / GIBIBYTE;
@@ -1414,9 +1411,11 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHROME_ROWS, GitDiff, HomeProjection, LEFT_WIDTH, ProjectedSession, TerminalViewProjection,
-        Workspace, render_home, terminal_point_at, with_footer_gap,
+        CHROME_ROWS, GIBIBYTE, GitDiff, HomeProjection, LEFT_WIDTH, MEBIBYTE, ProjectedSession,
+        TerminalViewProjection, Workspace, format_memory, load_style, render_home,
+        terminal_point_at, with_footer_gap,
     };
+    use crate::presentation::theme::{Color, Style};
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{display_width, modal};
     use crate::usecase::application::controller::{
@@ -2496,5 +2495,39 @@ mod tests {
         assert_eq!(rendered, held_rendered);
         assert_ne!(rendered, advanced_rendered);
         assert_eq!(first, strip(&advanced_rendered));
+    }
+
+    #[test]
+    fn load_style_escalates_colour_at_the_busy_and_hot_thresholds() {
+        // Below `busy` the metric stays calm: an explicit dim white so it does not
+        // inherit the pink mascot foreground.
+        assert_eq!(
+            load_style(2_999, 3_000, 12_000),
+            Style::new().fg(Color::White).dim()
+        );
+        // At (and above) `busy` but below `hot` it warns in yellow.
+        assert_eq!(
+            load_style(3_000, 3_000, 12_000),
+            Style::new().fg(Color::Yellow)
+        );
+        assert_eq!(
+            load_style(11_999, 3_000, 12_000),
+            Style::new().fg(Color::Yellow)
+        );
+        // At (and above) `hot` it turns red.
+        assert_eq!(
+            load_style(12_000, 3_000, 12_000),
+            Style::new().fg(Color::Red)
+        );
+    }
+
+    #[test]
+    fn format_memory_switches_from_mebibytes_to_gibibytes() {
+        // Below one gibibyte the footprint reads in whole mebibytes.
+        assert_eq!(format_memory(45 * MEBIBYTE), "45MB");
+        // At a whole gibibyte the tenths digit is zero.
+        assert_eq!(format_memory(2 * GIBIBYTE), "2.0GB");
+        // A fractional gibibyte renders a single tenths digit.
+        assert_eq!(format_memory(GIBIBYTE + 5 * 107_374_183), "1.5GB");
     }
 }
