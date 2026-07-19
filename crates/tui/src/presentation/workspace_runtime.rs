@@ -802,9 +802,33 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let mut runtime = closeup_on(workspace, session);
-        assert!(runtime.handle_key(Key::Quit).is_empty());
+        // Ctrl-Q stays swallowed by the open overlay and raw passthrough is inert;
+        // neither leaves the Closeup action modal (unlike Escape / Ctrl-C).
+        assert!(runtime.handle_key(Key::CtrlQ).is_empty());
         assert!(runtime.handle_key(Key::Passthrough(vec![0x1b])).is_empty());
         assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
+    }
+
+    /// #355: the real-loop key translation exits the Closeup action modal to
+    /// Switch on both Escape and Ctrl-C (`Key::Quit`), dropping the persisted
+    /// modal so its caret never leaks into the next open.
+    #[test]
+    fn closeup_modal_escape_and_ctrl_c_exit_to_switch() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        for exit_key in [Key::Escape, Key::Quit] {
+            let mut runtime = closeup_on(workspace, session);
+            assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
+            assert!(runtime.closeup_modal().is_some());
+            let effects = runtime.handle_key(exit_key.clone());
+            assert!(effects.is_empty(), "{exit_key:?}");
+            assert!(
+                matches!(runtime.state().route(), Route::Home(HomeMode::Switch)),
+                "{exit_key:?}"
+            );
+            assert_eq!(runtime.state().overlay(), None, "{exit_key:?}");
+            assert!(runtime.closeup_modal().is_none(), "{exit_key:?}");
+        }
     }
 
     #[test]
@@ -824,11 +848,17 @@ mod tests {
         assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
         assert!(runtime.closeup_modal().is_some());
         assert!(!runtime.wants_live_input());
-        // Escape dismisses the forced modal and hands input back to the live pane.
+        // #355: Escape dismisses the forced modal and leaves Closeup for Switch
+        // (rather than handing input back to the live pane), so live passthrough
+        // stays disarmed until the session is re-activated.
         let _ = runtime.handle_key(Key::Escape);
+        assert!(matches!(
+            runtime.state().route(),
+            Route::Home(HomeMode::Switch)
+        ));
         assert_eq!(runtime.state().overlay(), None);
         assert!(runtime.closeup_modal().is_none());
-        assert!(runtime.wants_live_input());
+        assert!(!runtime.wants_live_input());
     }
 
     #[test]

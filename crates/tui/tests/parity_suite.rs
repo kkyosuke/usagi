@@ -413,7 +413,18 @@ fn controller_closeup_prefix_and_tab_gating_match_live_model() {
             .join("\n")
             .contains("Closeup: alpha")
     );
+    // #355: Escape on the tab-less action modal exits Closeup to Switch.
     let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    assert_eq!(
+        state.route(),
+        usagi_tui::usecase::application::controller::Route::Home(
+            usagi_tui::usecase::application::controller::HomeMode::Switch
+        )
+    );
+    assert_eq!(state.overlay(), None);
+
+    // Re-activate the session to exercise the live pane surface.
+    let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
     assert_eq!(state.overlay(), Some(Overlay::Closeup));
 
     // 4: once a pane is available the tab surface is frontmost.
@@ -446,10 +457,8 @@ fn controller_closeup_prefix_and_tab_gating_match_live_model() {
             direction: TabDirection::Previous,
         }]
     );
-    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
-    assert_eq!(state.overlay(), None);
 
-    // 2: the Switch action clears a forced overlay as well as changing mode.
+    // 2: Ctrl-O clears a forced overlay as well as changing mode.
     assert!(update(&mut state, AppEvent::Key(AppKey::CtrlO)).is_empty());
     assert_eq!(
         state.route(),

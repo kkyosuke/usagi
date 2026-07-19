@@ -89,7 +89,10 @@ Home controller の management input では、Switch の `Ctrl-A` は新規 sess
 選択中の `x` は `session remove`、`Shift`+`x`（`X`）は `session remove -f` を実行する。root と `+ new session`
 行では削除しない。`Ctrl-Q` は workspace 終了確認を開く。Switch の `Ctrl-C` は何もしない。Closeup の live pane は `Ctrl-O` prefix 以外の
 入力を所有するため、同じ control bytes は management transition に渡さない。Closeup の `Ctrl-O o` は
-Switch へ戻り、Switch 中の `Ctrl-O` は単体では mode を変えない。
+Switch へ戻り、Switch 中の `Ctrl-O` は単体では mode を変えない。Closeup action modal が前面にある間の `Esc` /
+`Ctrl-C` は、`Ctrl-O o` と同じく modal を閉じて Switch へ戻る（live pane の有無に依らない）。overlay を開いて
+いない Closeup の live pane 上の `Ctrl-C` が終了確認を開く契約はそのままで、他 overlay の `Ctrl-C` / `Esc`
+契約も変えない。
 
 左 sidebar の実 session 行は、左クリックで cursor を移し、同じ行を 400ms 以内にダブルクリックすると
 その session の Closeup を開く。root・`+ new session`・divider・mascot・footer はこの操作の対象外であり、
@@ -232,8 +235,9 @@ pending tab がある間は action modal を自動表示せず、その wave を
 `Ctrl-O Ctrl-A` を実行した場合は、選択 target の Closeup action を開いて modal に input を渡す。tab が 1 枚も無い
 Closeup は action modal が management input を所有し、Enter で `agent` / `terminal` を確定できる。tab が 1 つ以上で
 forced state が無い Closeup は tab が input を所有し、action modal は自動表示しない。tab があるときに action modal
-を再び出すのは `Ctrl-O Ctrl-A` だけで、その forced 表示は Esc で閉じて tab に戻る（Closeup から Switch へは抜けない）。
-modal が所有する間、tab selection、close、terminal passthrough は dispatch しない。
+を再び出すのは `Ctrl-O Ctrl-A` だけである。action modal が前面にある間の `Esc` / `Ctrl-C` は、tab の有無や forced
+表示か base surface かに依らず、modal を閉じて Switch へ戻る（`Ctrl-O Ctrl-O` と同じ着地で、action picker を dead-end に
+しない）。modal が所有する間、tab selection、close、terminal passthrough は dispatch しない。
 
 Closeup action で `agent`、`terminal`、または `diff` を確定すると、同じ pending tab を即座に一覧へ表示する。completion まで
 入力がなければ completion はその tab を選択して live / document tab に置換し、入力があれば自動選択を取り消す。この focus は
