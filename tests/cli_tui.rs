@@ -5,6 +5,12 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::sync::Mutex;
+
+/// Daemon lifecycle tests spawn the same test binary as a background daemon.
+/// Serialize those starts so parallel integration tests cannot race its process
+/// discovery and readiness publication on a loaded CI runner.
+static DAEMON_LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
 
 fn short_home() -> tempfile::TempDir {
     // A Unix-domain socket includes the data directory, generation, and socket
@@ -67,6 +73,9 @@ fn stdout(output: &Output) -> String {
 
 #[test]
 fn welcome_entry_renders_the_welcome_screen() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     // 引数なしと `hop` はどちらも welcome 画面を選ぶ。テストでは stdout が tty でないため、
     // 合成ルートは対話ループの代わりに welcome の 1 フレームを描いて返す。
     let home = short_home();
@@ -99,6 +108,9 @@ fn daemon_status_reports_not_running_with_a_fresh_data_dir() {
 
 #[test]
 fn cli_daemon_request_autostarts_without_manual_daemon_start() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     // This integration test owns the lifecycle contract.  Command payload
     // rendering is covered at the CLI/IPC boundary, and can legitimately
     // differ between accepted and immediately completed requests.
@@ -123,6 +135,9 @@ fn cli_daemon_request_autostarts_without_manual_daemon_start() {
 
 #[test]
 fn mcp_autostarts_without_manual_daemon_start() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let home = short_home();
     let mut child = Command::new(env!("CARGO_BIN_EXE_usagi"))
         .arg("mcp")
