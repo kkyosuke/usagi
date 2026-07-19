@@ -589,6 +589,13 @@ mod tests {
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
+        // While live, the scrollback projection includes the cursor row (this is
+        // what the controller's live-terminal viewport polls each frame).
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(
+            session.display_rows_with_scrollback(),
+            session.screen.rows_with_scrollback_and_cursor()
+        );
         session.state = SessionState::Exited;
         assert_eq!(
             session.display_rows_with_scrollback(),

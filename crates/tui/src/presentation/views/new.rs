@@ -106,6 +106,10 @@ pub struct New {
     name_dirty: bool,
 
     notice: Option<String>,
+    /// Directory-path fields に対して Tab が見つけた候補。繰り返し Tab を押すとこの順に
+    /// 入力欄へ反映する。
+    directory_matches: Vec<String>,
+    directory_match_index: usize,
 }
 
 impl New {
@@ -205,18 +209,24 @@ impl New {
     pub fn toggle_mode(&mut self) {
         self.mode = self.mode.other();
         self.focus_index = 0;
+        self.directory_matches.clear();
+        self.directory_match_index = 0;
     }
 
     /// フォーカスを次のフィールドへ（末尾で先頭へ回り込む）。
     pub fn focus_next(&mut self) {
         let len = self.mode.fields().len();
         self.focus_index = (self.focus_index + 1) % len;
+        self.directory_matches.clear();
+        self.directory_match_index = 0;
     }
 
     /// フォーカスを前のフィールドへ（先頭で末尾へ回り込む）。
     pub fn focus_prev(&mut self) {
         let len = self.mode.fields().len();
         self.focus_index = (self.focus_index + len - 1) % len;
+        self.directory_matches.clear();
+        self.directory_match_index = 0;
     }
 
     /// フォーカス中フィールドのキャレット位置に 1 文字挿入する。モード選択では何もしない。
@@ -226,6 +236,63 @@ impl New {
             input.insert(c);
         }
         self.after_edit(field);
+    }
+
+    /// Clone の Location または Existing の Directory を、ファイルシステム上の子
+    /// ディレクトリで補完する。候補は常に入力欄へ反映し、複数あるときは繰り返し Tab を押すと
+    /// 次の候補へ切り替わる。
+    pub fn complete_directory(&mut self) {
+        let field = self.focus();
+        if !matches!(field, Field::Location | Field::Path) {
+            self.focus_next();
+            return;
+        }
+
+        if !self.directory_matches.is_empty() {
+            self.directory_match_index =
+                (self.directory_match_index + 1) % self.directory_matches.len();
+            self.apply_directory_match(field);
+            return;
+        }
+
+        let value = self.focused_input().map_or("", TextInput::value);
+        let (parent, prefix) = directory_completion_base(value);
+        let Ok(entries) = std::fs::read_dir(&parent) else {
+            self.directory_matches.clear();
+            self.directory_match_index = 0;
+            return;
+        };
+
+        let mut matches = entries
+            .flatten()
+            .filter_map(|entry| entry.file_type().ok()?.is_dir().then(|| entry.file_name()))
+            .filter_map(|name| name.into_string().ok())
+            .filter(|name| name.starts_with(&prefix))
+            .map(|name| format_directory_candidate(value, &parent, &name))
+            .collect::<Vec<_>>();
+        matches.sort();
+
+        self.directory_matches = matches;
+        self.directory_match_index = 0;
+        self.apply_directory_match(field);
+    }
+
+    /// 選択中の補完候補を入力欄へ反映する。これはユーザーが入力した文字ではないので、候補列は
+    /// 保持して次の Tab で巡回できるようにする。
+    fn apply_directory_match(&mut self, field: Field) {
+        let Some(candidate) = self
+            .directory_matches
+            .get(self.directory_match_index)
+            .cloned()
+        else {
+            return;
+        };
+        if let Some(input) = self.field_mut(field) {
+            input.set_value(format!("{candidate}/"));
+        }
+        if field == Field::Path {
+            self.sync_name();
+        }
     }
 
     /// フォーカス中フィールドのキャレット手前の 1 文字を削除する。
@@ -282,6 +349,8 @@ impl New {
     /// 導出する。ディレクトリ・名前は手編集済みか（非空 ⇒ dirty）を追い、空にすると自動導出へ
     /// 戻る（エディタが候補を復活させる挙動に合わせる）。
     fn after_edit(&mut self, field: Field) {
+        self.directory_matches.clear();
+        self.directory_match_index = 0;
         match field {
             Field::Url => self.sync_directory(),
             Field::Directory => self.directory_dirty = !self.directory.is_empty(),
@@ -307,6 +376,31 @@ impl New {
         }
         self.name.set_value(suggest_name(self.path.value()));
     }
+}
+
+/// Split a partially entered path into the directory to enumerate and the child-name prefix.
+fn directory_completion_base(value: &str) -> (std::path::PathBuf, String) {
+    let path = std::path::Path::new(value);
+    if value.ends_with(std::path::MAIN_SEPARATOR) {
+        return (path.to_path_buf(), String::new());
+    }
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let prefix = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    (parent.to_path_buf(), prefix)
+}
+
+/// Preserve the user's relative/absolute spelling while appending a matching child directory.
+fn format_directory_candidate(value: &str, parent: &std::path::Path, name: &str) -> String {
+    if value.ends_with(std::path::MAIN_SEPARATOR) {
+        return format!("{value}{name}");
+    }
+    if parent == std::path::Path::new(".") {
+        return name.to_owned();
+    }
+    parent.join(name).to_string_lossy().into_owned()
 }
 
 /// リポジトリ URL から作成ディレクトリ名を提案する: 末尾のパス要素から `.git` を除いたもの。
@@ -495,6 +589,8 @@ fn notice_lines(block_pad: &str, notice: Option<&str>) -> Vec<String> {
 fn footer_hint(state: &New) -> &'static str {
     if state.focus() == Field::Mode {
         "←→: switch type / ↑↓/Tab: move field / Enter: create / Esc: back"
+    } else if matches!(state.focus(), Field::Location | Field::Path) {
+        "Tab: complete directory / ←→: move caret / ↑↓: move field / Enter: create / Esc: back"
     } else {
         "←→: move caret / ↑↓/Tab: move field / Enter: create / Esc: back"
     }
@@ -524,7 +620,10 @@ pub fn render(raw_height: usize, raw_width: usize, state: &New) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Field, Mode, New, render, suggest_directory, suggest_name};
+    use super::{
+        Field, Mode, New, directory_completion_base, format_directory_candidate, render,
+        suggest_directory, suggest_name,
+    };
 
     fn strip(line: &str) -> String {
         let mut out = String::new();
@@ -725,6 +824,104 @@ mod tests {
     }
 
     #[test]
+    fn directory_completion_preserves_relative_paths_and_splits_the_typed_prefix() {
+        assert_eq!(
+            directory_completion_base("/tmp/pro"),
+            (std::path::PathBuf::from("/tmp"), "pro".to_owned())
+        );
+        assert_eq!(
+            directory_completion_base("/tmp/"),
+            (std::path::PathBuf::from("/tmp/"), String::new())
+        );
+        assert_eq!(
+            format_directory_candidate("pro", std::path::Path::new("."), "project"),
+            "project"
+        );
+    }
+
+    #[test]
+    fn tab_completion_inserts_one_directory_and_cycles_multiple_matches() {
+        let temporary = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temporary.path().join("alpha")).unwrap();
+
+        let mut state = New::default();
+        state.toggle_mode();
+        state.focus_next(); // Path
+        type_str(&mut state, &temporary.path().join("al").to_string_lossy());
+        state.complete_directory();
+        assert_eq!(
+            state.path(),
+            format!("{}/", temporary.path().join("alpha").display())
+        );
+
+        std::fs::create_dir(temporary.path().join("alpine")).unwrap();
+        state = New::default();
+        state.toggle_mode();
+        state.focus_next(); // Path
+        type_str(&mut state, &temporary.path().join("al").to_string_lossy());
+        state.complete_directory();
+        assert_eq!(
+            state.path(),
+            format!("{}/", temporary.path().join("alpha").display())
+        );
+        state.complete_directory();
+        assert_eq!(
+            state.path(),
+            format!("{}/", temporary.path().join("alpine").display())
+        );
+        state.complete_directory();
+        assert_eq!(
+            state.path(),
+            format!("{}/", temporary.path().join("alpha").display())
+        );
+    }
+
+    #[test]
+    fn tab_completion_moves_non_directory_fields_and_handles_missing_or_empty_matches() {
+        let mut state = New::default();
+        // Tab on a non-directory field retains the form's ordinary field navigation.
+        state.complete_directory();
+        assert_eq!(state.focus(), Field::Url);
+
+        state.toggle_mode();
+        state.focus_next(); // Path
+        let temporary = tempfile::tempdir().unwrap();
+        std::fs::write(temporary.path().join("alpha-file"), "not a directory").unwrap();
+        type_str(
+            &mut state,
+            &temporary.path().join("alpha").to_string_lossy(),
+        );
+        state.complete_directory();
+        assert_eq!(
+            state.path(),
+            temporary.path().join("alpha").display().to_string()
+        );
+
+        state = New::default();
+        state.toggle_mode();
+        state.focus_next(); // Path
+        type_str(&mut state, "/path/that/does/not/exist/");
+        state.complete_directory();
+        assert_eq!(state.path(), "/path/that/does/not/exist/");
+    }
+
+    #[test]
+    fn tab_completion_handles_a_trailing_separator() {
+        let temporary = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temporary.path().join("child")).unwrap();
+
+        let mut state = New::default();
+        state.toggle_mode();
+        state.focus_next(); // Path
+        type_str(&mut state, &format!("{}/", temporary.path().display()));
+        state.complete_directory();
+        assert_eq!(
+            state.path(),
+            format!("{}/", temporary.path().join("child").display())
+        );
+    }
+
+    #[test]
     fn render_combines_every_section_in_clone_mode() {
         let mut state = New::default();
         state.focus_next(); // Url
@@ -804,6 +1001,15 @@ mod tests {
         state.focus_next(); // Url
         let frame = render(40, 80, &state);
         assert!(strip(frame.last().unwrap()).contains("move caret"));
+    }
+
+    #[test]
+    fn footer_names_directory_completion_on_a_directory_field() {
+        let mut state = New::default();
+        state.toggle_mode();
+        state.focus_next(); // Existing Directory
+        let frame = render(40, 80, &state);
+        assert!(strip(frame.last().unwrap()).contains("complete directory"));
     }
 
     #[test]

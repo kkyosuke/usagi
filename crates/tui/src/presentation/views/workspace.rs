@@ -22,16 +22,16 @@ use crate::presentation::layouts::panes;
 use crate::presentation::theme::{Color, Role, Style};
 use crate::presentation::views::closeup_modal::CloseupModal;
 use crate::presentation::views::decision_modal;
+use crate::presentation::views::pr_modal::{self, PrModal};
+use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
 use crate::presentation::widgets;
-use crate::presentation::widgets::TextInput;
 use crate::usecase::application::controller::{
-    AppState, Feedback, HomeMode, Selection, Target, TargetPhase,
+    AppState, Feedback, HomeMode, PrOverlay, PreviewOverlay, Selection, Target, TargetPhase,
 };
 use crate::usecase::application::pane::{
-    self, PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
+    PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
 };
-use crate::usecase::application::terminal_selection::TerminalPoint;
-use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId};
+use usagi_core::domain::id::{SessionId, WorkspaceId};
 
 /// 左ペイン（session menu）の希望表示幅。ここだけを変更して sidebar 幅を調整する。
 const LEFT_WIDTH: usize = 36;
@@ -47,13 +47,6 @@ const CPU_ICON: char = '\u{f2db}';
 const MEMORY_ICON: char = '\u{f233}';
 const MEBIBYTE: u64 = 1_048_576;
 const GIBIBYTE: u64 = 1_073_741_824;
-
-/// Returns the first screen column owned by the right pane.
-#[must_use]
-pub fn right_pane_left(raw_width: usize) -> usize {
-    let (_, width) = widgets::normalize_size(0, raw_width);
-    panes::split(width, LEFT_WIDTH).left.saturating_add(1)
-}
 
 /// Returns the PTY viewport that is visible inside the right-hand pane.
 #[must_use]
@@ -180,6 +173,10 @@ pub struct HomeProjection {
     closeup_action_visible: bool,
     decision_overlay: Option<crate::usecase::application::controller::DecisionOverlayState>,
     decisions: Vec<usagi_core::domain::user_decision::UserDecision>,
+    /// Open Pull Request overlay projection, drawn above the sidebar/pane frame.
+    pr_overlay: Option<PrOverlay>,
+    /// Open Markdown preview overlay projection, drawn above the frame.
+    preview_overlay: Option<PreviewOverlay>,
 }
 
 /// Home の右ペインに投影する tab strip の 1 項目。
@@ -238,6 +235,8 @@ impl HomeProjection {
                     == Some(crate::usecase::application::controller::Overlay::Closeup)),
             decision_overlay: state.decision_overlay().cloned(),
             decisions: state.decisions().to_vec(),
+            pr_overlay: state.pr_overlay().cloned(),
+            preview_overlay: state.preview_overlay().cloned(),
         }
     }
 
@@ -402,73 +401,40 @@ impl Mode {
         }
     }
 }
-
-/// 右ペインの 1 タブ。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Tab {
-    /// タブのラベル。
-    pub label: &'static str,
-}
-
-/// Workspace 画面の状態。左ペインは root 行を先頭に、[`WorkspaceState`] のセッション群を
-/// 選択できる。右ペインのタブは Switch / Closeup のどちらでも切り替えられる。
+/// Daemon-authoritative session cache backing the controller Home projection.
+///
+/// Home row state, selection, input, and rendering live in the controller
+/// (`AppState`/`render_home`); this view only holds the registry record, the
+/// session records and their stable identities, and the non-persistent metrics
+/// and Git observations the runtime refreshes each frame.
 #[derive(Debug, Clone)]
 pub struct Workspace {
     record: WorkspaceRecord,
     state: WorkspaceState,
-    mode: Mode,
-    /// 選択行。`0` は root 行、`1..=sessions.len()` は session 行、末尾は作成 action 行。
-    selected: usize,
-    pane_owner: WorkspaceId,
     /// Stable daemon session identities, aligned with `state.sessions`.
     session_ids: Vec<SessionId>,
-    /// Pane state belongs to a selected target, never to the whole workspace.
-    /// The legacy view still projects sessions by name, so the name is used only
-    /// as the local map key; daemon operations retain their fenced identities.
-    panes: BTreeMap<String, PaneState>,
-    /// Completed read-only pane documents, keyed by their durable operation.
-    pane_documents: BTreeMap<OperationId, Vec<String>>,
-    /// The user-interaction counter captured when a pane launch was requested.
-    /// A completion may take focus only while this remains unchanged, matching
-    /// the session-create landing rule.
-    pane_focus_at_request: BTreeMap<OperationId, u64>,
-    interaction_count: u64,
-    /// daemon で作成中の session。実 record が届くまで sidebar に skeleton として置く。
-    pending_session: Option<String>,
-    /// `+ new session` を置き換える v1-style inline name editor。
-    create_input: Option<TextInput>,
-    create_error: Option<String>,
     /// 最新の daemon observation。永続 workspace state には保存しない。
     metrics: Option<DaemonMetrics>,
     /// Non-persistent, asynchronously refreshed Git observations by stable ID.
     git_diffs: BTreeMap<SessionId, GitDiff>,
-    /// 選択中 live terminal tab の描画済み screen 行。runtime が redraw ごとに
-    /// daemon から poll した内容を投影する presentation-only の値。
-    terminal_view: Option<Vec<String>>,
-    /// Number of retained terminal rows kept below the viewport. Zero follows
-    /// live output; this belongs to the selected target's presentation state.
-    terminal_scroll: usize,
-    terminal_feedback: Option<String>,
 }
 
 impl Workspace {
-    /// core の workspace とその永続化済み状態から画面状態を作る。
+    /// core の workspace とその永続化済み状態からセッションキャッシュを作る。
     #[must_use]
     #[coverage(off)]
     pub fn new(workspace: WorkspaceRecord, state: WorkspaceState) -> Self {
         let session_ids = state.sessions.iter().map(|_| SessionId::new()).collect();
-        Self::with_runtime_ids(workspace, state, WorkspaceId::new(), session_ids)
+        Self::with_runtime_ids(workspace, state, session_ids)
     }
 
-    /// Build a workspace view from daemon-authoritative workspace and session
-    /// identities. These identities fence pane requests and completions; names
-    /// remain display-only map keys for the legacy view projection.
+    /// Build the cache from daemon-authoritative workspace state and session
+    /// identities. The identities fence pane requests and completions.
     #[must_use]
     #[coverage(off)]
     pub fn with_runtime_ids(
         workspace: WorkspaceRecord,
         state: WorkspaceState,
-        pane_owner: WorkspaceId,
         session_ids: Vec<SessionId>,
     ) -> Self {
         let session_ids = if session_ids.len() == state.sessions.len() {
@@ -476,35 +442,12 @@ impl Workspace {
         } else {
             state.sessions.iter().map(|_| SessionId::new()).collect()
         };
-        let mut panes = BTreeMap::from([(
-            String::new(),
-            PaneState::new(PaneSelection::Target(Target::Root(pane_owner))),
-        )]);
-        for session in &state.sessions {
-            panes.insert(
-                session.name.clone(),
-                PaneState::new(PaneSelection::Target(Target::Root(pane_owner))),
-            );
-        }
         Self {
             record: workspace,
             state,
-            mode: Mode::Switch,
-            selected: 0,
-            pane_owner,
             session_ids,
-            panes,
-            pane_documents: BTreeMap::new(),
-            pane_focus_at_request: BTreeMap::new(),
-            interaction_count: 0,
-            pending_session: None,
-            create_input: None,
-            create_error: None,
             metrics: None,
             git_diffs: BTreeMap::new(),
-            terminal_view: None,
-            terminal_scroll: 0,
-            terminal_feedback: None,
         }
     }
 
@@ -537,17 +480,15 @@ impl Workspace {
     }
 
     /// Replace only the sidebar's session projection from a daemon lifecycle
-    /// snapshot.  The legacy workspace state remains read-only auxiliary data.
-    /// A removed selected row safely falls back to root; a same-name recreated
-    /// row is treated as the snapshot's current incarnation.
+    /// snapshot. The persisted workspace state remains read-only auxiliary data.
     #[coverage(off)]
     pub fn replace_sessions(&mut self, sessions: Vec<SessionRecord>) {
         self.replace_sessions_and_ids(sessions, None);
     }
 
-    /// Replace sidebar rows and their daemon-issued runtime identities from
-    /// one lifecycle snapshot.  The vectors are aligned by snapshot order;
-    /// names remain display-only and are never used to recover an identity.
+    /// Replace sidebar rows and their daemon-issued runtime identities from one
+    /// lifecycle snapshot. The vectors are aligned by snapshot order; names
+    /// remain display-only and are never used to recover an identity.
     #[coverage(off)]
     pub fn replace_sessions_with_runtime_ids(
         &mut self,
@@ -563,51 +504,11 @@ impl Workspace {
         sessions: Vec<SessionRecord>,
         session_ids: Option<Vec<SessionId>>,
     ) {
-        let selected_name = self.focused_session().map(|session| session.name.clone());
-        // `pane()` is a read-only projection used by every render. Keep its
-        // per-session state map in lockstep with the daemon-owned snapshot before
-        // exposing a newly-created row to selection; otherwise selecting that row
-        // makes `pane()` look up a key that was never initialized and panics.
-        self.panes.retain(|name, _| {
-            name.is_empty() || sessions.iter().any(|session| session.name == *name)
-        });
-        for session in &sessions {
-            self.panes.entry(session.name.clone()).or_insert_with(|| {
-                PaneState::new(PaneSelection::Target(Target::Root(self.pane_owner)))
-            });
-        }
         self.state.sessions = sessions;
         if let Some(session_ids) = session_ids {
             debug_assert_eq!(session_ids.len(), self.state.sessions.len());
             self.session_ids = session_ids;
         }
-        self.selected = selected_name
-            .and_then(|name| {
-                self.state
-                    .sessions
-                    .iter()
-                    .position(|session| session.name == name)
-            })
-            .map_or(0, |index| index + 1);
-    }
-
-    /// 新しい session を作成する間、sidebar に非選択の skeleton 行を表示する。
-    #[coverage(off)]
-    pub fn begin_pending_session(&mut self, name: String) {
-        self.pending_session = Some(name);
-    }
-
-    /// session 作成の skeleton を取り除く。
-    #[coverage(off)]
-    pub fn clear_pending_session(&mut self) {
-        self.pending_session = None;
-    }
-
-    /// 作成中の session 名。skeleton の描画だけが利用する。
-    #[must_use]
-    #[coverage(off)]
-    pub fn pending_session(&self) -> Option<&str> {
-        self.pending_session.as_deref()
     }
 
     /// Replaces the daemon-observed metrics shown in the sidebar footer area.
@@ -636,575 +537,15 @@ impl Workspace {
         &self.git_diffs
     }
 
-    fn git_diff(&self, index: usize) -> Option<&GitDiff> {
-        self.session_ids
-            .get(index)
-            .and_then(|id| self.git_diffs.get(id))
-    }
-
     /// The workspace record passed to the daemon lifecycle command port.
     #[must_use]
     #[coverage(off)]
     pub fn record(&self) -> &WorkspaceRecord {
         &self.record
     }
-
-    /// The selected session record, if the root row is not selected.
-    #[must_use]
-    #[coverage(off)]
-    pub fn selected_session(&self) -> Option<&SessionRecord> {
-        self.focused_session()
-    }
-
-    /// Stable daemon identity of the focused session, if a session is selected.
-    #[must_use]
-    #[coverage(off)]
-    pub fn focused_session_id(&self) -> Option<SessionId> {
-        self.selected
-            .checked_sub(1)
-            .and_then(|index| self.session_ids.get(index).copied())
-    }
-
-    /// 現在の操作 mode。
-    #[must_use]
-    #[coverage(off)]
-    pub fn mode(&self) -> Mode {
-        self.mode
-    }
-
-    /// 選択中の session を操作する Closeup へ移る。
-    ///
-    /// session と tab の選択位置はそのまま維持する。
-    #[coverage(off)]
-    pub fn enter_closeup(&mut self) {
-        self.mode = Mode::Closeup;
-    }
-
-    /// session 一覧を操作する Switch へ戻る。
-    ///
-    /// session と tab の選択位置はそのまま維持する。
-    #[coverage(off)]
-    pub fn enter_switch(&mut self) {
-        self.mode = Mode::Switch;
-    }
-
-    /// application controller の Home mode を既存 view の表示 state に反映する。
-    ///
-    /// controller が selected / active の source of truth へ育つまで、既存 Workspace
-    /// view の session・tab state はそのまま保持する最小の adapter である。
-    #[coverage(off)]
-    pub fn apply_home_mode(&mut self, mode: HomeMode) {
-        self.mode = match mode {
-            HomeMode::Switch => Mode::Switch,
-            HomeMode::Closeup => Mode::Closeup,
-        };
-    }
-
-    /// タブ一覧。
-    #[must_use]
-    #[coverage(off)]
-    pub fn tabs(&self) -> &[Tab] {
-        &[]
-    }
-
-    /// 選択行の添字（`0` は root 行）。
-    #[must_use]
-    #[coverage(off)]
-    pub fn selected(&self) -> usize {
-        self.selected
-    }
-
-    /// アクティブなタブの添字。
-    #[must_use]
-    #[coverage(off)]
-    pub fn active_tab(&self) -> usize {
-        0
-    }
-
-    /// root 行を選択しているか。
-    #[must_use]
-    #[coverage(off)]
-    pub fn root_selected(&self) -> bool {
-        self.selected == 0
-    }
-
-    /// `+ new session` action row が選択されているか。
-    #[must_use]
-    #[coverage(off)]
-    pub fn new_session_selected(&self) -> bool {
-        self.selected == self.state.sessions.len() + 1
-    }
-
-    /// Move the sidebar cursor to the persistent `+ new session` row.
-    #[coverage(off)]
-    pub fn select_new_session(&mut self) {
-        self.selected = self.state.sessions.len() + 1;
-    }
-
-    /// Select a sidebar row resolved from a pointer hit test. Out-of-range
-    /// indices are ignored so a stale frame can never select a different row.
-    #[coverage(off)]
-    pub fn select_row(&mut self, index: usize) {
-        if index < self.row_count() {
-            self.selected = index;
-        }
-    }
-
-    #[must_use]
-    #[coverage(off)]
-    pub fn creating_session_inline(&self) -> bool {
-        self.create_input.is_some()
-    }
-
-    #[must_use]
-    #[coverage(off)]
-    pub fn inline_create_value(&self) -> Option<&str> {
-        self.create_input.as_ref().map(TextInput::value)
-    }
-
-    #[coverage(off)]
-    pub fn begin_inline_session_create(&mut self, first: Option<char>) {
-        let mut input = TextInput::default();
-        if let Some(character) = first {
-            input.insert(character);
-        }
-        self.create_input = Some(input);
-        self.revalidate_inline_session_create();
-    }
-
-    #[coverage(off)]
-    pub fn cancel_inline_session_create(&mut self) {
-        self.create_input = None;
-        self.create_error = None;
-    }
-
-    #[coverage(off)]
-    pub fn inline_create_insert(&mut self, character: char) {
-        if let Some(input) = &mut self.create_input {
-            input.insert(character);
-            self.revalidate_inline_session_create();
-        }
-    }
-
-    #[coverage(off)]
-    pub fn inline_create_backspace(&mut self) {
-        if let Some(input) = &mut self.create_input {
-            input.backspace();
-            self.revalidate_inline_session_create();
-        }
-    }
-
-    #[coverage(off)]
-    pub fn inline_create_move(&mut self, right: bool) {
-        if let Some(input) = &mut self.create_input {
-            if right {
-                input.move_right();
-            } else {
-                input.move_left();
-            }
-        }
-    }
-
-    pub fn inline_create_name(&mut self) -> Option<String> {
-        let name = self.create_input.as_ref()?.value().trim().to_owned();
-        if name.is_empty() {
-            self.create_error = Some("session name is required".to_owned());
-            None
-        } else if let Some(error) = self.inline_session_name_error(&name) {
-            self.create_error = Some(error);
-            None
-        } else {
-            Some(name)
-        }
-    }
-
-    /// Refresh the inline error after each edit. An empty draft is intentionally
-    /// quiet; Enter supplies the required-name message instead.
-    fn revalidate_inline_session_create(&mut self) {
-        let error = self
-            .create_input
-            .as_ref()
-            .and_then(|input| self.inline_session_name_error(input.value()));
-        self.create_error = error;
-    }
-
-    /// The daemon accepts only a short, filesystem-safe session identifier.
-    /// Keep the local feedback in lockstep with that request schema, and use the
-    /// current sidebar snapshot to catch duplicate managed sessions before a
-    /// request is sent. Stale branches/worktrees remain daemon-authoritative.
-    fn inline_session_name_error(&self, value: &str) -> Option<String> {
-        let name = value.trim();
-        if name.is_empty() {
-            return None;
-        }
-        if name.len() > 64 {
-            return Some("session name must be 64 characters or fewer".to_owned());
-        }
-        if !name
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-        {
-            return Some(
-                "session name may contain only letters, numbers, hyphens, and underscores"
-                    .to_owned(),
-            );
-        }
-        if self
-            .state
-            .sessions
-            .iter()
-            .any(|session| session.name == name)
-        {
-            return Some(format!("session \"{name}\" already exists"));
-        }
-        None
-    }
-
-    #[coverage(off)]
-    pub fn fail_inline_session_create(&mut self, error: String) {
-        self.create_error = Some(error);
-    }
-
-    #[coverage(off)]
-    pub fn finish_inline_session_create(&mut self) {
-        self.create_input = None;
-        self.create_error = None;
-    }
-
-    /// フォーカス中 session の表示ラベル。main 行では `"main"`。
-    #[must_use]
-    #[coverage(off)]
-    pub fn focused_label(&self) -> &str {
-        self.focused_session()
-            .map_or("main", SessionRecord::display_label)
-    }
-
-    /// フォーカス中 session に記録された Pull Request。root 行では空。
-    #[must_use]
-    #[coverage(off)]
-    pub fn focused_prs(&self) -> &[PrLink] {
-        self.focused_session()
-            .map_or(&[], |session| session.prs.as_slice())
-    }
-
-    /// フォーカス中 target の preview に出す安全な概要行。
-    #[must_use]
-    #[coverage(off)]
-    pub fn focused_preview_lines(&self) -> Vec<String> {
-        let (kind, path) = self.focused_session().map_or_else(
-            || ("workspace", self.path()),
-            |session| ("session", session.root.as_path()),
-        );
-        vec![
-            format!("{}: {}", kind, self.focused_label()),
-            format!("path: {}", path.display()),
-            format!("{} pull request(s)", self.focused_prs().len()),
-        ]
-    }
-
-    /// フォーカス中 target の scratchpad を text overlay 用の安全な行へ投影する。
-    #[must_use]
-    #[coverage(off)]
-    pub fn focused_note_lines(&self) -> Vec<String> {
-        let notes = self
-            .focused_session()
-            .map_or(&self.state.root_notes, |session| &session.notes);
-        let mut lines = Vec::new();
-        if let Some(note) = notes.note() {
-            lines.extend(note.lines().map(str::to_owned));
-        }
-        for todo in notes.todos() {
-            lines.push(format!(
-                "[{}] {}",
-                if todo.done { 'x' } else { ' ' },
-                todo.text
-            ));
-        }
-        for decision in notes.decisions() {
-            lines.push(format!(
-                "{}  {}",
-                decision.at.format("%Y-%m-%d"),
-                decision.text
-            ));
-        }
-        lines
-    }
-
-    /// 左ペインの選択を 1 つ下へ（末尾の session の次は先頭の root へ回り込む）。
-    #[coverage(off)]
-    pub fn select_next(&mut self) {
-        self.selected = (self.selected + 1) % self.row_count();
-    }
-
-    /// 左ペインの選択を 1 つ上へ（先頭の root の次は末尾の session へ回り込む）。
-    #[coverage(off)]
-    pub fn select_prev(&mut self) {
-        let rows = self.row_count();
-        self.selected = (self.selected + rows - 1) % rows;
-    }
-
-    /// 右ペインのタブを次へ（末尾で先頭へ回り込む）。
-    #[coverage(off)]
-    pub fn tab_next(&mut self) {
-        self.select_pane_tab(1);
-    }
-
-    /// 右ペインのタブを前へ（先頭で末尾へ回り込む）。
-    #[coverage(off)]
-    pub fn tab_prev(&mut self) {
-        self.select_pane_tab(-1);
-    }
-
-    /// Records a user action. Runtime wakeups deliberately do not call this,
-    /// so an asynchronous pane completion can safely land after redraws.
-    #[coverage(off)]
-    pub fn record_interaction(&mut self) {
-        self.interaction_count = self.interaction_count.saturating_add(1);
-    }
-
-    /// Request a visible daemon-owned pane placeholder.
-    /// The pane reducer keeps the durable operation identity until the runtime
-    /// replaces it with its fenced terminal reference; focus waits for that
-    /// completion unless the user acts in the meantime.
-    #[coverage(off)]
-    pub fn open_pane(&mut self, kind: PaneKind) -> usagi_core::domain::id::OperationId {
-        let operation = usagi_core::domain::id::OperationId::new();
-        let target = self.pane_target();
-        let pane = self.pane_mut();
-        let _ = pane::reduce(
-            pane,
-            PaneEvent::Request {
-                operation,
-                target,
-                kind,
-            },
-        );
-        self.pane_focus_at_request
-            .insert(operation, self.interaction_count);
-        operation
-    }
-
-    /// Apply a daemon-owned terminal completion to the currently selected pane.
-    #[coverage(off)]
-    pub fn complete_pane(
-        &mut self,
-        operation: usagi_core::domain::id::OperationId,
-        terminal: usagi_core::domain::id::TerminalRef,
-    ) {
-        let _ = pane::reduce(
-            self.pane_mut(),
-            PaneEvent::Succeeded {
-                operation,
-                terminal: terminal.clone(),
-            },
-        );
-        self.focus_completed_pane(operation, TabSelection::Live(terminal));
-    }
-
-    /// Complete a non-terminal pane and retain its safe document for rendering.
-    #[coverage(off)]
-    pub fn resolve_pane(&mut self, operation: OperationId, document: Vec<String>) {
-        let pane = self.pane_mut();
-        let _ = pane::reduce(pane, PaneEvent::Resolved { operation });
-        if pane
-            .tabs()
-            .iter()
-            .any(|tab| matches!(tab, PaneTab::Ready(ready) if ready.operation == operation))
-        {
-            self.pane_documents.insert(operation, document);
-        }
-        self.focus_completed_pane(operation, TabSelection::Ready(operation));
-    }
-
-    /// Remove a pending pane after a presentation-safe daemon error.
-    #[coverage(off)]
-    pub fn fail_pane(&mut self, operation: usagi_core::domain::id::OperationId, message: String) {
-        self.pane_focus_at_request.remove(&operation);
-        let _ = pane::reduce(self.pane_mut(), PaneEvent::Failed { operation, message });
-    }
-
-    /// Close the selected right-pane tab without affecting daemon ownership.
-    #[coverage(off)]
-    pub fn close_pane(&mut self) {
-        let pending = match self.pane().selected() {
-            PaneSelection::Tab(TabSelection::Pending(operation)) => Some(*operation),
-            PaneSelection::Target(_)
-            | PaneSelection::Tab(TabSelection::Live(_) | TabSelection::Ready(_)) => None,
-        };
-        let document = match self.pane().selected() {
-            PaneSelection::Tab(TabSelection::Ready(operation)) => Some(*operation),
-            PaneSelection::Target(_)
-            | PaneSelection::Tab(TabSelection::Pending(_) | TabSelection::Live(_)) => None,
-        };
-        let _ = pane::reduce(self.pane_mut(), PaneEvent::CloseSelected);
-        if let Some(operation) = pending {
-            self.pane_focus_at_request.remove(&operation);
-        }
-        if let Some(operation) = document {
-            self.pane_documents.remove(&operation);
-        }
-    }
-
-    #[coverage(off)]
-    fn focus_completed_pane(&mut self, operation: OperationId, selection: TabSelection) {
-        let Some(accepted_at) = self.pane_focus_at_request.remove(&operation) else {
-            return;
-        };
-        if accepted_at == self.interaction_count {
-            let _ = pane::reduce(
-                self.pane_mut(),
-                PaneEvent::Select(PaneSelection::Tab(selection)),
-            );
-        }
-    }
-
-    /// The fenced terminal of the focused live tab, if the selection is one.
-    ///
-    /// The runtime uses this to attach, poll and route keystrokes to the
-    /// daemon-owned terminal that is currently on screen.
-    #[must_use]
-    #[coverage(off)]
-    pub fn focused_live_terminal(&self) -> Option<&TerminalRef> {
-        match self.pane().selected() {
-            PaneSelection::Tab(TabSelection::Live(terminal)) => Some(terminal),
-            PaneSelection::Tab(TabSelection::Pending(_) | TabSelection::Ready(_))
-            | PaneSelection::Target(_) => None,
-        }
-    }
-
-    /// Projects the focused live terminal's rendered screen rows, or clears it.
-    /// This is presentation-only state supplied by the runtime each redraw.
-    #[coverage(off)]
-    pub fn set_terminal_view(&mut self, rows: Option<Vec<String>>) {
-        self.terminal_view = rows;
-        let len = self.terminal_view.as_ref().map_or(0, Vec::len);
-        self.terminal_scroll = self.terminal_scroll.min(len.saturating_sub(1));
-    }
-
-    /// Move one retained row toward older terminal output.
-    #[coverage(off)]
-    pub fn terminal_scroll_up(&mut self) {
-        let len = self.terminal_view.as_ref().map_or(0, Vec::len);
-        self.terminal_scroll = (self.terminal_scroll + 1).min(len.saturating_sub(1));
-    }
-
-    /// Move one retained row back toward the live terminal bottom.
-    #[coverage(off)]
-    pub fn terminal_scroll_down(&mut self) {
-        self.terminal_scroll = self.terminal_scroll.saturating_sub(1);
-    }
-
-    #[coverage(off)]
-    pub fn set_terminal_feedback(&mut self, feedback: Option<String>) {
-        self.terminal_feedback = feedback;
-    }
-
-    #[coverage(off)]
-    fn pane_target(&self) -> Target {
-        self.selected
-            .checked_sub(1)
-            .and_then(|index| self.session_ids.get(index).copied())
-            .map_or(Target::Root(self.pane_owner), Target::Session)
-    }
-
-    /// Pane state rendered by the right-hand Chrome strip.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the selected target has no local pane state. Constructors
-    /// and target selection maintain this invariant.
-    #[must_use]
-    #[coverage(off)]
-    pub fn pane(&self) -> &PaneState {
-        self.panes
-            .get(&self.pane_key())
-            .expect("a pane state exists for every selected target")
-    }
-
-    /// Safe document lines for the selected completed non-terminal tab.
-    #[must_use]
-    #[coverage(off)]
-    pub fn pane_document(&self) -> Option<&[String]> {
-        let PaneSelection::Tab(TabSelection::Ready(operation)) = self.pane().selected() else {
-            return None;
-        };
-        self.pane_documents.get(operation).map(Vec::as_slice)
-    }
-
-    #[must_use]
-    #[coverage(off)]
-    pub fn has_panes(&self) -> bool {
-        !self.pane().tabs().is_empty()
-    }
-
-    #[coverage(off)]
-    fn select_pane_tab(&mut self, direction: i8) {
-        let pane = self.pane_mut();
-        let tabs = pane.tabs();
-        if tabs.is_empty() {
-            return;
-        }
-        let current = tabs
-            .iter()
-            .position(|tab| pane_tab_selected(tab, pane.selected()))
-            .unwrap_or(0);
-        let next = if direction > 0 {
-            (current + 1) % tabs.len()
-        } else {
-            (current + tabs.len() - 1) % tabs.len()
-        };
-        let selection = match &tabs[next] {
-            PaneTab::Pending(pending) => {
-                PaneSelection::Tab(TabSelection::Pending(pending.operation))
-            }
-            PaneTab::Live(live) => PaneSelection::Tab(TabSelection::Live(live.terminal.clone())),
-            PaneTab::Ready(ready) => PaneSelection::Tab(TabSelection::Ready(ready.operation)),
-        };
-        let _ = pane::reduce(pane, PaneEvent::Select(selection));
-    }
-
-    #[coverage(off)]
-    fn pane_key(&self) -> String {
-        self.focused_session()
-            .map_or_else(String::new, |session| session.name.clone())
-    }
-
-    #[coverage(off)]
-    fn pane_mut(&mut self) -> &mut PaneState {
-        let key = self.pane_key();
-        self.panes
-            .entry(key)
-            .or_insert_with(|| PaneState::new(PaneSelection::Target(Target::Root(self.pane_owner))))
-    }
-
-    /// 選択できる行数（root 行 1＋セッション数＋作成 action 行）。
-    #[coverage(off)]
-    fn row_count(&self) -> usize {
-        self.state.sessions.len() + 2
-    }
-
-    /// フォーカス中のセッション（root 選択なら `None`）。
-    #[coverage(off)]
-    fn focused_session(&self) -> Option<&SessionRecord> {
-        self.selected
-            .checked_sub(1)
-            .and_then(|index| self.state.sessions.get(index))
-    }
 }
 
 // ── header ──────────────────────────────────────────────────────────────────
-
-/// 全幅の header: workspace 名のパンくずは左、mode toggle は右上に固定する。
-#[coverage(off)]
-fn header_line(width: usize, ws: &Workspace) -> String {
-    let sep = Style::new().dim().paint(" > ");
-    let left = format!(
-        " {}{sep}{}",
-        Role::Success.style().bold().paint("USAGI"),
-        Role::Success.style().bold().paint(ws.name()),
-    );
-    header_with_mode_toggle(width, &left, ws.mode())
-}
 
 /// v1 の chrome と同じアイコン付き mode 表示。現在の mode だけを accent で強調する。
 #[coverage(off)]
@@ -1244,74 +585,6 @@ fn header_spacer(width: usize) -> String {
 
 // ── left pane: session menu ─────────────────────────────────────────────────
 
-/// main は session と同じ2行の marker stack で描く。
-#[coverage(off)]
-fn root_rows(width: usize, ws: &Workspace) -> Vec<String> {
-    let selected = ws.root_selected();
-    let (marker, continuation) = if selected {
-        match ws.mode() {
-            Mode::Switch => (
-                Role::Danger.style().bold().paint("\u{f0907}"),
-                Role::Danger.style().bold().paint("|"),
-            ),
-            Mode::Closeup => (
-                Role::Success.style().bold().paint("|"),
-                Role::Success.style().bold().paint("|"),
-            ),
-        }
-    } else {
-        (" ".to_owned(), " ".to_owned())
-    };
-    let name = match (selected, ws.mode()) {
-        (true, _) => Role::Accent.style().bold().paint("main"),
-        (false, Mode::Switch) => Style::new().dim().paint("main"),
-        (false, Mode::Closeup) => Role::Accent.style().paint("main"),
-    };
-    vec![
-        widgets::pad_to_width(&format!("{marker} {name}"), width),
-        widgets::pad_to_width(
-            &format!(
-                "{continuation} {}",
-                Style::new().dim().paint("workspace main")
-            ),
-            width,
-        ),
-    ]
-}
-
-/// 選択可能な 1 行。`0` は root、`1..=sessions.len()` は session、末尾は作成 action。
-#[coverage(off)]
-fn selectable_rows(width: usize, ws: &Workspace, index: usize) -> Vec<String> {
-    if index == 0 {
-        root_rows(width, ws)
-    } else if index == ws.sessions().len() + 1 {
-        create_session_rows(width, index == ws.selected, ws)
-    } else {
-        ws.sessions().get(index - 1).map_or_else(
-            || root_rows(width, ws),
-            |session| {
-                session_menu_rows(
-                    width,
-                    index == ws.selected,
-                    ws.mode(),
-                    session,
-                    ws.git_diff(index - 1),
-                    sidebar_diff_columns(ws.session_ids(), &ws.git_diffs),
-                )
-            },
-        )
-    }
-}
-
-#[coverage(off)]
-fn workspace_row_height(index: usize, ws: &Workspace) -> usize {
-    if index == ws.sessions().len() + 1 {
-        1 + usize::from(ws.create_error.is_some()) + 2 * usize::from(ws.pending_session.is_some())
-    } else {
-        2
-    }
-}
-
 #[coverage(off)]
 fn sidebar_divider(width: usize) -> String {
     // Indenting the rule gives the root row and the session group distinct
@@ -1321,205 +594,6 @@ fn sidebar_divider(width: usize) -> String {
         .dim()
         .paint(&"─".repeat(width.saturating_sub(widgets::display_width(&indent))));
     widgets::pad_to_width(&format!("{indent}{rule}"), width)
-}
-
-#[coverage(off)]
-fn workspace_viewport_start(selected: usize, ws: &Workspace, capacity: usize) -> usize {
-    let mut start = 0;
-    while start < selected
-        && (start..=selected)
-            .map(|index| workspace_row_height(index, ws))
-            .sum::<usize>()
-            > capacity
-    {
-        start += 1;
-    }
-    start.min(ws.row_count().saturating_sub(1))
-}
-
-/// Resolve a left-sidebar cell in the current frame to its selectable row.
-///
-/// The calculation deliberately follows [`left_pane`]'s viewport and pending
-/// skeleton layout, so a click can neither land on the divider/mascot/footer
-/// nor select a row hidden above the viewport.
-#[must_use]
-#[coverage(off)]
-pub fn sidebar_row_at(
-    raw_height: usize,
-    raw_width: usize,
-    ws: &Workspace,
-    skeleton_frame: usize,
-    column: u16,
-    row: u16,
-) -> Option<usize> {
-    let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    let split = panes::split(width, LEFT_WIDTH);
-    if usize::from(column) >= split.left || usize::from(row) < CHROME_ROWS || height <= CHROME_ROWS
-    {
-        return None;
-    }
-    let body_height = height - CHROME_ROWS;
-    if body_height == 1 {
-        return (usize::from(row) == CHROME_ROWS).then_some(ws.selected);
-    }
-    let body_capacity = body_height - 1;
-    let metric_labels = mascot_metrics(ws.metrics.as_ref(), skeleton_frame);
-    let mascot = widgets::mascot::sidebar_block_with_sidecar(
-        split.left,
-        skeleton_frame as u64,
-        None,
-        &metric_labels,
-    );
-    let mascot_rows = mascot
-        .as_ref()
-        .filter(|block| body_capacity >= block.reserved_rows() + 2)
-        .map_or(0, widgets::mascot::MascotBlock::reserved_rows);
-    let content_capacity = body_capacity.saturating_sub(mascot_rows);
-    let target = usize::from(row) - CHROME_ROWS;
-    if target >= content_capacity {
-        return None;
-    }
-
-    let start = workspace_viewport_start(ws.selected, ws, content_capacity);
-    let mut offset = 0;
-    for index in start..ws.row_count() {
-        let pending_rows =
-            usize::from(index == ws.sessions().len() + 1 && ws.pending_session.is_some()) * 2;
-        let entry_rows = pending_rows + workspace_row_height(index, ws);
-        if offset + entry_rows > content_capacity {
-            break;
-        }
-        if target >= offset && target < offset + entry_rows {
-            return (target >= offset + pending_rows).then_some(index);
-        }
-        offset += entry_rows;
-        if index == 0 && offset < content_capacity {
-            if target == offset {
-                return None;
-            }
-            offset += 1;
-        }
-    }
-    None
-}
-
-#[coverage(off)]
-fn create_session_rows(width: usize, selected: bool, ws: &Workspace) -> Vec<String> {
-    let cursor = if selected {
-        Role::Danger.style().bold().paint(">")
-    } else {
-        " ".to_owned()
-    };
-    let style = if ws.mode() == Mode::Switch && !selected {
-        Style::new().dim()
-    } else {
-        Role::Success.style().bold()
-    };
-    let label = ws.create_input.as_ref().map_or_else(
-        || style.paint("+ new session"),
-        |input| {
-            format!(
-                "{}{}",
-                style.paint("+ new: "),
-                widgets::block_caret(input.value(), input.cursor(), &style)
-            )
-        },
-    );
-    let mut rows = vec![widgets::pad_to_width(&format!("{cursor} {label}"), width)];
-    if let Some(error) = &ws.create_error {
-        rows.push(widgets::pad_to_width(
-            &Role::Danger.style().paint(error),
-            width,
-        ));
-    }
-    rows
-}
-
-/// A real daemon-backed `SessionRecord` has a fixed two-line sidebar footprint.
-/// The first line reserves the note glyph; the second projects only persisted
-/// metadata, never a synthetic diff/GIF state or an executable shortcut.
-#[coverage(off)]
-fn session_menu_rows(
-    width: usize,
-    selected: bool,
-    mode: Mode,
-    session: &SessionRecord,
-    git_diff: Option<&GitDiff>,
-    columns: SidebarDiffColumns,
-) -> Vec<String> {
-    session_menu_rows_at(
-        width,
-        selected,
-        mode,
-        session,
-        git_diff,
-        columns,
-        Utc::now(),
-    )
-}
-
-/// 1 フレームでは同じ基準時刻を使うことで、複数 session が境界時刻に跨って別々の表現に
-/// なることを避ける。
-#[coverage(off)]
-fn session_menu_rows_at(
-    width: usize,
-    selected: bool,
-    mode: Mode,
-    session: &SessionRecord,
-    git_diff: Option<&GitDiff>,
-    columns: SidebarDiffColumns,
-    now: DateTime<Utc>,
-) -> Vec<String> {
-    let marker = if selected {
-        match mode {
-            Mode::Switch => Role::Danger.style().bold().paint("\u{f0907}"),
-            Mode::Closeup => Role::Success.style().bold().paint("|"),
-        }
-    } else {
-        " ".to_owned()
-    };
-    let label = widgets::clip_to_width(session.display_label(), width.saturating_sub(5));
-    let label = match (selected, mode) {
-        (true, _) => Role::Accent.style().bold().paint(&label),
-        (false, Mode::Switch) => Style::new().dim().paint(&label),
-        (false, Mode::Closeup) => Role::Accent.style().paint(&label),
-    };
-    let note = if session.notes.is_empty() {
-        "·"
-    } else {
-        "✎"
-    };
-    let first = widgets::pad_to_width(
-        &format!("{marker} {label}  {}", Style::new().dim().paint(note)),
-        width,
-    );
-    let modified = widgets::relative_session_time(session.last_active_or_created(), now);
-    let continuation = if selected {
-        match mode {
-            Mode::Switch => Role::Danger.style().bold().paint("|"),
-            Mode::Closeup => Role::Success.style().bold().paint("|"),
-        }
-    } else {
-        " ".to_owned()
-    };
-    let metadata = pr_summary(&session.prs).map_or_else(
-        || format!("{continuation} {modified}"),
-        |pr| format!("{continuation} {modified} · {pr}"),
-    );
-    let dim = mode == Mode::Switch && !selected;
-    let metadata = sidebar_metadata(metadata, git_diff, columns, width, dim);
-    vec![
-        first,
-        widgets::pad_to_width(
-            &(if dim {
-                Style::new().dim()
-            } else {
-                Style::new()
-            })
-            .paint(&metadata),
-            width,
-        ),
-    ]
 }
 
 /// Git summary columns are sized once for the entire sidebar.  This keeps the
@@ -1643,40 +717,6 @@ fn git_diff_text(diff: &GitDiff, columns: SidebarDiffColumns, dim: bool) -> Stri
     }
 }
 
-/// v1 と同様に、作成中の session を実行前から同じ sidebar 内に予約する skeleton 行。
-/// skeleton 自体は navigation target ではないため、cursor を持たない。名前と activity
-/// glyph は同じ左から右へ流れる wave に乗せ、静的な点滅ではなく作成中であることを示す。
-/// 実 session と同じ 2 行の高さを確保して、完了時の sidebar の揺れを防ぐ。
-const PENDING_SESSION_WAVE_SPEED: usize = 4;
-
-#[coverage(off)]
-fn pending_session_row(width: usize, name: &str, frame: usize) -> String {
-    let wave = widgets::Shimmer {
-        speed: PENDING_SESSION_WAVE_SPEED,
-        ..widgets::Shimmer::default()
-    };
-    let label = widgets::shimmer_text_with(name, frame, wave);
-    let activity = widgets::shimmer_text_with("●", frame, wave);
-    widgets::pad_to_width(&format!("  {activity} {label}"), width)
-}
-
-#[coverage(off)]
-fn pending_session_rows(width: usize, name: &str, frame: usize) -> Vec<String> {
-    vec![pending_session_row(width, name, frame), String::new()]
-}
-
-/// 左ペインの footer（キー操作ヒント、dim）。
-#[coverage(off)]
-fn left_footer(width: usize, ws: &Workspace) -> String {
-    let hint = match ws.mode() {
-        Mode::Switch => "[switch] ↑↓ select / Enter closeup",
-        Mode::Closeup => "[closeup] Ctrl-O then: o switch / a/Ctrl-A actions / n/p tabs",
-    };
-    Style::new()
-        .dim()
-        .paint(&widgets::clip_to_width(hint, width))
-}
-
 #[coverage(off)]
 fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> {
     metrics.map_or_else(
@@ -1735,172 +775,7 @@ fn format_memory(bytes: u64) -> String {
     }
 }
 
-/// 左ペイン（session menu）を `height` 行に組む。footer を最下行に
-/// 固定し、残りを viewport として選択中の session / root 行を常に表示する。
-#[coverage(off)]
-fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize) -> Vec<String> {
-    if height == 0 {
-        return Vec::new();
-    }
-    if height == 1 {
-        return selectable_rows(width, ws, ws.selected)
-            .into_iter()
-            .take(1)
-            .collect();
-    }
-
-    let body_capacity = height - 1;
-    // Keep the menu usable first. The mascot block includes its always-reserved
-    // blank row, so the viewport and footer cannot drift when speech adds rows.
-    let metric_labels = mascot_metrics(ws.metrics.as_ref(), skeleton_frame);
-    let mascot = widgets::mascot::sidebar_block_with_sidecar(
-        width,
-        skeleton_frame as u64,
-        None,
-        &metric_labels,
-    );
-    let show_mascot = mascot
-        .as_ref()
-        .is_some_and(|block| body_capacity >= block.reserved_rows() + 2);
-    let mascot_rows = if show_mascot {
-        mascot
-            .as_ref()
-            .map_or(0, widgets::mascot::MascotBlock::reserved_rows)
-    } else {
-        0
-    };
-    let content_capacity = body_capacity.saturating_sub(mascot_rows);
-    let viewport_capacity = content_capacity;
-    let start = workspace_viewport_start(ws.selected, ws, viewport_capacity);
-
-    let mut rows = Vec::with_capacity(height);
-    let now = Utc::now();
-    let diff_columns = sidebar_diff_columns(ws.session_ids(), &ws.git_diffs);
-    for index in start..ws.row_count() {
-        let mut entry = if index == 0 {
-            root_rows(width, ws)
-        } else if index == ws.sessions().len() + 1 {
-            create_session_rows(width, index == ws.selected, ws)
-        } else {
-            ws.sessions().get(index - 1).map_or_else(
-                || root_rows(width, ws),
-                |session| {
-                    session_menu_rows_at(
-                        width,
-                        index == ws.selected,
-                        ws.mode(),
-                        session,
-                        ws.git_diff(index - 1),
-                        diff_columns,
-                        now,
-                    )
-                },
-            )
-        };
-        if index == ws.sessions().len() + 1
-            && let Some(name) = ws.pending_session()
-        {
-            let mut pending = pending_session_rows(width, name, skeleton_frame);
-            pending.append(&mut entry);
-            entry = pending;
-        }
-        if rows.len() + entry.len() > viewport_capacity {
-            break;
-        }
-        rows.extend(entry);
-        if index == 0 && rows.len() < viewport_capacity {
-            rows.push(sidebar_divider(width));
-        }
-    }
-    rows.resize(content_capacity, String::new());
-    if show_mascot {
-        rows.extend(mascot.expect("shown mascot exists").rows().iter().cloned());
-        rows.push(String::new());
-    }
-    rows.push(left_footer(width, ws));
-    rows
-}
-
 // ── right pane: closeup ─────────────────────────────────────────────────────
-
-/// closeup の header: フォーカス中 session の identity。
-#[coverage(off)]
-fn closeup_header(ws: &Workspace) -> String {
-    format!(" {}", Role::Accent.style().bold().paint(ws.focused_label()))
-}
-
-/// tabmenu: pane reducer の stable selection を session 名の右の Chrome 風タブへ投影する。
-#[coverage(off)]
-fn tab_menu(width: usize, header: &str, ws: &Workspace, frame: usize) -> [String; 2] {
-    let labels = ws
-        .pane()
-        .tabs()
-        .iter()
-        .map(pane_tab_label)
-        .collect::<Vec<_>>();
-    let tabs = ws
-        .pane()
-        .tabs()
-        .iter()
-        .zip(&labels)
-        .map(|(tab, label)| widgets::session_tab::Tab {
-            label,
-            selected: pane_tab_selected(tab, ws.pane().selected()),
-            pending_frame: matches!(tab, PaneTab::Pending(_)).then_some(frame as u64),
-        })
-        .collect::<Vec<_>>();
-    widgets::session_tab::render_with_prefix(width, header, &tabs)
-}
-
-/// 右ペインの footer（キー操作ヒント、dim）。
-#[coverage(off)]
-fn right_footer(width: usize, ws: &Workspace) -> String {
-    let hint = ws.terminal_feedback.as_deref().unwrap_or(match ws.mode() {
-        Mode::Switch => "←→/hl tab / Enter/t closeup / : commands / p PR / q close / Ctrl-Q end",
-        Mode::Closeup => "←→/hl tab / ↑↓/jk action / : commands / p PR / q close / Ctrl-Q end",
-    });
-    Style::new()
-        .dim()
-        .paint(&widgets::clip_to_width(hint, width))
-}
-
-/// 右ペイン（closeup）を `height` 行に組む: header・tabmenu・content、footer を最下行に固定。
-#[coverage(off)]
-fn right_pane(height: usize, width: usize, ws: &Workspace, frame: usize) -> Vec<String> {
-    let header = closeup_header(ws);
-    let mut rows = Vec::new();
-    if ws.has_panes() {
-        let chrome = tab_menu(width, &header, ws, frame);
-        rows.extend(chrome);
-        rows.push(String::new());
-        if let Some(view) = &ws.terminal_view {
-            // A focused live terminal renders daemon PTY output. Reserve the
-            // footer and its breathing row, then clip each screen row to the
-            // pane width.
-            let content_cap = height.saturating_sub(rows.len() + 2);
-            rows.extend(terminal_viewport_rows(
-                view,
-                ws.terminal_scroll,
-                width,
-                content_cap,
-            ));
-        } else if let Some(document) = ws.pane_document() {
-            rows.extend(
-                document
-                    .iter()
-                    .map(|line| widgets::pad_to_width(line, width)),
-            );
-        }
-    } else {
-        rows.push(widgets::pad_to_width(&header, width));
-        rows.extend(widgets::session_tab::empty_pane(
-            width,
-            height.saturating_sub(3),
-            "No tabs stirring yet. Enter starts one.",
-        ));
-    }
-    with_footer_gap(rows, height, right_footer(width, ws))
-}
 
 // ── composition ─────────────────────────────────────────────────────────────
 
@@ -1943,128 +818,6 @@ fn terminal_viewport_rows(
         .collect()
 }
 
-/// 生の端末サイズに対する workspace 画面 1 フレーム分の行。全幅の header と罫線の下を、共通の
-/// [`panes`] レイアウトで左（session menu）・右（closeup）の 2 ペインに割って組む。サイズ 0 は
-/// 80×24 にフォールバックする。
-#[must_use]
-#[coverage(off)]
-pub fn render(raw_height: usize, raw_width: usize, ws: &Workspace) -> Vec<String> {
-    render_with_skeleton_frame(raw_height, raw_width, ws, 0)
-}
-
-/// [`render`] と同じ frame を描くが、pending session skeleton の shimmer 位相を指定する。
-#[must_use]
-#[coverage(off)]
-pub fn render_with_skeleton_frame(
-    raw_height: usize,
-    raw_width: usize,
-    ws: &Workspace,
-    skeleton_frame: usize,
-) -> Vec<String> {
-    let (height, width) = widgets::normalize_size(raw_height, raw_width);
-
-    let mut frame = Vec::with_capacity(height);
-    frame.push(header_line(width, ws));
-    frame.push(header_spacer(width));
-
-    let body_height = height.saturating_sub(CHROME_ROWS);
-    let split = panes::split(width, LEFT_WIDTH);
-    let left = left_pane(body_height, split.left, ws, skeleton_frame);
-    let right = dim_inactive_right_pane(
-        ws.mode() == Mode::Switch,
-        right_pane(body_height, split.right, ws, skeleton_frame),
-    );
-    frame.extend(panes::join(body_height, &left, &right, split));
-
-    frame.truncate(height);
-    frame
-}
-
-/// Converts a screen-cell pointer position into the retained terminal viewport
-/// row and terminal column currently rendered in the right pane.
-#[must_use]
-#[coverage(off)]
-pub fn terminal_point_at(
-    raw_height: usize,
-    raw_width: usize,
-    ws: &Workspace,
-    column: u16,
-    row: u16,
-) -> Option<TerminalPoint> {
-    let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    let right_left = right_pane_left(width);
-    let body_row = usize::from(row).checked_sub(CHROME_ROWS)?;
-    let column = usize::from(column).checked_sub(right_left)?;
-    let view = ws.terminal_view.as_ref()?;
-    let body_height = height.saturating_sub(CHROME_ROWS);
-    let content_top = 3;
-    let content_cap = body_height.saturating_sub(content_top + 2);
-    let content_row = body_row.checked_sub(content_top)?;
-    if content_row >= content_cap {
-        return None;
-    }
-    let start = view
-        .len()
-        .saturating_sub(content_cap.saturating_add(ws.terminal_scroll));
-    Some(TerminalPoint {
-        row: start + content_row,
-        column,
-    })
-}
-
-/// Returns the auto-scroll direction for a pointer held at either terminal
-/// viewport edge: `true` is toward older output and `false` toward live output.
-#[must_use]
-#[coverage(off)]
-pub fn terminal_auto_scroll_direction_at(
-    raw_height: usize,
-    raw_width: usize,
-    ws: &Workspace,
-    column: u16,
-    row: u16,
-) -> Option<bool> {
-    let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    let split = panes::split(width, LEFT_WIDTH);
-    if usize::from(column) < split.left.saturating_add(1) || ws.terminal_view.is_none() {
-        return None;
-    }
-    let body_row = usize::from(row).checked_sub(CHROME_ROWS)?;
-    let content_top = 3;
-    let content_cap = height.saturating_sub(CHROME_ROWS + content_top + 2);
-    // The first and last output rows are ordinary selectable cells. Only a
-    // pointer *outside* the viewport starts edge auto-scroll; treating the
-    // first row as an edge made that row impossible to select reliably.
-    (body_row < content_top)
-        .then_some(true)
-        .or_else(|| (body_row >= content_top.saturating_add(content_cap)).then_some(false))
-}
-
-/// The selectable row currently visible at the requested auto-scroll edge.
-#[must_use]
-#[coverage(off)]
-pub fn terminal_edge_point(
-    raw_height: usize,
-    raw_width: usize,
-    ws: &Workspace,
-    older: bool,
-) -> Option<TerminalPoint> {
-    let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    let split = panes::split(width, LEFT_WIDTH);
-    let view = ws.terminal_view.as_ref()?;
-    let content_cap = height.saturating_sub(CHROME_ROWS + 3 + 2);
-    let start = view
-        .len()
-        .saturating_sub(content_cap.saturating_add(ws.terminal_scroll));
-    Some(TerminalPoint {
-        row: if older {
-            start
-        } else {
-            start.saturating_add(content_cap.saturating_sub(1))
-        },
-        column: split.right.saturating_sub(1),
-    })
-}
-
 /// controller projection の Home frame を描く。
 ///
 /// 既存 Workspace view と同じ header / 2-pane geometry / viewport を使う。左側の gutter は
@@ -2091,7 +844,11 @@ pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -
         split,
     ));
     frame.truncate(height);
-    if let Some(overlay) = &home.decision_overlay {
+    if let Some(overlay) = &home.pr_overlay {
+        render_pr_overlay(height, width, &frame, overlay)
+    } else if let Some(overlay) = &home.preview_overlay {
+        render_preview_overlay(height, width, &frame, overlay)
+    } else if let Some(overlay) = &home.decision_overlay {
         decision_modal::render_over(height, width, &frame, overlay, &home.decisions)
     } else if home.closeup_action_visible {
         crate::presentation::views::closeup_modal::render_over(
@@ -2103,6 +860,53 @@ pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -
     } else {
         frame
     }
+}
+
+/// Compose the Pull Request overlay over `base`. A fetch error renders as a safe
+/// unavailable notice; otherwise the list modal is drawn at its selection.
+fn render_pr_overlay(
+    height: usize,
+    width: usize,
+    base: &[String],
+    overlay: &PrOverlay,
+) -> Vec<String> {
+    if let Some(error) = overlay.error() {
+        return text_overlay::render_over(
+            height,
+            width,
+            base,
+            &TextOverlay::new(
+                "Pull Request",
+                OverlayDocument::Unavailable(error.message.as_str().to_owned()),
+            ),
+        );
+    }
+    pr_modal::render_over(
+        height,
+        width,
+        base,
+        &PrModal::with_selection(overlay.prs().to_vec(), overlay.selected()),
+    )
+}
+
+/// Compose the Markdown preview overlay over `base`. A fetch error renders as a
+/// safe unavailable notice; otherwise the preview lines are drawn at their scroll.
+fn render_preview_overlay(
+    height: usize,
+    width: usize,
+    base: &[String],
+    overlay: &PreviewOverlay,
+) -> Vec<String> {
+    let document = overlay.error().map_or_else(
+        || OverlayDocument::Ready(overlay.lines().to_vec()),
+        |error| OverlayDocument::Unavailable(error.message.as_str().to_owned()),
+    );
+    text_overlay::render_over(
+        height,
+        width,
+        base,
+        &TextOverlay::new("Preview", document).scrolled_to(overlay.scroll()),
+    )
 }
 
 /// Apply the inactive treatment only while the left sidebar owns navigation.
@@ -2498,9 +1302,8 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHROME_ROWS, GitDiff, HomeProjection, LEFT_WIDTH, Mode, ProjectedSession,
-        TerminalViewProjection, Workspace, render, render_home, render_with_skeleton_frame,
-        sidebar_row_at, terminal_auto_scroll_direction_at, terminal_point_at, with_footer_gap,
+        CHROME_ROWS, GitDiff, HomeProjection, LEFT_WIDTH, ProjectedSession, TerminalViewProjection,
+        Workspace, render_home, with_footer_gap,
     };
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{display_width, modal};
@@ -2511,7 +1314,7 @@ mod tests {
     use crate::usecase::application::pane::{
         PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection, reduce,
     };
-    use crate::usecase::application::terminal_selection::TerminalPoint;
+
     use chrono::{DateTime, Utc};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -2520,9 +1323,9 @@ mod tests {
     };
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::pullrequest::{PrLink, PrState};
+
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
 
-    const MASCOT_INDENT: usize = 1;
     use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
     use usagi_core::domain::workspace_state::WorkspaceState;
 
@@ -2560,62 +1363,6 @@ mod tests {
     }
 
     #[test]
-    fn terminal_scroll_is_bounded_by_retained_history_and_returns_to_live_bottom() {
-        let mut ws = workspace();
-        ws.set_terminal_view(Some(vec![
-            "old".to_string(),
-            "middle".to_string(),
-            "live".to_string(),
-        ]));
-        ws.terminal_scroll_up();
-        ws.terminal_scroll_up();
-        ws.terminal_scroll_up();
-        assert_eq!(ws.terminal_scroll, 2);
-        ws.terminal_scroll_down();
-        assert_eq!(ws.terminal_scroll, 1);
-        ws.set_terminal_view(Some(vec!["live".to_string()]));
-        assert_eq!(
-            ws.terminal_scroll, 0,
-            "a shorter replay normalizes stale scroll"
-        );
-    }
-
-    #[test]
-    fn terminal_auto_scroll_keeps_the_first_output_row_selectable() {
-        let mut ws = workspace();
-        ws.set_terminal_view(Some(vec!["first".to_string(), "second".to_string()]));
-
-        assert_eq!(
-            terminal_auto_scroll_direction_at(24, 80, &ws, 37, 5),
-            None,
-            "the first visible output row is a selectable cell, not an edge"
-        );
-        assert_eq!(
-            terminal_auto_scroll_direction_at(24, 80, &ws, 37, 4),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn terminal_point_tracks_the_visible_scrollback_window() {
-        let mut ws = workspace();
-        ws.set_terminal_view(Some((0..20).map(|row| format!("row {row}")).collect()));
-
-        assert_eq!(
-            terminal_point_at(24, 80, &ws, 37, 5),
-            Some(TerminalPoint { row: 3, column: 0 })
-        );
-        assert_eq!(terminal_point_at(24, 80, &ws, 37, 4), None);
-
-        ws.terminal_scroll_up();
-        ws.terminal_scroll_up();
-        assert_eq!(
-            terminal_point_at(24, 80, &ws, 37, 5),
-            Some(TerminalPoint { row: 1, column: 0 })
-        );
-    }
-
-    #[test]
     fn right_pane_footer_keeps_a_blank_breathing_row() {
         let rows = with_footer_gap(vec!["body".to_string()], 4, "footer".to_string());
         assert_eq!(rows, vec!["body", "", "", "footer"]);
@@ -2623,18 +1370,6 @@ mod tests {
             with_footer_gap(Vec::new(), 1, "footer".to_string()),
             vec!["footer"]
         );
-    }
-
-    fn workspace_with_sessions(count: usize) -> Workspace {
-        let record = WorkspaceRecord::new("actual", "/tmp/actual");
-        let state = WorkspaceState {
-            sessions: (0..count)
-                .map(|index| session(&format!("session-{index:02}"), None, SessionOrigin::Human))
-                .collect(),
-            root_notes: Scratchpad::default(),
-            updated_at: now(),
-        };
-        Workspace::new(record, state)
     }
 
     fn strip(line: &str) -> String {
@@ -2652,14 +1387,6 @@ mod tests {
             out.push(ch);
         }
         out
-    }
-
-    fn joined(ws: &Workspace) -> String {
-        render(30, 100, ws)
-            .iter()
-            .map(|line| strip(line))
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 
     fn projected_session(id: SessionId, label: &str, cwd: &str) -> ProjectedSession {
@@ -2709,6 +1436,92 @@ mod tests {
         assert!(text.contains("+ new session"));
         assert!(!text.contains("+ new session  action"));
         assert!(text.contains("No tabs stirring yet. Enter starts one."));
+    }
+
+    fn pr_error() -> SafeError {
+        SafeError {
+            message: SafeMessage::new("gh unavailable"),
+            error_id: "pr".into(),
+        }
+    }
+
+    #[test]
+    fn render_home_draws_the_pr_overlay_at_its_selection() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('p')));
+        let mut first = PrLink::new(7, "https://github.com/o/r/pull/7");
+        first.title = Some("add feature".into());
+        let mut second = PrLink::new(8, "https://github.com/o/r/pull/8");
+        second.title = Some("fix bug".into());
+        second.state = PrState::Merged;
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target: Target::Root(workspace),
+                prs: vec![first, second],
+            }),
+        );
+        // Move the cursor to the second PR so the detail reflects the selection.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let text = joined_home(&home);
+        assert!(text.contains("Pull Request"));
+        assert!(text.contains("#7"));
+        assert!(text.contains("add feature"));
+        assert!(text.contains("merged"));
+        // The selected PR's detail URL is the second one.
+        assert!(text.contains("github.com/o/r/pull/8"));
+    }
+
+    #[test]
+    fn render_home_draws_a_pr_fetch_error_as_a_safe_notice() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsError {
+                target: Target::Root(workspace),
+                error: pr_error(),
+            }),
+        );
+        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let text = joined_home(&home);
+        assert!(text.contains("Pull Request"));
+        assert!(text.contains("gh unavailable"));
+    }
+
+    #[test]
+    fn render_home_draws_the_preview_overlay_and_its_error() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('v')));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target: Target::Root(workspace),
+                lines: vec!["# Heading".into(), "content line".into()],
+            }),
+        );
+        let ready = joined_home(&HomeProjection::from_state(&state, "work", "/work", &[]));
+        assert!(ready.contains("Preview"));
+        assert!(ready.contains("Heading"));
+        assert!(ready.contains("content line"));
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewError {
+                target: Target::Root(workspace),
+                error: SafeError {
+                    message: SafeMessage::new("no preview available"),
+                    error_id: "preview".into(),
+                },
+            }),
+        );
+        let errored = joined_home(&HomeProjection::from_state(&state, "work", "/work", &[]));
+        assert!(errored.contains("Preview"));
+        assert!(errored.contains("no preview available"));
     }
 
     #[test]
@@ -2958,7 +1771,7 @@ mod tests {
     }
 
     #[test]
-    fn home_metrics_sidecar_matches_the_legacy_daemon_metrics_row() {
+    fn home_metrics_sidecar_renders_the_daemon_metrics_row() {
         let metrics = usagi_core::usecase::client::DaemonMetrics {
             schema_version: 1,
             sampled_at_ms: 42,
@@ -2968,32 +1781,20 @@ mod tests {
             dropped_updates: 5,
         };
 
-        // Legacy path: the daemon observation flows through `set_metrics`.
-        let mut ws = workspace();
-        ws.set_metrics(Some(metrics.clone()));
-        let legacy = render_with_skeleton_frame(30, 100, &ws, 0);
-
-        // Controller path: the same observation flows through `with_metrics`.
+        // The daemon observation flows through `with_metrics` into the sidecar row
+        // beside usagi.
         let state = AppState::home(WorkspaceId::new(), Vec::new());
         let home = HomeProjection::from_state(&state, "actual", "/tmp/actual", &[])
             .with_metrics(Some(metrics));
         let controller = render_home(30, 100, &home);
 
-        let metric_row = |frame: &[String]| {
-            frame
-                .iter()
-                .find(|line| line.contains('\u{f2db}'))
-                .expect("daemon metric row beside usagi")
-                .clone()
-        };
-        let legacy_row = metric_row(&legacy);
-        let controller_row = metric_row(&controller);
+        let controller_row = controller
+            .iter()
+            .find(|line| line.contains('\u{f2db}'))
+            .expect("daemon metric row beside usagi");
 
-        // Parity covers both the glyphs and the load-aware colour styling, so the
-        // raw ANSI rows must be identical, not only their stripped text.
-        assert_eq!(strip(&controller_row), strip(&legacy_row));
-        assert_eq!(controller_row, legacy_row);
-        assert!(strip(&controller_row).contains("\u{f2db} 1%    \u{f233} 45MB"));
+        // The row carries both glyphs and the v1 CPU/memory summary text.
+        assert!(strip(controller_row).contains("\u{f2db} 1%    \u{f233} 45MB"));
     }
 
     #[test]
@@ -3237,508 +2038,6 @@ mod tests {
     }
 
     #[test]
-    fn workspace_is_built_from_domain_records() {
-        let ws = workspace();
-        assert_eq!(ws.name(), "actual");
-        assert_eq!(ws.path(), PathBuf::from("/tmp/actual"));
-        assert_eq!(ws.sessions().len(), 2);
-        assert_eq!(ws.sessions()[0].display_label(), "UI work");
-        assert!(!ws.has_panes());
-        assert_eq!(ws.mode(), Mode::Switch);
-        assert_eq!(ws.selected(), 0);
-        assert_eq!(ws.active_tab(), 0);
-        assert!(ws.root_selected());
-        assert!(format!("{:?}", ws.clone()).contains("actual"));
-        assert!(format!("{:?}", ws.pane()).contains("PaneState"));
-    }
-
-    #[test]
-    fn daemon_snapshot_replaces_sidebar_rows_without_persisting_legacy_state() {
-        let mut ws = workspace();
-        ws.select_next();
-
-        ws.replace_sessions(vec![session("fresh", None, SessionOrigin::Unknown)]);
-
-        assert_eq!(ws.sessions().len(), 1);
-        assert_eq!(ws.sessions()[0].name, "fresh");
-        assert!(ws.root_selected());
-    }
-
-    #[test]
-    fn sidebar_hit_test_resolves_visible_session_rows_only() {
-        let ws = workspace();
-        // Two chrome rows, the two-line root, then its divider precede the
-        // two-line session rows in the sidebar.
-        assert_eq!(sidebar_row_at(24, 100, &ws, 0, 0, 5), Some(1));
-        assert_eq!(sidebar_row_at(24, 100, &ws, 0, 0, 7), Some(2));
-        assert_eq!(sidebar_row_at(24, 100, &ws, 0, 0, 4), None);
-        assert_eq!(sidebar_row_at(24, 100, &ws, 0, 36, 5), None);
-    }
-
-    #[test]
-    fn created_session_snapshot_is_selectable_and_has_an_empty_pane_state() {
-        let mut ws = Workspace::new(
-            WorkspaceRecord::new("empty", "/tmp/empty"),
-            WorkspaceState::new(),
-        );
-
-        // This is the snapshot delivered when the create skeleton completes.
-        ws.replace_sessions(vec![session("fresh", None, SessionOrigin::Unknown)]);
-
-        ws.select_next();
-        assert_eq!(
-            ws.selected_session().map(|session| session.name.as_str()),
-            Some("fresh")
-        );
-        assert!(
-            ws.pane().tabs().is_empty(),
-            "new rows have a pane projection"
-        );
-
-        ws.enter_closeup();
-        assert!(
-            joined(&ws).contains("fresh"),
-            "Closeup renders the new session"
-        );
-    }
-
-    #[test]
-    fn snapshot_removal_discards_the_removed_session_pane_state() {
-        let mut ws = workspace();
-        assert!(ws.panes.contains_key("tui"));
-
-        ws.replace_sessions(vec![session("daemon", None, SessionOrigin::Unknown)]);
-
-        assert!(!ws.panes.contains_key("tui"));
-        assert!(ws.panes.contains_key("daemon"));
-    }
-
-    #[test]
-    fn select_cycles_from_the_root_through_sessions() {
-        let mut ws = workspace();
-        ws.select_next();
-        assert_eq!(ws.selected(), 1);
-        ws.select_next();
-        assert_eq!(ws.selected(), 2);
-        ws.select_next();
-        assert!(ws.new_session_selected());
-        let rendered = render(30, 100, &ws).join("\n");
-        assert!(rendered.contains("\u{1b}[1;32m+ new session\u{1b}[0m"));
-        assert!(!rendered.contains("+ new session  action"));
-        ws.select_next();
-        assert!(ws.root_selected());
-        ws.select_prev();
-        assert!(ws.new_session_selected());
-    }
-
-    #[test]
-    fn inline_session_create_validates_format_length_and_duplicates_while_typing() {
-        let mut ws = workspace();
-
-        ws.begin_inline_session_create(Some('/'));
-        assert_eq!(
-            ws.create_error.as_deref(),
-            Some("session name may contain only letters, numbers, hyphens, and underscores")
-        );
-
-        ws.cancel_inline_session_create();
-        ws.begin_inline_session_create(Some('t'));
-        ws.inline_create_insert('u');
-        ws.inline_create_insert('i');
-        assert_eq!(
-            ws.create_error.as_deref(),
-            Some("session \"tui\" already exists")
-        );
-        assert!(ws.inline_create_name().is_none());
-
-        ws.cancel_inline_session_create();
-        ws.begin_inline_session_create(Some('a'));
-        for _ in 0..64 {
-            ws.inline_create_insert('a');
-        }
-        assert_eq!(
-            ws.create_error.as_deref(),
-            Some("session name must be 64 characters or fewer")
-        );
-    }
-
-    #[test]
-    fn an_empty_workspace_selects_and_cycles_the_root_row() {
-        let mut ws = Workspace::new(
-            WorkspaceRecord::new("empty", "/tmp/empty"),
-            WorkspaceState::new(),
-        );
-        assert!(ws.root_selected());
-        ws.select_next();
-        ws.select_prev();
-        assert_eq!(ws.selected(), 0);
-        let text = joined(&ws);
-        assert!(text.contains("USAGI > empty"));
-        assert!(!text.contains("/tmp/empty"));
-        assert!(text.contains("─"));
-        assert!(text.contains("+ new session"));
-    }
-
-    #[test]
-    fn pane_tab_navigation_wraps_and_close_returns_to_empty_state() {
-        let mut ws = workspace();
-        ws.open_pane(PaneKind::Terminal);
-        ws.open_pane(PaneKind::Agent);
-        ws.tab_prev();
-        assert!(matches!(ws.pane().selected(), PaneSelection::Tab(_)));
-        ws.tab_next();
-        assert!(joined(&ws).contains("Terminal"));
-        assert!(joined(&ws).contains("Agent"));
-        ws.close_pane();
-        ws.close_pane();
-        assert!(!ws.has_panes());
-    }
-
-    #[test]
-    fn pane_tabs_are_scoped_to_the_selected_session() {
-        let mut ws = workspace();
-
-        ws.select_next();
-        ws.open_pane(PaneKind::Agent);
-        assert_eq!(ws.pane().tabs().len(), 1);
-
-        ws.select_next();
-        assert!(ws.pane().tabs().is_empty());
-        ws.open_pane(PaneKind::Terminal);
-        assert_eq!(ws.pane().tabs().len(), 1);
-
-        ws.select_prev();
-        assert!(
-            matches!(ws.pane().tabs(), [PaneTab::Pending(pending)] if pending.kind == PaneKind::Agent)
-        );
-    }
-
-    #[test]
-    fn mode_transitions_preserve_the_session_and_tab_selection() {
-        let mut ws = workspace();
-        ws.select_next();
-        ws.tab_next();
-        let selected = ws.selected();
-        let active_tab = ws.active_tab();
-
-        ws.enter_closeup();
-        assert_eq!(ws.mode(), Mode::Closeup);
-        assert_eq!(ws.selected(), selected);
-        assert_eq!(ws.active_tab(), active_tab);
-
-        ws.enter_switch();
-        assert_eq!(ws.mode(), Mode::Switch);
-        assert_eq!(ws.selected(), selected);
-        assert_eq!(ws.active_tab(), active_tab);
-        assert!(format!("{:?}", ws.mode()).contains("Switch"));
-    }
-
-    #[test]
-    fn controller_mode_adapter_preserves_existing_view_selection() {
-        let mut ws = workspace();
-        ws.select_next();
-        ws.tab_next();
-        ws.apply_home_mode(HomeMode::Closeup);
-        assert_eq!(ws.mode(), Mode::Closeup);
-        assert_eq!(ws.selected(), 1);
-        assert_eq!(ws.active_tab(), 0);
-        ws.apply_home_mode(HomeMode::Switch);
-        assert_eq!(ws.mode(), Mode::Switch);
-    }
-
-    #[test]
-    fn focused_label_and_pull_requests_follow_the_selected_session() {
-        let mut ws = workspace();
-        ws.state.sessions[0]
-            .prs
-            .push(PrLink::new(42, "https://example.com/pull/42"));
-
-        assert_eq!(ws.focused_label(), "main");
-        assert!(ws.focused_prs().is_empty());
-
-        ws.select_next();
-        assert_eq!(ws.focused_label(), "UI work");
-        assert_eq!(ws.focused_prs()[0].number, 42);
-
-        ws.select_next();
-        assert_eq!(ws.focused_label(), "daemon");
-        assert!(ws.focused_prs().is_empty());
-    }
-
-    #[test]
-    fn header_shows_both_modes_and_highlights_the_current_one() {
-        let mut ws = workspace();
-        let switch_frame = render(30, 100, &ws);
-        let switch_header = &switch_frame[0];
-        assert!(switch_header.contains("\u{1b}[1;36m\u{f0ec} switch\u{1b}[0m"));
-        assert!(switch_header.contains("\u{1b}[2m\u{f00e} closeup\u{1b}[0m"));
-        assert!(
-            strip(switch_header)
-                .trim_end()
-                .ends_with("\u{f0ec} switch  \u{f00e} closeup")
-        );
-        assert!(strip(&switch_frame[1]).trim().is_empty());
-
-        ws.enter_closeup();
-        let closeup_header = &render(30, 100, &ws)[0];
-        assert!(closeup_header.contains("\u{1b}[2m\u{f0ec} switch\u{1b}[0m"));
-        assert!(closeup_header.contains("\u{1b}[1;36m\u{f00e} closeup\u{1b}[0m"));
-        assert!(
-            strip(closeup_header)
-                .trim_end()
-                .ends_with("\u{f0ec} switch  \u{f00e} closeup")
-        );
-    }
-
-    #[test]
-    fn render_uses_mode_specific_footers_and_renders_chrome_tabs_from_pane_state() {
-        let mut ws = workspace();
-        let switch = joined(&ws);
-        assert!(switch.contains("[switch] ↑↓ select"));
-        assert!(switch.contains("←→/hl tab"));
-        assert!(switch.contains("Enter/t closeup"));
-        assert!(switch.contains("p PR"));
-        assert!(switch.contains("No tabs stirring yet. Enter starts one."));
-
-        ws.open_pane(PaneKind::Terminal);
-        ws.enter_closeup();
-        let closeup_frame = render(30, 100, &ws);
-        let closeup = closeup_frame
-            .iter()
-            .map(|line| strip(line))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(closeup.contains("[closeup] Ctrl-O then"));
-        assert!(closeup.contains("←→/hl tab"));
-        assert!(!closeup.contains("Esc switch"));
-        assert!(closeup.contains("↑↓/jk action"));
-        assert!(closeup.contains("Terminal"));
-        assert!(
-            !closeup.contains('▔'),
-            "a pending tab remains listed but does not take focus before completion"
-        );
-    }
-
-    #[test]
-    fn runtime_workspace_renderer_dims_the_right_pane_only_in_switch() {
-        let mut ws = workspace();
-        ws.open_pane(PaneKind::Terminal);
-
-        let switch_frame = render(30, 100, &ws);
-        let switch_right = switch_frame[CHROME_ROWS]
-            .split_once('│')
-            .expect("pane divider")
-            .1;
-        assert!(switch_right.contains("\u{1b}[2;36mmain"));
-        assert!(!switch_right.contains("\u{1b}[1;36mmain"));
-
-        ws.enter_closeup();
-        let closeup_frame = render(30, 100, &ws);
-        let closeup_right = closeup_frame[CHROME_ROWS]
-            .split_once('│')
-            .expect("pane divider")
-            .1;
-        assert!(closeup_right.contains("\u{1b}[1;36mmain"));
-        assert!(!closeup_right.starts_with("\u{1b}[2m"));
-    }
-
-    #[test]
-    fn render_shows_real_workspace_and_session_records() {
-        let text = joined(&workspace());
-        assert!(text.contains("USAGI"));
-        assert!(text.contains("actual"));
-        assert!(text.contains("USAGI > actual"));
-        assert!(!text.contains("Sessions"));
-        assert!(text.contains("UI work"));
-        assert!(text.contains("daemon"));
-        assert!(!text.contains("UTC"));
-        assert!(text.contains("No tabs stirring yet. Enter starts one."));
-        assert!(!text.contains("/tmp/actual"));
-        assert!(text.contains("main"));
-        assert!(!text.contains("Esc back"));
-        assert!(text.contains('│'));
-    }
-
-    #[test]
-    fn session_rows_project_legacy_time_note_and_visible_prs_without_false_affordances() {
-        let id = SessionId::new();
-        let mut record = session("日本語-session", None, SessionOrigin::Unknown);
-        record.last_active = Some(
-            DateTime::parse_from_rfc3339("2026-06-26T13:30:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
-        );
-        record.notes.note = Some("keep this visible".to_owned());
-        record
-            .prs
-            .push(PrLink::new(42, "https://example.test/pull/42"));
-        let mut dismissed = PrLink::new(99, "https://example.test/pull/99");
-        dismissed.state = PrState::Dismissed;
-        record.prs.push(dismissed);
-
-        let projection = ProjectedSession::from_record(id, &record);
-        assert_eq!(projection.id, id);
-        assert_eq!(projection.last_modified, record.last_active.unwrap());
-        assert!(projection.has_notes);
-        assert_eq!(projection.pr_summary.as_deref(), Some("PR #42"));
-
-        let base = DateTime::parse_from_rfc3339("2026-06-26T13:42:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let rows = super::session_menu_rows_at(
-            40,
-            true,
-            Mode::Switch,
-            &record,
-            None,
-            super::SidebarDiffColumns::default(),
-            base,
-        );
-        assert_eq!(rows.len(), 2);
-        assert!(rows[0].contains("\u{1b}[1;31m\u{f0907}\u{1b}[0m"));
-        assert!(rows[1].contains("\u{1b}[1;31m|\u{1b}[0m"));
-        assert!(strip(&rows[0]).contains("✎"));
-        assert!(strip(&rows[1]).contains("12m ago"));
-        assert!(strip(&rows[1]).contains("PR #42"));
-        assert!(!strip(&rows[1]).contains("diff"));
-        assert!(rows.iter().all(|row| display_width(row) == 40));
-        let narrow = super::session_menu_rows_at(
-            18,
-            true,
-            Mode::Switch,
-            &record,
-            None,
-            super::SidebarDiffColumns::default(),
-            base,
-        );
-        assert!(strip(&narrow[0]).contains("✎"));
-        assert!(narrow.iter().all(|row| display_width(row) == 18));
-
-        let closeup = super::session_menu_rows_at(
-            40,
-            true,
-            Mode::Closeup,
-            &record,
-            None,
-            super::SidebarDiffColumns::default(),
-            base,
-        );
-        assert!(closeup[0].contains("\u{1b}[1;32m|\u{1b}[0m"));
-        assert!(closeup[1].contains("\u{1b}[1;32m|\u{1b}[0m"));
-    }
-
-    #[test]
-    fn session_row_shows_completed_git_state_and_changed_lines() {
-        let record = session("topic", None, SessionOrigin::Unknown);
-        let base = DateTime::parse_from_rfc3339("2026-06-26T13:42:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let diff = GitDiff {
-            base: "origin/main".to_owned(),
-            ahead: 2,
-            behind: 1,
-            added: 12,
-            removed: 4,
-        };
-        let columns = super::SidebarDiffColumns {
-            ahead: 1,
-            behind: 1,
-            added: 2,
-            removed: 1,
-        };
-        let rows = super::session_menu_rows_at(
-            60,
-            false,
-            Mode::Switch,
-            &record,
-            Some(&diff),
-            columns,
-            base,
-        );
-        let plain = strip(&rows[1]);
-        assert!(plain.contains("↑2 ↓1"));
-        assert!(plain.contains("+ 12 - 4"));
-        assert!(!plain.contains("origin/main"));
-        assert!(rows[1].contains("\u{1b}[2;32m+ 12\u{1b}[0m"));
-        assert!(rows[1].contains("\u{1b}[2;31m- 4\u{1b}[0m"));
-        assert!(rows[1].contains("\u{1b}[2;36m↑2\u{1b}[0m"));
-        assert!(rows[1].contains("\u{1b}[2;35m↓1\u{1b}[0m"));
-        assert!(rows.iter().all(|row| display_width(row) == 60));
-
-        let selected = super::session_menu_rows_at(
-            60,
-            true,
-            Mode::Switch,
-            &record,
-            Some(&diff),
-            columns,
-            base,
-        );
-        assert!(selected[1].contains("\u{1b}[32m+ 12\u{1b}[0m"));
-        assert!(selected[1].contains("\u{1b}[31m- 4\u{1b}[0m"));
-        assert!(!selected[1].contains("\u{1b}[2;32m+ 12\u{1b}[0m"));
-        assert!(!selected[1].contains("\u{1b}[2;31m- 4\u{1b}[0m"));
-
-        let narrow = super::session_menu_rows_at(
-            18,
-            false,
-            Mode::Switch,
-            &record,
-            Some(&diff),
-            columns,
-            base,
-        );
-        assert!(narrow.iter().all(|row| display_width(row) == 18));
-    }
-
-    #[test]
-    fn session_git_summary_columns_are_shared_by_every_session() {
-        let base = DateTime::parse_from_rfc3339("2026-06-26T13:42:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let columns = super::SidebarDiffColumns {
-            ahead: 2,
-            behind: 1,
-            added: 4,
-            removed: 3,
-        };
-        let first = GitDiff {
-            base: "origin/main".to_owned(),
-            ahead: 1,
-            behind: 2,
-            added: 12,
-            removed: 4,
-        };
-        let second = GitDiff {
-            base: "origin/main".to_owned(),
-            ahead: 10,
-            behind: 1,
-            added: 1234,
-            removed: 567,
-        };
-        let first = super::session_menu_rows_at(
-            70,
-            false,
-            Mode::Switch,
-            &session("one", None, SessionOrigin::Unknown),
-            Some(&first),
-            columns,
-            base,
-        );
-        let second = super::session_menu_rows_at(
-            70,
-            false,
-            Mode::Switch,
-            &session("two", None, SessionOrigin::Unknown),
-            Some(&second),
-            columns,
-            base,
-        );
-        assert_eq!(strip(&first[1]).find('+'), strip(&second[1]).find('+'));
-        assert_eq!(strip(&first[1]).find('-'), strip(&second[1]).find('-'));
-    }
-
-    #[test]
     fn git_summary_supports_every_commit_column_shape() {
         let diff = GitDiff {
             base: "origin/main".to_owned(),
@@ -3786,31 +2085,6 @@ mod tests {
         assert_eq!(strip(&no_commits), "+ 1 - 2");
     }
 
-    #[test]
-    fn render_joins_git_diffs_to_the_matching_stable_session_id() {
-        let mut ws = workspace();
-        let daemon = ws.session_ids()[1];
-        ws.set_git_diffs(BTreeMap::from([(
-            daemon,
-            GitDiff {
-                base: "origin/main".to_owned(),
-                ahead: 3,
-                behind: 2,
-                added: 8,
-                removed: 1,
-            },
-        )]));
-
-        let rendered = render(30, 100, &ws)
-            .iter()
-            .map(|line| strip(line))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(rendered.contains("daemon"));
-        assert!(rendered.contains("↑3 ↓2 + 8 - 1"));
-        assert!(!rendered.contains("origin/main"));
-    }
-
     fn terminal_ref(workspace: WorkspaceId, session: SessionId) -> TerminalRef {
         TerminalRef {
             daemon_generation: DaemonGeneration::new(),
@@ -3822,62 +2096,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_tab_is_listed_with_a_wave_and_focuses_only_when_completion_is_uninterrupted() {
-        let workspace_id = WorkspaceId::new();
-        let session_id = SessionId::new();
-        let mut ws = Workspace::with_runtime_ids(
-            WorkspaceRecord::new("actual", "/tmp/actual"),
-            WorkspaceState {
-                sessions: vec![session("tui", None, SessionOrigin::Human)],
-                root_notes: Scratchpad::default(),
-                updated_at: now(),
-            },
-            workspace_id,
-            vec![session_id],
-        );
-        ws.select_next();
-        ws.enter_closeup();
-        let operation = ws.open_pane(PaneKind::Terminal);
-
-        let early = render_with_skeleton_frame(30, 100, &ws, 0).join("\n");
-        let later = render_with_skeleton_frame(30, 100, &ws, 12).join("\n");
-        assert!(strip(&early).contains("Terminal"));
-        assert_ne!(early, later, "the pending tab uses the shared loading wave");
-
-        let terminal = terminal_ref(workspace_id, session_id);
-        ws.complete_pane(operation, terminal.clone());
-        assert_eq!(
-            ws.pane().selected(),
-            &PaneSelection::Tab(TabSelection::Live(terminal))
-        );
-    }
-
-    #[test]
-    fn later_interaction_cancels_pending_tab_completion_focus() {
-        let workspace_id = WorkspaceId::new();
-        let session_id = SessionId::new();
-        let mut ws = Workspace::with_runtime_ids(
-            WorkspaceRecord::new("actual", "/tmp/actual"),
-            WorkspaceState {
-                sessions: vec![session("tui", None, SessionOrigin::Human)],
-                root_notes: Scratchpad::default(),
-                updated_at: now(),
-            },
-            workspace_id,
-            vec![session_id],
-        );
-        ws.select_next();
-        ws.enter_closeup();
-        let operation = ws.open_pane(PaneKind::Agent);
-        let selected_before_completion = ws.pane().selected().clone();
-        ws.record_interaction();
-
-        ws.complete_pane(operation, terminal_ref(workspace_id, session_id));
-        assert_eq!(ws.pane().selected(), &selected_before_completion);
-    }
-
-    #[test]
-    fn home_sidebar_git_columns_match_the_legacy_diff_row() {
+    fn home_sidebar_git_columns_render_the_diff_row() {
         let diff = GitDiff {
             base: "origin/main".to_owned(),
             ahead: 3,
@@ -3886,13 +2105,8 @@ mod tests {
             removed: 1,
         };
 
-        // Legacy path: the observation flows through `set_git_diffs`.
-        let mut ws = workspace();
-        let daemon_id = ws.session_ids()[1];
-        ws.set_git_diffs(BTreeMap::from([(daemon_id, diff.clone())]));
-        let legacy = render(30, 100, &ws);
-
-        // Controller path: the same observation flows through `with_git_diffs`.
+        // The observation flows through `with_git_diffs`, keyed by the stable
+        // session id, into the sidebar commit-summary column.
         let workspace_id = WorkspaceId::new();
         let tui = SessionId::new();
         let daemon = SessionId::new();
@@ -3909,17 +2123,12 @@ mod tests {
         .with_git_diffs(&BTreeMap::from([(daemon, diff)]));
         let controller = render_home(30, 100, &home);
 
-        let diff_row = |frame: &[String]| {
-            frame
-                .iter()
-                .map(|line| strip(line))
-                .find(|line| line.contains("↑3 ↓2"))
-                .expect("git diff row")
-        };
-        // The ported diff column is byte-identical after stripping ANSI: same
-        // summary text and the same right-aligned column positions.
-        assert_eq!(diff_row(&controller), diff_row(&legacy));
-        assert!(diff_row(&controller).contains("↑3 ↓2 + 8 - 1"));
+        let diff_row = controller
+            .iter()
+            .map(|line| strip(line))
+            .find(|line| line.contains("↑3 ↓2"))
+            .expect("git diff row");
+        assert!(diff_row.contains("↑3 ↓2 + 8 - 1"));
     }
 
     #[test]
@@ -3952,18 +2161,8 @@ mod tests {
             "live row".to_owned(),
         ];
 
-        // Legacy path: a focused live terminal renders daemon PTY output and its
-        // feedback flows through `set_terminal_feedback`.
-        let mut ws = workspace();
-        ws.enter_closeup();
-        let operation = ws.open_pane(PaneKind::Terminal);
-        ws.complete_pane(operation, terminal_ref(workspace_id, session));
-        ws.set_terminal_view(Some(view_rows.clone()));
-        ws.set_terminal_feedback(Some("copied 3 lines".to_owned()));
-        let legacy = render(30, 100, &ws);
-
-        // Controller path: the same rows and feedback flow through
-        // `with_terminal_view`.
+        // A focused live terminal's rows and feedback flow through
+        // `with_terminal_view` into the right pane.
         let target = Target::Session(session);
         let terminal = terminal_ref(workspace_id, session);
         let mut pane = PaneState::new(PaneSelection::Target(target));
@@ -4018,33 +2217,23 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let controller_right = right_pane(&controller);
-        let legacy_right = right_pane(&legacy);
-        // The live viewport rows and the terminal feedback both appear, matching
-        // the information the legacy pane draws.
+        // The live viewport rows and the terminal feedback both appear in the pane.
         assert!(controller_right.iter().any(|line| line == "live row"));
         assert!(controller_right.iter().any(|line| line == "old row"));
-        assert!(legacy_right.iter().any(|line| line == "live row"));
-        // The terminal feedback surfaces in the right-pane footer on both paths.
-        let footer_feedback = |frame: &[String]| {
-            frame
+        // The terminal feedback surfaces in the right-pane footer.
+        assert!(
+            controller
                 .iter()
                 .any(|line| strip(line).contains("copied 3 lines"))
-        };
-        assert!(footer_feedback(&controller));
-        assert!(footer_feedback(&legacy));
-        // The shared viewport window keeps the newest row anchored to the bottom
-        // of the content area on both paths.
-        let bottom_output = |right: &[String]| {
-            right
-                .iter()
-                .rfind(|line| line.ends_with(" row"))
-                .cloned()
-                .expect("a rendered output row")
-        };
-        assert_eq!(
-            bottom_output(&controller_right),
-            bottom_output(&legacy_right)
         );
+        // The viewport window keeps the newest row anchored to the bottom of the
+        // content area.
+        let bottom_output = controller_right
+            .iter()
+            .rfind(|line| line.ends_with(" row"))
+            .cloned()
+            .expect("a rendered output row");
+        assert_eq!(bottom_output, "live row");
     }
 
     #[test]
@@ -4052,15 +2241,6 @@ mod tests {
         let workspace_id = WorkspaceId::new();
         let session = SessionId::new();
         let rows = (0..20).map(|row| format!("row {row}")).collect::<Vec<_>>();
-
-        let mut ws = workspace();
-        ws.enter_closeup();
-        let operation = ws.open_pane(PaneKind::Terminal);
-        ws.complete_pane(operation, terminal_ref(workspace_id, session));
-        ws.set_terminal_view(Some(rows.clone()));
-        ws.terminal_scroll_up();
-        ws.terminal_scroll_up();
-        let legacy = render(24, 80, &ws);
 
         let target = Target::Session(session);
         let terminal = terminal_ref(workspace_id, session);
@@ -4114,9 +2294,8 @@ mod tests {
                 .filter(|line| line.starts_with("row "))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(output_rows(&controller), output_rows(&legacy));
         assert!(!output_rows(&controller).is_empty());
-        // A two-row scrollback offset keeps the live tail hidden on both paths.
+        // A two-row scrollback offset keeps the live tail hidden.
         assert!(!output_rows(&controller).iter().any(|line| line == "row 19"));
     }
 
@@ -4161,77 +2340,6 @@ mod tests {
     }
 
     #[test]
-    fn workspace_renderer_uses_v1_colours_for_switch_and_closeup_rows() {
-        let mut ws = workspace();
-        ws.select_next();
-
-        let switch = render(30, 100, &ws).join("\n");
-        assert!(switch.contains("\u{1b}[1;36mUI work\u{1b}[0m"));
-        assert!(switch.contains("\u{1b}[2mdaemon\u{1b}[0m"));
-        assert!(switch.contains("\u{1b}[2m+ new session\u{1b}[0m"));
-
-        ws.enter_closeup();
-        let closeup = render(30, 100, &ws).join("\n");
-        assert!(closeup.contains("\u{1b}[1;36mUI work\u{1b}[0m"));
-        assert!(closeup.contains("\u{1b}[36mdaemon\u{1b}[0m"));
-        assert!(closeup.contains("\u{1b}[1;32m+ new session\u{1b}[0m"));
-    }
-
-    #[test]
-    fn pending_session_is_rendered_as_a_non_selectable_shimmer_skeleton() {
-        let mut ws = workspace();
-        ws.begin_pending_session("feature-x".to_owned());
-
-        let frame = render_with_skeleton_frame(30, 100, &ws, 4);
-        let text = frame
-            .iter()
-            .map(|line| strip(line))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        assert!(text.contains("feature-x"));
-        assert!(text.contains('●'));
-        let skeleton = text.find("feature-x").unwrap();
-        let create = text.find("+ new session").unwrap();
-        assert!(
-            skeleton < create,
-            "skeleton is immediately above new session"
-        );
-        assert_eq!(
-            text.matches("> feature-x").count(),
-            0,
-            "a skeleton must not become a navigation target"
-        );
-
-        ws.clear_pending_session();
-        let cleared = render(30, 100, &ws)
-            .iter()
-            .map(|line| strip(line))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(!cleared.contains("feature-x"));
-    }
-
-    #[test]
-    fn pending_session_skeleton_uses_the_shared_shimmer_wave() {
-        let first = super::pending_session_row(100, "feature-x", 0);
-        let held = super::pending_session_row(100, "feature-x", 3);
-        let next = super::pending_session_row(100, "feature-x", 4);
-
-        assert_eq!(first, held, "the pending session wave advances slowly");
-        assert_ne!(first, next, "the pending session name sweeps");
-    }
-
-    #[test]
-    fn pending_session_skeleton_reserves_the_same_two_rows_as_a_session() {
-        let rows = super::pending_session_rows(30, "feature-x", 0);
-
-        assert_eq!(rows.len(), 2);
-        assert!(strip(&rows[0]).contains("feature-x"));
-        assert!(rows[1].is_empty());
-    }
-
-    #[test]
     fn waiting_daemon_sweep_advances_every_five_frames() {
         let rendered = super::mascot_metrics(None, 0).concat();
         let first = strip(&rendered);
@@ -4243,167 +2351,5 @@ mod tests {
         assert_eq!(rendered, held_rendered);
         assert_ne!(rendered, advanced_rendered);
         assert_eq!(first, strip(&advanced_rendered));
-    }
-
-    #[test]
-    fn render_places_the_v1_style_usagi_above_the_left_footer() {
-        let frame = render(30, 100, &workspace());
-        let left_width = LEFT_WIDTH;
-        let left_rows = frame[CHROME_ROWS..]
-            .iter()
-            .map(|line| strip(line).chars().take(left_width).collect::<String>())
-            .collect::<Vec<_>>();
-
-        let ears = left_rows
-            .iter()
-            .position(|line| line.contains("(\\(\\"))
-            .expect("sidebar ears");
-        assert!(left_rows[ears + 1].contains("(o.o)?"));
-        assert!(left_rows[ears + 2].contains("o(_(\")(\")"));
-        assert!(left_rows[ears + 3].trim().is_empty(), "reserved blank row");
-        assert!(left_rows[ears + 4].contains("[switch]"));
-        assert_eq!(left_rows[ears].find('('), Some(MASCOT_INDENT + 1));
-        assert_eq!(left_rows[ears + 1].find('('), Some(MASCOT_INDENT + 1));
-        assert_eq!(left_rows[ears + 2].find('o'), Some(MASCOT_INDENT));
-    }
-
-    #[test]
-    fn render_places_daemon_metrics_to_the_right_of_usagi() {
-        let mut ws = workspace();
-        let metrics = usagi_core::usecase::client::DaemonMetrics {
-            schema_version: 1,
-            sampled_at_ms: 42,
-            cpu_percent_hundredths: 123,
-            resident_memory_bytes: 45 * 1_048_576,
-            active_subscribers: 3,
-            dropped_updates: 5,
-        };
-        assert!(
-            super::mascot_metrics(Some(&metrics), 0)
-                .concat()
-                .contains("\u{1b}[2;37m\u{f2db}")
-        );
-        ws.set_metrics(Some(metrics));
-        let frame = render(30, 100, &ws);
-        let left_rows = frame[CHROME_ROWS..]
-            .iter()
-            .map(|line| strip(line).chars().take(LEFT_WIDTH).collect::<String>())
-            .collect::<Vec<_>>();
-        let metrics = left_rows
-            .iter()
-            .position(|line| line.contains('\u{f2db}'))
-            .expect("CPU beside usagi");
-        assert!(left_rows[metrics].contains("\u{f2db} 1%    \u{f233} 45MB"));
-    }
-
-    #[test]
-    fn render_prioritizes_the_session_menu_over_the_usagi_when_short() {
-        let frame = render(6, 100, &workspace());
-        let text = frame
-            .iter()
-            .map(|line| strip(line))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        assert!(text.contains("\u{f0907} main"));
-        assert!(!text.contains("(o.o)?"));
-    }
-
-    #[test]
-    fn render_places_the_selected_root_before_every_session() {
-        let text = joined(&workspace());
-        let root = text.find("\u{f0907} main").expect("selected main row");
-        let first = text.find("UI work").expect("first session row");
-        let second = text.find("daemon").expect("second session row");
-        assert!(root < first);
-        assert!(first < second);
-        assert!(text[root..first].contains('─'));
-    }
-
-    #[test]
-    fn render_reflects_selected_session_and_root() {
-        let mut ws = workspace();
-        let root_text = joined(&ws);
-        assert!(root_text.contains("No tabs stirring yet. Enter starts one."));
-        assert!(!root_text.contains("/tmp/actual"));
-
-        ws.select_next();
-        let session_text = joined(&ws);
-        assert!(session_text.contains("UI work"));
-        assert!(session_text.contains("No tabs stirring yet. Enter starts one."));
-
-        ws.open_pane(PaneKind::Terminal);
-        let frame = render(30, 100, &ws);
-        let right_header = strip(&frame[CHROME_ROWS]);
-        let name = right_header.find("UI work").expect("session name");
-        let tab = right_header.find("Terminal").expect("terminal tab");
-        assert!(name < tab);
-        assert!(!frame.iter().any(|line| strip(line).contains("/tmp/actual")));
-        ws.close_pane();
-
-        ws.select_next();
-        let second_session_text = joined(&ws);
-        assert!(second_session_text.contains("daemon"));
-        assert!(second_session_text.contains("No tabs stirring yet. Enter starts one."));
-    }
-
-    #[test]
-    fn render_marks_only_one_selected_row() {
-        let frame = render(30, 100, &workspace());
-        let cursor_rows = frame
-            .iter()
-            .filter(|line| {
-                let trimmed = strip(line).trim_start().to_owned();
-                trimmed.starts_with('>') || trimmed.starts_with('\u{f0907}')
-            })
-            .count();
-        assert_eq!(cursor_rows, 1);
-    }
-
-    #[test]
-    fn session_viewport_keeps_every_selection_and_the_root_visible() {
-        let mut ws = workspace_with_sessions(12);
-        let tiny_frame = render(3, 100, &ws);
-        assert!(
-            tiny_frame
-                .iter()
-                .map(|line| strip(line))
-                .any(|line| line.contains("\u{f0907} main"))
-        );
-        for expected in std::iter::once("main".to_string())
-            .chain((0..12).map(|index| format!("session-{index:02}")))
-        {
-            let frame = render(8, 100, &ws);
-            let selected = frame
-                .iter()
-                .map(|line| strip(line))
-                .find(|line| {
-                    let trimmed = line.trim_start();
-                    trimmed.starts_with('>') || trimmed.starts_with('\u{f0907}')
-                })
-                .expect("selected row must be inside the viewport");
-            assert!(selected.contains(&expected), "selected row: {selected}");
-            ws.select_next();
-        }
-    }
-
-    #[test]
-    fn render_fills_the_terminal_and_fits_its_width() {
-        let frame = render(30, 100, &workspace());
-        assert_eq!(frame.len(), 30);
-        assert!(frame.iter().all(|line| display_width(line) == 100));
-    }
-
-    #[test]
-    fn render_falls_back_for_a_zero_size() {
-        let frame = render(0, 0, &workspace());
-        assert_eq!(frame.len(), 24);
-        assert!(frame.iter().all(|line| display_width(line) == 80));
-    }
-
-    #[test]
-    fn render_does_not_overflow_a_short_terminal() {
-        assert_eq!(render(2, 80, &workspace()).len(), 2);
-        assert_eq!(render(1, 80, &workspace()).len(), 1);
     }
 }
