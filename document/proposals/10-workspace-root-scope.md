@@ -77,6 +77,6 @@ TUI の agent pane host を `HashMap<Target, PaneRuntime>` に変更し、`Targe
 
 ## security invariants
 
-- root scope は client 供給の path / argv / identity を受け付けない。cwd は daemon の trusted root のみ。
+- root scope は client 供給の path / argv / identity を受け付けない。cwd は daemon の trusted root のみ。要求された root `WorktreeId` は daemon が自分の永続値と照合し、一致しなければ spawn 前に拒否する。
 - session scope の隔離・fence を回帰させない（session 経路は常に `Some`、比較は Option 同士）。
 - root の durable operation は session lifecycle reducer に混ざらない。inbox は予約セグメントで分離する。
