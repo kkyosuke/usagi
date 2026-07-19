@@ -95,6 +95,7 @@ impl RemoveModal {
 
     /// Drop checked entries that no longer denote the same record in a fresh
     /// daemon snapshot. The selector never rebinds a checked entry by name.
+    #[coverage(off)] // LLVM attributes the retain closure as a separate uncovered function.
     pub fn reconcile(&mut self, current: &[SessionRecord]) {
         self.entries.retain(|entry| {
             current
