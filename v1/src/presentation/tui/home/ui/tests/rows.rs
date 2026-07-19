@@ -3377,6 +3377,112 @@ fn overview_preview_prompts_to_create_when_the_create_row_is_selected() {
     assert!(text.contains("Type a name"));
 }
 
+#[test]
+fn create_label_style_resolves_to_success_not_accent() {
+    // The "+ new session" affordance is the green Success role in every state
+    // (#302 の色規約, #362): emphasised (bold) while the 選択 cursor rests on it,
+    // plain otherwise. Pin the *role* so a stray colour — e.g. an accidental
+    // accent (cyan/blue) swap, the exact regression #362 guards — fails CI instead
+    // of shipping. `force_styling` makes the SGR check independent of whether the
+    // test binary happens to have colours enabled.
+    for emphasized in [true, false] {
+        let expected_success = {
+            let s = Style::new().success();
+            if emphasized {
+                s.bold()
+            } else {
+                s
+            }
+        };
+        let expected_accent = {
+            let s = Style::new().accent();
+            if emphasized {
+                s.bold()
+            } else {
+                s
+            }
+        };
+        let got = create_label_style(emphasized)
+            .force_styling(true)
+            .apply_to("+ new session")
+            .to_string();
+        assert_eq!(
+            got,
+            expected_success
+                .force_styling(true)
+                .apply_to("+ new session")
+                .to_string(),
+            "create affordance must resolve to the Success (green) role (emphasized={emphasized})"
+        );
+        assert_ne!(
+            got,
+            expected_accent
+                .force_styling(true)
+                .apply_to("+ new session")
+                .to_string(),
+            "create affordance must not be the accent (cyan/blue) role (emphasized={emphasized})"
+        );
+    }
+}
+
+#[test]
+fn create_affordance_surfaces_route_through_the_success_helper() {
+    // Every surface that draws the affordance — the full-sidebar row, its rail `+`
+    // twin, and the right-pane preview header — must paint the label through the
+    // shared Success helper, not a raw inline colour. Rendering with the cursor on
+    // the create row (選択/Overview) makes all three the emphasised variant, so
+    // each surface's label bytes match `create_label_style(true)` exactly.
+    let emphasised_label = create_label_style(true);
+
+    let mut list = list_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    list.focus_index(list.create_row());
+    let full = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &[],
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        80,
+        12,
+        true,
+        Sidebar::Full,
+        Utc::now(),
+        None,
+    );
+    // root(2) + divider(1) + session(3) = 6, so the create row is line 6.
+    assert!(full[6].contains(&emphasised_label.apply_to("+ new session").to_string()));
+
+    let rail = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &[],
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        5,
+        12,
+        true,
+        Sidebar::Rail,
+        Utc::now(),
+        None,
+    );
+    assert!(rail
+        .last()
+        .unwrap()
+        .contains(&emphasised_label.apply_to("+").to_string()));
+
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_switch();
+    state.overview_select(state.list().create_row());
+    let preview = overview_preview(&state, 60, 10);
+    assert!(preview[0].contains(&emphasised_label.apply_to("+ new session").to_string()));
+}
+
 /// A single workspace with `n` sessions named `s0`..`s{n-1}`, for the overflow
 /// scroll tests. `s0` is the primary.
 fn sessions(n: usize) -> Vec<WorktreeState> {

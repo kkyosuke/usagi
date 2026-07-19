@@ -62,89 +62,50 @@ pub enum Overlay {
     CreateSessionError,
 }
 
-/// 新規 session 入力で編集する項目。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum CreateSessionField {
-    #[default]
-    Name,
-    Profile,
-    Model,
-}
-
 /// daemon へ送る前の、TUI-local な新規 session 入力。
 ///
-/// profile/model は空なら未指定であり、daemon の workspace default policy に委ねる。
+/// 左サイドバーの `+ new session` 行に inline 展開する name-only 入力。profile/model
+/// は指定せず、daemon の workspace default policy に委ねる。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CreateSessionForm {
     name: String,
-    profile: String,
-    model: String,
-    field: CreateSessionField,
     error: Option<Notice>,
 }
 
 impl CreateSessionForm {
     #[must_use]
-    pub const fn field(&self) -> CreateSessionField {
-        self.field
-    }
-    #[must_use]
     pub fn name(&self) -> &str {
         &self.name
-    }
-    #[must_use]
-    pub fn profile(&self) -> &str {
-        &self.profile
-    }
-    #[must_use]
-    pub fn model(&self) -> &str {
-        &self.model
     }
     #[must_use]
     pub fn error(&self) -> Option<&Notice> {
         self.error.as_ref()
     }
 
-    fn selected_mut(&mut self) -> &mut String {
-        match self.field {
-            CreateSessionField::Name => &mut self.name,
-            CreateSessionField::Profile => &mut self.profile,
-            CreateSessionField::Model => &mut self.model,
-        }
-    }
-
-    fn next_field(&mut self) {
-        self.field = match self.field {
-            CreateSessionField::Name => CreateSessionField::Profile,
-            CreateSessionField::Profile => CreateSessionField::Model,
-            CreateSessionField::Model => CreateSessionField::Name,
-        };
-    }
-
     fn push(&mut self, character: char) {
-        self.selected_mut().push(character);
+        self.name.push(character);
         self.error = None;
     }
 
     fn backspace(&mut self) {
-        self.selected_mut().pop();
+        self.name.pop();
         self.error = None;
     }
 
     fn request(&mut self) -> Result<SessionCreateIntent, Notice> {
         let name = required_create_value(&self.name, "session name is required")?;
-        let profile = optional_profile(&self.profile)?;
-        let model = optional_model(&self.model)?;
         Ok(SessionCreateIntent {
             name,
-            profile,
-            model,
+            profile: None,
+            model: None,
         })
     }
 }
 
 /// Validated new-session request. This is intentionally product-neutral: adapter
-/// specific CLI flags and model allowlists remain daemon adapter concerns.
+/// specific CLI flags and model allowlists remain daemon adapter concerns. profile
+/// / model は現状 TUI の作成フローからは指定せず（常に `None`、daemon の workspace
+/// default policy に委ねる）、型は将来の daemon 側選択のため `Option` を保つ。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionCreateIntent {
     pub name: String,
@@ -167,17 +128,6 @@ fn optional_profile(value: &str) -> Result<Option<AgentProfileId>, Notice> {
         AgentProfileId::new(value)
             .map(Some)
             .map_err(|_| Notice::new("invalid agent profile"))
-    }
-}
-
-fn optional_model(value: &str) -> Result<Option<ModelSelector>, Notice> {
-    let value = value.trim();
-    if value.is_empty() {
-        Ok(None)
-    } else {
-        ModelSelector::new(value)
-            .map(Some)
-            .map_err(|_| Notice::new("invalid model selector"))
     }
 }
 
@@ -3009,10 +2959,6 @@ fn update_create_session_form(state: &mut AppState, key: &AppKey) -> Vec<Effect>
             state.overlay = None;
             Vec::new()
         }
-        AppKey::Tab => {
-            form.next_field();
-            Vec::new()
-        }
         AppKey::Backspace => {
             form.backspace();
             Vec::new()
@@ -3032,8 +2978,8 @@ fn update_create_session_form(state: &mut AppState, key: &AppKey) -> Vec<Effect>
                 Vec::new()
             }
         },
-        // Ctrl-A/Home and unsupported keys must never retrigger create while
-        // this form owns input.
+        // Ctrl-A/Home/Tab and unsupported keys must never retrigger create or edit
+        // a removed field while this name-only form owns input.
         _ => Vec::new(),
     }
 }
@@ -3305,41 +3251,40 @@ mod tests {
     }
 
     #[test]
-    fn create_session_form_edits_and_validates_each_field() {
+    fn create_session_form_edits_the_name_only_and_defaults_profile_and_model() {
         let mut form = CreateSessionForm::default();
-        assert_eq!(form.field(), CreateSessionField::Name);
         assert_eq!(form.name(), "");
-        assert_eq!(form.profile(), "");
-        assert_eq!(form.model(), "");
         assert!(form.error().is_none());
 
         assert!(required_create_value(" ", "required").is_err());
         assert_eq!(required_create_value(" name ", "required").unwrap(), "name");
-        assert_eq!(optional_profile("").unwrap(), None);
-        assert!(optional_profile("invalid profile").is_err());
-        assert_eq!(optional_model("").unwrap(), None);
-        assert!(optional_model("invalid\nmodel").is_err());
 
-        for character in "session".chars() {
-            form.push(character);
-        }
-        form.next_field();
-        for character in "codex".chars() {
-            form.push(character);
-        }
-        form.next_field();
-        for character in "gpt-5".chars() {
+        for character in "sessio".chars() {
             form.push(character);
         }
         form.backspace();
-        form.push('5');
+        form.push('o');
+        form.push('n');
 
         let request = form.request().unwrap();
         assert_eq!(request.name, "session");
-        assert_eq!(request.profile.unwrap().as_str(), "codex");
-        assert_eq!(request.model.unwrap().as_str(), "gpt-5");
-        form.next_field();
-        assert_eq!(form.field(), CreateSessionField::Name);
+        // profile / model are no longer part of the create flow: the intent always
+        // defers to the daemon's workspace default policy.
+        assert!(request.profile.is_none());
+        assert!(request.model.is_none());
+    }
+
+    #[test]
+    fn optional_profile_maps_blank_valid_and_invalid_inputs() {
+        // `optional_profile` still backs the Closeup `agent [profile]` command, so
+        // its blank / valid / invalid branches (including the error closure) stay
+        // exercised even though the create form no longer takes a profile.
+        assert_eq!(optional_profile("").unwrap(), None);
+        assert_eq!(
+            optional_profile(" codex ").unwrap().unwrap().as_str(),
+            "codex"
+        );
+        assert!(optional_profile("invalid profile").is_err());
     }
 
     #[test]
@@ -3837,29 +3782,17 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));
         assert_eq!(state.active(), Target::Root(workspace));
         assert_eq!(state.overlay(), Some(Overlay::CreateSession));
-        assert_eq!(
-            state.create_session_form().unwrap().field(),
-            CreateSessionField::Name
-        );
+        assert_eq!(state.create_session_form().unwrap().name(), "");
+        // Home / Tab while the name-only form owns input must not retrigger create
+        // nor edit any removed field.
         let _ = update(&mut state, AppEvent::Key(AppKey::Home));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
         assert_eq!(state.overlay(), Some(Overlay::CreateSession));
         for key in [
             AppKey::Char('w'),
             AppKey::Char('o'),
             AppKey::Char('r'),
             AppKey::Char('k'),
-            AppKey::Tab,
-            AppKey::Char('c'),
-            AppKey::Char('o'),
-            AppKey::Char('d'),
-            AppKey::Char('e'),
-            AppKey::Char('x'),
-            AppKey::Tab,
-            AppKey::Char('g'),
-            AppKey::Char('p'),
-            AppKey::Char('t'),
-            AppKey::Char('-'),
-            AppKey::Char('5'),
         ] {
             let _ = update(&mut state, AppEvent::Key(key));
         }
@@ -3869,8 +3802,8 @@ mod tests {
             [Effect::CreateSession { workspace: actual_workspace, token: PendingToken(1), intent, .. }]
                 if *actual_workspace == workspace
                     && intent.name == "work"
-                    && intent.profile.as_ref().is_some_and(|profile| profile.as_str() == "codex")
-                    && intent.model.as_ref().is_some_and(|model| model.as_str() == "gpt-5")
+                    && intent.profile.is_none()
+                    && intent.model.is_none()
         ));
         assert_eq!(state.pending().len(), 1);
         let token = state.pending()[0].token;
