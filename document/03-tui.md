@@ -171,8 +171,8 @@ dismissed を新規検出として通知しない。
 Enter は選択中の canonical HTTPS PR URL を browser effect に 1 回渡す。合成ルートは macOS では
 `open`、Linux では `xdg-open` を argv として実行する。URL を shell command に補間せず、検証失敗、
 未対応 platform、起動失敗は TUI を終了させず safe feedback にする。
-Closeup の `close [-f|--force]` は同じ checklist を開き、`-f` と `--force` は同値である。target、未知 flag、
-重複 flag は安全に拒否する。
+Closeup の `close [-f|--force]` は、選択中 session の削除を Overview と同じ daemon session-command port へ
+直接依頼し、`-f` と `--force` は同値である。target、未知 flag、重複 flag は安全に拒否する。
 
 `session remove -s [--force]`（`--select` も同義）は、現在選択中の row を即時削除せず、中央の
 session checklist を開く。`↑`/`↓` または `j`/`k` で cursor を移動し、Space で複数 row を選び、Enter で

@@ -20,8 +20,9 @@ use usagi_core::usecase::client::DaemonMetrics;
 
 use crate::presentation::layouts::panes;
 use crate::presentation::theme::{Color, Role, Style};
-use crate::presentation::views::closeup_modal::CloseupModal;
+use crate::presentation::views::closeup_modal::{self, CloseupModal};
 use crate::presentation::views::decision_modal;
+use crate::presentation::views::overview_modal::{self, OverviewModal};
 use crate::presentation::views::pr_modal::{self, PrModal};
 use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
 use crate::presentation::widgets;
@@ -178,6 +179,11 @@ pub struct HomeProjection {
     pr_overlay: Option<PrOverlay>,
     /// Open Markdown preview overlay projection, drawn above the frame.
     preview_overlay: Option<PreviewOverlay>,
+    /// Persisted Overview command-palette input, when its overlay is open. The
+    /// runtime owns this so the caret and filter survive across frames.
+    overview_modal: Option<OverviewModal>,
+    /// Persisted Closeup action-modal input, when its overlay is open.
+    closeup_modal: Option<CloseupModal>,
 }
 
 /// Home の右ペインに投影する tab strip の 1 項目。
@@ -238,7 +244,23 @@ impl HomeProjection {
             decisions: state.decisions().to_vec(),
             pr_overlay: state.pr_overlay().cloned(),
             preview_overlay: state.preview_overlay().cloned(),
+            overview_modal: None,
+            closeup_modal: None,
         }
+    }
+
+    /// Attach the runtime's persisted Overview / Closeup modal input so the
+    /// overlay renders its live caret and selection instead of a rebuilt, empty
+    /// modal. Both are `None` unless their overlay is open.
+    #[must_use]
+    pub fn with_overlay_modals(
+        mut self,
+        overview: Option<OverviewModal>,
+        closeup: Option<CloseupModal>,
+    ) -> Self {
+        self.overview_modal = overview;
+        self.closeup_modal = closeup;
+        self
     }
 
     /// pane reducer の tab と stable selection を右ペインへ投影する。
@@ -885,19 +907,24 @@ pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -
         split,
     ));
     frame.truncate(height);
-    if let Some(overlay) = &home.pr_overlay {
+    if let Some(modal) = &home.overview_modal {
+        overview_modal::render_over(height, width, &frame, modal)
+    } else if let Some(overlay) = &home.pr_overlay {
         render_pr_overlay(height, width, &frame, overlay)
     } else if let Some(overlay) = &home.preview_overlay {
         render_preview_overlay(height, width, &frame, overlay)
     } else if let Some(overlay) = &home.decision_overlay {
         decision_modal::render_over(height, width, &frame, overlay, &home.decisions)
     } else if home.closeup_action_visible {
-        crate::presentation::views::closeup_modal::render_over(
-            height,
-            width,
-            &frame,
-            &CloseupModal::new(home.active_label()),
-        )
+        // Prefer the runtime's persisted action modal (its caret and selection),
+        // titled with the active target. Fall back to a fresh modal only for the
+        // non-interactive snapshot path that has no runtime input state.
+        let modal = home
+            .closeup_modal
+            .clone()
+            .unwrap_or_else(|| CloseupModal::new(home.active_label()))
+            .with_session(home.active_label());
+        closeup_modal::render_over(height, width, &frame, &modal)
     } else {
         frame
     }

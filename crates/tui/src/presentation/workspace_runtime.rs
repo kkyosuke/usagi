@@ -19,12 +19,14 @@ use std::path::PathBuf;
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef};
 use usagi_core::usecase::client::DaemonMetrics;
 
+use crate::presentation::views::closeup_modal::CloseupModal;
+use crate::presentation::views::overview_modal::OverviewModal;
 use crate::presentation::views::workspace::{
     GitDiff, HomeProjection, ProjectedSession, TerminalViewProjection, render_home,
 };
 use crate::usecase::application::Key;
 use crate::usecase::application::controller::{
-    AppEvent, AppState, Effect, HomeMode, Route, TabDirection, Target, update,
+    AppEvent, AppKey, AppState, Effect, HomeMode, Overlay, Route, TabDirection, Target, update,
 };
 use crate::usecase::application::pane::{
     PaneEvent, PaneInputOwner, PaneKind, PaneRegistry, PaneRegistryEffect, PaneRegistryEvent,
@@ -49,6 +51,13 @@ pub struct CloseOutcome {
 pub struct WorkspaceRuntime {
     state: AppState,
     panes: PaneRegistry,
+    /// Persisted input state for the Overview (`:`) command palette. Present only
+    /// while the controller's [`Overlay::Overview`] is open, so its caret,
+    /// filter, and history survive across frames instead of being rebuilt.
+    overview_modal: Option<OverviewModal>,
+    /// Persisted input state for the Closeup action modal. Present only while the
+    /// controller's [`Overlay::Closeup`] is open.
+    closeup_modal: Option<CloseupModal>,
 }
 
 impl WorkspaceRuntime {
@@ -59,7 +68,25 @@ impl WorkspaceRuntime {
     pub fn new(workspace: usagi_core::domain::id::WorkspaceId, sessions: Vec<SessionId>) -> Self {
         let state = AppState::home(workspace, sessions);
         let panes = PaneRegistry::new(state.active());
-        Self { state, panes }
+        Self {
+            state,
+            panes,
+            overview_modal: None,
+            closeup_modal: None,
+        }
+    }
+
+    /// The Overview command palette's persisted input state, if its overlay is
+    /// open. The shell renders it instead of rebuilding an empty palette.
+    #[must_use]
+    pub const fn overview_modal(&self) -> Option<&OverviewModal> {
+        self.overview_modal.as_ref()
+    }
+
+    /// The Closeup action modal's persisted input state, if its overlay is open.
+    #[must_use]
+    pub const fn closeup_modal(&self) -> Option<&CloseupModal> {
+        self.closeup_modal.as_ref()
     }
 
     /// The controller state driving Home rows, overlays, and markers.
@@ -86,9 +113,124 @@ impl WorkspaceRuntime {
     /// calling this.
     #[must_use]
     pub fn handle_key(&mut self, key: Key) -> Vec<Effect> {
+        // The Overview / Closeup overlays own keyboard input while open: their
+        // persisted modal edits its own caret and selection, and the sidebar
+        // reducer never sees the key. This is the symmetry the other overlays
+        // already have, and it is why an open palette can no longer move the
+        // hidden Home cursor.
+        if self.state.overlay() == Some(Overlay::Overview) && self.overview_modal.is_some() {
+            return self.handle_overview_key(key);
+        }
+        if self.state.overlay() == Some(Overlay::Closeup) && self.closeup_modal.is_some() {
+            return self.handle_closeup_key(key);
+        }
         match app_event_from_key(key) {
             Some(event) => self.apply_event(event),
             None => Vec::new(),
+        }
+    }
+
+    /// Drive the Overview palette from one terminal key. Editing keys mutate the
+    /// persisted modal in place; Enter submits its resolved command through the
+    /// reducer as [`AppKey::SubmitOverview`], and Escape closes the overlay.
+    /// Every other key falls through to the reducer so global chords still work.
+    fn handle_overview_key(&mut self, key: Key) -> Vec<Effect> {
+        let modal = self
+            .overview_modal
+            .as_mut()
+            .expect("overview modal present when Overview overlay is open");
+        match key {
+            Key::Up => {
+                if !modal.recall_previous() {
+                    modal.select_prev();
+                }
+                Vec::new()
+            }
+            Key::Down => {
+                if !modal.recall_next() {
+                    modal.select_next();
+                }
+                Vec::new()
+            }
+            Key::Left => {
+                modal.cursor_left();
+                Vec::new()
+            }
+            Key::Right => {
+                modal.cursor_right();
+                Vec::new()
+            }
+            Key::Backspace => {
+                modal.backspace();
+                Vec::new()
+            }
+            Key::Tab => {
+                modal.complete_selected();
+                Vec::new()
+            }
+            Key::Char(character) => {
+                modal.insert_char(character);
+                Vec::new()
+            }
+            Key::Enter => {
+                let submission = modal.submission();
+                modal.record_submission();
+                self.apply_event(AppEvent::Key(AppKey::SubmitOverview(submission)))
+            }
+            Key::Escape => self.apply_event(AppEvent::Key(AppKey::Escape)),
+            other => match app_event_from_key(other) {
+                Some(event) => self.apply_event(event),
+                None => Vec::new(),
+            },
+        }
+    }
+
+    /// Drive the Closeup action modal from one terminal key. Editing keys mutate
+    /// the persisted modal; Enter submits the selected action or typed command as
+    /// [`AppKey::SubmitCloseup`], and Escape closes the overlay.
+    fn handle_closeup_key(&mut self, key: Key) -> Vec<Effect> {
+        let modal = self
+            .closeup_modal
+            .as_mut()
+            .expect("closeup modal present when Closeup overlay is open");
+        match key {
+            Key::Up => {
+                modal.select_prev();
+                Vec::new()
+            }
+            Key::Down => {
+                modal.select_next();
+                Vec::new()
+            }
+            Key::Left => {
+                modal.collapse();
+                Vec::new()
+            }
+            Key::Right => {
+                modal.expand_selected();
+                Vec::new()
+            }
+            Key::Backspace => {
+                modal.backspace();
+                Vec::new()
+            }
+            Key::Tab => {
+                modal.complete_selected();
+                Vec::new()
+            }
+            Key::Char(character) => {
+                modal.insert_char(character);
+                Vec::new()
+            }
+            Key::Enter => {
+                let submission = modal.submission();
+                self.apply_event(AppEvent::Key(AppKey::SubmitCloseup(submission)))
+            }
+            Key::Escape => self.apply_event(AppEvent::Key(AppKey::Escape)),
+            other => match app_event_from_key(other) {
+                Some(event) => self.apply_event(event),
+                None => Vec::new(),
+            },
         }
     }
 
@@ -99,7 +241,26 @@ impl WorkspaceRuntime {
     pub fn apply_event(&mut self, event: AppEvent) -> Vec<Effect> {
         let effects = update(&mut self.state, event);
         self.follow_active_target();
+        self.sync_overlay_modals();
         effects
+    }
+
+    /// Keep the persisted Overview / Closeup modals aligned with the controller's
+    /// overlay state. Opening an overlay lazily creates its empty modal; closing
+    /// it (through submit, Escape, or a live-pane transition) drops the modal so
+    /// its caret and filter never leak into the next time it opens.
+    fn sync_overlay_modals(&mut self) {
+        if self.state.overlay() == Some(Overlay::Overview) {
+            self.overview_modal.get_or_insert_with(OverviewModal::new);
+        } else {
+            self.overview_modal = None;
+        }
+        if self.state.overlay() == Some(Overlay::Closeup) {
+            self.closeup_modal
+                .get_or_insert_with(|| CloseupModal::new(String::new()));
+        } else {
+            self.closeup_modal = None;
+        }
     }
 
     /// Whether a live terminal currently owns keyboard input, so the shell
@@ -110,6 +271,7 @@ impl WorkspaceRuntime {
     pub fn wants_live_input(&self) -> bool {
         matches!(self.state.route(), Route::Home(HomeMode::Closeup))
             && self.state.has_live_pane()
+            && self.state.overlay().is_none()
             && matches!(self.panes.input_owner(), PaneInputOwner::Tab)
     }
 
@@ -359,7 +521,8 @@ impl WorkspaceRuntime {
                 .with_pane(self.panes.active_pane())
                 .with_metrics(metrics)
                 .with_git_diffs(git_diffs)
-                .with_terminal_view(terminal_view);
+                .with_terminal_view(terminal_view)
+                .with_overlay_modals(self.overview_modal.clone(), self.closeup_modal.clone());
         render_home(height, width, &projection)
     }
 }
@@ -379,7 +542,7 @@ mod tests {
     };
     use crate::usecase::application::Key;
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, Effect, HomeMode, Overlay, Route, TabDirection, Target,
+        AppEvent, AppKey, Effect, HomeMode, Overlay, Route, Selection, TabDirection, Target,
     };
     use crate::usecase::application::pane::{
         LivePane, PaneRegistry, PaneRegistryEvent, PaneSelection, PendingPane, reduce_registry,
@@ -414,6 +577,236 @@ mod tests {
         runtime
     }
 
+    /// Open the Overview palette from a fresh runtime and confirm its persisted
+    /// modal exists.
+    fn overview_on(workspace: WorkspaceId) -> WorkspaceRuntime {
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let _ = runtime.handle_key(Key::Char(':'));
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Overview));
+        assert!(runtime.overview_modal().is_some());
+        runtime
+    }
+
+    fn type_str(runtime: &mut WorkspaceRuntime, text: &str) {
+        for character in text.chars() {
+            let _ = runtime.handle_key(Key::Char(character));
+        }
+    }
+
+    #[test]
+    fn overview_palette_runs_a_typed_command_through_the_reducer() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = overview_on(workspace);
+        // Typing edits the palette, not the hidden sidebar cursor.
+        let before = runtime.state().selected();
+        let _ = runtime.handle_key(Key::Down); // candidate move, not sidebar move
+        type_str(&mut runtime, "session list");
+        assert_eq!(runtime.state().selected(), before);
+        let effects = runtime.handle_key(Key::Enter);
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::RefreshSessions { .. })),
+            "{effects:?}"
+        );
+        // A submitted command closes the palette and drops its modal.
+        assert_eq!(runtime.state().overlay(), None);
+        assert!(runtime.overview_modal().is_none());
+    }
+
+    #[test]
+    fn overview_palette_creates_a_session() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = overview_on(workspace);
+        type_str(&mut runtime, "session create feature-x");
+        let effects = runtime.handle_key(Key::Enter);
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::CreateSession { .. })),
+            "{effects:?}"
+        );
+    }
+
+    #[test]
+    fn overview_editing_keys_move_the_caret_and_filter_without_touching_the_sidebar() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.handle_key(Key::Char(':'));
+        let before = runtime.state().selected();
+        type_str(&mut runtime, "issue");
+        let _ = runtime.handle_key(Key::Backspace); // "issu"
+        let _ = runtime.handle_key(Key::Left); // caret motion
+        let _ = runtime.handle_key(Key::Right);
+        let _ = runtime.handle_key(Key::Tab); // complete → "issue"
+        let _ = runtime.handle_key(Key::Up); // no history yet → candidate move
+        let _ = runtime.handle_key(Key::Down);
+        assert_eq!(runtime.state().selected(), before);
+        assert_eq!(runtime.overview_modal().unwrap().input(), "issue");
+    }
+
+    #[test]
+    fn overview_history_recall_survives_an_invalid_submit() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = overview_on(workspace);
+        // An unknown command keeps the palette open and records the submission.
+        type_str(&mut runtime, "zzz");
+        let _ = runtime.handle_key(Key::Enter);
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Overview));
+        // Clear the draft, then Up recalls the recorded command.
+        for _ in 0..3 {
+            let _ = runtime.handle_key(Key::Backspace);
+        }
+        let _ = runtime.handle_key(Key::Up);
+        assert_eq!(runtime.overview_modal().unwrap().input(), "zzz");
+        // Down walks history forward again.
+        let _ = runtime.handle_key(Key::Down);
+    }
+
+    #[test]
+    fn overview_escape_closes_the_palette() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = overview_on(workspace);
+        let effects = runtime.handle_key(Key::Escape);
+        assert!(effects.is_empty());
+        assert_eq!(runtime.state().overlay(), None);
+        assert!(runtime.overview_modal().is_none());
+    }
+
+    #[test]
+    fn overview_reserved_keys_fall_through_to_the_reducer() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = overview_on(workspace);
+        // Ctrl-C is swallowed by the open overlay; passthrough yields nothing.
+        assert!(runtime.handle_key(Key::Quit).is_empty());
+        assert!(runtime.handle_key(Key::Passthrough(vec![0x1b])).is_empty());
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Overview));
+    }
+
+    #[test]
+    fn closeup_modal_launches_an_agent_by_default() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
+        assert!(runtime.closeup_modal().is_some());
+        // The default action is `agent`; Enter launches it for the active session.
+        let effects = runtime.handle_key(Key::Enter);
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::LaunchAgent { .. })),
+            "{effects:?}"
+        );
+        // Submitting closes the action modal; the edge-triggered live-pane level
+        // no longer re-opens it while the launched pane is still pending.
+        assert_eq!(runtime.state().overlay(), None);
+        assert!(runtime.closeup_modal().is_none());
+    }
+
+    #[test]
+    fn closeup_modal_opens_a_terminal_and_closes_a_session() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+
+        // `terminal` is the last action; Up wraps to it.
+        let mut runtime = closeup_on(workspace, session);
+        let _ = runtime.handle_key(Key::Up);
+        let effects = runtime.handle_key(Key::Enter);
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::OpenTerminal { .. })),
+            "{effects:?}"
+        );
+
+        // `close` is the second action; Down selects it and submits a remove.
+        let mut runtime = closeup_on(workspace, session);
+        let _ = runtime.handle_key(Key::Down);
+        let effects = runtime.handle_key(Key::Enter);
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::RemoveSession { .. })),
+            "{effects:?}"
+        );
+    }
+
+    #[test]
+    fn closeup_editing_keys_drive_the_modal_without_moving_the_sidebar() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        let selected_row = runtime.state().selected();
+        // Typing filters the action list; expand/collapse and completion edit the
+        // modal in place.
+        let _ = runtime.handle_key(Key::Down); // close
+        let _ = runtime.handle_key(Key::Right); // expand subcommands
+        let _ = runtime.handle_key(Key::Left); // collapse
+        type_str(&mut runtime, "ter");
+        let _ = runtime.handle_key(Key::Tab); // complete → terminal
+        let _ = runtime.handle_key(Key::Backspace);
+        assert!(matches!(runtime.state().selected(), Selection::Target(_)));
+        assert_eq!(runtime.state().selected(), selected_row);
+        // The modal persists across the edits (no live pane keeps it the surface).
+        assert!(runtime.closeup_modal().is_some());
+        let effects = runtime.handle_key(Key::Escape);
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn closeup_reserved_keys_fall_through_to_the_reducer() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        assert!(runtime.handle_key(Key::Quit).is_empty());
+        assert!(runtime.handle_key(Key::Passthrough(vec![0x1b])).is_empty());
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
+    }
+
+    #[test]
+    fn open_action_overlay_disarms_live_passthrough() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut runtime = closeup_on(workspace, session);
+        let operation = OperationId::new();
+        let terminal = terminal_ref(workspace, session);
+        let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
+        let _ = runtime.complete_pane(target, operation, terminal.clone());
+        let _ = runtime.focus_terminal(target, terminal);
+        // A focused live pane owns input until the action modal opens over it.
+        assert!(runtime.wants_live_input());
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::OpenCloseupModal));
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
+        assert!(runtime.closeup_modal().is_some());
+        assert!(!runtime.wants_live_input());
+        // Escape dismisses the forced modal and hands input back to the live pane.
+        let _ = runtime.handle_key(Key::Escape);
+        assert_eq!(runtime.state().overlay(), None);
+        assert!(runtime.closeup_modal().is_none());
+        assert!(runtime.wants_live_input());
+    }
+
+    #[test]
+    fn render_draws_the_open_overview_palette() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = overview_on(workspace);
+        type_str(&mut runtime, "session");
+        let frame = runtime.render(
+            24,
+            80,
+            "atlas",
+            "/work/root",
+            &[],
+            None,
+            &BTreeMap::new(),
+            None,
+        );
+        assert!(frame.join("\n").contains("Overview"));
+    }
+
     #[test]
     fn new_starts_at_root_with_an_empty_pane() {
         let workspace = WorkspaceId::new();
@@ -431,6 +824,8 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        // With no overlay open, a key the Home reducer never consumes is inert.
+        assert!(runtime.handle_key(Key::Left).is_empty());
         assert!(runtime.handle_key(Key::Down).is_empty());
         // Down selected the session; Enter now activates it.
         let effects = runtime.handle_key(Key::Enter);
