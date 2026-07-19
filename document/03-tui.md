@@ -141,7 +141,7 @@ inline 入力欄へ置き換わる。名前を入力して Enter を押すと通
 request を非同期に開始し、完了まで行の直前に session と同じ 2 行の skeleton を表示する。skeleton の activity glyph と session 名は同じ
 左から右へ流れる低速の wave で描き、静的な点滅にはしない。daemon が同一 `OperationId` と revision を持つ `session.created`
 完了 hook を返したときだけ、skeleton をその response 内の snapshot row に置き換えて loading を終了する。IME に依存しない `Ctrl-A` も
-同じ inline 入力を開く。`Ctrl-A` は選択カーソルも `+ new session` 行へ移動する。Esc は入力を取り消す。作成は名前だけを受け取り、profile / model は指定せず daemon の workspace default policy に委ねる（中央 modal ではなく行内の name-only 入力である）。入力中は英数字・`-`・`_` 以外、64 文字超過、または表示中 session と重複する名前を行の下に error として表示し、空の名前は Enter 時に error を表示する。これらは local validation で daemon へ送る前に弾き、入力（draft）は失わないので、error を直して再送できる。local validation の error（入力に付随）と、daemon が受付後に作成を拒否したときの表示は別物として扱う。前者は入力欄の直下に出し、後者は下記の作成失敗 dialog で安全な message だけを提示する。
+同じ inline 入力を開く。`Ctrl-A` は選択カーソルも `+ new session` 行へ移動する。Esc は入力を取り消す。作成は名前だけを受け取り、profile / model は指定せず daemon の workspace default policy に委ねる（中央 modal ではなく行内の name-only 入力である）。入力中は英数字・`-`・`_` 以外、64 文字超過、または表示中 session と重複する名前を caret 行の下に error として表示し、空の名前は Enter 時に error を表示する。error は caret 行と同じ 1 行に詰めて末尾を切り捨てるのではなく、sidebar 幅（`unicode-width` 準拠の表示桁数）に合わせて caret 行の**下へ折り返して**表示するため、CJK を含む長い安全文でも切れずに読める。折り返した行数は `+ new session` 行の高さ計上（viewport の scroll 起点と footer）と一致させ、error が伸びてもレイアウトがずれない。これらは local validation で daemon へ送る前に弾き、入力（draft）は失わないので、error を直して再送できる。local validation の error（入力に付随）と、daemon が受付後に作成を拒否したときの表示は別物として扱う。前者は入力欄の直下に出し、後者は下記の作成失敗 dialog で安全な message だけを提示する。
 作成 request の受付後、完了まで入力がなければ、作成された session を選択して Closeup へ移る。完了前に入力があればこの自動遷移を取り消し、
 作成完了後もその時点の操作 surface を保つ。
 完了 snapshot は sidebar row と daemon-issued session ID を同時に置換するため、`a` のような短い名前も

@@ -1105,7 +1105,7 @@ fn home_left_pane(
         .iter()
         .position(|row| *row == home.selected)
         .unwrap_or(0);
-    let start = home_viewport_start(&rows, selected_index, viewport_capacity);
+    let start = home_viewport_start(width, home, &rows, selected_index, viewport_capacity);
     let mut lines = Vec::with_capacity(height);
     for row in &rows[start..] {
         let row_lines = home_row_lines_at(width, home, *row, columns, now);
@@ -1135,12 +1135,18 @@ fn home_left_pane(
 }
 
 #[coverage(off)]
-fn home_viewport_start(rows: &[Selection], selected: usize, capacity: usize) -> usize {
+fn home_viewport_start(
+    width: usize,
+    home: &HomeProjection,
+    rows: &[Selection],
+    selected: usize,
+    capacity: usize,
+) -> usize {
     let mut start = 0;
     while start < selected
         && rows[start..=selected]
             .iter()
-            .map(|row| home_row_height(*row))
+            .map(|row| home_row_height_at(width, home, *row))
             .sum::<usize>()
             > capacity
     {
@@ -1158,6 +1164,18 @@ fn home_row_height(row: Selection) -> usize {
     }
 }
 
+/// Row height accounting for the inline create form. When the `+ new session` row
+/// owns input its height is the number of lines `new_session_input_lines` draws
+/// (caret row plus any wrapped error), so the viewport reserves exactly what is
+/// rendered. Every other row falls back to the static [`home_row_height`].
+#[coverage(off)]
+fn home_row_height_at(width: usize, home: &HomeProjection, row: Selection) -> usize {
+    if let (Selection::NewSession, Some(draft)) = (row, home.create_draft.as_ref()) {
+        return new_session_input_lines(width, draft).len();
+    }
+    home_row_height(row)
+}
+
 #[coverage(off)]
 fn home_row_lines_at(
     width: usize,
@@ -1167,10 +1185,12 @@ fn home_row_lines_at(
     now: DateTime<Utc>,
 ) -> Vec<String> {
     // When the create form owns input, the `+ new session` row becomes an inline
-    // name-only caret in place of its static label. This single-line surface keeps
-    // the row height at 1 so the viewport math is unchanged.
+    // name-only caret in place of its static label, with any validation error
+    // wrapped to the sidebar width below it. The row height therefore varies with
+    // the error, which `home_row_height_at` derives from the same builder so the
+    // viewport math stays aligned.
     if let (Selection::NewSession, Some(draft)) = (row, home.create_draft.as_ref()) {
-        return vec![new_session_input_line(width, draft)];
+        return new_session_input_lines(width, draft);
     }
     let target = match row {
         Selection::Target(target) => Some(target),
@@ -1276,22 +1296,35 @@ fn home_row_lines_at(
     }
 }
 
-/// Render the inline `+ new session` name input on a single sidebar line.
+/// Build the inline `+ new session` sidebar lines: the caret row, then any
+/// validation error wrapped to the sidebar `width` below it.
 ///
-/// The active row shows the accent cursor, a `+` affordance, and a block caret on
-/// the typed name. Any reducer validation message trails the caret in the danger
-/// style. profile / model never appear here.
-#[coverage(off)]
-fn new_session_input_line(width: usize, draft: &CreateDraft) -> String {
+/// The caret row shows the accent cursor, a `+` affordance, and a block caret on
+/// the typed name (`> + new: <name>`, documented in 03-tui.md); it stays a single
+/// clipped line since the name is the user's own bounded input. Any reducer
+/// validation message is wrapped **as plain text** to the display width and each
+/// segment is then painted in the danger style — wrapping the styled string
+/// directly would miscount ANSI escapes as visible columns. Every line is padded
+/// to `width` so CJK, styled, and narrow-width rows keep their columns aligned and
+/// nothing is silently truncated. profile / model never appear here.
+///
+/// The returned line count is authoritative: `home_row_height_at` reports the same
+/// length so the viewport's scroll math never diverges from what is drawn.
+fn new_session_input_lines(width: usize, draft: &CreateDraft) -> Vec<String> {
     let accent = Role::Accent.style().bold();
     let caret = widgets::block_caret(&draft.name, draft.name.chars().count(), &accent);
-    // Documented shape (03-tui.md): the row becomes `+ new: <name>` under the `>`
-    // cursor while the create form owns input.
-    let mut line = format!("{} + new: {caret}", accent.paint(">"));
+    let caret_line = format!("{} + new: {caret}", accent.paint(">"));
+    let mut lines = vec![widgets::pad_to_width(
+        &widgets::clip_to_width(&caret_line, width),
+        width,
+    )];
     if let Some(error) = &draft.error {
-        line = format!("{line}  {}", Role::Danger.style().bold().paint(error));
+        let danger = Role::Danger.style().bold();
+        for segment in widgets::wrap_to_width(error, width) {
+            lines.push(widgets::pad_to_width(&danger.paint(&segment), width));
+        }
     }
-    widgets::pad_to_width(&widgets::clip_to_width(&line, width), width)
+    lines
 }
 
 /// v1-compatible sidebar marker with explicit precedence.
@@ -1454,13 +1487,13 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHROME_ROWS, GIBIBYTE, GitDiff, HomeProjection, LEFT_WIDTH, MEBIBYTE, ProjectedSession,
-        TerminalViewProjection, Workspace, format_memory, load_style, render_home,
-        terminal_point_at, with_footer_gap,
+        CHROME_ROWS, CreateDraft, GIBIBYTE, GitDiff, HomeProjection, LEFT_WIDTH, MEBIBYTE,
+        ProjectedSession, TerminalViewProjection, Workspace, format_memory, load_style,
+        new_session_input_lines, render_home, terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Style};
     use crate::presentation::widgets::mascot::MascotSpeech;
-    use crate::presentation::widgets::{display_width, modal};
+    use crate::presentation::widgets::{display_width, modal, wrap_to_width};
     use crate::usecase::application::controller::{
         AppEvent, AppKey, AppState, BackendEvent, Feedback, HomeMode, Route, SafeError,
         SafeMessage, Selection, Target, update,
@@ -1671,6 +1704,117 @@ mod tests {
         let text = joined_home(&HomeProjection::from_state(&state, "work", "/work", &[]));
         assert!(text.contains("invalid character"));
         assert!(text.contains("ok/"));
+    }
+
+    #[test]
+    fn new_session_input_lines_draws_only_the_caret_row_without_an_error() {
+        let draft = CreateDraft {
+            name: "feature-x".into(),
+            error: None,
+        };
+        let lines = new_session_input_lines(30, &draft);
+        assert_eq!(lines.len(), 1);
+        assert!(strip(&lines[0]).contains("+ new: feature-x"));
+        assert_eq!(display_width(&lines[0]), 30);
+    }
+
+    #[test]
+    fn new_session_input_lines_wraps_a_long_error_below_the_caret_without_dropping_text() {
+        // A safe message wider than the sidebar must wrap across rows rather than
+        // being clipped with an ellipsis on the caret line.
+        let error = "session name is required and must be unique within the workspace";
+        let draft = CreateDraft {
+            name: "dup".into(),
+            error: Some(error.to_string()),
+        };
+        let width = 20;
+        let lines = new_session_input_lines(width, &draft);
+        // Caret row plus one row per wrapped error segment.
+        let wrapped = wrap_to_width(error, width);
+        assert!(wrapped.len() >= 2, "expected the error to wrap");
+        assert_eq!(lines.len(), 1 + wrapped.len());
+        // Every row keeps the sidebar column width; nothing overflows.
+        assert!(lines.iter().all(|line| display_width(line) == width));
+        // The wrap is lossless (no ellipsis / dropped text): the segments rebuild
+        // the original message and each rendered error row carries its segment.
+        assert_eq!(wrapped.concat(), error);
+        assert!(!strip(&lines[0]).contains('…'));
+        for (row, segment) in lines[1..].iter().zip(&wrapped) {
+            assert!(strip(row).starts_with(segment.as_str()));
+        }
+    }
+
+    #[test]
+    fn new_session_input_lines_wraps_cjk_errors_within_the_display_width() {
+        // Full-width glyphs count as two columns; wrapping must not overflow.
+        let error = "セッション名が重複しています";
+        let draft = CreateDraft {
+            name: "重複".into(),
+            error: Some(error.to_string()),
+        };
+        let width = 12;
+        let lines = new_session_input_lines(width, &draft);
+        let wrapped = wrap_to_width(error, width);
+        assert!(wrapped.len() >= 2, "expected the CJK error to wrap");
+        assert_eq!(lines.len(), 1 + wrapped.len());
+        // Full-width glyphs never push a row past the sidebar width.
+        assert!(lines.iter().all(|line| display_width(line) == width));
+        // Lossless: the wrapped segments rebuild the original CJK message.
+        assert_eq!(wrapped.concat(), error);
+    }
+
+    #[test]
+    fn new_session_input_lines_keeps_error_rows_styled_without_miscounting_ansi() {
+        // The error is wrapped as plain text and painted per row, so each row
+        // carries an SGR escape yet still measures at exactly the sidebar width.
+        let draft = CreateDraft {
+            name: String::new(),
+            error: Some("invalid character; use a-z0-9-_".to_string()),
+        };
+        let width = 16;
+        let lines = new_session_input_lines(width, &draft);
+        assert!(lines.len() >= 2);
+        for line in &lines[1..] {
+            assert!(line.contains('\u{1b}'), "error row should carry style");
+            assert!(display_width(line) <= width);
+        }
+    }
+
+    #[test]
+    fn new_session_input_lines_survive_a_tiny_width_without_panicking() {
+        let draft = CreateDraft {
+            name: "name".into(),
+            error: Some("too long".to_string()),
+        };
+        for width in [0usize, 1, 2, 3] {
+            let lines = new_session_input_lines(width, &draft);
+            assert!(!lines.is_empty());
+            assert!(lines.iter().all(|line| display_width(line) <= width));
+        }
+    }
+
+    #[test]
+    fn render_home_keeps_one_footer_and_fits_height_when_a_create_error_wraps() {
+        // Reproduce a wrapped inline create error, then confirm the sidebar still
+        // renders exactly `height` rows with a single footer — i.e. the row-height
+        // accounting matches the lines actually drawn.
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        for character in "bad/name/with/slashes".chars() {
+            let _ = update(&mut state, AppEvent::Key(AppKey::Char(character)));
+        }
+        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        for height in [6usize, 10, 30] {
+            let rows = render_home(height, 20, &home);
+            assert_eq!(rows.len(), height);
+            let footers = rows
+                .iter()
+                .filter(|line| strip(line).contains("[switch]"))
+                .count();
+            assert_eq!(footers, 1, "expected exactly one footer at height {height}");
+        }
     }
 
     fn pr_error() -> SafeError {
