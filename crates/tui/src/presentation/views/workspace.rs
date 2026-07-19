@@ -1158,6 +1158,42 @@ fn home_row_height(row: Selection) -> usize {
     }
 }
 
+/// Paint a Home sidebar row label with v1's colour precedence.
+///
+/// `+ new session` is a Success (green) affordance in every mode (#302 / #362):
+/// resolve it before the generic accent branches so the Switch cursor only adds
+/// bold and it never falls through to the accent (cyan) `selected` colour that
+/// real targets use. A non-cursor `+ new session` in Switch still takes the
+/// shared inactive dim, and Closeup keeps it Success but unbolded. Every other
+/// row keeps the established order: selected cursor (accent bold) → Switch
+/// inactive dim → current (accent bold) → plain accent.
+fn home_row_label(
+    row: Selection,
+    label: &str,
+    selected: bool,
+    current: bool,
+    mode: HomeMode,
+) -> String {
+    if matches!(row, Selection::NewSession) {
+        return if selected {
+            Role::Success.style().bold().paint(label)
+        } else if mode == HomeMode::Switch {
+            Style::new().dim().paint(label)
+        } else {
+            Role::Success.style().paint(label)
+        };
+    }
+    if selected {
+        Role::Accent.style().bold().paint(label)
+    } else if mode == HomeMode::Switch {
+        Style::new().dim().paint(label)
+    } else if current {
+        Role::Accent.style().bold().paint(label)
+    } else {
+        Role::Accent.style().paint(label)
+    }
+}
+
 #[coverage(off)]
 fn home_row_lines_at(
     width: usize,
@@ -1215,20 +1251,7 @@ fn home_row_lines_at(
     } else {
         label.to_string()
     };
-    let label = if selected {
-        Role::Accent.style().bold().paint(&label)
-    } else if home.mode == HomeMode::Switch {
-        // v1 keeps the Switch cursor legible by fading every inactive target.
-        // Do this after the selected case so the cursor's established semantic
-        // colour and marker precedence remain unchanged.
-        Style::new().dim().paint(&label)
-    } else if matches!(row, Selection::NewSession) {
-        Role::Success.style().bold().paint(&label)
-    } else if current {
-        Role::Accent.style().bold().paint(&label)
-    } else {
-        Role::Accent.style().paint(&label)
-    };
+    let label = home_row_label(row, &label, selected, current, home.mode);
     let first = if let Some(session) = session {
         let note = if session.has_notes { "✎" } else { "·" };
         widgets::pad_to_width(
@@ -1915,6 +1938,60 @@ mod tests {
         assert!(rendered.contains("\u{1b}[2mfirst\u{1b}[0m"));
         assert!(rendered.contains("\u{1b}[1;36msecond\u{1b}[0m"));
         assert!(rendered.contains("\u{1b}[2m+ new session\u{1b}[0m"));
+    }
+
+    #[test]
+    fn switch_paints_the_selected_new_session_row_success_not_accent() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        // Rows are [root, + new session]; one Down rests the Switch cursor on
+        // `+ new session` without opening the create form.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        assert_eq!(state.selected(), Selection::NewSession);
+        assert_eq!(state.route(), Route::Home(HomeMode::Switch));
+        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+
+        // Regression (#376): the Switch cursor on `+ new session` must keep the
+        // Success (green) role and only add bold — never fall through to the
+        // accent (cyan) `selected` branch used by real targets.
+        let rendered = render_home(30, 100, &home).join("\n");
+        assert!(rendered.contains("\u{1b}[1;32m+ new session\u{1b}[0m"));
+        assert!(!rendered.contains("\u{1b}[1;36m+ new session\u{1b}[0m"));
+        assert!(!rendered.contains("\u{1b}[36m+ new session\u{1b}[0m"));
+        // The red `>` cursor precedence is unchanged.
+        assert!(
+            render_home(30, 100, &home)
+                .iter()
+                .map(|line| strip(line))
+                .any(|line| line.contains("> + new session"))
+        );
+    }
+
+    #[test]
+    fn closeup_paints_the_new_session_row_success_without_bold() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        // Activate the session to enter Closeup; the persistent `+ new session`
+        // row still renders and, outside Switch, carries no cursor.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+        let home = HomeProjection::from_state(
+            &state,
+            "work",
+            "/work",
+            &[projected_session(session, "session", "/work/session")],
+        );
+
+        // Regression (#376): bold is reserved for the Switch cursor, so Closeup
+        // keeps `+ new session` Success (green) but unbolded, and never accent.
+        let rendered = render_home(30, 100, &home).join("\n");
+        assert!(rendered.contains("\u{1b}[32m+ new session\u{1b}[0m"));
+        assert!(!rendered.contains("\u{1b}[1;32m+ new session\u{1b}[0m"));
+        assert!(!rendered.contains("\u{1b}[1;36m+ new session\u{1b}[0m"));
+        assert!(!rendered.contains("\u{1b}[36m+ new session\u{1b}[0m"));
     }
 
     #[test]
