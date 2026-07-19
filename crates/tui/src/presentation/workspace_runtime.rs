@@ -281,6 +281,12 @@ impl WorkspaceRuntime {
         self.sync_live_pane();
     }
 
+    /// Sample the active target's live-pane availability into the controller.
+    /// This runs after every event and pane transition, so it feeds the reducer
+    /// the current *level*; the reducer detects the edge and stays inert on an
+    /// unchanged level (see [`AppEvent::LivePaneAvailability`]). That keeps an
+    /// overlay opened in the same batch (quit confirmation, PR / Preview) and
+    /// the Ctrl-C grace from being clobbered by the next sample.
     fn sync_live_pane(&mut self) {
         let live = matches!(self.state.active(), Target::Session(_))
             && self
@@ -332,7 +338,7 @@ mod tests {
     use super::{PaneEvent, PaneKind, PaneTab, TabSelection, WorkspaceRuntime, tab_selection};
     use crate::usecase::application::Key;
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, Effect, HomeMode, Route, TabDirection, Target,
+        AppEvent, AppKey, Effect, HomeMode, Overlay, Route, TabDirection, Target,
     };
     use crate::usecase::application::pane::{
         LivePane, PaneRegistry, PaneRegistryEvent, PaneSelection, PendingPane, reduce_registry,
@@ -686,6 +692,95 @@ mod tests {
             })),
             TabSelection::Live(terminal)
         );
+    }
+
+    /// #352 regression: a Closeup quit confirmation over a live pane must
+    /// survive the same-batch live resample `apply_event` performs, otherwise
+    /// the only quit path is switching away.
+    #[test]
+    fn closeup_live_quit_confirmation_survives_live_resample() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut runtime = closeup_on(workspace, session);
+
+        // Arm a live pane so Ctrl-C opens the quit confirmation.
+        let operation = OperationId::new();
+        let terminal = terminal_ref(workspace, session);
+        let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
+        let _ = runtime.complete_pane(target, operation, terminal);
+        assert!(runtime.state().has_live_pane());
+        assert_eq!(runtime.state().overlay(), None);
+
+        // Ctrl-C opens the confirmation and the trailing live resample keeps it.
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::CtrlC));
+        assert_eq!(runtime.state().overlay(), Some(Overlay::QuitConfirmation));
+
+        // It stays operable: a tick resamples live yet keeps it, then 'n' cancels.
+        let _ = runtime.apply_event(AppEvent::Tick);
+        assert_eq!(runtime.state().overlay(), Some(Overlay::QuitConfirmation));
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::Char('n')));
+        assert_eq!(runtime.state().overlay(), None);
+
+        // Reopening and confirming quit still reaches Detach.
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::CtrlC));
+        let effects = runtime.apply_event(AppEvent::Key(AppKey::Enter));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Detach))
+        );
+    }
+
+    /// #352 regression: PR / Preview overlays opened in a non-live Closeup must
+    /// not be overwritten by the same-batch (or a later tick's) live resample,
+    /// which previously forced `Overlay::Closeup` and stuck the modal.
+    #[test]
+    fn nonlive_closeup_pr_and_preview_overlays_open_and_close() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        assert!(!runtime.state().has_live_pane());
+
+        // The PR overlay opens and stays open across a resampling tick.
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenPrs));
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Prs));
+        let _ = runtime.apply_event(AppEvent::Tick);
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Prs));
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::Escape));
+        assert_eq!(runtime.state().overlay(), None);
+
+        // The Preview overlay behaves the same way.
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenPreview));
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Preview));
+        let _ = runtime.apply_event(AppEvent::Tick);
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Preview));
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::Escape));
+        assert_eq!(runtime.state().overlay(), None);
+    }
+
+    /// #352 regression: the Ctrl-C grace armed by leaving a live pane must not
+    /// be cleared by the next tick's resample of the unchanged non-live level.
+    #[test]
+    fn ctrl_c_grace_survives_a_tick_resample() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut runtime = closeup_on(workspace, session);
+
+        // Establish then drop a live pane: leaving it arms the Ctrl-C grace.
+        let operation = OperationId::new();
+        let terminal = terminal_ref(workspace, session);
+        let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
+        let _ = runtime.complete_pane(target, operation, terminal.clone());
+        assert!(runtime.state().has_live_pane());
+        let _ = runtime.exit_pane(target, terminal);
+        assert!(!runtime.state().has_live_pane());
+        assert!(runtime.state().ctrl_c_grace());
+
+        // A tick resamples the unchanged non-live level and must keep the grace.
+        let _ = runtime.apply_event(AppEvent::Tick);
+        assert!(runtime.state().ctrl_c_grace());
     }
 
     fn runtime_panes_mut(runtime: &mut WorkspaceRuntime) -> &mut PaneRegistry {
