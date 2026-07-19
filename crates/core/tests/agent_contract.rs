@@ -50,7 +50,7 @@ fn request(profile_id: AgentProfileId) -> LaunchRequest {
         initial_prompt: Some("continue safely".into()),
         scope: LaunchScope {
             workspace_id: WorkspaceId::new(),
-            session_id: SessionId::new(),
+            session_id: Some(SessionId::new()),
             worktree_id: WorktreeId::new(),
         },
         required_capabilities: BTreeSet::new(),

@@ -194,13 +194,15 @@ pub struct DaemonMetrics {
 
 /// Product-neutral Agent launch intent sent by a TUI client.
 ///
-/// The stable session identity is enough for the daemon to resolve its durable
-/// worktree scope. An omitted profile deliberately delegates selection to the
-/// daemon's default policy.
+/// The stable scope identity is enough for the daemon to resolve its durable
+/// worktree. A session identity resolves that session's worktree; an absent
+/// session (`None`) resolves the trusted workspace root. An omitted profile
+/// deliberately delegates selection to the daemon's default policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentLaunchIntent {
     pub workspace: WorkspaceId,
-    pub session: SessionId,
+    /// Owning session; absent for a workspace-root launch.
+    pub session: Option<SessionId>,
     pub profile: Option<AgentProfileId>,
 }
 

@@ -471,7 +471,9 @@ fn fenced_session(
         .sessions
         .iter()
         .position(|s| {
-            s.session_id == fence.session_id
+            // Managed-session completions always carry a session fence; a
+            // workspace-root operation never reaches this session reducer.
+            fence.session_id == Some(s.session_id)
                 && s.attempt == fence.lifecycle_attempt
                 && s.operation_id == Some(fence.operation_id)
         })
@@ -529,7 +531,7 @@ mod tests {
     ) -> CompletionFence {
         CompletionFence {
             workspace_id: s.workspace_id,
-            session_id: session.session_id,
+            session_id: Some(session.session_id),
             operation_id: op.operation_id,
             owner_daemon_generation: op.owner_daemon_generation,
             execution_attempt: 1,

@@ -290,24 +290,26 @@ pub struct AgentRuntimeRef {
     pub agent_runtime_id: AgentRuntimeId,
     /// The exact terminal which hosts this runtime.
     pub terminal: TerminalRef,
-    /// Session owning the Agent runtime.
-    pub session_id: SessionId,
+    /// Session owning the Agent runtime; absent for a workspace-root runtime.
+    pub session_id: Option<SessionId>,
 }
 
 impl AgentRuntimeRef {
-    /// Builds a runtime reference only when the terminal is in `session_id`.
+    /// Builds a runtime reference only when the terminal's owning scope matches
+    /// `session_id`.  A workspace-root runtime (`session_id == None`) must host a
+    /// workspace-root terminal, and a session runtime must host that session's
+    /// terminal.
     ///
     /// # Errors
     ///
-    /// Returns [`ScopeError`] for root terminals or a terminal from another
-    /// session.
+    /// Returns [`ScopeError`] when the terminal's scope does not match.
     #[coverage(off)]
     pub fn new(
         agent_runtime_id: AgentRuntimeId,
         terminal: TerminalRef,
-        session_id: SessionId,
+        session_id: Option<SessionId>,
     ) -> Result<Self, ScopeError> {
-        if terminal.session_id != Some(session_id) {
+        if terminal.session_id != session_id {
             return Err(ScopeError::SessionDoesNotOwnTerminal);
         }
         Ok(Self {
@@ -347,8 +349,8 @@ impl std::error::Error for ScopeError {}
 pub struct CompletionFence {
     /// Workspace containing the session.
     pub workspace_id: WorkspaceId,
-    /// Session record incarnation.
-    pub session_id: SessionId,
+    /// Session record incarnation; absent for a workspace-root operation.
+    pub session_id: Option<SessionId>,
     /// Durable intent being completed.
     pub operation_id: OperationId,
     /// Daemon generation that accepted the execution.
