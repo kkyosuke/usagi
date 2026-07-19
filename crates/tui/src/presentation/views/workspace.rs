@@ -175,7 +175,17 @@ pub struct HomeProjection {
     terminal_view: Option<TerminalViewProjection>,
     pane_tabs: Vec<HomePaneTab>,
     pane_error: Option<String>,
+    /// Whether the Closeup action modal covers the right pane this frame. Its
+    /// final value is only known once [`Self::with_pane`] has seen the pane
+    /// strip: the modal is the launcher surface only while Closeup has no tab at
+    /// all (pending included). An explicit or forced [`Overlay::Closeup`] keeps
+    /// it visible regardless, so [`Self::from_state`] seeds that case here and
+    /// [`Self::with_pane`] adds the empty-pane launcher case.
     closeup_action_visible: bool,
+    /// Whether the controller route is Closeup. [`Self::with_pane`] pairs this
+    /// with an empty pane strip to reveal the action launcher; it never widens
+    /// the explicit-overlay case seeded by [`Self::from_state`].
+    closeup_route: bool,
     decision_overlay: Option<crate::usecase::application::controller::DecisionOverlayState>,
     decisions: Vec<usagi_core::domain::user_decision::UserDecision>,
     /// Open Pull Request overlay projection, drawn above the sidebar/pane frame.
@@ -237,12 +247,19 @@ impl HomeProjection {
             terminal_view: None,
             pane_tabs: Vec::new(),
             pane_error: None,
+            // Seed only the explicit/forced action modal here (an open
+            // `Overlay::Closeup`). The launcher-over-empty-pane case cannot be
+            // decided without the pane strip, so `with_pane` finalizes it; this
+            // keeps a pending launch from being covered every frame.
             closeup_action_visible: matches!(
                 state.route(),
                 crate::usecase::application::controller::Route::Home(HomeMode::Closeup)
-            ) && (!state.has_live_pane()
-                || state.overlay()
-                    == Some(crate::usecase::application::controller::Overlay::Closeup)),
+            ) && state.overlay()
+                == Some(crate::usecase::application::controller::Overlay::Closeup),
+            closeup_route: matches!(
+                state.route(),
+                crate::usecase::application::controller::Route::Home(HomeMode::Closeup)
+            ),
             decision_overlay: state.decision_overlay().cloned(),
             decisions: state.decisions().to_vec(),
             pr_overlay: state.pr_overlay().cloned(),
@@ -283,6 +300,14 @@ impl HomeProjection {
             })
             .collect();
         self.pane_error = pane.error().map(str::to_owned);
+        // In Closeup the action modal is the launcher shown only while the pane
+        // holds no tab at all — pending placeholders included. A pending launch
+        // therefore keeps the wave visible instead of being re-covered every
+        // frame; the explicit/forced overlay case is already seeded above and is
+        // never narrowed here.
+        if self.closeup_route && self.pane_tabs.is_empty() {
+            self.closeup_action_visible = true;
+        }
         self
     }
 

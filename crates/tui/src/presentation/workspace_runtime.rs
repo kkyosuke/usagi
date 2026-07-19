@@ -1295,4 +1295,89 @@ mod tests {
     fn runtime_panes_mut(runtime: &mut WorkspaceRuntime) -> &mut PaneRegistry {
         &mut runtime.panes
     }
+
+    fn strip(line: &str) -> String {
+        let mut out = String::new();
+        let mut chars = line.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            out.push(ch);
+        }
+        out
+    }
+
+    /// Render one Home frame through the runtime and flatten it to plain text.
+    fn joined_frame(runtime: &WorkspaceRuntime) -> String {
+        runtime
+            .render(24, 100, "work", "/work", &[], None, &BTreeMap::new(), None)
+            .iter()
+            .map(|line| strip(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Submit the default `agent` action from an open Closeup modal and mirror
+    /// the resulting launch into the pane registry as the shell would, returning
+    /// the launch operation id.
+    fn submit_agent(runtime: &mut WorkspaceRuntime) -> OperationId {
+        let effects = runtime.handle_key(Key::Enter);
+        let mut operation = None;
+        for effect in &effects {
+            if let Effect::LaunchAgent { operation_id, .. } = effect {
+                operation = Some(*operation_id);
+            }
+            runtime.on_effect(effect);
+        }
+        operation.expect("Enter submits a LaunchAgent effect")
+    }
+
+    // ── R1: pending must not be re-covered by the action modal ───────────────
+
+    #[test]
+    fn pending_agent_launch_is_not_covered_by_the_action_modal() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        // Entering Closeup with an empty pane shows the action launcher.
+        assert!(
+            joined_frame(&runtime).contains("Closeup:"),
+            "the launcher is shown while the pane is empty"
+        );
+
+        let _ = submit_agent(&mut runtime);
+        // Submitting closes the modal and leaves a pending Agent tab. The action
+        // modal must not re-open over it every frame (the R1 regression); the
+        // pending tab and its wave own the pane.
+        assert_eq!(runtime.state().overlay(), None);
+        let frame = joined_frame(&runtime);
+        assert!(
+            !frame.contains("Closeup:"),
+            "the pending wave must not be covered by the action modal: {frame}"
+        );
+        assert!(frame.contains("Agent"), "the pending Agent tab is listed");
+    }
+
+    #[test]
+    fn failed_launch_restores_the_action_launcher() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        let operation = submit_agent(&mut runtime);
+        assert!(!joined_frame(&runtime).contains("Closeup:"));
+        // A failed launch drops the pending tab, so the launcher returns for the
+        // now-empty pane.
+        let _ = runtime.fail_pane(Target::Session(session), operation, "boom".to_owned());
+        assert!(runtime.active_pane().tabs().is_empty());
+        assert!(
+            joined_frame(&runtime).contains("Closeup:"),
+            "the launcher returns once the pane is empty again"
+        );
+    }
 }
