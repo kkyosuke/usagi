@@ -217,8 +217,10 @@ tab が無い target は、灰色の静的うさぎと `No tabs stirring yet. En
 右ペイン幅の中央に表示する。描画前に clip して各灰色 SGR を reset で閉じるため、狭幅でも後続の
 画面へ色が漏れない。この空状態は tick や runtime 接続に依存しない。overlay はこの Home frame を背景のまま合成する。
 
-Closeup action modal の表示と input owner は target entry の tab 有無と forced action state から導く。Switch で
-`Ctrl-O Ctrl-A` を実行した場合は、選択 target の Closeup action を開いて modal に input を渡す。tab が無い
+Closeup action modal の表示と input owner は target entry の tab 有無と forced action state から導く。ここでの
+「tab 有無」は pending・live・document のいずれの tab も 1 枚として数える（live pane の有無ではない）ため、起動待ちの
+pending tab がある間は action modal を自動表示せず、その wave を覆わない。Switch で
+`Ctrl-O Ctrl-A` を実行した場合は、選択 target の Closeup action を開いて modal に input を渡す。tab が 1 枚も無い
 Closeup は action modal が management input を所有し、Enter で `agent` / `terminal` を確定できる。tab が 1 つ以上で
 forced state が無い Closeup は tab が input を所有し、action modal は自動表示しない。tab があるときに action modal
 を再び出すのは `Ctrl-O Ctrl-A` だけで、その forced 表示は Esc で閉じて tab に戻る（Closeup から Switch へは抜けない）。
