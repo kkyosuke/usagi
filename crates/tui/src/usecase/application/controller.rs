@@ -60,17 +60,31 @@ pub enum Overlay {
     Preview,
 }
 
+/// session name に許される最大文字数（表示・path 双方の実害を避ける上限）。
+const MAX_SESSION_NAME_LEN: usize = 64;
+
 /// daemon へ送る前の、TUI-local な新規 session 入力。
 ///
 /// 左サイドバーの `+ new session` 行に inline 展開する name-only 入力。profile/model
 /// は指定せず、daemon の workspace default policy に委ねる。
+/// `existing` は現在表示中の session name で、同名入力を daemon へ送る前に local で弾く。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CreateSessionForm {
     name: String,
     error: Option<Notice>,
+    existing: Vec<String>,
 }
 
 impl CreateSessionForm {
+    /// 表示中 session の name を与えて空の form を作る。同名検出に使う。
+    #[must_use]
+    pub fn new(existing: Vec<String>) -> Self {
+        Self {
+            existing,
+            ..Self::default()
+        }
+    }
+
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -82,22 +96,60 @@ impl CreateSessionForm {
 
     fn push(&mut self, character: char) {
         self.name.push(character);
-        self.error = None;
+        self.revalidate();
     }
 
     fn backspace(&mut self) {
         self.name.pop();
-        self.error = None;
+        self.revalidate();
     }
 
+    /// 入力のたびに name の live validation を反映する。空名は「入力途中」であって
+    /// error にはせず（submit 時にだけ弾く）、不正文字・64 文字超過・同名は即座に
+    /// 行の下の error として見せる。draft は決して失わない。
+    fn revalidate(&mut self) {
+        self.error = validate_session_name_live(&self.name, &self.existing);
+    }
+
+    /// submit（Enter）時の検証。空名はここで初めて error になる。
     fn request(&mut self) -> Result<SessionCreateIntent, Notice> {
+        // 空名は submit 時にだけ弾く（入力途中は error にしない）。非空の name は
+        // 不正文字・64 文字超過・同名を local validation で拒否する。
         let name = required_create_value(&self.name, "session name is required")?;
+        if let Some(error) = validate_session_name_live(&self.name, &self.existing) {
+            return Err(error);
+        }
         Ok(SessionCreateIntent {
             name,
             profile: None,
             model: None,
         })
     }
+}
+
+/// 入力途中でも判定できる name の validation。空名（入力途中）は `None` を返し、
+/// 不正文字・64 文字超過・表示中 session との同名だけを safe な error にする。
+/// 返す message は利用者の入力を復唱せず、内部詳細も含めない。
+fn validate_session_name_live(name: &str, existing: &[String]) -> Option<Notice> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Messages are short on purpose: they render inline in the 36-column sidebar
+    // row beside the typed name, so a long sentence would just be clipped.
+    if !trimmed
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_')
+    {
+        return Some(Notice::new("invalid character"));
+    }
+    if trimmed.chars().count() > MAX_SESSION_NAME_LEN {
+        return Some(Notice::new("name too long (max 64)"));
+    }
+    if existing.iter().any(|current| current == trimmed) {
+        return Some(Notice::new("name already exists"));
+    }
+    None
 }
 
 /// Validated new-session request. This is intentionally product-neutral: adapter
@@ -585,6 +637,9 @@ pub struct AppState {
     create_session: Option<CreateSessionForm>,
     workspace: WorkspaceId,
     sessions: Vec<SessionId>,
+    /// 表示中 session の name。新規作成の同名 validation にだけ使う advisory copy で、
+    /// authoritative な identity は [`sessions`](Self::sessions) が持つ。
+    session_names: Vec<String>,
     selected: Selection,
     active: Target,
     notice: Option<Notice>,
@@ -618,6 +673,7 @@ impl AppState {
             create_session: None,
             workspace,
             sessions,
+            session_names: Vec::new(),
             selected: Selection::Target(root),
             active: root,
             notice: None,
@@ -716,6 +772,12 @@ impl AppState {
     #[coverage(off)]
     pub fn sessions(&self) -> &[SessionId] {
         &self.sessions
+    }
+    /// 表示中 session の name（同名 validation 用の advisory copy）。
+    #[must_use]
+    #[coverage(off)]
+    pub fn session_names(&self) -> &[String] {
+        &self.session_names
     }
     /// 最後の safe notice。
     #[must_use]
@@ -1170,6 +1232,9 @@ impl From<RuntimeEvent<BackendEvent>> for AppEvent {
 pub enum BackendEvent {
     /// stable identity で表した session snapshot。
     Sessions(Vec<SessionId>),
+    /// 表示中 session の name。新規作成の同名 validation にだけ使う advisory copy で、
+    /// [`Sessions`](Self::Sessions) の identity 同期とは独立に還流してよい。
+    SessionNames(Vec<String>),
     /// backend が safe と保証した notice。
     Notice(Notice),
     /// A phase event for exactly one Agent runtime pane.
@@ -2062,6 +2127,10 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state.reconcile_selection();
             Vec::new()
         }
+        AppEvent::Backend(BackendEvent::SessionNames(names)) => {
+            state.session_names = names;
+            Vec::new()
+        }
         AppEvent::Backend(BackendEvent::Notice(notice)) => {
             state.notice = Some(notice);
             Vec::new()
@@ -2906,7 +2975,7 @@ fn activate_selected(state: &mut AppState) -> Vec<Effect> {
 
 #[coverage(off)]
 fn open_create_session(state: &mut AppState) -> Vec<Effect> {
-    state.create_session = Some(CreateSessionForm::default());
+    state.create_session = Some(CreateSessionForm::new(state.session_names.clone()));
     state.overlay = Some(Overlay::CreateSession);
     Vec::new()
 }
@@ -3249,6 +3318,92 @@ mod tests {
             "codex"
         );
         assert!(optional_profile("invalid profile").is_err());
+    }
+
+    #[test]
+    fn create_session_form_defers_the_empty_name_error_to_submit() {
+        // While typing nothing, the empty name is "in progress", not an error.
+        let mut form = CreateSessionForm::new(Vec::new());
+        form.push(' ');
+        assert!(
+            form.error().is_none(),
+            "whitespace-only is not a live error"
+        );
+        // Submitting an effectively empty name surfaces the required-name error and
+        // keeps the draft so the user can keep typing.
+        let error = form.request().unwrap_err();
+        assert_eq!(error.message, "session name is required");
+        assert_eq!(form.name(), " ", "draft is preserved after a failed submit");
+    }
+
+    #[test]
+    fn create_session_form_rejects_invalid_characters_while_typing() {
+        let mut form = CreateSessionForm::new(Vec::new());
+        for character in "ok".chars() {
+            form.push(character);
+        }
+        assert!(form.error().is_none());
+        form.push('/');
+        assert_eq!(form.error().unwrap().message, "invalid character");
+        // Submitting keeps the draft and refuses to build a request.
+        assert!(form.request().is_err());
+        assert_eq!(form.name(), "ok/");
+        // Fixing the input clears the error and lets the request through.
+        form.backspace();
+        assert!(form.error().is_none());
+        assert_eq!(form.request().unwrap().name, "ok");
+    }
+
+    #[test]
+    fn create_session_form_rejects_names_longer_than_the_limit() {
+        let mut form = CreateSessionForm::new(Vec::new());
+        for _ in 0..=MAX_SESSION_NAME_LEN {
+            form.push('a');
+        }
+        assert_eq!(form.error().unwrap().message, "name too long (max 64)");
+        assert!(form.request().is_err());
+        // A name exactly at the limit is accepted.
+        form.backspace();
+        assert!(form.error().is_none());
+        assert_eq!(form.name().chars().count(), MAX_SESSION_NAME_LEN);
+        assert_eq!(
+            form.request().unwrap().name.chars().count(),
+            MAX_SESSION_NAME_LEN
+        );
+    }
+
+    #[test]
+    fn create_session_form_rejects_a_duplicate_of_a_displayed_session() {
+        let mut form = CreateSessionForm::new(vec!["alpha".to_owned()]);
+        for character in "alpha".chars() {
+            form.push(character);
+        }
+        assert_eq!(form.error().unwrap().message, "name already exists");
+        assert!(form.request().is_err());
+        assert_eq!(form.name(), "alpha", "draft is preserved");
+        // A distinct name is accepted; the duplicate check is against the exact name.
+        form.push('-');
+        form.push('2');
+        assert!(form.error().is_none());
+        assert_eq!(form.request().unwrap().name, "alpha-2");
+    }
+
+    #[test]
+    fn open_create_session_seeds_the_form_with_displayed_names() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionNames(vec!["alpha".to_owned()])),
+        );
+        // Down reaches `+ new session`; Enter opens the form seeded with the names.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        for character in "alpha".chars() {
+            let _ = update(&mut state, AppEvent::Key(AppKey::Char(character)));
+        }
+        let form = state.create_session_form().unwrap();
+        assert_eq!(form.error().unwrap().message, "name already exists");
     }
 
     #[test]
