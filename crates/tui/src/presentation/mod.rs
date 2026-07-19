@@ -1712,8 +1712,15 @@ fn drain_pane_completions_into_runtime(
         };
         match result {
             Ok(terminal) => {
-                let _ = runtime.complete_pane(target, operation, terminal.clone());
-                let _ = runtime.focus_terminal(target, terminal.clone());
+                // Completion always promotes the tab; the runtime focuses it only
+                // when the user has not interacted since the launch was requested,
+                // so a late completion never steals focus from what the user is
+                // reading. The focus decision stays in the runtime, not here.
+                let _ = runtime.complete_pane_focus_if_uninterrupted(
+                    target,
+                    operation,
+                    terminal.clone(),
+                );
                 ui.start_terminal_session(terminal, geometry);
             }
             Err(message) => {

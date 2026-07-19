@@ -236,7 +236,9 @@ forced state が無い Closeup は tab が input を所有し、action modal は
 modal が所有する間、tab selection、close、terminal passthrough は dispatch しない。
 
 Closeup action で `agent`、`terminal`、または `diff` を確定すると、同じ pending tab を即座に一覧へ表示する。completion まで
-入力がなければ completion はその tab を選択して live / document tab に置換し、入力があれば自動選択を取り消す。diff は terminal identity を持たない
+入力がなければ completion はその tab を選択して live / document tab に置換し、入力があれば自動選択を取り消す。この focus は
+session 作成と同じ interaction gate であり、受付時の interaction count を completion 時と照合して一致したときだけ steal する
+（読んでいる画面から focus を奪わない）。diff は terminal identity を持たない
 document tab として完了し、安全な document 本文を tab の content area に描画する。session の `terminal` は daemon が stable session / worktree scope を解決して起動する
 `login-shell` であり、TUI はローカル PTY を生成しない。session が利用可能でない、または daemon が応答しない場合は
 pending tab を安全な feedback に置き換える。`←` / `→`（または `h` / `l`）と `Ctrl-O Ctrl-N` / `Ctrl-O Ctrl-P` は tab を巡回し、`Ctrl-O x` は

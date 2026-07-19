@@ -58,6 +58,12 @@ pub struct WorkspaceRuntime {
     /// Persisted input state for the Closeup action modal. Present only while the
     /// controller's [`Overlay::Closeup`] is open.
     closeup_modal: Option<CloseupModal>,
+    /// User-interaction count captured when each pane launch was requested. A
+    /// completion may focus its tab only while the count is unchanged, mirroring
+    /// the controller's create-session gate
+    /// ([`AppState::interaction_count`]/[`PendingOperation::interaction_at_accept`]).
+    /// The entry is dropped when the launch completes, fails, or is cancelled.
+    pane_focus_at_request: BTreeMap<OperationId, u64>,
 }
 
 impl WorkspaceRuntime {
@@ -73,6 +79,7 @@ impl WorkspaceRuntime {
             panes,
             overview_modal: None,
             closeup_modal: None,
+            pane_focus_at_request: BTreeMap::new(),
         }
     }
 
@@ -288,6 +295,10 @@ impl WorkspaceRuntime {
     }
 
     /// Record a pane open request as a pending placeholder for `target`.
+    ///
+    /// The current interaction count is captured so a later
+    /// [`Self::complete_pane_focus_if_uninterrupted`] only steals focus when the
+    /// user has not touched the UI since the launch was accepted.
     pub fn request_pane(
         &mut self,
         target: Target,
@@ -305,7 +316,31 @@ impl WorkspaceRuntime {
                 },
             },
         );
+        self.pane_focus_at_request
+            .insert(operation, self.state.interaction_count());
         self.sync_live_pane();
+        effects
+    }
+
+    /// Promote a pending placeholder to a live tab once the daemon confirms the
+    /// terminal identity, then focus it only when no user interaction has
+    /// happened since the launch was requested.
+    ///
+    /// This is the shell's single entry point for a daemon completion: the focus
+    /// decision lives here (via the captured interaction count) rather than
+    /// leaking a condition into the frame loop, matching the create-session gate.
+    /// Completion always promotes the tab; only the focus is gated.
+    pub fn complete_pane_focus_if_uninterrupted(
+        &mut self,
+        target: Target,
+        operation: OperationId,
+        terminal: TerminalRef,
+    ) -> Vec<PaneRegistryEffect> {
+        let accepted_at = self.pane_focus_at_request.remove(&operation);
+        let mut effects = self.complete_pane(target, operation, terminal.clone());
+        if accepted_at == Some(self.state.interaction_count()) {
+            effects.extend(self.focus_terminal(target, terminal));
+        }
         effects
     }
 
@@ -345,6 +380,8 @@ impl WorkspaceRuntime {
                 event: PaneEvent::Failed { operation, message },
             },
         );
+        // A dropped placeholder can never complete, so retire its focus gate.
+        self.pane_focus_at_request.remove(&operation);
         self.sync_live_pane();
         effects
     }
@@ -401,6 +438,11 @@ impl WorkspaceRuntime {
             },
             PaneSelection::Target(_) => CloseOutcome::default(),
         };
+        // A cancelled pending launch will never complete, so drop its focus gate
+        // before the placeholder leaves the registry.
+        if let Some(operation) = outcome.cancel {
+            self.pane_focus_at_request.remove(&operation);
+        }
         let _ = route_tab_command(&mut self.panes, PaneTabCommand::Close);
         self.sync_live_pane();
         outcome
@@ -1379,5 +1421,45 @@ mod tests {
             joined_frame(&runtime).contains("Closeup:"),
             "the launcher returns once the pane is empty again"
         );
+    }
+
+    // ── R2: completion focus is gated on no later interaction ────────────────
+
+    #[test]
+    fn uninterrupted_completion_focuses_the_new_pane() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut runtime = closeup_on(workspace, session);
+        let operation = submit_agent(&mut runtime);
+        let terminal = terminal_ref(workspace, session);
+        // No interaction between request and completion → focus the completed tab.
+        let _ = runtime.complete_pane_focus_if_uninterrupted(target, operation, terminal.clone());
+        assert_eq!(
+            runtime.active_pane().selected(),
+            &PaneSelection::Tab(TabSelection::Live(terminal))
+        );
+        assert!(runtime.state().has_live_pane());
+    }
+
+    #[test]
+    fn interaction_after_launch_cancels_completion_focus() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut runtime = closeup_on(workspace, session);
+        let operation = submit_agent(&mut runtime);
+        // The user navigates while the pane loads. A late completion still
+        // promotes the tab but must not steal focus into it.
+        let _ = runtime.handle_key(Key::Down);
+        let terminal = terminal_ref(workspace, session);
+        let _ = runtime.complete_pane_focus_if_uninterrupted(target, operation, terminal);
+        // The tab is still promoted to live...
+        let tabs = runtime.active_pane().tabs();
+        assert_eq!(tabs.len(), 1);
+        assert!(matches!(tabs[0], PaneTab::Live(_)));
+        // ...but the completion did not steal focus into it: the selection stays
+        // off the freshly live tab, so no live terminal is focused.
+        assert!(runtime.focused_terminal().is_none());
     }
 }

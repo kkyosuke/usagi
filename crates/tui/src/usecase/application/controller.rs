@@ -817,6 +817,17 @@ impl AppState {
     pub const fn has_live_pane(&self) -> bool {
         self.has_live_pane
     }
+    /// Monotonic count of user interactions (keys and live input) applied so far.
+    ///
+    /// A launch accepted at count `n` may only auto-focus its completed pane while
+    /// this still reads `n`; a later key or input moves it and cancels the steal.
+    /// This is the same gate the create-session flow uses via
+    /// [`PendingOperation::interaction_at_accept`].
+    #[must_use]
+    #[coverage(off)]
+    pub const fn interaction_count(&self) -> u64 {
+        self.interaction_count
+    }
     /// Whether the next management `Ctrl-C` is deliberately absorbed.
     #[must_use]
     #[coverage(off)]
