@@ -229,7 +229,11 @@ connection の subscription だけを外し、Agent process・PTY・completion w
 
 Codex / Claude の Agent launch は `McpWiring` capability を要求し、daemon 自身の絶対パスで `usagi mcp` を
 子 MCP server として起動する。製品ごとの MCP 設定は adapter provision が spawn 時だけに渡すため、設定 payload は
-public launch plan、durable snapshot、IPC response に残らない。
+public launch plan、durable snapshot、IPC response に残らない。注入した usagi MCP tool は agent が確認なしで
+呼べる。Codex は `approval_policy = never`（provision が渡す argv と `.codex/config.toml`）で MCP tool 呼び出しの
+確認プロンプトを出さない。Claude は注入した `usagi` server のツールだけを事前許可する（`--allowedTools mcp__usagi`）
+ため、他の MCP server・shell・ファイル編集・network の permission model は通常どおり維持され、無効化・緩和しない。
+この事前許可も spawn 時 argv に限り、durable snapshot や IPC response には残らない。
 
 [`dispatch` request](04-ipc.md#dispatch-request) はこの launch 経路を再実装せずに合成する。daemon は session を lifecycle 経由で upsert し、worker Agent と `DispatchRun` / caller↔worker binding を durable registry に保存してから同じ runtime で prompt を起動する。PTY exit の durable commit 後、Completed / Failed inbox delivery が無ければ caller inbox に NoReport を一度だけ配送する。completion と exit は同じ `CompletionFence` を照合するため、late、duplicate、wrong-generation は state や inbox を変更しない。
 
