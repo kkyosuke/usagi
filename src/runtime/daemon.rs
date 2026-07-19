@@ -231,7 +231,17 @@ fn claude_mcp_arguments(command: &Path) -> Result<Vec<String>, ()> {
             }
         }
     });
-    Ok(vec!["--mcp-config".into(), config.to_string()])
+    // Pre-approve only the injected `usagi` server's tools so the agent never
+    // hits a consent prompt for usagi MCP calls.  Claude scopes `mcp__<server>`
+    // to that one server (wildcards are unsupported), so Bash, file edits, other
+    // MCP servers, and network stay under the normal permission model — this is
+    // deliberately narrower than `--dangerously-skip-permissions`.
+    Ok(vec![
+        "--mcp-config".into(),
+        config.to_string(),
+        "--allowedTools".into(),
+        "mcp__usagi".into(),
+    ])
 }
 
 /// Product-owned, non-secret pre-spawn readiness boundary.  Implementations
@@ -1801,6 +1811,8 @@ mod tests {
             [
                 "--mcp-config",
                 r#"{"mcpServers":{"usagi":{"args":["mcp"],"command":"/opt/usagi/bin/usagi"}}}"#,
+                "--allowedTools",
+                "mcp__usagi",
             ]
         );
     }
