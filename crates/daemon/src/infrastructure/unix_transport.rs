@@ -204,8 +204,15 @@ fn relative_endpoint(daemon: &Path, endpoint: &Path) -> io::Result<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
+/// Creates a private endpoint directory or verifies that an existing one is
+/// owned by the current user and has mode `0700`.
+///
+/// # Errors
+///
+/// Returns an error when `path` cannot be created or is not a private
+/// directory owned by the current user.
 #[coverage(off)]
-fn ensure_private_dir(path: &Path) -> io::Result<()> {
+pub fn ensure_private_dir(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(_) => verify_private(path, DIR_MODE, true),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
