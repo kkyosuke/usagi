@@ -1024,17 +1024,25 @@ fn apply_session_projection(
     }
 }
 
-/// Receive completed create workers before drawing the next frame. The returned
-/// port is reclaimed for the next command and a successful daemon snapshot is
-/// reconciled into the session cache, which [`sync_runtime_sessions`] then
-/// promotes into the controller's Home rows.
+/// Receive completed create/remove workers before drawing the next frame. The
+/// returned port is reclaimed for the next command and a successful daemon
+/// snapshot is reconciled into the session cache, which [`sync_runtime_sessions`]
+/// then promotes into the controller's Home rows. A failure is no longer dropped
+/// silently: the port's message is display-safe by contract, so it refluxes as a
+/// controller [`BackendEvent::Notice`] — distinct from an in-form local
+/// validation error — so the user learns the daemon rejected the request.
 #[coverage(off)]
-fn drain_session_completions(ui: &mut WorkspaceUi) {
+fn drain_session_completions(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime) {
     while let Ok(completion) = ui.session_completions.try_recv() {
         ui.session_commands = Some(completion.port);
         ui.removing_session = None;
-        if let Ok(result) = completion.result {
-            apply_session_projection(ui, result.sessions, result.session_ids);
+        match completion.result {
+            Ok(result) => apply_session_projection(ui, result.sessions, result.session_ids),
+            Err(message) => {
+                let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                    message,
+                ))));
+            }
         }
     }
 }
@@ -1284,6 +1292,17 @@ fn sync_runtime_sessions(runtime: &mut WorkspaceRuntime, ui: &WorkspaceUi) {
     let ids = ui.workspace.session_ids().to_vec();
     if runtime.state().sessions() != ids.as_slice() {
         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Sessions(ids)));
+    }
+    // Keep the reducer's advisory name copy in step so the create form can reject
+    // a duplicate name locally before it ever reaches the daemon.
+    let names: Vec<String> = ui
+        .workspace
+        .sessions()
+        .iter()
+        .map(|record| record.name.clone())
+        .collect();
+    if runtime.state().session_names() != names.as_slice() {
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionNames(names)));
     }
 }
 
@@ -1799,7 +1818,7 @@ fn drive_workspace_controller(
     // does not own (design §4.2).
     let mut controls = LiveTerminalControls::default();
     loop {
-        drain_session_completions(&mut ui);
+        drain_session_completions(&mut ui, &mut runtime);
         sync_runtime_sessions(&mut runtime, &ui);
         let (height, width) = term.size()?;
         ui.set_terminal_size(height, width);
@@ -2783,6 +2802,43 @@ mod tests {
             term.frames
                 .iter()
                 .all(|frame| !frame.join("\n").contains("New session"))
+        );
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn drain_session_completions_surfaces_a_daemon_failure_as_a_safe_notice() {
+        use crate::presentation::workspace_runtime::WorkspaceRuntime;
+
+        let snapshot = snapshot("demo");
+        let workspace_id = snapshot.workspace_id;
+        let view = WorkspaceView::with_runtime_ids(
+            snapshot.workspace,
+            snapshot.state,
+            snapshot.session_ids,
+        );
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace_id, Vec::new());
+
+        // A create worker returned a display-safe daemon rejection (e.g. a name the
+        // daemon refuses). The legacy path used to drop this on the floor; it must
+        // now reflux as a controller notice so the user sees the failure.
+        ui.session_completion_sender
+            .send(super::SessionCommandCompletion {
+                port: Box::new(UnavailableSessionCommandPort),
+                result: Err("daemon refused the session".to_owned()),
+            })
+            .unwrap();
+        assert!(runtime.state().notice().is_none());
+
+        super::drain_session_completions(&mut ui, &mut runtime);
+
+        assert_eq!(
+            runtime
+                .state()
+                .notice()
+                .map(|notice| notice.message.as_str()),
+            Some("daemon refused the session"),
         );
     }
 
