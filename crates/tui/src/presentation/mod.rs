@@ -9,6 +9,7 @@
 
 pub mod frame;
 pub mod layouts;
+pub mod metrics;
 pub mod theme;
 pub mod views;
 pub mod widgets;
@@ -27,6 +28,7 @@ use usagi_core::domain::recent::Recent;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::usecase::client::DaemonMetrics;
 
+use crate::presentation::metrics::{MetricsBackend, MetricsProjection};
 use crate::presentation::theme::{Color, Role, Style};
 use crate::presentation::views::config::{self, AvailableAgentModels, Config};
 use crate::presentation::views::new::{self, Field, New};
@@ -468,9 +470,10 @@ impl SessionCommandPortFactory for UnavailableSessionCommandPortFactory {
 
 /// daemon IO transport that the controller runtime keeps alongside its
 /// [`WorkspaceRuntime`]: the session-create worker, the daemon-authoritative
-/// session cache ([`WorkspaceView`]), pane launch workers, live terminal
-/// streams, and the metrics observation. Home row state, input, and rendering
-/// belong to the controller (`AppState`/`render_home`), not here.
+/// session cache ([`WorkspaceView`]), pane launch workers, and live terminal
+/// streams. Daemon metrics / git diffs are refluxed separately through
+/// [`metrics::MetricsBackend`]. Home row state, input, and rendering belong to
+/// the controller (`AppState`/`render_home`), not here.
 struct WorkspaceUi {
     workspace: WorkspaceView,
     /// A create owns the port in its worker until completion, preventing a
@@ -478,7 +481,6 @@ struct WorkspaceUi {
     session_commands: Option<Box<dyn SessionCommandPort>>,
     session_completions: Receiver<SessionCommandCompletion>,
     session_completion_sender: Sender<SessionCommandCompletion>,
-    metrics_port: Box<dyn MetricsPort>,
     agent: Option<AgentContext>,
     pane_launches: Vec<PaneLaunch>,
     pane_completions: Receiver<PaneLaunchCompletion>,
@@ -546,7 +548,6 @@ impl WorkspaceUi {
             session_commands: Some(session_commands),
             session_completions,
             session_completion_sender,
-            metrics_port: Box::new(NoMetrics),
             agent: None,
             pane_launches: Vec::new(),
             pane_completions,
@@ -554,11 +555,6 @@ impl WorkspaceUi {
             terminals: Vec::new(),
             terminal_size: (0, 0),
         }
-    }
-
-    fn with_metrics_port(mut self, metrics_port: Box<dyn MetricsPort>) -> Self {
-        self.metrics_port = metrics_port;
-        self
     }
 
     fn set_terminal_size(&mut self, height: usize, width: usize) {
@@ -1479,16 +1475,19 @@ fn drive_workspace_controller(
     let root_cwd = snapshot.workspace.path.clone();
     let workspace =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, session_ids.clone());
-    let mut ui = WorkspaceUi::new(workspace, session_commands)
-        .with_agent_context(workspace_id, session_ids.clone(), agent_port)
-        .with_metrics_port(metrics_port);
+    let mut ui = WorkspaceUi::new(workspace, session_commands).with_agent_context(
+        workspace_id,
+        session_ids.clone(),
+        agent_port,
+    );
     let mut runtime = WorkspaceRuntime::new(workspace_id, session_ids);
+    let mut metrics_backend = MetricsBackend::new(metrics_port);
+    let mut metrics_projection = MetricsProjection::default();
     let mut pending_targets: std::collections::HashMap<OperationId, Target> =
         std::collections::HashMap::new();
     loop {
         drain_session_completions(&mut ui);
         sync_runtime_sessions(&mut runtime, &ui);
-        refresh_metrics(&mut ui);
         let (height, width) = term.size()?;
         ui.set_terminal_size(height, width);
         let geometry = terminal_geometry(height, width);
@@ -1496,7 +1495,17 @@ fn drive_workspace_controller(
         ui.resize_terminals(geometry);
         let terminal_view = controller_terminal_view(&mut ui, &runtime);
         let sessions = project_controller_sessions(&ui);
-        let metrics = ui.workspace.metrics();
+        // Reflux daemon metrics / git diffs through the backend drain instead of
+        // polling the port inline: the shell folds the updates into its own
+        // projection cache, so the material no longer rides on the legacy view.
+        let metrics_sessions = sessions
+            .iter()
+            .map(|session| (session.id, session.cwd.clone()))
+            .collect::<Vec<_>>();
+        metrics_backend.poll(&metrics_sessions);
+        for update in metrics_backend.drain_events() {
+            metrics_projection.apply(update);
+        }
         let frame = render_controller_frame(
             height,
             width,
@@ -1504,8 +1513,8 @@ fn drive_workspace_controller(
             &workspace_name,
             &root_cwd,
             &sessions,
-            metrics,
-            ui.workspace.git_diffs(),
+            metrics_projection.metrics(),
+            metrics_projection.git_diffs(),
             terminal_view,
         );
         term.draw(&frame)?;
@@ -1569,21 +1578,6 @@ pub fn run_workspace_controller(
         browser,
     )
     .map(|_| Exit::Quit)
-}
-
-fn refresh_metrics(ui: &mut WorkspaceUi) {
-    if let Some(metrics) = ui.metrics_port.latest() {
-        ui.workspace.set_metrics(Some(metrics));
-    }
-    let sessions = ui
-        .workspace
-        .sessions()
-        .iter()
-        .zip(ui.workspace.session_ids())
-        .map(|(session, id)| (*id, session.root.clone()))
-        .collect::<Vec<_>>();
-    ui.workspace
-        .set_git_diffs(ui.metrics_port.git_diffs(&sessions));
 }
 
 /// Open list 用に、registry の生値と recent projection を結び付ける。
