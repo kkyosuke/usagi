@@ -62,7 +62,7 @@ workspace の root へ戻す。これにより、削除済み session を target
 
 Home の mode は Switch と Closeup である。Switch 中の右ペインは tab strip、content、footer を含めて dim
 表示し、左 sidebar が操作対象であることを示す。Closeup では右ペインを active な明度へ戻す。Overview、Closeup action、PR、preview、text、notes、
-environment、pending user decision は Home の背景を残す overlay として開き、最前面の overlay が入力を受け取る。diff は
+environment、pending user decision、session 作成失敗 dialog は Home の背景を残す overlay として開き、最前面の overlay が入力を受け取る。diff は
 Closeup pane の tab として開く。
 
 Pending user decision は workspace ID で fence した daemon snapshot からだけ投影する。overlay は pending
@@ -146,6 +146,14 @@ request を非同期に開始し、完了まで行の直前に session と同じ
 表示名ではなく stable ID で後続の Agent / terminal request を送る。snapshot の schema が不正な場合は raw
 IPC body を画面やログへ出さず、安全な error を画面に表示して `<data dir>/logs/error-YYYY-MM-DD.log` に schema
 error を記録する。
+
+daemon が受け付けた作成 request がその後に失敗したときは、Home 背景を残す confirmation/dialog style の
+error modal で安全なメッセージを提示する。表示するのは 1 行に縮めた safe message だけで、raw protocol /
+internal / secret detail は画面に出さない。この dialog は skeleton・pending row を片付けたうえで開くため、
+`Enter` / `Esc` / `Ctrl+C` で閉じると Home（Switch）へ戻り、作成入力や中途半端な作成状態を残さない。作成
+フォームなど別の overlay が前面にある間に失敗が届いた場合は、その overlay を壊さず従来どおり notice へ退避する。
+これは入力段階の inline validation（未受付の名前を行の下に error 表示する挙動）とは別で、dialog は受付後の
+daemon 失敗だけを扱う。
 
 GIF はこの projection に含めない。diff の詳細表示や実行 shortcut は実行可能な daemon command が無いため追加せず、sidebar は read-only の Git summary だけを表示する。既存の Closeup / overlay の入力所有者と操作だけを維持する。
 

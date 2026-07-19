@@ -58,6 +58,8 @@ pub enum Overlay {
     Prs,
     /// active target の Markdown preview。素材は port から還流する。
     Preview,
+    /// session 作成が accept 後に失敗したことを伝える dialog。表示は safe message だけ。
+    CreateSessionError,
 }
 
 /// 新規 session 入力で編集する項目。
@@ -633,6 +635,7 @@ pub struct AppState {
     pr_overlay: Option<PrOverlay>,
     preview_overlay: Option<PreviewOverlay>,
     create_session: Option<CreateSessionForm>,
+    create_session_error: Option<Notice>,
     workspace: WorkspaceId,
     sessions: Vec<SessionId>,
     selected: Selection,
@@ -666,6 +669,7 @@ impl AppState {
             pr_overlay: None,
             preview_overlay: None,
             create_session: None,
+            create_session_error: None,
             workspace,
             sessions,
             selected: Selection::Target(root),
@@ -712,6 +716,13 @@ impl AppState {
     #[coverage(off)]
     pub fn create_session_form(&self) -> Option<&CreateSessionForm> {
         self.create_session.as_ref()
+    }
+    /// Safe message for the create-failure dialog, present exactly while
+    /// [`Overlay::CreateSessionError`] is open.
+    #[must_use]
+    #[coverage(off)]
+    pub fn create_session_error(&self) -> Option<&Notice> {
+        self.create_session_error.as_ref()
     }
     /// Open environment editor, including unsaved values after a save failure.
     #[must_use]
@@ -2145,15 +2156,27 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 .iter()
                 .position(|pending| pending.token == result.token)
                 .map(|index| state.pending.remove(index));
-            state.notice = result.notice;
-            if result.succeeded
-                && let (Some(pending), Some(created)) = (pending, result.created)
-                && pending.interaction_at_accept == state.interaction_count
+            state.notice = result.notice.clone();
+            if result.succeeded {
+                if let (Some(pending), Some(created)) = (pending, result.created)
+                    && pending.interaction_at_accept == state.interaction_count
+                {
+                    state.sessions.push(created);
+                    state.selected = Selection::Target(Target::Session(created));
+                    state.active = Target::Session(created);
+                    state.route = Route::Home(HomeMode::Closeup);
+                }
+            } else if pending.is_some_and(|pending| pending.kind == PendingKind::CreateSession)
+                && state.overlay.is_none()
             {
-                state.sessions.push(created);
-                state.selected = Selection::Target(Target::Session(created));
-                state.active = Target::Session(created);
-                state.route = Route::Home(HomeMode::Closeup);
+                // A create accepted by the daemon later failed. Surface the safe
+                // message as a dismissible dialog over Home. The form was already
+                // cleared at submit and the pending row is now removed, so closing
+                // the dialog leaves no stale create input or half-created state.
+                // A concurrently open overlay keeps the notice fallback instead of
+                // being clobbered by the dialog.
+                state.create_session_error = result.notice;
+                state.overlay = Some(Overlay::CreateSessionError);
             }
             Vec::new()
         }
@@ -2294,6 +2317,16 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
         state.route = Route::Home(HomeMode::Switch);
         return Vec::new();
     }
+    // The create-failure dialog is a single-acknowledge surface: Enter, Escape,
+    // or Ctrl-C all dismiss it back to the Home background it was drawn over.
+    // Route is untouched, so it never conflicts with the surface the user was on.
+    if matches!(overlay, Overlay::CreateSessionError)
+        && matches!(key, AppKey::Escape | AppKey::CtrlC | AppKey::Enter)
+    {
+        state.create_session_error = None;
+        state.overlay = None;
+        return Vec::new();
+    }
     if matches!(key, AppKey::CtrlC | AppKey::CtrlQ) {
         return Vec::new();
     }
@@ -2321,6 +2354,9 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             }
         }
         Overlay::CreateSession => update_create_session_form(state, &key),
+        // Dismissal is handled by the early Enter/Escape/Ctrl-C branch above; any
+        // other key is inert while the create-failure dialog owns input.
+        Overlay::CreateSessionError => Vec::new(),
         Overlay::Prs => update_prs_overlay(state, &key),
         Overlay::Preview => update_preview_overlay(state, &key),
         Overlay::Overview if matches!(key, AppKey::Escape) => {
@@ -3873,6 +3909,107 @@ mod tests {
             }),
         );
         assert!(effects.is_empty());
+        assert_eq!(
+            state.notice().map(|notice| notice.message.as_str()),
+            Some("safe failure")
+        );
+    }
+
+    /// Drive a create to a submitted request and return its pending token.
+    #[coverage(off)]
+    fn submit_create(state: &mut AppState, name: &[char]) -> PendingToken {
+        let _ = update(state, AppEvent::Key(AppKey::CtrlA));
+        for character in name {
+            let _ = update(state, AppEvent::Key(AppKey::Char(*character)));
+        }
+        match &update(state, AppEvent::Key(AppKey::Enter))[..] {
+            [Effect::CreateSession { token, .. }] => *token,
+            other => panic!("expected a single create effect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failed_create_opens_the_error_dialog_with_only_the_safe_message() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        let token = submit_create(&mut state, &['a', 'p', 'i']);
+        // Submitting closes the form and leaves no overlay open.
+        assert_eq!(state.overlay(), None);
+        assert!(state.create_session_form().is_none());
+        assert_eq!(state.pending().len(), 1);
+
+        let effects = update(
+            &mut state,
+            AppEvent::OperationResult(OperationResult {
+                token,
+                succeeded: false,
+                created: None,
+                notice: Some(Notice::new("worktree path already exists")),
+            }),
+        );
+        assert!(effects.is_empty());
+        // The pending row is cleared and the dialog carries the safe message.
+        assert!(state.pending().is_empty());
+        assert_eq!(state.overlay(), Some(Overlay::CreateSessionError));
+        assert_eq!(
+            state
+                .create_session_error()
+                .map(|notice| notice.message.as_str()),
+            Some("worktree path already exists")
+        );
+        // No half-created state leaks: sidebar rows and active target are unchanged.
+        assert!(state.sessions().is_empty());
+        assert_eq!(state.active(), Target::Root(workspace));
+    }
+
+    #[test]
+    fn dismissing_the_create_error_dialog_returns_to_home_without_residue() {
+        let (workspace, _, _) = ids();
+        for dismiss in [AppKey::Escape, AppKey::Enter, AppKey::CtrlC] {
+            let mut state = AppState::home(workspace, Vec::new());
+            let token = submit_create(&mut state, &['x']);
+            let _ = update(
+                &mut state,
+                AppEvent::OperationResult(OperationResult {
+                    token,
+                    succeeded: false,
+                    created: None,
+                    notice: Some(Notice::new("daemon unavailable")),
+                }),
+            );
+            assert_eq!(state.overlay(), Some(Overlay::CreateSessionError));
+
+            let effects = update(&mut state, AppEvent::Key(dismiss));
+            assert!(effects.is_empty());
+            assert_eq!(state.overlay(), None);
+            assert!(state.create_session_error().is_none());
+            assert!(state.create_session_form().is_none());
+            // Dismissal leaves the resident Home route intact.
+            assert_eq!(state.route(), Route::Home(HomeMode::Switch));
+        }
+    }
+
+    #[test]
+    fn a_create_failure_keeps_the_notice_fallback_while_another_overlay_is_open() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        let token = submit_create(&mut state, &['y']);
+        // The user opens the quit confirmation before the create result returns.
+        let _ = update(&mut state, AppEvent::Key(AppKey::CtrlQ));
+        assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
+
+        let _ = update(
+            &mut state,
+            AppEvent::OperationResult(OperationResult {
+                token,
+                succeeded: false,
+                created: None,
+                notice: Some(Notice::new("safe failure")),
+            }),
+        );
+        // The open overlay is not clobbered; the message stays a plain notice.
+        assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
+        assert!(state.create_session_error().is_none());
         assert_eq!(
             state.notice().map(|notice| notice.message.as_str()),
             Some("safe failure")

@@ -42,12 +42,12 @@ use crate::presentation::views::workspace::{
     self, GitDiff, HomeProjection, ProjectedSession, TerminalViewProjection,
     Workspace as WorkspaceView, render_home, terminal_point_at,
 };
-use crate::presentation::views::{create_session_modal, quit_modal};
+use crate::presentation::views::{create_session_error_modal, create_session_modal, quit_modal};
 use crate::presentation::widgets::modal::{self, ConfirmationView};
 use crate::presentation::workspace_runtime::WorkspaceRuntime;
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, BackendEvent, Effect, NewRequest, Notice, Overlay, PointerAction,
-    SafeError, SafeMessage, Target,
+    AppEvent, AppKey, AppState, BackendEvent, Effect, NewRequest, Notice, OperationResult, Overlay,
+    PendingToken, PointerAction, SafeError, SafeMessage, Target,
 };
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort, canonical_browser_url};
@@ -488,6 +488,10 @@ struct WorkspaceUi {
     session_completion_sender: Sender<SessionCommandCompletion>,
     /// Session displayed as a removal skeleton until its daemon command returns.
     removing_session: Option<SessionId>,
+    /// Controller token of an in-flight create, so its completion can reflux a
+    /// failure to the reducer as an [`OperationResult`]. `Some` only while a
+    /// create worker owns the port.
+    creating_session: Option<PendingToken>,
     agent: Option<AgentContext>,
     pane_launches: Vec<PaneLaunch>,
     pane_completions: Receiver<PaneLaunchCompletion>,
@@ -556,6 +560,7 @@ impl WorkspaceUi {
             session_completions,
             session_completion_sender,
             removing_session: None,
+            creating_session: None,
             agent: None,
             pane_launches: Vec::new(),
             pane_completions,
@@ -1029,13 +1034,49 @@ fn apply_session_projection(
 /// reconciled into the session cache, which [`sync_runtime_sessions`] then
 /// promotes into the controller's Home rows.
 #[coverage(off)]
-fn drain_session_completions(ui: &mut WorkspaceUi) {
+fn drain_session_completions(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime) {
     while let Ok(completion) = ui.session_completions.try_recv() {
         ui.session_commands = Some(completion.port);
         ui.removing_session = None;
-        if let Ok(result) = completion.result {
-            apply_session_projection(ui, result.sessions, result.session_ids);
+        let creating = ui.creating_session.take();
+        match completion.result {
+            Ok(result) => apply_session_projection(ui, result.sessions, result.session_ids),
+            // A create that the daemon rejected refluxes to the reducer so its
+            // pending row clears and the safe message opens the create-failure
+            // dialog. The daemon message is collapsed to one safe line first, so
+            // no raw protocol/internal detail reaches the screen. Non-create
+            // failures keep their existing (silent) handling.
+            Err(message) => {
+                if let Some(token) = creating {
+                    let _ = runtime.apply_event(AppEvent::OperationResult(OperationResult {
+                        token,
+                        succeeded: false,
+                        created: None,
+                        notice: Some(Notice::new(safe_session_error(&message))),
+                    }));
+                }
+            }
         }
+    }
+}
+
+/// Collapse a daemon session-command error into a safe single line for the
+/// create-failure dialog. Mirrors [`new_project_notice`]: take the first line
+/// only and clip an over-long message, so multi-line stderr or an accidentally
+/// verbose error never leaks raw detail onto the screen.
+fn safe_session_error(message: &str) -> String {
+    const MAX: usize = 72;
+    let first = message.lines().next().unwrap_or("").trim();
+    let detail = if first.is_empty() {
+        "could not create the session"
+    } else {
+        first
+    };
+    if detail.chars().count() > MAX {
+        let truncated: String = detail.chars().take(MAX - 1).collect();
+        format!("{truncated}…")
+    } else {
+        detail.to_owned()
     }
 }
 
@@ -1484,6 +1525,12 @@ fn render_controller_frame(
     if runtime.state().overlay() == Some(Overlay::QuitConfirmation) {
         return quit_modal::render_over(height, width, &frame);
     }
+    // The create-failure dialog carries its safe message exactly while its
+    // overlay is open, so keying off the message avoids an unreachable
+    // "error overlay without a message" branch.
+    if let Some(error) = runtime.state().create_session_error() {
+        return create_session_error_modal::render_over(height, width, &frame, &error.message);
+    }
     frame
 }
 
@@ -1496,7 +1543,8 @@ fn dispatch_controller_effect(
     pending_targets: &mut std::collections::HashMap<OperationId, Target>,
 ) -> ControllerFlow {
     match effect {
-        Effect::CreateSession { intent, .. } => {
+        Effect::CreateSession { intent, token, .. } => {
+            ui.creating_session = Some(*token);
             begin_session_command(
                 ui,
                 SessionCommand::Create {
@@ -1802,7 +1850,7 @@ fn drive_workspace_controller(
     // does not own (design §4.2).
     let mut controls = LiveTerminalControls::default();
     loop {
-        drain_session_completions(&mut ui);
+        drain_session_completions(&mut ui, &mut runtime);
         sync_runtime_sessions(&mut runtime, &ui);
         let (height, width) = term.size()?;
         ui.set_terminal_size(height, width);
@@ -2379,8 +2427,8 @@ mod tests {
         key_to_terminal_bytes, new_project_notice, play_startup_splash, render_controller_frame,
         render_home_snapshot, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
-        run_workspace_controller, step_config, step_new, terminal_geometry, welcome_action,
-        write_banner,
+        run_workspace_controller, safe_session_error, step_config, step_new, terminal_geometry,
+        welcome_action, write_banner,
     };
     use crate::presentation::live_terminal::LiveTerminalControls;
     use crate::presentation::views::config::AvailableAgentModels;
@@ -2637,7 +2685,9 @@ mod tests {
     fn render_controller_frame_composites_the_home_and_overlays() {
         use crate::presentation::views::workspace::ProjectedSession;
         use crate::presentation::workspace_runtime::WorkspaceRuntime;
-        use crate::usecase::application::controller::{AppEvent, AppKey};
+        use crate::usecase::application::controller::{
+            AppEvent, AppKey, Effect, Notice, OperationResult,
+        };
 
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -2683,6 +2733,29 @@ mod tests {
         let overview =
             render_controller_frame(20, 80, &palette, "atlas", root, sessions, None, &git, None);
         assert!(overview.join("\n").contains("Overview"));
+
+        // Create-failure dialog: a failed create OperationResult opens it, and
+        // this path composites the safe message over Home.
+        let mut failing = WorkspaceRuntime::new(workspace, Vec::new());
+        let _ = failing.handle_key(Key::Down);
+        let _ = failing.handle_key(Key::Enter);
+        for character in ['a', 'p', 'i'] {
+            let _ = failing.handle_key(Key::Char(character));
+        }
+        let token = match &failing.handle_key(Key::Enter)[..] {
+            [Effect::CreateSession { token, .. }] => *token,
+            other => panic!("expected a create effect, got {other:?}"),
+        };
+        let _ = failing.apply_event(AppEvent::OperationResult(OperationResult {
+            token,
+            succeeded: false,
+            created: None,
+            notice: Some(Notice::new("worktree path already exists")),
+        }));
+        let failure =
+            render_controller_frame(20, 80, &failing, "atlas", root, &[], None, &git, None);
+        assert!(failure.join("\n").contains("Session create failed"));
+        assert!(failure.join("\n").contains("worktree path already exists"));
     }
 
     #[test]
@@ -3452,6 +3525,23 @@ mod tests {
         // 長い行は省略記号付きで切り詰める。
         let long = io::Error::other("x".repeat(200));
         let notice = new_project_notice(&long);
+        assert_eq!(notice.chars().count(), 72);
+        assert!(notice.ends_with('…'));
+    }
+
+    #[test]
+    fn safe_session_error_collapses_daemon_output_to_one_safe_line() {
+        // 空メッセージは汎用の一行へフォールバックする。
+        assert_eq!(safe_session_error(""), "could not create the session");
+        assert_eq!(
+            safe_session_error("   \n  "),
+            "could not create the session"
+        );
+        // 複数行の出力は先頭行だけを trim して残す（後続の内部詳細を漏らさない）。
+        let multi = "session name already exists\n  at daemon::lifecycle::create (secret path)";
+        assert_eq!(safe_session_error(multi), "session name already exists");
+        // 長い行は省略記号付きで切り詰める。
+        let notice = safe_session_error(&"x".repeat(200));
         assert_eq!(notice.chars().count(), 72);
         assert!(notice.ends_with('…'));
     }
