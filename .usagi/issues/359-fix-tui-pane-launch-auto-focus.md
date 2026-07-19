@@ -1,7 +1,7 @@
 ---
 number: 359
 title: fix(tui): pane launch 完了時の auto-focus を「起動後に操作が無いとき」だけに戻す退行修正
-status: in-progress
+status: done
 priority: medium
 labels: [tui, controller, regression]
 dependson: []
