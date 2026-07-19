@@ -1138,6 +1138,11 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         }
         Key::Up => AppKey::Up,
         Key::Down => AppKey::Down,
+        // Left/Right move the focus inside a horizontal choice (the Yes/No quit
+        // confirmation); the reducer ignores them elsewhere. Tab motion between
+        // live tabs stays Ctrl-N/P.
+        Key::Left => AppKey::Left,
+        Key::Right => AppKey::Right,
         Key::Enter => AppKey::Enter,
         Key::Backspace => AppKey::Backspace,
         Key::Tab => AppKey::Tab,
@@ -1146,9 +1151,9 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         Key::Quit => AppKey::CtrlC,
         Key::CtrlQ => AppKey::CtrlQ,
         // Input the Home reducer never consumes: raw PTY passthrough, terminal
-        // pointer drags (a shell + `TerminalSession` concern), Left/Right (tab
-        // motion is Ctrl-N/P), and Ctrl-D (Open Workspace only).
-        Key::Passthrough(_) | Key::Pointer(_) | Key::Left | Key::Right | Key::CtrlD => {
+        // pointer drags (a shell + `TerminalSession` concern), and Ctrl-D (Open
+        // Workspace only).
+        Key::Passthrough(_) | Key::Pointer(_) | Key::CtrlD => {
             return None;
         }
     };
@@ -1479,7 +1484,12 @@ fn render_controller_frame(
     // The create form renders inline in the `+ new session` sidebar row (see
     // `render_home`), so no overlay composite is needed here.
     if runtime.state().overlay() == Some(Overlay::QuitConfirmation) {
-        return quit_modal::render_over(height, width, &frame);
+        return quit_modal::render_over(
+            height,
+            width,
+            &frame,
+            runtime.state().quit_confirm_selected(),
+        );
     }
     frame
 }
@@ -2496,9 +2506,16 @@ mod tests {
                 action: PointerAction::Select,
             })
         );
-        // Left/Right and Ctrl-D carry no Home management meaning.
-        assert_eq!(app_event_from_key(Key::Left), None);
-        assert_eq!(app_event_from_key(Key::Right), None);
+        // Left/Right reach the reducer to move the Yes/No confirmation focus; the
+        // reducer ignores them outside that overlay. Ctrl-D stays Open-only.
+        assert_eq!(
+            app_event_from_key(Key::Left),
+            Some(AppEvent::Key(AppKey::Left))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Right),
+            Some(AppEvent::Key(AppKey::Right))
+        );
         assert_eq!(app_event_from_key(Key::CtrlD), None);
         // Tab close and terminal scroll/copy stay pane- and shell-level concerns.
         for action in [
@@ -2673,12 +2690,17 @@ mod tests {
         assert!(create.join("\n").contains("beta"));
         assert!(!create.join("\n").contains("New session"));
 
-        // Quit confirmation overlay.
+        // Quit confirmation overlay: the shared Yes/No buttons and shortcut line
+        // render, defaulting to Yes focused.
         let mut quitting = WorkspaceRuntime::new(workspace, vec![session]);
         let _ = quitting.apply_event(AppEvent::Key(AppKey::CtrlQ));
         let quit =
             render_controller_frame(20, 80, &quitting, "atlas", root, sessions, None, &git, None);
-        assert!(quit.join("\n").contains("Detach from this workspace?"));
+        let quit_text = quit.join("\n");
+        assert!(quit_text.contains("Detach from this workspace?"));
+        assert!(quit_text.contains("[ yes ]"));
+        assert!(quit_text.contains("[ no  ]"));
+        assert!(quit_text.contains("←→/Tab: choose"));
 
         // The runtime's persisted Overview palette renders through this path.
         let mut palette = WorkspaceRuntime::new(workspace, vec![session]);
@@ -2723,6 +2745,26 @@ mod tests {
             term.frames
                 .iter()
                 .any(|frame| frame.join("\n").contains("Detach from this workspace?"))
+        );
+        // Regression: the real Ctrl-Q frame carries the shared Yes/No buttons and
+        // the ←→/Tab shortcut, not the old free-text y/n prompt.
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("[ yes ]")),
+            "quit confirmation frame is missing the [ yes ] button"
+        );
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("[ no  ]")),
+            "quit confirmation frame is missing the [ no  ] button"
+        );
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("←→/Tab: choose")),
+            "quit confirmation frame is missing the choose shortcut"
         );
     }
 

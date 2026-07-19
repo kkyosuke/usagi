@@ -77,6 +77,15 @@ impl ConfirmationModal {
         }
     }
 
+    /// Build a modal whose focus mirrors an externally owned selection. Callers
+    /// that keep the Yes/No choice in their own (for example usecase-layer)
+    /// state project it into this presentation widget without duplicating the
+    /// selection API.
+    #[must_use]
+    pub const fn from_confirm_selected(confirm_selected: bool) -> Self {
+        Self { confirm_selected }
+    }
+
     /// Whether Yes is selected.
     #[must_use]
     pub const fn is_confirm_selected(self) -> bool {
@@ -371,6 +380,10 @@ mod tests {
         assert!(!modal.is_confirm_selected());
 
         assert!(ConfirmationModal::default().is_confirm_selected());
+
+        // A caller that owns the selection elsewhere can project it in directly.
+        assert!(ConfirmationModal::from_confirm_selected(true).is_confirm_selected());
+        assert!(!ConfirmationModal::from_confirm_selected(false).is_confirm_selected());
     }
 
     #[test]
