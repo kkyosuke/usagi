@@ -85,6 +85,8 @@ pub struct ProjectedSession {
     pub has_notes: bool,
     /// dismissed を除いた PR の表示安全な要約。未解決 title は表示に要求しない。
     pub pr_summary: Option<String>,
+    /// True while daemon-owned removal is pending.
+    pub removing: bool,
 }
 
 /// Read-only Git facts supplied asynchronously by the composition layer.
@@ -113,6 +115,7 @@ impl ProjectedSession {
             last_modified: record.last_active_or_created(),
             has_notes: !record.notes.is_empty(),
             pr_summary: pr_summary(&record.prs),
+            removing: false,
         }
     }
 }
@@ -1142,6 +1145,22 @@ fn home_row_lines_at(
         Selection::NewSession => ("+ new session", "", None),
     };
     let selected = home.mode == HomeMode::Switch && home.selected == row;
+    if let Some(session) = session.filter(|session| session.removing) {
+        let wave = widgets::Shimmer {
+            style: Role::Danger.style().bold(),
+            base_style: Role::Danger.style().dim(),
+            speed: 4,
+        };
+        let frame = usize::try_from(home.mascot_tick).unwrap_or(usize::MAX);
+        let label = widgets::shimmer_text_with(&session.label, frame, wave);
+        return vec![
+            widgets::pad_to_width(
+                &format!("  {} {}", Role::Danger.style().bold().paint("✂"), label),
+                width,
+            ),
+            String::new(),
+        ];
+    }
     let current = target == Some(home.active);
     let marker = home_row_marker(row, selected, current);
     let label = if session.is_some() {
@@ -1498,6 +1517,7 @@ mod tests {
             last_modified: now(),
             has_notes: false,
             pr_summary: None,
+            removing: false,
         }
     }
 

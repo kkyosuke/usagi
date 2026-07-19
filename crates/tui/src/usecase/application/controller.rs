@@ -2482,6 +2482,14 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
                 direction: TabDirection::Previous,
             }]
         }
+        // Switch の `x` / `X` removes only the cursor's session.  Keep this
+        // unavailable while an overlay owns input, and never turn the workspace
+        // root or the new-session row into a deletion target.
+        AppKey::Char('x' | 'X')
+            if state.overlay.is_none() && matches!(state.route, Route::Home(HomeMode::Switch)) =>
+        {
+            remove_selected_session(state, matches!(key, AppKey::Char('X')))
+        }
         AppKey::SubmitOverview(input) => submit_overview(state, &input),
         AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
         AppKey::OpenPrs | AppKey::Char('p') => open_prs(state),
@@ -2511,6 +2519,21 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         | AppKey::SetDecisionFreeform(_)
         | AppKey::SubmitDecision => Vec::new(),
     }
+}
+
+/// Request removal for Switch's selected session and leave the cursor on the
+/// preceding row while the presentation keeps the target as a loading skeleton.
+#[coverage(off)]
+fn remove_selected_session(state: &mut AppState, force: bool) -> Vec<Effect> {
+    let Selection::Target(Target::Session(session)) = state.selected else {
+        return Vec::new();
+    };
+    state.move_selection(-1);
+    vec![Effect::RemoveSession {
+        workspace: state.workspace,
+        session,
+        force,
+    }]
 }
 
 #[coverage(off)]
@@ -4031,6 +4054,38 @@ mod tests {
         assert_eq!(state.selected(), Selection::NewSession);
         let _ = update(&mut state, AppEvent::Key(AppKey::Char('x')));
         assert_eq!(state.selected(), Selection::NewSession);
+    }
+
+    #[test]
+    fn switch_x_removes_the_selected_session_and_shift_x_forces_it() {
+        let (workspace, first, second) = ids();
+        let mut state = AppState::home(workspace, vec![first, second]);
+
+        // The root is never a removal target.
+        assert!(update(&mut state, AppEvent::Key(AppKey::Char('x'))).is_empty());
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Char('x'))),
+            vec![Effect::RemoveSession {
+                workspace,
+                session: first,
+                force: false,
+            }]
+        );
+        assert_eq!(state.selected(), Selection::Target(Target::Root(workspace)));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Char('X'))),
+            vec![Effect::RemoveSession {
+                workspace,
+                session: second,
+                force: true,
+            }]
+        );
+        assert_eq!(state.selected(), Selection::Target(Target::Session(first)));
     }
 
     #[test]

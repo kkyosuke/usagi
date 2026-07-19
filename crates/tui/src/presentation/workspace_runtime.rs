@@ -1157,6 +1157,7 @@ mod tests {
             last_modified: Utc::now(),
             has_notes: false,
             pr_summary: None,
+            removing: false,
         };
         let frame = runtime.render(
             20,

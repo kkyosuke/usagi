@@ -95,6 +95,9 @@ Diff / Notes のタブを循環する。Enter または `t` で選択行の Clos
 Esc、Ctrl-C、Ctrl-D、Ctrl-Q を含む leader 以外のキー入力をすべて pane へ渡す。`Ctrl-O Ctrl-A` は
 Closeup action モーダルを前面に出す。
 
+Switch で session 行を選択しているとき、`x` は `session remove`、`Shift`+`x`（`X`）は
+`session remove -f` を実行する。root と `+ new session` 行では削除しない。
+
 `:` はどちらの mode からも Workspace scope の Overview モーダルを開く。文字入力・Backspace・
 `←→` のキャレット移動と `↑↓` の候補選択ができ、Esc で開く前の mode、session、tab へ戻る。
 `p` は選択中 session の Pull Request モーダルを開き、root では空一覧を表示する。`v` は対象の

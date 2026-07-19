@@ -83,6 +83,7 @@ fn session_projection(id: SessionId, label: &str) -> ProjectedSession {
             .with_timezone(&Utc),
         has_notes: false,
         pr_summary: None,
+        removing: false,
     }
 }
 
