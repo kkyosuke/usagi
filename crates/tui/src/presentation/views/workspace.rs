@@ -31,6 +31,7 @@ use crate::usecase::application::controller::{
 use crate::usecase::application::pane::{
     PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
 };
+use crate::usecase::application::terminal_selection::TerminalPoint;
 use usagi_core::domain::id::{SessionId, WorkspaceId};
 
 /// 左ペイン（session menu）の希望表示幅。ここだけを変更して sidebar 幅を調整する。
@@ -818,6 +819,46 @@ fn terminal_viewport_rows(
         .collect()
 }
 
+/// The row count reserved above the live-terminal content inside the right pane:
+/// the tab strip, the prefix line, and a blank spacer.
+const RIGHT_PANE_CONTENT_TOP: usize = 3;
+/// The footer gap reserved below the content window.
+const RIGHT_PANE_FOOTER_GAP: usize = 2;
+
+/// Convert a frame-cell pointer position into the retained-terminal viewport row
+/// and column currently rendered in the right pane, or `None` when the pointer is
+/// outside the live content window. `rows_len` and `scroll` describe the same
+/// bottom-anchored window [`terminal_viewport_rows`] draws, so a drag maps back to
+/// the exact cell under the cursor. This shares the pane geometry (chrome rows,
+/// split, content window) with [`render_home`] rather than duplicating it.
+#[must_use]
+pub fn terminal_point_at(
+    raw_height: usize,
+    raw_width: usize,
+    rows_len: usize,
+    scroll: usize,
+    column: u16,
+    row: u16,
+) -> Option<TerminalPoint> {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let split = panes::split(width, LEFT_WIDTH);
+    // The divider occupies one column between the panes.
+    let right_left = split.left.saturating_add(1);
+    let column = usize::from(column).checked_sub(right_left)?;
+    let body_row = usize::from(row).checked_sub(CHROME_ROWS)?;
+    let content_row = body_row.checked_sub(RIGHT_PANE_CONTENT_TOP)?;
+    let body_height = height.saturating_sub(CHROME_ROWS);
+    let content_cap = body_height.saturating_sub(RIGHT_PANE_CONTENT_TOP + RIGHT_PANE_FOOTER_GAP);
+    if content_row >= content_cap {
+        return None;
+    }
+    let start = rows_len.saturating_sub(content_cap.saturating_add(scroll));
+    Some(TerminalPoint {
+        row: start + content_row,
+        column,
+    })
+}
+
 /// controller projection の Home frame を描く。
 ///
 /// 既存 Workspace view と同じ header / 2-pane geometry / viewport を使う。左側の gutter は
@@ -1303,7 +1344,7 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 mod tests {
     use super::{
         CHROME_ROWS, GitDiff, HomeProjection, LEFT_WIDTH, ProjectedSession, TerminalViewProjection,
-        Workspace, render_home, with_footer_gap,
+        Workspace, render_home, terminal_point_at, with_footer_gap,
     };
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{display_width, modal};
@@ -1314,6 +1355,7 @@ mod tests {
     use crate::usecase::application::pane::{
         PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection, reduce,
     };
+    use crate::usecase::application::terminal_selection::TerminalPoint;
 
     use chrono::{DateTime, Utc};
     use std::collections::BTreeMap;
@@ -1333,6 +1375,37 @@ mod tests {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn terminal_point_at_maps_the_bottom_anchored_content_window() {
+        // 20x80: split.left = 36, right pane starts at column 37 (after the
+        // divider); the content window is 13 rows tall starting at frame row 5.
+        // With 30 rows and no scroll it is anchored at retained row 17.
+        assert_eq!(
+            terminal_point_at(20, 80, 30, 0, 41, 5),
+            Some(TerminalPoint { row: 17, column: 4 })
+        );
+        // Scrolling up shifts the anchored window toward older output.
+        assert_eq!(
+            terminal_point_at(20, 80, 30, 3, 37, 5),
+            Some(TerminalPoint { row: 14, column: 0 })
+        );
+        // The last visible content row is selectable.
+        assert_eq!(
+            terminal_point_at(20, 80, 30, 0, 37, 17),
+            Some(TerminalPoint { row: 29, column: 0 })
+        );
+    }
+
+    #[test]
+    fn terminal_point_at_rejects_pointers_outside_the_content_window() {
+        // Left of the right pane, in the header chrome, just above the content,
+        // and below the content window.
+        assert_eq!(terminal_point_at(20, 80, 30, 0, 36, 5), None);
+        assert_eq!(terminal_point_at(20, 80, 30, 0, 41, 1), None);
+        assert_eq!(terminal_point_at(20, 80, 30, 0, 41, 4), None);
+        assert_eq!(terminal_point_at(20, 80, 30, 0, 41, 18), None);
     }
 
     fn session(name: &str, display_name: Option<&str>, origin: SessionOrigin) -> SessionRecord {

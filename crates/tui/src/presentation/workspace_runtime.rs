@@ -34,6 +34,17 @@ use crate::usecase::application::pane::{
 
 use super::app_event_from_key;
 
+/// The daemon transport work the shell owes a closed pane tab. A live tab must
+/// have its client subscription detached; a still-pending launch must be dropped
+/// before it spawns a detached daemon terminal behind the vanished placeholder.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CloseOutcome {
+    /// The live terminal whose client subscription the shell must release.
+    pub detach: Option<TerminalRef>,
+    /// The pending launch the shell must cancel before it reaches the daemon.
+    pub cancel: Option<OperationId>,
+}
+
 /// Home runtime backed by the controller reducer and pane registry.
 pub struct WorkspaceRuntime {
     state: AppState,
@@ -209,6 +220,30 @@ impl WorkspaceRuntime {
         effects
     }
 
+    /// Close the focused pane tab (Ctrl-O x). Returns the daemon transport work
+    /// the shell must perform for the removed tab: `detach` a live terminal's
+    /// client subscription, or `cancel` a still-pending launch before it spawns a
+    /// detached daemon terminal. A target selection (no tab) is a no-op. The
+    /// registry state and the live-pane flag stay in sync either way.
+    pub fn close_focused_pane(&mut self) -> CloseOutcome {
+        let outcome = match self.panes.active_pane().selected() {
+            PaneSelection::Tab(TabSelection::Live(terminal)) => CloseOutcome {
+                detach: Some(terminal.clone()),
+                cancel: None,
+            },
+            PaneSelection::Tab(
+                TabSelection::Pending(operation) | TabSelection::Ready(operation),
+            ) => CloseOutcome {
+                detach: None,
+                cancel: Some(*operation),
+            },
+            PaneSelection::Target(_) => CloseOutcome::default(),
+        };
+        let _ = route_tab_command(&mut self.panes, PaneTabCommand::Close);
+        self.sync_live_pane();
+        outcome
+    }
+
     /// Cycle the active pane's selected tab for an `Effect::SelectTab`. Only the
     /// tab owner (not the action modal) reacts, matching the reducer contract.
     pub fn select_tab(&mut self, direction: TabDirection) -> Vec<PaneRegistryEffect> {
@@ -231,8 +266,12 @@ impl WorkspaceRuntime {
             Effect::SelectTab { direction } => {
                 let _ = self.select_tab(*direction);
             }
+            // A terminal only opens against a session pane. The workspace root
+            // has no pane strip, so an `OpenTerminal` for `Target::Root` falls
+            // through to the ignored arm below instead of stranding a placeholder
+            // tab that no completion can ever promote.
             Effect::OpenTerminal {
-                target,
+                target: target @ Target::Session(_),
                 operation_id,
                 ..
             } => {
@@ -335,7 +374,9 @@ fn tab_selection(tab: &PaneTab) -> TabSelection {
 
 #[cfg(test)]
 mod tests {
-    use super::{PaneEvent, PaneKind, PaneTab, TabSelection, WorkspaceRuntime, tab_selection};
+    use super::{
+        CloseOutcome, PaneEvent, PaneKind, PaneTab, TabSelection, WorkspaceRuntime, tab_selection,
+    };
     use crate::usecase::application::Key;
     use crate::usecase::application::controller::{
         AppEvent, AppKey, Effect, HomeMode, Overlay, Route, TabDirection, Target,
@@ -579,6 +620,78 @@ mod tests {
         let mut runtime = closeup_on(workspace, session);
         assert!(runtime.select_tab(TabDirection::Next).is_empty());
         assert!(runtime.select_tab(TabDirection::Previous).is_empty());
+    }
+
+    #[test]
+    fn close_focused_pane_on_a_live_tab_detaches_and_drops_it() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut runtime = closeup_on(workspace, session);
+        let operation = OperationId::new();
+        let terminal = terminal_ref(workspace, session);
+        let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
+        let _ = runtime.complete_pane(target, operation, terminal.clone());
+        let _ = runtime.focus_terminal(target, terminal.clone());
+        assert!(runtime.state().has_live_pane());
+
+        // Closing the focused live tab tells the shell to detach its subscription
+        // and removes the tab so no live pane remains.
+        let outcome = runtime.close_focused_pane();
+        assert_eq!(
+            outcome,
+            CloseOutcome {
+                detach: Some(terminal),
+                cancel: None,
+            }
+        );
+        assert!(runtime.active_pane().tabs().is_empty());
+        assert!(!runtime.state().has_live_pane());
+    }
+
+    #[test]
+    fn close_focused_pane_on_a_pending_tab_cancels_its_launch() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut runtime = closeup_on(workspace, session);
+        let operation = OperationId::new();
+        let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
+        // Select the pending placeholder, then close it.
+        let _ = runtime.select_tab(TabDirection::Next);
+        let outcome = runtime.close_focused_pane();
+        assert_eq!(
+            outcome,
+            CloseOutcome {
+                detach: None,
+                cancel: Some(operation),
+            }
+        );
+        assert!(runtime.active_pane().tabs().is_empty());
+    }
+
+    #[test]
+    fn close_focused_pane_without_a_selected_tab_is_a_no_op() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        assert_eq!(runtime.close_focused_pane(), CloseOutcome::default());
+        assert!(runtime.active_pane().tabs().is_empty());
+    }
+
+    #[test]
+    fn on_effect_never_records_a_terminal_placeholder_for_the_root() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        assert_eq!(runtime.state().active(), Target::Root(workspace));
+        runtime.on_effect(&Effect::OpenTerminal {
+            target: Target::Root(workspace),
+            operation_id: OperationId::new(),
+            arguments: String::new(),
+        });
+        // The root has no pane strip, so the request is dropped instead of
+        // stranding a placeholder that no completion can promote.
+        assert!(runtime.active_pane().tabs().is_empty());
     }
 
     #[test]
