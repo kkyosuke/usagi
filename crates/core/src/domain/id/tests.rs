@@ -132,14 +132,26 @@ fn terminal_fence_rejects_every_stale_scope_dimension() {
 fn runtime_scope_requires_its_terminal_session_and_runtime_id() {
     let session = SessionId::new();
     let scoped_terminal = terminal(Some(session));
-    let current = AgentRuntimeRef::new(AgentRuntimeId::new(), scoped_terminal, session).unwrap();
-    let other =
-        AgentRuntimeRef::new(AgentRuntimeId::new(), current.terminal.clone(), session).unwrap();
+    let current =
+        AgentRuntimeRef::new(AgentRuntimeId::new(), scoped_terminal, Some(session)).unwrap();
+    let other = AgentRuntimeRef::new(
+        AgentRuntimeId::new(),
+        current.terminal.clone(),
+        Some(session),
+    )
+    .unwrap();
     assert!(!current.fences(&other));
+    // A session runtime cannot host a workspace-root terminal, and vice versa.
     assert_eq!(
-        AgentRuntimeRef::new(AgentRuntimeId::new(), terminal(None), session),
+        AgentRuntimeRef::new(AgentRuntimeId::new(), terminal(None), Some(session)),
         Err(ScopeError::SessionDoesNotOwnTerminal)
     );
+    assert_eq!(
+        AgentRuntimeRef::new(AgentRuntimeId::new(), terminal(Some(session)), None),
+        Err(ScopeError::SessionDoesNotOwnTerminal)
+    );
+    // A workspace-root runtime hosts a workspace-root terminal.
+    assert!(AgentRuntimeRef::new(AgentRuntimeId::new(), terminal(None), None).is_ok());
     assert!(
         ScopeError::SessionDoesNotOwnTerminal
             .to_string()
@@ -151,7 +163,7 @@ fn runtime_scope_requires_its_terminal_session_and_runtime_id() {
 fn completion_fence_rejects_every_late_worker_mismatch() {
     let current = CompletionFence {
         workspace_id: WorkspaceId::new(),
-        session_id: SessionId::new(),
+        session_id: Some(SessionId::new()),
         operation_id: OperationId::new(),
         owner_daemon_generation: DaemonGeneration::new(),
         execution_attempt: 1,
@@ -164,7 +176,11 @@ fn completion_fence_rejects_every_late_worker_mismatch() {
             ..current.clone()
         },
         CompletionFence {
-            session_id: SessionId::new(),
+            session_id: Some(SessionId::new()),
+            ..current.clone()
+        },
+        CompletionFence {
+            session_id: None,
             ..current.clone()
         },
         CompletionFence {

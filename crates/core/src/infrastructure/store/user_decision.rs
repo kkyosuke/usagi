@@ -173,7 +173,7 @@ mod tests {
                 workspace_id: WorkspaceId::new(),
                 session_id: SessionId::new(),
                 caller: CallerRef {
-                    session_id: SessionId::new(),
+                    session_id: Some(SessionId::new()),
                     agent_id: AgentId::new(),
                 },
                 run_id: OperationId::new(),

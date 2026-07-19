@@ -54,7 +54,8 @@ use super::{
     terminal::{Geometry, InputRequest, PtyWriter, RegistryError},
 };
 
-/// A daemon-resolved, fully fenced checkout for an available managed session.
+/// A daemon-resolved, fully fenced checkout for an available scope (a managed
+/// session or the workspace root).
 ///
 /// It is produced only by the #268 scope resolver; this crate never re-derives
 /// it from a client supplied name or path.
@@ -74,15 +75,16 @@ pub enum ScopeResolveError {
     Storage,
 }
 
-/// Input port: the managed-session scope resolver owned by #268.  Consumed here
-/// to convert a product-neutral (workspace, session) launch intent into a
-/// fully fenced available checkout.  Name/path/argv re-resolution is
+/// Input port: the scope resolver owned by #268.  Consumed here to convert a
+/// product-neutral launch scope into a fully fenced available checkout.  A
+/// `Some` session resolves that managed session's worktree; a `None` session
+/// resolves the trusted workspace root. Name/path/argv re-resolution is
 /// intentionally impossible at this boundary.
 pub trait SessionScopeResolver {
     fn resolve_available_scope(
         &self,
         workspace: WorkspaceId,
-        session: SessionId,
+        session: Option<SessionId>,
     ) -> Result<ResolvedAgentScope, ScopeResolveError>;
 }
 
@@ -320,10 +322,10 @@ impl<
                 })?,
             DispatchAgentIntent::New { runtime, model } => self
                 .dispatch
-                .upsert_agent_by_runtime_model(session, runtime.clone(), model.clone())
+                .upsert_agent_by_runtime_model(Some(session), runtime.clone(), model.clone())
                 .map_err(|_| dispatch_storage_error())?,
         };
-        if worker.session_id != session {
+        if worker.session_id != Some(session) {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidArgument,
                 "dispatch agent does not belong to session",
@@ -332,7 +334,7 @@ impl<
         if matches!(intent.agent, DispatchAgentIntent::New { .. }) {
             let config = WorkspaceAgentConfig::read(
                 &scope
-                    .resolve_available_scope(intent.workspace, session)
+                    .resolve_available_scope(intent.workspace, Some(session))
                     .map_err(map_scope_error)?
                     .working_directory,
             );
@@ -351,7 +353,7 @@ impl<
         }
         let launch = AgentLaunchIntent {
             workspace: intent.workspace,
-            session,
+            session: Some(session),
             profile: Some(worker.runtime.clone()),
         };
         let semantic = format!(
@@ -401,7 +403,7 @@ impl<
             daemon_generation: self.generation,
             terminal_id: TerminalId::new(),
             workspace_id: launch.workspace,
-            session_id: Some(launch.session),
+            session_id: launch.session,
             worktree_id: resolved.worktree_id,
         };
         let runtime = AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), launch.session)
@@ -503,7 +505,7 @@ impl<
             daemon_generation: self.generation,
             terminal_id: TerminalId::new(),
             workspace_id: intent.workspace,
-            session_id: Some(intent.session),
+            session_id: intent.session,
             worktree_id: resolved.worktree_id,
         };
         let runtime = AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), intent.session)
@@ -887,7 +889,9 @@ fn semantic_key(intent: &AgentLaunchIntent) -> String {
     format!(
         "{}:{}:{}",
         intent.workspace.as_str(),
-        intent.session.as_str(),
+        intent
+            .session
+            .map_or_else(|| "workspace-root".to_owned(), |session| session.as_str()),
         intent
             .profile
             .as_ref()
@@ -1098,7 +1102,7 @@ mod tests {
         fn resolve_available_scope(
             &self,
             _: WorkspaceId,
-            _: SessionId,
+            _: Option<SessionId>,
         ) -> Result<ResolvedAgentScope, ScopeResolveError> {
             self.0.clone()
         }
@@ -1197,7 +1201,15 @@ mod tests {
     fn intent(profile: Option<&str>) -> AgentLaunchIntent {
         AgentLaunchIntent {
             workspace: WorkspaceId::new(),
-            session: SessionId::new(),
+            session: Some(SessionId::new()),
+            profile: profile.map(|name| AgentProfileId::new(name).unwrap()),
+        }
+    }
+
+    fn root_intent(profile: Option<&str>) -> AgentLaunchIntent {
+        AgentLaunchIntent {
+            workspace: WorkspaceId::new(),
+            session: None,
             profile: profile.map(|name| AgentProfileId::new(name).unwrap()),
         }
     }
@@ -1215,7 +1227,7 @@ mod tests {
             .unwrap();
         assert_eq!(admission.operation_id, operation);
         assert_eq!(admission.revision, 1);
-        assert_eq!(admission.terminal.session_id, Some(launch_intent.session));
+        assert_eq!(admission.terminal.session_id, launch_intent.session);
         let terminal = admission.terminal.clone();
 
         // Daemon-owned PTY output is journaled before it is replayable.
@@ -1306,6 +1318,35 @@ mod tests {
         assert_eq!(resync["exited"], 0);
         assert_eq!(runtime.pty.selected.as_ref(), Some(&terminal));
         assert_eq!(runtime.pty.writes, b"go\n");
+    }
+
+    #[test]
+    fn workspace_root_agent_launches_and_attaches_without_a_session() {
+        let mut runtime = runtime();
+        let fake_scope = FakeScope(Ok(scope()));
+        let operation = OperationId::new().to_string();
+        let launch_intent = root_intent(None);
+        let admission = runtime
+            .launch(&operation, &launch_intent, &fake_scope)
+            .unwrap();
+        // The admitted terminal is a workspace-root terminal (no session), and
+        // its live IO is attachable exactly like a session agent's.
+        assert_eq!(admission.terminal.session_id, None);
+        let terminal = admission.terminal.clone();
+        runtime.output(&terminal, b"root-agent\n".to_vec()).unwrap();
+        let attached = handled(runtime.handle_terminal(
+            ConnectionId::new(),
+            ClientId::new(),
+            RequestId::new(),
+            TerminalAction::Attach,
+            TerminalRequest::Attach {
+                terminal: terminal.clone(),
+            },
+        ));
+        assert_eq!(
+            attached["snapshot"]["replay"],
+            json!(b"root-agent\n".to_vec())
+        );
     }
 
     #[test]
@@ -1427,7 +1468,7 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let caller = CallerRef {
-            session_id: SessionId::new(),
+            session_id: Some(SessionId::new()),
             agent_id: usagi_core::domain::id::AgentId::new(),
         };
         let operation = OperationId::new().to_string();
@@ -1486,7 +1527,7 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let caller = CallerRef {
-            session_id: SessionId::new(),
+            session_id: Some(SessionId::new()),
             agent_id: usagi_core::domain::id::AgentId::new(),
         };
         let operation = OperationId::new().to_string();
@@ -1546,7 +1587,7 @@ mod tests {
             workspace: WorkspaceId::new(),
             session_name: "worker".into(),
             caller: CallerRef {
-                session_id: SessionId::new(),
+                session_id: Some(SessionId::new()),
                 agent_id: usagi_core::domain::id::AgentId::new(),
             },
             agent: DispatchAgentIntent::New {
@@ -1771,7 +1812,7 @@ mod tests {
             initial_prompt: None,
             scope: LaunchScope {
                 workspace_id: WorkspaceId::new(),
-                session_id: SessionId::new(),
+                session_id: Some(SessionId::new()),
                 worktree_id: WorktreeId::new(),
             },
             required_capabilities: BTreeSet::new(),

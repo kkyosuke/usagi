@@ -20,6 +20,15 @@ use crate::infrastructure::persistence::{json_file, store_lock::StoreLock};
 
 const REGISTRY_FILE: &str = "dispatch.json";
 const INBOX_DIR: &str = "inbox";
+/// Reserved inbox segment for a workspace-root caller. A `SessionId` is always a
+/// lowercase UUID, so this non-UUID literal can never collide with one.
+const ROOT_INBOX_SEGMENT: &str = "workspace-root";
+
+/// Maps an optional owning session to its durable inbox directory segment.
+/// `None` is the workspace root; `Some` is the session's UUID.
+fn session_segment(session_id: Option<SessionId>) -> String {
+    session_id.map_or_else(|| ROOT_INBOX_SEGMENT.to_owned(), |id| id.as_str())
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Registry {
@@ -50,7 +59,7 @@ impl DispatchStore {
     pub fn inbox_path(&self, caller: &CallerRef) -> PathBuf {
         self.dir
             .join(INBOX_DIR)
-            .join(caller.session_id.as_str())
+            .join(session_segment(caller.session_id))
             .join(format!("{}.jsonl", caller.agent_id.as_str()))
     }
 
@@ -81,7 +90,7 @@ impl DispatchStore {
     /// Returns an error when the registry cannot be locked, read, or written.
     pub fn upsert_agent_by_runtime_model(
         &self,
-        session_id: SessionId,
+        session_id: Option<SessionId>,
         runtime: AgentProfileId,
         model: ModelSelector,
     ) -> Result<Agent> {
@@ -333,7 +342,7 @@ mod tests {
             session,
             agent,
             CallerRef {
-                session_id: session,
+                session_id: Some(session),
                 agent_id: agent,
             },
         )
@@ -341,7 +350,7 @@ mod tests {
     fn agent(session_id: SessionId, agent_id: AgentId) -> Agent {
         Agent {
             agent_id,
-            session_id,
+            session_id: Some(session_id),
             runtime: AgentProfileId::new("codex").unwrap(),
             model: ModelSelector::new("gpt-5").unwrap(),
             status: AgentStatus::Idle,
@@ -381,12 +390,16 @@ mod tests {
             replacement
         );
         let reused = store
-            .upsert_agent_by_runtime_model(session, first.runtime.clone(), first.model.clone())
+            .upsert_agent_by_runtime_model(
+                Some(session),
+                first.runtime.clone(),
+                first.model.clone(),
+            )
             .unwrap();
         assert_eq!(reused.agent_id, agent_id);
         let created = store
             .upsert_agent_by_runtime_model(
-                session,
+                Some(session),
                 AgentProfileId::new("claude").unwrap(),
                 first.model.clone(),
             )
@@ -441,7 +454,7 @@ mod tests {
             run_id: run.run_id,
             caller,
             worker: WorkerRef {
-                session_id: session,
+                session_id: Some(session),
                 agent_id,
             },
         };
@@ -463,7 +476,7 @@ mod tests {
         let (session, agent_id, caller) = ids();
         let run_id = OperationId::new();
         let worker = WorkerRef {
-            session_id: session,
+            session_id: Some(session),
             agent_id,
         };
         store
@@ -486,7 +499,7 @@ mod tests {
         let store = Arc::new(DispatchStore::new(tmp.path()));
         let (session, agent_id, caller) = ids();
         let worker = WorkerRef {
-            session_id: session,
+            session_id: Some(session),
             agent_id,
         };
         let mut handles = Vec::new();
@@ -518,6 +531,44 @@ mod tests {
         fs::remove_file(store.inbox_path(&caller)).unwrap();
         fs::create_dir(store.inbox_path(&caller)).unwrap();
         assert!(store.inbox(&caller).is_err());
+    }
+
+    #[test]
+    fn workspace_root_caller_and_worker_use_a_reserved_inbox_segment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let agent_id = AgentId::new();
+        let root_caller = CallerRef {
+            session_id: None,
+            agent_id,
+        };
+        let run_id = OperationId::new();
+        let worker = WorkerRef {
+            session_id: None,
+            agent_id,
+        };
+        store
+            .append_inbox(&root_caller, message(run_id, worker))
+            .unwrap();
+        let path = store.inbox_path(&root_caller);
+        assert!(path.parent().unwrap().ends_with(super::ROOT_INBOX_SEGMENT));
+        assert_eq!(store.inbox(&root_caller).unwrap().len(), 1);
+
+        // A root agent is a distinct incarnation from any session agent with the
+        // same runtime/model, and is reused on the next resolve.
+        let runtime = AgentProfileId::new("codex").unwrap();
+        let model = ModelSelector::new("gpt-5").unwrap();
+        let root_agent = store
+            .upsert_agent_by_runtime_model(None, runtime.clone(), model.clone())
+            .unwrap();
+        assert_eq!(root_agent.session_id, None);
+        assert_eq!(
+            store
+                .upsert_agent_by_runtime_model(None, runtime, model)
+                .unwrap()
+                .agent_id,
+            root_agent.agent_id
+        );
     }
 
     #[test]

@@ -152,37 +152,35 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
         })?;
         match (action, request) {
             (TerminalAction::Launch, TerminalRequest::Launch { intent }) => {
-                let Some(session_id) = intent.request.scope.session_id else {
-                    return Err(ProtocolError::new(
-                        ErrorCode::OwnershipUnknown,
-                        "workspace-root terminal launch is not yet bound to a durable session fence",
-                    ));
-                };
+                // The scope's session is optional: `Some` is a managed session
+                // and `None` is the workspace root. Either way the daemon owner
+                // resolves the authoritative checkout path; the client never
+                // supplies it, so a root launch cannot escape the trusted root.
                 let resolved_scope = self
                     .scope
                     .resolve_available_scope(&intent.request.scope)
                     .map_err(|_| {
                         ProtocolError::new(
                             ErrorCode::InvalidArgument,
-                            "requested terminal scope is not an available managed session",
+                            "requested terminal scope is not an available managed scope",
                         )
                     })?;
                 if resolved_scope.scope != intent.request.scope {
                     return Err(ProtocolError::new(
                         ErrorCode::InvalidArgument,
-                        "requested terminal scope did not match the managed session",
+                        "requested terminal scope did not match the resolved scope",
                     ));
                 }
                 let terminal = TerminalRef {
                     daemon_generation: self.generation,
                     terminal_id: TerminalId::new(),
                     workspace_id: intent.request.scope.workspace_id,
-                    session_id: Some(session_id),
+                    session_id: intent.request.scope.session_id,
                     worktree_id: intent.request.scope.worktree_id,
                 };
                 let fence = CompletionFence {
                     workspace_id: terminal.workspace_id,
-                    session_id,
+                    session_id: terminal.session_id,
                     operation_id: OperationId::new(),
                     owner_daemon_generation: terminal.daemon_generation,
                     execution_attempt: 1,

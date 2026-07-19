@@ -113,6 +113,7 @@ impl GitRunner for SystemGit {
 /// connections; the store also locks every reducer mutation for crash safety.
 pub struct SessionRuntime<G> {
     repo_root: PathBuf,
+    root_worktree_id: WorktreeId,
     generation: DaemonGeneration,
     store: DaemonLifecycleStore,
     git: G,
@@ -123,6 +124,35 @@ impl<G: GitRunner> SessionRuntime<G> {
     #[must_use]
     pub fn repository_root(&self) -> &Path {
         &self.repo_root
+    }
+
+    /// Returns the durable workspace-root checkout identity. It is a real,
+    /// persisted incarnation (never derived from a name or path), so a
+    /// workspace-root terminal/agent is fenced exactly like a session one.
+    #[must_use]
+    pub fn root_worktree_id(&self) -> WorktreeId {
+        self.root_worktree_id
+    }
+
+    /// Resolves the trusted workspace-root scope. The client never supplies the
+    /// path: the workspace and root-worktree identities are verified against the
+    /// daemon's durable state, and the returned path is always the trusted
+    /// repository root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionRuntimeError::ScopeUnavailable`] when the workspace or
+    /// root-worktree identity is not this daemon's.
+    pub fn resolve_root_scope(
+        &self,
+        workspace_id: WorkspaceId,
+        worktree_id: WorktreeId,
+    ) -> Result<PathBuf, SessionRuntimeError> {
+        let state = self.state()?;
+        if state.workspace_id != workspace_id || worktree_id != self.root_worktree_id {
+            return Err(SessionRuntimeError::ScopeUnavailable);
+        }
+        Ok(self.repo_root.clone())
     }
 
     /// # Errors
@@ -161,8 +191,12 @@ impl<G: GitRunner> SessionRuntime<G> {
             let _ = std::fs::remove_file(&legacy_lifecycle);
             candidate_repo_root
         };
+        let root_worktree_id = store
+            .ensure_root_worktree_id()
+            .map_err(|_| SessionRuntimeError::Storage)?;
         let mut runtime = Self {
             repo_root,
+            root_worktree_id,
             generation,
             store,
             git,
@@ -194,7 +228,7 @@ impl<G: GitRunner> SessionRuntime<G> {
                 Ok(SessionReply {
                     operation_id: operation_id.to_owned(),
                     revision: state.state_revision,
-                    body: snapshot(&state),
+                    body: snapshot(&state, self.root_worktree_id),
                 })
             }
             SessionAction::Setup | SessionAction::Prompt => {
@@ -208,7 +242,7 @@ impl<G: GitRunner> SessionRuntime<G> {
     /// Returns an error when the durable lifecycle state cannot be read.
     pub fn snapshot(&self) -> Result<Value, SessionRuntimeError> {
         let state = self.state()?;
-        Ok(snapshot(&state))
+        Ok(snapshot(&state, self.root_worktree_id))
     }
 
     /// Resolves only an available, fully fenced managed session to a path.
@@ -320,7 +354,7 @@ impl<G: GitRunner> SessionRuntime<G> {
                 Ok(SessionReply {
                     operation_id: operation_id.to_string(),
                     revision: completed.state_revision,
-                    body: snapshot(&completed),
+                    body: snapshot(&completed, self.root_worktree_id),
                 })
             }
             Err(error) => {
@@ -379,7 +413,7 @@ impl<G: GitRunner> SessionRuntime<G> {
             return Ok(SessionReply {
                 operation_id: operation_id.to_string(),
                 revision: existing.progress_revision,
-                body: snapshot(&before),
+                body: snapshot(&before, self.root_worktree_id),
             });
         }
         let session = before
@@ -428,7 +462,7 @@ impl<G: GitRunner> SessionRuntime<G> {
                 Ok(SessionReply {
                     operation_id: operation_id.to_string(),
                     revision: completed.state_revision,
-                    body: snapshot(&completed),
+                    body: snapshot(&completed, self.root_worktree_id),
                 })
             }
             Err(_) => {
@@ -514,7 +548,7 @@ impl<G: GitRunner> SessionRuntime<G> {
                     "session_id": session.session_id,
                     "worktree_id": session.worktree_id,
                 })).collect::<Vec<_>>(),
-                "sessions": snapshot(&recovered)["sessions"].clone(),
+                "sessions": snapshot(&recovered, self.root_worktree_id)["sessions"].clone(),
                 "workspace_id": recovered.workspace_id,
             }),
         })
@@ -831,7 +865,7 @@ fn fence(
 ) -> CompletionFence {
     CompletionFence {
         workspace_id: state.workspace_id,
-        session_id: session.session_id,
+        session_id: Some(session.session_id),
         operation_id,
         owner_daemon_generation: state
             .operations
@@ -845,7 +879,7 @@ fn fence(
     }
 }
 
-fn snapshot(state: &WorkspaceLifecycleState) -> Value {
+fn snapshot(state: &WorkspaceLifecycleState, root_worktree_id: WorktreeId) -> Value {
     // A reservation is durable so a crashed daemon can reconcile it and replay
     // its operation safely, but it is not a usable session.  Publishing failed
     // (or otherwise non-available) reservations lets a failed create become a
@@ -858,7 +892,12 @@ fn snapshot(state: &WorkspaceLifecycleState) -> Value {
             session.lifecycle == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
         })
         .collect::<Vec<_>>();
-    json!({"workspace_id": state.workspace_id, "revision": state.state_revision, "sessions": sessions})
+    json!({
+        "workspace_id": state.workspace_id,
+        "root_worktree_id": root_worktree_id,
+        "revision": state.state_revision,
+        "sessions": sessions,
+    })
 }
 
 #[cfg(test)]

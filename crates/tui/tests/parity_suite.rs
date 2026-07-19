@@ -68,8 +68,12 @@ fn terminal(workspace: WorkspaceId, session: SessionId) -> TerminalRef {
 }
 
 fn runtime(workspace: WorkspaceId, session: SessionId) -> AgentRuntimeRef {
-    AgentRuntimeRef::new(AgentRuntimeId::new(), terminal(workspace, session), session)
-        .expect("fixture terminal belongs to its session")
+    AgentRuntimeRef::new(
+        AgentRuntimeId::new(),
+        terminal(workspace, session),
+        Some(session),
+    )
+    .expect("fixture terminal belongs to its session")
 }
 
 fn session_projection(id: SessionId, label: &str) -> ProjectedSession {

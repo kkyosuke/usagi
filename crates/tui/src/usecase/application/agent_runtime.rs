@@ -9,8 +9,6 @@
 
 use std::collections::HashMap;
 
-use usagi_core::domain::id::SessionId;
-
 use super::{
     agent_launch::{AgentLaunchAdapter, AgentLaunchEvent, AgentLaunchPort},
     controller::{self, AppEvent, AppState, Effect, Target},
@@ -19,9 +17,12 @@ use super::{
 };
 
 /// Stateful v2 runtime bridge for Agent effects and terminal observations.
+///
+/// Panes are keyed by [`Target`] so the workspace root (`Target::Root`) owns an
+/// Agent pane strip exactly like a managed session (`Target::Session`) does.
 pub struct AgentRuntimeHost<P> {
     adapter: AgentLaunchAdapter<P>,
-    panes: HashMap<SessionId, PaneRuntime>,
+    panes: HashMap<Target, PaneRuntime>,
 }
 
 /// Home controller と daemon-owned Agent pane host を同じ workspace
@@ -74,16 +75,15 @@ impl<P: AgentLaunchPort + TerminalPort> AgentRuntime<P> {
     }
 
     fn sync_live_pane(&mut self) {
-        let live = match self.state.active() {
-            Target::Session(session) => self.host.pane(session).is_some_and(|runtime| {
-                runtime
-                    .pane()
-                    .tabs()
-                    .iter()
-                    .any(|tab| matches!(tab, PaneTab::Live(_)))
-            }),
-            Target::Root(_) => false,
-        };
+        // The active target's pane owns the live signal whether it is a session
+        // or the workspace root; both are keyed uniformly in the host.
+        let live = self.host.pane(self.state.active()).is_some_and(|runtime| {
+            runtime
+                .pane()
+                .tabs()
+                .iter()
+                .any(|tab| matches!(tab, PaneTab::Live(_)))
+        });
         let _ = controller::update(&mut self.state, AppEvent::LivePaneAvailability(live));
     }
 }
@@ -98,8 +98,8 @@ impl<P> AgentRuntimeHost<P> {
     }
 
     #[must_use]
-    pub fn pane(&self, session: SessionId) -> Option<&PaneRuntime> {
-        self.panes.get(&session)
+    pub fn pane(&self, target: Target) -> Option<&PaneRuntime> {
+        self.panes.get(&target)
     }
 
     #[must_use]
@@ -120,14 +120,19 @@ impl<P: AgentLaunchPort + TerminalPort> AgentRuntimeHost<P> {
     /// Run a controller effect. Only Agent launch effects enter this host;
     /// other controller effects remain owned by their existing runners.
     pub fn dispatch(&mut self, effect: Effect) {
-        let Effect::LaunchAgent { session, .. } = &effect else {
+        let Effect::LaunchAgent {
+            workspace, session, ..
+        } = &effect
+        else {
             return;
         };
-        let runtime = self.panes.entry(*session).or_insert_with(|| {
-            PaneRuntime::new(PaneState::new(PaneSelection::Target(Target::Session(
-                *session,
-            ))))
-        });
+        // A workspace-root Agent (`session == None`) is keyed by `Target::Root`;
+        // a session Agent by `Target::Session`.
+        let target = session.map_or(Target::Root(*workspace), Target::Session);
+        let runtime = self
+            .panes
+            .entry(target)
+            .or_insert_with(|| PaneRuntime::new(PaneState::new(PaneSelection::Target(target))));
         self.adapter.dispatch(runtime, effect);
     }
 
@@ -141,12 +146,8 @@ impl<P: AgentLaunchPort + TerminalPort> AgentRuntimeHost<P> {
 
     /// Select a completed tab when the v2 UI focuses its owning session. This
     /// is deliberately explicit so a background completion cannot steal focus.
-    pub fn select_live(
-        &mut self,
-        session: SessionId,
-        terminal: &usagi_core::domain::id::TerminalRef,
-    ) {
-        if let Some(runtime) = self.panes.get_mut(&session) {
+    pub fn select_live(&mut self, target: Target, terminal: &usagi_core::domain::id::TerminalRef) {
+        if let Some(runtime) = self.panes.get_mut(&target) {
             runtime.dispatch(
                 self.adapter.port_mut(),
                 PaneEvent::Select(PaneSelection::Tab(TabSelection::Live(terminal.clone()))),
@@ -154,30 +155,30 @@ impl<P: AgentLaunchPort + TerminalPort> AgentRuntimeHost<P> {
         }
     }
 
-    /// Relay one daemon terminal observation for its owning session only.
-    pub fn stream(&mut self, session: SessionId, event: TerminalStreamEvent) {
-        if let Some(runtime) = self.panes.get_mut(&session) {
+    /// Relay one daemon terminal observation for its owning target only.
+    pub fn stream(&mut self, target: Target, event: TerminalStreamEvent) {
+        if let Some(runtime) = self.panes.get_mut(&target) {
             runtime.stream_event(self.adapter.port_mut(), event);
         }
     }
 
     /// Relay selected-pane input without a local fallback.
-    pub fn input(&mut self, session: SessionId, bytes: &[u8]) {
-        if let Some(runtime) = self.panes.get_mut(&session) {
+    pub fn input(&mut self, target: Target, bytes: &[u8]) {
+        if let Some(runtime) = self.panes.get_mut(&target) {
             runtime.input(self.adapter.port_mut(), bytes);
         }
     }
 
     /// Relay a geometry change to the selected attached pane.
-    pub fn resize(&mut self, session: SessionId, geometry: Geometry) {
-        if let Some(runtime) = self.panes.get_mut(&session) {
+    pub fn resize(&mut self, target: Target, geometry: Geometry) {
+        if let Some(runtime) = self.panes.get_mut(&target) {
             runtime.resize(self.adapter.port_mut(), geometry);
         }
     }
 
     /// Reconcile the selected pane after a daemon reconnect.
-    pub fn reconnect(&mut self, session: SessionId) {
-        if let Some(runtime) = self.panes.get_mut(&session) {
+    pub fn reconnect(&mut self, target: Target) {
+        if let Some(runtime) = self.panes.get_mut(&target) {
             runtime.reconnect(self.adapter.port_mut());
         }
     }
@@ -196,7 +197,7 @@ mod tests {
     use super::super::pane_runtime::{TerminalError, TerminalInventory, TerminalSnapshot};
     use super::*;
     use usagi_core::domain::id::{
-        DaemonGeneration, OperationId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
+        DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
     };
     use usagi_core::usecase::client::AgentLaunchIntent;
 
@@ -279,27 +280,27 @@ mod tests {
         let mut host = AgentRuntimeHost::new(Fake::default());
         host.dispatch(Effect::LaunchAgent {
             workspace,
-            session,
+            session: Some(session),
             operation_id: operation,
             profile: None,
         });
         assert_eq!(host.port().launches.len(), 1);
         assert_eq!(host.port().launches[0].1.profile, None);
         assert!(matches!(
-            host.pane(session).unwrap().pane().tabs(),
+            host.pane(Target::Session(session)).unwrap().pane().tabs(),
             [PaneTab::Pending(_)]
         ));
         host.apply(&AgentLaunchEvent::Succeeded {
             operation,
             terminal: terminal.clone(),
         });
-        host.select_live(session, &terminal);
+        host.select_live(Target::Session(session), &terminal);
         assert!(
-            matches!(host.pane(session).unwrap().pane().selected(), PaneSelection::Tab(TabSelection::Live(selected)) if *selected == terminal)
+            matches!(host.pane(Target::Session(session)).unwrap().pane().selected(), PaneSelection::Tab(TabSelection::Live(selected)) if *selected == terminal)
         );
-        host.input(session, b"hello");
+        host.input(Target::Session(session), b"hello");
         host.resize(
-            session,
+            Target::Session(session),
             Geometry {
                 cols: 100,
                 rows: 30,
@@ -322,7 +323,7 @@ mod tests {
         let mut host = AgentRuntimeHost::new(Fake::default());
         host.dispatch(Effect::LaunchAgent {
             workspace,
-            session,
+            session: Some(session),
             operation_id: operation,
             profile: Some(usagi_core::domain::agent::AgentProfileId::new("codex").unwrap()),
         });
@@ -341,7 +342,7 @@ mod tests {
             message: "agent profile is unavailable".to_owned(),
         });
 
-        let pane = host.pane(session).unwrap().pane();
+        let pane = host.pane(Target::Session(session)).unwrap().pane();
         assert!(pane.tabs().is_empty());
         assert_eq!(pane.error(), Some("agent profile is unavailable"));
     }
@@ -353,7 +354,7 @@ mod tests {
         let mut host = AgentRuntimeHost::new(Fake::default());
         host.dispatch(Effect::LaunchAgent {
             workspace,
-            session,
+            session: Some(session),
             operation_id: operation,
             profile: None,
         });
@@ -365,7 +366,7 @@ mod tests {
         });
 
         assert!(matches!(
-            host.pane(session).unwrap().pane().tabs(),
+            host.pane(Target::Session(session)).unwrap().pane().tabs(),
             [PaneTab::Pending(pending)] if pending.operation == operation
         ));
     }

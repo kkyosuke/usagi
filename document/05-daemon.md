@@ -39,6 +39,8 @@ effect を実行し、同じ daemon generation・operation・session attempt・r
 
 各 managed session は `SessionId` と `WorktreeId` を同時に永続化する。agent / delegation が必要とする path は、available の workspace / session / worktree identity がすべて一致する場合だけ daemon が返す。creating、deleting、failed、stale identity、表示名・path-only の指定は scope に解決しない。
 
+workspace root（`⌂ root`）も一つの scope として同じ仕組みで解決する。root scope は `session_id` を持たず（`None`）、workspace ごとに一度だけ生成して永続化した **root `WorktreeId`** で識別する。daemon は snapshot でこの root worktree id を公開し、launch 時に要求された workspace / root worktree identity が自分のものと一致する場合だけ、cwd を **trusted repository root** に解決する。root scope の cwd は常に daemon が持つ trusted root であり、client 供給の path は使わない。session scope の fence（`session_id` 必須の completion）はこの追加で回帰しない。詳細な設計根拠は [proposals/10-workspace-root-scope.md](proposals/10-workspace-root-scope.md)。
+
 client に返す session 一覧は `available` の managed session だけを投影する。作成に失敗した reservation と中断後に reconcile された record は、operation の再送・復旧判断のため daemon の durable state に残すが、TUI の選択可能な一覧には出さない。
 
 ## session tree と ignore rules
@@ -186,9 +188,11 @@ generic terminal coordinator、trusted `login-shell` profile resolver、durable 
 program として選ぶ。存在しない、相対 path、または NUL を含む値は `/bin/sh` へ fallback する。PTY 上では
 `-l -i` を渡し、shell の login と interactive startup を有効にする。daemon は client の完全な
 workspace / session / worktree ID を `SessionRuntime` の available managed session と照合してから、その同じ
-worktree path を cwd として profile resolver に渡す。不一致・unavailable な scope は spawn 前に拒否されるため、
-`TerminalLaunchRequest` の scope と実際の cwd は常に同じ managed session を指す。IPC client が任意の
-path・argv・environment を指定することはできない。
+worktree path を cwd として profile resolver に渡す。`session_id` を持たない **root scope** は、
+workspace と root worktree identity を daemon の永続 state と照合してから cwd を trusted repository root に
+解決する。いずれの scope でも不一致・unavailable なら spawn 前に拒否されるため、`TerminalLaunchRequest` の
+scope と実際の cwd は常に同じ scope（managed session または workspace root）を指す。IPC client が任意の
+path・argv・environment・root worktree identity を指定することはできない。
 
 | 項目 | 扱い |
 |---|---|
