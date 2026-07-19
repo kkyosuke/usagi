@@ -45,7 +45,10 @@ jobs:
       run: cargo llvm-cov --workspace --lcov --output-path lcov.info
 
     # 未達ファイル/関数/行のレポート生成は scripts/coverage-report-comment.rb に
-    # 抽出済み（fixture test: scripts/tests/coverage-report-comment.sh）。
+    # 抽出済み（fixture test: scripts/tests/coverage-report-comment.sh）。入力は
+    # `cargo llvm-cov report --json`（gate と同じ集計。lcov の per-monomorphization な
+    # 関数レコードと違い、マージ済み関数カバレッジで gate と一致する）。関数名は
+    # c++filt（binutils。ubuntu-latest に同梱）で Rust v0 を demangle する。
     # lcov.info が生成されていれば coverage の合否に関わらず（always）レポートを作り、
     # PR コメントと Job Summary の両方へ出す。Job Summary は権限不要のため fork PR でも
     # 必ず一覧が見える。compile/test 失敗で lcov.info が無い場合はここを skip する
@@ -54,7 +57,8 @@ jobs:
       if: always() && hashFiles('lcov.info') != ''
       run: |
         . ./scripts/coverage.sh
-        ruby scripts/coverage-report-comment.rb lcov.info > coverage-comment.md
+        coverage_report --json > coverage.json
+        ruby scripts/coverage-report-comment.rb coverage.json > coverage-comment.md
         cat coverage-comment.md >> "$GITHUB_STEP_SUMMARY"
 
     # PR コメントは同一リポジトリの PR に限定する。fork PR は token が read-only に
