@@ -296,18 +296,14 @@ fn input_line(value: &str, cursor: usize) -> String {
 
 /// 1 候補行: 選択中は `›` マーカー、コマンド名（accent）、説明（dim）。幅に切り詰める。
 fn hint_row(hint: overview::CommandInfo, selected: bool, inner: usize) -> String {
-    let marker = if selected {
-        Role::Danger.style().bold().paint("›")
-    } else {
-        " ".to_string()
-    };
+    let marker = modal::selection_marker(selected);
     // コマンド名は ASCII なので固定幅を char 数で確保してから塗る（説明の桁がそろう）。
     let name = Role::Accent
         .style()
         .bold()
         .paint(&format!("{:<10}", hint.name));
     let desc = Style::new().dim().paint(hint.description);
-    widgets::clip_to_width(&format!("  {marker} {name}{desc}"), inner)
+    modal::content_line(&format!("{marker} {name}{desc}"), inner)
 }
 
 /// コマンドパレットのボディ（枠の内側の行）。入力行・候補一覧・フッタからなる。
@@ -316,14 +312,14 @@ fn body(state: &OverviewModal) -> Vec<String> {
     let matches = state.matches();
     let mut lines = vec![input_line(state.input(), state.cursor()), String::new()];
     if matches.is_empty() {
-        lines.push(Style::new().dim().paint("  no matching command"));
+        lines.push(modal::empty_notice("no matching command"));
     } else {
         let header = if state.input().trim().is_empty() {
             "workspace commands"
         } else {
             "matches"
         };
-        lines.push(Style::new().dim().paint(&format!("  {header}")));
+        lines.push(modal::caption(header));
         for (i, hint) in matches.iter().take(MAX_MATCHES).enumerate() {
             lines.push(hint_row(*hint, i == state.selected, INNER_WIDTH));
             if state.selection_mode == ModalSelectionMode::Action
@@ -350,12 +346,8 @@ fn body(state: &OverviewModal) -> Vec<String> {
         .copied()
         .or_else(|| overview::help(&overview::DefaultRegistry, state.input()));
     if let Some(help) = help {
-        lines.push(Style::new().dim().paint(&format!("  {}", help.usage)));
-        lines.push(
-            Style::new()
-                .dim()
-                .paint(&format!("  {}", help.long_description)),
-        );
+        lines.push(modal::caption(help.usage));
+        lines.push(modal::caption(help.long_description));
     }
     lines.push(String::new());
     match state.result() {
@@ -368,27 +360,32 @@ fn body(state: &OverviewModal) -> Vec<String> {
         None => lines.push(String::new()),
     }
     lines.push(String::new());
-    lines.push(
-        Style::new()
-            .dim()
-            .paint(if state.selection_mode == ModalSelectionMode::Action {
-                "Tab: complete ↑↓ select → expand Enter run Esc: close"
-            } else {
-                "  Enter: run   Esc: close"
-            }),
-    );
-    modal::fixed_body(lines, BODY_HEIGHT)
+    lines.push(modal::footer(
+        if state.selection_mode == ModalSelectionMode::Action {
+            "Tab: complete ↑↓ select → expand Enter run Esc: close"
+        } else {
+            "Enter: run   Esc: close"
+        },
+    ));
+    lines
 }
 
 /// 生の端末サイズに対する overview modal 1 フレーム分の行。中央に浮かぶ枠付きダイアログとして
 /// 描く（枠と中央寄せは [`modal::render_modal`] に委譲）。サイズ 0 は 80×24 にフォールバック。
 #[must_use]
 pub fn render(raw_height: usize, raw_width: usize, state: &OverviewModal) -> Vec<String> {
-    modal::render_modal(raw_height, raw_width, "Overview", INNER_WIDTH, &body(state))
+    modal::render_body(
+        raw_height,
+        raw_width,
+        "Overview",
+        INNER_WIDTH,
+        BODY_HEIGHT,
+        body(state),
+    )
 }
 
 /// `base` の workspace フレームを背景に残し、overview modal を中央に合成する。
-/// サイズ 0 は 80×24 にフォールバックする。
+/// 小端末では [`modal::render_body_over`] が Home の帯を残す。サイズ 0 は 80×24 にフォールバックする。
 #[must_use]
 pub fn render_over(
     raw_height: usize,
@@ -396,42 +393,27 @@ pub fn render_over(
     base: &[String],
     state: &OverviewModal,
 ) -> Vec<String> {
-    let (height, _) = widgets::normalize_size(raw_height, raw_width);
-    // Leave a row of Home visible above and below a fixed-height palette on a
-    // short terminal. The normal-size body remains unchanged.
-    let body = modal::fixed_body(body(state), BODY_HEIGHT.min(height.saturating_sub(4)));
-    modal::render_over(raw_height, raw_width, base, "Overview", INNER_WIDTH, &body)
+    modal::render_body_over(
+        raw_height,
+        raw_width,
+        base,
+        "Overview",
+        INNER_WIDTH,
+        BODY_HEIGHT,
+        body(state),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{OverviewModal, PaletteResult, render, render_over};
-    use crate::presentation::widgets::display_width;
+    use crate::presentation::widgets::{display_width, strip_ansi};
     use usagi_core::domain::settings::ModalSelectionMode;
-
-    fn strip(line: &str) -> String {
-        let mut out = String::new();
-        let mut chars = line.chars();
-        while let Some(ch) = chars.next() {
-            if ch == '\u{1b}' {
-                for c in chars.by_ref() {
-                    if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
-                        break;
-                    }
-                }
-                continue;
-            }
-            if !matches!(ch, '\u{e0001}' | '\u{e0002}') {
-                out.push(ch);
-            }
-        }
-        out
-    }
 
     fn joined(state: &OverviewModal) -> String {
         render(24, 80, state)
             .iter()
-            .map(|l| strip(l))
+            .map(|l| strip_ansi(l))
             .collect::<Vec<_>>()
             .join("\n")
     }

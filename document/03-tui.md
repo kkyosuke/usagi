@@ -207,6 +207,35 @@ modal は view ごとに予約した body 行数で描画する。候補数、em
 内容が変化しても、開いている modal の枠高さは変わらない。端末が短い場合は予約領域を安全に clip し、
 Home 背景との合成範囲を越えない。
 
+### 共通 body-composition kit
+
+枠・配置の primitive（`boxed` / `render_modal` / `render_over` / `fixed_body` / `modal_inner_width`）の 1 段上に、
+各 modal が共通で使う **body 組み立ての約束事**を `widgets/modal.rs` に集約する。view は「何を表示するか」だけを
+持ち、余白・style・reserve は kit に委ねる。
+
+| helper | 生成する行 |
+|---|---|
+| `content_line(text, inner)` | body の 2 桁インデント + 内側幅への clip |
+| `caption(text)` | dim の見出し・注記行（2 桁インデント） |
+| `heading(text)` | accent 太字の見出し行（editor / 詳細 modal） |
+| `empty_notice(text)` | dim の空状態行（`(none)` / `no pull requests` など） |
+| `footer(hints)` | dim の help / フッタ行 |
+| `selection_marker(selected)` | 選択行の danger 太字 `›`（`widgets/select.rs` と同一経路） |
+| `scroll_above(n)` / `scroll_below(n)` | dim の scroll indicator `↑ N more` / `↓ N more` |
+| `render_body` / `render_body_over` | body 予約（`fixed_body`）＋中央配置／背景合成の双子。over は小端末で `height − 4` に clamp |
+
+インデント・footer 文言・選択マーカー・scroll 文言は 1 経路に統一する。移行では表示を byte 単位で回帰させない
+ことを基本とし、次の 3 か所だけを意図的に統一した（対応する test を更新済み）。
+
+- **text-viewer の scroll indicator**: 旧 `↑ N lines`（インデントなし）を、list modal と同じ `↑ N more`
+  （2 桁インデント）へ揃えた。
+- **Overview の action-mode footer**: インデントの無かった footer を、他の footer と同じ 2 桁インデントへ揃えた。
+- **共通マーカー**: `›` は `selection_marker` の 1 経路に集約し、`widgets/select.rs` の focus カーソルも再利用する。
+
+confirmation（Quit / open）の button・文言統一と、list / text-viewer / editor / palette の形別コンポーネント
+抽出は本 kit の上に別途載せる（それぞれ別 issue）。決定 modal の選択行が使う plain な `>` マーカーは、
+list コンポーネント抽出時に共通カーソルへ寄せる。
+
 ## Sidebar mascot
 
 Home の左 sidebar は footer の直上に usagi を表示する。frame は reducer が所有する tick でだけ

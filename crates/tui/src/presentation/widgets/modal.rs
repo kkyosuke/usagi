@@ -62,6 +62,132 @@ pub fn fixed_body(mut body: Vec<String>, body_height: usize) -> Vec<String> {
     body
 }
 
+/// The two-column left margin shared by modal body rows. Content, captions,
+/// footers, and scroll indicators all indent by this so a modal reads as one
+/// column no matter which view composed it.
+const BODY_INDENT: &str = "  ";
+
+/// A dim, body-indented line. Captions, empty-state notices, and footers share
+/// this one style; they differ only in role and call site, so each keeps its
+/// own name below while the styling lives here once.
+fn dim_body_line(text: &str) -> String {
+    Style::new().dim().paint(&format!("{BODY_INDENT}{text}"))
+}
+
+/// Indent `text` by the shared body margin and clip it to `inner_width`.
+///
+/// This folds the `clip_to_width(format!("  {line}"), inner)` idiom the list and
+/// editor modals repeated. Callers pre-style their spans; the returned line is
+/// only indented and clipped, never recoloured.
+#[must_use]
+pub fn content_line(text: &str, inner_width: usize) -> String {
+    clip_to_width(&format!("{BODY_INDENT}{text}"), inner_width)
+}
+
+/// A dim section caption, such as a list's heading row.
+#[must_use]
+pub fn caption(text: &str) -> String {
+    dim_body_line(text)
+}
+
+/// An accent, bold heading for an editor or detail modal.
+#[must_use]
+pub fn heading(text: &str) -> String {
+    Role::Accent
+        .style()
+        .bold()
+        .paint(&format!("{BODY_INDENT}{text}"))
+}
+
+/// A dim empty-state notice, such as `(none)` or `no pull requests`.
+#[must_use]
+pub fn empty_notice(text: &str) -> String {
+    dim_body_line(text)
+}
+
+/// A dim footer/help row listing the modal's key hints.
+#[must_use]
+pub fn footer(hints: &str) -> String {
+    dim_body_line(hints)
+}
+
+/// The danger, bold `›` cursor drawn before a selected list row, or a blank
+/// cell when the row is not selected. Shared with [`super::select`] so the form
+/// widgets and every modal draw one cursor glyph.
+#[must_use]
+pub fn selection_marker(selected: bool) -> String {
+    if selected {
+        Role::Danger.style().bold().paint("›")
+    } else {
+        " ".to_string()
+    }
+}
+
+/// A dim scroll indicator: `↑ N more` above the viewport or `↓ N more` below it.
+fn scroll_indicator(arrow: char, hidden: usize) -> String {
+    dim_body_line(&format!("{arrow} {hidden} more"))
+}
+
+/// `↑ N more` — the number of rows scrolled off the top of the viewport.
+#[must_use]
+pub fn scroll_above(hidden: usize) -> String {
+    scroll_indicator('↑', hidden)
+}
+
+/// `↓ N more` — the number of rows below the viewport.
+#[must_use]
+pub fn scroll_below(hidden: usize) -> String {
+    scroll_indicator('↓', hidden)
+}
+
+/// Reserve `body_height` rows for `lines` and render the modal centred on a
+/// blank frame. The twin of [`render_body_over`]; both fold the
+/// `fixed_body(…)` reserve so a view only composes its rows.
+#[must_use]
+pub fn render_body(
+    raw_height: usize,
+    raw_width: usize,
+    title: &str,
+    inner_width: usize,
+    body_height: usize,
+    lines: Vec<String>,
+) -> Vec<String> {
+    render_modal(
+        raw_height,
+        raw_width,
+        title,
+        inner_width,
+        &fixed_body(lines, body_height),
+    )
+}
+
+/// Reserve `body_height` rows for `lines` and composite the modal over `base`.
+///
+/// On a short terminal the reserve is clamped to `height - 4` so a sliver of the
+/// background stays visible above and below the box; normal terminals keep the
+/// full reserve. The twin of [`render_body`].
+#[must_use]
+pub fn render_body_over(
+    raw_height: usize,
+    raw_width: usize,
+    base: &[String],
+    title: &str,
+    inner_width: usize,
+    body_height: usize,
+    lines: Vec<String>,
+) -> Vec<String> {
+    let (height, _) = normalize_size(raw_height, raw_width);
+    let reserved = body_height.min(height.saturating_sub(4));
+    render_over(
+        raw_height,
+        raw_width,
+        base,
+        title,
+        inner_width,
+        &fixed_body(lines, reserved),
+    )
+}
+
 /// Shared state for a two-choice confirmation modal.
 #[derive(Debug, Clone, Copy)]
 pub struct ConfirmationModal {
@@ -340,10 +466,13 @@ pub fn render_over(
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfirmationModal, ConfirmationView, boxed, columns, confirmation_buttons, fixed_body,
-        modal_inner_width, render_confirmation_over, render_modal, render_over,
+        ConfirmationModal, ConfirmationView, boxed, caption, columns, confirmation_buttons,
+        content_line, empty_notice, fixed_body, footer, heading, modal_inner_width, render_body,
+        render_body_over, render_confirmation_over, render_modal, render_over, scroll_above,
+        scroll_below, selection_marker,
     };
-    use crate::presentation::theme::Role;
+    use crate::presentation::theme::{Role, Style};
+    use crate::presentation::widgets::clip_to_width;
 
     #[test]
     fn confirmation_buttons_mark_the_selected_choice() {
@@ -433,6 +562,74 @@ mod tests {
     fn fixed_body_reserves_rows_and_clips_overflow() {
         assert_eq!(fixed_body(vec!["one".into()], 3), vec!["one", "", ""]);
         assert_eq!(fixed_body(vec!["one".into(), "two".into()], 1), vec!["one"]);
+    }
+
+    #[test]
+    fn body_composition_helpers_pin_the_pre_refactor_idioms() {
+        // Each helper reproduces byte-for-byte the inline expression the views
+        // previously repeated, so migrating a view cannot move a glyph.
+        assert_eq!(content_line("row", 20), clip_to_width("  row", 20));
+        assert_eq!(
+            caption("Pull requests"),
+            Style::new().dim().paint("  Pull requests")
+        );
+        assert_eq!(empty_notice("(none)"), Style::new().dim().paint("  (none)"));
+        assert_eq!(
+            footer("↑↓ select   Esc: close"),
+            Style::new().dim().paint("  ↑↓ select   Esc: close")
+        );
+        assert_eq!(
+            heading("Decision"),
+            Role::Accent.style().bold().paint("  Decision")
+        );
+        assert_eq!(scroll_above(3), Style::new().dim().paint("  ↑ 3 more"));
+        assert_eq!(scroll_below(1), Style::new().dim().paint("  ↓ 1 more"));
+    }
+
+    #[test]
+    fn content_line_clips_a_wide_row_to_the_inner_width() {
+        let clipped = content_line("0123456789", 6);
+        assert!(display_width(&clipped) <= 6);
+        assert!(clipped.starts_with("  "));
+        assert!(clipped.contains('…'));
+    }
+
+    #[test]
+    fn selection_marker_is_a_danger_cursor_when_selected_and_blank_otherwise() {
+        assert_eq!(
+            selection_marker(true),
+            Role::Danger.style().bold().paint("›")
+        );
+        assert_eq!(selection_marker(false), " ");
+        // The form widgets reuse this exact cursor for their focused row.
+        assert!(
+            crate::presentation::widgets::select::render("Theme", "dark", true, false)
+                .starts_with(&selection_marker(true))
+        );
+    }
+
+    #[test]
+    fn render_body_and_over_fold_the_fixed_body_reserve() {
+        // Centred: reserves the full body height, then render_modal clips to the
+        // terminal, matching the old render_modal(…, &fixed_body(lines, h)).
+        let lines = vec!["one".to_string(), "two".to_string()];
+        let centred = render_body(24, 80, "T", 20, 6, lines.clone());
+        assert_eq!(
+            centred,
+            render_modal(24, 80, "T", 20, &fixed_body(lines.clone(), 6))
+        );
+
+        // Over a background: the reserve clamps to height - 4 on a short
+        // terminal so a sliver of the base survives above and below the box.
+        let base = vec!["background".to_string(); 8];
+        let over = render_body_over(8, 80, &base, "T", 20, 6, lines.clone());
+        let reserved = 6usize.min(8usize.saturating_sub(4));
+        assert_eq!(
+            over,
+            render_over(8, 80, &base, "T", 20, &fixed_body(lines, reserved))
+        );
+        assert_eq!(over.len(), 8);
+        assert!(over[0].starts_with("background"));
     }
 
     #[test]

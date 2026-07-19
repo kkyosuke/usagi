@@ -315,6 +315,31 @@ pub fn relative_time(from: DateTime<Utc>, now: DateTime<Utc>) -> String {
     from.format("%Y-%m-%d").to_string()
 }
 
+/// Strip ANSI escape sequences and the private-use cursor markers from a
+/// rendered line so a test can assert on its visible text. Every modal view
+/// test that inspects a frame's content shares this one helper instead of
+/// copying the same escape-skipping loop.
+#[cfg(test)]
+pub(crate) fn strip_ansi(line: &str) -> String {
+    use crate::presentation::frame::{INPUT_CURSOR_MARKER, TERMINAL_CURSOR_MARKER};
+    let mut out = String::new();
+    let mut chars = line.chars();
+    while let Some(ch) = chars.next() {
+        if ch == ESC {
+            for c in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if !matches!(ch, INPUT_CURSOR_MARKER | TERMINAL_CURSOR_MARKER) {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// Session sidebar 用の簡潔な相対時刻。`now` / `5m ago` / `3h ago` と表す。
 #[must_use]
 pub fn relative_session_time(from: DateTime<Utc>, now: DateTime<Utc>) -> String {

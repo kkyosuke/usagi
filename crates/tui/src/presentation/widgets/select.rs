@@ -1,6 +1,7 @@
 //! A compact selectable value row shared by form-like views.
 
 use crate::presentation::theme::{Role, Style};
+use crate::presentation::widgets::modal;
 
 /// Fixed label column used by Config selects so their value controls align.
 const LABEL_WIDTH: usize = 13;
@@ -12,11 +13,7 @@ const VALUE_WIDTH: usize = 6;
 /// while an unsaved value uses the warning colour across its whole row.
 #[must_use]
 pub fn render(label: &str, value: &str, focused: bool, changed: bool) -> String {
-    let marker = if focused {
-        Role::Danger.style().bold().paint("›")
-    } else {
-        " ".to_string()
-    };
+    let marker = modal::selection_marker(focused);
     let changed_marker = if changed {
         Role::Warning.style().bold().paint("●")
     } else {
@@ -45,11 +42,7 @@ pub fn disabled(label: &str, value: &str) -> String {
 /// Render a form action. Disabled actions remain visible but dimmed.
 #[must_use]
 pub fn action(label: &str, focused: bool, enabled: bool) -> String {
-    let marker = if focused {
-        Role::Danger.style().bold().paint("›")
-    } else {
-        " ".to_string()
-    };
+    let marker = modal::selection_marker(focused);
     let style = if enabled {
         Role::Success.style().bold()
     } else {

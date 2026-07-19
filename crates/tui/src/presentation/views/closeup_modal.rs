@@ -238,17 +238,13 @@ impl CloseupModal {
 
 /// 1 アクション行: 選択中は `›` マーカー、command 名（accent）、説明（dim）。
 fn action_row(action: closeup::CommandInfo, selected: bool, inner: usize) -> String {
-    let marker = if selected {
-        Role::Danger.style().bold().paint("›")
-    } else {
-        " ".to_string()
-    };
+    let marker = modal::selection_marker(selected);
     let label = Role::Accent
         .style()
         .bold()
         .paint(&format!("{:<14}", action.name));
     let desc = Style::new().dim().paint(action.description);
-    widgets::clip_to_width(&format!("  {marker} {label}{desc}"), inner)
+    modal::content_line(&format!("{marker} {label}{desc}"), inner)
 }
 
 /// アクションメニューのボディ（枠の内側の行）。対象セッションは v1 と同様に title にのみ載せる。
@@ -265,7 +261,7 @@ fn body(state: &CloseupModal) -> Vec<String> {
                 String::new(),
                 format!("❯ {prompt}"),
                 String::new(),
-                Style::new().dim().paint("  Enter: run   Esc: back"),
+                modal::footer("Enter: run   Esc: back"),
             ],
             BODY_HEIGHT,
         );
@@ -300,11 +296,9 @@ fn body(state: &CloseupModal) -> Vec<String> {
         }
     }
     lines.push(String::new());
-    lines.push(
-        Style::new()
-            .dim()
-            .paint("  ↑↓: select   →: expand   Enter: run   Esc: back"),
-    );
+    lines.push(modal::footer(
+        "↑↓: select   →: expand   Enter: run   Esc: back",
+    ));
     modal::fixed_body(lines, BODY_HEIGHT)
 }
 
@@ -343,7 +337,7 @@ pub fn render_over(
 #[cfg(test)]
 mod tests {
     use super::{CloseupModal, render, render_over};
-    use crate::presentation::widgets::display_width;
+    use crate::presentation::widgets::{display_width, strip_ansi};
     use usagi_core::domain::settings::ModalSelectionMode;
 
     #[test]
@@ -361,28 +355,10 @@ mod tests {
         assert_eq!(before, after);
     }
 
-    #[coverage(off)]
-    fn strip(line: &str) -> String {
-        let mut out = String::new();
-        let mut chars = line.chars();
-        while let Some(ch) = chars.next() {
-            if ch == '\u{1b}' {
-                for c in chars.by_ref() {
-                    if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
-                        break;
-                    }
-                }
-                continue;
-            }
-            out.push(ch);
-        }
-        out
-    }
-
     fn joined(state: &CloseupModal) -> String {
         render(24, 80, state)
             .iter()
-            .map(|l| strip(l))
+            .map(|l| strip_ansi(l))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -564,7 +540,7 @@ mod tests {
         modal.select_next(); // Focus agent
         let cursor_rows = render(24, 80, &modal)
             .iter()
-            .filter(|l| strip(l).contains('›'))
+            .filter(|l| strip_ansi(l).contains('›'))
             .count();
         assert_eq!(cursor_rows, 1);
     }

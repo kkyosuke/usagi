@@ -4,8 +4,8 @@
 //! persistence is deliberately handled by controller effects, keeping the
 //! workspace state and settings owners outside presentation.
 
-use crate::presentation::theme::{Role, Style};
-use crate::presentation::widgets::{self, modal};
+use crate::presentation::theme::Role;
+use crate::presentation::widgets::modal;
 use crate::usecase::application::controller::{EnvironmentEditor, NoteEditor, NoteSection};
 
 const INNER_WIDTH: usize = 62;
@@ -23,13 +23,13 @@ fn error_line(error: Option<&str>) -> Option<String> {
 }
 
 fn note_body(editor: &NoteEditor) -> Vec<String> {
-    let mut lines = vec![Style::new().dim().paint("  note · todos · decisions")];
+    let mut lines = vec![modal::caption("note · todos · decisions")];
     let section = match editor.section() {
         NoteSection::Note => "note",
         NoteSection::Todos => "todos",
         NoteSection::Decisions => "decisions",
     };
-    lines.push(Role::Accent.style().bold().paint(&format!("  [{section}]")));
+    lines.push(modal::heading(&format!("[{section}]")));
     match editor.section() {
         NoteSection::Note => lines.extend(
             editor
@@ -38,11 +38,11 @@ fn note_body(editor: &NoteEditor) -> Vec<String> {
                 .unwrap_or("(empty)")
                 .lines()
                 .take(MAX_ROWS)
-                .map(|line| widgets::clip_to_width(&format!("  {line}"), INNER_WIDTH)),
+                .map(|line| modal::content_line(line, INNER_WIDTH)),
         ),
         NoteSection::Todos => {
             if editor.scratchpad().todos().is_empty() {
-                lines.push(Style::new().dim().paint("  (no todos)"));
+                lines.push(modal::empty_notice("(no todos)"));
             }
             lines.extend(
                 editor
@@ -52,13 +52,13 @@ fn note_body(editor: &NoteEditor) -> Vec<String> {
                     .take(MAX_ROWS)
                     .map(|todo| {
                         let mark = if todo.done { "x" } else { " " };
-                        widgets::clip_to_width(&format!("  [{mark}] {}", todo.text), INNER_WIDTH)
+                        modal::content_line(&format!("[{mark}] {}", todo.text), INNER_WIDTH)
                     }),
             );
         }
         NoteSection::Decisions => {
             if editor.scratchpad().decisions().is_empty() {
-                lines.push(Style::new().dim().paint("  (no decisions)"));
+                lines.push(modal::empty_notice("(no decisions)"));
             }
             lines.extend(
                 editor
@@ -68,9 +68,9 @@ fn note_body(editor: &NoteEditor) -> Vec<String> {
                     .rev()
                     .take(MAX_ROWS)
                     .map(|decision| {
-                        widgets::clip_to_width(
+                        modal::content_line(
                             &format!(
-                                "  {}  {}",
+                                "{}  {}",
                                 decision.at.format("%Y-%m-%d %H:%M"),
                                 decision.text
                             ),
@@ -93,35 +93,32 @@ fn note_body(editor: &NoteEditor) -> Vec<String> {
         lines.push(line);
     }
     lines.push(String::new());
-    lines.push(Style::new().dim().paint("  Esc: close   Save: persist"));
+    lines.push(modal::footer("Esc: close   Save: persist"));
     modal::fixed_body(lines, NOTES_BODY_HEIGHT)
 }
 
 fn environment_body(editor: &EnvironmentEditor) -> Vec<String> {
-    let mut lines = vec![
-        Style::new()
-            .dim()
-            .paint("  workspace / session environment"),
-    ];
+    let mut lines = vec![modal::caption("workspace / session environment")];
     if editor.entries().is_empty() {
-        lines.push(Style::new().dim().paint("  (no environment variables)"));
+        lines.push(modal::empty_notice("(no environment variables)"));
     }
-    lines.extend(editor.entries().iter().take(MAX_ROWS).map(|entry| {
-        widgets::clip_to_width(&format!("  {}={}", entry.name, entry.value), INNER_WIDTH)
-    }));
+    lines.extend(
+        editor.entries().iter().take(MAX_ROWS).map(|entry| {
+            modal::content_line(&format!("{}={}", entry.name, entry.value), INNER_WIDTH)
+        }),
+    );
     if editor.entries().len() > MAX_ROWS {
-        lines.push(
-            Style::new()
-                .dim()
-                .paint(&format!("  … {} more", editor.entries().len() - MAX_ROWS)),
-        );
+        lines.push(modal::caption(&format!(
+            "… {} more",
+            editor.entries().len() - MAX_ROWS
+        )));
     }
     if let Some(line) = error_line(editor.error().map(|error| error.message.as_str())) {
         lines.push(String::new());
         lines.push(line);
     }
     lines.push(String::new());
-    lines.push(Style::new().dim().paint("  Esc: close   Save: persist"));
+    lines.push(modal::footer("Esc: close   Save: persist"));
     modal::fixed_body(lines, ENVIRONMENT_BODY_HEIGHT)
 }
 
