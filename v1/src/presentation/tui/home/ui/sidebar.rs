@@ -1254,6 +1254,25 @@ pub(super) fn rail_entry(
     (top, detail, resource)
 }
 
+/// The [`Palette`] role the persistent create affordance paints with: always
+/// **Success** (green), emphasised to bold while the 選択 (Overview) cursor rests
+/// on it. Every surface that draws `+ new session` — the full-sidebar
+/// [`create_row`], its rail `+` twin [`rail_create_row`], and the right-pane
+/// preview header ([`super::panes::overview_preview`]) — resolves its colour here
+/// so the affordance is a single Success-role decision. Routing it through the
+/// palette (rather than a raw `console` `.green()`) keeps the colour following a
+/// theme retune and makes an accidental swap to another role — e.g. `accent`
+/// (cyan/blue) — a visible colour regression a test can pin. See
+/// [`crate::presentation::theme`].
+pub(super) fn create_label_style(emphasized: bool) -> Style {
+    let base = Style::new().success();
+    if emphasized {
+        base.bold()
+    } else {
+        base
+    }
+}
+
 /// The persistent create row in the full sidebar. It uses the same gutter grammar
 /// as real rows (`>` only in 選択 when selected) but has no heat/status/resource
 /// lines because it is an action target rather than a session. The row is still
@@ -1261,11 +1280,9 @@ pub(super) fn rail_entry(
 /// the create input from a visible affordance.
 pub(super) fn create_row(selected: bool, in_overview: bool, width: usize) -> String {
     let gutter = gutter_cell(selected, false, in_overview);
-    let label = if selected && in_overview {
-        style(CREATE_ROW_LABEL).green().bold().to_string()
-    } else {
-        style(CREATE_ROW_LABEL).green().to_string()
-    };
+    let label = create_label_style(selected && in_overview)
+        .apply_to(CREATE_ROW_LABEL)
+        .to_string();
     clip_to_width(&format!("{gutter} {label}"), width)
 }
 
@@ -1417,11 +1434,9 @@ pub(super) fn rail_removing_session_rows(
 /// click / focus target remains visible at the rail's bottom.
 pub(super) fn rail_create_row(selected: bool, in_overview: bool) -> String {
     let gutter = gutter_cell(selected, false, in_overview);
-    let label = if selected && in_overview {
-        style("+").green().bold().to_string()
-    } else {
-        style("+").green().to_string()
-    };
+    let label = create_label_style(selected && in_overview)
+        .apply_to("+")
+        .to_string();
     pad_to_width(format!("{gutter} {label}"), RAIL_WIDTH)
 }
 
