@@ -74,7 +74,7 @@ impl SessionScopeResolver for FixedScope {
     fn resolve_available_scope(
         &self,
         _: WorkspaceId,
-        _: SessionId,
+        _: Option<SessionId>,
     ) -> Result<ResolvedAgentScope, ScopeResolveError> {
         Ok(ResolvedAgentScope {
             worktree_id: self.worktree_id,
@@ -157,7 +157,7 @@ impl PtyWriter for RealPtySpawner {
 fn intent(profile: Option<&str>) -> AgentLaunchIntent {
     AgentLaunchIntent {
         workspace: WorkspaceId::new(),
-        session: SessionId::new(),
+        session: Some(SessionId::new()),
         profile: profile.map(|name| AgentProfileId::new(name).unwrap()),
     }
 }
@@ -351,7 +351,7 @@ fn real_pty_claude_launch_fails_closed_when_the_binary_is_unavailable() {
         daemon_generation: DaemonGeneration::new(),
         terminal_id: usagi_core::domain::id::TerminalId::new(),
         workspace_id: launch_intent.workspace,
-        session_id: Some(launch_intent.session),
+        session_id: launch_intent.session,
         worktree_id: usagi_core::domain::id::WorktreeId::new(),
     };
     assert!(matches!(

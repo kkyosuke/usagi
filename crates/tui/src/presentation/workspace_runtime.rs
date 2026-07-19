@@ -470,24 +470,24 @@ impl WorkspaceRuntime {
             Effect::SelectTab { direction } => {
                 let _ = self.select_tab(*direction);
             }
-            // A terminal only opens against a session pane. The workspace root
-            // has no pane strip, so an `OpenTerminal` for `Target::Root` falls
-            // through to the ignored arm below instead of stranding a placeholder
-            // tab that no completion can ever promote.
+            // A terminal opens against any target's pane strip, including the
+            // workspace root (`Target::Root`); the daemon resolves the root
+            // scope to the trusted repository root.
             Effect::OpenTerminal {
-                target: target @ Target::Session(_),
+                target,
                 operation_id,
                 ..
             } => {
                 let _ = self.request_pane(*target, *operation_id, PaneKind::Terminal);
             }
             Effect::LaunchAgent {
+                workspace,
                 session,
                 operation_id,
                 ..
             } => {
-                let _ =
-                    self.request_pane(Target::Session(*session), *operation_id, PaneKind::Agent);
+                let target = session.map_or(Target::Root(*workspace), Target::Session);
+                let _ = self.request_pane(target, *operation_id, PaneKind::Agent);
             }
             _ => {}
         }
@@ -531,13 +531,14 @@ impl WorkspaceRuntime {
     /// overlay opened in the same batch (quit confirmation, PR / Preview) and
     /// the Ctrl-C grace from being clobbered by the next sample.
     fn sync_live_pane(&mut self) {
-        let live = matches!(self.state.active(), Target::Session(_))
-            && self
-                .panes
-                .active_pane()
-                .tabs()
-                .iter()
-                .any(|tab| matches!(tab, PaneTab::Live(_)));
+        // Any active target with a live tab — a session or the workspace root —
+        // carries the live signal; the pane registry is keyed uniformly.
+        let live = self
+            .panes
+            .active_pane()
+            .tabs()
+            .iter()
+            .any(|tab| matches!(tab, PaneTab::Live(_)));
         let _ = update(&mut self.state, AppEvent::LivePaneAvailability(live));
     }
 
@@ -1196,7 +1197,7 @@ mod tests {
         let agent_op = OperationId::new();
         runtime.on_effect(&Effect::LaunchAgent {
             workspace,
-            session,
+            session: Some(session),
             operation_id: agent_op,
             profile: None,
         });

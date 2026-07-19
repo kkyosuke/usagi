@@ -332,7 +332,7 @@ impl GenericTerminalCoordinator {
             && request.scope.session_id == terminal.session_id
             && request.scope.worktree_id == terminal.worktree_id
             && terminal.workspace_id == operation.workspace_id
-            && terminal.session_id == Some(operation.session_id)
+            && terminal.session_id == operation.session_id
             && terminal.daemon_generation == operation.owner_daemon_generation)
             .then_some(())
             .ok_or(GenericTerminalError::ScopeMismatch)
@@ -465,10 +465,7 @@ mod tests {
         };
         let fence = CompletionFence {
             workspace_id: request.scope.workspace_id,
-            session_id: request
-                .scope
-                .session_id
-                .expect("test request has a session"),
+            session_id: request.scope.session_id,
             operation_id: OperationId::new(),
             owner_daemon_generation: generation,
             execution_attempt: 1,
@@ -505,6 +502,36 @@ mod tests {
         assert!(!encoded.contains("xterm-256color"));
         c.disconnect(ConnectionId::new());
         assert_eq!(c.occupied_slots(), 1);
+        assert_eq!(c.terminal_snapshot(&terminal).unwrap().terminal, terminal);
+    }
+
+    #[test]
+    fn workspace_root_scope_launches_and_fences_without_a_session() {
+        let request = TerminalLaunchRequest {
+            profile_id: TerminalProfileId::new("login-shell").unwrap(),
+            scope: TerminalLaunchScope {
+                workspace_id: WorkspaceId::new(),
+                session_id: None,
+                worktree_id: WorktreeId::new(),
+            },
+        };
+        let (terminal, fence) = refs(&request);
+        assert_eq!(terminal.session_id, None);
+        assert_eq!(fence.session_id, None);
+        let mut c = GenericTerminalCoordinator::new(1, 64, 1);
+        let mut store = Store::default();
+        c.launch(
+            &request,
+            terminal.clone(),
+            fence,
+            Geometry { cols: 80, rows: 24 },
+            &mut Resolver,
+            &mut store,
+            &mut Spawner(Ok(process())),
+        )
+        .unwrap();
+        // The root terminal is registered and fenced by its own reference.
+        c.output(&terminal, b"root\n".to_vec()).unwrap();
         assert_eq!(c.terminal_snapshot(&terminal).unwrap().terminal, terminal);
     }
 

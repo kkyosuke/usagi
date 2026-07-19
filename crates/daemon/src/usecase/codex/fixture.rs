@@ -66,7 +66,7 @@ fn request(mode: LaunchMode) -> LaunchRequest {
         initial_prompt: Some("fix the test".into()),
         scope: LaunchScope {
             workspace_id: WorkspaceId::new(),
-            session_id: SessionId::new(),
+            session_id: Some(SessionId::new()),
             worktree_id: WorktreeId::new(),
         },
         required_capabilities: [AgentCapability::McpWiring].into_iter().collect(),
@@ -297,7 +297,7 @@ fn runtime_reservation_uses_the_codex_resolver_before_pty_spawn_and_exits_normal
         daemon_generation: generation,
         terminal_id: TerminalId::new(),
         workspace_id: request.scope.workspace_id,
-        session_id: Some(request.scope.session_id),
+        session_id: request.scope.session_id,
         worktree_id: request.scope.worktree_id,
     };
     let runtime =

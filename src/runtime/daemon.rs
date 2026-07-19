@@ -264,16 +264,22 @@ fn working_directory(
     sessions: &SharedSessionRuntime,
     context: &ProvisionContext,
 ) -> Result<PathBuf, ()> {
-    sessions
-        .lock()
-        .map_err(|_| ())?
-        .resolve_scope(
-            context.scope.workspace_id,
-            context.scope.session_id,
-            context.scope.worktree_id,
-        )
-        .map(|scope| scope.path)
-        .map_err(|_| ())
+    let runtime = sessions.lock().map_err(|_| ())?;
+    // A workspace-root launch has no session; its trusted cwd is the repository
+    // root. A session launch resolves that session's worktree path.
+    match context.scope.session_id {
+        None => runtime
+            .resolve_root_scope(context.scope.workspace_id, context.scope.worktree_id)
+            .map_err(|_| ()),
+        Some(session) => runtime
+            .resolve_scope(
+                context.scope.workspace_id,
+                session,
+                context.scope.worktree_id,
+            )
+            .map(|scope| scope.path)
+            .map_err(|_| ()),
+    }
 }
 
 /// The #268 scope resolver, adapted to the Agent owner's product-neutral
@@ -283,9 +289,22 @@ impl SessionScopeResolver for SharedScopeResolver {
     fn resolve_available_scope(
         &self,
         workspace: WorkspaceId,
-        session: SessionId,
+        session: Option<SessionId>,
     ) -> Result<ResolvedAgentScope, ScopeResolveError> {
         let runtime = self.0.lock().map_err(|_| ScopeResolveError::Storage)?;
+        // A workspace-root agent (no session) resolves to the trusted repository
+        // root and its durable root-worktree identity; a session agent resolves
+        // that session's available worktree. Neither trusts a client path.
+        let Some(session) = session else {
+            let worktree_id = runtime.root_worktree_id();
+            let working_directory = runtime
+                .resolve_root_scope(workspace, worktree_id)
+                .map_err(|_| ScopeResolveError::Unavailable)?;
+            return Ok(ResolvedAgentScope {
+                worktree_id,
+                working_directory,
+            });
+        };
         let snapshot = runtime
             .snapshot()
             .map_err(|_: SessionRuntimeError| ScopeResolveError::Storage)?;
@@ -310,19 +329,27 @@ impl TerminalScopeResolver for SharedTerminalScopeResolver {
         &self,
         requested: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
     ) -> Result<ResolvedTerminalScope, TerminalScopeResolveError> {
-        let session = requested
-            .session_id
-            .ok_or(TerminalScopeResolveError::Unavailable)?;
         let runtime = self
             .0
             .lock()
             .map_err(|_| TerminalScopeResolveError::Unavailable)?;
-        let scope = runtime
-            .resolve_scope(requested.workspace_id, session, requested.worktree_id)
-            .map_err(|_| TerminalScopeResolveError::Unavailable)?;
+        // A workspace-root scope (no session) resolves to the trusted repository
+        // root; a session scope resolves that session's worktree. Neither path
+        // trusts a client supplied path.
+        let working_directory = match requested.session_id {
+            None => runtime
+                .resolve_root_scope(requested.workspace_id, requested.worktree_id)
+                .map_err(|_| TerminalScopeResolveError::Unavailable)?,
+            Some(session) => {
+                runtime
+                    .resolve_scope(requested.workspace_id, session, requested.worktree_id)
+                    .map_err(|_| TerminalScopeResolveError::Unavailable)?
+                    .path
+            }
+        };
         Ok(ResolvedTerminalScope {
             scope: requested.clone(),
-            working_directory: scope.path,
+            working_directory,
         })
     }
 }

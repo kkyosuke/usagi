@@ -1,14 +1,14 @@
 ---
 number: 364
 title: feat(core): session-optional な durable scope/fence/dispatch 語彙と root worktree の永続化
-status: in-progress
+status: done
 priority: high
 labels: [core, workspace-root, agent, terminal]
 dependson: []
 related: []
 parent: 363
 created_at: 2026-07-19T21:04:49.858195+00:00
-updated_at: 2026-07-19T21:05:49.182469+00:00
+updated_at: 2026-07-19T21:12:55.688951+00:00
 ---
 
 ## 目的

@@ -196,7 +196,7 @@ fn launch(
             operation_id: operation.clone(),
             intent: AgentLaunchIntent {
                 workspace,
-                session,
+                session: Some(session),
                 profile: profile.map(|value| AgentProfileId::new(value).unwrap()),
             },
         })
@@ -302,7 +302,7 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
             operation_id: operation.clone(),
             intent: AgentLaunchIntent {
                 workspace,
-                session,
+                session: Some(session),
                 profile: None,
             },
         }) {
@@ -379,7 +379,7 @@ fn root_ipc_missing_or_not_authenticated_codex_is_safe_and_redacted() {
             operation_id: operation.clone(),
             intent: AgentLaunchIntent {
                 workspace,
-                session,
+                session: Some(session),
                 profile: Some(AgentProfileId::new("codex").unwrap()),
             },
         };

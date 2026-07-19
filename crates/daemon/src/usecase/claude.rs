@@ -188,7 +188,7 @@ mod tests {
             initial_prompt: Some("inspect this workspace".into()),
             scope: LaunchScope {
                 workspace_id: WorkspaceId::new(),
-                session_id: SessionId::new(),
+                session_id: Some(SessionId::new()),
                 worktree_id: WorktreeId::new(),
             },
             required_capabilities: [AgentCapability::McpWiring].into_iter().collect(),

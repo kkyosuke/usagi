@@ -150,7 +150,7 @@ mod tests {
                 terminal_id: TerminalId::new(),
                 daemon_generation: DaemonGeneration::new(),
             },
-            session,
+            Some(session),
         )
         .unwrap()
     }
