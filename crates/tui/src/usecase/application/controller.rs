@@ -3239,6 +3239,19 @@ mod tests {
     }
 
     #[test]
+    fn optional_profile_maps_blank_valid_and_invalid_inputs() {
+        // `optional_profile` still backs the Closeup `agent [profile]` command, so
+        // its blank / valid / invalid branches (including the error closure) stay
+        // exercised even though the create form no longer takes a profile.
+        assert_eq!(optional_profile("").unwrap(), None);
+        assert_eq!(
+            optional_profile(" codex ").unwrap().unwrap().as_str(),
+            "codex"
+        );
+        assert!(optional_profile("invalid profile").is_err());
+    }
+
+    #[test]
     fn management_classifier_preserves_closeup_control_chords() {
         let ctrl_a = |code| {
             LiveInput::Key(crate::usecase::terminal_input::KeyEvent::new(
