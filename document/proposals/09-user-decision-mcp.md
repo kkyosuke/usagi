@@ -4,8 +4,7 @@
 
 agent が人間の判断を要求する MCP、durable decision、TUI 回答の設計提案。未実装のため正本仕様には載せず、
 実装 task は #329–#330 で追跡する。#329/#330 は domain 型・store・TUI reducer skeleton までを入れたが、
-本番へ**未接続**である（詳細は [実装状況と未接続点（triage）](#実装状況と未接続点triage)）。残りの接続作業は
-#329/#330 の続きとして #378（MCP/daemon/配送）・#379（TUI 接続・自動表示）で追跡する。
+MCP/daemon の durable store 接続は #378 で実装され、TUI の本番接続・自動表示は #382 で追跡する。
 
 ## 目次
 
@@ -79,8 +78,8 @@ daemon confirmation event を受けてから UI から除き、reconnect/resync 
 
 | 層 | 現状 | 接続点 |
 |---|---|---|
-| MCP → daemon（core/cli） | `DispatchToolAction::UserDecision*` と `UserDecisionStore`、domain 型は存在。CLI は `user_decision_request`/`get` だけ tool 名を map 済み。`list`/`resolve`/`cancel`/`expire` は未 map | `dispatch_tool_action`（`crates/cli/src/mcp/serve.rs`） |
-| daemon / 合成ルート dispatch | 合成ルートの request 分岐（`src/runtime/daemon.rs` の `handle_connection_with_terminal_and` closure）は `kind` が `session`/`agent`/`dispatch`/`metrics`/`pr` のみを handler へ回し、`dispatch_tool`（= `DaemonRequest::DispatchTool` の serde tag）に**分岐が無い**。よって daemon の echo stub `presentation::ipc::dispatch` に落ち、`UserDecisionStore` を一切呼ばず OK を echo する | 合成ルートに `dispatch_tool` handler を追加し、`UserDecisionStore` の request/get/list/resolve/cancel/expire を呼ぶ |
+| MCP → daemon（core/cli） | `user_decision_request`/`get`/`list`/`resolve`/`cancel`/`expire` は `DispatchToolAction::UserDecision*` へ map される | MCP tool registry と `dispatch_tool_action` |
+| daemon / 合成ルート dispatch | `dispatch_tool` は `UserDecisionStore` の request/get/list/resolve/cancel/expire へ到達する。owner は payload ではなく唯一の running dispatch binding から復元し、曖昧な provenance は fail-closed にする | 合成ルートの `dispatch_tool` handler |
 | daemon → TUI 配送 | `DaemonPush::DecisionsSnapshot`/`DecisionResolved`/`DecisionError` と reducer への adapter は TUI 側に存在するが、これを wire から構築する decoder も、daemon がこの push を送る経路も無い | daemon の pending 投影 push（または snapshot 応答）と TUI transport decoder |
 | TUI 本番 port 注入 | `run_workspace_controller` は decision port を引数に取らず、`DaemonBackend` は本番で構築されず（`DaemonBackend::new` は test のみ）、`DecisionPort` は常に `NoDecisions`（no-op）。`Effect::RefreshDecisions`/`ResolveDecision` は本番で捨てられる | `run_workspace_controller` へ `DecisionPort` を追加し合成ルートで daemon-backed 実装を注入 |
 | TUI reducer 自動表示 | `BackendEvent::Decisions` は `state.decisions`（一覧）だけを更新し、`reconcile_decision_overlay` は**既に開いている** overlay しか調整しない。pending が増えても `Overlay::Decisions` を開かない。手動の `AppKey::OpenDecisions` も key binding が無く（`app_event_from_key` 等に未登録）到達不能 | pending 到着で overlay を自動 open する reducer 分岐＋手動 open の key binding |
@@ -88,13 +87,7 @@ daemon confirmation event を受けてから UI から除き、reconnect/resync 
 ### 修正方針（層順）
 
 ```text
-[378] MCP/daemon/runtime 配送
-  cli: user_decision_{list,resolve,cancel,expire} を tool へ map
-  runtime: dispatch_tool handler が UserDecisionStore を呼ぶ
-  daemon: workspace-scoped pending を DecisionsSnapshot push / snapshot 応答で投影
-  contract/store/IPC/resolve compare-and-set/cancel/expire/duplicate/restart の deterministic test
-
-[379] TUI 本番接続＋自動表示（378 に依存）
+[382] TUI 本番接続＋自動表示（378 に依存）
   run_workspace_controller に DecisionPort を追加、合成ルートで daemon-backed 実装を注入
   transport decoder が Decisions* push を DaemonPush へ decode
   reducer: pending 到着で Overlay::Decisions を自動 open（既存 modal input ownership を尊重）
