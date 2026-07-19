@@ -44,58 +44,38 @@ jobs:
     - name: Run tests with coverage
       run: cargo llvm-cov --workspace --lcov --output-path lcov.info
 
-    - name: Generate coverage summary
-      if: success()
+    # 未達ファイル/関数/行のレポート生成は scripts/coverage-report-comment.rb に
+    # 抽出済み（fixture test: scripts/tests/coverage-report-comment.sh）。
+    # lcov.info が生成されていれば coverage の合否に関わらず（always）レポートを作り、
+    # PR コメントと Job Summary の両方へ出す。Job Summary は権限不要のため fork PR でも
+    # 必ず一覧が見える。compile/test 失敗で lcov.info が無い場合はここを skip する
+    # （その場合は上の Run tests step が既に job を落としている）。
+    - name: Generate coverage report
+      if: always() && hashFiles('lcov.info') != ''
       run: |
         . ./scripts/coverage.sh
-        report=$(coverage_report --summary-only)
-        total=$(echo "$report" | awk '/^TOTAL/ { print $10 }')
+        ruby scripts/coverage-report-comment.rb lcov.info > coverage-comment.md
+        cat coverage-comment.md >> "$GITHUB_STEP_SUMMARY"
 
-        # Lines カバレッジが100%に満たないファイルをMarkdownテーブルの行に整形する。
-        # Lines のカバレッジ帯に応じて信号機の絵文字を付ける。
-        rows=$(echo "$report" | awk '
-          function emoji(c,   v) {
-            v = c; sub(/%/, "", v); v = v + 0
-            if (v >= 90) return "🟢"
-            else if (v >= 70) return "🟡"
-            else return "🔴"
-          }
-          /^Filename/ || /^-+$/ || /^TOTAL/ { next }
-          {
-            if ($10 != "100.00%") {
-              printf "| `%s` | %s | %s | %s %s |\n", $1, $4, $7, emoji($10), $10
-            }
-          }
-        ')
-
-        total_row=$(echo "$report" | awk '/^TOTAL/ { printf "| **🧮 合計** | **%s** | **%s** | **%s** |", $4, $7, $10 }')
-
-        {
-          echo "## 📊 Test Coverage"
-          echo ""
-          echo "> 🚀 **いまのカバレッジ (Lines): ${total}** — この調子でいこう！"
-          echo ""
-          if [ -z "$rows" ]; then
-            echo "🎉✨ パーフェクト！全ファイル Lines カバレッジ 100% を達成しました 🏆🐰"
-          else
-            echo "100% に届いていないファイルだけピックアップしました 👇"
-            echo ""
-            echo "| 📄 ファイル | 🌐 Regions | 🔧 Functions | 📈 Lines |"
-            echo "| :--- | ---: | ---: | ---: |"
-            echo "$rows"
-            echo "$total_row"
-          fi
-        } > coverage-comment.md
-
+    # PR コメントは同一リポジトリの PR に限定する。fork PR は token が read-only に
+    # 降格されコメントできないため Job Summary にフォールバックする。continue-on-error で
+    # コメント投稿の失敗が coverage gate（下の Enforce step の exit code）に波及しないようにする。
+    # header + recreate で同一 PR の再実行でもコメントを重複させず 1 件に更新する。
     - name: Comment coverage on PR
-      if: success()
+      if: >-
+        always() && hashFiles('lcov.info') != '' &&
+        github.event.pull_request.head.repo.full_name == github.repository
+      continue-on-error: true
       uses: marocchino/sticky-pull-request-comment@v2
       with:
         header: coverage
         recreate: true
         path: coverage-comment.md
 
+    # coverage gate の合否を決める唯一の step。レポート/コメントの後に always で走らせ、
+    # 100% 未満なら job を落とす（レポートは既に出力済み）。
     - name: Enforce 100% coverage
+      if: always() && hashFiles('lcov.info') != ''
       run: |
         . ./scripts/coverage.sh
         coverage_report \

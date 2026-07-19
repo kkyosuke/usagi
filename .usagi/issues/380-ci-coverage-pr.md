@@ -1,13 +1,13 @@
 ---
 number: 380
 title: ci(coverage): 失敗時に PR へ未達ファイル+関数一覧を安全・可読に投稿する（テスト可能な生成スクリプトに抽出）
-status: todo
+status: done
 priority: medium
 labels: [ci, coverage, dx]
 dependson: []
 related: []
 created_at: 2026-07-19T22:53:57.627451+00:00
-updated_at: 2026-07-19T22:53:57.627451+00:00
+updated_at: 2026-07-19T23:01:00.614911+00:00
 ---
 
 ## 背景 / 目的
