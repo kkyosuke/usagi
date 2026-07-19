@@ -297,15 +297,29 @@ fn is_ctrl_p(key: &KeyEvent) -> bool {
 
 fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
     if is_ctrl_o(key) {
-        Some(LiveTerminalAction::Switch)
-    } else if is_ctrl_a(key) {
-        Some(LiveTerminalAction::OpenCloseupModal)
-    } else if is_ctrl_n(key) {
-        Some(LiveTerminalAction::NextTab)
-    } else if is_ctrl_p(key) {
-        Some(LiveTerminalAction::PreviousTab)
-    } else {
-        None
+        return Some(LiveTerminalAction::Switch);
+    }
+    if is_ctrl_a(key) {
+        return Some(LiveTerminalAction::OpenCloseupModal);
+    }
+    if is_ctrl_n(key) {
+        return Some(LiveTerminalAction::NextTab);
+    }
+    if is_ctrl_p(key) {
+        return Some(LiveTerminalAction::PreviousTab);
+    }
+    // Plain follow-ups for the live-terminal view controls the Home reducer does
+    // not own: scroll the retained PTY output and close the focused tab. A
+    // modified variant (other than the control chords above) is not a prefix
+    // action and falls through to the PTY.
+    if key.modifiers != Modifiers::default() {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('x') => Some(LiveTerminalAction::CloseTab),
+        KeyCode::Char('u') | KeyCode::Up => Some(LiveTerminalAction::ScrollUp),
+        KeyCode::Char('d') | KeyCode::Down => Some(LiveTerminalAction::ScrollDown),
+        _ => None,
     }
 }
 
@@ -559,6 +573,27 @@ mod tests {
                 follow_up: ctrl('p'),
                 action: LiveTerminalAction::PreviousTab,
             },
+            // View controls the reducer does not own: tab close and scroll.
+            Case {
+                follow_up: key(KeyCode::Char('x')),
+                action: LiveTerminalAction::CloseTab,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('u')),
+                action: LiveTerminalAction::ScrollUp,
+            },
+            Case {
+                follow_up: key(KeyCode::Up),
+                action: LiveTerminalAction::ScrollUp,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('d')),
+                action: LiveTerminalAction::ScrollDown,
+            },
+            Case {
+                follow_up: key(KeyCode::Down),
+                action: LiveTerminalAction::ScrollDown,
+            },
         ];
         for case in cases {
             let mut classifier = LiveInputClassifier::default();
@@ -569,6 +604,18 @@ mod tests {
             assert_eq!(
                 classifier.classify(Duration::from_millis(1), case.follow_up),
                 LiveInputOutput::Action(case.action)
+            );
+        }
+    }
+
+    #[test]
+    fn plain_view_control_keys_reach_the_pty_without_a_leader() {
+        // The restored follow-ups are reserved only after a Ctrl-O leader; a bare
+        // press still types into the terminal.
+        for character in ['x', 'u', 'd'] {
+            assert_eq!(
+                LiveInputClassifier::default().classify(T0, key(KeyCode::Char(character))),
+                LiveInputOutput::Passthrough(character.to_string().into_bytes())
             );
         }
     }
