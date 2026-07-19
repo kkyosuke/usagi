@@ -10,6 +10,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -30,7 +31,12 @@ use usagi_daemon::infrastructure::unix_transport::connect_current;
 // Starting it can take longer than the normal test-runner budget on a loaded
 // CI worker, even though it is healthy. Keep the readiness deadline above
 // that startup variance; connection failures still fail deterministically.
-const DAEMON_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
+const DAEMON_READINESS_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Each case starts the shipping daemon binary. Serialising those startups
+/// avoids starving a loaded CI worker and turning socket publication into a
+/// spurious readiness timeout.
+static DAEMON_START_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn short_dir(prefix: &str) -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -249,6 +255,9 @@ fn safe_readiness_error(error: ClientError) {
 
 #[test]
 fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
+    let _serial = DAEMON_START_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let repo = fixture_repo();
     let home = short_dir("usagi-");
     let bin = home.path().join("bin");
@@ -353,6 +362,9 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
 
 #[test]
 fn root_ipc_missing_or_not_authenticated_codex_is_safe_and_redacted() {
+    let _serial = DAEMON_START_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for ready_status in [None, Some(1)] {
         let repo = fixture_repo();
         let home = short_dir("usagi-");
@@ -383,6 +395,9 @@ fn root_ipc_missing_or_not_authenticated_codex_is_safe_and_redacted() {
 
 #[test]
 fn root_ipc_fixture_login_shell_is_fenced_and_replays_exit() {
+    let _serial = DAEMON_START_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let repo = fixture_repo();
     let home = short_dir("usagi-");
     let bin = home.path().join("bin");
