@@ -4274,6 +4274,38 @@ mod tests {
     }
 
     #[test]
+    fn workspace_root_active_starts_a_session_less_agent_and_terminal() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        // The workspace root is selected and active by default.
+        assert_eq!(state.active, Target::Root(workspace));
+        assert_eq!(Target::Root(workspace).session_id(), None);
+        assert_eq!(Target::Session(session).session_id(), Some(session));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        let agent = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitCloseup("agent".to_owned())),
+        );
+        assert!(matches!(
+            agent.as_slice(),
+            [Effect::LaunchAgent { workspace: actual, session: None, profile: None, .. }]
+                if *actual == workspace
+        ));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        let terminal = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitCloseup("terminal open".to_owned())),
+        );
+        assert!(matches!(
+            terminal.as_slice(),
+            [Effect::OpenTerminal { target: Target::Root(actual), arguments, .. }]
+                if *actual == workspace && arguments == "open"
+        ));
+    }
+
+    #[test]
     fn overview_session_commands_use_typed_lifecycle_effects() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);

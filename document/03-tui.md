@@ -56,6 +56,12 @@ Home の navigation target は `Root(WorkspaceId)` または `Session(SessionId)
 配列 index は identity に使わない。selected は cursor、active は command と Closeup の対象であり、
 cursor の移動だけでは active を変更しない。
 
+`Root`（`⌂ root`）と `Session` はどちらも Agent / Terminal を作成できる scope である。Closeup の
+`agent` / `terminal` action は active target から scope（root は `session_id` なし、session はその
+`SessionId`）を導出し、pane は target ごとに独立して投影される。root の Agent / Terminal は daemon が
+trusted repository root を cwd として起動し、live 出力・入力・resize・detach/reconnect は session pane と
+同じ vocabulary で動く（設計根拠は [proposals/10-workspace-root-scope.md](proposals/10-workspace-root-scope.md)）。root 行は `x` / `X` による削除の対象外のままである。
+
 daemon snapshot で selected または active の session が見つからなくなった場合、両方を同じ
 workspace の root へ戻す。これにより、削除済み session を target にした古い local state を実行に
 使わない。
