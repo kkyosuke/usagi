@@ -6,20 +6,22 @@
 //!   memory stores and the `.gitignore` writer join it. Lives next to the code
 //!   it describes and is committed with it.
 //! - **The global per-user data directory** ([`data_dir`]): the production
-//!   `$USAGI_HOME` / `~/.usagi`, or its `develop/` child for a debug build.
+//!   `$USAGI_HOME` / `~/.usagi`, or its `dev/` child for a debug build.
 //!   The channel split prevents `cargo run` from touching a released daemon's
 //!   endpoint, record, or owned state.
 //!
 //! The two share the `.usagi` basename by convention but are independent
 //! directories with different contents and lifetimes.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-/// The repository-relative directory holding usagi's per-project metadata
-/// (`issues/`, `memory/`, `state.json`, …): `<repo>/.usagi`.
+/// The repository-relative directory holding usagi's per-project metadata.
 pub const STATE_DIR: &str = ".usagi";
+
+/// The single directory name used for debug runtime state.
+pub const DEV_DIR: &str = "dev";
 
 /// The directory under [`STATE_DIR`] that holds session worktrees, one per
 /// session: `<repo>/.usagi/sessions/<name>`.
@@ -29,10 +31,6 @@ pub const SESSIONS_DIR: &str = "sessions";
 pub const DATA_DIR_ENV: &str = "USAGI_HOME";
 /// Directory created under the user's home directory by default.
 const DATA_DIR_NAME: &str = ".usagi";
-/// Directory created under the global data directory for debug builds.
-const DEVELOPMENT_DIR_NAME: &str = "develop";
-/// Debug data directory name used before [`DEVELOPMENT_DIR_NAME`].
-const LEGACY_DEVELOPMENT_DIR_NAME: &str = "development";
 
 /// The build channel used to isolate development runtime state from releases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,10 +54,8 @@ pub const fn build_channel() -> BuildChannel {
 /// Resolve the directory where usagi stores its per-user data.
 ///
 /// `$USAGI_HOME` takes precedence; otherwise `~/.usagi` is used as the base.
-/// Debug builds append `develop/` to that base while release builds retain
-/// the base itself, preserving the established production location.  When
-/// `develop/` does not exist yet, debug builds retain compatibility with the
-/// previous `development/` directory.
+/// Debug builds append [`DEV_DIR`] to that base while release builds retain the
+/// base itself, preserving the established production location.
 ///
 /// # Errors
 ///
@@ -74,18 +70,30 @@ pub fn data_dir() -> Result<PathBuf> {
             .context("could not determine the home directory")?
             .join(DATA_DIR_NAME)
     };
-    Ok(match build_channel() {
-        BuildChannel::Production => base,
-        BuildChannel::Development => {
-            let development = base.join(DEVELOPMENT_DIR_NAME);
-            let legacy = base.join(LEGACY_DEVELOPMENT_DIR_NAME);
-            if !development.exists() && legacy.is_dir() {
-                legacy
-            } else {
-                development
-            }
-        }
-    })
+    Ok(channel_data_dir(base))
+}
+
+/// Resolve the build-channel-specific directory rooted at `base`.
+///
+/// Debug builds use `base/dev`; release builds use `base` unchanged. This is
+/// shared by global and project-local runtime state so their channel split
+/// cannot drift.
+#[must_use]
+pub fn channel_data_dir(base: impl AsRef<Path>) -> PathBuf {
+    let base = base.as_ref();
+    match build_channel() {
+        BuildChannel::Production => base.to_path_buf(),
+        BuildChannel::Development => base.join(DEV_DIR),
+    }
+}
+
+/// Resolve the build-channel-specific runtime-state directory for a project.
+///
+/// Debug builds use `<project_root>/.usagi/dev`; release builds use
+/// `<project_root>/.usagi`.
+#[must_use]
+pub fn project_data_dir(project_root: impl AsRef<Path>) -> PathBuf {
+    channel_data_dir(project_root.as_ref().join(STATE_DIR))
 }
 
 #[cfg(test)]
@@ -101,7 +109,7 @@ mod tests {
         unsafe { std::env::set_var(DATA_DIR_ENV, home.path()) };
         let expected = match build_channel() {
             BuildChannel::Production => home.path().to_path_buf(),
-            BuildChannel::Development => home.path().join(DEVELOPMENT_DIR_NAME),
+            BuildChannel::Development => home.path().join(DEV_DIR),
         };
         assert_eq!(data_dir().unwrap(), expected);
 
@@ -118,36 +126,12 @@ mod tests {
     }
 
     #[test]
-    fn data_dir_uses_the_legacy_development_directory_until_develop_exists() {
-        let _guard = crate::test_support::process_env_guard();
-        let home = tempfile::tempdir().unwrap();
-        std::fs::create_dir(home.path().join(LEGACY_DEVELOPMENT_DIR_NAME)).unwrap();
-        unsafe { std::env::set_var(DATA_DIR_ENV, home.path()) };
-
+    fn project_data_dir_uses_the_same_dev_directory_definition() {
         let expected = match build_channel() {
-            BuildChannel::Production => home.path().to_path_buf(),
-            BuildChannel::Development => home.path().join(LEGACY_DEVELOPMENT_DIR_NAME),
+            BuildChannel::Production => PathBuf::from("/project/.usagi"),
+            BuildChannel::Development => PathBuf::from("/project/.usagi/dev"),
         };
-        assert_eq!(data_dir().unwrap(), expected);
-
-        unsafe { std::env::remove_var(DATA_DIR_ENV) };
-    }
-
-    #[test]
-    fn data_dir_prefers_develop_over_the_legacy_development_directory() {
-        let _guard = crate::test_support::process_env_guard();
-        let home = tempfile::tempdir().unwrap();
-        std::fs::create_dir(home.path().join(LEGACY_DEVELOPMENT_DIR_NAME)).unwrap();
-        std::fs::create_dir(home.path().join(DEVELOPMENT_DIR_NAME)).unwrap();
-        unsafe { std::env::set_var(DATA_DIR_ENV, home.path()) };
-
-        let expected = match build_channel() {
-            BuildChannel::Production => home.path().to_path_buf(),
-            BuildChannel::Development => home.path().join(DEVELOPMENT_DIR_NAME),
-        };
-        assert_eq!(data_dir().unwrap(), expected);
-
-        unsafe { std::env::remove_var(DATA_DIR_ENV) };
+        assert_eq!(project_data_dir("/project"), expected);
     }
 
     #[test]

@@ -16,11 +16,7 @@ fn short_home() -> tempfile::TempDir {
 }
 
 fn channel_data_dir(home: &Path) -> PathBuf {
-    if cfg!(debug_assertions) {
-        home.join("develop")
-    } else {
-        home.to_path_buf()
-    }
+    usagi_core::infrastructure::paths::channel_data_dir(home)
 }
 
 fn run(args: &[&OsStr]) -> Output {

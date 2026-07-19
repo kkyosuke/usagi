@@ -23,7 +23,7 @@ use usagi_core::domain::session_lifecycle::{
 use usagi_core::infrastructure::git::list_worktrees;
 use usagi_core::infrastructure::git::{GitOutput, GitRunner, add_worktree, remove_worktree};
 use usagi_core::infrastructure::gitignore::migrate_usagi_ignore_rules;
-use usagi_core::infrastructure::paths::{SESSIONS_DIR, STATE_DIR};
+use usagi_core::infrastructure::paths::{SESSIONS_DIR, STATE_DIR, project_data_dir};
 use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
@@ -141,9 +141,8 @@ impl<G: GitRunner> SessionRuntime<G> {
         {
             repository_root
         } else {
-            let legacy_lifecycle = candidate_repo_root
-                .join(STATE_DIR)
-                .join("lifecycle-state.json");
+            let legacy_lifecycle =
+                project_data_dir(&candidate_repo_root).join("lifecycle-state.json");
             let state = if let Some(state) =
                 json_file::read(&legacy_lifecycle).map_err(|_| SessionRuntimeError::Storage)?
             {
@@ -1592,7 +1591,7 @@ mod tests {
     fn first_shared_start_migrates_legacy_repository_session_state() {
         let tmp = tempfile::tempdir().unwrap();
         let repository = tmp.path().join("repository");
-        let legacy_dir = repository.join(STATE_DIR);
+        let legacy_dir = project_data_dir(&repository);
         let state_dir = tmp.path().join("shared-daemon");
         let mut legacy = WorkspaceLifecycleState::new(WorkspaceId::new(), Utc::now());
         legacy.sessions.push(ManagedSession::new_creating(

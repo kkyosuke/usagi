@@ -6,7 +6,7 @@
 //! - [`issue`] — issue の CRUD・採番・`index.json`。
 //! - [`memory`] — memory の CRUD・`MEMORY.md` 目次・`index.json`。
 //! - [`workspace`] — workspace レジストリ（`workspaces.json`）。
-//! - [`state`] — repo の `WorkspaceState`（`<repo>/.usagi/state.json`）。
+//! - [`state`] — repo の `WorkspaceState`（debug は `<repo>/.usagi/dev/state.json`）。
 //! - [`dispatch`] — daemon-owned agent dispatch registry and caller inboxes.
 
 pub mod dispatch;
