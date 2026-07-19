@@ -108,6 +108,18 @@ mod tests {
     }
 
     #[test]
+    fn draws_the_dialog_without_a_message_row_when_the_message_is_empty() {
+        // An empty safe message leaves no wrapped rows; the dialog still opens
+        // with its title and dismiss hint rather than collapsing.
+        let base = vec!["home".to_owned(); 24];
+        let frame = render_over(24, 80, &base, "");
+        let text = joined(&frame);
+        assert!(text.contains("Session create failed"));
+        assert!(text.contains("Enter / Esc: dismiss"));
+        assert!(frame.iter().all(|line| display_width(line) <= 80));
+    }
+
+    #[test]
     fn fits_a_narrow_terminal_without_overflow() {
         let base = vec![String::new(); 16];
         let long = "x".repeat(200);
