@@ -267,7 +267,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
     fn launch(
         &mut self,
         workspace: WorkspaceId,
-        session: usagi_core::domain::id::SessionId,
+        session: Option<usagi_core::domain::id::SessionId>,
         profile: Option<usagi_core::domain::agent::AgentProfileId>,
     ) -> Result<usagi_core::domain::id::TerminalRef, String> {
         let mut client =
@@ -300,29 +300,42 @@ impl AgentCommandPort for DaemonAgentCommandPort {
     fn launch_terminal(
         &mut self,
         workspace: WorkspaceId,
-        session: usagi_core::domain::id::SessionId,
+        session: Option<usagi_core::domain::id::SessionId>,
         geometry: usagi_tui::usecase::application::pane_runtime::Geometry,
     ) -> Result<usagi_core::domain::id::TerminalRef, String> {
         let lifecycle = request_lifecycle_snapshot()
             .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
-        let managed = lifecycle
-            .sessions
-            .iter()
-            .find(|candidate| {
-                lifecycle.workspace_id == workspace && candidate.session_id == session
-            })
-            .ok_or_else(|| "selected session is no longer available".to_owned())?;
-        if managed.lifecycle != usagi_core::domain::session_lifecycle::SessionLifecycle::Available {
-            return Err("selected session is not ready for a terminal".to_owned());
+        if lifecycle.workspace_id != workspace {
+            return Err("workspace is no longer available".to_owned());
         }
+        // The client never supplies a path or invents a worktree identity: the
+        // worktree ID comes from the daemon snapshot (the session's for a session
+        // scope, the published root worktree for the workspace root) and the
+        // daemon re-validates it before resolving the trusted checkout path.
+        let worktree_id = match session {
+            None => lifecycle.root_worktree_id,
+            Some(session) => {
+                let managed = lifecycle
+                    .sessions
+                    .iter()
+                    .find(|candidate| candidate.session_id == session)
+                    .ok_or_else(|| "selected session is no longer available".to_owned())?;
+                if managed.lifecycle
+                    != usagi_core::domain::session_lifecycle::SessionLifecycle::Available
+                {
+                    return Err("selected session is not ready for a terminal".to_owned());
+                }
+                managed.worktree_id
+            }
+        };
         let intent = TerminalLaunchIntent {
             request: TerminalLaunchRequest {
                 profile_id: TerminalProfileId::new("login-shell")
                     .expect("static terminal profile is valid"),
                 scope: TerminalLaunchScope {
                     workspace_id: workspace,
-                    session_id: Some(session),
-                    worktree_id: managed.worktree_id,
+                    session_id: session,
+                    worktree_id,
                 },
             },
             geometry: TerminalGeometry {
@@ -471,6 +484,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
 
 struct LifecycleSnapshot {
     workspace_id: WorkspaceId,
+    root_worktree_id: usagi_core::domain::id::WorktreeId,
     revision: u64,
     sessions: Vec<ManagedSession>,
 }
@@ -538,6 +552,15 @@ fn lifecycle_snapshot(value: &serde_json::Value) -> Result<LifecycleSnapshot, St
                 serde_json::from_value(id)
                     .map_err(|_| "daemon session snapshot has an invalid workspace ID".to_owned())
             })?;
+        let root_worktree_id = object
+            .get("root_worktree_id")
+            .cloned()
+            .ok_or_else(|| "daemon session snapshot has no root worktree ID".to_owned())
+            .and_then(|id| {
+                serde_json::from_value(id).map_err(|_| {
+                    "daemon session snapshot has an invalid root worktree ID".to_owned()
+                })
+            })?;
         let sessions = object
             .get("sessions")
             .cloned()
@@ -548,6 +571,7 @@ fn lifecycle_snapshot(value: &serde_json::Value) -> Result<LifecycleSnapshot, St
             })?;
         Ok(LifecycleSnapshot {
             workspace_id,
+            root_worktree_id,
             revision,
             sessions,
         })
@@ -1361,6 +1385,7 @@ mod tests {
         failed.lifecycle = SessionLifecycle::Failed;
         let snapshot = LifecycleSnapshot {
             workspace_id: WorkspaceId::new(),
+            root_worktree_id: usagi_core::domain::id::WorktreeId::new(),
             revision: 1,
             sessions: vec![available, failed],
         };
@@ -1383,6 +1408,7 @@ mod tests {
         available.lifecycle = SessionLifecycle::Available;
         let snapshot = LifecycleSnapshot {
             workspace_id: WorkspaceId::new(),
+            root_worktree_id: usagi_core::domain::id::WorktreeId::new(),
             revision: 2,
             sessions: vec![available],
         };

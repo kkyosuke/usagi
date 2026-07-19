@@ -71,11 +71,13 @@ pub trait AgentCommandPort: Send {
     fn launch(
         &mut self,
         workspace: WorkspaceId,
-        session: SessionId,
+        session: Option<SessionId>,
         profile: Option<AgentProfileId>,
     ) -> Result<TerminalRef, String>;
 
-    /// Open a daemon-owned login shell for an existing managed session.
+    /// Open a daemon-owned login shell for a scope. `session` is absent for the
+    /// workspace root, whose checkout the daemon resolves to the trusted
+    /// repository root.
     ///
     /// The default keeps embedders that only expose Agent launch safe: the
     /// Terminal action becomes an inline failure instead of spawning anything
@@ -87,7 +89,7 @@ pub trait AgentCommandPort: Send {
     fn launch_terminal(
         &mut self,
         _workspace: WorkspaceId,
-        _session: SessionId,
+        _session: Option<SessionId>,
         _geometry: Geometry,
     ) -> Result<TerminalRef, String> {
         Err("terminal launch is unavailable".to_owned())
@@ -423,7 +425,7 @@ impl AgentCommandPort for UnavailableAgentCommandPort {
     fn launch(
         &mut self,
         _workspace: WorkspaceId,
-        _session: SessionId,
+        _session: Option<SessionId>,
         _profile: Option<AgentProfileId>,
     ) -> Result<TerminalRef, String> {
         Err("Agent launch is unavailable.".to_owned())
@@ -540,13 +542,15 @@ enum PaneLaunch {
     Agent {
         operation: OperationId,
         workspace: WorkspaceId,
-        session: SessionId,
+        /// Absent for a workspace-root Agent.
+        session: Option<SessionId>,
         profile: Option<AgentProfileId>,
     },
     Terminal {
         operation: OperationId,
         workspace: WorkspaceId,
-        session: SessionId,
+        /// Absent for a workspace-root terminal.
+        session: Option<SessionId>,
     },
 }
 
@@ -1580,7 +1584,8 @@ fn dispatch_controller_effect(
             operation_id,
             profile,
         } => {
-            pending_targets.insert(*operation_id, Target::Session(*session));
+            let target = session.map_or(Target::Root(*workspace), Target::Session);
+            pending_targets.insert(*operation_id, target);
             ui.pane_launches.push(PaneLaunch::Agent {
                 operation: *operation_id,
                 workspace: *workspace,
@@ -1589,17 +1594,19 @@ fn dispatch_controller_effect(
             });
         }
         Effect::OpenTerminal {
-            target: Target::Session(session),
+            target,
             operation_id,
             ..
         } => {
+            // A terminal opens for any target, including the workspace root; the
+            // daemon resolves the root scope to the trusted repository root.
             if let Some(agent) = ui.agent.as_ref() {
                 let workspace = agent.workspace;
-                pending_targets.insert(*operation_id, Target::Session(*session));
+                pending_targets.insert(*operation_id, *target);
                 ui.pane_launches.push(PaneLaunch::Terminal {
                     operation: *operation_id,
                     workspace,
-                    session: *session,
+                    session: target.session_id(),
                 });
             }
         }
@@ -1611,8 +1618,7 @@ fn dispatch_controller_effect(
         // yet inject, and the non-session workspace commands and entry-surface
         // effects have no Home executor, so they surface only as the reducer's
         // safe notice for now.
-        Effect::OpenTerminal { .. }
-        | Effect::RefreshSessions { .. }
+        Effect::RefreshSessions { .. }
         | Effect::SelectTab { .. }
         | Effect::WorkspaceCommand { .. }
         | Effect::LoadNotes { .. }
@@ -2610,7 +2616,7 @@ mod tests {
         fn launch(
             &mut self,
             _workspace: WorkspaceId,
-            _session: SessionId,
+            _session: Option<SessionId>,
             _profile: Option<AgentProfileId>,
         ) -> Result<TerminalRef, String> {
             Ok(self.0.clone())
@@ -2922,7 +2928,7 @@ mod tests {
         fn launch(
             &mut self,
             _workspace: WorkspaceId,
-            _session: SessionId,
+            _session: Option<SessionId>,
             _profile: Option<AgentProfileId>,
         ) -> Result<TerminalRef, String> {
             Ok(self.terminal.clone())
@@ -3231,7 +3237,7 @@ mod tests {
         fn launch(
             &mut self,
             _workspace: WorkspaceId,
-            _session: SessionId,
+            _session: Option<SessionId>,
             _profile: Option<AgentProfileId>,
         ) -> Result<TerminalRef, String> {
             Err("not launched in this test".to_owned())
@@ -3255,14 +3261,14 @@ mod tests {
     fn idle_agent_port_is_safe_when_an_unexpected_launch_is_requested() {
         let mut port = IdleAgentPort;
         let error = port
-            .launch(WorkspaceId::new(), SessionId::new(), None)
+            .launch(WorkspaceId::new(), Some(SessionId::new()), None)
             .unwrap_err();
 
         assert_eq!(error, "not launched in this test");
         assert_eq!(
             port.launch_terminal(
                 WorkspaceId::new(),
-                SessionId::new(),
+                Some(SessionId::new()),
                 Geometry { cols: 80, rows: 24 },
             )
             .unwrap_err(),
@@ -4075,7 +4081,7 @@ mod tests {
         fn launch(
             &mut self,
             _workspace: WorkspaceId,
-            _session: SessionId,
+            _session: Option<SessionId>,
             _profile: Option<AgentProfileId>,
         ) -> Result<TerminalRef, String> {
             Err("agent launch is unavailable".to_owned())
@@ -4093,7 +4099,7 @@ mod tests {
         };
         let mut port = DefaultTerminalPort;
         assert!(
-            port.launch(WorkspaceId::new(), SessionId::new(), None)
+            port.launch(WorkspaceId::new(), Some(SessionId::new()), None)
                 .is_err()
         );
         assert_eq!(
@@ -4117,7 +4123,7 @@ mod tests {
         assert_eq!(
             port.launch_terminal(
                 WorkspaceId::new(),
-                SessionId::new(),
+                Some(SessionId::new()),
                 Geometry { cols: 80, rows: 24 },
             ),
             Err("terminal launch is unavailable".to_owned())

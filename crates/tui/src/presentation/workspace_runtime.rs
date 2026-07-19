@@ -470,24 +470,24 @@ impl WorkspaceRuntime {
             Effect::SelectTab { direction } => {
                 let _ = self.select_tab(*direction);
             }
-            // A terminal only opens against a session pane. The workspace root
-            // has no pane strip, so an `OpenTerminal` for `Target::Root` falls
-            // through to the ignored arm below instead of stranding a placeholder
-            // tab that no completion can ever promote.
+            // A terminal opens against any target's pane strip, including the
+            // workspace root (`Target::Root`); the daemon resolves the root
+            // scope to the trusted repository root.
             Effect::OpenTerminal {
-                target: target @ Target::Session(_),
+                target,
                 operation_id,
                 ..
             } => {
                 let _ = self.request_pane(*target, *operation_id, PaneKind::Terminal);
             }
             Effect::LaunchAgent {
+                workspace,
                 session,
                 operation_id,
                 ..
             } => {
-                let _ =
-                    self.request_pane(Target::Session(*session), *operation_id, PaneKind::Agent);
+                let target = session.map_or(Target::Root(*workspace), Target::Session);
+                let _ = self.request_pane(target, *operation_id, PaneKind::Agent);
             }
             _ => {}
         }
@@ -531,13 +531,14 @@ impl WorkspaceRuntime {
     /// overlay opened in the same batch (quit confirmation, PR / Preview) and
     /// the Ctrl-C grace from being clobbered by the next sample.
     fn sync_live_pane(&mut self) {
-        let live = matches!(self.state.active(), Target::Session(_))
-            && self
-                .panes
-                .active_pane()
-                .tabs()
-                .iter()
-                .any(|tab| matches!(tab, PaneTab::Live(_)));
+        // Any active target with a live tab — a session or the workspace root —
+        // carries the live signal; the pane registry is keyed uniformly.
+        let live = self
+            .panes
+            .active_pane()
+            .tabs()
+            .iter()
+            .any(|tab| matches!(tab, PaneTab::Live(_)));
         let _ = update(&mut self.state, AppEvent::LivePaneAvailability(live));
     }
 
@@ -1147,7 +1148,7 @@ mod tests {
     }
 
     #[test]
-    fn on_effect_never_records_a_terminal_placeholder_for_the_root() {
+    fn on_effect_records_a_terminal_placeholder_for_the_root() {
         let workspace = WorkspaceId::new();
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         assert_eq!(runtime.state().active(), Target::Root(workspace));
@@ -1156,9 +1157,12 @@ mod tests {
             operation_id: OperationId::new(),
             arguments: String::new(),
         });
-        // The root has no pane strip, so the request is dropped instead of
-        // stranding a placeholder that no completion can promote.
-        assert!(runtime.active_pane().tabs().is_empty());
+        // The workspace root owns a pane strip like any target: the request
+        // records a pending placeholder the daemon completion later promotes.
+        assert!(matches!(
+            runtime.active_pane().tabs().last(),
+            Some(PaneTab::Pending(pending)) if pending.kind == PaneKind::Terminal
+        ));
     }
 
     #[test]
@@ -1196,7 +1200,7 @@ mod tests {
         let agent_op = OperationId::new();
         runtime.on_effect(&Effect::LaunchAgent {
             workspace,
-            session,
+            session: Some(session),
             operation_id: agent_op,
             profile: None,
         });

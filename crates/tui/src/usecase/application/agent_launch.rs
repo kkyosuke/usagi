@@ -153,11 +153,18 @@ impl<P: AgentLaunchPort + TerminalPort> AgentLaunchAdapter<P> {
             return;
         }
         self.submitted.insert(operation_id, intent.clone());
+        // A workspace-root Agent keys its pane by `Target::Root`; a session
+        // Agent keys it by that session. The pane host is keyed by `Target`, so
+        // both scopes get an independent pane strip.
+        let target = session.map_or(
+            super::controller::Target::Root(workspace),
+            super::controller::Target::Session,
+        );
         runtime.dispatch(
             &mut self.port,
             PaneEvent::Request {
                 operation: operation_id,
-                target: super::controller::Target::Session(session),
+                target,
                 kind: PaneKind::Agent,
             },
         );
@@ -185,7 +192,7 @@ impl<P: AgentLaunchPort + TerminalPort> AgentLaunchAdapter<P> {
             } => {
                 let valid = self.submitted.get(&operation).is_some_and(|intent| {
                     terminal.workspace_id == intent.workspace
-                        && terminal.session_id == Some(intent.session)
+                        && terminal.session_id == intent.session
                 });
                 if valid {
                     runtime.dispatch(
@@ -369,7 +376,7 @@ mod tests {
             &mut runtime,
             Effect::LaunchAgent {
                 workspace,
-                session,
+                session: Some(session),
                 operation_id: operation,
                 profile: None,
             },
@@ -410,7 +417,7 @@ mod tests {
         ));
         let effect = Effect::LaunchAgent {
             workspace,
-            session,
+            session: Some(session),
             operation_id: operation,
             profile: None,
         };
@@ -440,7 +447,7 @@ mod tests {
             &mut runtime,
             Effect::LaunchAgent {
                 workspace,
-                session,
+                session: Some(session),
                 operation_id: operation,
                 profile: None,
             },
@@ -465,7 +472,7 @@ mod tests {
         let operation = OperationId::new();
         let intent = AgentLaunchIntent {
             workspace,
-            session,
+            session: Some(session),
             profile: None,
         };
         let mut accepted = ipc_client(
@@ -545,7 +552,7 @@ mod tests {
             &mut runtime,
             Effect::LaunchAgent {
                 workspace,
-                session,
+                session: Some(session),
                 operation_id: operation,
                 profile: None,
             },

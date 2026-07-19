@@ -481,7 +481,7 @@ impl RuntimeCoordinator {
         runtime: &AgentRuntimeRef,
         operation: &CompletionFence,
     ) -> Result<(), RuntimeError> {
-        (runtime.terminal.session_id == Some(runtime.session_id)
+        (runtime.terminal.session_id == runtime.session_id
             && runtime.session_id == operation.session_id
             && runtime.terminal.workspace_id == operation.workspace_id
             && runtime.terminal.daemon_generation == operation.owner_daemon_generation)
@@ -596,7 +596,7 @@ mod tests {
             initial_prompt: None,
             scope: LaunchScope {
                 workspace_id: WorkspaceId::new(),
-                session_id: SessionId::new(),
+                session_id: Some(SessionId::new()),
                 worktree_id: WorktreeId::new(),
             },
             required_capabilities: BTreeSet::new(),
@@ -608,7 +608,7 @@ mod tests {
             daemon_generation: generation,
             terminal_id: TerminalId::new(),
             workspace_id: request.scope.workspace_id,
-            session_id: Some(request.scope.session_id),
+            session_id: request.scope.session_id,
             worktree_id: request.scope.worktree_id,
         };
         let runtime =

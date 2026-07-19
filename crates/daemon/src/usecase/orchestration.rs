@@ -483,7 +483,7 @@ mod tests {
     ) {
         let scope = LaunchScope {
             workspace_id: WorkspaceId::new(),
-            session_id: SessionId::new(),
+            session_id: Some(SessionId::new()),
             worktree_id: WorktreeId::new(),
         };
         let generation = DaemonGeneration::new();
@@ -493,7 +493,7 @@ mod tests {
                 daemon_generation: generation,
                 terminal_id: TerminalId::new(),
                 workspace_id: scope.workspace_id,
-                session_id: Some(scope.session_id),
+                session_id: scope.session_id,
                 worktree_id: scope.worktree_id,
             },
             scope.session_id,

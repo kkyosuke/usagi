@@ -16,7 +16,8 @@ use crate::domain::id::{AgentId, OperationId, SessionId, WorkspaceId, WorktreeId
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Agent {
     pub agent_id: AgentId,
-    pub session_id: SessionId,
+    /// Session owning the agent; absent for a workspace-root agent.
+    pub session_id: Option<SessionId>,
     pub runtime: AgentProfileId,
     pub model: ModelSelector,
     pub status: AgentStatus,
@@ -57,14 +58,16 @@ pub enum RunStatus {
 /// The caller side of a durable dispatch binding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallerRef {
-    pub session_id: SessionId,
+    /// Caller's session; absent for a workspace-root caller.
+    pub session_id: Option<SessionId>,
     pub agent_id: AgentId,
 }
 
 /// The worker side of a durable dispatch binding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerRef {
-    pub session_id: SessionId,
+    /// Worker's session; absent for a workspace-root worker.
+    pub session_id: Option<SessionId>,
     pub agent_id: AgentId,
 }
 
@@ -229,7 +232,8 @@ impl ModelSelector {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchScope {
     pub workspace_id: WorkspaceId,
-    pub session_id: SessionId,
+    /// Owning session; absent for a workspace-root launch.
+    pub session_id: Option<SessionId>,
     pub worktree_id: WorktreeId,
 }
 
@@ -512,7 +516,7 @@ mod tests {
             initial_prompt: Some("continue".into()),
             scope: LaunchScope {
                 workspace_id: WorkspaceId::new(),
-                session_id: SessionId::new(),
+                session_id: Some(SessionId::new()),
                 worktree_id: WorktreeId::new(),
             },
             required_capabilities: [AgentCapability::McpWiring].into_iter().collect(),
@@ -588,12 +592,12 @@ mod tests {
         let agent_id = AgentId::new();
         let run_id = OperationId::new();
         let worker = WorkerRef {
-            session_id,
+            session_id: Some(session_id),
             agent_id,
         };
         let agent = Agent {
             agent_id,
-            session_id,
+            session_id: Some(session_id),
             runtime: AgentProfileId::new("codex").unwrap(),
             model: ModelSelector::new("gpt-5").unwrap(),
             status: AgentStatus::Running,
@@ -610,7 +614,7 @@ mod tests {
         let binding = DispatchBinding {
             run_id,
             caller: CallerRef {
-                session_id,
+                session_id: Some(session_id),
                 agent_id,
             },
             worker: worker.clone(),

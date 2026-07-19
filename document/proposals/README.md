@@ -29,3 +29,4 @@ v1 の仕様スナップショットとして保存する。
 | 7 | [07-pty-crash-continuation.md](07-pty-crash-continuation.md) | PTY broker／FD handoff による daemon crash 後の terminal 継続 | 提案（MVP 非依存） |
 | 8 | [08-agent-dispatch-mcp.md](08-agent-dispatch-mcp.md) | 他 session の特定 agent への即時 dispatch、runtime/model validation、caller の durable inbox への確実な完了報告（MCP 契約） | 提案（実装 issue #321–#323, #331–#332） |
 | 9 | [09-user-decision-mcp.md](09-user-decision-mcp.md) | agent の user decision request と durable な回答配送・TUI 操作 | 提案（実装 issue #329–#330） |
+| 10 | [10-workspace-root-scope.md](10-workspace-root-scope.md) | workspace root（`⌂ root`）で Agent/Terminal を作成する session-optional な scope/fence 設計 | [04-ipc.md](../04-ipc.md) / [05-daemon.md](../05-daemon.md) / [03-tui.md](../03-tui.md) へ畳み込み済み（実装 issue #363–#368） |

@@ -429,7 +429,7 @@ mod tests {
         let dispatch = DispatchStore::new(temp.path());
         let run_id = OperationId::new();
         let caller = CallerRef {
-            session_id: SessionId::new(),
+            session_id: Some(SessionId::new()),
             agent_id: AgentId::new(),
         };
         dispatch
@@ -437,7 +437,7 @@ mod tests {
                 run_id,
                 caller: caller.clone(),
                 worker: WorkerRef {
-                    session_id: SessionId::new(),
+                    session_id: Some(SessionId::new()),
                     agent_id: AgentId::new(),
                 },
             })
@@ -448,7 +448,7 @@ mod tests {
                 InboxMessage {
                     run_id,
                     from: WorkerRef {
-                        session_id: SessionId::new(),
+                        session_id: Some(SessionId::new()),
                         agent_id: AgentId::new(),
                     },
                     kind: InboxKind::Failed,

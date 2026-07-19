@@ -74,10 +74,11 @@ pub struct RemoveSessionRequest {
 /// An Agent-launch request derived from [`Effect::LaunchAgent`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchAgentRequest {
-    /// Workspace the session belongs to.
+    /// Workspace the scope belongs to.
     pub workspace: WorkspaceId,
-    /// Stable identity of the session that hosts the Agent pane.
-    pub session: SessionId,
+    /// Stable identity of the session that hosts the Agent pane; absent for a
+    /// workspace-root Agent.
+    pub session: Option<SessionId>,
     /// Durable operation identity for the launch.
     pub operation_id: OperationId,
     /// Optional Agent profile; `None` uses the daemon default.
@@ -637,7 +638,7 @@ mod tests {
         assert_eq!(
             backend.dispatch(Effect::LaunchAgent {
                 workspace: WorkspaceId::new(),
-                session: SessionId::new(),
+                session: Some(SessionId::new()),
                 operation_id: OperationId::new(),
                 profile: None,
             }),
@@ -854,7 +855,7 @@ mod tests {
 
         let launch = LaunchAgentRequest {
             workspace,
-            session,
+            session: Some(session),
             operation_id,
             profile: None,
         };

@@ -9,7 +9,7 @@ use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::id::DaemonGeneration;
+use crate::domain::id::{DaemonGeneration, WorktreeId};
 use crate::domain::session_lifecycle::{LifecycleEvent, WorkspaceLifecycleState, reduce};
 use crate::infrastructure::persistence::{json_file, store_lock::StoreLock};
 
@@ -19,9 +19,17 @@ const STATE_FILE: &str = "sessions.json";
 ///
 /// Keeping the repository binding and lifecycle state in one envelope makes
 /// their relationship atomic: a crash cannot publish one without the other.
+///
+/// `root_worktree_id` is the durable incarnation of the workspace-root checkout.
+/// It is a real, never-reused identity (not derived from a name or path) so a
+/// workspace-root terminal/agent can be fenced exactly like a session one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PersistedLifecycle {
     repository_root: PathBuf,
+    /// Absent only in stores written before workspace-root scope existed; the
+    /// daemon backfills it once on open via [`DaemonLifecycleStore::ensure_root_worktree_id`].
+    #[serde(default)]
+    root_worktree_id: Option<WorktreeId>,
     state: WorkspaceLifecycleState,
 }
 
@@ -95,9 +103,32 @@ impl DaemonLifecycleStore {
             &self.state_path(),
             &PersistedLifecycle {
                 repository_root: repository_root.into(),
+                root_worktree_id: Some(WorktreeId::new()),
                 state: state.clone(),
             },
         )
+    }
+
+    /// Returns the durable workspace-root worktree identity, generating and
+    /// persisting one exactly once for a store written before workspace-root
+    /// scope existed. The identity is stable across every later restart.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the state is absent, cannot be locked, or written.
+    #[coverage(off)]
+    pub fn ensure_root_worktree_id(&self) -> Result<WorktreeId> {
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let mut persisted = self
+            .load_persisted()?
+            .ok_or_else(|| anyhow::anyhow!("lifecycle state has not been initialized"))?;
+        if let Some(existing) = persisted.root_worktree_id {
+            return Ok(existing);
+        }
+        let generated = WorktreeId::new();
+        persisted.root_worktree_id = Some(generated);
+        json_file::write_atomic(&self.dir, &self.state_path(), &persisted)?;
+        Ok(generated)
     }
 
     /// Atomically replaces a state only when the revision observed by a caller
@@ -127,6 +158,7 @@ impl DaemonLifecycleStore {
             &self.state_path(),
             &PersistedLifecycle {
                 repository_root: persisted.repository_root,
+                root_worktree_id: persisted.root_worktree_id,
                 state: state.clone(),
             },
         )
