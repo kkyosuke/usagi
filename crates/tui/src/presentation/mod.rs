@@ -1030,10 +1030,16 @@ fn apply_session_projection(
     }
 }
 
-/// Receive completed create workers before drawing the next frame. The returned
-/// port is reclaimed for the next command and a successful daemon snapshot is
-/// reconciled into the session cache, which [`sync_runtime_sessions`] then
-/// promotes into the controller's Home rows.
+/// Receive completed create/remove workers before drawing the next frame. The
+/// returned port is reclaimed for the next command and a successful daemon
+/// snapshot is reconciled into the session cache, which [`sync_runtime_sessions`]
+/// then promotes into the controller's Home rows. A failure is no longer dropped
+/// silently: the port's message is display-safe by contract and is collapsed to a
+/// safe single line before it reaches the screen. A create failure refluxes as a
+/// failed [`OperationResult`] so its pending row clears and the safe message opens
+/// the create-failure dialog; any other failure (e.g. remove) refluxes as a
+/// controller [`BackendEvent::Notice`]. Both are distinct from an in-form local
+/// validation error.
 #[coverage(off)]
 fn drain_session_completions(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime) {
     while let Ok(completion) = ui.session_completions.try_recv() {
@@ -1042,19 +1048,18 @@ fn drain_session_completions(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntim
         let creating = ui.creating_session.take();
         match completion.result {
             Ok(result) => apply_session_projection(ui, result.sessions, result.session_ids),
-            // A create that the daemon rejected refluxes to the reducer so its
-            // pending row clears and the safe message opens the create-failure
-            // dialog. The daemon message is collapsed to one safe line first, so
-            // no raw protocol/internal detail reaches the screen. Non-create
-            // failures keep their existing (silent) handling.
             Err(message) => {
+                let safe = safe_session_error(&message);
                 if let Some(token) = creating {
                     let _ = runtime.apply_event(AppEvent::OperationResult(OperationResult {
                         token,
                         succeeded: false,
                         created: None,
-                        notice: Some(Notice::new(safe_session_error(&message))),
+                        notice: Some(Notice::new(safe)),
                     }));
+                } else {
+                    let _ = runtime
+                        .apply_event(AppEvent::Backend(BackendEvent::Notice(Notice::new(safe))));
                 }
             }
         }
@@ -1326,6 +1331,17 @@ fn sync_runtime_sessions(runtime: &mut WorkspaceRuntime, ui: &WorkspaceUi) {
     let ids = ui.workspace.session_ids().to_vec();
     if runtime.state().sessions() != ids.as_slice() {
         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Sessions(ids)));
+    }
+    // Keep the reducer's advisory name copy in step so the create form can reject
+    // a duplicate name locally before it ever reaches the daemon.
+    let names: Vec<String> = ui
+        .workspace
+        .sessions()
+        .iter()
+        .map(|record| record.name.clone())
+        .collect();
+    if runtime.state().session_names() != names.as_slice() {
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionNames(names)));
     }
 }
 
@@ -2857,6 +2873,43 @@ mod tests {
             term.frames
                 .iter()
                 .all(|frame| !frame.join("\n").contains("New session"))
+        );
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn drain_session_completions_surfaces_a_daemon_failure_as_a_safe_notice() {
+        use crate::presentation::workspace_runtime::WorkspaceRuntime;
+
+        let snapshot = snapshot("demo");
+        let workspace_id = snapshot.workspace_id;
+        let view = WorkspaceView::with_runtime_ids(
+            snapshot.workspace,
+            snapshot.state,
+            snapshot.session_ids,
+        );
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace_id, Vec::new());
+
+        // A create worker returned a display-safe daemon rejection (e.g. a name the
+        // daemon refuses). The legacy path used to drop this on the floor; it must
+        // now reflux as a controller notice so the user sees the failure.
+        ui.session_completion_sender
+            .send(super::SessionCommandCompletion {
+                port: Box::new(UnavailableSessionCommandPort),
+                result: Err("daemon refused the session".to_owned()),
+            })
+            .unwrap();
+        assert!(runtime.state().notice().is_none());
+
+        super::drain_session_completions(&mut ui, &mut runtime);
+
+        assert_eq!(
+            runtime
+                .state()
+                .notice()
+                .map(|notice| notice.message.as_str()),
+            Some("daemon refused the session"),
         );
     }
 

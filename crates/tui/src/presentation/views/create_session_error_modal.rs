@@ -75,7 +75,10 @@ mod tests {
 
     /// The reducer opens this overlay on a failed create, and the shell keys the
     /// render off the same message, so a failure end-to-end shows the dialog.
+    // The submit match keeps an unreachable panic arm for a clear failure; the
+    // covered render paths live in the two tests above.
     #[test]
+    #[coverage(off)]
     fn reducer_failure_populates_the_message_this_view_draws() {
         let mut state = AppState::home(WorkspaceId::new(), Vec::new());
         let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));

@@ -1657,6 +1657,22 @@ mod tests {
         assert!(!text.contains("New session"));
     }
 
+    #[test]
+    fn render_home_draws_a_live_invalid_character_error_inline() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        // A disallowed character surfaces the safe rule reminder inline as the user
+        // types, without a modal and without discarding the draft name.
+        for character in "ok/".chars() {
+            let _ = update(&mut state, AppEvent::Key(AppKey::Char(character)));
+        }
+        let text = joined_home(&HomeProjection::from_state(&state, "work", "/work", &[]));
+        assert!(text.contains("invalid character"));
+        assert!(text.contains("ok/"));
+    }
+
     fn pr_error() -> SafeError {
         SafeError {
             message: SafeMessage::new("gh unavailable"),
