@@ -139,6 +139,32 @@ pub fn create_with_agent(
         origin,
         started_from,
         &SystemSetupCommandRunner,
+        None,
+    )
+}
+
+/// Create a session whose git worktrees branch from the exact `base_commit`.
+///
+/// This is the orchestration entry point for a worker stacked on another PR.
+/// The caller must resolve and validate the immutable commit before calling;
+/// ordinary interactive/MCP session creation continues to use the configured
+/// default branch through [`create_with_agent`].
+pub fn create_with_agent_at_base(
+    workspace_root: &Path,
+    name: &str,
+    agent: SessionAgent,
+    origin: SessionOrigin,
+    started_from: Option<String>,
+    base_commit: &str,
+) -> Result<CreatedSession> {
+    create_with_setup_runner(
+        workspace_root,
+        name,
+        agent,
+        origin,
+        started_from,
+        &SystemSetupCommandRunner,
+        Some(base_commit),
     )
 }
 
@@ -149,6 +175,7 @@ fn create_with_setup_runner(
     origin: SessionOrigin,
     started_from: Option<String>,
     setup_runner: &dyn SetupCommandRunner,
+    base_commit: Option<&str>,
 ) -> Result<CreatedSession> {
     let name = name.trim();
     if name.is_empty() {
@@ -208,14 +235,21 @@ fn create_with_setup_runner(
             .parent()
             .expect("dest_root always has a .usagi/sessions parent");
         fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
-        let base = tree::base_ref(workspace_root);
-        git::add_worktree(workspace_root, &dest_root, &branch, base.as_deref())?;
+        let configured_base = tree::base_ref(workspace_root);
+        let base = base_commit.or(configured_base.as_deref());
+        git::add_worktree(workspace_root, &dest_root, &branch, base)?;
         git::init_submodules(&dest_root)?;
         worktrees.push(dest_root.clone());
     } else {
         fs::create_dir_all(&dest_root)
             .context(format!("failed to create {}", dest_root.display()))?;
-        tree::build_dir(workspace_root, &dest_root, &branch, &mut worktrees)?;
+        tree::build_dir(
+            workspace_root,
+            &dest_root,
+            &branch,
+            base_commit,
+            &mut worktrees,
+        )?;
     }
 
     // Symlink usagi's shipped skills into each worktree so the agent launched
@@ -274,6 +308,16 @@ fn create_with_setup_runner(
         root: dest_root,
         worktrees,
     })
+}
+
+/// Source repositories mirrored into a newly-created session.
+pub(crate) fn source_repositories(workspace_root: &Path) -> Vec<PathBuf> {
+    tree::source_repos(workspace_root)
+}
+
+/// Configured base ref used by ordinary session creation for `repo`.
+pub(crate) fn configured_base_ref(repo: &Path) -> Option<String> {
+    tree::base_ref(repo)
 }
 
 /// Run the workspace's configured setup commands in the newly-created session
@@ -1419,6 +1463,7 @@ mod tests {
             SessionOrigin::Human,
             None,
             &runner,
+            None,
         )
         .unwrap();
 
@@ -1550,6 +1595,7 @@ mod tests {
             SessionOrigin::Human,
             None,
             &runner,
+            None,
         )
         .unwrap();
 

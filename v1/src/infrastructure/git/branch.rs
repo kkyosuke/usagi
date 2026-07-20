@@ -115,6 +115,19 @@ pub fn resolve_base_ref(repo: &Path, source: BranchSource, branch: Option<&str>)
     }
 }
 
+/// Resolve `revision` to its immutable commit id.
+///
+/// The `^{commit}` suffix rejects trees, blobs, and other non-commit objects so
+/// callers can safely use the returned id as a worktree base.
+pub fn resolve_commit(repo: &Path, revision: &str) -> Option<String> {
+    git_capture(
+        repo,
+        &["rev-parse", "--verify", &format!("{revision}^{{commit}}")],
+    )
+    .ok()
+    .flatten()
+}
+
 /// The first local branch nested under `name/` in `repo`, if any.
 ///
 /// Git stores branches as files under `.git/refs/heads/`, so a branch named
