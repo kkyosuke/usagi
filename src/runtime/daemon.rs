@@ -549,6 +549,24 @@ struct OwnedPty {
     terminal: TerminalRef,
     pty: Arc<Mutex<PtyTerminal>>,
 }
+
+fn release_owned_pty(
+    terminals: &mut BTreeMap<String, OwnedPty>,
+    selected: &mut Option<String>,
+    terminal: &TerminalRef,
+) -> bool {
+    let key = terminal.terminal_id.as_str();
+    let owned = terminals
+        .get(&key)
+        .is_some_and(|entry| entry.terminal.fences(terminal));
+    if owned {
+        terminals.remove(&key);
+        if selected.as_ref() == Some(&key) {
+            *selected = None;
+        }
+    }
+    owned
+}
 impl AgentPty {
     fn new(
         environment: BTreeMap<String, String>,
@@ -681,18 +699,7 @@ impl PtyWriter for AgentPty {
             .write_all(bytes)
     }
     fn release(&mut self, terminal: &TerminalRef) -> bool {
-        let key = terminal.terminal_id.as_str();
-        let owned = self
-            .terminals
-            .get(&key)
-            .is_some_and(|entry| entry.terminal.fences(terminal));
-        if owned {
-            self.terminals.remove(&key);
-            if self.selected.as_ref() == Some(&key) {
-                self.selected = None;
-            }
-        }
-        owned
+        release_owned_pty(&mut self.terminals, &mut self.selected, terminal)
     }
 }
 
@@ -836,18 +843,7 @@ impl PtyWriter for DaemonPty {
             .write_all(bytes)
     }
     fn release(&mut self, terminal: &TerminalRef) -> bool {
-        let key = terminal.terminal_id.as_str();
-        let owned = self
-            .terminals
-            .get(&key)
-            .is_some_and(|entry| entry.terminal.fences(terminal));
-        if owned {
-            self.terminals.remove(&key);
-            if self.selected.as_ref() == Some(&key) {
-                self.selected = None;
-            }
-        }
-        owned
+        release_owned_pty(&mut self.terminals, &mut self.selected, terminal)
     }
 }
 
