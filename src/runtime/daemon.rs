@@ -52,7 +52,8 @@ use usagi_daemon::usecase::generic_terminal::{
 use usagi_daemon::usecase::orchestration::AdapterRegistry;
 use usagi_daemon::usecase::pr_inventory::OutputPrProjector;
 use usagi_daemon::usecase::runtime::{
-    OutputJournal, ProvisionContext, PtySpawner, RuntimeStore, RuntimeStoreSnapshot, SpawnProvision,
+    OutputJournal, ProvisionContext, PtySpawner, RuntimeStore, RuntimeStoreSnapshot,
+    SpawnProvision, TerminateReapError,
 };
 use usagi_daemon::usecase::session_runtime::{SessionRuntime, SessionRuntimeError, SystemGit};
 use usagi_daemon::usecase::supervisor_runtime::{
@@ -657,6 +658,24 @@ impl PtySpawner for AgentPty {
             start_identity: "daemon-owned-agent-pty".to_owned(),
             process_group: pid,
         })
+    }
+
+    fn terminate_reap(&mut self, terminal: &TerminalRef) -> Result<(), TerminateReapError> {
+        let key = terminal.terminal_id.as_str();
+        let pty = Arc::clone(
+            &self
+                .terminals
+                .get(&key)
+                .filter(|entry| entry.terminal.fences(terminal))
+                .ok_or(TerminateReapError)?
+                .pty,
+        );
+        pty.lock()
+            .map_err(|_| TerminateReapError)?
+            .terminate_reap()
+            .map_err(|_| TerminateReapError)?;
+        release_owned_pty(&mut self.terminals, &mut self.selected, terminal);
+        Ok(())
     }
 }
 

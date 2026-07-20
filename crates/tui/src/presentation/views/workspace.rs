@@ -1241,12 +1241,12 @@ const CREATE_SKELETON_ROWS: usize = 2;
 /// typed name share one slow left-to-right wave — the same [`widgets::Shimmer`]
 /// sweep the removal skeleton and pending tabs use — so a pending create reads as
 /// loading, not a static row. `tick` is the shared sidebar mascot frame, so the
-/// wave advances only on `AppEvent::Tick`. The skeleton is never a cursor or
-/// current target, so it carries no marker.
+/// wave advances only on `AppEvent::Tick`. New-session feedback uses Success
+/// (green), never Accent (cyan), and is never a cursor or current target.
 fn create_skeleton_lines(width: usize, name: &str, tick: u64) -> Vec<String> {
     let wave = widgets::Shimmer {
-        style: Role::Accent.style().bold(),
-        base_style: Role::Accent.style().dim(),
+        style: Role::Success.style().bold(),
+        base_style: Role::Success.style().dim(),
         speed: 4,
     };
     let frame = usize::try_from(tick).unwrap_or(usize::MAX);
@@ -1438,9 +1438,9 @@ fn home_row_lines_at(
 /// validation error wrapped to the sidebar `width` below it.
 ///
 /// The caret row shows the `+ new:` affordance in the Success (green) role so it
-/// stays visually continuous with the static green `+ new session` label
-/// (#302 / #362 / #376), followed by a block caret on the typed name
-/// (`+ new: <name>`, documented in 03-tui.md). No selection `>` chevron is drawn:
+/// stays visually continuous with the static green `+ new session` label,
+/// followed by a white block-caret input (`+ new: <name>`, documented in
+/// 03-tui.md). No selection `>` chevron is drawn:
 /// the row already owns input, so the chevron is redundant here; a blank marker
 /// column keeps the affordance aligned with the static label. It stays a single
 /// clipped line since the name is the user's own bounded input. Any reducer
@@ -1453,14 +1453,13 @@ fn home_row_lines_at(
 /// The returned line count is authoritative: `home_row_height_at` reports the same
 /// length so the viewport's scroll math never diverges from what is drawn.
 fn new_session_input_lines(width: usize, draft: &CreateDraft) -> Vec<String> {
-    let accent = Role::Accent.style().bold();
-    // The `+ new:` affordance keeps the Success (green) role of the static
-    // `+ new session` label so the colour is continuous when the row expands into
-    // its inline input; the name/block caret stays accent. No `>` selection chevron
-    // is drawn (the row owns input, so it is redundant), but a blank marker column
+    // New-session input deliberately uses the neutral white foreground rather
+    // than the generic Accent (cyan) editing role. No `>` selection chevron is
+    // drawn (the row owns input, so it is redundant), but a blank marker column
     // keeps the affordance aligned with the static label.
+    let input = Style::new().fg(Color::White).bold();
     let affordance = Role::Success.style().bold();
-    let caret = widgets::block_caret(&draft.name, draft.name.chars().count(), &accent);
+    let caret = widgets::block_caret(&draft.name, draft.name.chars().count(), &input);
     let caret_line = format!("  {} {caret}", affordance.paint("+ new:"));
     let mut lines = vec![widgets::pad_to_width(
         &widgets::clip_to_width(&caret_line, width),
@@ -1479,15 +1478,15 @@ fn new_session_input_lines(width: usize, draft: &CreateDraft) -> Vec<String> {
 ///
 /// A selected session starts with v1's usagi glyph and uses a red `|` continuation;
 /// in Closeup its active two-line stack is green. Root and action rows retain the compact
-/// red `>` cursor in Switch.
+/// red `>` cursor in Switch, except that `+ new session` remains chevron-free
+/// even while it owns the Switch cursor.
 #[coverage(off)]
 fn home_row_marker(row: Selection, selected: bool, current: bool) -> String {
     if selected {
         return match row {
             Selection::Target(Target::Session(_)) => Role::Danger.style().bold().paint("\u{f0907}"),
-            Selection::Target(Target::Root(_)) | Selection::NewSession => {
-                Role::Danger.style().bold().paint(">")
-            }
+            Selection::Target(Target::Root(_)) => Role::Danger.style().bold().paint(">"),
+            Selection::NewSession => " ".to_string(),
         };
     }
     if current {
@@ -1798,7 +1797,12 @@ mod tests {
         assert!(
             first
                 .iter()
-                .all(|line| line.contains("\u{1b}[2;36m") || line.contains("\u{1b}[1;36m"))
+                .all(|line| line.contains("\u{1b}[2;32m") || line.contains("\u{1b}[1;32m"))
+        );
+        assert!(
+            first
+                .iter()
+                .all(|line| !line.contains("\u{1b}[2;36m") && !line.contains("\u{1b}[1;36m"))
         );
     }
 
@@ -1887,10 +1891,10 @@ mod tests {
     }
 
     #[test]
-    fn render_home_paints_the_inline_new_affordance_success_not_accent() {
+    fn render_home_paints_the_inline_new_affordance_success_with_white_input() {
         // The runtime path that actually draws the inline create form must keep the
-        // `+ new:` affordance in the Success (green) role and never fall to accent
-        // (cyan), matching the static `+ new session` colour (#302 / #362 / #376).
+        // `+ new:` affordance in the Success (green) role and typed input in the
+        // neutral white role, never Accent (cyan).
         let workspace = WorkspaceId::new();
         let mut state = AppState::home(workspace, Vec::new());
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
@@ -1904,6 +1908,8 @@ mod tests {
         assert!(rendered.contains("\u{1b}[1;32m+ new:\u{1b}[0m"));
         assert!(!rendered.contains("\u{1b}[1;36m+ new:"));
         assert!(!rendered.contains("\u{1b}[36m+ new:"));
+        assert!(rendered.contains("\u{1b}[1;37mfeature-x"));
+        assert!(!rendered.contains("\u{1b}[1;36mfeature-x"));
     }
 
     #[test]
@@ -1949,10 +1955,10 @@ mod tests {
     }
 
     #[test]
-    fn new_session_input_lines_paint_the_affordance_success_and_keep_the_name_accent() {
+    fn new_session_input_lines_paint_the_affordance_success_and_name_white() {
         // The `+ new:` affordance is Success (green) so it stays continuous with the
-        // static green `+ new session` label; the typed name keeps the accent (cyan)
-        // role for visibility. No `>` selection chevron is drawn on the input row.
+        // static green `+ new session` label; the typed name is white. No `>`
+        // selection chevron is drawn on the input row.
         let draft = CreateDraft {
             name: "feature-x".into(),
             error: None,
@@ -1961,8 +1967,9 @@ mod tests {
         // Affordance carries the Success SGR and never the accent one.
         assert!(caret.contains("\u{1b}[1;32m+ new:\u{1b}[0m"));
         assert!(!caret.contains("\u{1b}[1;36m+ new:"));
-        // The name span keeps the accent bold role.
-        assert!(caret.contains("\u{1b}[1;36mfeature-x"));
+        // The name span is neutral white, never Accent (cyan).
+        assert!(caret.contains("\u{1b}[1;37mfeature-x"));
+        assert!(!caret.contains("\u{1b}[1;36mfeature-x"));
         // No selection chevron: the caret text starts at `+ new:` after a blank
         // marker column, never with a `>`.
         let stripped = strip(&caret);
@@ -2399,12 +2406,19 @@ mod tests {
         assert!(rendered.contains("\u{1b}[1;32m+ new session\u{1b}[0m"));
         assert!(!rendered.contains("\u{1b}[1;36m+ new session\u{1b}[0m"));
         assert!(!rendered.contains("\u{1b}[36m+ new session\u{1b}[0m"));
-        // The red `>` cursor precedence is unchanged.
+        // Unlike other Switch rows, the new-session action stays chevron-free
+        // while it is focused.
         assert!(
             render_home(30, 100, &home)
                 .iter()
                 .map(|line| strip(line))
-                .any(|line| line.contains("> + new session"))
+                .any(|line| line.contains("  + new session"))
+        );
+        assert!(
+            render_home(30, 100, &home)
+                .iter()
+                .map(|line| strip(line))
+                .all(|line| !line.contains("> + new session"))
         );
     }
 

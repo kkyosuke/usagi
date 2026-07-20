@@ -1,14 +1,14 @@
 ---
 number: 466
 title: fix(v1/orchestrator): retry を process と generation で fence する
-status: todo
+status: done
 priority: high
 labels: [review, v1, orchestration, durability]
 dependson: []
 related: [182, 183, 184, 186]
 parent: 453
 created_at: 2026-07-20T12:06:21.701940+00:00
-updated_at: 2026-07-20T12:06:21.701940+00:00
+updated_at: 2026-07-20T22:47:37.562338+00:00
 ---
 
 ## 問題・影響

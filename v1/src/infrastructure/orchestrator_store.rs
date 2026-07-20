@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::domain::orchestrator::{Claim, Claims, Event, Plan, Stamped};
 use crate::infrastructure::{json_file, store_lock::StoreLock};
@@ -12,6 +13,13 @@ use crate::infrastructure::{json_file, store_lock::StoreLock};
 const FORMAT: &str = "usagi-orchestrator";
 const PLAN_VERSION: u32 = 1;
 const CLAIMS_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RejectedEvent {
+    pub event: Event,
+    pub reason: String,
+    pub rejected_at: DateTime<Utc>,
+}
 
 #[derive(Debug, Clone)]
 pub struct OrchestratorStore {
@@ -229,6 +237,63 @@ impl OrchestratorStore {
             Err(error) => Err(error).context(format!("failed to acknowledge {}", path.display())),
         }
     }
+
+    /// Move a stale/unknown event into an append-only rejection ledger. The
+    /// ledger write precedes pending-file removal under the plan lock, so a
+    /// crash may leave a harmless duplicate but can never silently lose it.
+    pub fn reject_event(
+        &self,
+        plan: &str,
+        event_id: &str,
+        reason: &str,
+        rejected_at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let plan_dir = self.plan_dir(plan);
+        let _lock = StoreLock::acquire(&plan_dir)?;
+        let pending = plan_dir.join("events").join(format!("{event_id}.json"));
+        let Some(event): Option<Event> = json_file::read(&pending)? else {
+            return Ok(false);
+        };
+        let dir = plan_dir.join("rejected-events");
+        let path = dir.join(format!("{event_id}.json"));
+        if !path.exists() {
+            json_file::write_atomic(
+                &dir,
+                &path,
+                &RejectedEvent {
+                    event,
+                    reason: reason.to_string(),
+                    rejected_at,
+                },
+            )?;
+        }
+        match fs::remove_file(&pending) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error).context(format!("failed to reject {}", pending.display())),
+        }
+    }
+
+    pub fn load_rejected_events(&self, plan: &str) -> Result<Vec<RejectedEvent>> {
+        let dir = self.plan_dir(plan).join("rejected-events");
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error).context(format!("failed to read {}", dir.display())),
+        };
+        let mut paths = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| {
+                json_file::read(&path)?
+                    .context(format!("rejected event disappeared: {}", path.display()))
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -349,6 +414,7 @@ mod tests {
             plan: "p".into(),
             issue: 1,
             generation: 2,
+            credential: Some("credential".into()),
             kind,
             terminal_revision: 0,
             observed_at: now(),
@@ -472,6 +538,7 @@ mod tests {
             plan: "p".into(),
             issue: 1,
             generation: 1,
+            credential: Some("credential".into()),
             kind,
             terminal_revision: 0,
             observed_at: now(),
@@ -499,6 +566,7 @@ mod tests {
             plan: "p".into(),
             issue: 1,
             generation: 1,
+            credential: Some("credential".into()),
             kind: EventKind::Succeeded,
             terminal_revision: 0,
             observed_at: now(),
@@ -507,5 +575,39 @@ mod tests {
         assert!(store.acknowledge_event("p", &event.id).unwrap());
         assert!(!store.acknowledge_event("p", &event.id).unwrap());
         assert!(store.load_events("p").unwrap().is_empty());
+    }
+
+    #[test]
+    fn stale_event_moves_to_durable_rejection_ledger() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = OrchestratorStore::new(tmp.path());
+        assert!(!store.reject_event("p", "missing", "stale", now()).unwrap());
+        assert!(store.load_rejected_events("p").unwrap().is_empty());
+        let event = Event {
+            id: "stale".into(),
+            plan: "p".into(),
+            issue: 1,
+            generation: 1,
+            credential: Some("old".into()),
+            kind: EventKind::Succeeded,
+            terminal_revision: 2,
+            observed_at: now(),
+        };
+        store.append_event(&event).unwrap();
+        assert!(store
+            .reject_event("p", "stale", "stale_generation", now())
+            .unwrap());
+        assert!(!store
+            .reject_event("p", "stale", "stale_generation", now())
+            .unwrap());
+        assert!(store.load_events("p").unwrap().is_empty());
+        assert_eq!(
+            store.load_rejected_events("p").unwrap(),
+            vec![RejectedEvent {
+                event,
+                reason: "stale_generation".into(),
+                rejected_at: now(),
+            }]
+        );
     }
 }

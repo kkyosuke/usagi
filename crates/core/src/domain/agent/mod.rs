@@ -29,6 +29,7 @@ pub struct Agent {
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
     Idle,
+    Starting,
     Running,
     Exited,
     Failed,
@@ -49,6 +50,7 @@ pub struct DispatchRun {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
+    Preparing,
     Running,
     Completed,
     Failed,
