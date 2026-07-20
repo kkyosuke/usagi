@@ -333,8 +333,8 @@ fn forward_live_terminal_input(
     };
     // A launch worker temporarily owns the port; surface the dropped
     // keystroke instead of swallowing it silently.
-    if !ui.send_terminal_bytes(&terminal, &bytes) {
-        controls.set_feedback("terminal is busy; keystroke dropped");
+    if let Err(message) = ui.send_terminal_bytes(&terminal, &bytes) {
+        controls.set_feedback(message);
     }
     true
 }
@@ -985,25 +985,26 @@ impl WorkspaceUi {
     }
 
     /// Forward raw passthrough bytes to the live terminal `terminal`. Returns
-    /// `false` when no attached session matches.
+    /// an error when the port is busy or the matching session cannot accept it.
     #[coverage(off)]
-    fn send_terminal_bytes(&mut self, terminal: &TerminalRef, bytes: &[u8]) -> bool {
+    fn send_terminal_bytes(&mut self, terminal: &TerminalRef, bytes: &[u8]) -> Result<(), String> {
         let Some(port) = self
             .agent
             .as_mut()
             .and_then(|agent| agent.port.as_deref_mut())
         else {
-            return false;
+            return Err("terminal is busy; keystroke not delivered".to_owned());
         };
         let Some(session) = self
             .terminals
             .iter_mut()
             .find(|session| session.terminal().fences(terminal))
         else {
-            return false;
+            return Err("terminal session is no longer available".to_owned());
         };
-        session.send_input(&mut AgentStreamPort(port), bytes);
-        true
+        session
+            .send_input(&mut AgentStreamPort(port), bytes)
+            .map_err(|error| error.message().to_owned())
     }
 
     /// Poll every attached terminal once and return the refs of those the daemon
@@ -1072,6 +1073,13 @@ impl WorkspaceUi {
             .iter()
             .find(|session| session.terminal().fences(terminal))
             .map(TerminalSession::cells)
+    }
+
+    fn terminal_error(&self, terminal: &TerminalRef) -> Option<&str> {
+        self.terminals
+            .iter()
+            .find(|session| session.terminal().fences(terminal))
+            .and_then(TerminalSession::error)
     }
 }
 
@@ -1859,7 +1867,11 @@ fn controller_terminal_view(
     controls.sync_focus(terminal.as_ref());
     let terminal = terminal?;
     let rows = ui.terminal_rows(&terminal, controls.selection())?;
-    Some(controls.project(rows, viewport_rows))
+    let mut projection = controls.project(rows, viewport_rows);
+    if let Some(error) = ui.terminal_error(&terminal) {
+        projection.feedback = Some(error.to_owned());
+    }
+    Some(projection)
 }
 
 /// Run the per-frame terminal sweep: poll every terminal, auto-close any that
@@ -3969,13 +3981,13 @@ mod tests {
     }
 
     /// A streaming agent port whose PTY attaches live from `replay`, then reports
-    /// exit on the next poll when `exit_on_poll` is set. It records each detach so
-    /// the auto-close path can be asserted end to end.
+    /// the configured safe error on poll. It records each detach so the auto-close
+    /// path can be asserted end to end.
     struct ScriptedAgentPort {
         terminal: TerminalRef,
         subscription: u64,
         replay: Vec<u8>,
-        exit_on_poll: bool,
+        poll_error: Option<TerminalError>,
         detaches: Arc<Mutex<Vec<u64>>>,
     }
 
@@ -4007,11 +4019,7 @@ mod tests {
             _terminal: &TerminalRef,
             _after_offset: u64,
         ) -> Result<Vec<TerminalChunk>, TerminalError> {
-            if self.exit_on_poll {
-                Err(TerminalError::Exited)
-            } else {
-                Ok(Vec::new())
-            }
+            self.poll_error.map_or(Ok(Vec::new()), Err)
         }
 
         fn input_terminal(
@@ -4078,7 +4086,7 @@ mod tests {
                 terminal: terminal.clone(),
                 subscription: 5,
                 replay: b"live!".to_vec(),
-                exit_on_poll: true,
+                poll_error: Some(TerminalError::Exited),
                 detaches: Arc::clone(&detaches),
             }),
         );
@@ -4091,6 +4099,41 @@ mod tests {
         assert!(runtime.active_pane().tabs().is_empty());
         assert!(!runtime.state().has_live_pane());
         assert_eq!(*detaches.lock().unwrap(), vec![5]);
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn reconnecting_and_stale_terminal_states_are_projected_into_the_pane_footer() {
+        for (error, expected) in [
+            (
+                TerminalError::Unavailable,
+                "daemon unavailable; reconnecting",
+            ),
+            (TerminalError::Stale, "terminal is no longer available"),
+        ] {
+            let workspace = WorkspaceId::new();
+            let session = SessionId::new();
+            let terminal = live_terminal_ref(workspace, session);
+            let (mut ui, runtime) = focused_live_pane(
+                workspace,
+                session,
+                terminal.clone(),
+                Box::new(ScriptedAgentPort {
+                    terminal,
+                    subscription: 6,
+                    replay: b"retained".to_vec(),
+                    poll_error: Some(error),
+                    detaches: Arc::new(Mutex::new(Vec::new())),
+                }),
+            );
+            let mut controls = LiveTerminalControls::default();
+
+            assert!(ui.poll_all_terminals().is_empty());
+            let view = controller_terminal_view(&ui, &runtime, &mut controls, 10).unwrap();
+
+            assert_eq!(view.feedback.as_deref(), Some(expected));
+            assert_eq!(view.rows[0], "retained");
+        }
     }
 
     #[test]
@@ -4108,7 +4151,7 @@ mod tests {
                 terminal,
                 subscription: 8,
                 replay: Vec::new(),
-                exit_on_poll: false,
+                poll_error: None,
                 detaches: Arc::clone(&detaches),
             }),
         );
@@ -4416,7 +4459,7 @@ mod tests {
                 terminal: terminal.clone(),
                 subscription: 9,
                 replay: b"hello".to_vec(),
-                exit_on_poll: false,
+                poll_error: None,
                 detaches: Arc::new(Mutex::new(Vec::new())),
             }),
         );
@@ -4523,7 +4566,7 @@ mod tests {
                 terminal: terminal.clone(),
                 subscription: 11,
                 replay: b"see https://example.com/x now".to_vec(),
-                exit_on_poll: false,
+                poll_error: None,
                 detaches: Arc::new(Mutex::new(Vec::new())),
             }),
         );
@@ -4594,7 +4637,7 @@ mod tests {
                 terminal: terminal.clone(),
                 subscription: 9,
                 replay: b"hello".to_vec(),
-                exit_on_poll: false,
+                poll_error: None,
                 detaches: Arc::new(Mutex::new(Vec::new())),
             }),
         );
@@ -4654,7 +4697,7 @@ mod tests {
                 terminal: terminal.clone(),
                 subscription: 9,
                 replay: b"ab\r\n\r\ncd".to_vec(),
-                exit_on_poll: false,
+                poll_error: None,
                 detaches: Arc::new(Mutex::new(Vec::new())),
             }),
         );
@@ -4695,7 +4738,7 @@ mod tests {
                 terminal: terminal.clone(),
                 subscription: 3,
                 replay,
-                exit_on_poll: false,
+                poll_error: None,
                 detaches: Arc::new(Mutex::new(Vec::new())),
             }),
         );
