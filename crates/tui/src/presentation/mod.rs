@@ -1644,12 +1644,11 @@ fn clear_terminal_selection_on_click(
     width: usize,
     rows_len: usize,
     scroll: usize,
-    column: u16,
-    row: u16,
+    pointer: (u16, u16),
 ) -> bool {
     if !runtime.wants_live_input()
         || !controls.has_selection()
-        || terminal_point_at(height, width, rows_len, scroll, column, row).is_none()
+        || terminal_point_at(height, width, rows_len, scroll, pointer.0, pointer.1).is_none()
     {
         return false;
     }
@@ -1688,7 +1687,13 @@ fn intercept_live_terminal_control(
         }
         Key::Click { column, row } => {
             return clear_terminal_selection_on_click(
-                runtime, controls, height, width, rows_len, scroll, *column, *row,
+                runtime,
+                controls,
+                height,
+                width,
+                rows_len,
+                scroll,
+                (*column, *row),
             );
         }
         _ => return false,
@@ -3675,8 +3680,7 @@ mod tests {
             80,
             rows_len,
             0,
-            37,
-            5,
+            (37, 5),
         ));
         assert!(!controls.has_selection());
 
@@ -3689,8 +3693,7 @@ mod tests {
             80,
             rows_len,
             0,
-            5,
-            2,
+            (5, 2),
         ));
     }
 
