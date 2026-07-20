@@ -191,6 +191,7 @@ pub enum RegistryError {
     SequenceGap,
     IdempotencyExpired,
     Exited,
+    PtyResizeFailed,
 }
 
 #[derive(Debug)]
@@ -442,11 +443,22 @@ impl TerminalRegistry {
     ///
     /// Returns [`RegistryError::StaleTarget`] for a non-current terminal.
     #[coverage(off)]
-    pub fn resize(
+    pub fn resize<W: PtyWriter>(
         &mut self,
         reference: &TerminalRef,
         geometry: Geometry,
+        writer: &mut W,
     ) -> Result<Snapshot, RegistryError> {
+        // Hold the registry's exclusive borrow across preflight, effect, and
+        // commit. The terminal actor mutex then keeps exit/replacement from
+        // racing an already validated resize.
+        let entry = self.entry(reference)?;
+        if entry.exited.is_some() {
+            return Err(RegistryError::Exited);
+        }
+        writer
+            .resize(reference, geometry)
+            .map_err(|_| RegistryError::PtyResizeFailed)?;
         let entry = self.entry_mut(reference)?;
         entry.geometry = geometry;
         entry.revision += 1;
@@ -864,6 +876,7 @@ mod tests {
         let r = reference();
         let mut registry = registry(r.clone());
         registry.append_output(&r, b"done".to_vec()).unwrap();
+        let mut writer = Writer::default();
         let snapshot = registry
             .resize(
                 &r,
@@ -871,6 +884,7 @@ mod tests {
                     cols: 100,
                     rows: 30,
                 },
+                &mut writer,
             )
             .unwrap();
         assert_eq!(snapshot.geometry.cols, 100);

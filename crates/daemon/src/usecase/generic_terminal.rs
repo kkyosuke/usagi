@@ -308,17 +308,18 @@ impl GenericTerminalCoordinator {
             .append_output(terminal, bytes)
             .map_err(GenericTerminalError::Terminal)
     }
-    pub fn resize(
+    pub fn resize<W: PtyWriter>(
         &mut self,
         terminal: &TerminalRef,
         geometry: Geometry,
+        writer: &mut W,
     ) -> Result<Snapshot, GenericTerminalError> {
         self.running(terminal)?;
         self.terminals
-            .resize(terminal, geometry)
+            .resize(terminal, geometry, writer)
             .map_err(GenericTerminalError::Terminal)
     }
-    /// Verifies durable ownership before an IPC adapter performs any PTY effect.
+    /// Verifies durable ownership before an IPC adapter performs an effect.
     pub fn ensure_running(&self, terminal: &TerminalRef) -> Result<(), GenericTerminalError> {
         self.running(terminal)
     }

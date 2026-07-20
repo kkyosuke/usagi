@@ -1093,11 +1093,8 @@ impl<
                 .map_err(map_runtime_error),
             (TerminalAction::Resize, TerminalRequest::Resize { geometry, .. }) => {
                 let geometry = terminal_geometry(geometry)?;
-                self.pty.resize(&runtime.terminal, geometry).map_err(|_| {
-                    ProtocolError::new(ErrorCode::Unavailable, "terminal resize failed")
-                })?;
                 self.coordinator
-                    .resize(runtime, geometry)
+                    .resize(runtime, geometry, &mut self.pty)
                     .map(|snapshot| json!(snapshot))
                     .map_err(map_runtime_error)
             }
@@ -1371,6 +1368,9 @@ fn map_runtime_error(error: RuntimeError) -> ProtocolError {
             ErrorCode::ResyncRequired,
             "agent terminal output requires resynchronization",
         ),
+        RuntimeError::Terminal(RegistryError::PtyResizeFailed) => {
+            (ErrorCode::Unavailable, "terminal resize failed")
+        }
         RuntimeError::Terminal(_)
         | RuntimeError::UnknownRuntime
         | RuntimeError::TerminalGenerationMismatch => {
@@ -1452,6 +1452,7 @@ mod tests {
         spawn: Option<SpawnFailure>,
         resized: Vec<(TerminalRef, Geometry)>,
         released: Vec<TerminalRef>,
+        resize_failure: bool,
     }
     impl PtySpawner for Pty {
         fn spawn(
@@ -1480,7 +1481,11 @@ mod tests {
             geometry: Geometry,
         ) -> Result<(), PtyWriteError> {
             self.resized.push((terminal.clone(), geometry));
-            Ok(())
+            if self.resize_failure {
+                Err(PtyWriteError { applied_prefix: 0 })
+            } else {
+                Ok(())
+            }
         }
         fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
             self.writes.extend_from_slice(bytes);
@@ -2527,6 +2532,97 @@ mod tests {
             runtime.exit(&foreign, 0).unwrap_err().code,
             ErrorCode::StaleTarget
         );
+    }
+
+    #[test]
+    fn agent_resize_rejects_each_forged_terminal_ref_field_before_pty_effect() {
+        let mut runtime = runtime();
+        let terminal = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &intent(None),
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap()
+            .terminal;
+        let mut forged = Vec::new();
+        let mut reference = terminal.clone();
+        reference.daemon_generation = DaemonGeneration::new();
+        forged.push(reference);
+        let mut reference = terminal.clone();
+        reference.terminal_id = TerminalId::new();
+        forged.push(reference);
+        let mut reference = terminal.clone();
+        reference.workspace_id = WorkspaceId::new();
+        forged.push(reference);
+        let mut reference = terminal.clone();
+        reference.session_id = Some(SessionId::new());
+        forged.push(reference);
+        let mut reference = terminal;
+        reference.worktree_id = WorktreeId::new();
+        forged.push(reference);
+
+        for terminal in forged {
+            assert!(matches!(
+                runtime.handle_terminal(
+                    ConnectionId::new(),
+                    ClientId::new(),
+                    RequestId::new(),
+                    TerminalAction::Resize,
+                    TerminalRequest::Resize {
+                        terminal,
+                        geometry: TerminalGeometry {
+                            cols: 100,
+                            rows: 40
+                        },
+                    },
+                ),
+                TerminalOutcome::NotOwned
+            ));
+        }
+        assert!(runtime.pty.resized.is_empty());
+    }
+
+    #[test]
+    fn agent_resize_failure_does_not_commit_geometry() {
+        let mut runtime = runtime();
+        let terminal = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &intent(None),
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap()
+            .terminal;
+        runtime.pty.resize_failure = true;
+
+        let outcome = runtime.handle_terminal(
+            ConnectionId::new(),
+            ClientId::new(),
+            RequestId::new(),
+            TerminalAction::Resize,
+            TerminalRequest::Resize {
+                terminal: terminal.clone(),
+                geometry: TerminalGeometry {
+                    cols: 100,
+                    rows: 40,
+                },
+            },
+        );
+        let TerminalOutcome::Handled(Err(error)) = outcome else {
+            panic!("agent resize failure must be handled")
+        };
+        assert_eq!(error.code, ErrorCode::Unavailable);
+
+        let snapshot = handled(runtime.handle_terminal(
+            ConnectionId::new(),
+            ClientId::new(),
+            RequestId::new(),
+            TerminalAction::Resync,
+            TerminalRequest::Resync { terminal },
+        ));
+        assert_eq!(snapshot["geometry"], json!({"cols":80,"rows":24}));
+        assert_eq!(runtime.pty.resized.len(), 1);
     }
 
     #[test]

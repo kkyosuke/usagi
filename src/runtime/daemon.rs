@@ -3470,6 +3470,8 @@ mod tests {
 
         pty.spawn(&launch, &terminal, Geometry { cols: 80, rows: 24 })
             .unwrap();
+        pty.resize(&terminal, Geometry { cols: 91, rows: 37 })
+            .unwrap();
         pty.select_terminal(&terminal);
         pty.write_all(b"exit\n").unwrap();
 

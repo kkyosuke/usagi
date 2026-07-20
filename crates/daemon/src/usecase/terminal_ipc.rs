@@ -272,13 +272,7 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
             ) => {
                 let geometry = geometry(size)?;
                 self.coordinator
-                    .ensure_running(&terminal)
-                    .map_err(map_error)?;
-                self.pty.resize(&terminal, geometry).map_err(|_| {
-                    ProtocolError::new(ErrorCode::Unavailable, "terminal resize failed")
-                })?;
-                self.coordinator
-                    .resize(&terminal, geometry)
+                    .resize(&terminal, geometry, &mut self.pty)
                     .map(|snapshot| json!(snapshot))
                     .map_err(map_error)
             }
@@ -365,6 +359,8 @@ fn geometry(value: TerminalGeometry) -> Result<Geometry, ProtocolError> {
 fn map_error(error: GenericTerminalError) -> ProtocolError {
     let code = match error {
         GenericTerminalError::Terminal(RegistryError::ResyncRequired) => ErrorCode::ResyncRequired,
+        GenericTerminalError::Terminal(RegistryError::PtyResizeFailed)
+        | GenericTerminalError::SpawnFailed => ErrorCode::Unavailable,
         GenericTerminalError::UnknownTerminal
         | GenericTerminalError::TerminalGenerationMismatch
         | GenericTerminalError::Terminal(_) => ErrorCode::StaleTarget,
@@ -372,7 +368,6 @@ fn map_error(error: GenericTerminalError) -> ProtocolError {
         GenericTerminalError::ReconcileRequired(_)
         | GenericTerminalError::Store
         | GenericTerminalError::InvalidSnapshot => ErrorCode::OwnershipUnknown,
-        GenericTerminalError::SpawnFailed => ErrorCode::Unavailable,
         GenericTerminalError::Launch(_) | GenericTerminalError::ScopeMismatch => {
             ErrorCode::InvalidArgument
         }
@@ -437,6 +432,9 @@ mod tests {
         spawned_geometry: Option<Geometry>,
         resized: Vec<Geometry>,
         released: Vec<TerminalRef>,
+        resize_failure: bool,
+        resize_started: Option<std::sync::mpsc::SyncSender<()>>,
+        resize_continue: Option<std::sync::mpsc::Receiver<()>>,
     }
     impl GenericPtySpawner for Pty {
         fn spawn(
@@ -458,7 +456,17 @@ mod tests {
     impl PtyWriter for Pty {
         fn resize(&mut self, _: &TerminalRef, geometry: Geometry) -> Result<(), PtyWriteError> {
             self.resized.push(geometry);
-            Ok(())
+            if let Some(started) = &self.resize_started {
+                started.send(()).unwrap();
+            }
+            if let Some(resume) = &self.resize_continue {
+                resume.recv().unwrap();
+            }
+            if self.resize_failure {
+                Err(PtyWriteError { applied_prefix: 0 })
+            } else {
+                Ok(())
+            }
         }
 
         fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
@@ -502,6 +510,183 @@ mod tests {
                 serde_json::to_value(request).unwrap(),
             )
             .unwrap()
+    }
+    fn launched_runtime() -> (
+        GenericTerminalRuntime<Resolver, Store, Pty, Scope>,
+        TerminalRef,
+    ) {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let worktree = WorktreeId::new();
+        let scope = TerminalLaunchScope {
+            workspace_id: workspace,
+            session_id: Some(session),
+            worktree_id: worktree,
+        };
+        let mut runtime = GenericTerminalRuntime::new(
+            DaemonGeneration::new(),
+            Resolver,
+            Store,
+            Pty::default(),
+            Scope {
+                scope: scope.clone(),
+                working_directory: PathBuf::from("/available-worktree"),
+            },
+        );
+        let terminal = serde_json::from_value(
+            call(
+                &mut runtime,
+                ConnectionId::new(),
+                ClientId::new(),
+                TerminalAction::Launch,
+                TerminalRequest::Launch {
+                    intent: usagi_core::usecase::client::TerminalLaunchIntent {
+                        request: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
+                            profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                            scope,
+                        },
+                        geometry: TerminalGeometry { cols: 80, rows: 24 },
+                    },
+                },
+            )["terminal"]
+                .clone(),
+        )
+        .unwrap();
+        (runtime, terminal)
+    }
+
+    #[test]
+    fn resize_rejects_each_forged_terminal_ref_field_before_pty_effect() {
+        let (mut runtime, terminal) = launched_runtime();
+        let mut forged = Vec::new();
+        let mut reference = terminal.clone();
+        reference.daemon_generation = DaemonGeneration::new();
+        forged.push(("daemon_generation", reference));
+        let mut reference = terminal.clone();
+        reference.terminal_id = TerminalId::new();
+        forged.push(("terminal_id", reference));
+        let mut reference = terminal.clone();
+        reference.workspace_id = WorkspaceId::new();
+        forged.push(("workspace_id", reference));
+        let mut reference = terminal.clone();
+        reference.session_id = Some(SessionId::new());
+        forged.push(("session_id", reference));
+        let mut reference = terminal;
+        reference.worktree_id = WorktreeId::new();
+        forged.push(("worktree_id", reference));
+
+        for (field, terminal) in forged {
+            let error = runtime
+                .request(
+                    ConnectionId::new(),
+                    ClientId::new(),
+                    RequestId::new(),
+                    TerminalAction::Resize,
+                    serde_json::to_value(TerminalRequest::Resize {
+                        terminal,
+                        geometry: TerminalGeometry {
+                            cols: 100,
+                            rows: 40,
+                        },
+                    })
+                    .unwrap(),
+                )
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::StaleTarget, "forged {field}");
+        }
+        assert!(runtime.pty.resized.is_empty());
+    }
+
+    #[test]
+    fn resize_failure_does_not_commit_geometry() {
+        let (mut runtime, terminal) = launched_runtime();
+        let before = runtime.coordinator.terminal_snapshot(&terminal).unwrap();
+        runtime.pty.resize_failure = true;
+
+        let error = runtime
+            .request(
+                ConnectionId::new(),
+                ClientId::new(),
+                RequestId::new(),
+                TerminalAction::Resize,
+                serde_json::to_value(TerminalRequest::Resize {
+                    terminal: terminal.clone(),
+                    geometry: TerminalGeometry {
+                        cols: 100,
+                        rows: 40,
+                    },
+                })
+                .unwrap(),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::Unavailable);
+        assert_eq!(runtime.pty.resized.len(), 1);
+        assert_eq!(
+            runtime.coordinator.terminal_snapshot(&terminal).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn resize_holds_the_actor_lock_across_effect_and_commit() {
+        use std::{
+            sync::{Arc, Mutex, mpsc},
+            time::Duration,
+        };
+
+        let (mut runtime, terminal) = launched_runtime();
+        let (started_tx, started_rx) = mpsc::sync_channel(0);
+        let (continue_tx, continue_rx) = mpsc::sync_channel(0);
+        runtime.pty.resize_started = Some(started_tx);
+        runtime.pty.resize_continue = Some(continue_rx);
+        let runtime = Arc::new(Mutex::new(runtime));
+        let resize_runtime = Arc::clone(&runtime);
+        let resize_terminal = terminal.clone();
+        let resize = std::thread::spawn(move || {
+            resize_runtime.lock().unwrap().request(
+                ConnectionId::new(),
+                ClientId::new(),
+                RequestId::new(),
+                TerminalAction::Resize,
+                serde_json::to_value(TerminalRequest::Resize {
+                    terminal: resize_terminal,
+                    geometry: TerminalGeometry {
+                        cols: 100,
+                        rows: 40,
+                    },
+                })
+                .unwrap(),
+            )
+        });
+        started_rx.recv().unwrap();
+
+        let exit_runtime = Arc::clone(&runtime);
+        let exit_terminal = terminal.clone();
+        let (exit_tx, exit_rx) = mpsc::sync_channel(0);
+        let exit = std::thread::spawn(move || {
+            let result = exit_runtime.lock().unwrap().exit(&exit_terminal, 0);
+            exit_tx.send(result).unwrap();
+        });
+        assert!(exit_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+        continue_tx.send(()).unwrap();
+        assert_eq!(
+            resize.join().unwrap().unwrap()["geometry"],
+            json!({"cols":100,"rows":40})
+        );
+        exit_rx.recv().unwrap().unwrap();
+        exit.join().unwrap();
+        let runtime = runtime.lock().unwrap();
+        assert_eq!(runtime.pty.resized.len(), 1);
+        assert_eq!(
+            runtime
+                .coordinator
+                .terminal_snapshot(&terminal)
+                .unwrap()
+                .exited,
+            Some(0)
+        );
     }
     #[test]
     fn fake_pty_covers_launch_attach_output_input_detach_reattach_and_exit() {
