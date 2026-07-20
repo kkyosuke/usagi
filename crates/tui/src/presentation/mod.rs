@@ -24,8 +24,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use chrono::{DateTime, Utc};
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::AgentProfileId;
-use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId};
+use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, UserDecisionId, WorkspaceId};
 use usagi_core::domain::recent::Recent;
+use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::usecase::client::DaemonMetrics;
 
@@ -154,6 +155,25 @@ pub trait AgentCommandPort: Send {
 
     /// Release a daemon terminal subscription; it must not stop the process.
     fn detach_terminal(&mut self, _terminal: &TerminalRef, _subscription: u64) {}
+}
+
+/// Daemon-authoritative durable decision boundary for the workspace runtime.
+///
+/// The controller keeps the list and editor locally, while this port is the
+/// only route that can refresh or resolve daemon-owned decisions.  Responses
+/// are projected back through [`BackendEvent`], preserving the reducer's
+/// one-way event flow and making the production adapter replaceable by a fake.
+pub trait DecisionCommandPort: Send {
+    /// Fetch the authoritative pending snapshot for one workspace.
+    fn refresh(&mut self, workspace: WorkspaceId) -> BackendEvent;
+    /// Submit one already validated answer. Rows remain visible until the
+    /// returned confirmation event reaches the reducer.
+    fn resolve(
+        &mut self,
+        workspace: WorkspaceId,
+        decision_id: UserDecisionId,
+        answer: UserDecisionAnswer,
+    ) -> BackendEvent;
 }
 
 /// Bridges the workspace [`AgentCommandPort`] into the [`TerminalStreamPort`]
@@ -429,6 +449,33 @@ impl AgentCommandPort for UnavailableAgentCommandPort {
         _profile: Option<AgentProfileId>,
     ) -> Result<TerminalRef, String> {
         Err("Agent launch is unavailable.".to_owned())
+    }
+}
+
+/// Decision fallback for the screen-graph compatibility path. Production
+/// composition injects its daemon-backed counterpart.
+struct UnavailableDecisionCommandPort;
+impl DecisionCommandPort for UnavailableDecisionCommandPort {
+    #[coverage(off)]
+    fn refresh(&mut self, _workspace: WorkspaceId) -> BackendEvent {
+        BackendEvent::Notice(Notice::new("User decisions are unavailable."))
+    }
+
+    #[coverage(off)]
+    fn resolve(
+        &mut self,
+        workspace: WorkspaceId,
+        decision_id: UserDecisionId,
+        _answer: UserDecisionAnswer,
+    ) -> BackendEvent {
+        BackendEvent::DecisionError {
+            workspace,
+            decision_id,
+            error: SafeError {
+                message: SafeMessage::new("User decisions are unavailable."),
+                error_id: "decision-unavailable".to_owned(),
+            },
+        }
     }
 }
 
@@ -1586,6 +1633,8 @@ fn render_controller_frame(
 #[coverage(off)]
 fn dispatch_controller_effect(
     ui: &mut WorkspaceUi,
+    decisions: &mut dyn DecisionCommandPort,
+    runtime: &mut WorkspaceRuntime,
     effect: &Effect,
     pending_targets: &mut std::collections::HashMap<OperationId, Target>,
 ) -> ControllerFlow {
@@ -1665,9 +1714,21 @@ fn dispatch_controller_effect(
         | Effect::OpenPullRequest { .. }
         | Effect::AttachWorkspace { .. }
         | Effect::CloneProject { .. }
-        | Effect::RegisterWorkspace { .. }
-        | Effect::RefreshDecisions { .. }
-        | Effect::ResolveDecision { .. } => {}
+        | Effect::RegisterWorkspace { .. } => {}
+        Effect::RefreshDecisions { workspace } => {
+            let _ = runtime.apply_event(AppEvent::Backend(decisions.refresh(*workspace)));
+        }
+        Effect::ResolveDecision {
+            workspace,
+            decision_id,
+            answer,
+        } => {
+            let _ = runtime.apply_event(AppEvent::Backend(decisions.resolve(
+                *workspace,
+                *decision_id,
+                answer.clone(),
+            )));
+        }
     }
     ControllerFlow::Continue
 }
@@ -1871,6 +1932,7 @@ fn drive_workspace_controller(
     snapshot: WorkspaceSnapshot,
     session_commands: Box<dyn SessionCommandPort>,
     agent_port: Box<dyn AgentCommandPort>,
+    mut decisions: Box<dyn DecisionCommandPort>,
     metrics_port: Box<dyn MetricsPort>,
     mut pr_port: Box<dyn PrSnapshotPort>,
     mut browser: Box<dyn BrowserOpener>,
@@ -1898,6 +1960,9 @@ fn drive_workspace_controller(
     // Live-terminal scroll offset, drag selection, and copy feedback the reducer
     // does not own (design §4.2).
     let mut controls = LiveTerminalControls::default();
+    // Seed the daemon-authoritative snapshot before the first frame so a
+    // pending decision is visible without requiring a manual key binding.
+    let _ = runtime.apply_event(AppEvent::Backend(decisions.refresh(workspace_id)));
     loop {
         drain_session_completions(&mut ui, &mut runtime);
         sync_runtime_sessions(&mut runtime, &ui);
@@ -1985,8 +2050,13 @@ fn drive_workspace_controller(
             ) {
                 let _ = runtime.apply_event(event);
             }
-            if dispatch_controller_effect(&mut ui, &effect, &mut pending_targets)
-                == ControllerFlow::Exit
+            if dispatch_controller_effect(
+                &mut ui,
+                decisions.as_mut(),
+                &mut runtime,
+                &effect,
+                &mut pending_targets,
+            ) == ControllerFlow::Exit
             {
                 return Ok(WorkspaceStep::Quit);
             }
@@ -2006,6 +2076,7 @@ pub fn run_workspace_controller(
     snapshot: WorkspaceSnapshot,
     session_commands: Box<dyn SessionCommandPort>,
     agent_port: Box<dyn AgentCommandPort>,
+    decisions: Box<dyn DecisionCommandPort>,
     metrics_port: Box<dyn MetricsPort>,
     pr_port: Box<dyn PrSnapshotPort>,
     browser: Box<dyn BrowserOpener>,
@@ -2015,6 +2086,7 @@ pub fn run_workspace_controller(
         snapshot,
         session_commands,
         agent_port,
+        decisions,
         metrics_port,
         pr_port,
         browser,
@@ -2207,6 +2279,7 @@ fn open_snapshot_via_controller<'a, 'b>(
         snapshot,
         session_commands.create(),
         agent_port,
+        Box::new(UnavailableDecisionCommandPort),
         metrics_port,
         Box::new(UnavailablePrSnapshotPort),
         Box::new(UnavailableBrowserOpener),
@@ -2470,11 +2543,11 @@ mod tests {
         DefaultSettingsPort, Exit, Geometry, MetricsPort, MetricsPortFactory, NewStep, NoMetrics,
         NoMetricsFactory, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult,
         Start, TerminalAttach, TerminalChunk, TerminalError, UnavailableBrowserOpener,
-        UnavailablePrSnapshotPort, UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader,
-        WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
-        close_exited_panes, controller_terminal_view, handle_terminal_pointer,
-        key_to_terminal_bytes, new_project_notice, play_startup_splash, render_controller_frame,
-        render_home_snapshot, run as run_from_start, run_with_settings,
+        UnavailableDecisionCommandPort, UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
+        WelcomeStep, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi,
+        WorkspaceView, app_event_from_key, close_exited_panes, controller_terminal_view,
+        handle_terminal_pointer, key_to_terminal_bytes, new_project_notice, play_startup_splash,
+        render_controller_frame, render_home_snapshot, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_controller, safe_session_error, step_config, step_new, terminal_geometry,
         welcome_action, write_banner,
@@ -2843,6 +2916,7 @@ mod tests {
             snapshot,
             Box::new(UnavailableSessionCommandPort),
             Box::new(SuccessfulAgentPort(terminal)),
+            Box::new(UnavailableDecisionCommandPort),
             Box::new(NoMetrics),
             Box::new(UnavailablePrSnapshotPort),
             Box::new(UnavailableBrowserOpener),
@@ -2921,6 +2995,7 @@ mod tests {
             snapshot,
             Box::new(UnavailableSessionCommandPort),
             Box::new(SuccessfulAgentPort(terminal)),
+            Box::new(UnavailableDecisionCommandPort),
             Box::new(NoMetrics),
             Box::new(UnavailablePrSnapshotPort),
             Box::new(UnavailableBrowserOpener),

@@ -10,7 +10,7 @@
 //! 入力編集と候補選択の純粋操作だけを公開する。
 
 use crate::presentation::theme::{Role, Style};
-use crate::presentation::widgets::{self, TextInput, modal};
+use crate::presentation::widgets::{TextInput, modal};
 use crate::usecase::overview;
 use usagi_core::domain::settings::ModalSelectionMode;
 
@@ -285,15 +285,6 @@ impl OverviewModal {
     }
 }
 
-/// `❯ <input>` の入力行。共通 block cursor が編集位置の 1 文字を反転し、空・行末では
-/// 反転空白 1 つを置く。
-fn input_line(value: &str, cursor: usize) -> String {
-    let prompt = Role::Danger.style().bold().paint("❯");
-    let accent = Role::Accent.style();
-    let body = widgets::block_caret(value, cursor, &accent);
-    format!("{prompt} {body}")
-}
-
 /// 1 候補行: 選択中は `›` マーカー、コマンド名（accent）、説明（dim）。幅に切り詰める。
 fn hint_row(hint: overview::CommandInfo, selected: bool, inner: usize) -> String {
     let marker = modal::selection_marker(selected);
@@ -310,7 +301,10 @@ fn hint_row(hint: overview::CommandInfo, selected: bool, inner: usize) -> String
 #[coverage(off)] // Rendering branches are covered by frame snapshots; LLVM misses ANSI subcommand rows.
 fn body(state: &OverviewModal) -> Vec<String> {
     let matches = state.matches();
-    let mut lines = vec![input_line(state.input(), state.cursor()), String::new()];
+    let mut lines = vec![
+        modal::prompt_line(state.input(), state.cursor()),
+        String::new(),
+    ];
     if matches.is_empty() {
         lines.push(modal::empty_notice("no matching command"));
     } else {
@@ -327,16 +321,10 @@ fn body(state: &OverviewModal) -> Vec<String> {
                 && i == state.selected
             {
                 for (sub_index, subcommand) in state.subcommands().iter().enumerate() {
-                    let marker = if sub_index == state.selected_subcommand {
-                        "›"
-                    } else {
-                        " "
-                    };
-                    lines.push(
-                        Style::new()
-                            .dim()
-                            .paint(&format!("      {marker} {subcommand}")),
-                    );
+                    lines.push(modal::subcommand_row(
+                        subcommand,
+                        sub_index == state.selected_subcommand,
+                    ));
                 }
             }
         }

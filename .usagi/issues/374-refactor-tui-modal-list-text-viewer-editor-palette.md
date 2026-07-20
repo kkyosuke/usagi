@@ -1,13 +1,13 @@
 ---
 number: 374
 title: refactor(tui): modal を形別コンポーネント（list / text-viewer / editor / palette）へ整理する
-status: todo
+status: done
 priority: medium
 labels: [tui, ui, modal, refactor]
 dependson: [372]
 related: [261, 317, 244, 243]
 created_at: 2026-07-19T22:01:02.622286+00:00
-updated_at: 2026-07-19T22:01:02.622286+00:00
+updated_at: 2026-07-20T01:06:05.103338+00:00
 ---
 
 ## 目的

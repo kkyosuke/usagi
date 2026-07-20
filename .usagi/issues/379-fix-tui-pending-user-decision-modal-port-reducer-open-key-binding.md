@@ -1,13 +1,13 @@
 ---
 number: 379
 title: fix(tui): pending user decision を本番で配送・自動 modal 表示する（port 注入・reducer 自動 open・key binding）
-status: todo
+status: done
 priority: high
 labels: [tui, daemon, ux, bug]
 dependson: [378]
 related: [329, 330, 328]
 created_at: 2026-07-19T22:45:03.430438+00:00
-updated_at: 2026-07-19T22:45:03.430438+00:00
+updated_at: 2026-07-20T00:50:10.891462+00:00
 ---
 
 ## 背景 / 不具合

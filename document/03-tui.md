@@ -145,7 +145,10 @@ Home sidebar は `main → divider → session* → + new session` の順序と 
 session は selected / active を main に縮退させ、空一覧でも main と作成 action は残る。
 
 Switch で `+ new session` を選び Enter（または `t`）を押すと、その行が `+ new: <name>` の
-inline 入力欄へ置き換わる。名前を入力して Enter を押すと通常の `session create <name>` と同じ daemon
+inline 入力欄へ置き換わる。置き換わった入力欄でも `+ new` affordance は静的な `+ new session` と同じ
+Success（緑）で描き、入力中の名前は accent で描くため、静的行から入力欄へ移っても affordance の緑が途切れない。
+入力欄はその行が入力を所有しているため、選択を表す `>` chevron は描かず、空のマーカー列で affordance を静的
+ラベルと揃える。名前を入力して Enter を押すと通常の `session create <name>` と同じ daemon
 request を非同期に開始し、完了まで行の直前に session と同じ 2 行の skeleton を表示する。skeleton の activity glyph と session 名は同じ
 左から右へ流れる低速の wave で描き、静的な点滅にはしない。daemon が同一 `OperationId` と revision を持つ `session.created`
 完了 hook を返したときだけ、skeleton をその response 内の snapshot row に置き換えて loading を終了する。IME に依存しない `Ctrl-A` も
@@ -242,9 +245,6 @@ Home 背景との合成範囲を越えない。
 - **Overview の action-mode footer**: インデントの無かった footer を、他の footer と同じ 2 桁インデントへ揃えた。
 - **共通マーカー**: `›` は `selection_marker` の 1 経路に集約し、`widgets/select.rs` の focus カーソルも再利用する。
 
-list / text-viewer / editor / palette の形別コンポーネント抽出は本 kit の上に別途載せる（別 issue）。
-決定 modal の選択行が使う plain な `>` マーカーは、list コンポーネント抽出時に共通カーソルへ寄せる。
-
 ### 共通 confirmation component
 
 Yes/No の確認は `widgets/modal.rs` の `render_confirmation_over` 1 経路で描く。表示内容は
@@ -263,6 +263,29 @@ footer 行は body-composition kit の `footer` helper を通す。
 ボタン付き variant の Yes/No 選択状態は `ConfirmationModal` が持ち、compact variant は選択状態を
 持たない（state 引数を読まない）。open の cleanup は list 本文に手組みしていた `y/n` prompt を廃し、
 unregister と同じ overlay 経路で合成する。
+
+### 形別コンポーネント
+
+body-composition kit の 1 段上に、modal を「形（shape）」ごとの薄い composition helper として整理する。
+各 modal の view には固有の state・キー解釈・内容だけを残し、行の並べ方・scroll viewport・選択・prompt と
+いった形の共通部分を `widgets/modal.rs` の shape helper へ寄せる。
+
+| shape | 対象 modal | shape helper | 共通化する部分 |
+|---|---|---|---|
+| list | Prs / Closeup / Decisions（一覧・option） / remove | `list_window` + `scroll_window` + `selection_marker` | 選択追従の viewport・カーソルマーカー・`↑/↓ N more`・行 clip |
+| text-viewer | Preview（`text_overlay`。PR error の Unavailable も） | `viewport_window` + `scroll_window` | offset 起点の読み取り専用 scroll・scroll indicator |
+| editor | Notes / Environment / Decisions（editor） | `content_line` + `caption` / `heading` + `footer` | draft 行・section 切替・error 行・footer |
+| palette | Overview / Closeup（prompt） | `prompt_line` + `subcommand_row` + list helper | `❯` 入力行・前方一致候補・inline subcommand picker・result / footer |
+
+- **scroll viewport は 1 経路**。選択追従（list）は `list_window(len, selected, capacity)`、offset 起点
+  （text-viewer）は `viewport_window(len, offset, capacity)` が半開区間 `[start, end)` を返し、`scroll_window(rows, start, end)`
+  が `↑ N more` / `↓ N more` を挟んで窓を描く。pr_modal の旧 `visible_bounds` と text_overlay の inline scroll 計算は
+  この 3 helper に統合した。
+- **palette の入力行は `prompt_line(value, cursor)`**（danger `❯` + accent block caret）に集約し、Overview と
+  Closeup（prompt）が同じ prompt を描く。inline subcommand picker は `subcommand_row(label, selected)` に寄せる。
+  subcommand の quiet な `›` は list の danger カーソルとは別に保つ。
+- **決定 modal の選択行は共通カーソルへ移行**した。旧 plain `>` を `selection_marker` の danger `›` に揃え、他の
+  list modal と同じ `content_line(format!("{marker} {label}"), inner)` で描く。
 
 ## Sidebar mascot
 

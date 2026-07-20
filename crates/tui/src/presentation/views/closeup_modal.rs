@@ -9,7 +9,7 @@
 //! カーソル移動と選択の純粋操作だけを公開する。
 
 use crate::presentation::theme::{Role, Style};
-use crate::presentation::widgets::{self, TextInput, modal};
+use crate::presentation::widgets::{TextInput, modal};
 use crate::usecase::closeup;
 use usagi_core::domain::settings::ModalSelectionMode;
 
@@ -250,16 +250,11 @@ fn action_row(action: closeup::CommandInfo, selected: bool, inner: usize) -> Str
 /// アクションメニューのボディ（枠の内側の行）。対象セッションは v1 と同様に title にのみ載せる。
 fn body(state: &CloseupModal) -> Vec<String> {
     if state.selection_mode == ModalSelectionMode::Prompt {
-        let prompt = widgets::block_caret(
-            state.input.value(),
-            state.input.cursor(),
-            &Role::Accent.style(),
-        );
         return modal::fixed_body(
             vec![
                 Style::new().dim().paint("Type a command:"),
                 String::new(),
-                format!("❯ {prompt}"),
+                modal::prompt_line(state.input.value(), state.input.cursor()),
                 String::new(),
                 modal::footer("Enter: run   Esc: back"),
             ],
@@ -268,30 +263,17 @@ fn body(state: &CloseupModal) -> Vec<String> {
     }
     let mut lines = vec![
         Style::new().dim().paint("Run a command:  (type to filter)"),
-        format!(
-            "❯ {}",
-            widgets::block_caret(
-                state.input.value(),
-                state.input.cursor(),
-                &Role::Accent.style()
-            )
-        ),
+        modal::prompt_line(state.input.value(), state.input.cursor()),
         String::new(),
     ];
     for (i, action) in state.matches().iter().enumerate() {
         lines.push(action_row(*action, i == state.selected, INNER_WIDTH));
         if state.expanded && i == state.selected {
             for (sub_index, subcommand) in state.subcommands().iter().enumerate() {
-                let marker = if sub_index == state.selected_subcommand {
-                    "›"
-                } else {
-                    " "
-                };
-                lines.push(
-                    Style::new()
-                        .dim()
-                        .paint(&format!("      {marker} {subcommand}")),
-                );
+                lines.push(modal::subcommand_row(
+                    subcommand,
+                    sub_index == state.selected_subcommand,
+                ));
             }
         }
     }
