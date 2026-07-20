@@ -543,14 +543,15 @@ impl RuntimeCoordinator {
 
     /// Updates the fenced runtime terminal geometry.
     #[coverage(off)]
-    pub fn resize(
+    pub fn resize<W: PtyWriter>(
         &mut self,
         runtime: &AgentRuntimeRef,
         geometry: Geometry,
+        writer: &mut W,
     ) -> Result<Snapshot, RuntimeError> {
         self.running(runtime)?;
         self.terminals
-            .resize(&runtime.terminal, geometry)
+            .resize(&runtime.terminal, geometry, writer)
             .map_err(RuntimeError::Terminal)
     }
 
@@ -1203,13 +1204,15 @@ mod tests {
         let reattached = c.attach(&runtime, connection).unwrap();
         assert_eq!(reattached.snapshot.replay, b"boot\n");
         assert_eq!(c.replay_from(&runtime, 0).unwrap()[0].data, b"boot\n");
+        let mut resize_writer = Writer::default();
         assert_eq!(
             c.resize(
                 &runtime,
                 Geometry {
                     cols: 120,
                     rows: 40
-                }
+                },
+                &mut resize_writer,
             )
             .unwrap()
             .geometry

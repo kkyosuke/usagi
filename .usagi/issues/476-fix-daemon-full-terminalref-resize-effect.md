@@ -1,14 +1,14 @@
 ---
 number: 476
 title: fix(daemon): full TerminalRef 検証後にだけ resize effect を実行する
-status: todo
+status: done
 priority: high
 labels: [review, v2, daemon, terminal, security]
 dependson: []
 related: [214, 218, 264, 309]
 parent: 453
 created_at: 2026-07-20T12:06:25.014656+00:00
-updated_at: 2026-07-20T12:06:25.014656+00:00
+updated_at: 2026-07-20T21:40:10.557199+00:00
 ---
 
 ## 問題・影響
