@@ -516,23 +516,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                 after_offset,
             },
         )?;
-        let outputs = body["output"].as_array().cloned().unwrap_or_default();
-        let mut chunks = Vec::with_capacity(outputs.len());
-        for output in outputs {
-            let start_offset = output["start_offset"]
-                .as_u64()
-                .ok_or(TerminalError::Unavailable)?;
-            let end_offset = output["end_offset"]
-                .as_u64()
-                .ok_or(TerminalError::Unavailable)?;
-            let data = serde_json::from_value(output["data"].clone()).unwrap_or_default();
-            chunks.push(TerminalChunk {
-                start_offset,
-                end_offset,
-                data,
-            });
-        }
-        Ok(chunks)
+        decode_terminal_poll(&body)
     }
 
     #[coverage(off)]
@@ -569,6 +553,41 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             },
         );
     }
+}
+
+/// Decode a terminal `Resume` reply into the output chunks a session applies.
+///
+/// The daemon reports the hosting process's exit in the same reply
+/// (`"exited": true`) for both generic terminals and Agent runtimes. Once no
+/// further output remains to apply, that exit is surfaced as
+/// [`TerminalError::Exited`] so the per-frame poll — not only an incidental
+/// resync — transitions the [`usagi_tui`] terminal session to exited and the
+/// Closeup pane tab is dropped. A reply that still carries fresh output yields
+/// the chunks first; the next poll (which returns no new output) then reports
+/// the exit, preserving the final output before the tab disappears.
+fn decode_terminal_poll(body: &serde_json::Value) -> Result<Vec<TerminalChunk>, TerminalError> {
+    let outputs = body["output"].as_array().cloned().unwrap_or_default();
+    let mut chunks = Vec::with_capacity(outputs.len());
+    for output in outputs {
+        let start_offset = output["start_offset"]
+            .as_u64()
+            .ok_or(TerminalError::Unavailable)?;
+        let end_offset = output["end_offset"]
+            .as_u64()
+            .ok_or(TerminalError::Unavailable)?;
+        let data = serde_json::from_value(output["data"].clone()).unwrap_or_default();
+        chunks.push(TerminalChunk {
+            start_offset,
+            end_offset,
+            data,
+        });
+    }
+    // `exited` is absent while running (and on daemons that omit it), so only an
+    // explicit `true` — after the final output is drained — ends the session.
+    if chunks.is_empty() && body["exited"].as_bool() == Some(true) {
+        return Err(TerminalError::Exited);
+    }
+    Ok(chunks)
 }
 
 struct LifecycleSnapshot {
@@ -1448,10 +1467,12 @@ pub(crate) fn launch(
 #[cfg(test)]
 mod tests {
     use super::{
-        LifecycleSnapshot, PersistentSettingsPort, Start, control_key, created_session_hook,
-        load_screen_graph_data, load_workspace_state, passthrough_key,
+        LifecycleSnapshot, PersistentSettingsPort, Start, TerminalChunk, TerminalError,
+        control_key, created_session_hook, decode_terminal_poll, load_screen_graph_data,
+        load_workspace_state, passthrough_key,
     };
     use chrono::Utc;
+    use serde_json::json;
     use usagi_core::domain::id::{OperationId, WorkspaceId};
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
@@ -1464,6 +1485,60 @@ mod tests {
     use usagi_tui::usecase::terminal_input::{
         KeyCode, KeyEvent, KeyEventKind, LiveInput, Modifiers,
     };
+
+    #[test]
+    fn decode_terminal_poll_returns_output_chunks_while_running() {
+        let body = json!({
+            "output": [{"start_offset": 0, "end_offset": 3, "data": b"abc".to_vec()}],
+            "exited": false,
+        });
+        assert_eq!(
+            decode_terminal_poll(&body),
+            Ok(vec![TerminalChunk {
+                start_offset: 0,
+                end_offset: 3,
+                data: b"abc".to_vec(),
+            }])
+        );
+    }
+
+    #[test]
+    fn decode_terminal_poll_treats_a_missing_exited_flag_as_running() {
+        // A daemon reply that omits `exited` (or predates the field) must not be
+        // read as an exit, so a live pane tab is never dropped spuriously.
+        let body = json!({ "output": [] });
+        assert_eq!(decode_terminal_poll(&body), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn decode_terminal_poll_surfaces_exit_once_output_is_drained() {
+        let body = json!({ "output": [], "exited": true });
+        assert_eq!(decode_terminal_poll(&body), Err(TerminalError::Exited));
+    }
+
+    #[test]
+    fn decode_terminal_poll_yields_final_output_before_reporting_exit() {
+        // The exit reply may still carry fresh output; it is applied first and the
+        // exit is reported on the next (drained) poll, preserving final output.
+        let body = json!({
+            "output": [{"start_offset": 6, "end_offset": 8, "data": b"hi".to_vec()}],
+            "exited": true,
+        });
+        assert_eq!(
+            decode_terminal_poll(&body),
+            Ok(vec![TerminalChunk {
+                start_offset: 6,
+                end_offset: 8,
+                data: b"hi".to_vec(),
+            }])
+        );
+    }
+
+    #[test]
+    fn decode_terminal_poll_rejects_a_malformed_output_frame() {
+        let body = json!({ "output": [{"end_offset": 3, "data": b"abc".to_vec()}] });
+        assert_eq!(decode_terminal_poll(&body), Err(TerminalError::Unavailable));
+    }
 
     #[test]
     fn lifecycle_snapshot_excludes_failed_sessions_from_the_tui_projection() {
