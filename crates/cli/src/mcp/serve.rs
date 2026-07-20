@@ -2,8 +2,8 @@
 //! `initialize` / `tools/list` / `tools/call` / `resources/list` / `resources/read` を
 //! 処理して 1 行の応答を返す。
 //!
-//! `handle_line`（str → 応答文字列 or なし）に純粋なルーティングを閉じ込め、`serve` は
-//! 実 IO（stdin/stdout）の反復だけを担う。実 IO は合成ルートが注入するため、ルーティングは
+//! 1 接続の lifecycle state と行単位の validation/routing を `handle_line_with_client` に閉じ込め、
+//! `serve` は実 IO（stdin/stdout）の反復だけを担う。実 IO は合成ルートが注入するため、routing は
 //! ユニットテストできる。`tools/call` は実装済み tool を対応する store / daemon 経路へ送り、
 //! issue / memory は cwd の core store usecase、session 系は daemon client へ接続し、
 //! tool 個別または daemon のエラーを JSON-RPC エラーへ変換する。
@@ -21,9 +21,15 @@ use super::runtime_model::{PathExecutableLocator, RuntimeModelSnapshot, Workspac
 use super::tool::ToolError;
 use super::{dispatch, resources, tools};
 
-/// サーバが宣言する MCP プロトコルバージョン。クライアントが `initialize` で別の版を
-/// 要求したらそれをエコーし、無ければこの既定を返す。
-const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
+/// サーバが対応する MCP プロトコルバージョン。
+const SUPPORTED_PROTOCOL_VERSION: &str = "2025-06-18";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ServerState {
+    AwaitingInitialize,
+    AwaitingInitialized,
+    Ready,
+}
 
 /// stdin の JSON-RPC を行ごとに処理し、応答を stdout へ書く。EOF で正常終了する。
 ///
@@ -82,6 +88,7 @@ pub fn serve_with_client_and_snapshot(
     snapshot: &RuntimeModelSnapshot,
 ) -> io::Result<()> {
     let mut buf = Vec::new();
+    let mut state = ServerState::AwaitingInitialize;
     loop {
         buf.clear();
         // 生バイトで 1 行読む。真の IO エラーだけ `?` で伝播する。
@@ -94,7 +101,8 @@ pub fn serve_with_client_and_snapshot(
         if line.is_empty() {
             continue;
         }
-        if let Some(response) = handle_line_with_client(line, version, client, snapshot) {
+        if let Some(response) = handle_line_with_client(line, version, client, snapshot, &mut state)
+        {
             writeln!(out, "{response}")?;
         }
     }
@@ -115,11 +123,13 @@ impl DaemonClient for UnavailableClient {
 #[coverage(off)]
 fn handle_line(line: &str, version: &str) -> Option<String> {
     let mut unavailable = UnavailableClient;
+    let mut state = ServerState::Ready;
     handle_line_with_client(
         line,
         version,
         &mut unavailable,
         &RuntimeModelSnapshot::default(),
+        &mut state,
     )
 }
 
@@ -129,25 +139,73 @@ fn handle_line_with_client(
     version: &str,
     client: &mut dyn DaemonClient,
     snapshot: &RuntimeModelSnapshot,
+    state: &mut ServerState,
 ) -> Option<String> {
     let Ok(request) = serde_json::from_str::<Value>(line) else {
         return Some(
             protocol::error(Value::Null, error_code::PARSE_ERROR, "parse error").to_string(),
         );
     };
-    let method = request.get("method").and_then(Value::as_str);
-    let id = request.get("id").cloned();
-    match (method, id) {
-        // 通常のリクエスト（method ＋ id）。
-        (Some(method), Some(id)) => {
-            Some(respond(method, id, request.get("params"), version, client, snapshot).to_string())
-        }
-        // method が無いのに id がある＝不正リクエスト。
-        (None, Some(id)) => {
-            Some(protocol::error(id, error_code::INVALID_REQUEST, "missing method").to_string())
-        }
-        // 通知（method のみ、id 無し）と、method も id も無い行は応答しない。
-        (Some(_) | None, None) => None,
+    let Some(object) = request.as_object() else {
+        return Some(
+            protocol::error(Value::Null, error_code::INVALID_REQUEST, "invalid request")
+                .to_string(),
+        );
+    };
+    let is_notification = !object.contains_key("id");
+    let response_id = match object.get("id") {
+        Some(id) if valid_id(id) => id.clone(),
+        Some(_) | None => Value::Null,
+    };
+    let invalid = |code, message: &str| {
+        (!is_notification).then(|| protocol::error(response_id.clone(), code, message).to_string())
+    };
+
+    if object.get("jsonrpc") != Some(&Value::String(protocol::VERSION.to_owned())) {
+        return invalid(error_code::INVALID_REQUEST, "jsonrpc must be \"2.0\"");
+    }
+    if object.contains_key("id") && !valid_id(&object["id"]) {
+        return invalid(
+            error_code::INVALID_REQUEST,
+            "id must be a string or integer",
+        );
+    }
+    let Some(method) = object.get("method").and_then(Value::as_str) else {
+        return invalid(error_code::INVALID_REQUEST, "method must be a string");
+    };
+    if object
+        .get("params")
+        .is_some_and(|params| !params.is_object())
+    {
+        return invalid(error_code::INVALID_PARAMS, "params must be an object");
+    }
+
+    if is_notification {
+        handle_notification(method, state);
+        return None;
+    }
+
+    Some(
+        respond(
+            method,
+            response_id,
+            object.get("params"),
+            version,
+            client,
+            snapshot,
+            state,
+        )
+        .to_string(),
+    )
+}
+
+fn valid_id(id: &Value) -> bool {
+    id.is_string() || id.as_i64().is_some() || id.as_u64().is_some()
+}
+
+fn handle_notification(method: &str, state: &mut ServerState) {
+    if method == "notifications/initialized" && *state == ServerState::AwaitingInitialized {
+        *state = ServerState::Ready;
     }
 }
 
@@ -160,9 +218,35 @@ fn respond(
     version: &str,
     client: &mut dyn DaemonClient,
     snapshot: &RuntimeModelSnapshot,
+    state: &mut ServerState,
 ) -> Value {
+    if method == "initialize" {
+        if *state != ServerState::AwaitingInitialize {
+            return protocol::error(
+                id,
+                error_code::INVALID_REQUEST,
+                "initialize is only allowed once at connection start",
+            );
+        }
+        return match initialize_result(params, version) {
+            Ok(result) => {
+                *state = ServerState::AwaitingInitialized;
+                protocol::success(id, result)
+            }
+            Err(message) => protocol::error(id, error_code::INVALID_PARAMS, message),
+        };
+    }
+    if method == "notifications/initialized" {
+        return protocol::error(
+            id,
+            error_code::INVALID_REQUEST,
+            "notifications/initialized must be a notification",
+        );
+    }
+    if method != "ping" && *state != ServerState::Ready {
+        return protocol::error(id, error_code::INVALID_REQUEST, "server is not initialized");
+    }
     match method {
-        "initialize" => protocol::success(id, initialize_result(params, version)),
         "ping" => protocol::success(id, json!({})),
         "tools/list" => protocol::success(id, tools_list_result(snapshot)),
         "tools/call" => tools_call(id, params, client, snapshot),
@@ -178,16 +262,21 @@ fn respond(
 
 /// `initialize` の結果（プロトコル版・capabilities・serverInfo）。
 #[coverage(off)]
-fn initialize_result(params: Option<&Value>, version: &str) -> Value {
-    let protocol_version = params
-        .and_then(|p| p.get("protocolVersion"))
+fn initialize_result(params: Option<&Value>, version: &str) -> Result<Value, &'static str> {
+    let Some(protocol_version) = params
+        .and_then(|params| params.get("protocolVersion"))
         .and_then(Value::as_str)
-        .unwrap_or(DEFAULT_PROTOCOL_VERSION);
-    json!({
-        "protocolVersion": protocol_version,
+    else {
+        return Err("missing protocolVersion");
+    };
+    if protocol_version != SUPPORTED_PROTOCOL_VERSION {
+        return Err("unsupported protocolVersion; server supports 2025-06-18");
+    }
+    Ok(json!({
+        "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
         "capabilities": { "tools": {}, "resources": {} },
         "serverInfo": { "name": "usagi", "version": version },
-    })
+    }))
 }
 
 /// `tools/list` の結果（全 tool の name / description / inputSchema）。
@@ -223,6 +312,16 @@ fn tools_call(
     let Some(name) = params.and_then(|p| p.get("name")).and_then(Value::as_str) else {
         return protocol::error(id, error_code::INVALID_PARAMS, "missing tool name");
     };
+    if params
+        .and_then(|params| params.get("arguments"))
+        .is_some_and(|arguments| !arguments.is_object())
+    {
+        return protocol::error(
+            id,
+            error_code::INVALID_PARAMS,
+            "arguments must be an object",
+        );
+    }
     let mut arguments = params
         .and_then(|p| p.get("arguments"))
         .cloned()
@@ -430,8 +529,8 @@ fn supervisor_tool_action(name: &str) -> Option<SupervisorToolAction> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_PROTOCOL_VERSION, handle_line, serve, serve_with_client,
-        serve_with_client_and_snapshot,
+        SUPPORTED_PROTOCOL_VERSION, ServerState, handle_line, handle_line_with_client, serve,
+        serve_with_client, serve_with_client_and_snapshot,
     };
     use crate::mcp::runtime_model::{
         ExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig,
@@ -462,9 +561,40 @@ mod tests {
         handle_line(line, "9.9.9").map(|s| serde_json::from_str(&s).unwrap())
     }
 
+    fn initialize(line: &str) -> Value {
+        let mut client = RecordingClient {
+            reply: Ok(DaemonReply::Ok(serde_json::json!({}))),
+            requests: vec![],
+        };
+        let mut state = ServerState::AwaitingInitialize;
+        serde_json::from_str(
+            &handle_line_with_client(
+                line,
+                "9.9.9",
+                &mut client,
+                &RuntimeModelSnapshot::default(),
+                &mut state,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn initialized_input(request: &str) -> String {
+        format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"{SUPPORTED_PROTOCOL_VERSION}\"}}}}\n{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}}\n{request}"
+        )
+    }
+
+    fn last_response(output: &[u8]) -> Value {
+        serde_json::from_str(std::str::from_utf8(output).unwrap().lines().last().unwrap()).unwrap()
+    }
+
     #[test]
-    fn initialize_echoes_protocol_and_reports_server_version() {
-        let v = call(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#).unwrap();
+    fn initialize_negotiates_supported_protocol_and_reports_server_version() {
+        let v = initialize(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+        );
         assert_eq!(v["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(v["result"]["serverInfo"]["name"], "usagi");
         assert_eq!(v["result"]["serverInfo"]["version"], "9.9.9");
@@ -473,9 +603,14 @@ mod tests {
     }
 
     #[test]
-    fn initialize_falls_back_to_default_protocol() {
-        let v = call(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#).unwrap();
-        assert_eq!(v["result"]["protocolVersion"], DEFAULT_PROTOCOL_VERSION);
+    fn initialize_rejects_missing_and_unsupported_protocol_versions() {
+        let missing = initialize(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#);
+        assert_eq!(missing["error"]["code"], -32602);
+        let unsupported = initialize(
+            r#"{"jsonrpc":"2.0","id":"v","method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
+        );
+        assert_eq!(unsupported["id"], "v");
+        assert_eq!(unsupported["error"]["code"], -32602);
     }
 
     #[test]
@@ -483,6 +618,8 @@ mod tests {
         let v = call(r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#).unwrap();
         assert!(v["result"].is_object());
         assert_eq!(v["id"], 2);
+        let large = call(r#"{"jsonrpc":"2.0","id":18446744073709551615,"method":"ping"}"#).unwrap();
+        assert_eq!(large["id"], serde_json::json!(u64::MAX));
     }
 
     #[test]
@@ -531,6 +668,11 @@ mod tests {
     fn tools_call_without_name_is_invalid_params() {
         let v = call(r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{}}"#).unwrap();
         assert_eq!(v["error"]["code"], -32602);
+        let arguments = call(
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"session_list","arguments":[]}}"#,
+        )
+        .unwrap();
+        assert_eq!(arguments["error"]["code"], -32602);
     }
 
     #[test]
@@ -605,6 +747,92 @@ mod tests {
     }
 
     #[test]
+    fn raw_stdio_validates_json_rpc_envelopes_and_preserves_error_ids() {
+        let input = concat!(
+            "not json\n",
+            "[]\n",
+            "1\n",
+            "{\"id\":1,\"method\":\"ping\"}\n",
+            "{\"jsonrpc\":\"1.0\",\"id\":2,\"method\":\"ping\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"ping\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":1.5,\"method\":\"ping\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":7}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":\"p\",\"method\":\"ping\",\"params\":[]}\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":7}\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":[]}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"ping\"}\n",
+        );
+        let mut output = Vec::new();
+        serve(input.as_bytes(), &mut output, "9.9.9").unwrap();
+        let responses: Vec<Value> = std::str::from_utf8(&output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+
+        assert_eq!(responses.len(), 10);
+        assert_eq!(responses[0]["error"]["code"], -32700);
+        assert_eq!(responses[0]["id"], Value::Null);
+        for response in &responses[1..8] {
+            assert_eq!(response["error"]["code"], -32600);
+        }
+        assert_eq!(responses[1]["id"], Value::Null);
+        assert_eq!(responses[3]["id"], 1);
+        assert_eq!(responses[4]["id"], 2);
+        assert_eq!(responses[5]["id"], Value::Null);
+        assert_eq!(responses[6]["id"], Value::Null);
+        assert_eq!(responses[7]["id"], 3);
+        assert_eq!(responses[8]["error"]["code"], -32602);
+        assert_eq!(responses[8]["id"], "p");
+        assert_eq!(responses[9]["result"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn raw_stdio_negotiates_version_and_enforces_lifecycle_without_effects() {
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"session_list\"}}\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"session_list\"}}\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\"}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"session_list\"}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"session_list\"}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{\"name\":\"session_list\"}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}\n",
+        );
+        let mut output = Vec::new();
+        let mut client = RecordingClient {
+            reply: Ok(DaemonReply::Ok(serde_json::json!({"effect":true}))),
+            requests: vec![],
+        };
+        serve_with_client(input.as_bytes(), &mut output, "9.9.9", &mut client).unwrap();
+        let responses: Vec<Value> = std::str::from_utf8(&output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+
+        assert_eq!(responses.len(), 7);
+        assert_eq!(responses[0]["error"]["code"], -32600);
+        assert_eq!(responses[1]["error"]["code"], -32602);
+        assert_eq!(responses[1]["id"], 2);
+        assert_eq!(responses[2]["result"]["protocolVersion"], "2025-06-18");
+        assert_eq!(responses[3]["error"]["code"], -32600);
+        assert_eq!(responses[4]["error"]["code"], -32600);
+        assert!(
+            responses[5]["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("effect")
+        );
+        assert_eq!(responses[6]["error"]["code"], -32600);
+        assert_eq!(client.requests.len(), 1);
+    }
+
+    #[test]
     fn serve_reads_lines_skips_blanks_and_writes_responses() {
         let input = "\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n";
         let mut out = Vec::new();
@@ -663,9 +891,10 @@ mod tests {
                 }),
             ),
         ] {
-            let input = format!(
+            let request = format!(
                 r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{{"name":"a"}}}}}}"#
             ) + "\n";
+            let input = initialized_input(&request);
             let mut out = Vec::new();
             let mut client = RecordingClient {
                 reply,
@@ -703,9 +932,10 @@ mod tests {
             "session_delegate_issue",
             "session_delegate_brief",
         ] {
-            let input = format!(
+            let request = format!(
                 r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{{}}}}}}"#
             ) + "\n";
+            let input = initialized_input(&request);
             let mut out = Vec::new();
             let mut client = RecordingClient {
                 reply: Ok(DaemonReply::Ok(serde_json::json!({"connected":true}))),
@@ -787,9 +1017,10 @@ mod tests {
             } else {
                 r#"{"summary":"ok"}"#
             };
-            let input = format!(
+            let request = format!(
                 r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#
             ) + "\n";
+            let input = initialized_input(&request);
             let mut out = Vec::new();
             let mut client = RecordingClient {
                 reply: Ok(DaemonReply::Ok(serde_json::json!({"ok":true}))),
@@ -836,9 +1067,10 @@ mod tests {
             } else {
                 "{}"
             };
-            let input = format!(
+            let request = format!(
                 r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#
             ) + "\n";
+            let input = initialized_input(&request);
             let mut out = Vec::new();
             let mut client = RecordingClient {
                 reply: Err(ClientError::Protocol(
@@ -861,7 +1093,7 @@ mod tests {
                 &snapshot,
             )
             .unwrap();
-            let response: Value = serde_json::from_slice(&out).unwrap();
+            let response = last_response(&out);
             assert_eq!(response["error"]["code"], -32603, "{name}");
             assert!(
                 response["error"]["message"]
@@ -880,15 +1112,15 @@ mod tests {
             &FakeLocator(&["claude"]),
         );
         // An empty config never publishes a runtime even when its executable exists.
-        let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n";
+        let input = initialized_input("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
         let mut out = Vec::new();
         let mut client = RecordingClient {
             reply: Ok(DaemonReply::Ok(serde_json::json!({}))),
             requests: vec![],
         };
-        serve_with_client_and_snapshot(&input[..], &mut out, "9.9.9", &mut client, &snapshot)
+        serve_with_client_and_snapshot(input.as_bytes(), &mut out, "9.9.9", &mut client, &snapshot)
             .unwrap();
-        let listed: Value = serde_json::from_slice(&out).unwrap();
+        let listed = last_response(&out);
         let dispatch = listed["result"]["tools"]
             .as_array()
             .unwrap()
@@ -907,18 +1139,22 @@ mod tests {
             &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
             &FakeLocator(&["claude"]),
         );
-        let input = b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"session_dispatch\",\"arguments\":{\"agent\":{\"runtime\":\"claude\",\"model\":\"opus\"}}}}\n";
+        let input = initialized_input(
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"session_dispatch\",\"arguments\":{\"agent\":{\"runtime\":\"claude\",\"model\":\"opus\"}}}}\n",
+        );
         let mut out = Vec::new();
-        serve_with_client_and_snapshot(&input[..], &mut out, "9.9.9", &mut client, &snapshot)
+        serve_with_client_and_snapshot(input.as_bytes(), &mut out, "9.9.9", &mut client, &snapshot)
             .unwrap();
         assert!(String::from_utf8(out).unwrap().contains("not allowed"));
     }
 
     #[test]
     fn default_serve_returns_a_structured_unavailable_error_for_session_tools() {
-        let input = b"\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"session_create\"}}\n";
+        let input = initialized_input(
+            "\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"session_create\"}}\n",
+        );
         let mut out = Vec::new();
-        serve(&input[..], &mut out, "9.9.9").unwrap();
+        serve(input.as_bytes(), &mut out, "9.9.9").unwrap();
         let output = String::from_utf8(out).unwrap();
         assert!(output.contains("managed daemon client is not configured"));
     }

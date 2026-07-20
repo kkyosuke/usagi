@@ -76,11 +76,14 @@ fn run_mcp(home: &Path, cwd: &Path, requests: &str) -> Output {
         .stdout(Stdio::piped())
         .spawn()
         .expect("usagi mcp を起動できる");
+    let input = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"2025-06-18\"}}}}\n{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}}\n{requests}"
+    );
     child
         .stdin
         .take()
         .expect("MCP stdin")
-        .write_all(requests.as_bytes())
+        .write_all(input.as_bytes())
         .expect("MCP requests を書き込める");
     child.wait_with_output().expect("MCP の終了を待てる")
 }
@@ -88,11 +91,20 @@ fn run_mcp(home: &Path, cwd: &Path, requests: &str) -> Output {
 fn mcp_texts(output: &Output) -> Vec<serde_json::Value> {
     stdout(output)
         .lines()
-        .map(|line| {
+        .filter_map(|line| {
             let response: serde_json::Value = serde_json::from_str(line).unwrap();
-            let text = response["result"]["content"][0]["text"].as_str().unwrap();
-            serde_json::from_str(text).unwrap()
+            let content = response["result"]["content"].as_array()?;
+            let text = content[0]["text"].as_str().unwrap();
+            Some(serde_json::from_str(text).unwrap())
         })
+        .collect()
+}
+
+fn mcp_responses(output: &Output) -> Vec<serde_json::Value> {
+    stdout(output)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|response: &serde_json::Value| response["id"] != 0)
         .collect()
 }
 
@@ -196,7 +208,7 @@ fn mcp_autostarts_without_manual_daemon_start() {
         .stdin
         .take()
         .expect("MCP stdin")
-        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n")
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}\n")
         .expect("MCP initialize を書き込める");
     let output = child.wait_with_output().expect("MCP の終了を待てる");
     assert!(output.status.success());
@@ -287,10 +299,7 @@ fn mcp_store_tools_cover_prompt_update_search_and_delete_lifecycles() {
         "{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_delete\",\"arguments\":{}}}\n",
     );
     let missing = run_mcp(home.path(), &session, missing_requests);
-    let missing_responses: Vec<serde_json::Value> = stdout(&missing)
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let missing_responses = mcp_responses(&missing);
     assert!(
         missing_responses[0]["error"]["message"]
             .as_str()
@@ -319,8 +328,7 @@ fn mcp_store_tools_cover_prompt_update_search_and_delete_lifecycles() {
         "{\"jsonrpc\":\"2.0\",\"id\":25,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_search\",\"arguments\":{}}}\n",
     );
     let broken = run_mcp(home.path(), &broken_session, broken_requests);
-    for line in stdout(&broken).lines() {
-        let response: serde_json::Value = serde_json::from_str(line).unwrap();
+    for response in mcp_responses(&broken) {
         assert_eq!(response["error"]["code"], -32603);
     }
 
@@ -330,8 +338,7 @@ fn mcp_store_tools_cover_prompt_update_search_and_delete_lifecycles() {
         "{\"jsonrpc\":\"2.0\",\"id\":28,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_delete\",\"arguments\":{\"number\":1}}}\n",
     );
     let refused = run_mcp(home.path(), workspace.path(), root_requests);
-    for line in stdout(&refused).lines() {
-        let response: serde_json::Value = serde_json::from_str(line).unwrap();
+    for response in mcp_responses(&refused) {
         assert_eq!(response["error"]["code"], -32603);
         assert!(
             response["error"]["message"]

@@ -124,6 +124,7 @@ impl McpHarness {
         initialized["result"]["capabilities"]["tools"]
             .as_object()
             .expect("initialize advertises tools");
+        harness.initialized();
         harness
     }
 
@@ -144,6 +145,16 @@ impl McpHarness {
         let response: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(response["id"], id);
         response
+    }
+
+    fn initialized(&mut self) {
+        writeln!(
+            self.process.stdin,
+            "{}",
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+        )
+        .unwrap();
+        self.process.stdin.flush().unwrap();
     }
 
     pub fn tool(&mut self, name: &str, arguments: &Value) -> Value {
@@ -287,6 +298,7 @@ impl McpHarness {
             &json!({"protocolVersion":"2025-06-18","clientInfo":{"name":"credential-e2e","version":"1"}}),
         );
         assert_eq!(initialized["result"]["serverInfo"]["name"], "usagi");
+        self.initialized();
     }
 
     pub fn daemon_client(&self) -> IpcClient<std::os::unix::net::UnixStream> {
