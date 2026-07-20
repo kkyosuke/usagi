@@ -4,11 +4,11 @@ title: test(tui): controller・presentation・production wiring を coverage 対
 status: todo
 priority: medium
 labels: [review, v2, tui, coverage]
-dependson: [484]
+dependson: [484, 462]
 related: [356, 360, 380]
 parent: 453
 created_at: 2026-07-20T12:06:50.164691+00:00
-updated_at: 2026-07-20T12:07:42.169284+00:00
+updated_at: 2026-07-20T12:35:30.347348+00:00
 ---
 
 ## 問題・影響

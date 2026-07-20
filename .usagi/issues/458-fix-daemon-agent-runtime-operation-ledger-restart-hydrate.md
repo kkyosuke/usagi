@@ -5,10 +5,10 @@ status: todo
 priority: high
 labels: [review, v2, daemon, agent, durability]
 dependson: []
-related: [209, 251, 271, 283, 311, 350, 386, 402]
+related: [209, 251, 271, 283, 311, 350, 386, 402, 460]
 parent: 453
 created_at: 2026-07-20T12:06:19.000658+00:00
-updated_at: 2026-07-20T12:06:19.000658+00:00
+updated_at: 2026-07-20T12:35:29.639277+00:00
 ---
 
 ## 問題・影響
