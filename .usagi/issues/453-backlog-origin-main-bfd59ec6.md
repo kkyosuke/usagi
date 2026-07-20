@@ -16,6 +16,8 @@ updated_at: 2026-07-20T12:05:18.222534+00:00
 
 `v1/` は現在の出荷物、root workspace は v2 である。両版を同じ子 issue に含めるのは、共有 `scripts/install.sh` が原因で同時修正が必要な #461 だけとする。未完了 backlog で受入条件を完全に覆う finding は #405 と #406 を再利用し、新規 issue を重複作成しない。
 
+採番中に別 session の Draft PR #1142 が #410〜#456 を並行作成したため、本 epic は #453、子は #457 から始まる。同 Draft は基準が古く、今回必須の責務分割・本文区分を満たさないため main backlog とはみなさず、本 backlog PR を正本として supersede する。番号 gap は再利用しない。
+
 ## 成立条件 / 再現フロー
 
 - v2 daemon/TUI/core は production composition を実際に通る再起動・実 PTY・IPC テストで確認する。
