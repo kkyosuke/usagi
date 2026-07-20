@@ -1,13 +1,13 @@
 ---
 number: 393
 title: fix(tui): live terminal の通常クリックで保持済み選択を解除する
-status: in-progress
+status: done
 priority: medium
 labels: [tui, bug]
 dependson: []
 related: [390]
 created_at: 2026-07-20T03:56:14.791768+00:00
-updated_at: 2026-07-20T03:56:17.923593+00:00
+updated_at: 2026-07-20T04:04:58.566039+00:00
 ---
 
 ## 概要
