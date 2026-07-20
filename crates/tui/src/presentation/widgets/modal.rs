@@ -240,20 +240,94 @@ impl Default for ConfirmationModal {
     }
 }
 
+/// The footer key hints shared by interactive Yes/No confirmations. Callers who
+/// want single-key hints instead pass their own string via [`ConfirmationView`].
+const CONFIRMATION_HINTS: &str = "Enter/y: yes   Esc/n: no   ←→/Tab: choose";
+
 /// Display content and emphasis for a shared confirmation modal.
+///
+/// Build one with [`ConfirmationView::confirmation`], which fills the standard
+/// Yes/No defaults (danger confirm, warning cancel, `[ yes ] [ no ]` buttons,
+/// the [`CONFIRMATION_HINTS`] footer). Override any public field to reshape the
+/// prompt, or call [`ConfirmationView::compact`] for a button-less single-key
+/// variant. Every confirmation surface flows through this one component so the
+/// frame, buttons, and footer stay identical across Quit, unregister, and
+/// cleanup.
 pub struct ConfirmationView<'a> {
     pub title: &'a str,
     pub inner_width: usize,
     pub heading: String,
     pub message: &'a str,
+    /// Role (colour) of the affirmative button when it is focused.
     pub confirm_role: Role,
+    /// Role (colour) of the negative button when it is focused.
+    pub cancel_role: Role,
+    /// Label inside the affirmative button (default `yes`).
+    pub confirm_label: &'a str,
+    /// Label inside the negative button (default `no`).
+    pub cancel_label: &'a str,
+    /// Footer key-hint string, indented and dimmed by the shared [`footer`].
+    pub hints: &'a str,
+    /// Whether to draw the interactive `[ yes ] [ no ]` button row. A compact
+    /// prompt (no focus toggle) sets this false and relies on `hints` alone.
+    pub buttons: bool,
 }
 
-/// Two fixed-width Yes/No buttons shared by confirmation modals. Selection
-/// uses role-coloured text and bold weight; focus never changes the bracket
-/// geometry.
+impl<'a> ConfirmationView<'a> {
+    /// A standard Yes/No confirmation: danger confirm, warning cancel,
+    /// `[ yes ] [ no ]` buttons, and the shared Enter/y … Esc/n … ←→/Tab hints.
+    /// Reshape it by overriding public fields (e.g. `confirm_role`, labels).
+    #[must_use]
+    pub fn confirmation(
+        title: &'a str,
+        inner_width: usize,
+        heading: String,
+        message: &'a str,
+    ) -> Self {
+        Self {
+            title,
+            inner_width,
+            heading,
+            message,
+            confirm_role: Role::Danger,
+            cancel_role: Role::Warning,
+            confirm_label: "yes",
+            cancel_label: "no",
+            hints: CONFIRMATION_HINTS,
+            buttons: true,
+        }
+    }
+
+    /// Turn this into a compact prompt: `hints` as single-key guidance and no
+    /// interactive `[ yes ] [ no ]` row. For confirmations whose input has no
+    /// Yes/No focus toggle (for example the open-screen y/n cleanup).
+    #[must_use]
+    pub fn compact(mut self, hints: &'a str) -> Self {
+        self.buttons = false;
+        self.hints = hints;
+        self
+    }
+}
+
+/// Two fixed-width Yes/No buttons shared by confirmation modals. Labels are
+/// padded to a common width so focus never changes the bracket geometry;
+/// selection uses role-coloured text and bold weight.
 #[must_use]
-pub fn confirmation_buttons(confirm_selected: bool, confirm_role: Role) -> String {
+pub fn confirmation_buttons(
+    confirm_selected: bool,
+    confirm_role: Role,
+    cancel_role: Role,
+    confirm_label: &str,
+    cancel_label: &str,
+) -> String {
+    // Pad both labels to a common width so the two buttons stay the same size
+    // regardless of which word is longer (`yes`/`no` → `[ yes ]` / `[ no  ]`).
+    let label_width = confirm_label
+        .chars()
+        .count()
+        .max(cancel_label.chars().count());
+    let confirm_text = format!("[ {confirm_label:<label_width$} ]");
+    let cancel_text = format!("[ {cancel_label:<label_width$} ]");
     let selected = |role: Role| role.style().bold();
     // `dim` alone inherits the terminal's current foreground colour. Give idle
     // labels an explicit white base so focus changes cannot leave a stale
@@ -261,19 +335,23 @@ pub fn confirmation_buttons(confirm_selected: bool, confirm_role: Role) -> Strin
     let idle = Style::new().fg(Color::White).dim();
     let (yes, no) = if confirm_selected {
         (
-            selected(confirm_role).paint("[ yes ]"),
-            idle.paint("[ no  ]"),
+            selected(confirm_role).paint(&confirm_text),
+            idle.paint(&cancel_text),
         )
     } else {
         (
-            idle.paint("[ yes ]"),
-            selected(Role::Warning).paint("[ no  ]"),
+            idle.paint(&confirm_text),
+            selected(cancel_role).paint(&cancel_text),
         )
     };
     format!("  {yes}  {no}")
 }
 
-/// Render a standard Yes/No confirmation over an existing frame.
+/// Render a confirmation over an existing frame through the shared component.
+///
+/// The button row is drawn only when `view.buttons` is set; a compact prompt
+/// keeps the heading, message, and footer hints alone. `state` selects the
+/// focused button and is unused by a compact prompt.
 #[must_use]
 pub fn render_confirmation_over(
     raw_height: usize,
@@ -282,21 +360,28 @@ pub fn render_confirmation_over(
     state: ConfirmationModal,
     view: ConfirmationView<'_>,
 ) -> Vec<String> {
+    let mut body = vec![
+        view.heading,
+        Style::new().fg(Color::White).paint(view.message),
+        String::new(),
+    ];
+    if view.buttons {
+        body.push(confirmation_buttons(
+            state.is_confirm_selected(),
+            view.confirm_role,
+            view.cancel_role,
+            view.confirm_label,
+            view.cancel_label,
+        ));
+    }
+    body.push(footer(view.hints));
     render_over(
         raw_height,
         raw_width,
         base,
         view.title,
         view.inner_width,
-        &[
-            view.heading,
-            Style::new().fg(Color::White).paint(view.message),
-            String::new(),
-            confirmation_buttons(state.is_confirm_selected(), view.confirm_role),
-            Style::new()
-                .dim()
-                .paint("  Enter/y: yes   Esc/n: no   ←→/Tab: choose"),
-        ],
+        &body,
     )
 }
 
@@ -485,8 +570,8 @@ mod tests {
 
     #[test]
     fn confirmation_buttons_mark_the_selected_choice() {
-        let ok_selected = confirmation_buttons(true, Role::Success);
-        let cancel_selected = confirmation_buttons(false, Role::Danger);
+        let ok_selected = confirmation_buttons(true, Role::Success, Role::Warning, "yes", "no");
+        let cancel_selected = confirmation_buttons(false, Role::Danger, Role::Warning, "yes", "no");
         assert_eq!(display_width(&ok_selected), display_width(&cancel_selected));
         assert_eq!(display_width(&ok_selected), 18);
         assert!(ok_selected.contains("[ yes ]"));
@@ -495,6 +580,18 @@ mod tests {
         assert!(cancel_selected.contains("\u{1b}[1;33m"));
         assert!(ok_selected.contains("\u{1b}[2;37m"));
         assert!(cancel_selected.contains("\u{1b}[2;37m"));
+    }
+
+    #[test]
+    fn confirmation_buttons_pad_custom_labels_to_a_common_width() {
+        // Labels are caller-supplied; the shorter one is padded so both buttons
+        // keep the same bracket geometry no matter which word is longer.
+        let buttons = confirmation_buttons(true, Role::Danger, Role::Success, "remove", "keep");
+        assert!(buttons.contains("[ remove ]"));
+        assert!(buttons.contains("[ keep   ]"));
+        // The affirmative carries the danger SGR; the idle negative stays white.
+        assert!(buttons.contains("\u{1b}[1;31m[ remove ]"));
+        assert!(buttons.contains("\u{1b}[2;37m[ keep   ]"));
     }
 
     #[test]
@@ -522,19 +619,42 @@ mod tests {
             60,
             &vec![String::new(); 12],
             ConfirmationModal::new(),
-            ConfirmationView {
-                title: "Confirm",
-                inner_width: 40,
-                heading: "Proceed?".to_owned(),
-                message: "This is a test.",
-                confirm_role: Role::Danger,
-            },
+            ConfirmationView::confirmation("Confirm", 52, "Proceed?".to_owned(), "This is a test."),
         )
         .join("\n");
         assert!(frame.contains("[ yes ]"));
         assert!(frame.contains("[ no  ]"));
+        // The footer flows through the shared `footer` helper (#372), so its
+        // dim, body-indented rendering appears verbatim in the frame.
+        assert!(frame.contains(&footer(super::CONFIRMATION_HINTS)));
         assert!(frame.contains("Enter/y: yes"));
         assert!(frame.contains("Esc/n: no"));
+        assert!(frame.contains("←→/Tab: choose"));
+    }
+
+    #[test]
+    fn compact_confirmation_drops_the_buttons_and_uses_single_key_hints() {
+        // A compact prompt (no Yes/No focus toggle) keeps the heading, message,
+        // and single-key footer hints, but never draws the button row.
+        let frame = render_confirmation_over(
+            12,
+            60,
+            &vec![String::new(); 12],
+            ConfirmationModal::new(),
+            ConfirmationView::confirmation(
+                "Clean up registry",
+                52,
+                "Remove missing registry entries?".to_owned(),
+                "Registry entries whose folder is gone are removed.",
+            )
+            .compact("y: remove   n/Esc: cancel"),
+        )
+        .join("\n");
+        assert!(frame.contains("Remove missing registry entries?"));
+        assert!(frame.contains("y: remove   n/Esc: cancel"));
+        assert!(!frame.contains("[ yes ]"));
+        assert!(!frame.contains("[ no  ]"));
+        assert!(!frame.contains("←→/Tab: choose"));
     }
     use crate::presentation::widgets::display_width;
 

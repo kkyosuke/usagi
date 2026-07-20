@@ -428,15 +428,8 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
         let path = format!("↳ {}", workspace.path.display());
         lines.push(indent(&Style::new().dim().paint(&path)));
     }
-    if open.cleanup_confirming() {
-        lines.push(String::new());
-        lines.push(indent(
-            &Role::Danger
-                .style()
-                .bold()
-                .paint("Remove missing registry entries? y/n"),
-        ));
-    }
+    // The cleanup confirmation is composited as a shared confirmation overlay by
+    // `render_open`, so this list body stays free of a bespoke y/n prompt.
     lines
 }
 
