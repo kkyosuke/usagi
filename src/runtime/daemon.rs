@@ -1052,7 +1052,7 @@ fn start_ipc_accept_loop(
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &scope_sessions, request_id, &body, hello),
                                         Some("metrics") => dispatch_metrics(&metrics, request_id, &body, hello),
                                         Some("pr") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
-                                        Some("dispatch_tool") => dispatch_user_decision(&agent_launch, &scope_sessions, &decisions, request_id, &body, hello),
+                                        Some("dispatch_tool") => dispatch_dispatch_tool(&agent_launch, &scope_sessions, &decisions, request_id, &body, hello),
                                         _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
                                     },
                                 );
@@ -1066,6 +1066,400 @@ fn start_ipc_accept_loop(
             }
         })
         .map(|_| ())
+}
+
+fn dispatch_dispatch_tool(
+    agent: &SharedAgentRuntime,
+    sessions: &SharedSessionRuntime,
+    decisions: &UserDecisionStore,
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    body: &serde_json::Value,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    let action = serde_json::from_value::<DaemonRequest>(body.clone())
+        .ok()
+        .and_then(|request| match request {
+            DaemonRequest::DispatchTool { action, .. } => Some(action),
+            _ => None,
+        });
+    if action.is_some_and(|action| {
+        matches!(
+            action,
+            DispatchToolAction::Dispatch
+                | DispatchToolAction::SessionGet
+                | DispatchToolAction::AgentList
+                | DispatchToolAction::AgentGet
+                | DispatchToolAction::AgentComplete
+                | DispatchToolAction::AgentFail
+                | DispatchToolAction::AgentInbox
+        )
+    }) {
+        dispatch_agent_tool(agent, sessions, request_id, body, hello)
+    } else {
+        dispatch_user_decision(agent, sessions, decisions, request_id, body, hello)
+    }
+}
+
+#[allow(clippy::too_many_lines)] // One handler keeps authentication and durable routing atomic.
+fn dispatch_agent_tool(
+    agent: &SharedAgentRuntime,
+    sessions: &SharedSessionRuntime,
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    body: &serde_json::Value,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    use chrono::{DateTime, Utc};
+    use usagi_core::domain::agent::{
+        AgentProfileId, AgentStatus, InboxKind, ModelSelector, StructuredResult,
+    };
+    use usagi_core::domain::id::{AgentId, OperationId};
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
+    use usagi_core::usecase::client::{DispatchAgentIntent, DispatchIntent};
+
+    #[derive(Deserialize)]
+    struct SessionPayload {
+        name: String,
+    }
+    #[derive(Deserialize)]
+    struct DispatchPayload {
+        session: SessionPayload,
+        agent: serde_json::Value,
+        prompt: String,
+    }
+    #[derive(Deserialize)]
+    struct AgentIdPayload {
+        agent_id: AgentId,
+    }
+    #[derive(Deserialize)]
+    struct ReportPayload {
+        summary: String,
+        #[serde(default)]
+        result: Option<StructuredResult>,
+        #[serde(default)]
+        error: Option<String>,
+        #[serde(default)]
+        run_id: Option<OperationId>,
+    }
+    #[derive(Deserialize)]
+    struct InboxPayload {
+        #[serde(default)]
+        since: Option<DateTime<Utc>>,
+        #[serde(default)]
+        unread_only: bool,
+    }
+
+    let parsed = serde_json::from_value::<DaemonRequest>(body.clone())
+        .ok()
+        .and_then(|request| match request {
+            DaemonRequest::DispatchTool {
+                action,
+                operation_id,
+                payload,
+                caller_context,
+            } => Some((action, operation_id, payload, caller_context)),
+            _ => None,
+        });
+    let Some((action, operation_id, payload, caller_context)) = parsed else {
+        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+    };
+    let response = (|| -> Result<(ResponseOutcome, serde_json::Value), ProtocolError> {
+        let credential = caller_context
+            .as_ref()
+            .filter(|context| !context.credential.is_empty())
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::OwnershipUnknown,
+                    "agent caller provenance is unknown",
+                )
+            })?;
+        let snapshot = sessions
+            .lock()
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
+            })?
+            .snapshot()
+            .map_err(|_| {
+                ProtocolError::new(
+                    ErrorCode::Unavailable,
+                    "daemon could not read managed sessions",
+                )
+            })?;
+        let workspace = snapshot
+            .get("workspace_id")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .ok_or_else(|| {
+                ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
+            })?;
+        let mut runtime = agent.lock().map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+        })?;
+        let caller = runtime
+            .mcp_dispatch_caller(&credential.credential)
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::OwnershipUnknown,
+                    "agent caller provenance is unknown",
+                )
+            })?;
+        let store = runtime.dispatch_store();
+        let task_for = |agent_id: AgentId| -> Result<serde_json::Value, ProtocolError> {
+            let mut runs = store
+                .runs()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable")
+                })?
+                .into_iter()
+                .filter(|run| run.agent_id == agent_id)
+                .collect::<Vec<_>>();
+            runs.sort_by_key(|run| run.started_at);
+            Ok(runs
+                .last()
+                .map_or(serde_json::Value::Null, |run| serde_json::json!(run)))
+        };
+        match action {
+            DispatchToolAction::Dispatch => {
+                let input = serde_json::from_value::<DispatchPayload>(payload).map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid session_dispatch payload",
+                    )
+                })?;
+                let selected = if let Some(id) = input.agent.get("id") {
+                    if input.agent.as_object().is_none_or(|value| value.len() != 1) {
+                        return Err(ProtocolError::new(
+                            ErrorCode::InvalidArgument,
+                            "agent selector must use exactly one branch",
+                        ));
+                    }
+                    DispatchAgentIntent::Existing {
+                        agent_id: serde_json::from_value(id.clone()).map_err(|_| {
+                            ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent id")
+                        })?,
+                    }
+                } else {
+                    let object = input
+                        .agent
+                        .as_object()
+                        .filter(|value| value.len() == 2)
+                        .ok_or_else(|| {
+                            ProtocolError::new(
+                                ErrorCode::InvalidArgument,
+                                "agent selector must use exactly one branch",
+                            )
+                        })?;
+                    let runtime = object
+                        .get("runtime")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value::<AgentProfileId>(value).ok())
+                        .ok_or_else(|| {
+                            ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent runtime")
+                        })?;
+                    let model = object
+                        .get("model")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value::<ModelSelector>(value).ok())
+                        .ok_or_else(|| {
+                            ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent model")
+                        })?;
+                    DispatchAgentIntent::New { runtime, model }
+                };
+                let session_name = input.session.name;
+                let session_id = if let Some(id) = session_id_by_name(&snapshot, &session_name) {
+                    id
+                } else {
+                    drop(runtime);
+                    let created = sessions
+                        .lock()
+                        .map_err(|_| {
+                            ProtocolError::new(
+                                ErrorCode::Unavailable,
+                                "session runtime is unavailable",
+                            )
+                        })?
+                        .handle(
+                            usagi_core::usecase::client::SessionAction::Create,
+                            &operation_id,
+                            &serde_json::json!({"name": session_name}),
+                        )
+                        .map_err(|error| {
+                            ProtocolError::new(ErrorCode::InvalidArgument, error.safe_message())
+                        })?;
+                    let id = session_id_by_name(&created.body, &session_name).ok_or_else(|| {
+                        ProtocolError::new(
+                            ErrorCode::Unavailable,
+                            "created session is not available",
+                        )
+                    })?;
+                    runtime = agent.lock().map_err(|_| {
+                        ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                    })?;
+                    id
+                };
+                let scope = SharedScopeResolver(Arc::clone(sessions));
+                let admission = runtime.dispatch(
+                    &operation_id,
+                    &DispatchIntent {
+                        workspace,
+                        session_name: session_name.clone(),
+                        caller,
+                        agent: selected,
+                        prompt: input.prompt,
+                    },
+                    session_id,
+                    &scope,
+                )?;
+                let run_id = OperationId::parse(&admission.operation_id)
+                    .map_err(|_| ProtocolError::new(ErrorCode::Internal, "invalid admitted run"))?;
+                let run = runtime
+                    .dispatch_store()
+                    .runs()
+                    .map_err(|_| {
+                        ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable")
+                    })?
+                    .into_iter()
+                    .find(|run| run.run_id == run_id)
+                    .ok_or_else(|| {
+                        ProtocolError::new(
+                            ErrorCode::Unavailable,
+                            "admitted dispatch is unavailable",
+                        )
+                    })?;
+                Ok((
+                    ResponseOutcome::Accepted {
+                        operation_id: usagi_core::infrastructure::ipc::OperationId(
+                            admission.operation_id.clone(),
+                        ),
+                        operation_revision: admission.revision,
+                    },
+                    serde_json::json!({"run_id": admission.operation_id, "session": session_name, "agent_id": run.agent_id, "terminal": admission.terminal, "completed": admission.completed}),
+                ))
+            }
+            DispatchToolAction::SessionGet => {
+                let input = serde_json::from_value::<SessionPayload>(payload).map_err(|_| {
+                    ProtocolError::new(ErrorCode::InvalidArgument, "invalid session_get payload")
+                })?;
+                let session_id = session_id_by_name(&snapshot, &input.name).ok_or_else(|| {
+                    ProtocolError::new(ErrorCode::InvalidArgument, "session was not found")
+                })?;
+                let agents = store.agents().map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable"))?.into_iter().filter(|item| item.session_id == Some(session_id)).map(|item| Ok(serde_json::json!({"agent_id": item.agent_id, "runtime": item.runtime, "model": item.model, "status": item.status, "task": task_for(item.agent_id)?}))).collect::<Result<Vec<_>, ProtocolError>>()?;
+                Ok((
+                    ResponseOutcome::Ok,
+                    serde_json::json!({"session": input.name, "agents": agents}),
+                ))
+            }
+            DispatchToolAction::AgentList => {
+                let session = payload
+                    .get("session")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|name| {
+                        session_id_by_name(&snapshot, name).ok_or_else(|| {
+                            ProtocolError::new(ErrorCode::InvalidArgument, "session was not found")
+                        })
+                    })
+                    .transpose()?;
+                let status = payload
+                    .get("status")
+                    .cloned()
+                    .map(serde_json::from_value::<AgentStatus>)
+                    .transpose()
+                    .map_err(|_| {
+                        ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent status")
+                    })?;
+                let agents = store.agents().map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable"))?.into_iter().filter(|item| session.is_none_or(|id| item.session_id == Some(id)) && status.is_none_or(|value| item.status == value)).map(|item| Ok(serde_json::json!({"agent_id": item.agent_id, "session_id": item.session_id, "runtime": item.runtime, "model": item.model, "status": item.status, "task": task_for(item.agent_id)?}))).collect::<Result<Vec<_>, ProtocolError>>()?;
+                Ok((ResponseOutcome::Ok, serde_json::json!({"agents": agents})))
+            }
+            DispatchToolAction::AgentGet => {
+                let input = serde_json::from_value::<AgentIdPayload>(payload).map_err(|_| {
+                    ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent_get payload")
+                })?;
+                let item = store
+                    .agent(input.agent_id)
+                    .map_err(|_| {
+                        ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable")
+                    })?
+                    .ok_or_else(|| {
+                        ProtocolError::new(ErrorCode::InvalidArgument, "agent was not found")
+                    })?;
+                let runs = store
+                    .runs()
+                    .map_err(|_| {
+                        ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable")
+                    })?
+                    .into_iter()
+                    .filter(|run| run.agent_id == item.agent_id)
+                    .collect::<Vec<_>>();
+                Ok((
+                    ResponseOutcome::Ok,
+                    serde_json::json!({"agent": item, "runs": runs}),
+                ))
+            }
+            DispatchToolAction::AgentComplete | DispatchToolAction::AgentFail => {
+                let input = serde_json::from_value::<ReportPayload>(payload).map_err(|_| {
+                    ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent report payload")
+                })?;
+                if input.summary.trim().is_empty() {
+                    return Err(ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "report summary must not be empty",
+                    ));
+                }
+                let kind = if action == DispatchToolAction::AgentComplete {
+                    InboxKind::Completed
+                } else {
+                    InboxKind::Failed
+                };
+                let summary = input
+                    .error
+                    .filter(|_| kind == InboxKind::Failed)
+                    .map_or(input.summary.clone(), |error| {
+                        format!("{}: {error}", input.summary)
+                    });
+                let delivered = runtime.report_from_mcp(
+                    &credential.credential,
+                    input.run_id,
+                    kind,
+                    summary,
+                    input.result,
+                )?;
+                Ok((
+                    ResponseOutcome::Ok,
+                    serde_json::json!({"delivered_to": delivered}),
+                ))
+            }
+            DispatchToolAction::AgentInbox => {
+                let input = serde_json::from_value::<InboxPayload>(payload).map_err(|_| {
+                    ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent_inbox payload")
+                })?;
+                let messages = store
+                    .inbox(&caller)
+                    .map_err(|_| {
+                        ProtocolError::new(ErrorCode::Unavailable, "dispatch inbox is unavailable")
+                    })?
+                    .into_iter()
+                    .filter(|message| !input.unread_only || !message.read)
+                    .filter(|message| input.since.is_none_or(|since| message.created_at > since))
+                    .collect::<Vec<_>>();
+                Ok((
+                    ResponseOutcome::Ok,
+                    serde_json::json!({"messages": messages}),
+                ))
+            }
+            _ => Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "invalid agent tool action",
+            )),
+        }
+    })();
+    match response {
+        Ok((outcome, body)) => envelope(hello, request_id, outcome, body),
+        Err(error) => envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Error(error),
+            serde_json::json!(null),
+        ),
+    }
 }
 
 /// PR events are deliberately only hints; the IPC request always returns this
