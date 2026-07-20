@@ -1,14 +1,14 @@
 ---
 number: 501
 title: dev: recommend-tests を v2 workspace path と test target に対応させる
-status: todo
+status: done
 priority: medium
 labels: [review, v2, test, developer-experience]
 dependson: []
 related: [180]
 parent: 453
 created_at: 2026-07-20T12:07:09.334989+00:00
-updated_at: 2026-07-20T12:07:09.334989+00:00
+updated_at: 2026-07-20T23:41:14.163753+00:00
 ---
 
 ## 問題・影響
