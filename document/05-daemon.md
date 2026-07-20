@@ -293,9 +293,10 @@ Codex / Claude の Agent launch は `McpWiring` capability を要求し、daemon
 子 MCP server として起動する。製品ごとの MCP 設定は adapter provision が spawn 時だけに渡すため、設定 payload は
 public launch plan、durable snapshot、IPC response に残らない。注入した usagi MCP tool は agent が確認なしで
 呼べる。Codex は spawn 時に `mcp_servers.usagi.default_tools_approval_mode = "approve"` を渡し、注入した
-`usagi` server だけを事前許可する。Claude も注入した `usagi` server のツールだけを事前許可する
-（`--allowedTools mcp__usagi`）。したがって他の MCP server・shell・ファイル編集・network の permission model は
-通常どおり維持され、無効化・緩和しない。
+`usagi` server だけを事前許可する。子 server には `USAGI_HOME` と caller credential だけを forward する。
+詳細な MCP caller contract は [7. MCP サーバ](07-mcp.md#起動と経路) を正本とする。Claude も注入した `usagi`
+server のツールだけを事前許可する（`--allowedTools mcp__usagi`）。したがって他の MCP server・shell・ファイル編集・
+network の permission model は通常どおり維持され、無効化・緩和しない。
 
 daemon が起動した MCP child だけには、live Agent runtime に結び付く opaque な caller credential を
 private provision として渡す。`user_decision_*` はこの credential、daemon generation、terminal incarnation、
