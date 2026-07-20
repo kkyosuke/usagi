@@ -10,18 +10,15 @@
 //! This module is the pure decision behind that guard, in two modes keyed off
 //! the agent's `cwd`:
 //!
-//! - **Session mode** ([`escapes_worktree`]): the agent runs inside a session
-//!   worktree, and may edit anything inside it. Given the worktree and the path
-//!   a tool wants to touch, does that path escape the worktree? The path is
-//!   resolved *lexically* (folding `.` / `..` without touching the filesystem)
-//!   so it works for files that do not exist yet (a fresh `Write` target) and
-//!   stays deterministic under test.
+//! - **Session mode** ([`path_escapes_root`]): the agent runs inside a session
+//!   worktree, and may edit anything inside it. Existing ancestors are
+//!   canonicalized so symlinks cannot turn a lexical in-root target into an
+//!   external write; nonexistent leaf components remain supported for `Write`.
 //! - **Root mode** ([`is_write_tool`] / [`command_mutates_repo`]): the agent is
 //!   the coordinator running at the workspace root (cwd is *not* under
 //!   `.usagi/sessions/`, see [`is_session_worktree`]). It must not mutate the
 //!   repository at all, so *every* file-writing tool is denied regardless of
-//!   path, and `Bash` calls are denied when they invoke a repository-mutating
-//!   git subcommand (read-only git like `status` / `log` / `diff` still runs).
+//!   path, and only unambiguously read-only shell commands are allowed.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -96,11 +93,6 @@ const READ_ONLY_GIT_SUBCOMMANDS: &[&str] = &[
     "version",
 ];
 
-/// Command wrappers that may precede `git` in a shell command; skipped when
-/// locating the `git` invocation so `sudo git commit` / `env git push` are
-/// still caught.
-const COMMAND_WRAPPERS: &[&str] = &["sudo", "command", "env", "nohup", "time"];
-
 /// Pre-subcommand git global options that consume the following token as their
 /// value (e.g. `git -C /path commit`), so the value is not mistaken for the
 /// subcommand.
@@ -114,76 +106,81 @@ const GIT_OPTS_WITH_VALUE: &[&str] = &[
     "--config-env",
 ];
 
-/// Whether a `Bash` `command` would run a repository-mutating git subcommand.
-///
-/// The command is split on the usual shell separators (`&&`, `||`, `|`, `;`,
-/// `&`, newline) into simple commands, and each is inspected for a `git`
-/// invocation whose subcommand is *not* in [`READ_ONLY_GIT_SUBCOMMANDS`]. Any
-/// such invocation makes the whole command mutating — so `git status && git
-/// commit …` is denied on the `commit`. This is a lexical heuristic (it does
-/// not evaluate command substitution or quoting), which is the robust,
-/// fail-safe direction: it errs toward denying rather than missing a mutation.
+/// Whether a root `Bash` command might mutate the repository or filesystem.
+/// Anything outside the strict read-only allowlist is treated as mutating.
 pub fn command_mutates_repo(command: &str) -> bool {
-    split_simple_commands(command)
-        .into_iter()
-        .filter_map(git_subcommand)
-        .any(|sub| !READ_ONLY_GIT_SUBCOMMANDS.contains(&sub))
+    !root_command_is_read_only(command)
 }
 
-/// Split a shell command into its simple commands by folding every shell
-/// separator (`&&`, `||`, `|`, `;`, `&`, CR/LF) to a newline and splitting on
-/// it. Longer operators are folded before their single-character prefixes so
-/// `&&` / `||` do not leave a stray `&` / `|`.
-fn split_simple_commands(command: &str) -> Vec<&str> {
-    command
-        .split(['\n', '\r', ';', '&', '|'])
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-        .collect()
+/// Whether a root-coordinator shell command is unambiguously read-only.
+///
+/// This is intentionally a small allowlist, not a shell parser. Shell syntax,
+/// wrappers, interpreters, redirection, command substitution, mutating
+/// utilities, and unknown executables are denied. Absolute `git` paths are
+/// recognized by basename and remain subject to the read-only subcommand list.
+pub fn root_command_is_read_only(command: &str) -> bool {
+    if command.trim().is_empty()
+        || command
+            .chars()
+            .any(|c| matches!(c, '\n' | '\r' | ';' | '&' | '|' | '>' | '<' | '`' | '$'))
+    {
+        return false;
+    }
+    let Ok(tokens) = shell_words::split(command) else {
+        return false;
+    };
+    let Some(program) = tokens.first() else {
+        return false;
+    };
+    let basename = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program);
+    if basename == "git" {
+        let Some(subcommand) = git_subcommand_from_tokens(&tokens[1..]) else {
+            return false;
+        };
+        return READ_ONLY_GIT_SUBCOMMANDS.contains(&subcommand)
+            && !tokens.iter().any(|token| {
+                token == "-o"
+                    || token == "--output"
+                    || token.starts_with("--output=")
+                    || token == "--exec-path"
+                    || token.starts_with("--exec-path=")
+            });
+    }
+    matches!(
+        basename,
+        "pwd"
+            | "ls"
+            | "cat"
+            | "head"
+            | "tail"
+            | "wc"
+            | "stat"
+            | "test"
+            | "true"
+            | "false"
+            | "which"
+            | "rg"
+            | "grep"
+    )
 }
 
-/// The git subcommand a single simple command would run, or `None` when it does
-/// not invoke `git`. Leading `VAR=value` assignments and command wrappers
-/// (`sudo`, `env`, …) are skipped to reach `git`; then git's pre-subcommand
-/// options are skipped — including the ones that consume a following value — so
-/// the first non-option token is the subcommand.
-fn git_subcommand(segment: &str) -> Option<&str> {
-    let mut tokens = segment.split_whitespace().peekable();
-    while let Some(&token) = tokens.peek() {
-        if is_env_assignment(token) || COMMAND_WRAPPERS.contains(&token) {
-            tokens.next();
-        } else {
-            break;
-        }
-    }
-    if tokens.next()? != "git" {
-        return None;
-    }
-    while let Some(token) = tokens.next() {
+fn git_subcommand_from_tokens(tokens: &[String]) -> Option<&str> {
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = tokens[index].as_str();
         if token.starts_with('-') {
+            index += 1;
             if GIT_OPTS_WITH_VALUE.contains(&token) {
-                tokens.next();
+                index += 1;
             }
-            continue;
+        } else {
+            return Some(token);
         }
-        return Some(token);
     }
     None
-}
-
-/// Whether `token` is a leading `NAME=value` environment assignment (a
-/// shell-legal variable name followed by `=`), which precedes the command it
-/// applies to.
-fn is_env_assignment(token: &str) -> bool {
-    match token.split_once('=') {
-        Some((name, _)) => {
-            !name.is_empty()
-                && name.chars().enumerate().all(|(i, c)| {
-                    c == '_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit())
-                })
-        }
-        None => false,
-    }
 }
 
 /// True when `target` resolves outside `worktree`. A relative `target` is taken
@@ -199,6 +196,40 @@ pub fn escapes_worktree(worktree: &Path, target: &Path) -> bool {
         worktree.join(target)
     };
     !normalize(&absolute).starts_with(normalize(worktree))
+}
+
+/// Resolve a tool target through every existing symlink-bearing ancestor and
+/// report whether it escapes `root`. Missing leaf components are allowed for a
+/// new file, but failure to canonicalize the root/cwd/existing ancestor is an
+/// error so callers can deny fail-closed.
+pub fn path_escapes_root(root: &Path, cwd: &Path, target: &Path) -> Result<bool, String> {
+    let root = std::fs::canonicalize(root).map_err(|error| error.to_string())?;
+    let cwd = std::fs::canonicalize(cwd).map_err(|error| error.to_string())?;
+    if !cwd.starts_with(&root) {
+        return Ok(true);
+    }
+    let absolute = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        cwd.join(target)
+    };
+    let normalized = normalize(&absolute);
+    let mut existing = normalized.as_path();
+    let mut missing = Vec::new();
+    while !existing.exists() {
+        let Some(name) = existing.file_name() else {
+            return Err(format!("no existing ancestor for {}", target.display()));
+        };
+        missing.push(name.to_os_string());
+        existing = existing
+            .parent()
+            .ok_or_else(|| format!("no existing ancestor for {}", target.display()))?;
+    }
+    let mut resolved = std::fs::canonicalize(existing).map_err(|error| error.to_string())?;
+    for component in missing.iter().rev() {
+        resolved.push(component);
+    }
+    Ok(!resolved.starts_with(root))
 }
 
 /// Fold `.` and `..` out of `path` lexically, without consulting the filesystem.
@@ -361,9 +392,10 @@ mod tests {
     }
 
     #[test]
-    fn non_git_commands_are_not_flagged() {
-        for command in ["ls -la", "cargo test", "echo hi", ""] {
-            assert!(!command_mutates_repo(command));
+    fn only_allowlisted_non_git_commands_are_not_flagged() {
+        assert!(!command_mutates_repo("ls -la"));
+        for command in ["cargo test", "echo hi", ""] {
+            assert!(command_mutates_repo(command));
         }
     }
 
@@ -373,8 +405,8 @@ mod tests {
         assert!(command_mutates_repo("git status && git commit -m x"));
         assert!(command_mutates_repo("cd foo; git push"));
         assert!(command_mutates_repo("git log | cat && git add ."));
-        // A chain of only read-only git stays allowed.
-        assert!(!command_mutates_repo("git status && git log"));
+        // Shell composition is denied even if its visible commands look read-only.
+        assert!(command_mutates_repo("git status && git log"));
     }
 
     #[test]
@@ -386,20 +418,17 @@ mod tests {
     }
 
     #[test]
-    fn wrappers_and_env_assignments_before_git_are_seen_through() {
+    fn wrappers_and_env_assignments_are_denied() {
         assert!(command_mutates_repo("sudo git push"));
         assert!(command_mutates_repo("GIT_DIR=/x git commit"));
         assert!(command_mutates_repo("env git rebase main"));
-        assert!(!command_mutates_repo("FOO=bar git status"));
+        assert!(command_mutates_repo("FOO=bar git status"));
     }
 
     #[test]
-    fn git_with_no_subcommand_is_not_mutating() {
-        // Bare `git`, and `git` whose only tokens are consumed by value-taking
-        // global options, leave no subcommand — the token walk falls through to
-        // `None`, so there is nothing to deny (read-only-by-omission).
-        assert!(!command_mutates_repo("git"));
-        assert!(!command_mutates_repo("git -C /repo"));
+    fn git_with_no_subcommand_is_denied() {
+        assert!(command_mutates_repo("git"));
+        assert!(command_mutates_repo("git -C /repo"));
     }
 
     #[test]
@@ -407,5 +436,67 @@ mod tests {
         // The name accepts digits past index 0 (`A1=…`); such a leading
         // assignment is still seen through to the mutating git behind it.
         assert!(command_mutates_repo("A1=x git commit"));
+    }
+
+    #[test]
+    fn root_shell_allowlist_rejects_wrappers_redirection_and_mutators() {
+        for command in [
+            "sh -c 'git status'",
+            "git status > out",
+            "sed -i s/a/b/ file",
+            "rm file",
+            "env git status",
+            "command git status",
+            "/usr/bin/git commit -m x",
+            "git log --output=/tmp/out",
+            "echo $(git status)",
+        ] {
+            assert!(!root_command_is_read_only(command), "allowed {command}");
+        }
+        for command in [
+            "git status",
+            "/usr/bin/git log --oneline",
+            "git -C /repo diff",
+            "rg sandbox src",
+            "/bin/ls -la",
+        ] {
+            assert!(root_command_is_read_only(command), "denied {command}");
+        }
+    }
+
+    #[test]
+    fn adversarial_command_variations_stay_denied() {
+        let seeds = [
+            "sh -c 'touch /tmp/x'",
+            "git status > /tmp/x",
+            "sed -i s/a/b/ file",
+            "rm -rf target",
+            "env git commit -m x",
+        ];
+        for seed in seeds {
+            for command in [seed.to_string(), format!("  {seed}"), format!("{seed}  ")] {
+                assert!(!root_command_is_read_only(&command), "allowed {command:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_path_check_blocks_a_real_symlink_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo/.usagi/sessions/work");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let sentinel = outside.join("sentinel");
+        std::fs::write(&sentinel, "safe").unwrap();
+        let link = worktree.join("escape");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&outside, &link).unwrap();
+
+        assert!(path_escapes_root(&worktree, &worktree, &link.join("sentinel")).unwrap());
+        assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "safe");
+        assert!(!path_escapes_root(&worktree, &worktree, Path::new("new/file")).unwrap());
     }
 }

@@ -169,6 +169,24 @@ fn claude_hooks_settings(usagi_bin: &str) -> String {
     serde_json::to_string(&settings).expect("hook settings serialize to JSON")
 }
 
+/// Prefix a Claude argv with usagi's fail-closed OS sandbox launcher. Every
+/// path is one shell-escaped argument; the hidden launcher canonicalizes it
+/// before granting write access and refuses to start Claude on any failure.
+fn sandbox_prefix(wiring: &AgentWiring) -> String {
+    let mode = if wiring.is_root { "root" } else { "session" };
+    let mut prefix = format!(
+        "{} claude-sandbox --mode {}",
+        shell_single_quote(&wiring.usagi_bin),
+        shell_single_quote(mode)
+    );
+    for root in &wiring.sandbox_writable_roots {
+        prefix.push_str(" --writable-root ");
+        prefix.push_str(&shell_single_quote(&root.to_string_lossy()));
+    }
+    prefix.push_str(" -- ");
+    prefix
+}
+
 /// The Claude Code adapter.
 #[derive(Default)]
 pub struct ClaudeAgent;
@@ -230,9 +248,10 @@ impl Agent for ClaudeAgent {
         let system_prompt = shell_single_quote(&system_prompt);
         let hooks = shell_single_quote(&hooks);
         format!(
-            "claude {resume_flag}{model_flag}--mcp-config {mcp_config} \
+            "{}claude {resume_flag}{model_flag}--mcp-config {mcp_config} \
              --append-system-prompt {system_prompt} \
-             --settings {hooks}{prompt_arg}"
+             --settings {hooks}{prompt_arg}",
+            sandbox_prefix(wiring)
         )
     }
 
@@ -242,8 +261,9 @@ impl Agent for ClaudeAgent {
         // interactive launch via `--mcp-config`, so the agent can drive usagi
         // (session_list / session_remove …) while it works. No interactive person
         // is present, so `--dangerously-skip-permissions` lets it act (delete
-        // worktrees, run git) without approval prompts. Lifecycle hooks are
-        // omitted: a headless run reports no phase to watch.
+        // worktrees, run git) without approval prompts. The command still runs
+        // inside the same fail-closed OS sandbox as an interactive launch.
+        // Lifecycle hooks are omitted: a headless run reports no phase to watch.
         let mcp_config = mcp_config_json(wiring);
         let mcp_config = shell_single_quote(&mcp_config);
         let prompt = shell_single_quote(prompt);
@@ -252,7 +272,8 @@ impl Agent for ClaudeAgent {
             None => String::new(),
         };
         format!(
-            "claude -p {prompt} {model_flag}--dangerously-skip-permissions --mcp-config {mcp_config}"
+            "{}claude -p {prompt} {model_flag}--dangerously-skip-permissions --mcp-config {mcp_config}",
+            sandbox_prefix(wiring)
         )
     }
 
@@ -328,6 +349,15 @@ mod tests {
         }
     }
 
+    fn claude_tokens(command: &str) -> Vec<String> {
+        let tokens = shell_words::split(command).expect("launch line is well-formed shell");
+        let index = tokens
+            .iter()
+            .position(|token| token == "claude")
+            .expect("sandbox command contains Claude argv");
+        tokens[index..].to_vec()
+    }
+
     #[test]
     fn launch_command_renders_the_model_flag_only_when_a_model_is_set() {
         // Default (no model): Claude is launched without `--model`, on its own
@@ -346,6 +376,21 @@ mod tests {
     }
 
     #[test]
+    fn interactive_and_headless_launches_always_enter_the_os_sandbox() {
+        let wiring = wiring("/opt/usagi", None);
+        for command in [
+            ClaudeAgent::new().launch_command(&wiring, false, None),
+            ClaudeAgent::new().headless_command(&wiring, "clean"),
+        ] {
+            let tokens = shell_words::split(&command).unwrap();
+            assert_eq!(tokens[0], "/opt/usagi");
+            assert_eq!(tokens[1], "claude-sandbox");
+            assert_eq!(tokens[2..5], ["--mode", "session", "--"]);
+            assert_eq!(tokens[5], "claude");
+        }
+    }
+
+    #[test]
     fn launch_command_wires_in_the_usagi_mcp_servers() {
         // With the local LLM off (`None`), the unified usagi server is wired in
         // and the system prompt is just the worktree note.
@@ -353,7 +398,7 @@ mod tests {
         // The program is `claude`, with usagi's MCP server passed inline via
         // `--mcp-config` and a session-scoped instruction passed via
         // `--append-system-prompt` (both single-quoted so the shell keeps them).
-        let tokens = shell_words::split(&launch).expect("launch line is well-formed shell");
+        let tokens = claude_tokens(&launch);
         assert_eq!(tokens.len(), 7);
         assert_eq!(tokens[0], "claude");
         assert_eq!(tokens[1], "--mcp-config");
@@ -379,10 +424,10 @@ mod tests {
         // picks up the worktree's previous conversation; the rest of the wiring
         // is unchanged.
         let resumed = ClaudeAgent::new().launch_command(&wiring("usagi", None), true, None);
-        assert!(resumed.starts_with("claude --continue --mcp-config '"));
+        assert!(resumed.contains(" -- claude --continue --mcp-config '"));
         // Without resuming the flag is absent and the command starts plainly.
         let fresh = ClaudeAgent::new().launch_command(&wiring("usagi", None), false, None);
-        assert!(fresh.starts_with("claude --mcp-config '"));
+        assert!(fresh.contains(" -- claude --mcp-config '"));
         assert!(!fresh.contains("--continue"));
     }
 
@@ -396,7 +441,7 @@ mod tests {
             ClaudeAgent::new().launch_command(&wiring("usagi", None), false, Some("fix issue #50"));
         assert!(launch.ends_with(" -- 'fix issue #50'"));
         // The wiring is still present and the program still starts plainly.
-        assert!(launch.starts_with("claude --mcp-config '"));
+        assert!(launch.contains(" -- claude --mcp-config '"));
         assert!(launch.contains("--append-system-prompt '"));
         // With no prompt the trailing query is absent: the command is exactly the
         // prompt-carrying one with its ` -- '…'` suffix stripped.
@@ -429,7 +474,7 @@ mod tests {
         // the program name and the prompt is still the trailing query.
         let launch =
             ClaudeAgent::new().launch_command(&wiring("usagi", None), true, Some("keep going"));
-        assert!(launch.starts_with("claude --continue --mcp-config '"));
+        assert!(launch.contains(" -- claude --continue --mcp-config '"));
         assert!(launch.ends_with(" 'keep going'"));
     }
 
@@ -529,7 +574,8 @@ mod tests {
         // out: a successful injection would split into extra tokens (e.g. a
         // standalone `touch`/`/tmp/pwned`). Instead the malicious payload stays
         // sealed inside the `--mcp-config` argument as inert JSON text.
-        let tokens = shell_words::split(&launch).expect("launch line is well-formed shell");
+        let all_tokens = shell_words::split(&launch).expect("launch line is well-formed shell");
+        let tokens = claude_tokens(&launch);
         assert_eq!(tokens[0], "claude");
         assert_eq!(tokens[1], "--mcp-config");
         let mcp: serde_json::Value =
@@ -543,7 +589,7 @@ mod tests {
             "/Users/o'brien/bin/usagi"
         );
         // No token is the bare injected command — it never escaped the JSON.
-        assert!(!tokens.iter().any(|t| t == "touch" || t == "/tmp/pwned"));
+        assert!(!all_tokens.iter().any(|t| t == "touch" || t == "/tmp/pwned"));
     }
 
     #[test]
@@ -553,11 +599,12 @@ mod tests {
         // the background agent can drive usagi (session_list / session_remove …)
         // unattended.
         let launch = ClaudeAgent::new().headless_command(&wiring("usagi", None), "clean up");
-        assert_eq!(
-            launch,
-            "claude -p 'clean up' --dangerously-skip-permissions \
-             --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}}}'"
-        );
+        let tokens = claude_tokens(&launch);
+        assert_eq!(tokens[0], "claude");
+        assert_eq!(tokens[1], "-p");
+        assert_eq!(tokens[2], "clean up");
+        assert_eq!(tokens[3], "--dangerously-skip-permissions");
+        assert_eq!(tokens[4], "--mcp-config");
     }
 
     #[test]
@@ -581,7 +628,7 @@ mod tests {
             &wiring("/Users/o'brien/bin/usagi", None),
             "don't delete 'main'",
         );
-        let tokens = shell_words::split(&launch).expect("headless line is well-formed shell");
+        let tokens = claude_tokens(&launch);
         assert_eq!(tokens[0], "claude");
         assert_eq!(tokens[1], "-p");
         assert_eq!(tokens[2], "don't delete 'main'");
