@@ -1145,11 +1145,14 @@ fn dispatch_user_decision(
         .ok()
         .and_then(|request| match request {
             DaemonRequest::DispatchTool {
-                action, payload, ..
-            } => Some((action, payload)),
+                action,
+                payload,
+                caller_context,
+                ..
+            } => Some((action, payload, caller_context)),
             _ => None,
         });
-    let Some((action, payload)) = parsed else {
+    let Some((action, payload, caller_context)) = parsed else {
         return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
     };
     if !matches!(
@@ -1186,23 +1189,34 @@ fn dispatch_user_decision(
         let runtime = agent.lock().map_err(|_| {
             ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
         })?;
+        let credential = caller_context.as_ref().ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "decision caller provenance is unknown",
+            )
+        })?;
+        let run_id = runtime.mcp_caller(&credential.credential).ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "decision caller provenance is unknown",
+            )
+        })?;
         let dispatch = runtime.dispatch_store();
-        let active: Vec<_> = dispatch
+        let run = dispatch
             .runs()
             .map_err(|_| {
                 ProtocolError::new(ErrorCode::Unavailable, "dispatch provenance is unavailable")
             })?
             .into_iter()
-            .filter(|run| run.status == RunStatus::Running)
-            .collect();
-        let [run] = active.as_slice() else {
-            return Err(ProtocolError::new(
-                ErrorCode::OwnershipUnknown,
-                "decision caller provenance is ambiguous",
-            ));
-        };
+            .find(|run| run.run_id == run_id && run.status == RunStatus::Running)
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::OwnershipUnknown,
+                    "decision caller provenance is unknown",
+                )
+            })?;
         let binding = dispatch
-            .binding(run.run_id)
+            .binding(run_id)
             .map_err(|_| {
                 ProtocolError::new(ErrorCode::Unavailable, "dispatch provenance is unavailable")
             })?
@@ -1228,7 +1242,7 @@ fn dispatch_user_decision(
             workspace_id: workspace,
             session_id,
             caller: binding.caller,
-            run_id: run.run_id,
+            run_id,
         })
     })();
     let response = owner.and_then(|owner| {

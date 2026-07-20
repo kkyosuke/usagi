@@ -11,8 +11,8 @@ use std::io::{self, BufRead, Write};
 
 use serde_json::{Value, json};
 use usagi_core::usecase::client::{
-    ClientError, DaemonClient, DaemonReply, DaemonRequest, DispatchToolAction, SessionAction,
-    SupervisorToolAction,
+    ClientError, DaemonClient, DaemonReply, DaemonRequest, DispatchToolAction, McpCallerContext,
+    SessionAction, SupervisorToolAction,
 };
 
 use super::protocol::{self, error_code};
@@ -269,6 +269,10 @@ fn tools_call(
             action,
             operation_id,
             payload: arguments,
+            caller_context: std::env::var("USAGI_MCP_CALLER_CREDENTIAL")
+                .ok()
+                .filter(|credential| !credential.is_empty())
+                .map(|credential| McpCallerContext { credential }),
         }) {
             Ok(DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body)) => protocol::success(
                 id,

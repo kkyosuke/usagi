@@ -112,6 +112,12 @@ struct AgentOperation {
     outcome: Result<AgentAdmission, ProtocolError>,
 }
 
+#[derive(Debug, Clone)]
+struct McpCaller {
+    runtime: AgentRuntimeRef,
+    operation: OperationId,
+}
+
 /// The routing decision for a terminal request that addresses a `TerminalRef`.
 pub enum TerminalOutcome {
     /// The Agent owner recognizes the terminal and produced this result.
@@ -152,6 +158,7 @@ pub struct AgentRuntime<S, P, J, L = PathExecutableLocator> {
     dispatch: DispatchStore,
     locator: L,
     operations: BTreeMap<String, AgentOperation>,
+    mcp_callers: BTreeMap<String, McpCaller>,
 }
 
 impl<S, P, J> AgentRuntime<S, P, J, PathExecutableLocator> {
@@ -231,6 +238,7 @@ impl<S, P, J, L> AgentRuntime<S, P, J, L> {
             dispatch,
             locator,
             operations: BTreeMap::new(),
+            mcp_callers: BTreeMap::new(),
         }
     }
 
@@ -249,6 +257,17 @@ impl<S, P, J, L> AgentRuntime<S, P, J, L> {
     #[must_use]
     pub fn dispatch_store(&self) -> &DispatchStore {
         &self.dispatch
+    }
+
+    /// Resolves an opaque MCP credential only while its exact runtime is live.
+    #[must_use]
+    pub fn mcp_caller(&self, credential: &str) -> Option<OperationId> {
+        let caller = self.mcp_callers.get(credential)?;
+        self.coordinator
+            .record_for(&caller.runtime)
+            .ok()
+            .filter(|record| record.state == super::runtime::RuntimeState::Running)
+            .map(|_| caller.operation)
     }
 }
 
@@ -437,6 +456,7 @@ impl<
             operation: fence,
             mcp_allowed: true,
         };
+        let credential = OperationId::new().to_string();
         self.orchestrator
             .launch(
                 &mut self.coordinator,
@@ -446,6 +466,7 @@ impl<
                 self.geometry,
                 &mut self.store,
                 &mut self.pty,
+                Some(credential.clone()),
             )
             .map_err(map_orchestration_error)?;
         self.dispatch
@@ -458,6 +479,13 @@ impl<
                 status: RunStatus::Running,
             })
             .map_err(|_| dispatch_storage_error())?;
+        self.mcp_callers.insert(
+            credential,
+            McpCaller {
+                runtime: authorization.runtime,
+                operation,
+            },
+        );
         self.dispatch
             .upsert_binding(DispatchBinding {
                 run_id: operation,
@@ -548,6 +576,7 @@ impl<
                 self.geometry,
                 &mut self.store,
                 &mut self.pty,
+                None,
             )
             .map_err(map_orchestration_error)?;
         Ok(AgentAdmission {
@@ -1490,6 +1519,12 @@ mod tests {
                 &FakeScope(Ok(configured_scope(worktree.path()))),
             )
             .unwrap();
+        let credential = runtime.mcp_callers.keys().next().cloned().unwrap();
+        assert_eq!(
+            runtime.mcp_caller(&credential),
+            Some(OperationId::parse(&operation).unwrap())
+        );
+        assert_eq!(runtime.mcp_caller("forged"), None);
         let run_id = OperationId::parse(&operation).unwrap();
         assert_eq!(
             runtime
@@ -1513,6 +1548,7 @@ mod tests {
             admission
         );
         runtime.exit(&admission.terminal, 0).unwrap();
+        assert_eq!(runtime.mcp_caller(&credential), None);
         let inbox = runtime.dispatch_store().inbox(&caller).unwrap();
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].kind, InboxKind::NoReport);

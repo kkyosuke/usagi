@@ -1,13 +1,13 @@
 ---
 number: 383
 title: fix(daemon): Codex MCP に runtime-fenced caller provenance を注入する
-status: todo
+status: in-progress
 priority: high
 labels: [daemon, mcp, codex, security]
 dependson: []
 related: [378, 379, 364]
 created_at: 2026-07-20T01:05:43.934926+00:00
-updated_at: 2026-07-20T01:05:43.934926+00:00
+updated_at: 2026-07-20T01:20:28.204879+00:00
 ---
 
 ## 背景 / 不具合

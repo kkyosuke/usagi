@@ -214,6 +214,7 @@ impl Orchestrator {
         geometry: Geometry,
         store: &mut S,
         spawner: &mut P,
+        mcp_credential: Option<String>,
     ) -> Result<(), OrchestrationError> {
         if !authorization.fences(&authorization.runtime, &authorization.operation)
             || request.scope.session_id != authorization.runtime.session_id
@@ -240,6 +241,7 @@ impl Orchestrator {
                 adapter,
                 store,
                 spawner,
+                mcp_credential,
             )
             .map_err(OrchestrationError::Runtime)
     }
@@ -560,6 +562,7 @@ mod tests {
                 Geometry { cols: 80, rows: 24 },
                 &mut store,
                 &mut spawner,
+                None,
             )
             .unwrap();
         orchestration
@@ -599,6 +602,7 @@ mod tests {
                 Geometry { cols: 80, rows: 24 },
                 &mut store,
                 &mut spawner,
+                None,
             )
             .unwrap();
         assert_eq!(
