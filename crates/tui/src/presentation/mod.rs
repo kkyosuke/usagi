@@ -50,7 +50,7 @@ use crate::presentation::widgets::modal::{self, ConfirmationView};
 use crate::presentation::workspace_runtime::WorkspaceRuntime;
 use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, Effect, NewRequest, Notice, OperationResult, Overlay,
-    PendingToken, PointerAction, SafeError, SafeMessage, Target,
+    PendingToken, SafeError, SafeMessage, Target,
 };
 use crate::usecase::application::pane::PaneKind;
 use crate::usecase::application::pane_runtime::Geometry;
@@ -1156,7 +1156,16 @@ fn drain_session_completions(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntim
         ui.removing_session = None;
         let creating = ui.creating_session.take();
         match completion.result {
-            Ok(result) => apply_session_projection(ui, result.sessions, result.session_ids),
+            Ok(result) => {
+                let reconciled_snapshot = result.sessions.is_some();
+                apply_session_projection(ui, result.sessions, result.session_ids);
+                if reconciled_snapshot {
+                    // Preserve the snapshot boundary even when its stable ID list
+                    // is unchanged, so a click can never pair across reconciliation.
+                    let ids = ui.workspace.session_ids().to_vec();
+                    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Sessions(ids)));
+                }
+            }
             Err(message) => {
                 let safe = safe_session_error(&message);
                 if let Some(pending) = creating {
@@ -1268,24 +1277,16 @@ fn drain_pane_launches(ui: &mut WorkspaceUi, geometry: Geometry) {
 /// mascot via [`AppEvent::Tick`] — real resize dimensions come from `term.size()`
 /// and backend results from `DaemonBackend::drain_events()`, not from a `Key`.
 ///
-/// A sidebar [`Key::Click`] becomes an [`AppEvent::Pointer`] the reducer
-/// hit-tests against the live sidebar geometry; the shell no longer resolves the
-/// row. Returns `None` for input the Home reducer never consumes: raw PTY
-/// passthrough, terminal-viewport pointer drags (a shell + `TerminalSession`
-/// concern), and keys with no Home management meaning.
+/// Sidebar clicks need a monotonic timestamp and are adapted separately by
+/// [`sidebar_pointer_event`]. Returns `None` for input the Home reducer never
+/// consumes: raw PTY passthrough, pointer input, and keys with no Home management
+/// meaning.
 #[must_use]
 #[allow(clippy::needless_pass_by_value)]
 pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
     let app_key = match key {
         Key::Live(action) => return live_action_to_app_key(action).map(AppEvent::Key),
         Key::Other => return Some(AppEvent::Tick),
-        Key::Click { column, row } => {
-            return Some(AppEvent::Pointer {
-                column,
-                row,
-                action: PointerAction::Select,
-            });
-        }
         Key::Up => AppKey::Up,
         Key::Down => AppKey::Down,
         // Left/Right move the focus inside a horizontal choice (the Yes/No quit
@@ -1307,7 +1308,7 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         // Input the Home reducer never consumes: raw PTY passthrough, terminal
         // pointer drags (a shell + `TerminalSession` concern), and Ctrl-D (Open
         // Workspace only).
-        Key::Passthrough(_) | Key::Pointer(_) | Key::CtrlD => {
+        Key::Passthrough(_) | Key::Pointer(_) | Key::Click { .. } | Key::CtrlD => {
             return None;
         }
     };
@@ -2048,34 +2049,11 @@ fn drain_pane_completions_into_runtime(
     }
 }
 
-/// The maximum gap between two presses on the same sidebar cell that the shell
-/// promotes from a Select to an Activate pointer gesture.
-const SIDEBAR_DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
-
-/// Build the pointer event for a sidebar click, promoting a second press on the
-/// same cell within [`SIDEBAR_DOUBLE_CLICK`] to an Activate. The shell tracks
-/// only this timing window; the reducer owns the row hit-test.
-#[coverage(off)]
-fn sidebar_pointer_event(
-    last_click: &mut Option<(u16, u16, std::time::Instant)>,
-    column: u16,
-    row: u16,
-) -> AppEvent {
-    let now = std::time::Instant::now();
-    let doubled = last_click.is_some_and(|(last_column, last_row, at)| {
-        last_column == column && last_row == row && now.duration_since(at) <= SIDEBAR_DOUBLE_CLICK
-    });
-    *last_click = (!doubled).then_some((column, row, now));
-    let action = if doubled {
-        PointerAction::Activate
-    } else {
-        PointerAction::Select
-    };
-    AppEvent::Pointer {
-        column,
-        row,
-        action,
-    }
+/// Build the controller event for a sidebar click. The shell supplies the raw
+/// cell and an injected monotonic timestamp; stable identity and double-click
+/// detection remain controller responsibilities.
+fn sidebar_pointer_event(column: u16, row: u16, at: std::time::Duration) -> AppEvent {
+    AppEvent::Pointer { column, row, at }
 }
 
 #[coverage(off)] // Real-terminal resync composition; reducer state is unit-tested below the port.
@@ -2153,10 +2131,9 @@ fn drive_workspace_controller(
     let mut metrics_projection = MetricsProjection::default();
     let mut pending_targets: std::collections::HashMap<OperationId, Target> =
         std::collections::HashMap::new();
-    // The reducer hit-tests sidebar clicks against the last terminal geometry;
-    // the shell only tracks the double-click window that promotes a Select to an
-    // Activate, never the row itself.
-    let mut last_click: Option<(u16, u16, std::time::Instant)> = None;
+    // The reducer hit-tests sidebar clicks and owns stable-identity double-click
+    // state. The shell's clock is reduced to a deterministic elapsed timestamp.
+    let pointer_clock = std::time::Instant::now();
     // Live-terminal scroll offset, drag selection, and copy feedback the reducer
     // does not own (design §4.2).
     let mut controls = LiveTerminalControls::default();
@@ -2257,8 +2234,6 @@ fn drive_workspace_controller(
         ) {
             continue;
         }
-        // A second click on the same cell within the window activates the row the
-        // reducer resolves; otherwise the click just moves the cursor.
         let effects = if let Key::Click { column, row } = key {
             // The notice centre occupies the right side of Home's top header.
             // Keep it above the sidebar hit-test so a header click never moves
@@ -2269,7 +2244,7 @@ fn drive_workspace_controller(
             {
                 runtime.apply_event(AppEvent::Key(AppKey::OpenDecisions))
             } else {
-                runtime.apply_event(sidebar_pointer_event(&mut last_click, column, row))
+                runtime.apply_event(sidebar_pointer_event(column, row, pointer_clock.elapsed()))
             }
         } else {
             runtime.handle_key(key)
@@ -2790,16 +2765,14 @@ mod tests {
         render_controller_frame, render_home_snapshot, restore_open_panes, run as run_from_start,
         run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
-        run_workspace_controller, safe_session_error, step_config, step_new, terminal_geometry,
-        welcome_action, write_banner,
+        run_workspace_controller, safe_session_error, sidebar_pointer_event, step_config, step_new,
+        terminal_geometry, welcome_action, write_banner,
     };
     use crate::presentation::live_terminal::LiveTerminalControls;
     use crate::presentation::views::config::AvailableAgentModels;
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
-    use crate::usecase::application::controller::{
-        AppEvent, AppKey, NewRequest, PointerAction, Target,
-    };
+    use crate::usecase::application::controller::{AppEvent, AppKey, NewRequest, Target};
     use crate::usecase::application::pane::PaneKind;
     use crate::usecase::application::run as dispatch;
     use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
@@ -2907,15 +2880,8 @@ mod tests {
         assert_eq!(app_event_from_key(Key::Other), Some(AppEvent::Tick));
         // Raw passthrough and terminal pointer drags never reach the Home reducer.
         assert_eq!(app_event_from_key(Key::Passthrough(vec![0x1b])), None);
-        // A sidebar click becomes a pointer event the reducer hit-tests.
-        assert_eq!(
-            app_event_from_key(Key::Click { column: 3, row: 4 }),
-            Some(AppEvent::Pointer {
-                column: 3,
-                row: 4,
-                action: PointerAction::Select,
-            })
-        );
+        // Sidebar clicks need the real runtime's injected monotonic timestamp.
+        assert_eq!(app_event_from_key(Key::Click { column: 3, row: 4 }), None);
         // Left/Right reach the reducer to move the Yes/No confirmation focus; the
         // reducer ignores them outside that overlay. Ctrl-D stays Open-only.
         assert_eq!(
@@ -2936,6 +2902,19 @@ mod tests {
         ] {
             assert_eq!(app_event_from_key(Key::Live(action)), None);
         }
+    }
+
+    #[test]
+    fn sidebar_pointer_adapter_preserves_coordinates_and_injected_time() {
+        let at = std::time::Duration::from_millis(1_234);
+        assert_eq!(
+            sidebar_pointer_event(3, 4, at),
+            AppEvent::Pointer {
+                column: 3,
+                row: 4,
+                at,
+            }
+        );
     }
 
     fn ws(name: &str) -> Workspace {
@@ -3391,6 +3370,58 @@ mod tests {
                 .map(|notice| notice.message.as_str()),
             Some("daemon refused the session"),
         );
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn session_snapshot_adapter_preserves_reconciliation_boundary_for_pointer_state() {
+        use crate::presentation::workspace_runtime::WorkspaceRuntime;
+        use crate::usecase::application::controller::{HomeMode, Route};
+
+        let snapshot = snapshot("demo");
+        let workspace_id = snapshot.workspace_id;
+        let session = snapshot.session_ids[0];
+        let records = snapshot.state.sessions.clone();
+        let view = WorkspaceView::with_runtime_ids(
+            snapshot.workspace,
+            snapshot.state,
+            snapshot.session_ids,
+        );
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace_id, vec![session]);
+        let _ = runtime.apply_event(AppEvent::Resize {
+            width: 100,
+            height: 30,
+        });
+        let _ = runtime.apply_event(sidebar_pointer_event(
+            5,
+            4,
+            std::time::Duration::from_millis(1_000),
+        ));
+
+        ui.session_completion_sender
+            .send(super::SessionCommandCompletion {
+                port: Box::new(UnavailableSessionCommandPort),
+                result: Ok(SessionCommandResult {
+                    message: "same snapshot".to_owned(),
+                    sessions: Some(records),
+                    session_ids: Some(vec![session]),
+                }),
+            })
+            .unwrap();
+        super::drain_session_completions(&mut ui, &mut runtime);
+        assert_eq!(runtime.state().sessions(), &[session]);
+        let _ = runtime.apply_event(sidebar_pointer_event(
+            5,
+            4,
+            std::time::Duration::from_millis(1_100),
+        ));
+
+        assert_eq!(runtime.state().active(), Target::Root(workspace_id));
+        assert!(matches!(
+            runtime.state().route(),
+            Route::Home(HomeMode::Switch)
+        ));
     }
 
     /// A streaming agent port whose PTY attaches live from `replay`, then reports
