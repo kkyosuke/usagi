@@ -974,6 +974,54 @@ mod tests {
             DurableOperationOutcome::OwnershipUnknown
         );
     }
+
+    #[test]
+    fn durable_snapshot_schema_round_trips_every_safe_outcome_and_rejects_unknown_fields() {
+        let request = request();
+        let (runtime, operation) = refs(&request);
+        let launch = Resolver::default().resolve(&request).unwrap().snapshot;
+        for outcome in [
+            DurableOperationOutcome::Accepted,
+            DurableOperationOutcome::Completed,
+            DurableOperationOutcome::SpawnUnavailable,
+            DurableOperationOutcome::ExitUnavailable,
+            DurableOperationOutcome::OwnershipUnknown,
+        ] {
+            let snapshot = RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![DurableRuntimeRecord {
+                    runtime: runtime.clone(),
+                    operation: operation.clone(),
+                    launch: launch.clone(),
+                    state: RuntimeState::Exited,
+                    process: Some(process()),
+                    semantic_key: Some("intent".into()),
+                    outcome,
+                }],
+            };
+            assert_eq!(
+                serde_json::from_str::<RuntimeStoreSnapshot>(
+                    &serde_json::to_string(&snapshot).unwrap()
+                )
+                .unwrap(),
+                snapshot
+            );
+        }
+        assert!(
+            serde_json::from_value::<RuntimeStoreSnapshot>(serde_json::json!({
+                "schema_version": RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                "records": [],
+                "future_field": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<RuntimeStoreSnapshot>(serde_json::json!({
+                "schema_version": RUNTIME_SNAPSHOT_SCHEMA_VERSION
+            }))
+            .is_err()
+        );
+    }
     fn launch<S: RuntimeStore>(
         coordinator: &mut RuntimeCoordinator,
         request: &LaunchRequest,
