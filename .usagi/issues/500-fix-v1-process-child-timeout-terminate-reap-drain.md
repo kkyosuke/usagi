@@ -1,14 +1,14 @@
 ---
 number: 500
 title: fix(v1/process): child timeout 後の terminate・reap・drain を有界化する
-status: in-progress
+status: done
 priority: medium
 labels: [review, v1, process, resilience]
 dependson: []
 related: [171, 189]
 parent: 453
 created_at: 2026-07-20T12:07:09.009717+00:00
-updated_at: 2026-07-20T23:00:39.746390+00:00
+updated_at: 2026-07-20T23:28:47.159631+00:00
 ---
 
 ## 問題・影響
