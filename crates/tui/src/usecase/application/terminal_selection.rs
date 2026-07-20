@@ -8,7 +8,7 @@
 use unicode_width::UnicodeWidthChar;
 
 /// A location in the visible terminal viewport, measured in terminal columns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TerminalPoint {
     pub row: usize,
     pub column: usize,
