@@ -1,14 +1,14 @@
 ---
 number: 459
 title: fix(daemon): generic terminal snapshot を restart 時に hydrate する
-status: in-progress
+status: done
 priority: high
 labels: [review, v2, daemon, terminal, durability]
 dependson: []
 related: [209, 255, 264, 311, 350, 365, 386, 458]
 parent: 453
 created_at: 2026-07-20T12:06:19.331895+00:00
-updated_at: 2026-07-20T13:29:44.069256+00:00
+updated_at: 2026-07-20T13:48:18.717887+00:00
 ---
 
 ## 問題・影響
