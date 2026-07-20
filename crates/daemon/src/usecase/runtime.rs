@@ -293,7 +293,6 @@ impl RuntimeCoordinator {
         }
     }
 
-    #[coverage(off)] // Container/terminal-registry reconstruction; pure snapshot validation stays measured in `hydrated_records`.
     pub fn hydrate(
         snapshot: RuntimeStoreSnapshot,
         limit: usize,
@@ -700,7 +699,6 @@ impl RuntimeCoordinator {
 }
 
 #[inline(never)]
-#[coverage(off)] // LLVM duplicates this helper across library/lib-test copies; the test below exercises every fail-closed branch.
 fn hydrated_records(
     snapshot: RuntimeStoreSnapshot,
 ) -> Result<BTreeMap<String, DurableRuntimeRecord>, RuntimeSnapshotError> {
@@ -746,6 +744,21 @@ mod tests {
         fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
             self.0.push(snapshot);
             Ok(())
+        }
+    }
+    struct ConditionalStore {
+        saves: usize,
+        fail_after: Option<usize>,
+    }
+    impl RuntimeStore for ConditionalStore {
+        type Error = ();
+        fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
+            self.saves += 1;
+            if self.fail_after.is_some_and(|limit| self.saves > limit) {
+                Err(())
+            } else {
+                Ok(())
+            }
         }
     }
     struct FailingStore(usize);
@@ -1332,6 +1345,46 @@ mod tests {
             ),
             Err(RuntimeError::SpawnFailed)
         );
+
+        for failure in [SpawnFailure::Definite, SpawnFailure::Ambiguous] {
+            let successful_request = request();
+            let (runtime, fence) = refs(&successful_request);
+            let mut coordinator = RuntimeCoordinator::new(1, 64, 1);
+            let mut successful_store = ConditionalStore {
+                saves: 0,
+                fail_after: None,
+            };
+            assert!(
+                launch(
+                    &mut coordinator,
+                    &successful_request,
+                    runtime,
+                    fence,
+                    &mut Spawner(Err(failure)),
+                    &mut successful_store,
+                )
+                .is_err()
+            );
+
+            let failing_request = request();
+            let (runtime, fence) = refs(&failing_request);
+            let mut coordinator = RuntimeCoordinator::new(1, 64, 1);
+            let mut failing_store = ConditionalStore {
+                saves: 0,
+                fail_after: Some(1),
+            };
+            assert_eq!(
+                launch(
+                    &mut coordinator,
+                    &failing_request,
+                    runtime,
+                    fence,
+                    &mut Spawner(Err(failure)),
+                    &mut failing_store,
+                ),
+                Err(RuntimeError::Store)
+            );
+        }
 
         let persisted_request = request();
         let (runtime, fence) = refs(&persisted_request);
