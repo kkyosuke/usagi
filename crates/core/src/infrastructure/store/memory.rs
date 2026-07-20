@@ -939,4 +939,52 @@ mod tests {
             std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
         }
     }
+
+    #[test]
+    fn dirty_remove_rebuilds_and_failed_read_repair_returns_source_summaries() {
+        let _guard = crate::test_support::process_env_guard();
+        let logs = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var(crate::infrastructure::paths::DATA_DIR_ENV, logs.path());
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(tmp.path());
+        store.write(&memory("one", "One")).unwrap();
+        fail_next_atomic_write(&store.toc_path(), AtomicWriteStage::Rename);
+        store.write(&memory("two", "Two")).unwrap();
+
+        assert_eq!(
+            store.remove_with_outcome("one").unwrap().derived,
+            DerivedState::Fresh
+        );
+        fail_next_atomic_write(&store.toc_path(), AtomicWriteStage::Rename);
+        store.write(&memory("three", "Three")).unwrap();
+        fail_next_atomic_write(&store.index_path(), AtomicWriteStage::Rename);
+        let names: Vec<_> = store
+            .summaries()
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.name)
+            .collect();
+        assert_eq!(names, vec!["three", "two"]);
+
+        unsafe {
+            std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_reports_a_source_metadata_error_without_mutation() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(tmp.path());
+        fs::create_dir_all(store.dir()).unwrap();
+        let path = store.dir().join("loop.md");
+        symlink("loop.md", &path).unwrap();
+
+        assert!(store.remove("loop").is_err());
+        assert!(path.symlink_metadata().unwrap().file_type().is_symlink());
+    }
 }

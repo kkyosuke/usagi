@@ -1105,4 +1105,37 @@ mod tests {
             std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
         }
     }
+
+    #[test]
+    fn dirty_remove_rebuilds_and_failed_read_repair_returns_source_summaries() {
+        let _guard = crate::test_support::process_env_guard();
+        let logs = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var(crate::infrastructure::paths::DATA_DIR_ENV, logs.path());
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(1, "One")).unwrap();
+        fail_next_atomic_write(&store.index_path(), AtomicWriteStage::Rename);
+        store.write(&issue(2, "Two")).unwrap();
+
+        assert_eq!(
+            store.remove_with_outcome(1).unwrap().derived,
+            DerivedState::Fresh
+        );
+        fail_next_atomic_write(&store.index_path(), AtomicWriteStage::Rename);
+        store.write(&issue(3, "Three")).unwrap();
+        fail_next_atomic_write(&store.index_path(), AtomicWriteStage::Rename);
+        let numbers: Vec<_> = store
+            .summaries()
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.number)
+            .collect();
+        assert_eq!(numbers, vec![2, 3]);
+
+        unsafe {
+            std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
+        }
+    }
 }
