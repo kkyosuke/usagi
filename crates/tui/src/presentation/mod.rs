@@ -1633,6 +1633,30 @@ fn handle_terminal_pointer(
     }
 }
 
+/// Clear a finished terminal selection only when a normal left click lands in
+/// the live terminal's rendered content viewport. Sidebar, chrome, modal, and
+/// empty-selection clicks retain their existing ownership and handling.
+#[coverage(off)]
+fn clear_terminal_selection_on_click(
+    runtime: &WorkspaceRuntime,
+    controls: &mut LiveTerminalControls,
+    height: usize,
+    width: usize,
+    rows_len: usize,
+    scroll: usize,
+    column: u16,
+    row: u16,
+) -> bool {
+    if !runtime.wants_live_input()
+        || !controls.has_selection()
+        || terminal_point_at(height, width, rows_len, scroll, column, row).is_none()
+    {
+        return false;
+    }
+    controls.clear_selection();
+    true
+}
+
 /// Intercept the live-terminal view controls the Home reducer does not own —
 /// scroll, tab close, and pointer drag / copy — returning `true` when the key was
 /// consumed here so the shell loop skips reducer dispatch. `rows_len` / `scroll`
@@ -1660,6 +1684,11 @@ fn intercept_live_terminal_control(
         Key::Pointer(pointer) => {
             handle_terminal_pointer(
                 ui, runtime, controls, term, height, width, rows_len, scroll, *pointer,
+            );
+        }
+        Key::Click { column, row } => {
+            return clear_terminal_selection_on_click(
+                runtime, controls, height, width, rows_len, scroll, *column, *row,
             );
         }
         _ => return false,
@@ -2644,10 +2673,10 @@ mod tests {
         Start, TerminalAttach, TerminalChunk, TerminalError, UnavailableBrowserOpener,
         UnavailableDecisionCommandPort, UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
         WelcomeStep, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi,
-        WorkspaceView, app_event_from_key, close_exited_panes, controller_terminal_view,
-        handle_terminal_pointer, key_to_terminal_bytes, new_project_notice, play_startup_splash,
-        render_controller_frame, render_home_snapshot, restore_open_panes, run as run_from_start,
-        run_with_settings,
+        WorkspaceView, app_event_from_key, clear_terminal_selection_on_click, close_exited_panes,
+        controller_terminal_view, handle_terminal_pointer, key_to_terminal_bytes,
+        new_project_notice, play_startup_splash, render_controller_frame, render_home_snapshot,
+        restore_open_panes, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_controller, safe_session_error, step_config, step_new, terminal_geometry,
         welcome_action, write_banner,
@@ -3605,6 +3634,64 @@ mod tests {
             projected.iter().any(|row| row.contains("\u{1b}[7mhello")),
             "selection highlight lost after release: {projected:?}"
         );
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn a_normal_click_in_live_terminal_content_clears_only_the_retained_selection() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let (ui, runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(ScriptedAgentPort {
+                terminal: terminal.clone(),
+                subscription: 9,
+                replay: b"hello".to_vec(),
+                exit_on_poll: false,
+                detaches: Arc::new(Mutex::new(Vec::new())),
+            }),
+        );
+        let rows_len = ui
+            .terminal_rows(&terminal, None)
+            .expect("attached live rows")
+            .len();
+        let mut controls = LiveTerminalControls::default();
+        controls.sync_focus(Some(&terminal));
+        controls.begin_selection(TerminalSelection::begin(
+            ui.terminal_cells(&terminal).expect("terminal cells"),
+            TerminalPoint { row: 0, column: 0 },
+        ));
+        controls.extend_selection(TerminalPoint { row: 0, column: 4 });
+        let _ = controls.finish_drag();
+
+        // The right pane starts at column 37 and terminal content at row 5.
+        assert!(clear_terminal_selection_on_click(
+            &runtime,
+            &mut controls,
+            20,
+            80,
+            rows_len,
+            0,
+            37,
+            5,
+        ));
+        assert!(!controls.has_selection());
+
+        // With no selection, a left-sidebar click is still left for sidebar
+        // navigation; the terminal interceptor must not consume it.
+        assert!(!clear_terminal_selection_on_click(
+            &runtime,
+            &mut controls,
+            20,
+            80,
+            rows_len,
+            0,
+            5,
+            2,
+        ));
     }
 
     #[test]
