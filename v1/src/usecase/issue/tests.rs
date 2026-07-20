@@ -302,6 +302,28 @@ fn create_assigns_increasing_numbers_and_defaults_to_todo() {
 }
 
 #[test]
+fn create_retry_reuses_committed_source_identity_after_derived_failure() {
+    use crate::infrastructure::issue_store::IssueStore;
+    use crate::infrastructure::json_file::{fail_next_atomic_write, AtomicWriteStage};
+
+    let _guard = crate::test_support::process_env_guard();
+    let logs = tempfile::tempdir().unwrap();
+    std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, logs.path());
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let store = IssueStore::new(repo);
+    fail_next_atomic_write(&store.index_path(), AtomicWriteStage::Rename);
+
+    let first = create(repo, new_issue("same request")).unwrap();
+    let retry = create(repo, new_issue("same request")).unwrap();
+
+    assert_eq!(retry.number, first.number);
+    assert_eq!(retry.created_at, first.created_at);
+    assert_eq!(store.scan().unwrap().len(), 1);
+    std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+}
+
+#[test]
 fn create_numbers_issues_across_the_whole_workspace() {
     // A workspace root with two session worktrees mirrored under
     // `.usagi/sessions/`. Issues live in each worktree's own store, but

@@ -78,7 +78,7 @@ pub fn save(repo_root: &Path, new: NewMemory) -> Result<Memory> {
     // same name cannot interleave between the two and clobber the result.
     let lock = store.lock()?;
     let now = Utc::now();
-    let memory = match store.read(&name)? {
+    let memory = match store.read_locked(&name)? {
         Some(existing) => Memory {
             name,
             title: new.title,
@@ -146,7 +146,7 @@ pub fn update(repo_root: &Path, name: &str, changes: MemoryChanges) -> Result<Op
     // `save` of the same memory cannot interleave between the two and clobber
     // this change (a lost update). Mirrors `save` above.
     let lock = store.lock()?;
-    let Some(mut memory) = store.read(&slugify(name))? else {
+    let Some(mut memory) = store.read_locked(&slugify(name))? else {
         return Ok(None);
     };
     if let Some(title) = changes.title {

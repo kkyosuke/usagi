@@ -71,6 +71,30 @@ fn create_with_json_emits_the_issue() {
 }
 
 #[test]
+fn create_retry_after_derived_failure_reports_same_committed_issue() {
+    use crate::infrastructure::issue_store::IssueStore;
+    use crate::infrastructure::json_file::{fail_next_atomic_write, AtomicWriteStage};
+
+    let _guard = crate::test_support::process_env_guard();
+    let logs = tempfile::tempdir().unwrap();
+    std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, logs.path());
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    fail_next_atomic_write(
+        &IssueStore::new(repo).index_path(),
+        AtomicWriteStage::Rename,
+    );
+
+    create(repo, "retry-safe", vec![]);
+    create(repo, "retry-safe", vec![]);
+
+    let issues = IssueStore::new(repo).scan().unwrap();
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].number, 1);
+    std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+}
+
+#[test]
 fn list_marks_ready_blocked_and_done() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();

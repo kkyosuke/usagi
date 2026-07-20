@@ -230,6 +230,7 @@ Nerd Font が未導入なら、Nerd Fonts の GitHub リリースから JetBrain
 - **着手可能（ready）の可視化**: `list` / `search` は各 issue が ready かを示します。ready = `dependson` に挙げた issue が**すべて `done`** で、かつ自身が未 `done`。ブロック中の issue には未達の依存番号（`(blocked by 1, 3)`）を併記するので、いま着手できるタスクが一目で分かります。
 - **グループ化・グラフ・進捗**: `--group-by` は `status` / `priority` / `milestone` / `parent` を受け付け、グループごとに見出しと進捗サマリ（件数・完了率・ready 数・バー）を出します。`graph` は `dependson` の依存ツリーを描き、ダイヤモンドや循環は一度だけ展開して `↑` を付けます。
 - **グラフの状態グリフ**: `graph` は各ノードの先頭に進捗が一目で分かるグリフを付けます。`✓` 完了（`done`）、`○` 着手可能（ready）、`⊘` 依存未達でブロック中（blocked）。TUI の `issue graph` はこれに加えて色分けします（[02-tui.md](02-tui.md#issue)）。
+- **派生キャッシュの部分失敗**: source Markdown の保存・削除後に `index.json` の更新だけが失敗した場合、command は適用済みの操作として成功します。再生成予約を残し、次回 read（process 再起動後を含む）で自動修復するため、同じ command を再送しても別 issue を作成したり二重削除したりしません。永続化契約の詳細は [issue の保存形式](../data/03-issues.md) を参照してください。
 
 ```
 $ usagi issue list
@@ -262,6 +263,7 @@ $ usagi issue graph
 - `--name` / `<名>` は与えた文字列をスラッグ化して識別子にします（例: `"User Prefers Tabs"` → `user-prefers-tabs`）。
 - `save` / `list` / `show` / `update` / `search` は `--json` で機械可読な JSON を出力します（`delete` は対象外）。
 - メモリを保存・更新・削除すると、目次 `MEMORY.md` と派生キャッシュ `index.json` が再生成されます。
+- source Markdown の保存・削除後に `MEMORY.md` / `index.json` の更新だけが失敗した場合も command は適用済みの操作として成功し、次回 read（process 再起動後を含む）で自動修復します。同じ command の再送は memory name に対して冪等です。永続化契約の詳細は [メモリの保存形式](../data/04-memory.md) を参照してください。
 
 ```
 $ usagi memory save --name "tabs" --title "ユーザーはタブを好む" --type user

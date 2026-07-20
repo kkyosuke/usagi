@@ -1,14 +1,14 @@
 ---
 number: 479
 title: fix(v1/store): Markdown source commit と derived failure の outcome を分離する
-status: todo
+status: in-progress
 priority: medium
 labels: [review, v1, persistence, durability]
 dependson: []
 related: [113, 117]
 parent: 453
 created_at: 2026-07-20T12:06:47.530967+00:00
-updated_at: 2026-07-20T12:06:47.530967+00:00
+updated_at: 2026-07-20T23:26:31.802409+00:00
 ---
 
 ## 問題・影響

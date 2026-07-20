@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::issue::{Issue, IssueSummary};
-use crate::infrastructure::markdown_store::{MarkdownEntry, MarkdownStore};
+use crate::infrastructure::markdown_store::{MarkdownEntry, MarkdownStore, MutationOutcome};
 use crate::infrastructure::repo_paths::STATE_DIR;
 use crate::infrastructure::store_lock::StoreLock;
 
@@ -175,6 +175,12 @@ impl IssueStore {
 
     /// Read a single issue by number, or `None` if it does not exist.
     pub fn read(&self, number: u32) -> Result<Option<Issue>> {
+        self.repair_derived_best_effort();
+        self.read_locked(number)
+    }
+
+    /// Read source while the caller already holds this store's lock.
+    pub fn read_locked(&self, number: u32) -> Result<Option<Issue>> {
         let files = self.unique_files_for(number)?;
         let Some(path) = files.into_iter().next() else {
             return Ok(None);
@@ -184,7 +190,7 @@ impl IssueStore {
 
     /// Write `issue` to disk and refresh the index, taking the store lock for the
     /// duration so concurrent writers serialise.
-    pub fn write(&self, issue: &Issue) -> Result<()> {
+    pub fn write(&self, issue: &Issue) -> Result<MutationOutcome<()>> {
         let lock = self.lock()?;
         self.write_locked(&lock, issue)
     }
@@ -192,7 +198,9 @@ impl IssueStore {
     /// Like [`write`](Self::write) but assumes the caller already holds this
     /// store's [`lock`](Self::lock). If the title changes, the new file is written
     /// before stale-named siblings for the same number are removed.
-    pub fn write_locked(&self, _lock: &StoreLock, issue: &Issue) -> Result<()> {
+    pub fn write_locked(&self, _lock: &StoreLock, issue: &Issue) -> Result<MutationOutcome<()>> {
+        let rebuild_required = self.inner.derived_is_dirty();
+        self.inner.mark_derived_dirty()?;
         let existing = self.unique_files_for(issue.number)?;
         let target = self.inner.write_markdown(issue)?;
         for stale in existing {
@@ -200,27 +208,62 @@ impl IssueStore {
                 fs::remove_file(&stale).context(format!("failed to remove {}", stale.display()))?;
             }
         }
-        self.inner.reindex_after_write(issue)
+        let refresh = if rebuild_required {
+            self.inner.rebuild_derived().map(|_| ())
+        } else {
+            self.inner.reindex_after_write(issue)
+        };
+        Ok(self.inner.finish_committed((), refresh))
     }
 
     /// Remove the issue with `number`, returning whether anything was deleted,
     /// then refresh the index. Takes the store lock for the duration.
     pub fn remove(&self, number: u32) -> Result<bool> {
+        Ok(self.remove_with_outcome(number)?.value)
+    }
+
+    /// Remove source and report whether its derived files remain fresh.
+    pub fn remove_with_outcome(&self, number: u32) -> Result<MutationOutcome<bool>> {
         let _lock = self.lock()?;
         let files = self.unique_files_for(number)?;
         if files.is_empty() {
-            return Ok(false);
+            let repair = self.inner.repair_derived_locked();
+            return Ok(self.inner.finish_committed(false, repair));
         }
+        let rebuild_required = self.inner.derived_is_dirty();
+        self.inner.mark_derived_dirty()?;
         for file in files {
             fs::remove_file(&file).context(format!("failed to remove {}", file.display()))?;
         }
-        self.inner.reindex_after_remove(&number)?;
-        Ok(true)
+        let refresh = if rebuild_required {
+            self.inner.rebuild_derived().map(|_| ())
+        } else {
+            self.inner.reindex_after_remove(&number)
+        };
+        Ok(self.inner.finish_committed(true, refresh))
     }
 
     /// Metadata summaries for every issue.
     pub fn summaries(&self) -> Result<Vec<IssueSummary>> {
+        self.repair_derived_best_effort();
+        if self.inner.derived_is_dirty() {
+            return self.inner.source_summaries();
+        }
         self.inner.summaries()
+    }
+
+    fn repair_derived_best_effort(&self) {
+        if !self.inner.derived_is_dirty() {
+            return;
+        }
+        let repair = self
+            .lock()
+            .and_then(|_lock| self.inner.repair_derived_locked());
+        if let Err(error) = repair {
+            crate::infrastructure::error_log::ErrorLog::record(&format!(
+                "issue derived rebuild remains scheduled after read: {error:#}"
+            ));
+        }
     }
 
     /// Write the number-sorted `summaries` to `index.json` as the derived cache.
@@ -262,6 +305,8 @@ fn number_from_filename(path: &Path) -> Option<u32> {
 mod tests {
     use super::*;
     use crate::domain::issue::{IssuePriority, IssueStatus};
+    use crate::infrastructure::json_file::{fail_next_atomic_write, AtomicWriteStage};
+    use crate::infrastructure::markdown_store::DerivedState;
     use chrono::{TimeZone, Utc};
 
     fn issue(number: u32, title: &str) -> Issue {
@@ -763,5 +808,59 @@ mod tests {
         fs::write(store.dir().join("README.txt"), "ignore me").unwrap();
 
         assert_eq!(store.scan().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn derived_failure_commits_issue_mutations_and_reopen_repairs_them() {
+        let _guard = crate::test_support::process_env_guard();
+        let logs = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, logs.path());
+        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = IssueStore::new(tmp.path());
+            let created = issue(1, "Created");
+            fail_next_atomic_write(&store.index_path(), stage);
+
+            let outcome = store.write(&created).unwrap();
+            assert_eq!(outcome.derived, DerivedState::RebuildNeeded);
+            assert_eq!(store.scan().unwrap(), vec![created.clone()]);
+
+            let updated = issue(1, "Updated");
+            let reopened = IssueStore::new(tmp.path());
+            assert_eq!(reopened.read(1).unwrap(), Some(created));
+            fail_next_atomic_write(&reopened.index_path(), stage);
+            assert_eq!(
+                reopened.write(&updated).unwrap().derived,
+                DerivedState::RebuildNeeded
+            );
+            assert_eq!(reopened.read(1).unwrap(), Some(updated));
+
+            fail_next_atomic_write(&reopened.index_path(), stage);
+            let removed = reopened.remove_with_outcome(1).unwrap();
+            assert!(removed.value);
+            assert_eq!(removed.derived, DerivedState::RebuildNeeded);
+            let retry = IssueStore::new(tmp.path()).remove_with_outcome(1).unwrap();
+            assert!(!retry.value);
+            assert_eq!(retry.derived, DerivedState::Fresh);
+        }
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn source_failure_does_not_mutate_issue_identity() {
+        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = IssueStore::new(tmp.path());
+            let created_path = store.dir().join("001-created.md");
+            fail_next_atomic_write(&created_path, stage);
+            assert!(store.write(&issue(1, "Created")).is_err());
+            assert!(store.scan().unwrap().is_empty());
+
+            store.write(&issue(1, "Old")).unwrap();
+            let updated_path = store.dir().join("001-updated.md");
+            fail_next_atomic_write(&updated_path, stage);
+            assert!(store.write(&issue(1, "Updated")).is_err());
+            assert_eq!(store.read(1).unwrap().unwrap().title, "Old");
+        }
     }
 }
