@@ -1071,22 +1071,16 @@ fn drain_session_completions(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntim
 }
 
 /// Collapse a daemon session-command error into a safe single line for the
-/// create-failure dialog. Mirrors [`new_project_notice`]: take the first line
-/// only and clip an over-long message, so multi-line stderr or an accidentally
-/// verbose error never leaks raw detail onto the screen.
+/// create-failure dialog: take the first line only, so multi-line stderr or
+/// internal detail on later lines never leaks onto the screen. The line is kept
+/// in full — the dialog wraps it to the box width and shows all of it, so no
+/// length cap truncates a legitimate error into an ellipsis.
 fn safe_session_error(message: &str) -> String {
-    const MAX: usize = 72;
     let first = message.lines().next().unwrap_or("").trim();
-    let detail = if first.is_empty() {
-        "could not create the session"
+    if first.is_empty() {
+        "could not create the session".to_owned()
     } else {
-        first
-    };
-    if detail.chars().count() > MAX {
-        let truncated: String = detail.chars().take(MAX - 1).collect();
-        format!("{truncated}…")
-    } else {
-        detail.to_owned()
+        first.to_owned()
     }
 }
 
@@ -3605,10 +3599,10 @@ mod tests {
         // 複数行の出力は先頭行だけを trim して残す（後続の内部詳細を漏らさない）。
         let multi = "session name already exists\n  at daemon::lifecycle::create (secret path)";
         assert_eq!(safe_session_error(multi), "session name already exists");
-        // 長い行は省略記号付きで切り詰める。
+        // 長い先頭行は切り詰めず全文を保つ（dialog が幅に合わせて折り返して全文表示する）。
         let notice = safe_session_error(&"x".repeat(200));
-        assert_eq!(notice.chars().count(), 72);
-        assert!(notice.ends_with('…'));
+        assert_eq!(notice.chars().count(), 200);
+        assert!(!notice.contains('…'));
     }
 
     #[test]
