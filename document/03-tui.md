@@ -84,8 +84,8 @@ production fallback stub は持たない。
 
 各 Effect は実 action を 1 回開始するか、安全な明示 error completion を 1 件返す。session create は成功時も
 要求 token と作成された `SessionId` を持つ `OperationResult` を返す。失敗だけを返して成功を snapshot 更新に
-暗黙化しない。terminal の `open` は同じ target の live terminal を再利用し、`new` は新規起動するため、
-controller が正規化した引数を host まで保持する。notes と environment の保存は target の集合全体を永続化し、
+暗黙化しない。terminal の `open` は同じ target の live terminal を再利用し、`new` は target の worktree を
+cwd に native terminal を開くため、controller は両者を別 effect として host まで保持する。notes と environment の保存は target の集合全体を永続化し、
 decision / PR / browser / notification は daemon または platform adapter の結果を controller へ還流する。
 従来 silent no-op だった操作も成功扱いせず、画面に安全な結果を返す。永続データの migration は発生しない。
 

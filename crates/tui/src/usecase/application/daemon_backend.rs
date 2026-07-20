@@ -132,6 +132,9 @@ pub trait AgentPort {
     fn launch_agent(&mut self, request: LaunchAgentRequest);
     /// Open or reuse a generic terminal for a stable target.
     fn open_terminal(&mut self, request: OpenTerminalRequest);
+    /// Open the target's worktree in the platform terminal without creating a
+    /// daemon-owned pane.
+    fn open_external_terminal(&mut self, target: Target);
     /// Move the active pane's stable tab selection.
     fn select_tab(&mut self, direction: TabDirection);
 }
@@ -356,6 +359,7 @@ impl DaemonBackend {
                 operation_id,
                 arguments,
             }),
+            Effect::OpenExternalTerminal { target } => self.agent.open_external_terminal(target),
             Effect::SelectTab { direction } => self.agent.select_tab(direction),
             Effect::LoadNotes { target } => self.store.load_notes(target, self.completions()),
             Effect::SaveNotes { target, scratchpad } => {
@@ -460,6 +464,7 @@ mod tests {
     struct FakeAgent {
         launched: Vec<LaunchAgentRequest>,
         opened: Vec<OpenTerminalRequest>,
+        external: Vec<Target>,
         tabs: Vec<TabDirection>,
     }
 
@@ -470,6 +475,10 @@ mod tests {
 
         fn open_terminal(&mut self, request: OpenTerminalRequest) {
             self.opened.push(request);
+        }
+
+        fn open_external_terminal(&mut self, target: Target) {
+            self.external.push(target);
         }
 
         fn select_tab(&mut self, direction: TabDirection) {
