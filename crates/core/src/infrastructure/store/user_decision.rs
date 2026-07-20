@@ -299,6 +299,28 @@ mod tests {
     }
 
     #[test]
+    fn compatible_resolved_event_is_consumed_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let decision = item();
+        store.create(decision.clone()).unwrap().unwrap();
+        store
+            .resolve(
+                decision.owner.workspace_id,
+                decision.decision_id,
+                UserDecisionAnswer::Option {
+                    option_id: "a".into(),
+                },
+                Utc::now(),
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(store.consume_events().unwrap(), Ok(1));
+        assert_eq!(store.consume_events().unwrap(), Ok(0));
+    }
+
+    #[test]
     fn consumer_rejects_an_event_without_its_resolved_record() {
         let temp = tempfile::tempdir().unwrap();
         let store = UserDecisionStore::new(temp.path());
