@@ -30,12 +30,36 @@ pub struct Node {
     pub state: NodeState,
     pub attempt: u32,
     pub generation: u64,
+    /// Durable identity/liveness of the process for the current generation.
+    /// Missing data is a legacy binding and must never be inferred active.
+    #[serde(default)]
+    pub process: Option<WorkerProcess>,
+    #[serde(default)]
+    pub retired_generations: Vec<u64>,
     pub lease: Option<Lease>,
     pub deadline: Option<DateTime<Utc>>,
     pub next_retry: Option<DateTime<Utc>>,
     pub worker: Option<String>,
     pub base: Option<Base>,
     pub pull_request: Option<PullRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerProcess {
+    pub generation: u64,
+    pub credential: String,
+    pub state: WorkerProcessState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerProcessState {
+    Starting,
+    Active,
+    StopRequested,
+    Retired,
+    /// Conservative migration/restart state: no replacement may be spawned.
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +133,11 @@ pub struct Event {
     pub plan: String,
     pub issue: u64,
     pub generation: u64,
+    /// Immutable identity captured by the Agent process at spawn time. Legacy
+    /// events have no credential and are rejected instead of borrowing the
+    /// worktree's mutable active binding.
+    #[serde(default)]
+    pub credential: Option<String>,
     pub kind: EventKind,
     /// Monotonic revision supplied by the lifecycle boundary. It distinguishes
     /// two observations of the same terminal kind in one worker generation.

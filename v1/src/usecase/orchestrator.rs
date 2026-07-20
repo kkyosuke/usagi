@@ -8,7 +8,8 @@ use chrono::{DateTime, Duration, Utc};
 
 use crate::domain::agent_phase::AgentPhase;
 use crate::domain::orchestrator::{
-    Base, Claim, Event, EventKind, Lease, NodeState, Plan, PullRequest,
+    Base, Claim, Event, EventKind, Lease, NodeState, Plan, PullRequest, WorkerProcess,
+    WorkerProcessState,
 };
 use crate::domain::workspace_state::{SessionAgent, SessionOrigin};
 use crate::infrastructure::git;
@@ -29,8 +30,18 @@ pub struct Observation {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionObservation {
     pub worker: Option<String>,
+    pub root: Option<PathBuf>,
+    pub process: ProcessLiveness,
     pub base: Option<Base>,
     pub pull_request: Option<PullRequest>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ProcessLiveness {
+    Alive,
+    Dead,
+    #[default]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +57,13 @@ pub enum Action {
         issue: u64,
         worker: Option<String>,
     },
+    Retire {
+        id: String,
+        issue: u64,
+        generation: u64,
+        worker: String,
+        root: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +72,8 @@ pub struct ReconcileResult {
     pub actions: Vec<Action>,
     /// Event ids safe to acknowledge after `plan` has been durably committed.
     pub acknowledgements: Vec<String>,
+    /// Stale, unknown, or legacy events to move into the durable rejection log.
+    pub rejections: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -65,6 +85,8 @@ pub struct TickOutcome {
     /// Claims that rejected this tick's delegate actions. No worker/session or
     /// prompt side effect has happened for these actions.
     pub busy: Vec<Claim>,
+    pub retired: usize,
+    pub rejected: usize,
 }
 
 /// A dependency base that cannot safely be used for worker creation.
@@ -166,25 +188,39 @@ pub fn reconcile(
     let mut next = plan.clone();
     let mut actions = Vec::new();
     let mut acknowledgements = Vec::new();
+    let mut rejections = Vec::new();
 
     for event in &observation.events {
-        if event.plan == next.id {
-            // Unknown and stale generations are intentionally acknowledged too:
-            // they cannot affect this plan now or in a future generation.
-            acknowledgements.push(event.id.clone());
-        }
         let Some(node) = next.nodes.get_mut(&event.issue) else {
+            if event.plan == next.id {
+                rejections.push(event.id.clone());
+            }
             continue;
         };
-        if event.plan != next.id || event.generation != node.generation {
+        let credential_matches = node.process.as_ref().is_some_and(|process| {
+            process.generation == event.generation
+                && event.credential.as_deref() == Some(process.credential.as_str())
+        });
+        if event.plan != next.id
+            || event.generation != node.generation
+            || !credential_matches
+            || node.state.terminal()
+        {
+            if event.plan == next.id {
+                rejections.push(event.id.clone());
+            }
             continue;
         }
+        acknowledgements.push(event.id.clone());
         match event.kind {
             EventKind::PrOpened => node.state = NodeState::PrOpen,
             EventKind::Succeeded => node.state = NodeState::MergeWait,
             EventKind::Failed | EventKind::Interrupted | EventKind::TimedOut => {
                 node.state = NodeState::RetryWait;
                 node.next_retry = Some(observation.observed_at + Duration::seconds(30));
+                if let Some(process) = node.process.as_mut() {
+                    process.state = WorkerProcessState::StopRequested;
+                }
             }
         }
     }
@@ -193,6 +229,46 @@ pub fn reconcile(
         let Some(node) = next.nodes.get_mut(&issue) else {
             continue;
         };
+        if let Some(process) = node.process.as_mut() {
+            if process.state == WorkerProcessState::Retired {
+                // Confirmed retirement is durable and cannot be downgraded by
+                // stale phase/marker files after a restart.
+            } else {
+                match seen.process {
+                    ProcessLiveness::Alive => {
+                        if process.state != WorkerProcessState::StopRequested {
+                            process.state = WorkerProcessState::Active;
+                        }
+                    }
+                    ProcessLiveness::Dead => {
+                        process.state = WorkerProcessState::Retired;
+                        if !node.retired_generations.contains(&process.generation) {
+                            node.retired_generations.push(process.generation);
+                        }
+                        if matches!(node.state, NodeState::Delegating | NodeState::Running) {
+                            node.state = NodeState::RetryWait;
+                            node.lease = None;
+                            node.next_retry = Some(observation.observed_at + Duration::seconds(30));
+                        }
+                    }
+                    ProcessLiveness::Unknown => {
+                        if !matches!(
+                            process.state,
+                            WorkerProcessState::Starting | WorkerProcessState::StopRequested
+                        ) {
+                            process.state = WorkerProcessState::Unknown;
+                        }
+                    }
+                }
+            }
+        } else if node.generation > 0 && seen.worker.is_some() {
+            // Legacy mutable bindings have no immutable process credential.
+            node.process = Some(WorkerProcess {
+                generation: node.generation,
+                credential: String::new(),
+                state: WorkerProcessState::Unknown,
+            });
+        }
         if let Some(pr) = &seen.pull_request {
             node.pull_request = Some(pr.clone());
             node.state = if pr.merged {
@@ -242,6 +318,36 @@ pub fn reconcile(
             node.state = NodeState::RetryWait;
             node.lease = None;
             node.next_retry = Some(observation.observed_at + Duration::seconds(30));
+            if let Some(process) = node.process.as_mut() {
+                process.state = WorkerProcessState::StopRequested;
+            }
+        }
+    }
+
+    // Cancellation is terminal for plan state but not proof that its process
+    // exited. Keep requesting a confirmed retirement and never spawn a successor.
+    for (&issue, node) in &mut next.nodes {
+        if node.state != NodeState::Cancelled
+            || node
+                .process
+                .as_ref()
+                .is_none_or(|process| process.state == WorkerProcessState::Retired)
+        {
+            continue;
+        }
+        if let Some(process) = node.process.as_mut() {
+            process.state = WorkerProcessState::StopRequested;
+            if let Some(seen) = observation.sessions.get(&issue) {
+                if let (Some(worker), Some(root)) = (&seen.worker, &seen.root) {
+                    actions.push(Action::Retire {
+                        id: format!("{}-{issue}-{}-cancel-retire", next.id, process.generation),
+                        issue,
+                        generation: process.generation,
+                        worker: worker.clone(),
+                        root: root.clone(),
+                    });
+                }
+            }
         }
     }
 
@@ -267,6 +373,24 @@ pub fn reconcile(
         if capacity == 0 {
             break;
         }
+        let retrying = next.nodes[&issue].state == NodeState::RetryWait;
+        if retrying {
+            let process = next.nodes[&issue].process.as_ref();
+            if !process.is_some_and(|process| process.state == WorkerProcessState::Retired) {
+                if let (Some(process), Some(seen)) = (process, observation.sessions.get(&issue)) {
+                    if let (Some(worker), Some(root)) = (&seen.worker, &seen.root) {
+                        actions.push(Action::Retire {
+                            id: format!("{}-{issue}-{}-retire", next.id, process.generation),
+                            issue,
+                            generation: process.generation,
+                            worker: worker.clone(),
+                            root: root.clone(),
+                        });
+                    }
+                }
+                continue;
+            }
+        }
         let Some(base) = work_ready(&next, issue) else {
             next.nodes.get_mut(&issue).unwrap().state = NodeState::Blocked;
             continue;
@@ -281,6 +405,12 @@ pub fn reconcile(
             expires_at: observation.observed_at + lease_duration,
         });
         node.next_retry = None;
+        let credential = format!("generation-{}", node.generation);
+        node.process = Some(WorkerProcess {
+            generation: node.generation,
+            credential,
+            state: WorkerProcessState::Starting,
+        });
         actions.push(Action::Delegate {
             id: format!("{}-{issue}-{}-delegate", next.id, node.generation),
             issue,
@@ -293,6 +423,7 @@ pub fn reconcile(
         plan: next,
         actions,
         acknowledgements,
+        rejections,
     }
 }
 
@@ -300,6 +431,15 @@ pub fn reconcile_workspace_tick(
     workspace: &Path,
     global_slots_remaining: usize,
     now: DateTime<Utc>,
+) -> Result<TickOutcome> {
+    reconcile_workspace_tick_with_retirement(workspace, global_slots_remaining, now, |_, _| false)
+}
+
+pub fn reconcile_workspace_tick_with_retirement(
+    workspace: &Path,
+    global_slots_remaining: usize,
+    now: DateTime<Utc>,
+    mut retire: impl FnMut(&Path, &str) -> bool,
 ) -> Result<TickOutcome> {
     let store = OrchestratorStore::new(workspace);
     let mut outcome = TickOutcome::default();
@@ -336,6 +476,16 @@ pub fn reconcile_workspace_tick(
                 outcome.acknowledgements += 1;
             }
         }
+        for event_id in &result.rejections {
+            if store.reject_event(
+                &result.plan.id,
+                event_id,
+                "stale_or_unknown_generation",
+                now,
+            )? {
+                outcome.rejected += 1;
+            }
+        }
         let (actions, busy) =
             admit_delegate_actions(workspace, &store, &mut result.plan, result.actions, now)?;
         result.actions = actions;
@@ -356,6 +506,36 @@ pub fn reconcile_workspace_tick(
             queue_owner_prompt(&owner_worktree, &result.plan, &result.actions)?;
             outcome.owner_queued += 1;
         }
+        let mut plan_retired = false;
+        for action in &result.actions {
+            if let Action::Retire {
+                issue,
+                generation,
+                worker,
+                root,
+                ..
+            } = action
+            {
+                if retire(root, worker) {
+                    if let Some(process) = result
+                        .plan
+                        .nodes
+                        .get_mut(issue)
+                        .and_then(|node| node.process.as_mut())
+                    {
+                        if process.generation == *generation {
+                            process.state = WorkerProcessState::Retired;
+                            let node = result.plan.nodes.get_mut(issue).unwrap();
+                            if !node.retired_generations.contains(generation) {
+                                node.retired_generations.push(*generation);
+                            }
+                            outcome.retired += 1;
+                            plan_retired = true;
+                        }
+                    }
+                }
+            }
+        }
         let (delegated, blocked, failed) = dispatch_actions(
             workspace,
             &owner_worktree,
@@ -364,13 +544,16 @@ pub fn reconcile_workspace_tick(
             &store,
             now,
         )?;
-        if !blocked.is_empty() || !failed.is_empty() {
+        let dispatch_changed = !blocked.is_empty() || !failed.is_empty();
+        if dispatch_changed {
             for issue in blocked {
                 block_delegation(&mut result.plan, issue);
             }
             for issue in failed {
                 retry_delegation(&mut result.plan, issue, now);
             }
+        }
+        if dispatch_changed || plan_retired {
             store.save_plan(&result.plan, Some(saved_revision), now)?;
         }
         outcome.delegated += delegated;
@@ -572,6 +755,9 @@ fn retry_delegation(plan: &mut Plan, issue: u64, now: DateTime<Utc>) {
         node.lease = None;
         node.worker = None;
         node.next_retry = Some(now + Duration::seconds(30));
+        if let Some(process) = node.process.as_mut() {
+            process.state = WorkerProcessState::StopRequested;
+        }
     }
 }
 
@@ -611,6 +797,17 @@ fn observe(workspace: &Path, plan: &Plan, now: DateTime<Utc>) -> Result<Observat
             binding.issue,
             SessionObservation {
                 worker: Some(status.name),
+                root: Some(status.root.clone()),
+                process: if matches!(status.agent_phase, Some(AgentPhase::Exited)) {
+                    ProcessLiveness::Dead
+                } else if crate::infrastructure::agent_live_pane_store::is_live(
+                    &status.root,
+                    crate::infrastructure::resource::process_alive,
+                ) {
+                    ProcessLiveness::Alive
+                } else {
+                    ProcessLiveness::Unknown
+                },
                 base: node.base.clone(),
                 pull_request,
             },
@@ -628,7 +825,7 @@ fn reobserve_absent(actions: &[Action]) -> BTreeMap<u64, SessionObservation> {
         .iter()
         .filter_map(|action| match action {
             Action::Reobserve { issue, .. } => Some((*issue, SessionObservation::default())),
-            Action::Delegate { .. } => None,
+            Action::Delegate { .. } | Action::Retire { .. } => None,
         })
         .collect()
 }
@@ -728,6 +925,13 @@ fn delegate_worker(
         plan: plan.id.clone(),
         issue: issue_number,
         generation,
+        credential: Some(
+            plan.nodes[&issue_number]
+                .process
+                .as_ref()
+                .map(|process| process.credential.clone())
+                .unwrap_or_else(|| format!("generation-{generation}")),
+        ),
         owner_worktree: owner_worktree.to_path_buf(),
     };
     orchestrator_event::register(&created.root, &binding)?;
@@ -783,6 +987,11 @@ fn queue_owner_prompt(owner_worktree: &Path, plan: &Plan, actions: &[Action]) ->
                 "- reobserve issue #{issue} ({})",
                 worker.as_deref().unwrap_or("no worker")
             )),
+            Action::Retire {
+                issue, generation, ..
+            } => lines.push(format!(
+                "- retire issue #{issue}, generation {generation} before retry"
+            )),
         }
     }
     agent_prompt_store::set(owner_worktree, &lines.join("\n"))?;
@@ -837,6 +1046,8 @@ mod tests {
             state,
             attempt: 0,
             generation: 0,
+            process: None,
+            retired_generations: vec![],
             lease: None,
             deadline: None,
             next_retry: None,
@@ -943,6 +1154,8 @@ mod tests {
         );
         let seen = SessionObservation {
             worker: Some("issue-1".into()),
+            root: Some(PathBuf::from("/issue-1")),
+            process: ProcessLiveness::Alive,
             base: first.plan.nodes[&1].base.clone(),
             pull_request: None,
         };
@@ -1046,6 +1259,39 @@ mod tests {
     }
 
     #[test]
+    fn legacy_retry_binding_migrates_to_unknown_and_never_redelegates() {
+        let mut legacy = node(1, NodeState::RetryWait);
+        legacy.generation = 4;
+        legacy.next_retry = Some(now());
+        let result = reconcile(
+            &plan(legacy),
+            &Observation {
+                observed_at: now(),
+                sessions: [(
+                    1,
+                    SessionObservation {
+                        worker: Some("owner-issue-1".into()),
+                        root: Some(PathBuf::from("/legacy")),
+                        process: ProcessLiveness::Unknown,
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+                events: vec![],
+            },
+            Duration::minutes(5),
+        );
+        assert_eq!(
+            result.plan.nodes[&1].process.as_ref().unwrap().state,
+            WorkerProcessState::Unknown
+        );
+        assert!(result
+            .actions
+            .iter()
+            .all(|action| !matches!(action, Action::Delegate { .. })));
+    }
+
+    #[test]
     fn expired_lease_and_deadline_do_not_move_inactive_states() {
         let mut n = node(1, NodeState::PrOpen);
         n.lease = Some(Lease {
@@ -1089,6 +1335,8 @@ mod tests {
                     1,
                     SessionObservation {
                         worker: None,
+                        root: None,
+                        process: ProcessLiveness::Unknown,
                         base: None,
                         pull_request: Some(pr.clone()),
                     },
@@ -1130,6 +1378,7 @@ mod tests {
             plan: "p".into(),
             issue: 1,
             generation: 1,
+            credential: Some("old".into()),
             kind: EventKind::Succeeded,
             terminal_revision: 0,
             observed_at: now(),
@@ -1146,6 +1395,7 @@ mod tests {
                         plan: "p".into(),
                         issue: 99,
                         generation: 0,
+                        credential: None,
                         kind: EventKind::Succeeded,
                         terminal_revision: 0,
                         observed_at: now(),
@@ -1236,11 +1486,17 @@ mod tests {
         ] {
             let mut n = node(1, NodeState::Running);
             n.generation = 2;
+            n.process = Some(WorkerProcess {
+                generation: 2,
+                credential: "current".into(),
+                state: WorkerProcessState::Active,
+            });
             let event = Event {
                 id: "event".into(),
                 plan: "p".into(),
                 issue: 1,
                 generation: 2,
+                credential: Some("current".into()),
                 kind,
                 terminal_revision: 0,
                 observed_at: now(),
@@ -1265,6 +1521,7 @@ mod tests {
             plan: "other-plan".into(),
             issue: 1,
             generation: 0,
+            credential: None,
             kind: EventKind::Succeeded,
             terminal_revision: 0,
             observed_at: now(),
@@ -1298,6 +1555,8 @@ mod tests {
                         1,
                         SessionObservation {
                             worker: None,
+                            root: None,
+                            process: ProcessLiveness::Unknown,
                             base: None,
                             pull_request: Some(pr.clone()),
                         },
@@ -1350,6 +1609,11 @@ mod tests {
     fn due_retry_delegates_but_capacity_and_blocked_dependencies_wait() {
         let mut retry = node(1, NodeState::RetryWait);
         retry.next_retry = Some(now());
+        retry.process = Some(WorkerProcess {
+            generation: 0,
+            credential: "p-1-0".into(),
+            state: WorkerProcessState::Retired,
+        });
         let retried = reconcile(
             &plan(retry),
             &Observation {
@@ -1403,6 +1667,82 @@ mod tests {
         assert_eq!(result.plan.nodes[&1].state, NodeState::RetryWait);
         assert!(!result.plan.nodes[&1].state.occupies_worker());
         assert!(result.actions.is_empty());
+    }
+
+    #[test]
+    fn immediate_process_exit_retires_generation_without_a_second_spawn() {
+        let first = reconcile(
+            &plan(node(1, NodeState::Runnable)),
+            &Observation {
+                observed_at: now(),
+                ..Default::default()
+            },
+            Duration::minutes(5),
+        );
+        let result = reconcile(
+            &first.plan,
+            &Observation {
+                observed_at: now(),
+                sessions: [(
+                    1,
+                    SessionObservation {
+                        worker: Some("owner-issue-1".into()),
+                        root: Some(PathBuf::from("/worker")),
+                        process: ProcessLiveness::Dead,
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+                events: vec![],
+            },
+            Duration::minutes(5),
+        );
+        let node = &result.plan.nodes[&1];
+        assert_eq!(node.state, NodeState::RetryWait);
+        assert_eq!(node.retired_generations, vec![1]);
+        assert!(result.actions.is_empty());
+    }
+
+    #[test]
+    fn cancelled_node_retires_process_and_rejects_late_completion() {
+        let mut cancelled = node(1, NodeState::Cancelled);
+        cancelled.generation = 3;
+        cancelled.process = Some(WorkerProcess {
+            generation: 3,
+            credential: "p-1-3".into(),
+            state: WorkerProcessState::Active,
+        });
+        let late = Event {
+            id: "late-after-cancel".into(),
+            plan: "p".into(),
+            issue: 1,
+            generation: 3,
+            credential: Some("p-1-3".into()),
+            kind: EventKind::Succeeded,
+            terminal_revision: 1,
+            observed_at: now(),
+        };
+        let result = reconcile(
+            &plan(cancelled),
+            &Observation {
+                observed_at: now(),
+                sessions: [(
+                    1,
+                    SessionObservation {
+                        worker: Some("owner-issue-1".into()),
+                        root: Some(PathBuf::from("/worker")),
+                        process: ProcessLiveness::Alive,
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+                events: vec![late],
+            },
+            Duration::minutes(5),
+        );
+        assert_eq!(result.plan.nodes[&1].state, NodeState::Cancelled);
+        assert_eq!(result.rejections, vec!["late-after-cancel"]);
+        assert!(matches!(result.actions.as_slice(), [Action::Retire { .. }]));
     }
 
     #[test]
@@ -1554,7 +1894,7 @@ mod tests {
                 1,
                 match &admitted[0] {
                     Action::Delegate { base, .. } => base,
-                    Action::Reobserve { .. } => unreachable!(),
+                    Action::Reobserve { .. } | Action::Retire { .. } => unreachable!(),
                 },
             )
             .unwrap();
@@ -1635,6 +1975,125 @@ mod tests {
                 .by_issue
                 .len(),
             1
+        );
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn retry_fences_live_process_and_stale_generation_across_restart_ticks() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        crate::usecase::issue::create(
+            tmp.path(),
+            crate::usecase::issue::NewIssue {
+                title: "Retry fenced work".into(),
+                priority: Default::default(),
+                labels: Vec::new(),
+                dependson: Vec::new(),
+                related: Vec::new(),
+                parent: None,
+                milestone: None,
+                body: String::new(),
+            },
+        )
+        .unwrap();
+        let store = OrchestratorStore::new(tmp.path());
+        store
+            .save_plan(&plan(node(1, NodeState::Runnable)), None, now())
+            .unwrap();
+
+        reconcile_workspace_tick(tmp.path(), 1, now()).unwrap();
+        let worker = session::list(tmp.path()).unwrap().remove(0);
+        crate::infrastructure::agent_state_store::write(&worker.root, AgentPhase::Running).unwrap();
+        crate::infrastructure::agent_live_pane_store::set(&worker.root, std::process::id())
+            .unwrap();
+        let generation_one = store.load_plan("p").unwrap().unwrap().value.nodes[&1]
+            .process
+            .clone()
+            .unwrap();
+        store
+            .append_event(&Event {
+                id: "generation-one-failed".into(),
+                plan: "p".into(),
+                issue: 1,
+                generation: 1,
+                credential: Some(generation_one.credential.clone()),
+                kind: EventKind::Failed,
+                terminal_revision: 1,
+                observed_at: now(),
+            })
+            .unwrap();
+        reconcile_workspace_tick(tmp.path(), 1, now()).unwrap();
+        let due = now() + Duration::seconds(31);
+
+        // A failed stop confirmation cannot create generation two.
+        let failed =
+            reconcile_workspace_tick_with_retirement(tmp.path(), 1, due, |_, _| false).unwrap();
+        assert_eq!(failed.retired, 0);
+        assert_eq!(session::list(tmp.path()).unwrap().len(), 1);
+        assert_eq!(
+            store.load_plan("p").unwrap().unwrap().value.nodes[&1].generation,
+            1
+        );
+
+        // Confirmed kill/reap is durable; a later stateless tick (daemon/TUI
+        // restart shape) may then reuse the session for generation two.
+        let retired = reconcile_workspace_tick_with_retirement(tmp.path(), 1, due, |root, _| {
+            crate::infrastructure::agent_state_store::write(root, AgentPhase::Exited).unwrap();
+            crate::infrastructure::agent_live_pane_store::clear(root);
+            true
+        })
+        .unwrap();
+        assert_eq!(retired.retired, 1);
+        reconcile_workspace_tick(tmp.path(), 1, due + Duration::seconds(1)).unwrap();
+        let generation_two = store.load_plan("p").unwrap().unwrap().value.nodes[&1]
+            .process
+            .clone()
+            .unwrap();
+        assert_eq!(generation_two.generation, 2);
+        assert_eq!(session::list(tmp.path()).unwrap().len(), 1);
+
+        // A late event keeps generation one's immutable credential and is moved
+        // to the rejection ledger without changing generation two.
+        store
+            .append_event(&Event {
+                id: "late-generation-one".into(),
+                plan: "p".into(),
+                issue: 1,
+                generation: 1,
+                credential: Some(generation_one.credential),
+                kind: EventKind::Succeeded,
+                terminal_revision: 2,
+                observed_at: due,
+            })
+            .unwrap();
+        let rejected = reconcile_workspace_tick(tmp.path(), 1, due + Duration::seconds(2)).unwrap();
+        assert_eq!(rejected.rejected, 1);
+        assert_eq!(store.load_rejected_events("p").unwrap().len(), 1);
+        assert_eq!(
+            store.load_plan("p").unwrap().unwrap().value.nodes[&1].generation,
+            2
+        );
+
+        store
+            .append_event(&Event {
+                id: "generation-two-succeeded".into(),
+                plan: "p".into(),
+                issue: 1,
+                generation: 2,
+                credential: Some(generation_two.credential),
+                kind: EventKind::Succeeded,
+                terminal_revision: 1,
+                observed_at: due,
+            })
+            .unwrap();
+        reconcile_workspace_tick(tmp.path(), 1, due + Duration::seconds(3)).unwrap();
+        assert_eq!(
+            store.load_plan("p").unwrap().unwrap().value.nodes[&1].state,
+            NodeState::MergeWait
         );
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
@@ -1813,6 +2272,11 @@ mod tests {
         .unwrap();
         set_worktree_status(tmp.path(), "worker", BranchStatus::Synced);
         let mut n = node(1, NodeState::Running);
+        n.process = Some(WorkerProcess {
+            generation: 0,
+            credential: "p-1-0".into(),
+            state: WorkerProcessState::Active,
+        });
         n.pull_request = Some(PullRequest {
             number: 10,
             url: "https://example.test/pr/10".into(),
@@ -1841,6 +2305,7 @@ mod tests {
                 plan: "p".into(),
                 issue: 1,
                 generation: 0,
+                credential: Some("p-1-0".into()),
                 owner_worktree: tmp.path().join(".usagi/sessions/owner"),
             },
         )
@@ -1850,6 +2315,7 @@ mod tests {
             plan: "p".into(),
             issue: 1,
             generation: 0,
+            credential: Some("p-1-0".into()),
             kind: EventKind::Succeeded,
             terminal_revision: 0,
             observed_at: now(),
@@ -1900,11 +2366,18 @@ mod tests {
             1
         );
         let first = store.load_claims().unwrap().value.by_issue[&1].clone();
+        let credential = store.load_plan("p").unwrap().unwrap().value.nodes[&1]
+            .process
+            .as_ref()
+            .unwrap()
+            .credential
+            .clone();
         let event = Event {
             id: "p-1-1-failed-0".into(),
             plan: "p".into(),
             issue: 1,
             generation: 1,
+            credential: Some(credential),
             kind: EventKind::Failed,
             terminal_revision: 0,
             observed_at: now(),
@@ -1920,8 +2393,16 @@ mod tests {
             NodeState::RetryWait
         );
 
+        let retired = reconcile_workspace_tick_with_retirement(
+            tmp.path(),
+            1,
+            now() + Duration::seconds(31),
+            |_, _| true,
+        )
+        .unwrap();
+        assert_eq!(retired.retired, 1);
         let retried =
-            reconcile_workspace_tick(tmp.path(), 1, now() + Duration::seconds(31)).unwrap();
+            reconcile_workspace_tick(tmp.path(), 1, now() + Duration::seconds(32)).unwrap();
 
         assert_eq!(retried.delegated, 1);
         let second = store.load_claims().unwrap().value.by_issue[&1].clone();
@@ -2145,6 +2626,7 @@ mod tests {
                     plan: "other".into(),
                     issue: 1,
                     generation: 0,
+                    credential: Some("other-1-0".into()),
                     owner_worktree: tmp.path().to_path_buf(),
                 },
             ),
@@ -2155,6 +2637,7 @@ mod tests {
                     plan: "p".into(),
                     issue: 99,
                     generation: 0,
+                    credential: Some("p-99-0".into()),
                     owner_worktree: tmp.path().to_path_buf(),
                 },
             ),
@@ -2165,6 +2648,7 @@ mod tests {
                     plan: "p".into(),
                     issue: 1,
                     generation: 7,
+                    credential: Some("p-1-7".into()),
                     owner_worktree: tmp.path().to_path_buf(),
                 },
             ),

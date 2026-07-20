@@ -2706,10 +2706,11 @@ fn reconcile_orchestrators(
     limit: usize,
 ) -> Vec<String> {
     let slots_remaining = autostart_slots_remaining(pool.borrow().occupied_agent_slots(), limit);
-    match crate::usecase::orchestrator::reconcile_workspace_tick(
+    match crate::usecase::orchestrator::reconcile_workspace_tick_with_retirement(
         workspace,
         slots_remaining,
         chrono::Utc::now(),
+        |root, worker| pool.borrow_mut().retire_orchestrator_agent(root, worker),
     ) {
         Ok(outcome)
             if outcome.delegated > 0 || outcome.owner_queued > 0 || !outcome.busy.is_empty() =>

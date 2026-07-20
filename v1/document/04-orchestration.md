@@ -11,6 +11,7 @@
 
 - [用語](#用語)
 - [自律オーケストレーション運用モデル](#自律オーケストレーション運用モデル)
+- [retry・cancel の process 境界](#retrycancel-の-process-境界)
 - [なぜ worktree を 1 か所に集約するのか](#なぜ-worktree-を-1-か所に集約するのか)
 - [セッションの構築（再帰走査と複数リポジトリ対応）](#セッションの構築再帰走査と複数リポジトリ対応)
 - [複数ワークスペースの統合（unite）](#複数ワークスペースの統合unite)
@@ -119,6 +120,16 @@ root（⌂ root 行）
 A と B は判定軸が別（MCP プロセス側の path 一致 / Agent の cwd）で互いに独立に効くため、一方をすり抜けても
 他方が捕まえます。読み取り・整形・session 操作（`issue_search` / `issue_get` / `issue_to_prompt` /
 `memory_*` / すべての `session_*`）は root でも許可し、オーケストレーションを妨げません。
+
+## retry・cancel の process 境界
+
+durable orchestrator の retry は同じ worker session を再利用しますが、同じ Agent process は再利用しません。旧 process の
+kill / reap と generation の retirement を永続化できた場合だけ次 generation を起動します。cancel も process retirement を
+確認しますが、後続 generation は作りません。kill 失敗や restart 後に liveness を確認できない状態では安全側に停止します。
+
+各 process は起動時に immutable generation credential を受け取り、遅延 event はその credential の generation として記録されます。
+active binding の後書き換えで新 generation を借用することはありません。保存形式、旧 binding の移行、stale event の durable rejection は
+[orchestrator plan・claim・event](data/05-orchestrators.md)を正本とします。
 
 ## なぜ worktree を 1 か所に集約するのか
 
