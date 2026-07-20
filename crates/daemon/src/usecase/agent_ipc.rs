@@ -41,7 +41,10 @@ use usagi_core::{
     infrastructure::runtime_model::{
         ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig,
     },
-    infrastructure::store::dispatch::DispatchStore,
+    infrastructure::store::dispatch::{
+        AgentAdmissionReservation, CredentialProvenance as DispatchCredentialProvenance,
+        DispatchStore,
+    },
     usecase::client::{
         AgentLaunchIntent, DispatchAgentIntent, DispatchIntent, TerminalAction, TerminalRequest,
     },
@@ -278,6 +281,9 @@ impl<S, P, J, L> AgentRuntime<S, P, J, L> {
         snapshot: super::runtime::RuntimeStoreSnapshot,
     ) -> Result<Self, super::runtime::RuntimeSnapshotError> {
         let coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64)?;
+        dispatch
+            .reconcile_incomplete_admissions()
+            .map_err(|_| super::runtime::RuntimeSnapshotError::DispatchReconcile)?;
         let operations = coordinator
             .snapshot()
             .records
@@ -584,6 +590,7 @@ impl<
         outcome
     }
 
+    #[allow(clippy::too_many_lines)] // Admission keeps its durable prepare/spawn/commit order visible.
     fn admit_dispatch<R: SessionScopeResolver>(
         &mut self,
         operation: OperationId,
@@ -594,6 +601,34 @@ impl<
         semantic_key: &str,
         scope: &R,
     ) -> Result<AgentAdmission, ProtocolError> {
+        if let Some(existing) = self
+            .dispatch
+            .admission(operation)
+            .map_err(|_| dispatch_storage_error())?
+        {
+            return Err(if existing.semantic_key == semantic_key {
+                ProtocolError::new(
+                    ErrorCode::OwnershipUnknown,
+                    "agent admission is incomplete and cannot be spawned again",
+                )
+            } else {
+                ProtocolError::new(
+                    ErrorCode::IdempotencyConflict,
+                    "operation id was reused with a different dispatch",
+                )
+            });
+        }
+        if self
+            .dispatch
+            .run(operation)
+            .map_err(|_| dispatch_storage_error())?
+            .is_some()
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "legacy agent admission is incomplete and cannot be spawned again",
+            ));
+        }
         let resolved = scope
             .resolve_available_scope(launch.workspace, launch.session)
             .map_err(map_scope_error)?;
@@ -636,49 +671,58 @@ impl<
             mcp_allowed: true,
         };
         let credential = OperationId::new().to_string();
-        self.orchestrator
-            .launch_with_semantic(
-                &mut self.coordinator,
-                &mut self.registry,
-                &authorization,
-                &request,
-                self.geometry,
-                &mut self.store,
-                &mut self.pty,
-                Some(credential.clone()),
-                semantic_key.to_owned(),
-            )
-            .map_err(map_orchestration_error)?;
+        let mut reserved_worker = worker.clone();
+        reserved_worker.status = AgentStatus::Starting;
+        reserved_worker.current_run = Some(operation);
         self.dispatch
-            .upsert_run(DispatchRun {
-                run_id: operation,
-                agent_id: worker.agent_id,
-                prompt: prompt.to_owned(),
-                started_at: Utc::now(),
-                ended_at: None,
-                status: RunStatus::Running,
-            })
+            .reserve_admission(
+                reserved_worker,
+                DispatchRun {
+                    run_id: operation,
+                    agent_id: worker.agent_id,
+                    prompt: prompt.to_owned(),
+                    started_at: Utc::now(),
+                    ended_at: None,
+                    status: RunStatus::Preparing,
+                },
+                DispatchBinding {
+                    run_id: operation,
+                    caller: caller.clone(),
+                    worker: WorkerRef {
+                        session_id: worker.session_id,
+                        agent_id: worker.agent_id,
+                    },
+                },
+                AgentAdmissionReservation {
+                    operation_id: operation,
+                    semantic_key: semantic_key.to_owned(),
+                    credential_provenance: DispatchCredentialProvenance::DaemonMintedEphemeral,
+                },
+            )
             .map_err(|_| dispatch_storage_error())?;
         self.mcp_callers.insert(
-            credential,
+            credential.clone(),
             McpCaller {
-                runtime: authorization.runtime,
+                runtime: authorization.runtime.clone(),
                 operation,
             },
         );
-        self.dispatch
-            .upsert_binding(DispatchBinding {
-                run_id: operation,
-                caller: caller.clone(),
-                worker: WorkerRef {
-                    session_id: worker.session_id,
-                    agent_id: worker.agent_id,
-                },
-            })
-            .map_err(|_| dispatch_storage_error())?;
-        self.dispatch
-            .transition_agent(worker.agent_id, AgentStatus::Running, Some(operation))
-            .map_err(|_| dispatch_storage_error())?;
+        if let Err(error) = self.orchestrator.launch_with_semantic(
+            &mut self.coordinator,
+            &mut self.registry,
+            &authorization,
+            &request,
+            self.geometry,
+            &mut self.store,
+            &mut self.pty,
+            Some(credential.clone()),
+            semantic_key.to_owned(),
+        ) {
+            self.mcp_callers.remove(&credential);
+            let _ = self.dispatch.fail_admission(operation);
+            return Err(map_orchestration_error(error));
+        }
+        self.commit_admission(operation, &credential, &authorization.runtime)?;
         Ok(AgentAdmission {
             operation_id: operation.to_string(),
             revision: 1,
@@ -707,6 +751,35 @@ impl<
                 "agent operation id must be a canonical operation identifier",
             )
         })?;
+        let launch_semantic = semantic_key(intent);
+        if let Some(existing) = self
+            .dispatch
+            .admission(operation)
+            .map_err(|_| dispatch_storage_error())?
+        {
+            return Err(if existing.semantic_key == launch_semantic {
+                ProtocolError::new(
+                    ErrorCode::OwnershipUnknown,
+                    "agent admission is incomplete and cannot be spawned again",
+                )
+            } else {
+                ProtocolError::new(
+                    ErrorCode::IdempotencyConflict,
+                    "operation id was reused with a different agent launch",
+                )
+            });
+        }
+        if self
+            .dispatch
+            .run(operation)
+            .map_err(|_| dispatch_storage_error())?
+            .is_some()
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "legacy agent admission is incomplete and cannot be spawned again",
+            ));
+        }
         let resolved = scope
             .resolve_available_scope(intent.workspace, intent.session)
             .map_err(map_scope_error)?;
@@ -753,29 +826,7 @@ impl<
             mcp_allowed: true,
         };
         let credential = OperationId::new().to_string();
-        self.orchestrator
-            .launch_with_semantic(
-                &mut self.coordinator,
-                &mut self.registry,
-                &authorization,
-                &request,
-                self.geometry,
-                &mut self.store,
-                &mut self.pty,
-                Some(credential.clone()),
-                semantic_key(&AgentLaunchIntent {
-                    workspace: intent.workspace,
-                    session: intent.session,
-                    profile: intent.profile.clone(),
-                }),
-            )
-            .map_err(map_orchestration_error)?;
-        if queued.is_some() {
-            self.dispatch
-                .consume_prompt(intent.session)
-                .map_err(|_| dispatch_storage_error())?;
-        }
-        let worker = self
+        let mut worker = self
             .dispatch
             .upsert_agent_by_runtime_model(
                 intent.session,
@@ -783,43 +834,89 @@ impl<
                 ModelSelector::new("default").expect("literal model selector is canonical"),
             )
             .map_err(|_| dispatch_storage_error())?;
-        self.dispatch
-            .upsert_run(DispatchRun {
-                run_id: operation,
-                agent_id: worker.agent_id,
-                prompt: String::new(),
-                started_at: Utc::now(),
-                ended_at: None,
-                status: RunStatus::Running,
-            })
-            .map_err(|_| dispatch_storage_error())?;
+        worker.status = AgentStatus::Starting;
+        worker.current_run = Some(operation);
         let caller = CallerRef {
             session_id: worker.session_id,
             agent_id: worker.agent_id,
         };
         self.dispatch
-            .upsert_binding(DispatchBinding {
-                run_id: operation,
-                caller,
-                worker: WorkerRef {
-                    session_id: worker.session_id,
+            .reserve_admission(
+                worker.clone(),
+                DispatchRun {
+                    run_id: operation,
                     agent_id: worker.agent_id,
+                    prompt: String::new(),
+                    started_at: Utc::now(),
+                    ended_at: None,
+                    status: RunStatus::Preparing,
                 },
-            })
+                DispatchBinding {
+                    run_id: operation,
+                    caller,
+                    worker: WorkerRef {
+                        session_id: worker.session_id,
+                        agent_id: worker.agent_id,
+                    },
+                },
+                AgentAdmissionReservation {
+                    operation_id: operation,
+                    semantic_key: launch_semantic.clone(),
+                    credential_provenance: DispatchCredentialProvenance::DaemonMintedEphemeral,
+                },
+            )
             .map_err(|_| dispatch_storage_error())?;
+        if queued.is_some() {
+            self.dispatch
+                .consume_prompt(intent.session)
+                .map_err(|_| dispatch_storage_error())?;
+        }
         self.mcp_callers.insert(
-            credential,
+            credential.clone(),
             McpCaller {
-                runtime: authorization.runtime,
+                runtime: authorization.runtime.clone(),
                 operation,
             },
         );
+        if let Err(error) = self.orchestrator.launch_with_semantic(
+            &mut self.coordinator,
+            &mut self.registry,
+            &authorization,
+            &request,
+            self.geometry,
+            &mut self.store,
+            &mut self.pty,
+            Some(credential.clone()),
+            launch_semantic,
+        ) {
+            self.mcp_callers.remove(&credential);
+            let _ = self.dispatch.fail_admission(operation);
+            return Err(map_orchestration_error(error));
+        }
+        self.commit_admission(operation, &credential, &authorization.runtime)?;
         Ok(AgentAdmission {
             operation_id: operation_id.to_owned(),
             revision: 1,
             terminal,
             completed: false,
         })
+    }
+
+    fn commit_admission(
+        &mut self,
+        operation: OperationId,
+        credential: &str,
+        runtime: &AgentRuntimeRef,
+    ) -> Result<(), ProtocolError> {
+        if matches!(self.dispatch.commit_admission(operation), Ok(true)) {
+            return Ok(());
+        }
+        let compensation =
+            self.coordinator
+                .compensate_after_spawn(runtime, &mut self.store, &mut self.pty);
+        self.mcp_callers.remove(credential);
+        let _ = self.dispatch.fail_admission(operation);
+        Err(map_runtime_error(compensation))
     }
 
     /// Journals daemon-owned PTY output before it becomes replayable.  A stale
@@ -1846,6 +1943,77 @@ mod tests {
     }
 
     #[test]
+    fn restart_reconciles_prepared_admission_without_spawning_a_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let dispatch_dir = dir.path().join("dispatch");
+        let spawns = Arc::new(AtomicU32::new(0));
+        let operation = OperationId::new().to_string();
+        let launch_intent = intent(None);
+        let mut first = AgentRuntime::with_dispatch(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store {
+                saves: 0,
+                fail_after: Some(0),
+            },
+            Journal::default(),
+            CountingPty(Arc::clone(&spawns)),
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+            DispatchStore::new(&dispatch_dir),
+        );
+        assert_eq!(
+            first
+                .launch(&operation, &launch_intent, &FakeScope(Ok(scope())),)
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+        assert_eq!(spawns.load(Ordering::SeqCst), 0);
+        drop(first);
+
+        let mut second = AgentRuntime::hydrate_with_dispatch_and_locator(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            CountingPty(Arc::clone(&spawns)),
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+            DispatchStore::new(&dispatch_dir),
+            PathExecutableLocator,
+            RuntimeStoreSnapshot::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            second
+                .launch(&operation, &launch_intent, &FakeScope(Ok(scope())),)
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+        let mut conflict = launch_intent;
+        conflict.profile = Some(AgentProfileId::new("other").unwrap());
+        assert_eq!(
+            second
+                .launch(&operation, &conflict, &FakeScope(Ok(scope())))
+                .unwrap_err()
+                .code,
+            ErrorCode::IdempotencyConflict
+        );
+        assert_eq!(spawns.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            second
+                .dispatch
+                .run(OperationId::parse(&operation).unwrap())
+                .unwrap()
+                .unwrap()
+                .status,
+            RunStatus::Failed
+        );
+    }
+
+    #[test]
     fn queued_prompt_is_consumed_by_launch_and_auto_then_delivers_live() {
         let mut runtime = runtime();
         let launch_intent = intent(None);
@@ -2223,6 +2391,36 @@ mod tests {
     }
 
     #[test]
+    fn legacy_run_without_admission_metadata_is_not_spawned() {
+        let mut runtime = runtime();
+        let operation = OperationId::new();
+        runtime
+            .dispatch
+            .upsert_run(DispatchRun {
+                run_id: operation,
+                agent_id: usagi_core::domain::id::AgentId::new(),
+                prompt: String::new(),
+                started_at: Utc::now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .unwrap();
+
+        assert_eq!(
+            runtime
+                .launch(
+                    &operation.to_string(),
+                    &intent(None),
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+        assert_eq!(runtime.coordinator.occupied_slots(), 0);
+    }
+
+    #[test]
     fn dispatch_launches_once_persists_binding_and_synthesizes_no_report_on_exit() {
         let fixture = tempfile::tempdir().unwrap();
         std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
@@ -2254,6 +2452,9 @@ mod tests {
             )
             .unwrap();
         let credential = runtime.mcp_callers.keys().next().cloned().unwrap();
+        let durable_snapshot = serde_json::to_string(&runtime.coordinator.snapshot()).unwrap();
+        assert!(durable_snapshot.contains("daemon_minted_ephemeral"));
+        assert!(!durable_snapshot.contains(&credential));
         assert_eq!(
             runtime.mcp_caller(&credential),
             Some(OperationId::parse(&operation).unwrap())

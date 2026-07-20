@@ -567,7 +567,7 @@ fn task_node(
 
 fn terminal(status: RunStatus) -> Option<(TaskState, InboxKind)> {
     match status {
-        RunStatus::Running => None,
+        RunStatus::Preparing | RunStatus::Running => None,
         RunStatus::Completed => Some((TaskState::Succeeded, InboxKind::Completed)),
         RunStatus::Failed => Some((TaskState::Failed, InboxKind::Failed)),
         RunStatus::NoReport => Some((TaskState::Failed, InboxKind::NoReport)),

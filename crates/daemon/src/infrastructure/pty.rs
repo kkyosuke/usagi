@@ -153,6 +153,22 @@ impl PtyTerminal {
             .map_err(io_error)
             .and_then(|status| i32::try_from(status.exit_code()).map_err(std::io::Error::other))
     }
+
+    /// Terminates and reaps this daemon-owned child. Used only to compensate a
+    /// failed admission commit after the process has already been spawned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the child lock, termination, or wait fails.
+    pub fn terminate_reap(&self) -> std::io::Result<()> {
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|_| std::io::Error::other("PTY child lock poisoned"))?;
+        child.kill().map_err(io_error)?;
+        child.wait().map_err(io_error)?;
+        Ok(())
+    }
 }
 
 impl PtyWriter for PtyTerminal {

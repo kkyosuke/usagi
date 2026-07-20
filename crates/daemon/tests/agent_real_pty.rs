@@ -10,9 +10,10 @@
 //!   closed (the product binary cannot be found) into a safe daemon error —
 //!   never a replacement spawn or a guessed terminal.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -27,6 +28,7 @@ use usagi_core::domain::id::{
     WorkspaceId,
 };
 use usagi_core::infrastructure::ipc::ErrorCode;
+use usagi_core::infrastructure::store::dispatch::DispatchStore;
 use usagi_core::usecase::agent::AgentProfileCatalog;
 use usagi_core::usecase::client::{AgentLaunchIntent, TerminalAction, TerminalRequest};
 use usagi_daemon::infrastructure::pty::PtyTerminal;
@@ -41,7 +43,7 @@ use usagi_daemon::usecase::generation::ProcessIdentity;
 use usagi_daemon::usecase::orchestration::AdapterRegistry;
 use usagi_daemon::usecase::runtime::{
     AdapterError, AgentAdapter, OutputJournal, ProvisionContext, PtySpawner, ResolvedLaunch,
-    RuntimeStore, RuntimeStoreSnapshot, SpawnProvision,
+    RuntimeStore, RuntimeStoreSnapshot, SpawnProvision, TerminateReapError,
 };
 use usagi_daemon::usecase::terminal::{Geometry, Output, PtyWriteError, PtyWriter, SpawnFailure};
 
@@ -53,6 +55,30 @@ impl RuntimeStore for MemoryStore {
     type Error = ();
     fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
         self.0.push(snapshot);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct FailSecondSaveStore {
+    saves: usize,
+    snapshots: Vec<RuntimeStoreSnapshot>,
+}
+struct FailFirstSaveStore;
+impl RuntimeStore for FailFirstSaveStore {
+    type Error = ();
+    fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
+        Err(())
+    }
+}
+impl RuntimeStore for FailSecondSaveStore {
+    type Error = ();
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
+        self.saves += 1;
+        if self.saves == 2 {
+            return Err(());
+        }
+        self.snapshots.push(snapshot);
         Ok(())
     }
 }
@@ -93,6 +119,10 @@ enum Observation {
 struct RealPtySpawner {
     observations: Sender<Observation>,
     environment: Vec<(String, String)>,
+    terminals: BTreeMap<String, Arc<Mutex<PtyTerminal>>>,
+    spawns: Arc<AtomicUsize>,
+    terminations: Arc<AtomicUsize>,
+    break_registry_after_spawn: Option<PathBuf>,
 }
 impl PtySpawner for RealPtySpawner {
     fn spawn(
@@ -122,6 +152,14 @@ impl PtySpawner for RealPtySpawner {
         let pid = pty.process_id().ok_or(SpawnFailure::Ambiguous)?;
         let reader = pty.reader().map_err(|_| SpawnFailure::Ambiguous)?;
         let pty = Arc::new(Mutex::new(pty));
+        self.terminals
+            .insert(terminal.terminal_id.as_str().clone(), Arc::clone(&pty));
+        self.spawns.fetch_add(1, Ordering::SeqCst);
+        if let Some(path) = &self.break_registry_after_spawn {
+            std::fs::rename(path, path.with_extension("saved"))
+                .map_err(|_| SpawnFailure::Ambiguous)?;
+            std::fs::create_dir(path).map_err(|_| SpawnFailure::Ambiguous)?;
+        }
         let observations = self.observations.clone();
         let output_terminal = terminal.clone();
         let exit_pty = Arc::clone(&pty);
@@ -154,6 +192,18 @@ impl PtySpawner for RealPtySpawner {
             start_identity: "real-pty".to_owned(),
             process_group: pid,
         })
+    }
+
+    fn terminate_reap(&mut self, terminal: &TerminalRef) -> Result<(), TerminateReapError> {
+        let key = terminal.terminal_id.as_str();
+        let pty = self.terminals.get(&key).ok_or(TerminateReapError)?;
+        pty.lock()
+            .map_err(|_| TerminateReapError)?
+            .terminate_reap()
+            .map_err(|_| TerminateReapError)?;
+        self.terminals.remove(&key);
+        self.terminations.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 }
 impl PtyWriter for RealPtySpawner {
@@ -282,6 +332,10 @@ fn agent_real_pty_rebuilds_the_allowlisted_environment_and_commits_exit() {
                 ("HOME".to_owned(), "/public/home".to_owned()),
                 ("USAGI_PRIORITY".to_owned(), "profile".to_owned()),
             ],
+            terminals: BTreeMap::new(),
+            spawns: Arc::new(AtomicUsize::new(0)),
+            terminations: Arc::new(AtomicUsize::new(0)),
+            break_registry_after_spawn: None,
         },
         AgentProfileId::new("claude").unwrap(),
         Geometry { cols: 80, rows: 24 },
@@ -342,6 +396,239 @@ fn agent_real_pty_rebuilds_the_allowlisted_environment_and_commits_exit() {
     );
 }
 
+#[test]
+fn post_spawn_commit_failure_terminates_reaps_and_never_respawns_the_operation() {
+    let (sender, _observations): (Sender<Observation>, Receiver<Observation>) = mpsc::channel();
+    let profile = AgentProfile::new(
+        AgentProfileId::new("claude").unwrap(),
+        "Claude",
+        1,
+        [],
+        [LaunchMode::Interactive],
+    );
+    let mut registry = AdapterRegistry::new();
+    registry
+        .register(
+            profile.clone(),
+            Box::new(ShellAdapter {
+                profile,
+                script: "sleep 30".to_owned(),
+            }),
+        )
+        .unwrap();
+    let spawns = Arc::new(AtomicUsize::new(0));
+    let terminations = Arc::new(AtomicUsize::new(0));
+    let mut runtime = AgentRuntime::new(
+        DaemonGeneration::new(),
+        registry,
+        FailSecondSaveStore::default(),
+        MemoryJournal::default(),
+        RealPtySpawner {
+            observations: sender,
+            environment: Vec::new(),
+            terminals: BTreeMap::new(),
+            spawns: Arc::clone(&spawns),
+            terminations: Arc::clone(&terminations),
+            break_registry_after_spawn: None,
+        },
+        AgentProfileId::new("claude").unwrap(),
+        Geometry { cols: 80, rows: 24 },
+    );
+    let scope = FixedScope {
+        worktree_id: usagi_core::domain::id::WorktreeId::new(),
+        working_directory: PathBuf::from("/"),
+    };
+    let operation = OperationId::new().to_string();
+    let launch_intent = intent(None);
+
+    assert_eq!(
+        runtime
+            .launch(&operation, &launch_intent, &scope)
+            .unwrap_err()
+            .code,
+        ErrorCode::Unavailable
+    );
+    assert_eq!(spawns.load(Ordering::SeqCst), 1);
+    assert_eq!(terminations.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        runtime
+            .launch(&operation, &launch_intent, &scope)
+            .unwrap_err()
+            .code,
+        ErrorCode::Unavailable
+    );
+    let mut conflict = launch_intent;
+    conflict.profile = Some(AgentProfileId::new("other").unwrap());
+    assert_eq!(
+        runtime
+            .launch(&operation, &conflict, &scope)
+            .unwrap_err()
+            .code,
+        ErrorCode::IdempotencyConflict
+    );
+    assert_eq!(spawns.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn pre_spawn_dispatch_and_runtime_save_failures_never_create_a_real_pty() {
+    fn registry() -> AdapterRegistry {
+        let profile = AgentProfile::new(
+            AgentProfileId::new("claude").unwrap(),
+            "Claude",
+            1,
+            [],
+            [LaunchMode::Interactive],
+        );
+        let mut registry = AdapterRegistry::new();
+        registry
+            .register(
+                profile.clone(),
+                Box::new(ShellAdapter {
+                    profile,
+                    script: "sleep 30".to_owned(),
+                }),
+            )
+            .unwrap();
+        registry
+    }
+    let scope = FixedScope {
+        worktree_id: usagi_core::domain::id::WorktreeId::new(),
+        working_directory: PathBuf::from("/"),
+    };
+
+    let invalid_parent = tempfile::NamedTempFile::new().unwrap();
+    let (sender, _observations) = mpsc::channel();
+    let dispatch_spawns = Arc::new(AtomicUsize::new(0));
+    let mut dispatch_failure = AgentRuntime::with_dispatch(
+        DaemonGeneration::new(),
+        registry(),
+        MemoryStore::default(),
+        MemoryJournal::default(),
+        RealPtySpawner {
+            observations: sender,
+            environment: Vec::new(),
+            terminals: BTreeMap::new(),
+            spawns: Arc::clone(&dispatch_spawns),
+            terminations: Arc::new(AtomicUsize::new(0)),
+            break_registry_after_spawn: None,
+        },
+        AgentProfileId::new("claude").unwrap(),
+        Geometry { cols: 80, rows: 24 },
+        DispatchStore::new(invalid_parent.path()),
+    );
+    assert_eq!(
+        dispatch_failure
+            .launch(&OperationId::new().to_string(), &intent(None), &scope)
+            .unwrap_err()
+            .code,
+        ErrorCode::Unavailable
+    );
+    assert_eq!(dispatch_spawns.load(Ordering::SeqCst), 0);
+
+    let (sender, _observations) = mpsc::channel();
+    let runtime_spawns = Arc::new(AtomicUsize::new(0));
+    let mut runtime_failure = AgentRuntime::new(
+        DaemonGeneration::new(),
+        registry(),
+        FailFirstSaveStore,
+        MemoryJournal::default(),
+        RealPtySpawner {
+            observations: sender,
+            environment: Vec::new(),
+            terminals: BTreeMap::new(),
+            spawns: Arc::clone(&runtime_spawns),
+            terminations: Arc::new(AtomicUsize::new(0)),
+            break_registry_after_spawn: None,
+        },
+        AgentProfileId::new("claude").unwrap(),
+        Geometry { cols: 80, rows: 24 },
+    );
+    assert_eq!(
+        runtime_failure
+            .launch(&OperationId::new().to_string(), &intent(None), &scope)
+            .unwrap_err()
+            .code,
+        ErrorCode::OwnershipUnknown
+    );
+    assert_eq!(runtime_spawns.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn dispatch_commit_failure_compensates_real_pty_and_keeps_prepared_fence() {
+    let (sender, _observations): (Sender<Observation>, Receiver<Observation>) = mpsc::channel();
+    let profile = AgentProfile::new(
+        AgentProfileId::new("claude").unwrap(),
+        "Claude",
+        1,
+        [],
+        [LaunchMode::Interactive],
+    );
+    let mut registry = AdapterRegistry::new();
+    registry
+        .register(
+            profile.clone(),
+            Box::new(ShellAdapter {
+                profile,
+                script: "sleep 30".to_owned(),
+            }),
+        )
+        .unwrap();
+    let dispatch_dir = tempfile::tempdir().unwrap();
+    let dispatch = DispatchStore::new(dispatch_dir.path());
+    let registry_path = dispatch.registry_path();
+    let spawns = Arc::new(AtomicUsize::new(0));
+    let terminations = Arc::new(AtomicUsize::new(0));
+    let mut runtime = AgentRuntime::with_dispatch(
+        DaemonGeneration::new(),
+        registry,
+        MemoryStore::default(),
+        MemoryJournal::default(),
+        RealPtySpawner {
+            observations: sender,
+            environment: Vec::new(),
+            terminals: BTreeMap::new(),
+            spawns: Arc::clone(&spawns),
+            terminations: Arc::clone(&terminations),
+            break_registry_after_spawn: Some(registry_path.clone()),
+        },
+        AgentProfileId::new("claude").unwrap(),
+        Geometry { cols: 80, rows: 24 },
+        dispatch,
+    );
+    let scope = FixedScope {
+        worktree_id: usagi_core::domain::id::WorktreeId::new(),
+        working_directory: PathBuf::from("/"),
+    };
+    let operation = OperationId::new().to_string();
+    let launch_intent = intent(None);
+
+    assert_eq!(
+        runtime
+            .launch(&operation, &launch_intent, &scope)
+            .unwrap_err()
+            .code,
+        ErrorCode::Unavailable
+    );
+    assert_eq!(spawns.load(Ordering::SeqCst), 1);
+    assert_eq!(terminations.load(Ordering::SeqCst), 1);
+
+    std::fs::remove_dir(&registry_path).unwrap();
+    std::fs::rename(registry_path.with_extension("saved"), &registry_path).unwrap();
+    let durable = std::fs::read_to_string(&registry_path).unwrap();
+    let durable_json: serde_json::Value = serde_json::from_str(&durable).unwrap();
+    assert_eq!(durable_json["runs"][0]["status"], "preparing");
+    assert!(durable.contains("daemon_minted_ephemeral"));
+    assert!(!durable.contains("USAGI_MCP_CALLER_CREDENTIAL"));
+    assert_eq!(
+        runtime
+            .launch(&operation, &launch_intent, &scope)
+            .unwrap_err()
+            .code,
+        ErrorCode::Unavailable
+    );
+    assert_eq!(spawns.load(Ordering::SeqCst), 1);
+}
+
 // ---- fail-closed: the real Claude adapter when the binary is unavailable ----
 
 struct UnavailableBinaryProvisioner;
@@ -377,6 +664,10 @@ fn real_pty_claude_launch_fails_closed_when_the_binary_is_unavailable() {
             // never found, so the real PTY spawn fails closed deterministically
             // whether or not the product binary is installed.
             environment: vec![("PATH".to_owned(), String::new())],
+            terminals: BTreeMap::new(),
+            spawns: Arc::new(AtomicUsize::new(0)),
+            terminations: Arc::new(AtomicUsize::new(0)),
+            break_registry_after_spawn: None,
         },
         AgentProfileId::new("claude").unwrap(),
         Geometry { cols: 80, rows: 24 },

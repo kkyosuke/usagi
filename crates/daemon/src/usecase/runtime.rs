@@ -43,6 +43,16 @@ pub struct DurableRuntimeRecord {
     /// deliberately absent from the durable form.
     #[serde(default)]
     pub outcome: DurableOperationOutcome,
+    /// Secret-free provenance only. The minted credential value exists solely
+    /// in the live Agent owner and spawn provision.
+    #[serde(default)]
+    pub credential_provenance: Option<CredentialProvenance>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialProvenance {
+    DaemonMintedEphemeral,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -123,6 +133,7 @@ pub enum RuntimeSnapshotError {
     DuplicateRuntime,
     DuplicateOperation,
     ScopeMismatch,
+    DispatchReconcile,
 }
 
 pub trait RuntimeStore {
@@ -252,7 +263,18 @@ pub trait PtySpawner {
         provision: &SpawnProvision,
         terminal: &TerminalRef,
     ) -> Result<ProcessIdentity, SpawnFailure>;
+
+    /// Terminates and reaps the exact child owned by `terminal` after an
+    /// admission commit failure. Implementations which cannot prove both
+    /// effects fail closed and leave the runtime reconcile-required.
+    fn terminate_reap(&mut self, _terminal: &TerminalRef) -> Result<(), TerminateReapError> {
+        Err(TerminateReapError)
+    }
 }
+
+/// The exact child could not be both terminated and reaped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminateReapError;
 pub trait OutputJournal {
     type Error;
     fn append(&mut self, output: &Output) -> Result<(), Self::Error>;
@@ -356,6 +378,9 @@ impl RuntimeCoordinator {
             return Err(RuntimeError::ConcurrencyExhausted);
         }
         let mut resolved = adapter.resolve(request).map_err(RuntimeError::Adapter)?;
+        let credential_provenance = mcp_credential
+            .as_ref()
+            .map(|_| CredentialProvenance::DaemonMintedEphemeral);
         if let Some(credential) = mcp_credential {
             let name = usagi_core::domain::agent::EnvironmentVariableName::new(
                 "USAGI_MCP_CALLER_CREDENTIAL",
@@ -382,6 +407,7 @@ impl RuntimeCoordinator {
                 process: None,
                 semantic_key: Some(semantic_key),
                 outcome: DurableOperationOutcome::Accepted,
+                credential_provenance,
             },
         );
         self.persist(store)?; // durable reservation/snapshot precedes every external effect
@@ -400,11 +426,7 @@ impl RuntimeCoordinator {
                 record.process = Some(process);
                 record.state = RuntimeState::Running;
                 if self.persist(store).is_err() {
-                    self.records.get_mut(&key).expect("inserted").state =
-                        RuntimeState::ReconcileRequired(ReconcileState::PersistAfterSpawn);
-                    return Err(RuntimeError::ReconcileRequired(
-                        ReconcileState::PersistAfterSpawn,
-                    ));
+                    return Err(self.compensate_spawn(&runtime, store, spawner));
                 }
                 Ok(())
             }
@@ -425,6 +447,52 @@ impl RuntimeCoordinator {
                     ReconcileState::SpawnAmbiguous,
                 ))
             }
+        }
+    }
+
+    /// Compensates a failure after spawn but before the whole admission has
+    /// committed. A successful return is intentionally impossible: even when
+    /// termination succeeds the original request remains a durable failure.
+    #[coverage(off)]
+    pub fn compensate_after_spawn<S: RuntimeStore, P: PtySpawner>(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        store: &mut S,
+        spawner: &mut P,
+    ) -> RuntimeError {
+        self.compensate_spawn(runtime, store, spawner)
+    }
+
+    #[coverage(off)] // Generic store/spawner monomorphizations duplicate the same tested compensation branches.
+    fn compensate_spawn<S: RuntimeStore, P: PtySpawner>(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        store: &mut S,
+        spawner: &mut P,
+    ) -> RuntimeError {
+        let terminated = spawner.terminate_reap(&runtime.terminal).is_ok();
+        let record = self
+            .record_mut(runtime)
+            .expect("spawn compensation targets the reserved runtime");
+        if terminated {
+            record.state = RuntimeState::SpawnFailed;
+            record.outcome = DurableOperationOutcome::SpawnUnavailable;
+            record.process = None;
+        } else {
+            record.state = RuntimeState::ReconcileRequired(ReconcileState::OrphanRunning);
+            record.outcome = DurableOperationOutcome::OwnershipUnknown;
+        }
+        if self.persist(store).is_err() {
+            return RuntimeError::ReconcileRequired(if terminated {
+                ReconcileState::PersistAfterSpawn
+            } else {
+                ReconcileState::OrphanRunning
+            });
+        }
+        if terminated {
+            RuntimeError::SpawnFailed
+        } else {
+            RuntimeError::ReconcileRequired(ReconcileState::OrphanRunning)
         }
     }
 
@@ -812,6 +880,23 @@ mod tests {
             self.0.clone()
         }
     }
+    struct CompensatingSpawner {
+        terminated: bool,
+    }
+    impl PtySpawner for CompensatingSpawner {
+        fn spawn(
+            &mut self,
+            _: &DurableLaunchSnapshot,
+            _: &SpawnProvision,
+            _: &TerminalRef,
+        ) -> Result<ProcessIdentity, SpawnFailure> {
+            Ok(process())
+        }
+        fn terminate_reap(&mut self, _: &TerminalRef) -> Result<(), TerminateReapError> {
+            self.terminated = true;
+            Ok(())
+        }
+    }
     #[derive(Default)]
     struct Journal(Vec<Output>);
     impl OutputJournal for Journal {
@@ -883,6 +968,7 @@ mod tests {
                     process: Some(process()),
                     semantic_key: Some("first".into()),
                     outcome: DurableOperationOutcome::Accepted,
+                    credential_provenance: Some(CredentialProvenance::DaemonMintedEphemeral),
                 },
                 DurableRuntimeRecord {
                     runtime,
@@ -892,6 +978,7 @@ mod tests {
                     process: Some(process()),
                     semantic_key: Some("second".into()),
                     outcome: DurableOperationOutcome::Completed,
+                    credential_provenance: Some(CredentialProvenance::DaemonMintedEphemeral),
                 },
             ],
         };
@@ -935,6 +1022,7 @@ mod tests {
             process: Some(process()),
             semantic_key: Some("intent".into()),
             outcome: DurableOperationOutcome::Completed,
+            credential_provenance: Some(CredentialProvenance::DaemonMintedEphemeral),
         };
         assert_eq!(
             hydrated_records(RuntimeStoreSnapshot {
@@ -1023,6 +1111,7 @@ mod tests {
                     process: Some(process()),
                     semantic_key: Some("intent".into()),
                     outcome,
+                    credential_provenance: Some(CredentialProvenance::DaemonMintedEphemeral),
                 }],
             };
             assert_eq!(
@@ -1048,12 +1137,12 @@ mod tests {
             .is_err()
         );
     }
-    fn launch<S: RuntimeStore>(
+    fn launch<S: RuntimeStore, P: PtySpawner>(
         coordinator: &mut RuntimeCoordinator,
         request: &LaunchRequest,
         runtime: AgentRuntimeRef,
         fence: CompletionFence,
-        spawner: &mut Spawner,
+        spawner: &mut P,
         store: &mut S,
     ) -> Result<(), RuntimeError> {
         coordinator.launch(
@@ -1345,6 +1434,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // The failpoint matrix shares setup and asserts each retained state in order.
     fn spawn_and_persistence_uncertainty_are_retained_for_reconcile() {
         let failed_request = request();
         let (runtime, fence) = refs(&failed_request);
@@ -1417,10 +1507,71 @@ mod tests {
                 &mut store
             ),
             Err(RuntimeError::ReconcileRequired(
-                ReconcileState::PersistAfterSpawn
+                ReconcileState::OrphanRunning
             ))
         );
         assert_eq!(c.occupied_slots(), 1);
+
+        let compensated_request = request();
+        let (compensated_runtime, compensated_fence) = refs(&compensated_request);
+        let mut compensated = RuntimeCoordinator::new(1, 64, 1);
+        let mut one_shot_failure = FailingStore(0);
+        let mut terminating = CompensatingSpawner { terminated: false };
+        assert_eq!(
+            launch(
+                &mut compensated,
+                &compensated_request,
+                compensated_runtime,
+                compensated_fence,
+                &mut terminating,
+                &mut one_shot_failure,
+            ),
+            Err(RuntimeError::SpawnFailed)
+        );
+        assert!(terminating.terminated);
+        assert_eq!(compensated.occupied_slots(), 0);
+        assert_eq!(
+            compensated.snapshot().records[0].state,
+            RuntimeState::SpawnFailed
+        );
+
+        for terminate_succeeds in [true, false] {
+            let request = request();
+            let (runtime, fence) = refs(&request);
+            let mut coordinator = RuntimeCoordinator::new(1, 64, 1);
+            let mut store = ConditionalStore {
+                saves: 0,
+                fail_after: Some(1),
+            };
+            let error = if terminate_succeeds {
+                let mut spawner = CompensatingSpawner { terminated: false };
+                launch(
+                    &mut coordinator,
+                    &request,
+                    runtime,
+                    fence,
+                    &mut spawner,
+                    &mut store,
+                )
+            } else {
+                launch(
+                    &mut coordinator,
+                    &request,
+                    runtime,
+                    fence,
+                    &mut Spawner(Ok(process())),
+                    &mut store,
+                )
+            };
+            assert_eq!(
+                error,
+                Err(RuntimeError::ReconcileRequired(if terminate_succeeds {
+                    ReconcileState::PersistAfterSpawn
+                } else {
+                    ReconcileState::OrphanRunning
+                }))
+            );
+        }
 
         let request = request();
         let (runtime, fence) = refs(&request);
