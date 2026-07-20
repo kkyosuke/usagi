@@ -59,7 +59,7 @@ pub fn save(store: &MemoryStore, spec: NewMemory, now: DateTime<Utc>) -> Result<
     let name = slugify(&spec.name);
     let lock = store.lock()?;
     let created_at = store
-        .read(&name)?
+        .read_locked(&name)?
         .map_or(now, |existing| existing.created_at);
     let memory = Memory {
         name,
@@ -110,7 +110,7 @@ pub fn save_partial(
 ) -> Result<Memory> {
     let slug = slugify(name);
     let lock = store.lock()?;
-    let memory = if let Some(mut memory) = store.read(&slug)? {
+    let memory = if let Some(mut memory) = store.read_locked(&slug)? {
         if let Some(title) = patch.title {
             memory.title = title;
         }

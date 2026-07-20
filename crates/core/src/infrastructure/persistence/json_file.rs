@@ -24,6 +24,51 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 /// temp file name; combined with the pid it is unique across processes too.
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AtomicWriteStage {
+    Write,
+    Rename,
+}
+
+#[cfg(test)]
+struct AtomicWriteFailpoint {
+    path: PathBuf,
+    stage: AtomicWriteStage,
+}
+
+#[cfg(test)]
+thread_local! {
+    static ATOMIC_WRITE_FAILPOINT: std::cell::RefCell<Option<AtomicWriteFailpoint>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+/// Fail the next matching atomic write in this test thread.
+#[cfg(test)]
+pub(crate) fn fail_next_atomic_write(path: &Path, stage: AtomicWriteStage) {
+    ATOMIC_WRITE_FAILPOINT.with(|failpoint| {
+        *failpoint.borrow_mut() = Some(AtomicWriteFailpoint {
+            path: path.to_path_buf(),
+            stage,
+        });
+    });
+}
+
+#[cfg(test)]
+fn take_atomic_write_failpoint(path: &Path, stage: AtomicWriteStage) -> bool {
+    ATOMIC_WRITE_FAILPOINT.with(|failpoint| {
+        let matches = failpoint
+            .borrow()
+            .as_ref()
+            .is_some_and(|failpoint| failpoint.path == path && failpoint.stage == stage);
+        if matches {
+            failpoint.borrow_mut().take();
+        }
+        matches
+    })
+}
+
 /// A per-writer-unique temp path for `path`: the full target name with a
 /// `.tmp.<pid>.<counter>` suffix appended.
 ///
@@ -74,6 +119,10 @@ fn write_atomically(path: &Path, bytes: &[u8], durable: bool) -> Result<()> {
 /// remove the temp file on any error this returns.
 #[coverage(off)]
 fn write_atomically_inner(tmp: &Path, path: &Path, bytes: &[u8], durable: bool) -> Result<()> {
+    #[cfg(test)]
+    if take_atomic_write_failpoint(path, AtomicWriteStage::Write) {
+        anyhow::bail!("injected atomic write failure for {}", path.display());
+    }
     {
         let mut file =
             fs::File::create(tmp).context(format!("failed to create {}", tmp.display()))?;
@@ -83,6 +132,10 @@ fn write_atomically_inner(tmp: &Path, path: &Path, bytes: &[u8], durable: bool) 
             file.sync_all()
                 .context(format!("failed to flush {}", tmp.display()))?;
         }
+    }
+    #[cfg(test)]
+    if take_atomic_write_failpoint(path, AtomicWriteStage::Rename) {
+        anyhow::bail!("injected atomic rename failure for {}", path.display());
     }
     fs::rename(tmp, path).context(format!("failed to replace {}", path.display()))?;
     if durable {

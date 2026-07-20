@@ -219,6 +219,16 @@ retry は `ProtocolError` の retry mode に従う。mutation を再送すると
 を保持する。TUI は stream sequence、resource revision、terminal output offset を別々に保持し、gap や
 epoch の不一致では output を継ぎ足さず、snapshot resync を要求する。
 
+terminal の `unavailable` は connection-local subscription の喪失として扱う。TUI は 100ms から 2s 上限の
+指数 backoff で transport を開き直し、元の完全な `TerminalRef` に `attach` して atomic snapshot と新しい
+subscription を取得する。成功後は snapshot の `output_offset` から `resume` し、backoff と subscription-local
+input sequence を reset する。`stale_target`、`ownership_unknown`、exited は retry 対象ではなく、detach / tab
+close も pending retry を解除する。どの失敗経路も replacement launch を行わない。
+
+terminal input は Live な connection-owned subscription がある場合だけ送る。非 Live、subscription 不在、または
+request failure は typed failure であり、client は success として捨てず未配送 feedback を表示する。再接続まで
+入力を queue / replay しないため、遅延送信や二重送信は生じない。
+
 MCP の dispatch request は `DispatchTool` action として送る。daemon が session upsert、agent/run/binding
 の解決、inbox の読み書きを行い、MCP は durable state を直接読んだり書いたりしない。完了・失敗は worker
 の current run と binding が一意に一致するときだけ配送し、不一致は completion fence と同じ fail-closed

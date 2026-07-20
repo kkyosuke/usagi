@@ -1,14 +1,14 @@
 ---
 number: 477
 title: fix(core): v2 Markdown source commit と derived failure の outcome を分離する
-status: todo
+status: done
 priority: medium
 labels: [review, v2, core, persistence]
 dependson: []
 related: [113, 211]
 parent: 453
 created_at: 2026-07-20T12:06:46.908907+00:00
-updated_at: 2026-07-20T12:06:46.908907+00:00
+updated_at: 2026-07-20T22:33:06.399814+00:00
 ---
 
 ## 問題・影響

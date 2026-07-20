@@ -275,16 +275,31 @@ fn production_user_decision_round_trip_reaches_the_original_caller() {
         &format!(
             r#"#!/bin/sh
 if [ "$1 $2" = "login status" ]; then exit 0; fi
+credential_forwarded=false
+approval_disabled=false
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-c" ] && [ "$2" = 'mcp_servers.usagi.env_vars = ["USAGI_HOME", "USAGI_MCP_CALLER_CREDENTIAL"]' ]; then
+    credential_forwarded=true
+  fi
+  if [ "$1" = "-c" ] && [ "$2" = 'mcp_servers.usagi.default_tools_approval_mode = "approve"' ]; then
+    approval_disabled=true
+  fi
+  shift
+done
+if [ "$credential_forwarded" != true ] || [ "$approval_disabled" != true ]; then
+  printf 'missing Codex MCP credential or non-interactive approval configuration\n' >> "$USAGI_MCP_FIXTURE_LOG"
+  exit 1
+fi
 {{
   printf '%s\n' '{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-06-18","clientInfo":{{"name":"decision-agent","version":"1"}}}}}}'
   printf '%s\n' '{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"user_decision_request","arguments":{{"title":"Deploy?","prompt":"Choose","options":[{{"id":"yes","label":"Yes"}}]}}}}}}'
-}} | "{executable}" mcp >> "$USAGI_MCP_FIXTURE_LOG"
+}} | env -i PATH="$PATH" USAGI_HOME="$USAGI_HOME" USAGI_MCP_CALLER_CREDENTIAL="$USAGI_MCP_CALLER_CREDENTIAL" "{executable}" mcp >> "$USAGI_MCP_FIXTURE_LOG"
 while [ ! -f "$USAGI_MCP_FIXTURE_LOG.decision" ]; do sleep 1; done
 decision_id=$(sed -n '1p' "$USAGI_MCP_FIXTURE_LOG.decision")
 {{
   printf '%s\n' '{{"jsonrpc":"2.0","id":3,"method":"initialize","params":{{"protocolVersion":"2025-06-18","clientInfo":{{"name":"decision-agent","version":"1"}}}}}}'
   printf '{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"user_decision_get","arguments":{{"decision_id":"%s"}}}}}}\n' "$decision_id"
-}} | "{executable}" mcp >> "$USAGI_MCP_FIXTURE_LOG"
+}} | env -i PATH="$PATH" USAGI_HOME="$USAGI_HOME" USAGI_MCP_CALLER_CREDENTIAL="$USAGI_MCP_CALLER_CREDENTIAL" "{executable}" mcp >> "$USAGI_MCP_FIXTURE_LOG"
 "#,
         ),
     );
