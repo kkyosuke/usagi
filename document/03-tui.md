@@ -242,9 +242,30 @@ Home 背景との合成範囲を越えない。
 - **Overview の action-mode footer**: インデントの無かった footer を、他の footer と同じ 2 桁インデントへ揃えた。
 - **共通マーカー**: `›` は `selection_marker` の 1 経路に集約し、`widgets/select.rs` の focus カーソルも再利用する。
 
-confirmation（Quit / open）の button・文言統一と、list / text-viewer / editor / palette の形別コンポーネント
-抽出は本 kit の上に別途載せる（それぞれ別 issue）。決定 modal の選択行が使う plain な `>` マーカーは、
-list コンポーネント抽出時に共通カーソルへ寄せる。
+confirmation（Quit / open）の button・文言統一は本 kit の上に別途載せる（別 issue）。
+
+### 形別コンポーネント
+
+body-composition kit の 1 段上に、modal を「形（shape）」ごとの薄い composition helper として整理する。
+各 modal の view には固有の state・キー解釈・内容だけを残し、行の並べ方・scroll viewport・選択・prompt と
+いった形の共通部分を `widgets/modal.rs` の shape helper へ寄せる。
+
+| shape | 対象 modal | shape helper | 共通化する部分 |
+|---|---|---|---|
+| list | Prs / Closeup / Decisions（一覧・option） / remove | `list_window` + `scroll_window` + `selection_marker` | 選択追従の viewport・カーソルマーカー・`↑/↓ N more`・行 clip |
+| text-viewer | Preview（`text_overlay`。PR error の Unavailable も） | `viewport_window` + `scroll_window` | offset 起点の読み取り専用 scroll・scroll indicator |
+| editor | Notes / Environment / Decisions（editor） | `content_line` + `caption` / `heading` + `footer` | draft 行・section 切替・error 行・footer |
+| palette | Overview / Closeup（prompt） | `prompt_line` + `subcommand_row` + list helper | `❯` 入力行・前方一致候補・inline subcommand picker・result / footer |
+
+- **scroll viewport は 1 経路**。選択追従（list）は `list_window(len, selected, capacity)`、offset 起点
+  （text-viewer）は `viewport_window(len, offset, capacity)` が半開区間 `[start, end)` を返し、`scroll_window(rows, start, end)`
+  が `↑ N more` / `↓ N more` を挟んで窓を描く。pr_modal の旧 `visible_bounds` と text_overlay の inline scroll 計算は
+  この 3 helper に統合した。
+- **palette の入力行は `prompt_line(value, cursor)`**（danger `❯` + accent block caret）に集約し、Overview と
+  Closeup（prompt）が同じ prompt を描く。inline subcommand picker は `subcommand_row(label, selected)` に寄せる。
+  subcommand の quiet な `›` は list の danger カーソルとは別に保つ。
+- **決定 modal の選択行は共通カーソルへ移行**した。旧 plain `>` を `selection_marker` の danger `›` に揃え、他の
+  list modal と同じ `content_line(format!("{marker} {label}"), inner)` で描く。
 
 ## Sidebar mascot
 

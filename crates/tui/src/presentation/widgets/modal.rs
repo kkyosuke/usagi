@@ -140,6 +140,87 @@ pub fn scroll_below(hidden: usize) -> String {
     scroll_indicator('↓', hidden)
 }
 
+// ── shape composition ──────────────────────────────────────────────────────
+//
+// The helpers below sit one layer above the body-composition kit: they encode
+// the *shape* a modal takes (a selection list, a scrolling text viewer, a
+// command palette) so each view keeps only its own state, keys, and content.
+// A shape owns the parts that repeat across every modal of that shape — the
+// scroll viewport, the cursor row, the palette prompt — while the view decides
+// what each row says.
+
+/// The half-open window `[start, end)` of a `len`-row **selection list** that
+/// keeps row `selected` visible within `capacity` rows.
+///
+/// The window follows the cursor: as the selection moves past the bottom edge
+/// the window scrolls so the selected row sits on that edge, and it never scrolls
+/// past the final row. This folds the PR list's `visible_bounds`; every
+/// selection list (PR / closeup / decision) computes its viewport the same way.
+#[must_use]
+pub fn list_window(len: usize, selected: usize, capacity: usize) -> (usize, usize) {
+    let visible = len.min(capacity);
+    let start = selected
+        .saturating_sub(visible.saturating_sub(1))
+        .min(len.saturating_sub(visible));
+    (start, start + visible)
+}
+
+/// The half-open window `[start, end)` showing up to `capacity` rows of a
+/// `len`-row **text viewer** from scroll `offset`.
+///
+/// Unlike [`list_window`] the anchor is the offset itself, not a selection, so
+/// the reader scrolls freely; the start is clamped so a non-empty document
+/// always keeps at least its last row on screen. Folds the text overlay's
+/// offset math.
+#[must_use]
+pub fn viewport_window(len: usize, offset: usize, capacity: usize) -> (usize, usize) {
+    let start = offset.min(len.saturating_sub(1));
+    let end = start.saturating_add(capacity).min(len);
+    (start, end)
+}
+
+/// Emit the `[start, end)` slice of `rows` bracketed by `↑ N more` / `↓ N more`
+/// indicators.
+///
+/// This is the one scroll-viewport renderer shared by the list and text-viewer
+/// shapes: rows hidden above or below the window each collapse to a single
+/// indicator line, so the PR list and the text overlay no longer open-code the
+/// same emission. Callers pair it with [`list_window`] or [`viewport_window`].
+#[must_use]
+pub fn scroll_window(rows: &[String], start: usize, end: usize) -> Vec<String> {
+    let mut out = Vec::with_capacity(end.saturating_sub(start) + 2);
+    if start > 0 {
+        out.push(scroll_above(start));
+    }
+    out.extend(rows.get(start..end).unwrap_or_default().iter().cloned());
+    if end < rows.len() {
+        out.push(scroll_below(rows.len() - end));
+    }
+    out
+}
+
+/// The **palette** input line: a danger `❯` prompt followed by the block-caret
+/// rendering of `value` with the caret at byte `cursor`.
+///
+/// Shared by the overview and closeup palettes so every command input draws the
+/// same prompt glyph and accent caret.
+#[must_use]
+pub fn prompt_line(value: &str, cursor: usize) -> String {
+    let prompt = Role::Danger.style().bold().paint("❯");
+    let body = super::block_caret(value, cursor, &Role::Accent.style());
+    format!("{prompt} {body}")
+}
+
+/// A dim inline subcommand row under a palette action: a plain `›` / space
+/// marker indented under its parent command. Folds the picker row the overview
+/// and closeup palettes both drew; its quiet marker stays distinct from the
+/// list cursor [`selection_marker`].
+#[must_use]
+pub fn subcommand_row(label: &str, selected: bool) -> String {
+    let marker = if selected { "›" } else { " " };
+    Style::new().dim().paint(&format!("      {marker} {label}"))
+}
+
 /// Reserve `body_height` rows for `lines` and render the modal centred on a
 /// blank frame. The twin of [`render_body_over`]; both fold the
 /// `fixed_body(…)` reserve so a view only composes its rows.
@@ -476,9 +557,10 @@ pub fn render_over(
 mod tests {
     use super::{
         ConfirmationModal, ConfirmationView, boxed, caption, columns, confirmation_buttons,
-        content_line, empty_notice, fixed_body, footer, heading, modal_inner_width, render_body,
-        render_body_over, render_confirmation_over, render_modal, render_over, scroll_above,
-        scroll_below, selection_marker,
+        content_line, empty_notice, fixed_body, footer, heading, list_window, modal_inner_width,
+        prompt_line, render_body, render_body_over, render_confirmation_over, render_modal,
+        render_over, scroll_above, scroll_below, scroll_window, selection_marker, subcommand_row,
+        viewport_window,
     };
     use crate::presentation::theme::{Role, Style};
     use crate::presentation::widgets::clip_to_width;
@@ -597,6 +679,71 @@ mod tests {
         );
         assert_eq!(scroll_above(3), Style::new().dim().paint("  ↑ 3 more"));
         assert_eq!(scroll_below(1), Style::new().dim().paint("  ↓ 1 more"));
+    }
+
+    #[test]
+    fn list_window_follows_the_selection_and_clamps_to_the_list() {
+        // Fewer rows than the capacity: the whole list is the window.
+        assert_eq!(list_window(3, 2, 6), (0, 3));
+        // Selection inside the first page keeps the window at the top.
+        assert_eq!(list_window(10, 0, 6), (0, 6));
+        assert_eq!(list_window(10, 5, 6), (0, 6));
+        // Past the bottom edge the window scrolls to keep the selection visible.
+        assert_eq!(list_window(10, 6, 6), (1, 7));
+        assert_eq!(list_window(10, 9, 6), (4, 10));
+        // An empty list yields an empty window rather than panicking.
+        assert_eq!(list_window(0, 0, 6), (0, 0));
+    }
+
+    #[test]
+    fn viewport_window_anchors_on_the_scroll_offset() {
+        // Offset zero shows the first `capacity` rows.
+        assert_eq!(viewport_window(20, 0, 5), (0, 5));
+        // A mid-document offset is the window start.
+        assert_eq!(viewport_window(20, 12, 5), (12, 17));
+        // The start clamps so the last row always stays on screen.
+        assert_eq!(viewport_window(20, 100, 5), (19, 20));
+        // A short document shows only what it has.
+        assert_eq!(viewport_window(3, 0, 5), (0, 3));
+        // An empty document yields an empty window.
+        assert_eq!(viewport_window(0, 0, 5), (0, 0));
+    }
+
+    #[test]
+    fn scroll_window_brackets_the_slice_with_more_indicators() {
+        let rows: Vec<String> = (0..6).map(|n| format!("row {n}")).collect();
+        // A window flush with both ends emits no indicators.
+        assert_eq!(scroll_window(&rows, 0, 6), rows);
+        // Hidden rows above and below each collapse to one indicator line.
+        let windowed = scroll_window(&rows, 2, 4);
+        assert_eq!(windowed.first(), Some(&scroll_above(2)));
+        assert_eq!(windowed.last(), Some(&scroll_below(2)));
+        assert!(windowed.contains(&"row 2".to_string()));
+        assert!(windowed.contains(&"row 3".to_string()));
+        assert!(!windowed.contains(&"row 1".to_string()));
+        // An out-of-range window degrades to just its indicators.
+        assert_eq!(scroll_window(&rows, 8, 8), vec![scroll_above(8)]);
+    }
+
+    #[test]
+    fn prompt_line_draws_a_danger_prompt_and_accent_caret() {
+        let line = prompt_line("cmd", 3);
+        assert!(line.starts_with(&Role::Danger.style().bold().paint("❯")));
+        assert!(line.contains("cmd"));
+        // The caret past the value is the shared block caret's inverse space.
+        assert!(line.contains("\u{1b}[7"));
+    }
+
+    #[test]
+    fn subcommand_row_marks_the_selected_picker_row() {
+        assert_eq!(
+            subcommand_row("open", true),
+            Style::new().dim().paint("      › open")
+        );
+        assert_eq!(
+            subcommand_row("new", false),
+            Style::new().dim().paint("        new")
+        );
     }
 
     #[test]
