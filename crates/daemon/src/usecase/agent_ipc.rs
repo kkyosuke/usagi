@@ -28,7 +28,8 @@ use usagi_core::{
     domain::{
         agent::{
             AgentCapability, AgentProfileId, AgentStatus, CallerRef, DispatchBinding, DispatchRun,
-            InboxKind, InboxMessage, LaunchMode, LaunchRequest, LaunchScope, RunStatus, WorkerRef,
+            InboxKind, InboxMessage, LaunchMode, LaunchRequest, LaunchScope, ModelSelector,
+            RunStatus, WorkerRef,
         },
         id::{
             AgentRuntimeId, AgentRuntimeRef, ClientId, CompletionFence, ConnectionId,
@@ -112,6 +113,12 @@ struct AgentOperation {
     outcome: Result<AgentAdmission, ProtocolError>,
 }
 
+#[derive(Debug, Clone)]
+struct McpCaller {
+    runtime: AgentRuntimeRef,
+    operation: OperationId,
+}
+
 /// The routing decision for a terminal request that addresses a `TerminalRef`.
 pub enum TerminalOutcome {
     /// The Agent owner recognizes the terminal and produced this result.
@@ -152,6 +159,7 @@ pub struct AgentRuntime<S, P, J, L = PathExecutableLocator> {
     dispatch: DispatchStore,
     locator: L,
     operations: BTreeMap<String, AgentOperation>,
+    mcp_callers: BTreeMap<String, McpCaller>,
 }
 
 impl<S, P, J> AgentRuntime<S, P, J, PathExecutableLocator> {
@@ -231,6 +239,7 @@ impl<S, P, J, L> AgentRuntime<S, P, J, L> {
             dispatch,
             locator,
             operations: BTreeMap::new(),
+            mcp_callers: BTreeMap::new(),
         }
     }
 
@@ -249,6 +258,17 @@ impl<S, P, J, L> AgentRuntime<S, P, J, L> {
     #[must_use]
     pub fn dispatch_store(&self) -> &DispatchStore {
         &self.dispatch
+    }
+
+    /// Resolves an opaque MCP credential only while its exact runtime is live.
+    #[must_use]
+    pub fn mcp_caller(&self, credential: &str) -> Option<OperationId> {
+        let caller = self.mcp_callers.get(credential)?;
+        self.coordinator
+            .record_for(&caller.runtime)
+            .ok()
+            .filter(|record| record.state == super::runtime::RuntimeState::Running)
+            .map(|_| caller.operation)
     }
 }
 
@@ -437,6 +457,7 @@ impl<
             operation: fence,
             mcp_allowed: true,
         };
+        let credential = OperationId::new().to_string();
         self.orchestrator
             .launch(
                 &mut self.coordinator,
@@ -446,6 +467,7 @@ impl<
                 self.geometry,
                 &mut self.store,
                 &mut self.pty,
+                Some(credential.clone()),
             )
             .map_err(map_orchestration_error)?;
         self.dispatch
@@ -458,6 +480,13 @@ impl<
                 status: RunStatus::Running,
             })
             .map_err(|_| dispatch_storage_error())?;
+        self.mcp_callers.insert(
+            credential,
+            McpCaller {
+                runtime: authorization.runtime,
+                operation,
+            },
+        );
         self.dispatch
             .upsert_binding(DispatchBinding {
                 run_id: operation,
@@ -479,6 +508,7 @@ impl<
         })
     }
 
+    #[allow(clippy::too_many_lines)] // Admission atomically fences launch, caller registration, and replay state.
     fn admit<R: SessionScopeResolver>(
         &mut self,
         operation_id: &str,
@@ -522,7 +552,7 @@ impl<
             expected_revision: 0,
         };
         let request = LaunchRequest {
-            profile_id,
+            profile_id: profile_id.clone(),
             mode: LaunchMode::Interactive,
             model: None,
             resume: false,
@@ -539,6 +569,7 @@ impl<
             operation: fence,
             mcp_allowed: true,
         };
+        let credential = OperationId::new().to_string();
         self.orchestrator
             .launch(
                 &mut self.coordinator,
@@ -548,8 +579,48 @@ impl<
                 self.geometry,
                 &mut self.store,
                 &mut self.pty,
+                Some(credential.clone()),
             )
             .map_err(map_orchestration_error)?;
+        let worker = self
+            .dispatch
+            .upsert_agent_by_runtime_model(
+                intent.session,
+                profile_id.clone(),
+                ModelSelector::new("default").expect("literal model selector is canonical"),
+            )
+            .map_err(|_| dispatch_storage_error())?;
+        self.dispatch
+            .upsert_run(DispatchRun {
+                run_id: operation,
+                agent_id: worker.agent_id,
+                prompt: String::new(),
+                started_at: Utc::now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .map_err(|_| dispatch_storage_error())?;
+        let caller = CallerRef {
+            session_id: worker.session_id,
+            agent_id: worker.agent_id,
+        };
+        self.dispatch
+            .upsert_binding(DispatchBinding {
+                run_id: operation,
+                caller,
+                worker: WorkerRef {
+                    session_id: worker.session_id,
+                    agent_id: worker.agent_id,
+                },
+            })
+            .map_err(|_| dispatch_storage_error())?;
+        self.mcp_callers.insert(
+            credential,
+            McpCaller {
+                runtime: authorization.runtime,
+                operation,
+            },
+        );
         Ok(AgentAdmission {
             operation_id: operation_id.to_owned(),
             revision: 1,
@@ -744,11 +815,23 @@ impl<
                 .attach(runtime, connection)
                 .map(|attached| json!(attached))
                 .map_err(map_runtime_error),
-            (TerminalAction::Resume, TerminalRequest::Resume { after_offset, .. }) => self
-                .coordinator
-                .replay_from(runtime, after_offset)
-                .map(|output| json!({ "output": output }))
-                .map_err(map_runtime_error),
+            (TerminalAction::Resume, TerminalRequest::Resume { after_offset, .. }) => {
+                let output = self
+                    .coordinator
+                    .replay_from(runtime, after_offset)
+                    .map_err(map_runtime_error)?;
+                // Parity with the generic terminal Resume: a polling client
+                // observes the hosting terminal's exit on the incremental poll,
+                // not only on a resync snapshot. Without this an exited Agent's
+                // pane tab is never dropped from the Closeup strip.
+                let exited = self
+                    .coordinator
+                    .terminal_snapshot(runtime)
+                    .map_err(map_runtime_error)?
+                    .exited
+                    .is_some();
+                Ok(json!({ "output": output, "exited": exited }))
+            }
             (TerminalAction::Resync, TerminalRequest::Resync { .. }) => self
                 .coordinator
                 .terminal_snapshot(runtime)
@@ -1321,6 +1404,50 @@ mod tests {
     }
 
     #[test]
+    fn agent_resume_reports_exit_for_parity_with_the_generic_terminal() {
+        // Regression: an Agent's `Resume` must carry the hosting terminal's
+        // `exited` flag (like the generic terminal Resume), so a TUI client's
+        // per-frame poll observes the exit and drops the pane tab instead of
+        // leaving it stranded until an incidental resync.
+        let mut runtime = runtime();
+        let fake_scope = FakeScope(Ok(scope()));
+        let operation = OperationId::new().to_string();
+        let launch_intent = intent(None);
+        let terminal = runtime
+            .launch(&operation, &launch_intent, &fake_scope)
+            .unwrap()
+            .terminal;
+        runtime.output(&terminal, b"working\n".to_vec()).unwrap();
+
+        let connection = ConnectionId::new();
+        let client = ClientId::new();
+        let live = handled(runtime.handle_terminal(
+            connection,
+            client,
+            RequestId::new(),
+            TerminalAction::Resume,
+            TerminalRequest::Resume {
+                terminal: terminal.clone(),
+                after_offset: 0,
+            },
+        ));
+        assert_eq!(live["exited"], false);
+
+        runtime.exit(&terminal, 0).unwrap();
+        let exited = handled(runtime.handle_terminal(
+            connection,
+            client,
+            RequestId::new(),
+            TerminalAction::Resume,
+            TerminalRequest::Resume {
+                terminal: terminal.clone(),
+                after_offset: 8,
+            },
+        ));
+        assert_eq!(exited["exited"], true);
+    }
+
+    #[test]
     fn workspace_root_agent_launches_and_attaches_without_a_session() {
         let mut runtime = runtime();
         let fake_scope = FakeScope(Ok(scope()));
@@ -1490,6 +1617,12 @@ mod tests {
                 &FakeScope(Ok(configured_scope(worktree.path()))),
             )
             .unwrap();
+        let credential = runtime.mcp_callers.keys().next().cloned().unwrap();
+        assert_eq!(
+            runtime.mcp_caller(&credential),
+            Some(OperationId::parse(&operation).unwrap())
+        );
+        assert_eq!(runtime.mcp_caller("forged"), None);
         let run_id = OperationId::parse(&operation).unwrap();
         assert_eq!(
             runtime
@@ -1513,6 +1646,7 @@ mod tests {
             admission
         );
         runtime.exit(&admission.terminal, 0).unwrap();
+        assert_eq!(runtime.mcp_caller(&credential), None);
         let inbox = runtime.dispatch_store().inbox(&caller).unwrap();
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].kind, InboxKind::NoReport);
