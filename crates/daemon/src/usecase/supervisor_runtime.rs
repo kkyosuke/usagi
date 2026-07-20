@@ -978,6 +978,38 @@ mod tests {
             .unwrap();
         assert_eq!(events.len(), 3);
         assert_eq!(cursor.next_sequence, 4);
+        assert!(
+            runtime
+                .events("caller-b", started.supervisor_run_id, 0, 10)
+                .unwrap_err()
+                .to_string()
+                .contains("does not exist")
+        );
+        assert!(
+            runtime
+                .cancel(
+                    "caller-b",
+                    started.supervisor_run_id,
+                    "foreign".into(),
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("does not exist")
+        );
+        assert!(
+            runtime
+                .resolve_escalation(
+                    "caller-b",
+                    started.supervisor_run_id,
+                    OperationId::new(),
+                    EscalationDecision::Resume,
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("does not exist")
+        );
         let run = runtime
             .supervisor
             .load(started.supervisor_run_id)
