@@ -731,11 +731,21 @@ fn render_row_selected(
     selection: Option<(usize, usize)>,
 ) -> String {
     let cursor = cursor.filter(|column| *column < row.len());
+    // A selection extends the rendered extent past the row's trailing blanks so
+    // selected padding — and fully blank lines that fall inside a multi-row
+    // selection — are highlighted instead of being trimmed away. Without this,
+    // dragging across the space-padded, mostly-blank screens agents draw leaves
+    // the selection invisible even though copy still captures the cells. `end`
+    // is `usize::MAX` for a non-final selected row, so clamp it to the last real
+    // column and never past the grid width.
+    let selection_last =
+        selection.and_then(|(_, end)| row.len().checked_sub(1).map(|last| end.min(last)));
     let last = row
         .iter()
         .rposition(|cell| cell.ch != ' ' && !cell.continuation)
         .into_iter()
         .chain(cursor)
+        .chain(selection_last)
         .max();
     let Some(last) = last else {
         return String::new();
@@ -883,6 +893,39 @@ mod tests {
         assert_eq!(
             screen.rows_with_scrollback_and_cursor_selection((0, 1), (0, 2)),
             vec!["A\u{1b}[7mあ\u{1b}[0mB"]
+        );
+    }
+
+    #[test]
+    fn selection_highlights_trailing_padding_and_blank_lines_inside_the_range() {
+        // Row 0 has text padded by blanks, row 1 is fully blank, row 2 has text:
+        // the shape agents draw. A block drag over all three must stay visible.
+        let mut screen = TerminalScreen::new(3, 6);
+        screen.advance(b"ab\r\n\r\ncd");
+        assert_eq!(screen.rows(), vec!["ab", "", "cd"]);
+
+        // Select trailing padding only (cols 2..=4 on row 0, past "ab"). The
+        // selected blanks are rendered as reverse-video spaces so the drag is
+        // visible even though it covers no glyphs.
+        let trailing = screen.rows_with_scrollback_and_cursor_selection((0, 2), (0, 4));
+        assert_eq!(trailing[0], "ab\u{1b}[7m   \u{1b}[0m");
+
+        // A block selection spanning the blank middle row highlights every
+        // in-range column of that row instead of collapsing it to "".
+        let block = screen.rows_with_scrollback_and_cursor_selection((0, 0), (1, 5));
+        assert_eq!(block[0], "\u{1b}[7mab    \u{1b}[0m");
+        assert_eq!(block[1], "\u{1b}[7m      \u{1b}[0m");
+    }
+
+    #[test]
+    fn selection_ending_within_content_does_not_add_trailing_highlight() {
+        // Regression guard: a selection that stops inside the text must not
+        // extend reverse-video into the trailing padding.
+        let mut screen = TerminalScreen::new(1, 6);
+        screen.advance(b"abcdef");
+        assert_eq!(
+            screen.rows_with_scrollback_and_cursor_selection((0, 0), (0, 2)),
+            vec!["\u{1b}[7mabc\u{1b}[0mdef"]
         );
     }
 

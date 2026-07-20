@@ -1544,14 +1544,16 @@ fn handle_terminal_pointer(
             else {
                 return;
             };
-            if controls.has_selection() {
+            if controls.is_dragging() {
                 controls.extend_selection(point);
             } else if let Some(cells) = ui.terminal_cells(&terminal) {
                 controls.begin_selection(TerminalSelection::begin(cells, point));
             }
         }
         PointerKind::Up => {
-            if let Some(text) = controls.take_copy_text() {
+            // Releasing the mouse copies the selection but keeps it highlighted:
+            // the range stays on screen until a new drag replaces it.
+            if let Some(text) = controls.finish_drag() {
                 let result = term.copy_text(&text);
                 controls.record_copy(&text, result);
             }
@@ -2578,6 +2580,7 @@ mod tests {
     };
     use crate::usecase::application::pane::PaneKind;
     use crate::usecase::application::run as dispatch;
+    use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
     use crate::usecase::application::{EntryScreen, Key, Terminal};
     use crate::usecase::overview::SessionCommand;
     use crate::usecase::terminal_input::{LiveTerminalAction, PointerEvent, PointerKind};
@@ -3359,6 +3362,58 @@ mod tests {
         );
 
         assert_eq!(term.copied, vec!["hello".to_owned()]);
+        // Releasing the mouse keeps the range highlighted instead of clearing it,
+        // and the projected rows still carry the reverse-video selection.
+        assert!(controls.has_selection());
+        assert!(!controls.is_dragging());
+        let projected = ui
+            .terminal_rows(&terminal, controls.selection())
+            .expect("selection rows");
+        assert!(
+            projected.iter().any(|row| row.contains("\u{1b}[7mhello")),
+            "selection highlight lost after release: {projected:?}"
+        );
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn a_block_selection_over_padding_stays_visible_in_the_projected_rows() {
+        // Regression: agents draw space-padded, mostly-blank screens. A block
+        // drag across text, a blank line, and trailing padding must reach the
+        // projected rows as reverse-video, not be trimmed into an invisible
+        // selection (copy already worked from the snapshot cells).
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let (ui, _runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(ScriptedAgentPort {
+                terminal: terminal.clone(),
+                subscription: 9,
+                replay: b"ab\r\n\r\ncd".to_vec(),
+                exit_on_poll: false,
+                detaches: Arc::new(Mutex::new(Vec::new())),
+            }),
+        );
+        let cells = ui.terminal_cells(&terminal).expect("attached cells");
+        let mut selection = TerminalSelection::begin(cells, TerminalPoint { row: 0, column: 0 });
+        selection.extend(TerminalPoint { row: 1, column: 5 });
+        let rows = ui
+            .terminal_rows(&terminal, Some(&selection))
+            .expect("selection rows");
+        // Row 0's trailing padding and the blank row 1 are highlighted.
+        assert!(
+            rows[0].contains("\u{1b}[7m") && rows[0].contains("ab"),
+            "row 0 padding not highlighted: {:?}",
+            rows[0]
+        );
+        assert!(
+            rows[1].contains("\u{1b}[7m"),
+            "blank row 1 not highlighted: {:?}",
+            rows[1]
+        );
     }
 
     #[test]

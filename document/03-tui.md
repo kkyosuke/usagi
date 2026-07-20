@@ -363,7 +363,10 @@ primary screen から押し出された行は 10,000 行を上限とする local
 replay で履歴が短くなった場合は offset を有効範囲へ正規化する。`↑` / `↓` は scrollback 操作に予約せず、PTY の
 history navigation へそのまま送る。right pane の footer の直前には常に 1 行の空白を置く。
 
-出力は mouse drag により選択でき、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。キー入力は
+出力は mouse drag により選択でき、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。drag 中も
+drag を離した後も、選択範囲は右ペインに reverse-video で示し続ける。選択は次の drag が新しい選択を始めるか、focus が別の
+terminal へ移るまで表示され続ける（release で即座に消えない）。選択の可視化は選択した桁全体に及び、行末の空白 padding や
+選択範囲に含まれる空行も反転する（agent が描く空白 padding 中心の画面でも選択が消えない）。キー入力は
 コピーに使わず、`Ctrl-C` を含めて live terminal へそのまま送る。
 clipboard adapter は macOS の `pbcopy`、Windows の `clip.exe`、
 Wayland の `wl-copy`、X11 の `xclip` / `xsel` を現在の環境に応じて使う。利用可能な backend がない場合は copy を成功扱いにせず、
