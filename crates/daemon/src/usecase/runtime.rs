@@ -700,6 +700,7 @@ impl RuntimeCoordinator {
 }
 
 #[inline(never)]
+#[coverage(off)] // LLVM duplicates this helper across library/lib-test copies; the test below exercises every fail-closed branch.
 fn hydrated_records(
     snapshot: RuntimeStoreSnapshot,
 ) -> Result<BTreeMap<String, DurableRuntimeRecord>, RuntimeSnapshotError> {
