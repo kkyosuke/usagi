@@ -948,7 +948,7 @@ impl AppState {
     /// always lands on the row the user sees. It reads the last terminal geometry
     /// from [`AppState::size`], so a pointer event before the first resize is
     /// inert.
-    fn sidebar_selection_at(&self, column: u16, row: u16) -> Option<Selection> {
+    pub(crate) fn sidebar_selection_at(&self, column: u16, row: u16) -> Option<Selection> {
         let (raw_width, raw_height) = self.size?;
         let width = if raw_width == 0 {
             80

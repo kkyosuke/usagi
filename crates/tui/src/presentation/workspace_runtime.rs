@@ -15,6 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef};
 use usagi_core::usecase::client::DaemonMetrics;
@@ -26,7 +27,8 @@ use crate::presentation::views::workspace::{
 };
 use crate::usecase::application::Key;
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, Effect, HomeMode, Overlay, Route, TabDirection, Target, update,
+    AppEvent, AppKey, AppState, Effect, HomeMode, Overlay, PointerAction, Route, Selection,
+    TabDirection, Target, update,
 };
 use crate::usecase::application::pane::{
     PaneEvent, PaneInputOwner, PaneKind, PaneRegistry, PaneRegistryEffect, PaneRegistryEvent,
@@ -47,10 +49,23 @@ pub struct CloseOutcome {
     pub cancel: Option<OperationId>,
 }
 
+/// The longest gap between two presses on the *same resolved sidebar row* that
+/// still counts as a double click. Keyed on the row's stable identity rather than
+/// the raw terminal cell, so a real double click that jitters by a cell — or lands
+/// on the row's other content line — still activates, while a second press whose
+/// row changed underneath it (scroll, snapshot reorder, session removal) does not.
+const SIDEBAR_DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
 /// Home runtime backed by the controller reducer and pane registry.
 pub struct WorkspaceRuntime {
     state: AppState,
     panes: PaneRegistry,
+    /// The last sidebar row a click resolved to, with the instant it landed. A
+    /// second click on the *same* [`Selection`] within [`SIDEBAR_DOUBLE_CLICK`]
+    /// promotes to an activate; it is keyed on identity, not the terminal cell, so
+    /// the gesture survives cell jitter and never fires on a row that scrolled or
+    /// was replaced under the cursor between the two presses.
+    last_click: Option<(Selection, Instant)>,
     /// Persisted input state for the Overview (`:`) command palette. Present only
     /// while the controller's [`Overlay::Overview`] is open, so its caret,
     /// filter, and history survive across frames instead of being rebuilt.
@@ -80,6 +95,7 @@ impl WorkspaceRuntime {
             overview_modal: None,
             closeup_modal: None,
             pane_focus_at_request: BTreeMap::new(),
+            last_click: None,
         }
     }
 
@@ -135,6 +151,57 @@ impl WorkspaceRuntime {
             Some(event) => self.apply_event(event),
             None => Vec::new(),
         }
+    }
+
+    /// Handle a left click on the Home sidebar at 0-based terminal cell
+    /// `(column, row)`, promoting a second click on the same session row within
+    /// [`SIDEBAR_DOUBLE_CLICK`] to an activate (open Closeup, exactly as Enter
+    /// would). `now` is injected so the timing window is deterministic in tests;
+    /// the shell passes [`Instant::now`].
+    ///
+    /// The double-click is keyed on the row's resolved [`Selection`] identity, not
+    /// the raw cell. A single click only moves the cursor. Root and `+ new
+    /// session` never activate from the pointer — they keep their keyboard
+    /// affordances — so only a real session row switches. A click while an overlay
+    /// or the inline create form owns the surface, or one that misses the sidebar
+    /// body, is inert and resets the pending gesture so the next real click starts
+    /// fresh.
+    #[must_use]
+    pub fn pointer_click(&mut self, column: u16, row: u16, now: Instant) -> Vec<Effect> {
+        // A modal or the inline create form owns the surface: a background sidebar
+        // click is inert and must not seed a double-click.
+        if self.state.overlay().is_some() {
+            self.last_click = None;
+            return Vec::new();
+        }
+        let Some(selection) = self.state.sidebar_selection_at(column, row) else {
+            // Off the sidebar body (chrome, divider, mascot, empty tail): drop any
+            // pending gesture so a stray click never completes a double.
+            self.last_click = None;
+            return Vec::new();
+        };
+        // Only a real session row switches on a double click. Root and the
+        // `+ new session` action move the cursor but are never activated by the
+        // pointer (contract in `document/03-tui.md`).
+        let activatable = matches!(selection, Selection::Target(Target::Session(_)));
+        let doubled = activatable
+            && self.last_click.is_some_and(|(previous, at)| {
+                previous == selection && now.duration_since(at) <= SIDEBAR_DOUBLE_CLICK
+            });
+        // Remember this click's identity for the next gesture unless it just
+        // completed a double, so a rapid third click starts a new gesture rather
+        // than activating again.
+        self.last_click = (!doubled).then_some((selection, now));
+        let action = if doubled {
+            PointerAction::Activate
+        } else {
+            PointerAction::Select
+        };
+        self.apply_event(AppEvent::Pointer {
+            column,
+            row,
+            action,
+        })
     }
 
     /// Drive the Overview palette from one terminal key. Editing keys mutate the
@@ -585,7 +652,8 @@ mod tests {
     };
     use crate::usecase::application::Key;
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, Effect, HomeMode, Overlay, Route, Selection, TabDirection, Target,
+        AppEvent, AppKey, BackendEvent, Effect, HomeMode, Overlay, Route, Selection, TabDirection,
+        Target,
     };
     use crate::usecase::application::pane::{
         LivePane, PaneRegistry, PaneRegistryEvent, PaneSelection, PendingPane, reduce_registry,
@@ -593,6 +661,7 @@ mod tests {
     use crate::usecase::terminal_input::LiveTerminalAction;
     use chrono::Utc;
     use std::collections::BTreeMap;
+    use std::time::{Duration, Instant};
     use usagi_core::domain::id::{
         DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
     };
@@ -1498,5 +1567,235 @@ mod tests {
         // ...but the completion did not steal focus into it: the selection stays
         // off the freshly live tab, so no live terminal is focused.
         assert!(runtime.focused_terminal().is_none());
+    }
+
+    /// A runtime with a known terminal geometry so `pointer_click` can hit-test.
+    /// With `100x30` and one session the sidebar rows are: Root at row 2, the
+    /// divider at row 3, the session's two content lines at rows 4-5, and
+    /// `+ new session` at row 6 (mirrors the reducer's pointer tests).
+    fn sized_runtime(
+        workspace: WorkspaceId,
+        sessions: Vec<SessionId>,
+        width: u16,
+        height: u16,
+    ) -> WorkspaceRuntime {
+        let mut runtime = WorkspaceRuntime::new(workspace, sessions);
+        let _ = runtime.apply_event(AppEvent::Resize { width, height });
+        runtime
+    }
+
+    #[test]
+    fn single_click_selects_a_session_without_switching() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = sized_runtime(workspace, vec![session], 100, 30);
+        let effects = runtime.pointer_click(5, 4, Instant::now());
+        // A single click only moves the cursor onto the row.
+        assert!(effects.is_empty());
+        assert_eq!(
+            runtime.state().selected(),
+            Selection::Target(Target::Session(session))
+        );
+        assert!(matches!(
+            runtime.state().route(),
+            Route::Home(HomeMode::Switch)
+        ));
+        assert_eq!(runtime.state().active(), Target::Root(workspace));
+    }
+
+    #[test]
+    fn double_click_on_the_same_session_row_opens_closeup() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = sized_runtime(workspace, vec![session], 100, 30);
+        let t0 = Instant::now();
+        let _ = runtime.pointer_click(5, 4, t0);
+        let _ = runtime.pointer_click(5, 4, t0 + Duration::from_millis(120));
+        // The second press within the window activates the row, exactly as Enter.
+        assert_eq!(runtime.state().active(), Target::Session(session));
+        assert!(matches!(
+            runtime.state().route(),
+            Route::Home(HomeMode::Closeup)
+        ));
+    }
+
+    #[test]
+    fn double_click_survives_cell_jitter_within_the_same_row() {
+        // A real double click jitters by a cell, and a session row spans two
+        // content lines. Keying the window on the resolved row identity (not the
+        // raw cell) still activates when the second press lands elsewhere in the
+        // same row — the coordinate-keyed predecessor dropped this to two singles.
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = sized_runtime(workspace, vec![session], 100, 30);
+        let t0 = Instant::now();
+        let _ = runtime.pointer_click(5, 4, t0); // the name line
+        let _ = runtime.pointer_click(7, 5, t0 + Duration::from_millis(120)); // the second line
+        assert_eq!(runtime.state().active(), Target::Session(session));
+        assert!(matches!(
+            runtime.state().route(),
+            Route::Home(HomeMode::Closeup)
+        ));
+    }
+
+    #[test]
+    fn a_slow_second_click_only_selects() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = sized_runtime(workspace, vec![session], 100, 30);
+        let t0 = Instant::now();
+        let _ = runtime.pointer_click(5, 4, t0);
+        // Past the 400ms window: the gesture is two independent single clicks.
+        let _ = runtime.pointer_click(5, 4, t0 + Duration::from_millis(600));
+        assert_eq!(runtime.state().active(), Target::Root(workspace));
+        assert!(matches!(
+            runtime.state().route(),
+            Route::Home(HomeMode::Switch)
+        ));
+        assert_eq!(
+            runtime.state().selected(),
+            Selection::Target(Target::Session(session))
+        );
+    }
+
+    #[test]
+    fn a_second_click_on_a_different_row_does_not_activate() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = sized_runtime(workspace, vec![session], 100, 30);
+        let t0 = Instant::now();
+        let _ = runtime.pointer_click(5, 4, t0); // the session row
+        let _ = runtime.pointer_click(5, 2, t0 + Duration::from_millis(80)); // the root row
+        // The cursor follows to root; nothing is activated.
+        assert_eq!(
+            runtime.state().selected(),
+            Selection::Target(Target::Root(workspace))
+        );
+        assert_eq!(runtime.state().active(), Target::Root(workspace));
+        assert!(matches!(
+            runtime.state().route(),
+            Route::Home(HomeMode::Switch)
+        ));
+    }
+
+    #[test]
+    fn root_and_new_session_rows_never_activate_on_a_pointer_double_click() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = sized_runtime(workspace, Vec::new(), 100, 30);
+        let t0 = Instant::now();
+        // Root (row 2) is outside the pointer-activation contract: two quick
+        // clicks stay in Switch and never open Closeup.
+        let _ = runtime.pointer_click(5, 2, t0);
+        let _ = runtime.pointer_click(5, 2, t0 + Duration::from_millis(80));
+        assert_eq!(runtime.state().active(), Target::Root(workspace));
+        assert!(matches!(
+            runtime.state().route(),
+            Route::Home(HomeMode::Switch)
+        ));
+        assert_eq!(runtime.state().overlay(), None);
+        // `+ new session` (row 4 with no sessions) selects on click but a pointer
+        // double click never opens the create form — that stays Enter / Ctrl-A.
+        let _ = runtime.pointer_click(5, 4, t0 + Duration::from_millis(160));
+        let _ = runtime.pointer_click(5, 4, t0 + Duration::from_millis(200));
+        assert_eq!(runtime.state().selected(), Selection::NewSession);
+        assert_eq!(runtime.state().overlay(), None);
+    }
+
+    #[test]
+    fn a_snapshot_that_replaces_the_row_under_the_cursor_does_not_activate() {
+        // Click a session, then a daemon snapshot swaps it for another session at
+        // the same cell (a remove + same-name re-create earns a fresh id). The
+        // second click resolves to the new identity, so the stale row that was
+        // clicked first is never activated.
+        let workspace = WorkspaceId::new();
+        let original = SessionId::new();
+        let replacement = SessionId::new();
+        let mut runtime = sized_runtime(workspace, vec![original], 100, 30);
+        let t0 = Instant::now();
+        let _ = runtime.pointer_click(5, 4, t0);
+        assert_eq!(
+            runtime.state().selected(),
+            Selection::Target(Target::Session(original))
+        );
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Sessions(vec![replacement])));
+        let _ = runtime.pointer_click(5, 4, t0 + Duration::from_millis(120));
+        // Same cell, same window — but a different identity, so it only selects.
+        assert_eq!(
+            runtime.state().selected(),
+            Selection::Target(Target::Session(replacement))
+        );
+        assert_eq!(runtime.state().active(), Target::Root(workspace));
+        assert!(matches!(
+            runtime.state().route(),
+            Route::Home(HomeMode::Switch)
+        ));
+    }
+
+    #[test]
+    fn a_scrolled_list_that_shifts_the_row_under_the_cursor_does_not_activate() {
+        // A short viewport scrolls as the cursor walks to the tail. A second click
+        // on the same cell then resolves to a different row, so no switch fires
+        // even though the raw cell is identical and within the window.
+        let workspace = WorkspaceId::new();
+        let sessions: Vec<SessionId> = (0..6).map(|_| SessionId::new()).collect();
+        let mut runtime = sized_runtime(workspace, sessions, 100, 10);
+        let t0 = Instant::now();
+        let _ = runtime.pointer_click(5, 4, t0);
+        let first = runtime.state().selected();
+        // Walk the cursor to the tail so the list scrolls under the fixed cell.
+        while runtime.state().selected() != Selection::NewSession {
+            let _ = runtime.handle_key(Key::Down);
+        }
+        let _ = runtime.pointer_click(5, 4, t0 + Duration::from_millis(120));
+        let second = runtime.state().selected();
+        assert_ne!(
+            first, second,
+            "the scroll must shift a new row under the cell"
+        );
+        assert_eq!(runtime.state().active(), Target::Root(workspace));
+        assert!(matches!(
+            runtime.state().route(),
+            Route::Home(HomeMode::Switch)
+        ));
+    }
+
+    #[test]
+    fn a_click_while_an_overlay_owns_the_surface_is_inert() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = sized_runtime(workspace, vec![session], 100, 30);
+        // Open the Overview palette; a background double click must not switch.
+        let _ = runtime.handle_key(Key::Char(':'));
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Overview));
+        let before = runtime.state().selected();
+        let t0 = Instant::now();
+        let first = runtime.pointer_click(5, 4, t0);
+        let second = runtime.pointer_click(5, 4, t0 + Duration::from_millis(80));
+        assert!(first.is_empty() && second.is_empty());
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Overview));
+        assert_eq!(runtime.state().selected(), before);
+        assert_eq!(runtime.state().active(), Target::Root(workspace));
+    }
+
+    #[test]
+    fn a_click_off_the_sidebar_body_resets_a_pending_double() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = sized_runtime(workspace, vec![session], 100, 30);
+        let t0 = Instant::now();
+        let _ = runtime.pointer_click(5, 4, t0); // arm on the session row
+        let _ = runtime.pointer_click(5, 0, t0 + Duration::from_millis(40)); // header: off-body reset
+        let _ = runtime.pointer_click(5, 4, t0 + Duration::from_millis(80)); // within window but reset
+        // The intervening off-body click cleared the gesture, so the third click
+        // is a fresh single click rather than a double.
+        assert_eq!(
+            runtime.state().selected(),
+            Selection::Target(Target::Session(session))
+        );
+        assert_eq!(runtime.state().active(), Target::Root(workspace));
+        assert!(matches!(
+            runtime.state().route(),
+            Route::Home(HomeMode::Switch)
+        ));
     }
 }

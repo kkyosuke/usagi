@@ -2048,36 +2048,6 @@ fn drain_pane_completions_into_runtime(
     }
 }
 
-/// The maximum gap between two presses on the same sidebar cell that the shell
-/// promotes from a Select to an Activate pointer gesture.
-const SIDEBAR_DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
-
-/// Build the pointer event for a sidebar click, promoting a second press on the
-/// same cell within [`SIDEBAR_DOUBLE_CLICK`] to an Activate. The shell tracks
-/// only this timing window; the reducer owns the row hit-test.
-#[coverage(off)]
-fn sidebar_pointer_event(
-    last_click: &mut Option<(u16, u16, std::time::Instant)>,
-    column: u16,
-    row: u16,
-) -> AppEvent {
-    let now = std::time::Instant::now();
-    let doubled = last_click.is_some_and(|(last_column, last_row, at)| {
-        last_column == column && last_row == row && now.duration_since(at) <= SIDEBAR_DOUBLE_CLICK
-    });
-    *last_click = (!doubled).then_some((column, row, now));
-    let action = if doubled {
-        PointerAction::Activate
-    } else {
-        PointerAction::Select
-    };
-    AppEvent::Pointer {
-        column,
-        row,
-        action,
-    }
-}
-
 #[coverage(off)] // Real-terminal resync composition; reducer state is unit-tested below the port.
 fn decision_ids(event: &BackendEvent) -> std::collections::BTreeSet<UserDecisionId> {
     match event {
@@ -2153,10 +2123,6 @@ fn drive_workspace_controller(
     let mut metrics_projection = MetricsProjection::default();
     let mut pending_targets: std::collections::HashMap<OperationId, Target> =
         std::collections::HashMap::new();
-    // The reducer hit-tests sidebar clicks against the last terminal geometry;
-    // the shell only tracks the double-click window that promotes a Select to an
-    // Activate, never the row itself.
-    let mut last_click: Option<(u16, u16, std::time::Instant)> = None;
     // Live-terminal scroll offset, drag selection, and copy feedback the reducer
     // does not own (design §4.2).
     let mut controls = LiveTerminalControls::default();
@@ -2257,8 +2223,9 @@ fn drive_workspace_controller(
         ) {
             continue;
         }
-        // A second click on the same cell within the window activates the row the
-        // reducer resolves; otherwise the click just moves the cursor.
+        // A second click on the same session row within the window activates it
+        // (the runtime keys the double-click on the resolved row identity, not the
+        // cell); otherwise the click just moves the cursor.
         let effects = if let Key::Click { column, row } = key {
             // The notice centre occupies the right side of Home's top header.
             // Keep it above the sidebar hit-test so a header click never moves
@@ -2269,7 +2236,7 @@ fn drive_workspace_controller(
             {
                 runtime.apply_event(AppEvent::Key(AppKey::OpenDecisions))
             } else {
-                runtime.apply_event(sidebar_pointer_event(&mut last_click, column, row))
+                runtime.pointer_click(column, row, std::time::Instant::now())
             }
         } else {
             runtime.handle_key(key)
