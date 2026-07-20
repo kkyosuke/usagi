@@ -744,11 +744,23 @@ impl<
                 .attach(runtime, connection)
                 .map(|attached| json!(attached))
                 .map_err(map_runtime_error),
-            (TerminalAction::Resume, TerminalRequest::Resume { after_offset, .. }) => self
-                .coordinator
-                .replay_from(runtime, after_offset)
-                .map(|output| json!({ "output": output }))
-                .map_err(map_runtime_error),
+            (TerminalAction::Resume, TerminalRequest::Resume { after_offset, .. }) => {
+                let output = self
+                    .coordinator
+                    .replay_from(runtime, after_offset)
+                    .map_err(map_runtime_error)?;
+                // Parity with the generic terminal Resume: a polling client
+                // observes the hosting terminal's exit on the incremental poll,
+                // not only on a resync snapshot. Without this an exited Agent's
+                // pane tab is never dropped from the Closeup strip.
+                let exited = self
+                    .coordinator
+                    .terminal_snapshot(runtime)
+                    .map_err(map_runtime_error)?
+                    .exited
+                    .is_some();
+                Ok(json!({ "output": output, "exited": exited }))
+            }
             (TerminalAction::Resync, TerminalRequest::Resync { .. }) => self
                 .coordinator
                 .terminal_snapshot(runtime)
@@ -1318,6 +1330,50 @@ mod tests {
         assert_eq!(resync["exited"], 0);
         assert_eq!(runtime.pty.selected.as_ref(), Some(&terminal));
         assert_eq!(runtime.pty.writes, b"go\n");
+    }
+
+    #[test]
+    fn agent_resume_reports_exit_for_parity_with_the_generic_terminal() {
+        // Regression: an Agent's `Resume` must carry the hosting terminal's
+        // `exited` flag (like the generic terminal Resume), so a TUI client's
+        // per-frame poll observes the exit and drops the pane tab instead of
+        // leaving it stranded until an incidental resync.
+        let mut runtime = runtime();
+        let fake_scope = FakeScope(Ok(scope()));
+        let operation = OperationId::new().to_string();
+        let launch_intent = intent(None);
+        let terminal = runtime
+            .launch(&operation, &launch_intent, &fake_scope)
+            .unwrap()
+            .terminal;
+        runtime.output(&terminal, b"working\n".to_vec()).unwrap();
+
+        let connection = ConnectionId::new();
+        let client = ClientId::new();
+        let live = handled(runtime.handle_terminal(
+            connection,
+            client,
+            RequestId::new(),
+            TerminalAction::Resume,
+            TerminalRequest::Resume {
+                terminal: terminal.clone(),
+                after_offset: 0,
+            },
+        ));
+        assert_eq!(live["exited"], false);
+
+        runtime.exit(&terminal, 0).unwrap();
+        let exited = handled(runtime.handle_terminal(
+            connection,
+            client,
+            RequestId::new(),
+            TerminalAction::Resume,
+            TerminalRequest::Resume {
+                terminal: terminal.clone(),
+                after_offset: 8,
+            },
+        ));
+        assert_eq!(exited["exited"], true);
     }
 
     #[test]
