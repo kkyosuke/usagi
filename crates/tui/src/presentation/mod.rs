@@ -1440,6 +1440,19 @@ fn begin_session_command(
     true
 }
 
+/// A terminal wake-up is a bounded opportunity to adopt lifecycle changes made
+/// by another client, such as an MCP server. Never enqueue a refresh while the
+/// single session command port is owned by a worker: its completion already
+/// carries an authoritative snapshot.
+fn tick_session_refresh(
+    key: &Key,
+    session_commands_available: bool,
+    workspace: WorkspaceId,
+) -> Option<Effect> {
+    (matches!(key, Key::Other) && session_commands_available)
+        .then_some(Effect::RefreshSessions { workspace })
+}
+
 /// The daemon-owned name for the session identified by `session`, if the current
 /// sidebar projection still holds it. A `RemoveSession` effect carries the stable
 /// identity, while the session command port speaks the daemon-facing name.
@@ -2456,6 +2469,11 @@ fn drive_workspace_controller(
                 workspace: workspace_id,
             });
         }
+        if let Some(effect) =
+            tick_session_refresh(&key, ui.session_commands.is_some(), workspace_id)
+        {
+            let _ = backend.dispatch(effect);
+        }
         if forward_live_terminal_input(&mut ui, &runtime, &mut controls, &key) {
             continue;
         }
@@ -3095,7 +3113,7 @@ mod tests {
         run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_controller, safe_session_error, sidebar_pointer_event, step_config, step_new,
-        terminal_geometry, welcome_action, write_banner,
+        terminal_geometry, tick_session_refresh, welcome_action, write_banner,
     };
     use crate::presentation::live_terminal::LiveTerminalControls;
     use crate::presentation::views::config::AvailableAgentModels;
@@ -3242,6 +3260,18 @@ mod tests {
         ] {
             assert_eq!(app_event_from_key(Key::Live(action)), None);
         }
+    }
+
+    #[test]
+    fn terminal_wakeup_refreshes_sessions_only_when_the_port_is_available() {
+        let workspace = WorkspaceId::new();
+
+        assert_eq!(
+            tick_session_refresh(&Key::Other, true, workspace),
+            Some(Effect::RefreshSessions { workspace })
+        );
+        assert_eq!(tick_session_refresh(&Key::Other, false, workspace), None);
+        assert_eq!(tick_session_refresh(&Key::Enter, true, workspace), None);
     }
 
     #[test]
