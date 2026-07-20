@@ -1163,6 +1163,19 @@ fn validate_workspace_directory(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Classify what currently exists at `path` for New-project pre-validation.
+/// Metadata is resolved through symlinks; anything unreadable (including a
+/// missing path or a broken link) is treated as [`WorkspaceProbe::Missing`],
+/// and the subsequent clone/register would surface any deeper IO failure.
+#[coverage(off)]
+fn probe_path(path: &Path) -> workspace_usecase::WorkspaceProbe {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_dir() => workspace_usecase::WorkspaceProbe::Directory,
+        Ok(_) => workspace_usecase::WorkspaceProbe::NonDirectory,
+        Err(_) => workspace_usecase::WorkspaceProbe::Missing,
+    }
+}
+
 fn load_workspace_state(
     path: &Path,
 ) -> std::io::Result<usagi_core::domain::workspace_state::WorkspaceState> {
@@ -1232,6 +1245,24 @@ impl WorkspaceLoader for FsWorkspaceLoader {
 
     #[coverage(off)]
     fn create_workspace(&mut self, request: &NewRequest) -> std::io::Result<WorkspaceSnapshot> {
+        // 副作用（create_dir_all / git clone / registry 書き込み）の前に事前検証する。
+        // 既存 workspace・不正パスはここで安全な 1 行メッセージにして返し、何も作らないまま
+        // 呼び出し側（NewStep::Create 失敗枝）が draft を保って同画面で再試行できるようにする。
+        let (kind, target): (workspace_usecase::NewWorkspaceKind, &Path) = match request {
+            NewRequest::Clone { destination, .. } => {
+                (workspace_usecase::NewWorkspaceKind::Clone, destination)
+            }
+            NewRequest::Existing { path, .. } => {
+                (workspace_usecase::NewWorkspaceKind::Existing, path)
+            }
+        };
+        let registered = workspace_usecase::is_registered(
+            &self.storage.load_workspaces().map_err(io_error)?,
+            target,
+        );
+        workspace_usecase::preflight_new_workspace(kind, registered, probe_path(target))
+            .map_err(|error| io_error(error.message()))?;
+
         let path = match request {
             NewRequest::Clone {
                 repository,
@@ -1251,7 +1282,6 @@ impl WorkspaceLoader for FsWorkspaceLoader {
                     .map_err(io_error)?
             }
             NewRequest::Existing { path, name } => {
-                validate_workspace_directory(path)?;
                 workspace_usecase::register(&self.storage, path, name, Utc::now())
                     .map_err(io_error)?;
                 path.clone()
