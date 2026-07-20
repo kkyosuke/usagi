@@ -67,6 +67,35 @@ fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+fn run_mcp(home: &Path, cwd: &Path, requests: &str) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_usagi"))
+        .arg("mcp")
+        .env("USAGI_HOME", home)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("usagi mcp を起動できる");
+    child
+        .stdin
+        .take()
+        .expect("MCP stdin")
+        .write_all(requests.as_bytes())
+        .expect("MCP requests を書き込める");
+    child.wait_with_output().expect("MCP の終了を待てる")
+}
+
+fn mcp_texts(output: &Output) -> Vec<serde_json::Value> {
+    stdout(output)
+        .lines()
+        .map(|line| {
+            let response: serde_json::Value = serde_json::from_str(line).unwrap();
+            let text = response["result"]["content"][0]["text"].as_str().unwrap();
+            serde_json::from_str(text).unwrap()
+        })
+        .collect()
+}
+
 #[test]
 fn welcome_entry_renders_the_welcome_screen() {
     let _guard = DAEMON_LIFECYCLE_LOCK
@@ -173,6 +202,145 @@ fn mcp_autostarts_without_manual_daemon_start() {
     assert!(output.status.success());
     assert!(stdout(&output).contains("\"serverInfo\""));
     assert_daemon_running(home.path());
+    stop_daemon(home.path());
+}
+
+#[test]
+fn mcp_store_tools_round_trip_through_stdio_and_durable_files() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let workspace = tempfile::tempdir().unwrap();
+    let session = workspace.path().join(".usagi/sessions/e2e");
+    std::fs::create_dir_all(&session).unwrap();
+    let requests = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_create\",\"arguments\":{\"title\":\"MCP durable issue\",\"priority\":\"high\",\"labels\":[\"mcp\"],\"body\":\"round trip\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_get\",\"arguments\":{\"number\":1}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_search\",\"arguments\":{\"query\":\"durable\",\"label\":\"mcp\",\"ready\":true}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_save\",\"arguments\":{\"name\":\"MCP Fact\",\"title\":\"Durable fact\",\"type\":\"project\",\"body\":\"remember me\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_get\",\"arguments\":{\"name\":\"mcp-fact\"}}}\n",
+    );
+    let output = run_mcp(home.path(), &session, requests);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let values = mcp_texts(&output);
+    assert_eq!(values[0]["number"], 1);
+    assert_eq!(values[1]["title"], "MCP durable issue");
+    assert_eq!(values[2][0]["ready"], true);
+    assert_eq!(values[3]["name"], "mcp-fact");
+    assert_eq!(values[4]["body"], "remember me");
+    assert!(
+        session
+            .join(".usagi/issues/001-mcp-durable-issue.md")
+            .is_file()
+    );
+    assert!(session.join(".usagi/memory/mcp-fact.md").is_file());
+    stop_daemon(home.path());
+}
+
+#[test]
+fn mcp_store_tools_cover_prompt_update_search_and_delete_lifecycles() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let workspace = tempfile::tempdir().unwrap();
+    let session = workspace.path().join(".usagi/sessions/lifecycle");
+    std::fs::create_dir_all(&session).unwrap();
+    let requests = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_create\",\"arguments\":{\"title\":\"Lifecycle\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_to_prompt\",\"arguments\":{\"number\":1}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_update\",\"arguments\":{\"number\":1,\"status\":\"in-progress\",\"parent\":null}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_save\",\"arguments\":{\"name\":\"life\",\"title\":\"Life\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_save\",\"arguments\":{\"name\":\"life\",\"body\":\"changed\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_search\",\"arguments\":{\"query\":\"changed\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_delete\",\"arguments\":{\"number\":1}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_delete\",\"arguments\":{\"name\":\"life\"}}}\n",
+    );
+    let output = run_mcp(home.path(), &session, requests);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let values = mcp_texts(&output);
+    assert!(values[1]["prompt"].as_str().unwrap().contains("Lifecycle"));
+    assert_eq!(values[2]["status"], "in-progress");
+    assert_eq!(values[4]["body"], "changed");
+    assert_eq!(values[5][0]["name"], "life");
+    assert_eq!(values[6]["deleted"], true);
+    assert_eq!(values[7]["deleted"], true);
+
+    let missing_requests = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_update\",\"arguments\":{\"number\":1,\"status\":\"done\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_get\",\"arguments\":{\"name\":\"life\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_search\",\"arguments\":{\"type\":9}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_save\",\"arguments\":{\"name\":\"missing-title\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_create\",\"arguments\":{}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_to_prompt\",\"arguments\":{}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_search\",\"arguments\":{\"ready\":\"yes\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_update\",\"arguments\":{\"status\":\"done\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_delete\",\"arguments\":{}}}\n",
+    );
+    let missing = run_mcp(home.path(), &session, missing_requests);
+    let missing_responses: Vec<serde_json::Value> = stdout(&missing)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        missing_responses[0]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no issue")
+    );
+    assert_eq!(missing_responses[1]["result"]["content"][0]["text"], "null");
+    assert_eq!(missing_responses[2]["error"]["code"], -32602);
+    assert_eq!(missing_responses[3]["error"]["code"], -32603);
+    for response in &missing_responses[4..] {
+        assert_eq!(response["error"]["code"], -32602);
+    }
+
+    let broken_session = workspace.path().join(".usagi/sessions/broken");
+    std::fs::create_dir_all(broken_session.join(".usagi")).unwrap();
+    std::fs::write(broken_session.join(".usagi/issues"), "not a directory").unwrap();
+    std::fs::write(broken_session.join(".usagi/memory"), "not a directory").unwrap();
+    let broken_requests = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":18,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_create\",\"arguments\":{\"title\":\"Broken\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":19,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_get\",\"arguments\":{\"number\":1}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_to_prompt\",\"arguments\":{\"number\":1}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_search\",\"arguments\":{}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_update\",\"arguments\":{\"number\":1}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_delete\",\"arguments\":{\"number\":1}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":24,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_save\",\"arguments\":{\"name\":\"fact\",\"title\":\"Fact\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":25,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_search\",\"arguments\":{}}}\n",
+    );
+    let broken = run_mcp(home.path(), &broken_session, broken_requests);
+    for line in stdout(&broken).lines() {
+        let response: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(response["error"]["code"], -32603);
+    }
+
+    let root_requests = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":26,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_create\",\"arguments\":{\"title\":\"refused\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":27,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_update\",\"arguments\":{\"number\":1}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":28,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_delete\",\"arguments\":{\"number\":1}}}\n",
+    );
+    let refused = run_mcp(home.path(), workspace.path(), root_requests);
+    for line in stdout(&refused).lines() {
+        let response: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(response["error"]["code"], -32603);
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("workspace root")
+        );
+    }
+    assert!(!workspace.path().join(".usagi/issues").exists());
     stop_daemon(home.path());
 }
 

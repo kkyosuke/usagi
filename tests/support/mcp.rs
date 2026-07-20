@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 
 pub struct McpHarness {
     workspace: tempfile::TempDir,
+    cwd: PathBuf,
     home: tempfile::TempDir,
     fixture_bin: PathBuf,
     fixture_log: PathBuf,
@@ -32,6 +33,15 @@ struct McpProcess {
 impl McpHarness {
     #[must_use]
     pub fn start() -> Self {
+        Self::start_at(None)
+    }
+
+    #[must_use]
+    pub fn start_in_session(name: &str) -> Self {
+        Self::start_at(Some(name))
+    }
+
+    fn start_at(session: Option<&str>) -> Self {
         let workspace = short_dir("usagi-mcp-workspace-");
         git(workspace.path(), &["init", "-q"]);
         git(
@@ -55,6 +65,11 @@ impl McpHarness {
             "[agents.codex]\nmodels = [\"fixture-codex\"]\n[agents.claude]\nmodels = [\"fixture-claude\"]\n",
         )
         .unwrap();
+        let cwd = session.map_or_else(
+            || workspace.path().to_path_buf(),
+            |name| workspace.path().join(".usagi/sessions").join(name),
+        );
+        fs::create_dir_all(&cwd).unwrap();
 
         let path = format!(
             "{}:{}",
@@ -63,7 +78,7 @@ impl McpHarness {
         );
         let mut child = Command::new(env!("CARGO_BIN_EXE_usagi"))
             .arg("mcp")
-            .current_dir(workspace.path())
+            .current_dir(&cwd)
             .env("USAGI_HOME", home.path())
             .env("USAGI_MCP_FIXTURE_LOG", &fixture_log)
             .env("PATH", path)
@@ -80,6 +95,7 @@ impl McpHarness {
         let stdout = BufReader::new(child.stdout.take().unwrap());
         let mut harness = Self {
             workspace,
+            cwd,
             home,
             fixture_bin,
             fixture_log,
@@ -134,6 +150,11 @@ impl McpHarness {
     #[must_use]
     pub fn workspace(&self) -> &Path {
         self.workspace.path()
+    }
+
+    #[must_use]
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
     }
 
     #[must_use]
