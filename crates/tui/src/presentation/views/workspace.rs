@@ -1094,8 +1094,13 @@ fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
     };
     widgets::clip_to_width(
         &format!(
-            "  🔔 session {}: {}  (click bell to review)",
-            decision.owner.session_id, decision.title
+            "  🔔 {}: {}  (click bell to review)",
+            decision
+                .owner
+                .session_id
+                .as_ref()
+                .map_or_else(|| "workspace root".to_owned(), ToString::to_string),
+            decision.title
         ),
         width,
     )

@@ -2081,7 +2081,15 @@ fn notify_new_decisions(
         }
         notifications.notify(
             "usagi: decision needed",
-            &format!("session {}: {}", decision.owner.session_id, decision.title),
+            &format!(
+                "{}: {}",
+                decision
+                    .owner
+                    .session_id
+                    .as_ref()
+                    .map_or_else(|| "workspace root".to_owned(), ToString::to_string),
+                decision.title
+            ),
         );
     }
 }

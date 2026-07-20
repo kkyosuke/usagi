@@ -76,9 +76,13 @@ pub fn render_over(
         for (index, decision) in decisions.iter().enumerate() {
             body.push(modal::content_line(
                 &format!(
-                    "{} session {}: {}",
+                    "{} {}: {}",
                     modal::selection_marker(index == overlay.selected()),
-                    decision.owner.session_id,
+                    decision
+                        .owner
+                        .session_id
+                        .as_ref()
+                        .map_or_else(|| "workspace root".to_owned(), ToString::to_string),
                     decision.title
                 ),
                 INNER_WIDTH,
