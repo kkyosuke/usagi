@@ -170,6 +170,10 @@ durable store は、受理される create / remove operation の owner generati
 
 daemon 起動時には未完了の create / initialize / delete journal を reconcile する。physical effect の完了を証明できない record は再実行せず safe failure にして明示 recovery を待つ。
 
+interrupted reconciliation は session を `failed`、対応 operation を terminal `failed` に同じ durable state で記録する。元の `OperationId` の再送は保存済み safe failure を返し、effect を再試行しない。operator が filesystem / Git の状態を確認・修復した後は、明示 recovery または新しい `OperationId` による許可された lifecycle 操作を使う。
+
+旧 reducer が書いた `session.lifecycle = failed` と `operation.status = succeeded` の矛盾した snapshot は daemon open 時に保守的に補正する。failure stage、session name、operation の canonical semantic key が一致する operation だけを `failed` に戻して関連付け、成功 outcome や success hook は生成しない。この移行は effect の再実行可能性を推測しないため、自動 retry は行わず明示 recovery を待つ。
+
 ## terminal ownership
 
 terminal registry は daemon generation が所有する `TerminalRef` を key にする。attach は snapshot と

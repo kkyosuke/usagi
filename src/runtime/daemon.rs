@@ -2229,8 +2229,7 @@ fn dispatch_session(
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
-    use usagi_core::infrastructure::ipc::ResponseOutcome;
-    use usagi_core::usecase::client::{DaemonRequest, SessionAction};
+    use usagi_core::usecase::client::DaemonRequest;
     let request = serde_json::from_value::<DaemonRequest>(body.clone())
         .ok()
         .and_then(|request| match request {
@@ -2252,6 +2251,18 @@ fn dispatch_session(
         &operation_id,
         &payload,
     );
+    session_response_envelope(action, &payload, result, request_id, hello)
+}
+
+fn session_response_envelope(
+    action: usagi_core::usecase::client::SessionAction,
+    payload: &serde_json::Value,
+    result: Result<usagi_daemon::usecase::session_runtime::SessionReply, SessionRuntimeError>,
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    use usagi_core::infrastructure::ipc::ResponseOutcome;
+    use usagi_core::usecase::client::SessionAction;
     match result {
         Ok(reply) => {
             let recovery_apply =
@@ -3145,6 +3156,58 @@ mod tests {
     use usagi_daemon::usecase::terminal_ipc::{
         ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
     };
+
+    fn session_test_hello() -> usagi_core::infrastructure::ipc::ServerHello {
+        use usagi_core::infrastructure::ipc::{
+            BuildIdentity, ConnectionId, DaemonGeneration, GenerationRole, ProtocolLimits,
+            ProtocolVersion,
+        };
+        usagi_core::infrastructure::ipc::ServerHello {
+            connection_nonce: "test".into(),
+            connection_id: ConnectionId("connection".into()),
+            daemon_generation: DaemonGeneration("generation".into()),
+            generation_role: GenerationRole::Active,
+            protocol: ProtocolVersion {
+                generation: 1,
+                revision: 0,
+            },
+            capabilities: vec![],
+            build: BuildIdentity {
+                version: "test".into(),
+                commit: "test".into(),
+                target: "test".into(),
+            },
+            limits: ProtocolLimits::default(),
+        }
+    }
+
+    #[test]
+    fn failed_create_and_remove_replay_as_error_envelopes_without_success_hooks() {
+        use usagi_core::infrastructure::ipc::{EnvelopeKind, ErrorCode, ResponseOutcome};
+        use usagi_core::usecase::client::SessionAction;
+
+        for action in [SessionAction::Create, SessionAction::Remove] {
+            let response = session_response_envelope(
+                action,
+                &serde_json::json!({"name":"one"}),
+                Err(SessionRuntimeError::DurableFailure(
+                    "durable session failure".into(),
+                )),
+                usagi_core::infrastructure::ipc::RequestId("request".into()),
+                &session_test_hello(),
+            );
+            let EnvelopeKind::Response { outcome, body, .. } = response.kind else {
+                panic!("session dispatch must produce a response")
+            };
+            assert_eq!(body, serde_json::Value::Null);
+            let ResponseOutcome::Error(error) = outcome else {
+                panic!("failed session replay must not be accepted")
+            };
+            assert_eq!(error.code, ErrorCode::InvalidArgument);
+            assert_eq!(error.message, "durable session failure");
+            assert!(body.get("hook").is_none());
+        }
+    }
 
     #[test]
     fn product_mcp_arguments_start_usagi_mcp_from_the_daemon_binary() {
