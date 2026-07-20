@@ -6977,6 +6977,15 @@
       "tracking": "root-cli-follow-up"
     },
     {
+      "path": "src/runtime/cli.rs",
+      "symbol": "<module>",
+      "occurrence": 1,
+      "reason": "migration_debt",
+      "owner": "root-cli",
+      "expires": "2027-01-31",
+      "tracking": "root-cli-follow-up"
+    },
+    {
       "path": "src/runtime/clipboard.rs",
       "symbol": "<module>",
       "occurrence": 1,
