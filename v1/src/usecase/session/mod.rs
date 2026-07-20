@@ -3125,6 +3125,9 @@ mod tests {
 
     #[test]
     fn remove_resumes_after_a_crash_between_git_teardown_and_phase_commit() {
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
         let created = create(root.path(), "crashed").unwrap();
@@ -3165,6 +3168,7 @@ mod tests {
         );
         assert!(sessions_of(root.path()).is_empty());
         assert!(pending_of(root.path(), "crashed").is_none());
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 
     #[test]
