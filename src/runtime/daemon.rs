@@ -854,6 +854,9 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         Arc::clone(&pr_inventory),
         Arc::clone(&supervisor),
     )?;
+    let decisions = Arc::new(UserDecisionStore::new(data_dir.join("daemon")));
+    consume_user_decision_events(&decisions)
+        .map_err(|error| std::io::Error::other(error.message))?;
     start_ipc_accept_loop(
         listener,
         server,
@@ -861,7 +864,7 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         terminal,
         agent,
         pr_inventory,
-        Arc::new(UserDecisionStore::new(data_dir.join("daemon"))),
+        decisions,
         Arc::new(Mutex::new(ProcessMetrics { previous: None })),
         supervisor,
     )
@@ -1086,6 +1089,7 @@ fn start_ipc_accept_loop(
                                         Some("pr") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
                                         Some("dispatch_tool") => dispatch_dispatch_tool(&agent_launch, &scope_sessions, &decisions, request_id, &body, hello),
                                         Some("supervisor_tool") => dispatch_supervisor_tool(&supervisor, connection, request_id, &body, hello),
+                                        Some("user_decision") => dispatch_user_decision(&agent_launch, &scope_sessions, &decisions, request_id, &body, hello),
                                         _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
                                     },
                                 );
@@ -1848,10 +1852,20 @@ fn dispatch_user_decision(
                 payload,
                 caller_context,
                 ..
-            } => Some((action, payload, caller_context)),
+            } => Some((action, payload, caller_context, false)),
+            DaemonRequest::UserDecision { action, payload } => {
+                use usagi_core::usecase::client::TuiUserDecisionAction;
+                let action = match action {
+                    TuiUserDecisionAction::Get => DispatchToolAction::UserDecisionGet,
+                    TuiUserDecisionAction::List => DispatchToolAction::UserDecisionList,
+                    TuiUserDecisionAction::Resolve => DispatchToolAction::UserDecisionResolve,
+                    TuiUserDecisionAction::Cancel => DispatchToolAction::UserDecisionCancel,
+                };
+                Some((action, payload, None, true))
+            }
             _ => None,
         });
-    let Some((action, payload, caller_context)) = parsed else {
+    let Some((action, payload, caller_context, tui_access)) = parsed else {
         return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
     };
     if !matches!(
@@ -1866,8 +1880,8 @@ fn dispatch_user_decision(
         return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
     }
 
-    let owner = (|| -> Result<UserDecisionOwner, ProtocolError> {
-        let workspace = sessions
+    let workspace = (|| -> Result<_, ProtocolError> {
+        sessions
             .lock()
             .map_err(|_| {
                 ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
@@ -1884,7 +1898,12 @@ fn dispatch_user_decision(
             .and_then(|value| serde_json::from_value(value).ok())
             .ok_or_else(|| {
                 ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
-            })?;
+            })
+    })();
+    let owner = workspace.and_then(|workspace| -> Result<_, ProtocolError> {
+        if tui_access {
+            return Ok((workspace, None));
+        }
         let runtime = agent.lock().map_err(|_| {
             ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
         })?;
@@ -1931,17 +1950,22 @@ fn dispatch_user_decision(
                 "decision caller provenance is inconsistent",
             ));
         }
-        Ok(UserDecisionOwner {
-            workspace_id: workspace,
-            session_id: binding.worker.session_id,
-            caller: binding.caller,
-            run_id,
-        })
-    })();
-    let response = owner.and_then(|owner| {
+        Ok((
+            workspace,
+            Some(UserDecisionOwner {
+                workspace_id: workspace,
+                session_id: binding.worker.session_id,
+                caller: binding.caller,
+                run_id,
+            }),
+        ))
+    });
+    let response = owner.and_then(|(workspace, owner)| {
+        consume_user_decision_events(store)?;
         let now = Utc::now();
         let result = (|| -> Result<serde_json::Value, UserDecisionError> { match action {
             DispatchToolAction::UserDecisionRequest => {
+                let owner = owner.ok_or(UserDecisionError::Terminal)?;
                 let input = serde_json::from_value::<RequestPayload>(payload)
                     .map_err(|_| UserDecisionError::Terminal)?;
                 store
@@ -1956,28 +1980,29 @@ fn dispatch_user_decision(
             }
             DispatchToolAction::UserDecisionGet => {
                 let input = serde_json::from_value::<DecisionIdPayload>(payload).map_err(|_| UserDecisionError::Terminal)?;
-                store.get(owner.workspace_id, input.decision_id).map_err(|_| UserDecisionError::Terminal)?
+                store.get(workspace, input.decision_id).map_err(|_| UserDecisionError::Terminal)?
                     .map(|decision| serde_json::json!(decision)).ok_or(UserDecisionError::Terminal)
             }
-            DispatchToolAction::UserDecisionList => store.pending(owner.workspace_id)
+            DispatchToolAction::UserDecisionList => store.pending(workspace)
                 .map_err(|_| UserDecisionError::Terminal)
-                .map(|decisions| serde_json::json!({"workspace": owner.workspace_id, "decisions": decisions})),
+                .map(|decisions| serde_json::json!({"workspace": workspace, "decisions": decisions})),
             DispatchToolAction::UserDecisionResolve => {
                 let input = serde_json::from_value::<ResolvePayload>(payload).map_err(|_| UserDecisionError::Terminal)?;
-                store.resolve(owner.workspace_id, input.decision_id, input.answer, now)
+                let decision = store.resolve(workspace, input.decision_id, input.answer, now)
                     .map_err(|_| UserDecisionError::Terminal)?
-                    .map(|decision| serde_json::json!(decision))
+                    ?;
+                Ok(serde_json::json!(decision))
             }
             DispatchToolAction::UserDecisionCancel | DispatchToolAction::UserDecisionExpire => {
                 let input = serde_json::from_value::<DecisionIdPayload>(payload).map_err(|_| UserDecisionError::Terminal)?;
                 let status = if action == DispatchToolAction::UserDecisionCancel { UserDecisionStatus::Cancelled } else { UserDecisionStatus::Expired };
-                store.terminal(owner.workspace_id, input.decision_id, status, now)
+                store.terminal(workspace, input.decision_id, status, now)
                     .map_err(|_| UserDecisionError::Terminal)?
                     .map(|decision| serde_json::json!(decision))
             }
             _ => unreachable!(),
         } })();
-        result.map_err(|error| {
+        let value = result.map_err(|error| {
             let (code, message) = match error {
                 UserDecisionError::IdempotencyConflict => (ErrorCode::IdempotencyConflict, "decision idempotency key conflicts"),
                 UserDecisionError::InvalidOption => (ErrorCode::InvalidArgument, "decision option is not allowed"),
@@ -1986,7 +2011,11 @@ fn dispatch_user_decision(
                 UserDecisionError::Terminal => (ErrorCode::RevisionConflict, "decision is not pending or is outside this workspace"),
             };
             ProtocolError::new(code, message)
-        })
+        })?;
+        if action == DispatchToolAction::UserDecisionResolve {
+            consume_user_decision_events(store)?;
+        }
+        Ok(value)
     });
     match response {
         Ok(value) => envelope(hello, request_id, ResponseOutcome::Ok, value),
@@ -1997,6 +2026,22 @@ fn dispatch_user_decision(
             serde_json::json!(null),
         ),
     }
+}
+
+fn consume_user_decision_events(
+    decisions: &UserDecisionStore,
+) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+    decisions
+        .consume_events()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "decision outbox is unavailable"))?
+        .map(|_| ())
+        .map_err(|_| {
+            ProtocolError::new(
+                ErrorCode::Unavailable,
+                "decision delivery record is inconsistent",
+            )
+        })
 }
 
 fn dispatch_dispatch(

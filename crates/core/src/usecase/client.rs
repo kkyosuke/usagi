@@ -74,6 +74,13 @@ pub enum DaemonRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller_context: Option<McpCallerContext>,
     },
+    /// Workspace-scoped human decision surface used by the local TUI. Unlike
+    /// `DispatchTool`, this path never accepts agent-originated requests and
+    /// does not treat a missing agent credential as authorization.
+    UserDecision {
+        action: TuiUserDecisionAction,
+        payload: Value,
+    },
     /// MCP control and observation for a daemon-owned supervisor aggregate.
     /// Caller provenance is derived by the daemon from the IPC context; it is
     /// intentionally not a client-supplied field in this request.
@@ -164,6 +171,17 @@ pub enum DispatchToolAction {
     UserDecisionResolve,
     UserDecisionCancel,
     UserDecisionExpire,
+}
+
+/// Human operations exposed to the workspace TUI. Request creation and
+/// deadline expiry remain credential-fenced agent operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TuiUserDecisionAction {
+    Get,
+    List,
+    Resolve,
+    Cancel,
 }
 
 /// The opt-in supervisor MCP surface.  It is separate from dispatch so adding
