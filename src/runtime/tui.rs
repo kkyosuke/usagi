@@ -35,6 +35,8 @@ use usagi_core::usecase::client::{
     DaemonRequest, IpcClient, MetricsAction, PrAction, PrRequest, SessionAction, TerminalAction,
     TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
 };
+use usagi_core::usecase::environment as environment_usecase;
+use usagi_core::usecase::note::Target as StoreTarget;
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 use usagi_core::usecase::workspace as workspace_usecase;
 use usagi_daemon::usecase::session_runtime::SystemGit;
@@ -45,11 +47,12 @@ use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::GitDiff;
 use usagi_tui::presentation::{
     self, AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, DecisionCommandPort,
-    DesktopNotificationPort, Exit, MetricsPort, MetricsPortFactory, SessionCommandPort,
-    SessionCommandPortFactory, SessionCommandResult, Start, WorkspaceLoader, WorkspaceSnapshot,
+    DesktopNotificationPort, EnvironmentStorePort, Exit, MetricsPort, MetricsPortFactory,
+    SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, Start, WorkspaceLoader,
+    WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::controller::{
-    BackendEvent, NewRequest, Notice, SafeError, SafeMessage,
+    BackendEvent, EnvironmentEntry, NewRequest, Notice, SafeError, SafeMessage, Target,
 };
 use usagi_tui::usecase::application::pane_runtime::Geometry;
 use usagi_tui::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
@@ -177,6 +180,141 @@ impl DecisionCommandPort for DaemonDecisionCommandPort {
             Err(error) => BackendEvent::DecisionError {
                 workspace,
                 decision_id,
+                error: Self::safe_error(error),
+            },
+        }
+    }
+}
+
+/// Production environment store for the controller's `LoadEnvironment` /
+/// `SaveEnvironment` effects. The durable authority is the repository's
+/// `state.json` (the same store notes/todos/decisions use); this adapter maps
+/// the controller's stable [`Target`] identity to that name-keyed store and
+/// projects each read/write back as a controller [`BackendEvent`].
+struct RepoEnvironmentStore {
+    store: WorkspaceStateStore,
+    /// Stable session identities paired with their store names, captured from
+    /// the snapshot the runtime opened with (the TUI never infers a name from an
+    /// id elsewhere).
+    session_names: Vec<(usagi_core::domain::id::SessionId, String)>,
+}
+
+impl RepoEnvironmentStore {
+    #[coverage(off)]
+    fn from_snapshot(snapshot: &WorkspaceSnapshot) -> Self {
+        let session_names = snapshot
+            .session_ids
+            .iter()
+            .copied()
+            .zip(
+                snapshot
+                    .state
+                    .sessions
+                    .iter()
+                    .map(|record| record.name.clone()),
+            )
+            .collect();
+        Self {
+            store: WorkspaceStateStore::new(&snapshot.workspace.path),
+            session_names,
+        }
+    }
+
+    /// Resolve a controller target to the name-keyed store target, or `None`
+    /// when a session id is no longer in the snapshot (a stale target).
+    #[coverage(off)]
+    fn resolve(&self, target: Target) -> Option<StoreTarget<'_>> {
+        match target {
+            Target::Root(_) => Some(StoreTarget::Root),
+            Target::Session(id) => self
+                .session_names
+                .iter()
+                .find(|(known, _)| *known == id)
+                .map(|(_, name)| StoreTarget::Session(name.as_str())),
+        }
+    }
+
+    #[coverage(off)]
+    fn safe_error(reason: impl std::fmt::Display) -> SafeError {
+        SafeError {
+            message: SafeMessage::new(reason.to_string()),
+            error_id: "environment-store-error".to_owned(),
+        }
+    }
+
+    #[coverage(off)]
+    fn stale_target() -> SafeError {
+        Self::safe_error("this session is no longer available")
+    }
+}
+
+#[coverage(off)]
+fn environment_entries(map: BTreeMap<String, String>) -> Vec<EnvironmentEntry> {
+    map.into_iter()
+        .map(|(name, value)| EnvironmentEntry { name, value })
+        .collect()
+}
+
+#[coverage(off)]
+fn environment_map(entries: &[EnvironmentEntry]) -> BTreeMap<String, String> {
+    entries
+        .iter()
+        .map(|entry| (entry.name.clone(), entry.value.clone()))
+        .collect()
+}
+
+impl EnvironmentStorePort for RepoEnvironmentStore {
+    #[coverage(off)]
+    fn load(&mut self, target: Target) -> BackendEvent {
+        let Some(scope) = self.resolve(target) else {
+            return BackendEvent::EnvironmentError {
+                target,
+                error: Self::stale_target(),
+            };
+        };
+        match environment_usecase::environment(&self.store, scope) {
+            Ok(map) => BackendEvent::EnvironmentLoaded {
+                target,
+                entries: environment_entries(map),
+            },
+            Err(error) => BackendEvent::EnvironmentError {
+                target,
+                error: Self::safe_error(error),
+            },
+        }
+    }
+
+    #[coverage(off)]
+    fn save(&mut self, target: Target, entries: Vec<EnvironmentEntry>) -> BackendEvent {
+        let Some(scope) = self.resolve(target) else {
+            return BackendEvent::EnvironmentError {
+                target,
+                error: Self::stale_target(),
+            };
+        };
+        match environment_usecase::set_environment(
+            &self.store,
+            scope,
+            environment_map(&entries),
+            Utc::now(),
+        ) {
+            // Reflux the persisted set so the editor mirrors exactly what landed.
+            Ok(true) => match environment_usecase::environment(&self.store, scope) {
+                Ok(map) => BackendEvent::EnvironmentLoaded {
+                    target,
+                    entries: environment_entries(map),
+                },
+                Err(error) => BackendEvent::EnvironmentError {
+                    target,
+                    error: Self::safe_error(error),
+                },
+            },
+            Ok(false) => BackendEvent::EnvironmentError {
+                target,
+                error: Self::stale_target(),
+            },
+            Err(error) => BackendEvent::EnvironmentError {
+                target,
                 error: Self::safe_error(error),
             },
         }
@@ -706,6 +844,7 @@ impl LifecycleSnapshot {
                         last_active: None,
                         notes: Scratchpad::default(),
                         prs: Vec::new(),
+                        environment: std::collections::BTreeMap::new(),
                     });
                 record.root = workspace
                     .path
@@ -1556,6 +1695,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
     let mut loader = FsWorkspaceLoader::open_default()?;
     let snapshot = loader.open(path)?;
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        let environment = Box::new(RepoEnvironmentStore::from_snapshot(&snapshot));
         run_with_metrics_hook(|| {
             run_in_terminal(|terminal| {
                 presentation::run_workspace_controller(
@@ -1564,6 +1704,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
                     Box::new(DaemonSessionCommandPort::default()),
                     Box::new(DaemonAgentCommandPort::new()),
                     Box::new(DaemonDecisionCommandPort),
+                    environment,
                     Box::new(PlatformDesktopNotifier),
                     Box::new(DaemonMetricsPort::new()),
                     Box::new(DaemonPrSnapshotPort),
@@ -1605,21 +1746,24 @@ pub(crate) fn launch(
 #[cfg(test)]
 mod tests {
     use super::{
-        LifecycleSnapshot, PersistentSettingsPort, Start, TerminalChunk, TerminalError,
-        control_key, created_session_hook, decode_terminal_poll, load_screen_graph_data,
-        load_workspace_state, passthrough_key,
+        EnvironmentStorePort, LifecycleSnapshot, PersistentSettingsPort, RepoEnvironmentStore,
+        Start, TerminalChunk, TerminalError, control_key, created_session_hook,
+        decode_terminal_poll, load_screen_graph_data, load_workspace_state, passthrough_key,
     };
     use chrono::Utc;
     use serde_json::json;
-    use usagi_core::domain::id::{OperationId, WorkspaceId};
+    use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
     use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycle};
     use usagi_core::domain::settings::{ModalSelectionMode, Settings};
+    use usagi_core::domain::workspace_state::WorkspaceState;
     use usagi_core::infrastructure::paths::project_data_dir;
+    use usagi_core::infrastructure::store::state::WorkspaceStateStore;
     use usagi_core::infrastructure::store::workspace::Storage;
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
     use usagi_tui::usecase::application::Key;
+    use usagi_tui::usecase::application::controller::{BackendEvent, EnvironmentEntry, Target};
     use usagi_tui::usecase::terminal_input::{
         KeyCode, KeyEvent, KeyEventKind, LiveInput, Modifiers,
     };
@@ -1741,6 +1885,7 @@ mod tests {
                 ..Default::default()
             },
             prs: Vec::new(),
+            environment: std::collections::BTreeMap::new(),
         };
 
         let projected = snapshot.project(&workspace, &[legacy]);
@@ -1958,6 +2103,88 @@ mod tests {
         assert!(state.root_notes.note.is_none());
         assert!(state.root_notes.todos.is_empty());
         assert!(state.root_notes.decisions.is_empty());
+    }
+
+    #[test]
+    fn repo_environment_store_persists_root_and_session_and_rejects_stale_targets() {
+        let workspace = tempfile::tempdir().unwrap();
+        // Seed a session so a session-target save resolves in the store.
+        let seeded = SessionRecord {
+            name: "alpha".to_owned(),
+            display_name: None,
+            origin: SessionOrigin::Human,
+            started_from: None,
+            root: workspace.path().join(".usagi/sessions/alpha"),
+            created_at: Utc::now(),
+            last_active: None,
+            notes: Scratchpad::default(),
+            prs: Vec::new(),
+            environment: std::collections::BTreeMap::new(),
+        };
+        WorkspaceStateStore::new(workspace.path())
+            .save(&WorkspaceState {
+                sessions: vec![seeded],
+                ..Default::default()
+            })
+            .unwrap();
+
+        let alpha_id = SessionId::new();
+        let mut store = RepoEnvironmentStore {
+            store: WorkspaceStateStore::new(workspace.path()),
+            session_names: vec![(alpha_id, "alpha".to_owned())],
+        };
+        let root = Target::Root(WorkspaceId::new());
+
+        // Root starts empty, then a save persists and refluxes the stored set.
+        assert!(matches!(
+            store.load(root),
+            BackendEvent::EnvironmentLoaded { entries, .. } if entries.is_empty()
+        ));
+        let saved = store.save(
+            root,
+            vec![EnvironmentEntry {
+                name: "A".to_owned(),
+                value: "1".to_owned(),
+            }],
+        );
+        assert!(matches!(
+            &saved,
+            BackendEvent::EnvironmentLoaded { entries, .. }
+                if entries.len() == 1 && entries[0].name == "A" && entries[0].value == "1"
+        ));
+        // A fresh read confirms the write actually landed in state.json.
+        assert!(matches!(
+            store.load(root),
+            BackendEvent::EnvironmentLoaded { entries, .. } if entries.len() == 1
+        ));
+
+        // A session target resolves to its state.json record and persists there.
+        let alpha = Target::Session(alpha_id);
+        assert!(matches!(
+            store.save(
+                alpha,
+                vec![EnvironmentEntry {
+                    name: "TOKEN".to_owned(),
+                    value: "xyz".to_owned(),
+                }],
+            ),
+            BackendEvent::EnvironmentLoaded { entries, .. } if entries[0].name == "TOKEN"
+        ));
+        assert!(matches!(
+            store.load(alpha),
+            BackendEvent::EnvironmentLoaded { entries, .. } if entries[0].value == "xyz"
+        ));
+
+        // A stale session id (absent from the snapshot mapping) fails safely.
+        let stale = Target::Session(SessionId::new());
+        assert!(matches!(
+            store.load(stale),
+            BackendEvent::EnvironmentError { .. }
+        ));
+        assert!(matches!(
+            store.save(stale, Vec::new()),
+            BackendEvent::EnvironmentError { .. }
+        ));
     }
 
     #[test]

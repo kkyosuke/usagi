@@ -262,6 +262,12 @@ pub struct EnvironmentEditor {
     target: Target,
     entries: Vec<EnvironmentEntry>,
     error: Option<SafeError>,
+    /// `true` while the initial read is in flight, before any values have
+    /// refluxed. Distinguishes "still loading" from "loaded, but empty".
+    loading: bool,
+    /// `true` while a save is in flight. Local edits and re-saves are ignored
+    /// until the owning port refluxes, so a save can never be double-submitted.
+    saving: bool,
 }
 
 /// Local navigation and draft state for a durable user decision.  The durable
@@ -438,6 +444,8 @@ impl EnvironmentEditor {
             target,
             entries: Vec::new(),
             error: None,
+            loading: true,
+            saving: false,
         }
     }
 
@@ -455,6 +463,24 @@ impl EnvironmentEditor {
     #[coverage(off)]
     pub fn error(&self) -> Option<&SafeError> {
         self.error.as_ref()
+    }
+    /// Whether the initial read is still in flight (no values refluxed yet).
+    #[must_use]
+    #[coverage(off)]
+    pub const fn is_loading(&self) -> bool {
+        self.loading
+    }
+    /// Whether a save is in flight; the editor rejects edits and re-saves until
+    /// it clears.
+    #[must_use]
+    #[coverage(off)]
+    pub const fn is_saving(&self) -> bool {
+        self.saving
+    }
+    /// Whether the editor is accepting local edits and saves (neither the
+    /// initial read nor a save is in flight).
+    fn is_busy(&self) -> bool {
+        self.loading || self.saving
     }
 }
 
@@ -1163,6 +1189,8 @@ pub enum AppKey {
     SaveNotes,
     /// Insert or replace one environment variable in the local editor.
     SetEnvironment { name: String, value: String },
+    /// Remove one environment variable from the local editor by name.
+    RemoveEnvironment { name: String },
     /// Persist the current environment through its owning port.
     SaveEnvironment,
     /// 将来の terminal input / command vocabulary 用の文字入力。
@@ -2336,6 +2364,8 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
             {
                 editor.entries.clone_from(entries);
                 editor.error = None;
+                editor.loading = false;
+                editor.saving = false;
             }
         }
         BackendEvent::EnvironmentError { target, error } => {
@@ -2345,6 +2375,8 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                 .filter(|editor| editor.target == *target)
             {
                 editor.error = Some(error.clone());
+                editor.loading = false;
+                editor.saving = false;
             }
         }
         BackendEvent::PullRequestsLoaded { target, prs } => {
@@ -2710,6 +2742,7 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         | AppKey::ToggleTodo(_)
         | AppKey::SaveNotes
         | AppKey::SetEnvironment { .. }
+        | AppKey::RemoveEnvironment { .. }
         | AppKey::SaveEnvironment
         | AppKey::DecisionPrevious
         | AppKey::DecisionNext
@@ -2780,7 +2813,7 @@ fn update_editor_key(state: &mut AppState, key: &AppKey) -> Option<Vec<Effect>> 
             if let Some(editor) = state
                 .environment_editor
                 .as_mut()
-                .filter(|_| environment_open)
+                .filter(|editor| environment_open && !editor.is_busy())
             {
                 if let Some(entry) = editor.entries.iter_mut().find(|entry| entry.name == *name) {
                     entry.value.clone_from(value);
@@ -2797,12 +2830,24 @@ fn update_editor_key(state: &mut AppState, key: &AppKey) -> Option<Vec<Effect>> 
             }
             Some(Vec::new())
         }
+        AppKey::RemoveEnvironment { name } => {
+            if let Some(editor) = state
+                .environment_editor
+                .as_mut()
+                .filter(|editor| environment_open && !editor.is_busy())
+            {
+                editor.entries.retain(|entry| entry.name != *name);
+                editor.error = None;
+            }
+            Some(Vec::new())
+        }
         AppKey::SaveEnvironment => Some(
             state
                 .environment_editor
-                .as_ref()
-                .filter(|_| environment_open)
+                .as_mut()
+                .filter(|editor| environment_open && !editor.is_busy())
                 .map_or_else(Vec::new, |editor| {
+                    editor.saving = true;
                     vec![Effect::SaveEnvironment {
                         target: editor.target,
                         entries: editor.entries.clone(),
@@ -2943,7 +2988,14 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
         return Vec::new();
     }
     match overview::interpret(input) {
-        Ok(overview::Command::Env { .. }) => open_environment(state),
+        Ok(overview::Command::Env { arguments }) => {
+            if arguments.trim().is_empty() {
+                open_environment(state)
+            } else {
+                state.notice = Some(Notice::new("env takes no arguments (usage: env)"));
+                Vec::new()
+            }
+        }
         Ok(overview::Command::Session { arguments }) => submit_overview_session(state, &arguments),
         Ok(command) => {
             state.overlay = None;
@@ -5197,6 +5249,195 @@ mod tests {
             environment.error().unwrap().message.as_str(),
             "Could not save environment"
         );
+    }
+
+    fn entry(name: &str, value: &str) -> EnvironmentEntry {
+        EnvironmentEntry {
+            name: name.to_owned(),
+            value: value.to_owned(),
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn environment_editor_loads_edits_removes_and_saves_with_a_double_submit_guard() {
+        let (workspace, session, _) = ids();
+        // No navigation: the active target is the workspace root.
+        let target = Target::Root(workspace);
+        let mut state = AppState::home(workspace, vec![session]);
+        let mut backend = FakeBackend::default();
+
+        // Open: the editor is in the loading state and requests a read.
+        let effects = update(&mut state, AppEvent::Key(AppKey::OpenEnvironment));
+        assert_eq!(effects, vec![Effect::LoadEnvironment { target }]);
+        assert!(state.environment_editor().unwrap().is_loading());
+        // Edits are ignored while the read is in flight.
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SetEnvironment {
+                name: "EARLY".to_owned(),
+                value: "x".to_owned(),
+            }),
+        );
+        assert!(state.environment_editor().unwrap().entries().is_empty());
+
+        // The read refluxes: loading clears and the values appear.
+        backend.push_event(BackendEvent::EnvironmentLoaded {
+            target,
+            entries: vec![entry("A", "1"), entry("B", "2")],
+        });
+        run_fake_cycle(&mut state, &mut backend, effects);
+        assert!(!state.environment_editor().unwrap().is_loading());
+        assert_eq!(state.environment_editor().unwrap().entries().len(), 2);
+
+        // Add (kept sorted by name), edit in place, and delete.
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SetEnvironment {
+                name: "C".to_owned(),
+                value: "3".to_owned(),
+            }),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SetEnvironment {
+                name: "A".to_owned(),
+                value: "9".to_owned(),
+            }),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::RemoveEnvironment {
+                name: "B".to_owned(),
+            }),
+        );
+        let edited = vec![entry("A", "9"), entry("C", "3")];
+        assert_eq!(
+            state.environment_editor().unwrap().entries(),
+            edited.as_slice()
+        );
+
+        // Save: the editor enters the saving state and emits the full set.
+        let saves = update(&mut state, AppEvent::Key(AppKey::SaveEnvironment));
+        assert_eq!(
+            saves,
+            vec![Effect::SaveEnvironment {
+                target,
+                entries: edited.clone(),
+            }]
+        );
+        assert!(state.environment_editor().unwrap().is_saving());
+
+        // A second Save while one is in flight is ignored (no double-submit), and
+        // edits/removes are held until the save resolves.
+        assert!(update(&mut state, AppEvent::Key(AppKey::SaveEnvironment)).is_empty());
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SetEnvironment {
+                name: "D".to_owned(),
+                value: "4".to_owned(),
+            }),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::RemoveEnvironment {
+                name: "A".to_owned(),
+            }),
+        );
+        assert_eq!(
+            state.environment_editor().unwrap().entries(),
+            edited.as_slice()
+        );
+        assert!(state.environment_editor().unwrap().is_saving());
+
+        // Success refluxes the persisted set and clears the saving state.
+        backend.push_event(BackendEvent::EnvironmentLoaded {
+            target,
+            entries: edited.clone(),
+        });
+        run_fake_cycle(&mut state, &mut backend, saves);
+        assert!(!state.environment_editor().unwrap().is_saving());
+        assert!(state.environment_editor().unwrap().error().is_none());
+
+        // A save failure keeps the values, surfaces a safe error, and clears the
+        // saving state so the edit remains retryable.
+        let retry = update(&mut state, AppEvent::Key(AppKey::SaveEnvironment));
+        assert_eq!(retry.len(), 1);
+        backend.push_event(BackendEvent::EnvironmentError {
+            target,
+            error: SafeError {
+                message: SafeMessage::new("Could not save environment"),
+                error_id: "safe-env-retry".to_owned(),
+            },
+        });
+        run_fake_cycle(&mut state, &mut backend, retry);
+        assert!(!state.environment_editor().unwrap().is_saving());
+        assert_eq!(
+            state.environment_editor().unwrap().entries(),
+            edited.as_slice()
+        );
+        assert_eq!(
+            state
+                .environment_editor()
+                .unwrap()
+                .error()
+                .unwrap()
+                .message
+                .as_str(),
+            "Could not save environment"
+        );
+        // After a failure the retry is allowed again.
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::SaveEnvironment)).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn overview_env_opens_the_editor_and_rejects_extra_arguments() {
+        let (workspace, _, _) = ids();
+
+        // The `env` command (Prompt-mode raw text or Action-mode candidate) opens
+        // the active target's editor and requests a read.
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let effects = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("env".to_owned())),
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::LoadEnvironment {
+                target: Target::Root(workspace),
+            }]
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Environment));
+
+        // Whitespace-only arguments are still treated as no arguments.
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let effects = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("env   ".to_owned())),
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::LoadEnvironment {
+                target: Target::Root(workspace),
+            }]
+        );
+
+        // Extra arguments are rejected safely: the editor never opens, the
+        // Overview stays up, and a safe notice explains the usage.
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let effects = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("env extra".to_owned())),
+        );
+        assert!(effects.is_empty());
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+        assert!(state.environment_editor().is_none());
     }
 
     fn pending_decision(workspace: WorkspaceId) -> UserDecision {

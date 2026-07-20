@@ -15,6 +15,7 @@ fn session(name: &str) -> SessionRecord {
         last_active: None,
         notes: Scratchpad::default(),
         prs: Vec::new(),
+        environment: std::collections::BTreeMap::new(),
     }
 }
 
@@ -48,6 +49,7 @@ fn populated_state_round_trips_through_json() {
             todos: vec![SessionTodo::new("triage")],
             decisions: Vec::new(),
         },
+        root_environment: std::collections::BTreeMap::new(),
         updated_at: ts,
     };
 
