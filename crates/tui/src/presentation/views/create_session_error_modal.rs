@@ -154,13 +154,10 @@ mod tests {
         // interior padding match: box column (1) + body indent (2) on each side.
         for row in &message_rows {
             let (left, right) = interior_padding(row);
-            assert_eq!(
-                left,
-                right,
-                "asymmetric padding on row {:?}: {left} left vs {right} right",
-                strip_ansi(row)
-            );
+            // Left and right interior padding match: box column (1) + body
+            // indent (2) on each side.
             assert_eq!(left, 1 + modal::BODY_INDENT_WIDTH);
+            assert_eq!(right, left);
         }
         assert_eq!(widest.0, widest.1);
     }
