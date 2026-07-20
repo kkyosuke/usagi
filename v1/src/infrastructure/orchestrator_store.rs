@@ -10,18 +10,28 @@ use crate::domain::orchestrator::{Claim, Claims, Event, Plan, Stamped};
 use crate::infrastructure::{json_file, store_lock::StoreLock};
 
 const FORMAT: &str = "usagi-orchestrator";
-const VERSION: u32 = 1;
+const PLAN_VERSION: u32 = 1;
+const CLAIMS_VERSION: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct OrchestratorStore {
     root: PathBuf,
+    workspace: String,
 }
 
 impl OrchestratorStore {
     pub fn new(workspace: &Path) -> Self {
+        let workspace = workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.to_path_buf());
         Self {
             root: workspace.join(".usagi/orchestrators"),
+            workspace: workspace.to_string_lossy().into_owned(),
         }
+    }
+
+    pub fn workspace_key(&self) -> &str {
+        &self.workspace
     }
 
     fn plan_dir(&self, id: &str) -> PathBuf {
@@ -35,7 +45,11 @@ impl OrchestratorStore {
     }
 
     pub fn load_plan(&self, id: &str) -> Result<Option<Stamped<Plan>>> {
-        json_file::read(&self.state_path(id))
+        let plan = json_file::read(&self.state_path(id))?;
+        if let Some(stamped) = &plan {
+            validate_envelope(stamped, PLAN_VERSION, "plan")?;
+        }
+        Ok(plan)
     }
 
     pub fn plan_ids(&self) -> Result<Vec<String>> {
@@ -78,7 +92,7 @@ impl OrchestratorStore {
         }
         let stamped = Stamped {
             format: FORMAT.into(),
-            version: VERSION,
+            version: PLAN_VERSION,
             revision: actual.map_or(0, |v| v + 1),
             written_at: now,
             value: plan.clone(),
@@ -88,15 +102,28 @@ impl OrchestratorStore {
     }
 
     pub fn load_claims(&self) -> Result<Stamped<Claims>> {
-        Ok(
-            json_file::read(&self.claims_path())?.unwrap_or_else(|| Stamped {
-                format: FORMAT.into(),
-                version: VERSION,
-                revision: 0,
-                written_at: DateTime::<Utc>::UNIX_EPOCH,
-                value: Claims::default(),
-            }),
-        )
+        let claims: Option<Stamped<Claims>> = json_file::read(&self.claims_path())?;
+        if let Some(stamped) = &claims {
+            validate_envelope(stamped, CLAIMS_VERSION, "claims")?;
+            if stamped
+                .value
+                .by_issue
+                .values()
+                .any(|claim| claim.workspace != self.workspace)
+            {
+                bail!(
+                    "orchestrator claims workspace does not match {}",
+                    self.workspace
+                );
+            }
+        }
+        Ok(claims.unwrap_or_else(|| Stamped {
+            format: FORMAT.into(),
+            version: CLAIMS_VERSION,
+            revision: 0,
+            written_at: DateTime::<Utc>::UNIX_EPOCH,
+            value: Claims::default(),
+        }))
     }
 
     /// Atomically claims `(workspace, issue)`. An expired claim still blocks
@@ -105,22 +132,28 @@ impl OrchestratorStore {
         &self,
         claim: Claim,
         now: DateTime<Utc>,
-        session_and_pr_absent: bool,
-    ) -> Result<bool> {
+        absent_observation: Option<&Claim>,
+    ) -> Result<ClaimOutcome> {
+        if claim.workspace != self.workspace {
+            bail!("claim workspace does not match {}", self.workspace);
+        }
         let _lock = StoreLock::acquire(&self.root)?;
         let mut claims = self.load_claims()?;
         if let Some(current) = claims.value.by_issue.get(&claim.issue) {
-            let same = current.plan == claim.plan && current.owner == claim.owner;
+            let same = current.plan == claim.plan
+                && current.owner == claim.owner
+                && current.generation == claim.generation;
             let expired = current.lease.expires_at <= now;
-            if !same && (!expired || !session_and_pr_absent) {
-                return Ok(false);
+            let observed_absent = absent_observation.is_some_and(|seen| seen == current);
+            if !same && (!expired || !observed_absent) {
+                return Ok(ClaimOutcome::Busy(current.clone()));
             }
         }
         claims.value.by_issue.insert(claim.issue, claim);
         claims.revision += 1;
         claims.written_at = now;
         json_file::write_atomic(&self.root, &self.claims_path(), &claims)?;
-        Ok(true)
+        Ok(ClaimOutcome::Acquired)
     }
 
     pub fn release_claim(
@@ -128,6 +161,7 @@ impl OrchestratorStore {
         issue: u64,
         plan: &str,
         owner: &str,
+        generation: u64,
         now: DateTime<Utc>,
     ) -> Result<bool> {
         let _lock = StoreLock::acquire(&self.root)?;
@@ -136,7 +170,7 @@ impl OrchestratorStore {
             .value
             .by_issue
             .get(&issue)
-            .is_some_and(|c| c.plan == plan && c.owner == owner);
+            .is_some_and(|c| c.plan == plan && c.owner == owner && c.generation == generation);
         if !owned {
             return Ok(false);
         }
@@ -197,6 +231,23 @@ impl OrchestratorStore {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimOutcome {
+    Acquired,
+    Busy(Claim),
+}
+
+fn validate_envelope<T>(stamped: &Stamped<T>, version: u32, kind: &str) -> Result<()> {
+    if stamped.format != FORMAT || stamped.version != version {
+        bail!(
+            "unsupported orchestrator {kind} envelope: format {:?}, version {}",
+            stamped.format,
+            stamped.version
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -213,6 +264,7 @@ mod tests {
     }
     fn claim(owner: &str) -> Claim {
         Claim {
+            workspace: String::new(),
             issue: 183,
             plan: owner.into(),
             owner: owner.into(),
@@ -236,14 +288,16 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 thread::spawn(move || {
                     barrier.wait();
-                    store.claim(claim(owner), now(), false).unwrap()
+                    let mut claim = claim(owner);
+                    claim.workspace = store.workspace_key().into();
+                    store.claim(claim, now(), None).unwrap()
                 })
             })
             .collect();
         let wins = handles
             .into_iter()
             .map(|handle| handle.join().unwrap())
-            .filter(|won| *won)
+            .filter(|won| matches!(won, ClaimOutcome::Acquired))
             .count();
         assert_eq!(wins, 1);
     }
@@ -252,10 +306,20 @@ mod tests {
     fn expired_claim_needs_fresh_absence_observation() {
         let tmp = tempfile::tempdir().unwrap();
         let store = OrchestratorStore::new(tmp.path());
-        store.claim(claim("a"), now(), false).unwrap();
+        let mut first = claim("a");
+        first.workspace = store.workspace_key().into();
+        store.claim(first.clone(), now(), None).unwrap();
         let later = now() + Duration::minutes(6);
-        assert!(!store.claim(claim("b"), later, false).unwrap());
-        assert!(store.claim(claim("b"), later, true).unwrap());
+        let mut second = claim("b");
+        second.workspace = store.workspace_key().into();
+        assert!(matches!(
+            store.claim(second.clone(), later, None).unwrap(),
+            ClaimOutcome::Busy(_)
+        ));
+        assert_eq!(
+            store.claim(second, later, Some(&first)).unwrap(),
+            ClaimOutcome::Acquired
+        );
     }
 
     #[test]
@@ -332,9 +396,12 @@ mod tests {
     fn only_owner_can_release_claim() {
         let tmp = tempfile::tempdir().unwrap();
         let store = OrchestratorStore::new(tmp.path());
-        store.claim(claim("a"), now(), false).unwrap();
-        assert!(!store.release_claim(183, "b", "b", now()).unwrap());
-        assert!(store.release_claim(183, "a", "a", now()).unwrap());
+        let mut first = claim("a");
+        first.workspace = store.workspace_key().into();
+        store.claim(first, now(), None).unwrap();
+        assert!(!store.release_claim(183, "b", "b", 1, now()).unwrap());
+        assert!(!store.release_claim(183, "a", "a", 2, now()).unwrap());
+        assert!(store.release_claim(183, "a", "a", 1, now()).unwrap());
     }
 
     #[test]
@@ -344,6 +411,55 @@ mod tests {
             .load_events("missing")
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn claims_fail_closed_on_unknown_envelope_or_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = OrchestratorStore::new(tmp.path());
+        let claims_path = tmp.path().join(".usagi/orchestrators/claims.json");
+        fs::create_dir_all(claims_path.parent().unwrap()).unwrap();
+        fs::write(
+            &claims_path,
+            r#"{"format":"usagi-orchestrator","version":1,"revision":0,"written_at":"2026-01-01T00:00:00Z","value":{"by_issue":{}}}"#,
+        )
+        .unwrap();
+        assert!(store
+            .load_claims()
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported orchestrator claims envelope"));
+
+        let stamped = Stamped {
+            format: FORMAT.into(),
+            version: CLAIMS_VERSION,
+            revision: 0,
+            written_at: now(),
+            value: Claims {
+                by_issue: [(183, claim("a"))].into(),
+            },
+        };
+        json_file::write_atomic(claims_path.parent().unwrap(), &claims_path, &stamped).unwrap();
+        assert!(store
+            .load_claims()
+            .unwrap_err()
+            .to_string()
+            .contains("workspace does not match"));
+    }
+
+    #[test]
+    fn equal_issue_numbers_in_different_workspaces_have_independent_claims() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        for (workspace, owner) in [(first.path(), "a"), (second.path(), "b")] {
+            let store = OrchestratorStore::new(workspace);
+            let mut candidate = claim(owner);
+            candidate.workspace = store.workspace_key().into();
+            assert_eq!(
+                store.claim(candidate, now(), None).unwrap(),
+                ClaimOutcome::Acquired
+            );
+        }
     }
 
     #[test]

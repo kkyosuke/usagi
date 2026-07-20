@@ -2711,10 +2711,17 @@ fn reconcile_orchestrators(
         slots_remaining,
         chrono::Utc::now(),
     ) {
-        Ok(outcome) if outcome.delegated > 0 || outcome.owner_queued > 0 => vec![format!(
-            "orchestrator reconciled {} plan(s): delegated {}, owner wake-ups {}",
-            outcome.plans, outcome.delegated, outcome.owner_queued
-        )],
+        Ok(outcome)
+            if outcome.delegated > 0 || outcome.owner_queued > 0 || !outcome.busy.is_empty() =>
+        {
+            vec![format!(
+                "orchestrator reconciled {} plan(s): delegated {}, busy claims {}, owner wake-ups {}",
+                outcome.plans,
+                outcome.delegated,
+                outcome.busy.len(),
+                outcome.owner_queued
+            )]
+        }
         Ok(_) => Vec::new(),
         Err(error) => {
             crate::infrastructure::error_log::ErrorLog::record(&format!(
