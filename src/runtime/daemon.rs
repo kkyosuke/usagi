@@ -31,7 +31,7 @@ use usagi_core::infrastructure::store::dispatch::DispatchStore;
 use usagi_core::infrastructure::store::pr_inventory::PrInventoryStore;
 use usagi_core::infrastructure::store::user_decision::UserDecisionStore;
 use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
-use usagi_core::usecase::client::{DaemonRequest, DispatchToolAction};
+use usagi_core::usecase::client::{DaemonRequest, DispatchToolAction, SupervisorToolAction};
 use usagi_daemon::infrastructure::pty::PtyTerminal;
 use usagi_daemon::infrastructure::unix_transport::{SecureUnixListener, ensure_private_dir};
 use usagi_daemon::presentation::DaemonEnv;
@@ -55,6 +55,9 @@ use usagi_daemon::usecase::runtime::{
     OutputJournal, ProvisionContext, PtySpawner, RuntimeStore, RuntimeStoreSnapshot, SpawnProvision,
 };
 use usagi_daemon::usecase::session_runtime::{SessionRuntime, SessionRuntimeError, SystemGit};
+use usagi_daemon::usecase::supervisor_runtime::{
+    DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime,
+};
 use usagi_daemon::usecase::terminal::{Geometry, Output, PtyWriteError, PtyWriter, SpawnFailure};
 use usagi_daemon::usecase::terminal_ipc::{
     GenericTerminalRuntime, ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
@@ -384,6 +387,14 @@ fn available_worktree(snapshot: &serde_json::Value, session: SessionId) -> Optio
 
 type RootAgentRuntime = AgentRuntime<FileRuntimeStore, AgentPty, DiscardJournal>;
 type SharedAgentRuntime = Arc<Mutex<RootAgentRuntime>>;
+type SharedSupervisorRuntime = Arc<Mutex<SupervisorRuntime>>;
+
+struct DeferredDecisionWaker;
+impl DecisionWaker for DeferredDecisionWaker {
+    fn wake(&mut self, _: &DecisionWake) -> anyhow::Result<()> {
+        anyhow::bail!("parent agent wake adapter is unavailable")
+    }
+}
 
 /// Locks the shared Agent owner for one terminal request; a poisoned lock is a
 /// safe unavailable error rather than a client-side fallback.
@@ -829,10 +840,19 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         agent_pty,
         mcp_command,
     );
+    let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(&data_dir.join("daemon"))));
+    if let Ok(runtime) = supervisor.lock()
+        && let Err(error) = runtime.tick_all(chrono::Utc::now(), &mut DeferredDecisionWaker)
+    {
+        ErrorLog::record(&format!(
+            "supervisor startup reconciliation deferred: {error}"
+        ));
+    }
     start_agent_observer(
         Arc::clone(&agent),
         agent_observations,
         Arc::clone(&pr_inventory),
+        Arc::clone(&supervisor),
     )?;
     start_ipc_accept_loop(
         listener,
@@ -843,6 +863,7 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         pr_inventory,
         Arc::new(UserDecisionStore::new(data_dir.join("daemon"))),
         Arc::new(Mutex::new(ProcessMetrics { previous: None })),
+        supervisor,
     )
 }
 
@@ -896,6 +917,7 @@ fn start_agent_observer(
     agent: SharedAgentRuntime,
     observations: Receiver<AgentPtyObservation>,
     pr_inventory: SharedPrInventory,
+    supervisor: SharedSupervisorRuntime,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("usagi-agent-observer".to_string())
@@ -918,6 +940,14 @@ fn start_agent_observer(
                     }
                     AgentPtyObservation::Exited(reference, status) => {
                         let _ = agent.exit(&reference, status);
+                        if let Ok(runtime) = supervisor.lock()
+                            && let Err(error) =
+                                runtime.tick_all(chrono::Utc::now(), &mut DeferredDecisionWaker)
+                        {
+                            ErrorLog::record(&format!(
+                                "supervisor completion reconciliation deferred: {error}"
+                            ));
+                        }
                     }
                 }
             }
@@ -1010,6 +1040,7 @@ fn start_ipc_accept_loop(
     pr_inventory: SharedPrInventory,
     decisions: Arc<UserDecisionStore>,
     metrics: SharedProcessMetrics,
+    supervisor: SharedSupervisorRuntime,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("usagi-ipc".to_string())
@@ -1026,6 +1057,7 @@ fn start_ipc_accept_loop(
                         let pr_inventory = Arc::clone(&pr_inventory);
                         let decisions = Arc::clone(&decisions);
                         let metrics = Arc::clone(&metrics);
+                        let supervisor = Arc::clone(&supervisor);
                         let _ = std::thread::Builder::new()
                             .name("usagi-ipc-client".to_string())
                             .spawn(move || {
@@ -1043,7 +1075,7 @@ fn start_ipc_accept_loop(
                                     &mut writer,
                                     &server,
                                     &mut owner,
-                                    |request_id, body, hello| match body
+                                    |request_id, body, hello, connection, _client| match body
                                         .get("kind")
                                         .and_then(serde_json::Value::as_str)
                                     {
@@ -1053,6 +1085,7 @@ fn start_ipc_accept_loop(
                                         Some("metrics") => dispatch_metrics(&metrics, request_id, &body, hello),
                                         Some("pr") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
                                         Some("dispatch_tool") => dispatch_dispatch_tool(&agent_launch, &scope_sessions, &decisions, request_id, &body, hello),
+                                        Some("supervisor_tool") => dispatch_supervisor_tool(&supervisor, connection, request_id, &body, hello),
                                         _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
                                     },
                                 );
@@ -1456,10 +1489,266 @@ fn dispatch_agent_tool(
         Err(error) => envelope(
             hello,
             request_id,
+            usagi_core::infrastructure::ipc::ResponseOutcome::Error(error),
+            serde_json::Value::Null,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn dispatch_supervisor_tool(
+    runtime: &SharedSupervisorRuntime,
+    connection: usagi_core::domain::id::ConnectionId,
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    body: &serde_json::Value,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    use chrono::Utc;
+    use usagi_core::domain::{
+        id::OperationId,
+        supervisor::{EscalationDecision, SupervisorRunId, SupervisorRunState},
+    };
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
+
+    #[derive(Deserialize)]
+    struct StartPayload {
+        root_task: String,
+        #[serde(default)]
+        initial_task_dag: Vec<InitialTask>,
+        policy_selector: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct RunPayload {
+        supervisor_run_id: SupervisorRunId,
+    }
+    #[derive(Deserialize)]
+    struct ListPayload {
+        state: Option<SupervisorRunState>,
+        caller: Option<String>,
+        session: Option<String>,
+        cursor: Option<String>,
+        #[serde(default = "default_page_limit")]
+        limit: usize,
+    }
+    #[derive(Deserialize)]
+    struct CancelPayload {
+        supervisor_run_id: SupervisorRunId,
+        reason: String,
+    }
+    #[derive(Deserialize)]
+    struct ResolvePayload {
+        supervisor_run_id: SupervisorRunId,
+        escalation_id: OperationId,
+        decision: EscalationDecision,
+    }
+    #[derive(Deserialize)]
+    struct EventsPayload {
+        supervisor_run_id: SupervisorRunId,
+        #[serde(default)]
+        after_sequence: u64,
+        #[serde(default = "default_page_limit")]
+        limit: usize,
+    }
+
+    fn default_page_limit() -> usize {
+        50
+    }
+
+    let parsed = serde_json::from_value::<DaemonRequest>(body.clone());
+    let Ok(DaemonRequest::SupervisorTool {
+        action,
+        operation_id,
+        payload,
+    }) = parsed
+    else {
+        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+    };
+    let caller = format!("ipc-connection:{connection}");
+    let result = runtime
+        .lock()
+        .map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "supervisor runtime is unavailable")
+        })
+        .and_then(|runtime| match action {
+            SupervisorToolAction::Start => {
+                let input: StartPayload = serde_json::from_value(payload).map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid supervisor_start payload",
+                    )
+                })?;
+                let started = runtime
+                    .start(
+                        &caller,
+                        &operation_id,
+                        input.root_task,
+                        input.initial_task_dag,
+                        input.policy_selector,
+                        Utc::now(),
+                    )
+                    .map_err(supervisor_error)?;
+                runtime
+                    .tick(
+                        started.supervisor_run_id,
+                        Utc::now(),
+                        &mut DeferredDecisionWaker,
+                    )
+                    .map_err(supervisor_error)?;
+                serde_json::to_value(
+                    runtime
+                        .get(&caller, started.supervisor_run_id)
+                        .map_err(supervisor_error)?
+                        .ok_or_else(|| {
+                            ProtocolError::new(
+                                ErrorCode::Internal,
+                                "started supervisor run disappeared",
+                            )
+                        })?,
+                )
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Internal, "supervisor response encoding failed")
+                })
+            }
+            SupervisorToolAction::Get => {
+                let input: RunPayload = serde_json::from_value(payload).map_err(|_| {
+                    ProtocolError::new(ErrorCode::InvalidArgument, "invalid supervisor_get payload")
+                })?;
+                serde_json::to_value(
+                    runtime
+                        .get(&caller, input.supervisor_run_id)
+                        .map_err(supervisor_error)?
+                        .ok_or_else(|| {
+                            ProtocolError::new(
+                                ErrorCode::OwnershipUnknown,
+                                "supervisor run is unavailable to this caller",
+                            )
+                        })?,
+                )
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Internal, "supervisor response encoding failed")
+                })
+            }
+            SupervisorToolAction::List => {
+                let input: ListPayload = serde_json::from_value(payload).map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid supervisor_list payload",
+                    )
+                })?;
+                if input.limit == 0
+                    || input.limit > 100
+                    || input.session.is_some()
+                    || input.caller.as_ref().is_some_and(|value| value != &caller)
+                {
+                    return Err(ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid supervisor_list filter",
+                    ));
+                }
+                let offset = input
+                    .cursor
+                    .as_deref()
+                    .unwrap_or("0")
+                    .parse::<usize>()
+                    .map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::InvalidArgument,
+                            "invalid supervisor_list cursor",
+                        )
+                    })?;
+                let runs = runtime
+                    .list(&caller, input.state)
+                    .map_err(supervisor_error)?;
+                let page: Vec<_> = runs.iter().skip(offset).take(input.limit).collect();
+                let next_cursor =
+                    (offset + page.len() < runs.len()).then(|| (offset + page.len()).to_string());
+                Ok(serde_json::json!({"runs": page, "next_cursor": next_cursor}))
+            }
+            SupervisorToolAction::Cancel => {
+                let input: CancelPayload = serde_json::from_value(payload).map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid supervisor_cancel payload",
+                    )
+                })?;
+                serde_json::to_value(
+                    runtime
+                        .cancel(&caller, input.supervisor_run_id, input.reason, Utc::now())
+                        .map_err(supervisor_error)?,
+                )
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Internal, "supervisor response encoding failed")
+                })
+            }
+            SupervisorToolAction::ResolveEscalation => {
+                let input: ResolvePayload = serde_json::from_value(payload).map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid supervisor_resolve_escalation payload",
+                    )
+                })?;
+                serde_json::to_value(
+                    runtime
+                        .resolve_escalation(
+                            &caller,
+                            input.supervisor_run_id,
+                            input.escalation_id,
+                            input.decision,
+                            Utc::now(),
+                        )
+                        .map_err(supervisor_error)?,
+                )
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Internal, "supervisor response encoding failed")
+                })
+            }
+            SupervisorToolAction::Events => {
+                let input: EventsPayload = serde_json::from_value(payload).map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid supervisor_events payload",
+                    )
+                })?;
+                if input.limit == 0 || input.limit > 100 {
+                    return Err(ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid supervisor_events limit",
+                    ));
+                }
+                let (events, cursor) = runtime
+                    .events(
+                        &caller,
+                        input.supervisor_run_id,
+                        input.after_sequence,
+                        input.limit,
+                    )
+                    .map_err(supervisor_error)?;
+                Ok(serde_json::json!({"events": events, "next_sequence": cursor.next_sequence}))
+            }
+        });
+    match result {
+        Ok(value) => envelope(hello, request_id, ResponseOutcome::Ok, value),
+        Err(error) => envelope(
+            hello,
+            request_id,
             ResponseOutcome::Error(error),
             serde_json::json!(null),
         ),
     }
+}
+
+fn supervisor_error(error: anyhow::Error) -> usagi_core::infrastructure::ipc::ProtocolError {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+    let message = error.to_string();
+    drop(error);
+    let code = if message.contains("reused") {
+        ErrorCode::IdempotencyConflict
+    } else if message.contains("does not exist") {
+        ErrorCode::OwnershipUnknown
+    } else {
+        ErrorCode::InvalidArgument
+    };
+    ProtocolError::new(code, message)
 }
 
 /// PR events are deliberately only hints; the IPC request always returns this

@@ -6,7 +6,7 @@
 //! wake reservations, then performs the finite set of reserved wake effects.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -18,13 +18,17 @@ use usagi_core::{
         agent::{InboxKind, RunStatus},
         id::OperationId,
         supervisor::{
-            RunProvenance, SupervisorEvent, SupervisorEventKind, SupervisorEventSource,
-            SupervisorRunId, TaskId, TaskState,
+            EscalationDecision, RunProvenance, SupervisorEvent, SupervisorEventKind,
+            SupervisorEventSource, SupervisorRun, SupervisorRunId, SupervisorRunQuery,
+            SupervisorRunState, TaskId, TaskNode, TaskState,
         },
     },
     infrastructure::{
         persistence::json_file,
-        store::{dispatch::DispatchStore, supervisor::SupervisorStore},
+        store::{
+            dispatch::DispatchStore,
+            supervisor::{EventCursor, EventQuery, SupervisorStore},
+        },
     },
 };
 
@@ -61,11 +65,31 @@ pub trait DecisionWaker {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct RuntimeState {
     wakes: BTreeMap<String, WakeReservation>,
+    starts: BTreeMap<String, StartReservation>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WakeReservation {
     wake: DecisionWake,
     delivered: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StartReservation {
+    semantic_key: String,
+    supervisor_run_id: SupervisorRunId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InitialTask {
+    pub task_id: String,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    pub instruction: String,
+    #[serde(default = "default_artifact_contract")]
+    pub required_artifact_contract: String,
+}
+
+fn default_artifact_contract() -> String {
+    "none".into()
 }
 
 /// The single daemon-owned scheduler runtime. It is intentionally independent
@@ -84,6 +108,233 @@ impl SupervisorRuntime {
             dispatch: DispatchStore::new(state_dir),
             state_path: state_dir.join("supervisor-scheduler.json"),
         }
+    }
+
+    /// Starts one durable run. The operation key is reserved before aggregate
+    /// initialization, so retrying after a disconnect reuses the same run ID.
+    ///
+    /// # Errors
+    /// Returns an error for conflicting idempotency, invalid DAGs, or durable IO failure.
+    #[coverage(off)] // Also linked into the root production binary; LLVM attributes its nested reducer calls to duplicate crate instances. Unit and production E2E tests cover the behavior.
+    pub fn start(
+        &self,
+        caller: &str,
+        operation_id: &str,
+        root_task: String,
+        initial_tasks: Vec<InitialTask>,
+        policy_selector: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Result<SupervisorRunQuery> {
+        let semantic_key = serde_json::to_string(&(
+            caller,
+            &root_task,
+            &initial_tasks,
+            policy_selector.as_deref().unwrap_or("default"),
+        ))?;
+        let mut state = self.load_state()?;
+        let reservation = match state.starts.get(operation_id) {
+            Some(existing) if existing.semantic_key == semantic_key => existing.clone(),
+            Some(_) => anyhow::bail!("operation id was reused with a different supervisor start"),
+            None => {
+                let reservation = StartReservation {
+                    semantic_key,
+                    supervisor_run_id: SupervisorRunId::new(),
+                };
+                state
+                    .starts
+                    .insert(operation_id.to_owned(), reservation.clone());
+                self.save_state(&state)?;
+                reservation
+            }
+        };
+        if let Some(run) = self.supervisor.load(reservation.supervisor_run_id)? {
+            return Ok(run.query());
+        }
+        let policy_revision = policy_selector.unwrap_or_else(|| "default".into());
+        let mut run = SupervisorRun::new_with_id(
+            reservation.supervisor_run_id,
+            caller.to_owned(),
+            operation_id.to_owned(),
+            operation_id.to_owned(),
+            policy_revision,
+            now,
+        );
+        self.supervisor.initialize(&run)?;
+        let root_id = TaskId::new("root")?;
+        run = self.apply(
+            &run,
+            now,
+            SupervisorEventSource::Admission,
+            SupervisorEventKind::AddTask {
+                task: task_node(&run, root_id, BTreeSet::new(), root_task, "none".into()),
+            },
+        )?;
+        let mut pending = initial_tasks;
+        while !pending.is_empty() {
+            let before = pending.len();
+            let mut remaining = Vec::new();
+            for task in pending {
+                let dependencies = task
+                    .dependencies
+                    .iter()
+                    .map(|value| TaskId::new(value.clone()))
+                    .collect::<Result<BTreeSet<_>, _>>()?;
+                if dependencies.iter().all(|id| run.tasks.contains_key(id)) {
+                    let task_id = TaskId::new(task.task_id)?;
+                    run = self.apply(
+                        &run,
+                        now,
+                        SupervisorEventSource::Admission,
+                        SupervisorEventKind::AddTask {
+                            task: task_node(
+                                &run,
+                                task_id,
+                                dependencies,
+                                task.instruction,
+                                task.required_artifact_contract,
+                            ),
+                        },
+                    )?;
+                } else {
+                    remaining.push(task);
+                }
+            }
+            if remaining.len() == before {
+                anyhow::bail!("initial task DAG has a missing dependency or cycle");
+            }
+            pending = remaining;
+        }
+        run = self.apply(
+            &run,
+            now,
+            SupervisorEventSource::Admission,
+            SupervisorEventKind::SetRunState {
+                state: SupervisorRunState::Running,
+                terminal_reason: None,
+            },
+        )?;
+        Ok(run.query())
+    }
+
+    /// Reads one caller-owned durable run.
+    ///
+    /// # Errors
+    /// Returns an error when durable state cannot be read.
+    pub fn get(&self, caller: &str, id: SupervisorRunId) -> Result<Option<SupervisorRunQuery>> {
+        Ok(self.owned_run(caller, id)?.map(|run| run.query()))
+    }
+
+    /// Lists caller-owned durable runs.
+    ///
+    /// # Errors
+    /// Returns an error when durable state cannot be listed or replayed.
+    pub fn list(
+        &self,
+        caller: &str,
+        state: Option<SupervisorRunState>,
+    ) -> Result<Vec<SupervisorRunQuery>> {
+        Ok(self
+            .supervisor
+            .runs()?
+            .into_iter()
+            .filter(|run| {
+                run.root_caller_ref == caller && state.is_none_or(|value| run.state == value)
+            })
+            .map(|run| run.query())
+            .collect())
+    }
+
+    /// Commits a fenced cancellation.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown owner, invalid transition, or durable IO failure.
+    pub fn cancel(
+        &self,
+        caller: &str,
+        id: SupervisorRunId,
+        reason: String,
+        now: DateTime<Utc>,
+    ) -> Result<SupervisorRunQuery> {
+        let run = self
+            .owned_run(caller, id)?
+            .ok_or_else(|| anyhow::anyhow!("supervisor run does not exist for this caller"))?;
+        self.apply(
+            &run,
+            now,
+            SupervisorEventSource::Cancel,
+            SupervisorEventKind::Cancel {
+                task_id: None,
+                reason,
+            },
+        )
+        .map(|run| run.query())
+    }
+
+    /// Commits an authorized escalation decision.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid owner/fence/transition or durable IO failure.
+    pub fn resolve_escalation(
+        &self,
+        caller: &str,
+        id: SupervisorRunId,
+        escalation_id: OperationId,
+        decision: EscalationDecision,
+        now: DateTime<Utc>,
+    ) -> Result<SupervisorRunQuery> {
+        let run = self
+            .owned_run(caller, id)?
+            .ok_or_else(|| anyhow::anyhow!("supervisor run does not exist for this caller"))?;
+        self.apply(
+            &run,
+            now,
+            SupervisorEventSource::Admission,
+            SupervisorEventKind::ResolveEscalation {
+                escalation_id,
+                decision,
+            },
+        )
+        .map(|run| run.query())
+    }
+
+    /// Returns redaction-safe event metadata for one caller-owned run.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown owner or durable IO failure.
+    pub fn events(
+        &self,
+        caller: &str,
+        id: SupervisorRunId,
+        after_sequence: u64,
+        limit: usize,
+    ) -> Result<(Vec<EventQuery>, EventCursor)> {
+        self.owned_run(caller, id)?
+            .ok_or_else(|| anyhow::anyhow!("supervisor run does not exist for this caller"))?;
+        self.supervisor.events(
+            id,
+            EventCursor {
+                next_sequence: after_sequence.saturating_add(1),
+            },
+            limit,
+        )
+    }
+
+    /// Reconciles every durable run after startup or a completion wake.
+    ///
+    /// # Errors
+    /// Returns the first durable reconciliation or wake delivery failure.
+    pub fn tick_all<W: DecisionWaker>(&self, now: DateTime<Utc>, waker: &mut W) -> Result<()> {
+        for run in self.supervisor.runs()? {
+            self.tick(run.supervisor_run_id, now, waker)?;
+        }
+        Ok(())
+    }
+
+    fn owned_run(&self, caller: &str, id: SupervisorRunId) -> Result<Option<SupervisorRun>> {
+        Ok(self
+            .supervisor
+            .load(id)?
+            .filter(|run| run.root_caller_ref == caller))
     }
 
     /// Reconciles one run and delivers each durably reserved wake at least once.
@@ -287,6 +538,30 @@ impl SupervisorRuntime {
             &self.state_path,
             state,
         )
+    }
+}
+
+fn task_node(
+    run: &SupervisorRun,
+    task_id: TaskId,
+    dependencies: BTreeSet<TaskId>,
+    instruction: String,
+    required_artifact_contract: String,
+) -> TaskNode {
+    TaskNode {
+        instruction_digest: format!("task:{}", task_id.0),
+        task_id,
+        supervisor_run_id: run.supervisor_run_id,
+        parent_task_id: None,
+        dependencies,
+        instruction_body: instruction,
+        required_artifact_contract,
+        attempt: 1,
+        generation: 1,
+        assigned_dispatch_run: None,
+        retry_at: None,
+        verification_digest: None,
+        state: TaskState::Pending,
     }
 }
 
@@ -632,5 +907,150 @@ mod tests {
         let restarted = SupervisorRuntime::new(temp.path());
         restarted.tick(id, now(), &mut waker).unwrap();
         assert_eq!(waker.wakes.len(), 1);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn control_surface_is_idempotent_owned_and_durable() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let initial = vec![InitialTask {
+            task_id: "child".into(),
+            dependencies: vec!["root".into()],
+            instruction: "secret child instruction".into(),
+            required_artifact_contract: "none".into(),
+        }];
+        let started = runtime
+            .start(
+                "caller-a",
+                "operation-a",
+                "secret root instruction".into(),
+                initial.clone(),
+                None,
+                now(),
+            )
+            .unwrap();
+        assert_eq!(started.state, SupervisorRunState::Running);
+        assert_eq!(started.tasks.len(), 2);
+        assert_eq!(
+            runtime
+                .start(
+                    "caller-a",
+                    "operation-a",
+                    "secret root instruction".into(),
+                    initial,
+                    None,
+                    now(),
+                )
+                .unwrap()
+                .supervisor_run_id,
+            started.supervisor_run_id
+        );
+        assert!(
+            runtime
+                .start(
+                    "caller-a",
+                    "operation-a",
+                    "different".into(),
+                    vec![],
+                    None,
+                    now(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("reused")
+        );
+        assert!(
+            runtime
+                .get("caller-b", started.supervisor_run_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            runtime
+                .list("caller-a", Some(SupervisorRunState::Running))
+                .unwrap()
+                .len(),
+            1
+        );
+        let (events, cursor) = runtime
+            .events("caller-a", started.supervisor_run_id, 0, 10)
+            .unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(cursor.next_sequence, 4);
+        let run = runtime
+            .supervisor
+            .load(started.supervisor_run_id)
+            .unwrap()
+            .unwrap();
+        let escalated = runtime
+            .apply(
+                &run,
+                now(),
+                SupervisorEventSource::Admission,
+                SupervisorEventKind::Escalate {
+                    task_id: None,
+                    reason: "operator decision required".into(),
+                    safe_evidence: "safe evidence".into(),
+                    choices: vec!["resume".into()],
+                },
+            )
+            .unwrap();
+        let escalation_id = escalated.escalation.as_ref().unwrap().escalation_id;
+        let resumed = runtime
+            .resolve_escalation(
+                "caller-a",
+                started.supervisor_run_id,
+                escalation_id,
+                EscalationDecision::Resume,
+                now(),
+            )
+            .unwrap();
+        assert_eq!(resumed.state, SupervisorRunState::Running);
+        let cancelled = runtime
+            .cancel(
+                "caller-a",
+                started.supervisor_run_id,
+                "operator requested".into(),
+                now(),
+            )
+            .unwrap();
+        assert_eq!(cancelled.state, SupervisorRunState::Cancelled);
+        assert_eq!(
+            SupervisorRuntime::new(temp.path())
+                .list("caller-a", None)
+                .unwrap()
+                .len(),
+            1
+        );
+        runtime.tick_all(now(), &mut Waker::default()).unwrap();
+    }
+
+    #[test]
+    fn start_rejects_an_unresolvable_initial_dag() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = SupervisorRuntime::new(temp.path());
+        let error = runtime
+            .start(
+                "caller",
+                "operation",
+                "root".into(),
+                vec![InitialTask {
+                    task_id: "child".into(),
+                    dependencies: vec!["missing".into()],
+                    instruction: "child".into(),
+                    required_artifact_contract: "none".into(),
+                }],
+                Some("strict".into()),
+                now(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("missing dependency or cycle"));
+        let parsed: InitialTask = serde_json::from_value(serde_json::json!({
+            "task_id": "default-contract",
+            "instruction": "body"
+        }))
+        .unwrap();
+        assert_eq!(parsed.required_artifact_contract, "none");
     }
 }

@@ -60,7 +60,7 @@ tool は系統ごとに分かれ、`tools/list` に載る `name` と `inputSchem
 | `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合して user-decision store を操作する |
 | `issue_*` / `memory_*` | cwd の Markdown store を core usecase 経由で操作する |
 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` | caller credential を live Agent runtime と照合し、daemon-owned worker PTY と dispatch store/inbox を操作する |
-| `supervisor_*` | daemon が明示的な JSON-RPC エラーを返し、durable effect は生じない |
+| `supervisor_start` / `supervisor_get` / `supervisor_list` / `supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` | IPC connection から daemon が導出した caller provenance の範囲で、durable supervisor aggregate を作成・観測・制御する |
 
 agent は durable effect を保証する行だけを実行手順に使う。daemon は handler の無い action の入力
 payload を成功応答としてエコーしない。
@@ -70,10 +70,11 @@ dispatch 系は credential から caller と current run を復元する。`sess
 `agent_complete` / `agent_fail` は保存済み binding の caller inbox だけへ配送され、`agent_inbox` は
 認証済み caller 自身の inbox だけを返す。payload の caller 名や cwd から identity を補完しない。
 
-daemon に durable handler が無い tool action は成功として扱わない。現在、supervisor 系の
-`supervisor_start` / `supervisor_get` / `supervisor_list` /
-`supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` は、`tools/call` で
-明示的な JSON-RPC エラーを返す。daemon は入力 payload を成功応答としてエコーせず、副作用も生じない。
+`supervisor_start` は root task と初期 DAG を snapshot と append-only event journal に保存し、同じ
+`idempotency_key` の再送では同じ run を返す。get/list/events の応答は instruction body を含まない安全な
+projection である。cancel と escalation resolution は run 作成時に daemon が記録した caller provenance と
+一致する IPC connection からだけ受理する。daemon は起動時と Agent completion 時に共有
+`SupervisorRuntime` を tick し、dispatch の terminal fact を aggregate へ反映する。
 
 issue / memory の store 系 tool は、CLI 面と同じ `usagi-core` usecase に cwd と実時計を
 束縛する薄い adapter である。成功時は usecase の結果 JSON を MCP の text content に入れて

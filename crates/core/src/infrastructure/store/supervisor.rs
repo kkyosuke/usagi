@@ -19,12 +19,12 @@ const SNAPSHOT_SUFFIX: &str = ".snapshot.json";
 const JOURNAL_SUFFIX: &str = ".events.jsonl";
 
 /// Cursor used to page a run's event history without exposing payload bodies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct EventCursor {
     pub next_sequence: u64,
 }
 /// Redaction-safe journal result.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct EventQuery {
     pub sequence: u64,
     pub event_id: crate::domain::id::OperationId,
@@ -119,6 +119,38 @@ impl SupervisorStore {
     #[coverage(off)]
     pub fn query(&self, id: SupervisorRunId) -> Result<Option<SupervisorRunQuery>> {
         Ok(self.load(id)?.map(|run| run.query()))
+    }
+    /// Returns every durable aggregate, including journal records committed
+    /// after its latest snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the state directory or an aggregate is corrupt.
+    #[coverage(off)]
+    pub fn runs(&self) -> Result<Vec<SupervisorRun>> {
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error).context("failed to list supervisor runs"),
+        };
+        let mut runs = Vec::new();
+        for entry in entries {
+            let path = entry?.path();
+            if !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(SNAPSHOT_SUFFIX))
+            {
+                continue;
+            }
+            let snapshot: SupervisorRun = json_file::read(&path)?
+                .ok_or_else(|| anyhow::anyhow!("supervisor snapshot disappeared"))?;
+            if let Some(run) = self.load(snapshot.supervisor_run_id)? {
+                runs.push(run);
+            }
+        }
+        runs.sort_by_key(|run| (run.created_at, run.supervisor_run_id));
+        Ok(runs)
     }
     /// Lists event metadata from `cursor`, and the next cursor if more history
     /// was returned. Event kinds and instruction bodies are intentionally absent.
