@@ -574,24 +574,25 @@ pub fn mcp_capable_clis(runner: &dyn CommandRunner) -> Vec<AgentCli> {
 /// - the repository's shared git common directory, so sandboxed Codex sessions
 ///   can update `.git` without approval prompts.
 ///
-/// A git resolver failure leaves the launch usable with the workspace metadata
-/// root only; adapters still add their own fixed roots (for Codex, usagi's
-/// global data directory).
+/// The git common directory is an explicit allow root because both session git
+/// operations and coordinator MCP delegation update it. The repository working
+/// tree remains outside that grant. A resolver failure leaves the grant absent;
+/// Claude's sandbox still starts with the remaining canonical roots and any
+/// attempted git mutation fails closed.
 pub fn wiring_for_launch(
     base: &AgentWiring,
     model: Option<String>,
     dir: &Path,
-    mode: LaunchMode,
+    _mode: LaunchMode,
     resolve_git_common_dir: &dyn Fn(&Path) -> Option<PathBuf>,
 ) -> AgentWiring {
     let mut sandbox_writable_roots = base.sandbox_writable_roots.clone();
-    if mode == LaunchMode::Interactive {
-        sandbox_writable_roots.push(crate::usecase::session::workspace_root(dir).join(STATE_DIR));
-        sandbox_writable_roots.extend(resolve_git_common_dir(dir));
-    }
+    sandbox_writable_roots.push(crate::usecase::session::workspace_root(dir).join(STATE_DIR));
+    let is_root = !crate::usecase::workspace_guard::is_session_worktree(dir);
+    sandbox_writable_roots.extend(resolve_git_common_dir(dir));
     AgentWiring {
         model,
-        is_root: !crate::usecase::workspace_guard::is_session_worktree(dir),
+        is_root,
         sandbox_writable_roots,
         ..base.clone()
     }
@@ -1403,21 +1404,25 @@ mod tests {
     }
 
     #[test]
-    fn launch_wiring_carries_workspace_state_dir_for_workspace_root() {
+    fn launch_wiring_carries_state_and_git_roots_for_workspace_root() {
         let dir = Path::new("/repo");
         let wiring = wiring_for_launch(&base_wiring(), None, dir, LaunchMode::Interactive, &|_| {
-            None
+            Some(PathBuf::from("/repo/.git"))
         });
 
         assert!(wiring.is_root);
         assert_eq!(
             wiring.sandbox_writable_roots,
-            vec![PathBuf::from("/old/git"), PathBuf::from("/repo/.usagi")]
+            vec![
+                PathBuf::from("/old/git"),
+                PathBuf::from("/repo/.usagi"),
+                PathBuf::from("/repo/.git")
+            ]
         );
     }
 
     #[test]
-    fn launch_wiring_marks_workspace_root_and_skips_headless_sandbox_roots() {
+    fn launch_wiring_gives_headless_cleanup_only_state_and_git_write_roots() {
         use std::cell::Cell;
 
         let dir = Path::new("/repo");
@@ -1430,8 +1435,6 @@ mod tests {
             resolve_git_common_dir(dir),
             Some(PathBuf::from("/repo/.git"))
         );
-        let calls_before_launch = calls.get();
-
         let wiring = wiring_for_launch(
             &base_wiring(),
             None,
@@ -1441,10 +1444,14 @@ mod tests {
         );
 
         assert!(wiring.is_root);
-        assert_eq!(calls.get(), calls_before_launch);
+        assert_eq!(calls.get(), 2);
         assert_eq!(
             wiring.sandbox_writable_roots,
-            vec![PathBuf::from("/old/git")]
+            vec![
+                PathBuf::from("/old/git"),
+                PathBuf::from("/repo/.usagi"),
+                PathBuf::from("/repo/.git")
+            ]
         );
     }
 }

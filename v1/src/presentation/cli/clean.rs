@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::domain::agent::LaunchMode;
 use crate::domain::settings::AgentCli;
 use crate::infrastructure::repo_paths::STATE_DIR;
 
@@ -57,7 +58,13 @@ pub fn run(
 
     let agent_cli = resolve_agent_cli(settings.agent_cli, agent.as_deref())?;
     let adapter = crate::infrastructure::agent::agent_for(agent_cli);
-    let wiring = settings.agent_wiring(&usagi_bin);
+    let wiring = crate::usecase::agent::wiring_for_launch(
+        &settings.agent_wiring(&usagi_bin),
+        None,
+        &root,
+        LaunchMode::Headless,
+        &crate::infrastructure::git::git_common_dir,
+    );
 
     let prompt = clean_prompt(dry_run);
     let _ = adapter.provision(&wiring);

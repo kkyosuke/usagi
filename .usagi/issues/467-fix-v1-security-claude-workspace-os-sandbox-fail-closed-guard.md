@@ -1,14 +1,14 @@
 ---
 number: 467
 title: fix(v1/security): Claude workspace を OS sandbox と fail-closed guard で隔離する
-status: todo
+status: in-progress
 priority: high
 labels: [review, v1, security, claude, sandbox]
 dependson: []
 related: [105, 107, 108, 149]
 parent: 453
 created_at: 2026-07-20T12:06:22.042681+00:00
-updated_at: 2026-07-20T12:06:22.042681+00:00
+updated_at: 2026-07-20T13:04:40.439885+00:00
 ---
 
 ## 問題・影響
