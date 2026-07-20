@@ -2146,20 +2146,21 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                     .map(|decision| decision.decision_id),
             );
             reconcile_decision_overlay(state);
-            // A snapshot is authoritative, but must not repeatedly steal focus
-            // after the user dismissed its already-known rows.  A first snapshot
-            // (including reconnect/resync) and newly arrived rows open the list
-            // only when no other modal/editor owns keyboard input.
+            // A newly created decision is actionable immediately.  Open its
+            // answer editor rather than making the user traverse the list.
+            // Reconnect snapshots contain only known rows, so they preserve a
+            // deliberate dismiss and never steal focus.
             if state.overlay.is_none()
-                && state
+                && let Some(decision) = state
                     .decisions
                     .iter()
-                    .any(|decision| !previously_known.contains(&decision.decision_id))
+                    .find(|decision| !previously_known.contains(&decision.decision_id))
+                    .cloned()
             {
                 state.overlay = Some(Overlay::Decisions);
                 state.decision_overlay = Some(DecisionOverlayState {
                     selected: 0,
-                    editor: None,
+                    editor: Some(DecisionEditor::new(decision)),
                 });
             }
             Vec::new()
@@ -2171,11 +2172,21 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             if workspace != state.workspace {
                 return Vec::new();
             }
+            let closes_active_modal = state
+                .decision_overlay
+                .as_ref()
+                .and_then(|overlay| overlay.editor.as_ref())
+                .is_some_and(|editor| editor.decision.decision_id == decision_id);
             state
                 .decisions
                 .retain(|decision| decision.decision_id != decision_id);
             state.unread_decisions.remove(&decision_id);
-            reconcile_decision_overlay(state);
+            if closes_active_modal {
+                state.overlay = None;
+                state.decision_overlay = None;
+            } else {
+                reconcile_decision_overlay(state);
+            }
             Vec::new()
         }
         AppEvent::Backend(BackendEvent::DecisionError {
@@ -5642,7 +5653,26 @@ mod tests {
         );
         assert_eq!(state.overlay(), Some(Overlay::Decisions));
         assert!(state.decision_overlay().is_some());
+        assert_eq!(
+            state
+                .decision_overlay()
+                .and_then(DecisionOverlayState::editor)
+                .map(|editor| editor.decision().decision_id),
+            Some(first.decision_id)
+        );
         assert_eq!(state.unread_decision_ids().len(), 1);
+
+        // The response view closes only after the daemon confirms its durable
+        // resolve; this is the request -> modal -> answer -> close path.
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::DecisionResolved {
+                workspace,
+                decision_id: first.decision_id,
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(state.decision_overlay().is_none());
 
         // Dismissal changes only UI state. A duplicate/resync snapshot must not
         // steal focus again, while a genuinely new pending row may notify.
@@ -5652,7 +5682,7 @@ mod tests {
             &mut state,
             AppEvent::Backend(BackendEvent::Decisions {
                 workspace,
-                decisions: vec![first.clone()],
+                decisions: vec![],
             }),
         );
         assert_eq!(state.overlay(), None);

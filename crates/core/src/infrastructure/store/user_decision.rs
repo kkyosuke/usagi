@@ -2,8 +2,7 @@
 //!
 //! A resolve changes the decision and appends its delivery in one replaced JSON
 //! document under one lock. A daemon consumer validates the event against that
-//! record and clears the outbox atomically; the credential-fenced caller then
-//! reads the resolved record by decision ID.
+//! record and acknowledges it only after delivery to the originating run.
 
 #![allow(clippy::missing_errors_doc)] // Store IO errors follow the shared store contract.
 
@@ -73,6 +72,32 @@ impl UserDecisionStore {
     }
     pub fn events(&self) -> Result<Vec<UserDecisionResolvedEvent>> {
         Ok(self.load()?.events)
+    }
+    /// Returns the resolved durable record only when it still agrees with an
+    /// outbox event.  This prevents a consumer from routing an answer based on
+    /// forged or stale event data.
+    pub fn get_for_event(&self, event: &UserDecisionResolvedEvent) -> Result<Option<UserDecision>> {
+        Ok(self.load()?.decisions.into_iter().find(|decision| {
+            decision.decision_id == event.decision_id
+                && decision.owner.caller == event.recipient
+                && decision.status == UserDecisionStatus::Resolved
+                && decision.answer.as_ref() == Some(&event.answer)
+        }))
+    }
+    /// Acknowledges one validated delivery. Repeated acknowledgements are a
+    /// safe no-op, which makes reconnect recovery idempotent.
+    pub fn ack_event(&self, id: UserDecisionId) -> Result<bool> {
+        self.mutate(|state| {
+            let Some(index) = state
+                .events
+                .iter()
+                .position(|event| event.decision_id == id)
+            else {
+                return false;
+            };
+            state.events.remove(index);
+            true
+        })
     }
     pub fn consume_events(&self) -> Result<Result<usize, UserDecisionDeliveryError>> {
         self.mutate(|state| {
@@ -246,8 +271,9 @@ mod tests {
         let event = store.events().unwrap().pop().unwrap();
         assert_eq!(event.decision_id, decision.decision_id);
         assert_eq!(event.recipient, decision.owner.caller);
-        assert_eq!(store.consume_events().unwrap(), Ok(1));
-        assert_eq!(store.consume_events().unwrap(), Ok(0));
+        assert_eq!(store.get_for_event(&event).unwrap(), Some(resolved.clone()));
+        assert!(store.ack_event(event.decision_id).unwrap());
+        assert!(!store.ack_event(event.decision_id).unwrap());
         assert!(store.events().unwrap().is_empty());
         assert_eq!(
             store
@@ -270,6 +296,28 @@ mod tests {
                 .answer,
             resolved.answer
         );
+    }
+
+    #[test]
+    fn compatible_resolved_event_is_consumed_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let decision = item();
+        store.create(decision.clone()).unwrap().unwrap();
+        store
+            .resolve(
+                decision.owner.workspace_id,
+                decision.decision_id,
+                UserDecisionAnswer::Option {
+                    option_id: "a".into(),
+                },
+                Utc::now(),
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(store.consume_events().unwrap(), Ok(1));
+        assert_eq!(store.consume_events().unwrap(), Ok(0));
     }
 
     #[test]
