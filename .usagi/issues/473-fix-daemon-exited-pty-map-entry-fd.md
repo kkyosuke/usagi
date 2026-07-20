@@ -1,14 +1,14 @@
 ---
 number: 473
 title: fix(daemon): exited PTY の map entry と FD を回収する
-status: todo
+status: in-progress
 priority: high
 labels: [review, v2, daemon, terminal, resource]
 dependson: []
 related: [218, 251, 264, 271, 385, 472]
 parent: 453
 created_at: 2026-07-20T12:06:24.030994+00:00
-updated_at: 2026-07-20T12:07:41.204045+00:00
+updated_at: 2026-07-20T21:23:40.365527+00:00
 ---
 
 ## 問題・影響

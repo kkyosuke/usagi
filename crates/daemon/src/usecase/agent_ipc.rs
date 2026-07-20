@@ -841,9 +841,17 @@ impl<
             .coordinator
             .runtime_for_terminal(terminal)
             .ok_or_else(stale_terminal)?;
-        self.coordinator
-            .exit(&runtime, status, &mut self.store)
-            .map_err(map_runtime_error)?;
+        let result = self.coordinator.exit(&runtime, status, &mut self.store);
+        if matches!(
+            result,
+            Ok(())
+                | Err(RuntimeError::ReconcileRequired(
+                    super::runtime::ReconcileState::PersistAfterExit
+                ))
+        ) {
+            self.pty.release(terminal);
+        }
+        result.map_err(map_runtime_error)?;
 
         // The operation ledger is the only authority for replay.  Update it
         // after the terminal registry and durable runtime record have accepted
@@ -1443,6 +1451,7 @@ mod tests {
         selected: Option<TerminalRef>,
         spawn: Option<SpawnFailure>,
         resized: Vec<(TerminalRef, Geometry)>,
+        released: Vec<TerminalRef>,
     }
     impl PtySpawner for Pty {
         fn spawn(
@@ -1476,6 +1485,10 @@ mod tests {
         fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
             self.writes.extend_from_slice(bytes);
             Ok(())
+        }
+        fn release(&mut self, terminal: &TerminalRef) -> bool {
+            self.released.push(terminal.clone());
+            true
         }
     }
 
@@ -2012,6 +2025,28 @@ mod tests {
         assert_eq!(live["exited"], false);
 
         runtime.exit(&terminal, 0).unwrap();
+        assert!(runtime.exit(&terminal, 0).is_err());
+        assert_eq!(
+            runtime.pty.released.as_slice(),
+            std::slice::from_ref(&terminal)
+        );
+        let late_resize = runtime.handle_terminal(
+            connection,
+            client,
+            RequestId::new(),
+            TerminalAction::Resize,
+            TerminalRequest::Resize {
+                terminal: terminal.clone(),
+                geometry: TerminalGeometry { cols: 80, rows: 24 },
+            },
+        );
+        assert!(matches!(
+            late_resize,
+            TerminalOutcome::Handled(Err(ProtocolError {
+                code: ErrorCode::StaleTarget,
+                ..
+            }))
+        ));
         let exited = handled(runtime.handle_terminal(
             connection,
             client,
@@ -2023,6 +2058,24 @@ mod tests {
             },
         ));
         assert_eq!(exited["exited"], true);
+    }
+
+    #[test]
+    fn observed_exit_releases_transport_when_the_final_store_write_fails() {
+        let mut runtime = runtime();
+        let terminal = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &intent(None),
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap()
+            .terminal;
+        runtime.store.fail_after = Some(runtime.store.saves);
+
+        let error = runtime.exit(&terminal, 0).unwrap_err();
+        assert_eq!(error.code, ErrorCode::OwnershipUnknown);
+        assert_eq!(runtime.pty.released, [terminal]);
     }
 
     #[test]

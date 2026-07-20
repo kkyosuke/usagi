@@ -143,10 +143,19 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
     pub fn exit(&mut self, terminal: &TerminalRef, status: i32) -> Result<(), ProtocolError>
     where
         S: TerminalStore,
+        P: PtyWriter,
     {
-        self.coordinator
-            .exit(terminal, status, &mut self.store)
-            .map_err(map_error)
+        let result = self.coordinator.exit(terminal, status, &mut self.store);
+        if matches!(
+            result,
+            Ok(())
+                | Err(GenericTerminalError::ReconcileRequired(
+                    super::terminal::TerminalReconcileState::PersistAfterExit
+                ))
+        ) {
+            self.pty.release(terminal);
+        }
+        result.map_err(map_error)
     }
 }
 
@@ -427,6 +436,7 @@ mod tests {
         spawned_directories: Vec<PathBuf>,
         spawned_geometry: Option<Geometry>,
         resized: Vec<Geometry>,
+        released: Vec<TerminalRef>,
     }
     impl GenericPtySpawner for Pty {
         fn spawn(
@@ -454,6 +464,11 @@ mod tests {
         fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
             self.writes.extend_from_slice(bytes);
             Ok(())
+        }
+
+        fn release(&mut self, terminal: &TerminalRef) -> bool {
+            self.released.push(terminal.clone());
+            true
         }
     }
     struct Scope {
@@ -597,6 +612,41 @@ mod tests {
             6
         );
         runtime.exit(&terminal, 0).unwrap();
+        assert!(runtime.exit(&terminal, 0).is_err());
+        assert_eq!(
+            runtime.pty.released.as_slice(),
+            std::slice::from_ref(&terminal)
+        );
+        let late_resize = runtime
+            .request(
+                connection,
+                client,
+                RequestId::new(),
+                TerminalAction::Resize,
+                serde_json::to_value(TerminalRequest::Resize {
+                    terminal: terminal.clone(),
+                    geometry: TerminalGeometry { cols: 80, rows: 24 },
+                })
+                .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(late_resize.code, ErrorCode::StaleTarget);
+        let late_input = runtime
+            .request(
+                connection,
+                client,
+                RequestId::new(),
+                TerminalAction::Input,
+                serde_json::to_value(TerminalRequest::Input {
+                    terminal: terminal.clone(),
+                    subscription,
+                    input_seq: 1,
+                    bytes: b"late\n".to_vec(),
+                })
+                .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(late_input.code, ErrorCode::StaleTarget);
         assert_eq!(
             call(
                 &mut runtime,
