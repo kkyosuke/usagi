@@ -132,17 +132,29 @@ impl FileRuntimeStore {
     /// Missing snapshots are normal on a first launch.  Parse/write failures
     /// deliberately leave the old bytes untouched so a later recovery can
     /// inspect the last known-good durable snapshot.
-    fn reconcile_after_restart(&mut self) -> std::io::Result<usize> {
+    fn reconcile_after_restart(&mut self) -> std::io::Result<RuntimeStoreSnapshot> {
         let Some(snapshot) =
             json_file::read::<RuntimeStoreSnapshot>(&self.0).map_err(std::io::Error::other)?
         else {
-            return Ok(0);
+            return Ok(RuntimeStoreSnapshot::default());
         };
+        snapshot.validate_schema().map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid agent runtime snapshot schema: {error:?}"),
+            )
+        })?;
+        let legacy = snapshot.schema_version == 1;
         let (snapshot, interrupted) = snapshot.reconcile_after_daemon_restart();
-        if interrupted != 0 {
-            self.save(snapshot)?;
+        if interrupted != 0 || legacy {
+            self.save(snapshot.clone())?;
         }
-        Ok(interrupted)
+        if interrupted != 0 {
+            ErrorLog::record(&format!(
+                "daemon startup reconciled {interrupted} agent runtime(s) as interrupted (identity_unknown)"
+            ));
+        }
+        Ok(snapshot)
     }
 }
 
@@ -883,7 +895,7 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         Arc::clone(&runtime),
         agent_pty,
         mcp_command,
-    );
+    )?;
     let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(&data_dir.join("daemon"))));
     if let Ok(runtime) = supervisor.lock()
         && let Err(error) = runtime.tick_all(chrono::Utc::now(), &mut DeferredDecisionWaker)
@@ -920,17 +932,9 @@ fn open_agent_runtime(
     sessions: SharedSessionRuntime,
     pty: AgentPty,
     mcp_command: PathBuf,
-) -> SharedAgentRuntime {
+) -> std::io::Result<SharedAgentRuntime> {
     let mut store = FileRuntimeStore(data_dir.join("daemon").join("agents.json"));
-    match store.reconcile_after_restart() {
-        Ok(0) => {}
-        Ok(interrupted) => ErrorLog::record(&format!(
-            "daemon startup reconciled {interrupted} agent runtime(s) as interrupted (identity_unknown)"
-        )),
-        Err(error) => ErrorLog::record(&format!(
-            "daemon startup could not reconcile durable agent runtimes: {error}"
-        )),
-    }
+    let snapshot = store.reconcile_after_restart()?;
     let mut registry = AdapterRegistry::new();
     let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness);
     let data_home = if cfg!(debug_assertions) {
@@ -955,7 +959,7 @@ fn open_agent_runtime(
             data_home,
         }),
     );
-    Arc::new(Mutex::new(AgentRuntime::with_dispatch(
+    let runtime = AgentRuntime::hydrate_with_dispatch_and_locator(
         generation,
         registry,
         store,
@@ -964,7 +968,16 @@ fn open_agent_runtime(
         AgentProfileId::new("codex").expect("literal profile id is canonical"),
         Geometry { cols: 80, rows: 24 },
         DispatchStore::new(data_dir.join("daemon")),
-    )))
+        usagi_core::infrastructure::runtime_model::PathExecutableLocator,
+        snapshot,
+    )
+    .map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid agent runtime snapshot: {error:?}"),
+        )
+    })?;
+    Ok(Arc::new(Mutex::new(runtime)))
 }
 
 fn start_agent_observer(
@@ -3712,6 +3725,26 @@ mod tests {
             serde_json::from_slice::<RuntimeStoreSnapshot>(&std::fs::read(path).unwrap()).unwrap(),
             snapshot
         );
+    }
+
+    #[test]
+    fn corrupt_or_unknown_agent_snapshot_fails_closed_without_overwrite() {
+        for bytes in [
+            b"{not-json".as_slice(),
+            br#"{"schema_version":999,"records":[]}"#.as_slice(),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("agents.json");
+            std::fs::write(&path, bytes).unwrap();
+            let before = std::fs::read(&path).unwrap();
+
+            assert!(
+                FileRuntimeStore(path.clone())
+                    .reconcile_after_restart()
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(path).unwrap(), before);
+        }
     }
 
     #[test]

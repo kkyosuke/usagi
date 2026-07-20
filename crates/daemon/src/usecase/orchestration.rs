@@ -216,6 +216,31 @@ impl Orchestrator {
         spawner: &mut P,
         mcp_credential: Option<String>,
     ) -> Result<(), OrchestrationError> {
+        self.launch_with_semantic(
+            runtime,
+            registry,
+            authorization,
+            request,
+            geometry,
+            store,
+            spawner,
+            mcp_credential,
+            "internal-launch".to_owned(),
+        )
+    }
+
+    pub fn launch_with_semantic<S: RuntimeStore, P: PtySpawner>(
+        &mut self,
+        runtime: &mut RuntimeCoordinator,
+        registry: &mut AdapterRegistry,
+        authorization: &RuntimeAuthorization,
+        request: &LaunchRequest,
+        geometry: Geometry,
+        store: &mut S,
+        spawner: &mut P,
+        mcp_credential: Option<String>,
+        semantic_key: String,
+    ) -> Result<(), OrchestrationError> {
         if !authorization.fences(&authorization.runtime, &authorization.operation)
             || request.scope.session_id != authorization.runtime.session_id
             || request.scope.workspace_id != authorization.runtime.terminal.workspace_id
@@ -233,7 +258,7 @@ impl Orchestrator {
             .adapter_mut(&request.profile_id)
             .map_err(|_| OrchestrationError::UnknownProfile)?;
         runtime
-            .launch(
+            .launch_with_semantic(
                 request,
                 authorization.runtime.clone(),
                 authorization.operation.clone(),
@@ -242,6 +267,7 @@ impl Orchestrator {
                 store,
                 spawner,
                 mcp_credential,
+                semantic_key,
             )
             .map_err(OrchestrationError::Runtime)
     }
