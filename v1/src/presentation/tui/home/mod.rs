@@ -797,7 +797,7 @@ fn prepare_launch(
                 .provision(&launch_wiring)
                 .map_err(|err| format!("agent provision failed: {err}"))?;
             Some(crate::domain::agent::with_exit_phase(
-                &agent.launch_command(&launch_wiring, resume, None),
+                &agent.launch_command(&launch_wiring, resume, opening_prompt.as_deref()),
                 &launch_wiring.usagi_bin,
             ))
         } else {
@@ -814,7 +814,10 @@ fn prepare_launch(
             active: request.active,
             env,
             command,
-            opening_prompt,
+            // Pass a queued task as the Agent CLI's opening prompt. Writing it to
+            // the PTY immediately after spawning races the CLI's startup and can
+            // leave the text at the shell instead of submitting it to the Agent.
+            opening_prompt: None,
         })
     })();
     LaunchResult {
@@ -1608,16 +1611,19 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         } else {
             None
         };
-        // The command stays prompt-free; the queued MCP prompt is submitted
-        // through stdin after the fresh pane starts, so it is not counted
-        // against the shell argv limit and is delivered only once.
+        // Give a queued task to the Agent CLI as its opening prompt. PTY input
+        // immediately after spawn races CLI initialization, particularly when a
+        // child session is created and delegated from an already-running Agent.
         let spawn_prompt = queued_prompt.as_ref().map(|taken| taken.prompt.as_str());
         let _ = agent.provision(&launch_wiring);
         let spawn_command = crate::domain::agent::with_exit_phase(
+            &agent.launch_command(&launch_wiring, resume, spawn_prompt),
+            &launch_wiring.usagi_bin,
+        );
+        let plain_command = crate::domain::agent::with_exit_phase(
             &agent.launch_command(&launch_wiring, resume, None),
             &launch_wiring.usagi_bin,
         );
-        let plain_command = spawn_command.clone();
         let initial = Some(spawn_command.as_str());
         let later_initial = Some(plain_command.as_str());
         // Resolve effective secret env (global plus workspace-local) only
@@ -1685,7 +1691,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     kind,
                     terminal::pool::PaneLaunch {
                         agent_command: initial,
-                        opening_prompt: spawn_prompt,
+                        opening_prompt: None,
                         cli,
                         label: &label,
                         env: &pane_env,
@@ -1699,7 +1705,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     run_agent,
                     terminal::pool::PaneLaunch {
                         agent_command: initial,
-                        opening_prompt: spawn_prompt,
+                        opening_prompt: None,
                         cli,
                         label: &label,
                         env: &pane_env,
@@ -2015,7 +2021,11 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             (
                 terminal::tabs::PaneKind::Agent,
                 Some(crate::domain::agent::with_exit_phase(
-                    &agent.launch_command(&launch_wiring, resume, None),
+                    &agent.launch_command(
+                        &launch_wiring,
+                        resume,
+                        queued_prompt.as_ref().map(|taken| taken.prompt.as_str()),
+                    ),
                     &launch_wiring.usagi_bin,
                 )),
                 cli.display_name().to_string(),
@@ -2112,10 +2122,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     ps.kind,
                     terminal::pool::PaneLaunch {
                         agent_command: ps.agent_command.as_deref(),
-                        opening_prompt: ps
-                            .queued_prompt
-                            .as_ref()
-                            .map(|taken| taken.prompt.as_str()),
+                        opening_prompt: None,
                         cli: ps.cli,
                         label: &ps.label,
                         env: &env,
@@ -3118,11 +3125,13 @@ mod tests {
     use super::terminal::pool::MonitorSnapshot;
     use super::{
         autostart_slots_remaining, classify_launch_queue, persisted_session_agent_for,
-        queued_prompt_action, requeue_launch_failure, state_fingerprint, AutostartPrompts,
-        LaunchQueuePoll, LaunchSource, QueuedPromptAction,
+        prepare_launch, queued_prompt_action, requeue_launch_failure, state_fingerprint,
+        AutostartPrompts, LaunchQueuePoll, LaunchRequest, LaunchSource, QueuedPromptAction,
+        SharedEnv,
     };
-    use std::collections::HashSet;
+    use std::collections::{BTreeMap, HashSet};
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Condvar, Mutex};
 
     fn with_data_dir(body: impl FnOnce(&Path)) {
         let _guard = crate::test_support::process_env_guard();
@@ -3201,6 +3210,49 @@ mod tests {
             QueuedPromptAction::SpawnAgent,
             "a terminal-only session has no live agent and may spawn one",
         );
+    }
+
+    #[test]
+    fn autostart_passes_the_queued_task_to_the_agent_launch_command() {
+        let workspace = tempfile::tempdir().unwrap();
+        let session = workspace.path().join(".usagi/sessions/child");
+        std::fs::create_dir_all(&session).unwrap();
+        let env: SharedEnv = Arc::new((Mutex::new(Some(BTreeMap::new())), Condvar::new()));
+        let request = LaunchRequest {
+            id: 1,
+            dir: session,
+            label: "child".to_string(),
+            source: LaunchSource::Autostart(AutostartPrompts {
+                launch: Some(crate::infrastructure::agent_prompt_store::TakenPrompt {
+                    prompt: "delegated task".to_string(),
+                    retry: None,
+                    reuse_live_agent: false,
+                }),
+                live: None,
+            }),
+            pane_kind: super::terminal::tabs::PaneKind::Agent,
+            cli: crate::domain::settings::AgentCli::Codex,
+            session_model: None,
+            stored_label: None,
+            fresh_fallback_prompt: super::terminal::pool::FreshFallbackPrompt::Ignore,
+            active: None,
+            env,
+        };
+        let wiring = crate::domain::agent::AgentWiring {
+            usagi_bin: "usagi".to_string(),
+            local_llm_model: None,
+            model: None,
+            is_root: false,
+            sandbox_writable_roots: Vec::new(),
+        };
+
+        let prepared = prepare_launch(request, &wiring).prepared.unwrap();
+
+        assert!(prepared
+            .command
+            .as_deref()
+            .is_some_and(|command| command.contains(" -- 'delegated task'")));
+        assert_eq!(prepared.opening_prompt, None);
     }
 
     #[test]
