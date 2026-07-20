@@ -8,6 +8,7 @@ src/domain/*	domain	domain module changed	cargo test --lib {module}::
 src/usecase/*	usecase	usecase module changed	cargo test --lib {module}::|{domain_command}
 src/infrastructure/*	infrastructure	infrastructure module changed	cargo test --lib {module}::|{usecase_command}
 src/presentation/*	presentation	presentation surface changed	cargo test --lib {module}::|{usecase_command}
+tests/support/*	integration	shared integration harness affects its consumer tests	cargo test --test mcp_e2e|cargo test --workspace --quiet
 tests/*.rs	integration	integration test target changed	cargo test --test {test}
 third_party/vt100/*	third_party	vendored terminal parser affects terminal and TUI behavior	cargo test --manifest-path third_party/vt100/Cargo.toml|cargo test --lib infrastructure::terminal::|cargo test --test tui_e2e|cargo test --workspace --quiet
 *.md	docs	documentation changed; Rust gate can be skipped for docs-only changes	lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' 'v1/README.md' 'v1/document/**/*.md' '.agents/**/*.md' '.github/**/*.md'
