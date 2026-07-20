@@ -171,6 +171,10 @@ pub fn clear(worktree: &Path) {
     worktree_keyed_store::clear(STATE_SUBDIR, worktree);
 }
 
+pub fn try_clear(worktree: &Path) -> Result<()> {
+    worktree_keyed_store::try_clear(STATE_SUBDIR, worktree)
+}
+
 /// Extract the worktree directory from a Claude Code hook's JSON payload: its
 /// `cwd` field, which is the directory the agent was launched in. Returns `None`
 /// when the payload is not JSON or carries no `cwd`, so the caller can fall back.

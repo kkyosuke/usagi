@@ -1,6 +1,6 @@
 //! Reconcile the on-disk session tree with the sessions recorded in
-//! `state.json`, force-removing strays left by interrupted creates, crashes, or
-//! hand-edited state.
+//! `state.json`, quarantining strays left by interrupted creates, crashes, or
+//! hand-edited state until their ownership can be reviewed explicitly.
 
 use std::collections::HashSet;
 use std::fs;
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use super::tree;
-use crate::infrastructure::error_log::ErrorLog;
+use crate::domain::workspace_state::{PendingSessionRemoval, SessionRemovalPhase, WorkspaceState};
 use crate::infrastructure::git;
 use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR};
 use crate::infrastructure::workspace_store::WorkspaceStore;
@@ -17,14 +17,14 @@ use crate::infrastructure::workspace_store::WorkspaceStore;
 /// Reconcile the on-disk session tree under `.usagi/sessions/` with the sessions
 /// recorded in `state.json`. Every *directory* there that has no matching record
 /// is a stray — left by an interrupted create, a hand-edited `state.json`, or a
-/// crash — and is force-removed: its per-repository git worktrees are
-/// unregistered, the session branch is dropped, and any copied files are
-/// deleted, regardless of uncommitted changes. Loose files are left untouched.
+/// crash — and is durably quarantined as an orphaned pending removal. Reconcile
+/// never force-deletes it because the missing record means ownership cannot be
+/// established safely. Loose files are left untouched.
 ///
-/// Returns the stray directories that were removed.
+/// Returns the stray directories newly quarantined by this pass.
 ///
 /// This is the public, self-locking entry point: it acquires the workspace
-/// store lock for the duration of the scan-and-prune so it never races a
+/// store lock for the duration of the scan-and-quarantine so it never races a
 /// concurrent writer. [`create`](super::create) and [`remove`](super::remove)
 /// already hold that lock across their whole operation and call
 /// [`reconcile_locked`] directly instead, so the load-and-destroy here cannot
@@ -47,10 +47,18 @@ pub(super) fn reconcile_locked(workspace_root: &Path) -> Result<Vec<PathBuf>> {
     }
 
     let store = WorkspaceStore::new(workspace_root);
-    let recorded: HashSet<String> = store
-        .load()?
-        .map(|state| state.sessions.into_iter().map(|s| s.name).collect())
-        .unwrap_or_default();
+    let mut state = store.load()?.unwrap_or_else(WorkspaceState::new);
+    let recorded: HashSet<String> = state
+        .sessions
+        .iter()
+        .map(|session| session.name.clone())
+        .chain(
+            state
+                .pending_removals
+                .iter()
+                .map(|pending| pending.name.clone()),
+        )
+        .collect();
 
     // Cheap pre-check before the expensive rescan: match the recorded session
     // names against the directory names directly under `.usagi/sessions/`. When
@@ -74,16 +82,19 @@ pub(super) fn reconcile_locked(workspace_root: &Path) -> Result<Vec<PathBuf>> {
         return Ok(Vec::new());
     }
 
-    let repo_worktrees = list_repo_worktrees(workspace_root)?;
-    let mut removed = Vec::new();
+    let mut quarantined = Vec::new();
     for (stray, name) in strays {
-        // A stray is untracked and possibly dirty: force it out unconditionally.
-        // Its branch is `usagi/<name>` (see [`super::branch_name`]).
-        discard_session(&stray, &super::branch_name(&name), &repo_worktrees, true)?;
-        removed.push(stray);
+        state.pending_removals.push(PendingSessionRemoval {
+            name,
+            root: stray.clone(),
+            worktrees: Vec::new(),
+            phase: SessionRemovalPhase::Orphaned,
+        });
+        quarantined.push(stray);
     }
-
-    Ok(removed)
+    state.updated_at = chrono::Utc::now();
+    store.save(&state)?;
+    Ok(quarantined)
 }
 
 /// Each source repository under `workspace_root` paired with its worktrees,
@@ -105,14 +116,13 @@ pub(super) fn list_repo_worktrees(
 /// Physically destroy one session whose directory is `root` and whose branch is
 /// `branch`: unregister any worktree on that branch from each source repository,
 /// drop the now-orphaned branch, then delete whatever files remain under `root`.
-/// With `force`, a dirty worktree is discarded and the git steps are
-/// best-effort (a session may be partly torn down already, or never fully
-/// built). Without `force`, a worktree git refuses to remove (dirty or locked)
-/// aborts the call *before* the directory is deleted, so uncommitted work is
-/// never silently discarded; only `delete_branch` stays best-effort either way.
+/// With `force`, a dirty worktree may be discarded. Infrastructure failures
+/// (including locked worktrees) still abort before the directory is deleted so
+/// the durable caller can retain context and retry. Already-absent components
+/// remain successful, making partial teardown idempotent.
 ///
-/// Shared by [`reconcile`] (pruning strays, always forced) and
-/// [`remove`](super::remove) so the teardown procedure lives in one place.
+/// Used by [`remove`](super::remove); reconcile quarantines unowned strays and
+/// therefore never calls this destructive primitive.
 /// `repo_worktrees` is each source repository paired with its worktrees, from
 /// [`list_repo_worktrees`].
 pub(super) fn discard_session(
@@ -136,18 +146,7 @@ pub(super) fn discard_session(
             // its git registration stayed behind, dangling at the session path and
             // blocking any later session of the same name from being created.
             if wt.branch.as_deref() == Some(branch) || canon(&wt.path).starts_with(&root_canon) {
-                let removed = git::remove_worktree(repo, &wt.path, force);
-                // Forced teardown discards a dirty worktree by design, so any
-                // failure there is best-effort. Without `force`, git refuses a
-                // worktree that turned dirty (or is locked) after the caller's
-                // clean check — propagate that so we abort *before* deleting the
-                // directory below, rather than silently destroying uncommitted
-                // work and leaving a dangling worktree registration. An
-                // unregistered / never-built path reports `Ok`, so this still
-                // tolerates a partly torn-down session.
-                if !force {
-                    removed?;
-                }
+                git::remove_worktree(repo, &wt.path, force)?;
             }
         }
     }
@@ -165,25 +164,9 @@ pub(super) fn discard_session(
     }
 
     for (repo, _) in repo_worktrees {
-        // Clear any dangling registration the teardown left at the session path,
-        // then drop the now-orphaned session branch. Both are best-effort: a
-        // session that was never fully built has no registration and no branch.
-        // Leaving the branch behind is precisely what blocks a later `create` of
-        // the same name (`git worktree add -b <name>` fails on the existing
-        // branch) with no record left to `remove` — the "name permanently
-        // unusable" failure this guards against.
-        let _ = git::prune_worktrees(repo);
-        // Dropping the branch is best-effort (a never-built session has none), but
-        // a real failure here *is* that "name permanently unusable" state — the
-        // branch lingers, blocking recreation, with no record left to retry.
-        // Swallowing it silently would make that undiagnosable, so route it to the
-        // daily log (the session teardown itself still succeeds either way).
-        if let Err(e) = git::delete_branch(repo, branch) {
-            ErrorLog::record(&format!(
-                "failed to delete session branch \"{branch}\" in {} during teardown; \
-                 it is now orphaned and may block recreating this session: {e}",
-                repo.display()
-            ));
+        git::prune_worktrees(repo)?;
+        if git::branch_exists(repo, branch) {
+            git::delete_branch(repo, branch)?;
         }
     }
     Ok(())

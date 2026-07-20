@@ -231,9 +231,14 @@ pub fn clear(worktree: &Path, id: u64) -> Result<bool> {
 
 /// Discard any launch transaction for a session being removed.
 pub fn clear_any(worktree: &Path) {
+    let _ = try_clear_any(worktree);
+}
+
+pub fn try_clear_any(worktree: &Path) -> Result<()> {
     if let Some(request) = read(worktree) {
-        let _ = clear(worktree, request.id);
+        clear(worktree, request.id)?;
     }
+    Ok(())
 }
 
 pub fn queued_worktrees_in(base: &Path) -> Vec<PathBuf> {

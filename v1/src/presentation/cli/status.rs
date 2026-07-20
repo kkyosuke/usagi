@@ -64,6 +64,7 @@ mod tests {
     fn state() -> WorkspaceState {
         let ts = Utc.with_ymd_and_hms(2026, 6, 13, 5, 1, 0).unwrap();
         WorkspaceState {
+            pending_removals: Vec::new(),
             root_todos: Vec::new(),
             root_decisions: Vec::new(),
             updated_at: ts,

@@ -116,6 +116,10 @@ pub fn clear(worktree: &Path) {
     worktree_keyed_store::clear(OPEN_PANES_SUBDIR, worktree);
 }
 
+pub fn try_clear(worktree: &Path) -> Result<()> {
+    worktree_keyed_store::try_clear(OPEN_PANES_SUBDIR, worktree)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

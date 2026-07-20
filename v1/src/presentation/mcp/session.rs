@@ -974,6 +974,7 @@ fn statuses_to_json(statuses: &[session::SessionStatus]) -> Value {
                     "started_from": s.started_from,
                     "root": s.root,
                     "agent_phase": s.agent_phase.map_or("none", |p| p.as_str()),
+                    "removal": s.removal.map(|phase| phase.as_str()),
                     "worktrees": s.worktrees.iter().map(|wt| json!({
                         "path": wt.path,
                         "branch": wt.branch,
@@ -1043,7 +1044,10 @@ fn session_tool_schemas() -> Value {
                 \"dirty\" / \"local\" / \"pushed\" / \"synced\") plus `dirty` and \
                 `merged` booleans. `merged` is true when the default branch \
                 already contains all of the worktree (status \"synced\"). \
-                Read-only and cheap — it reads the cached state.json and the \
+                `removal` is null normally, \"git_teardown\" or \"context_cleanup\" \
+                while a retryable removal is in progress, and \"orphaned\" for an \
+                unrecorded tree quarantined from automatic deletion. Read-only and \
+                cheap — it reads the cached state.json and the \
                 agent-phase files with no git spawn, so the values are as fresh \
                 as the latest workspace sync. A coordinator watches for \
                 agent_phase \"ended\" (the child turn completed), \"exited\" (the process \
@@ -1486,7 +1490,6 @@ mod tests {
         model_probe: Box<dyn AgentModelProbe>,
     ) -> SessionMcpServer {
         let worktree = root.join(".usagi").join("sessions").join(name);
-        fs::create_dir_all(&worktree).unwrap();
         let runner = Box::new(FakeRunner(vec!["claude", "codex", "codex-fugu"]));
         SessionMcpServer::new(
             root.to_path_buf(),
