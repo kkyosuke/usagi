@@ -508,6 +508,7 @@ impl<
         })
     }
 
+    #[allow(clippy::too_many_lines)] // Admission atomically fences launch, caller registration, and replay state.
     fn admit<R: SessionScopeResolver>(
         &mut self,
         operation_id: &str,
