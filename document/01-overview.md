@@ -111,6 +111,8 @@ launch を依頼する。その他の引数は安全な feedback で拒否し、
 Overview の `session create <name>`、`session list`、`session overview`、
 `session remove <name> [--force]` は daemon IPC へ request を送る。remove は command に明示した
 session 名だけに作用し、現在選択中の row や root を暗黙の対象にしない。
+左ペインは terminal の wake-up ごとに daemon の session snapshot を再取得するため、MCP など別クライアントが
+作成・削除した session も表示へ反映する。session command の実行中は、その完了時の snapshot で同じ同期を行う。
 Closeup の `close [-f|--force]` は同じ session checklist を開く。文法、force、keyboard 操作は
 [TUI の Overview と modal](03-tui.md#overview-と-modal) が正本である。
 
