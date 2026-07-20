@@ -12,6 +12,7 @@
 - [保存場所](#保存場所)
 - [issue ファイル（`NNN-<slug>.md`）](#issue-ファイルnnn-slugmd)
 - [採番（ワークスペース横断）](#採番ワークスペース横断)
+- [番号 identity と重複修復](#番号-identity-と重複修復)
 - [`index.json`（派生キャッシュ）](#indexjson派生キャッシュ)
 - [依存関係の解決（着手可能な issue）](#依存関係の解決着手可能な-issue)
 
@@ -76,11 +77,11 @@ updated_at: 2026-06-14T00:00:00+00:00
 - `parent` / `milestone` は値があるときだけ frontmatter に出力します（未設定の issue には行自体が現れません）。`labels` / `dependson` / `related` は空でも `[]` を書きます。
 - frontmatter は `serde_yaml` 不採用の方針に合わせ、既知フィールドを対象にした軽量パーサで読み書きします。未知のキーは無視するので、フォーマットを後方互換に拡張できます。
 - 書き込みはアトミック（一時ファイル + `rename`）。タイトル変更でスラッグが変わった場合は、**先に新しいファイルを書いてから**同じ番号の旧ファイルを削除して 1 issue = 1 ファイルを保ちます（順序が逆だと書き込みの途中でクラッシュした場合に issue の実体ファイルが消えうるため）。
-- 同一ストアに対する read-modify-write（採番→書き込み、旧ファイル削除、`index.json` の更新）は、ストアごとの `.lock` ファイルに対するプロセス間排他ロック（advisory lock）で直列化します。MCP サーバと TUI が同じ `.usagi/issues/` を同時に書いても、ロックを保持した一連の操作が他プロセスと混ざらず、番号の重複取得や派生キャッシュの取りこぼしが起きません。
+- 同一ストアに対する read-modify-write（旧ファイル削除、`index.json` の更新）は、ストアごとの `.lock` ファイルに対するプロセス間排他ロック（advisory lock）で直列化します。採番は下記の workspace-global authority で別に直列化します。
 
 ## 採番（ワークスペース横断）
 
-新規 issue の `number` は、**ワークスペース内のすべての issue ストアを横断した最大値 + 1** で決めます。
+新規 issue の `number` は、**ワークスペース内のすべての issue ストアを横断した最大値と、予約済み high-water mark の大きい方 + 1** で決めます。
 対象は次の 2 種類です。
 
 ```
@@ -89,10 +90,42 @@ updated_at: 2026-06-14T00:00:00+00:00
 ```
 
 issue がセッション worktree ごとに書かれる（[保存場所](#保存場所)）ため、自ストアだけを見て採番すると、
-同じ起点から分岐した 2 つのセッションが同じ番号を振り直し、ブランチをマージしたときに衝突します。これを避けるため
-採番時にすべての worktree のストアを走査します。
+同じ起点から分岐した 2 つのセッションが同じ番号を振り直し、ブランチをマージしたときに衝突します。Git linked
+worktree は共通の Git directory を持つため、usagi はその配下の `usagi/issue-numbers/` を採番 authority として使います
+（Git repository でない workspace は `<workspace>/.usagi/issue-numbers/`）。authority の `.lock` を取得したまま全
+worktree を走査し、番号を予約するため、別 process・別 worktree の同時 create も直列化されます。
 
-**同じストア**に対する同時作成は、採番（最大値の読み取り）と書き込みを 1 回のロック取得で囲うため番号が重複しません（[issue ファイル](#issue-ファイルnnn-slugmd)のロック）。一方、**別々の worktree**（ルートと各セッション）はそれぞれ独立したストア＝独立したロックなので、これは**横断ロックではありません**。**ほぼ同時**に異なる worktree で新規作成すると同じ番号を取りうり（その場合は通常のマージコンフリクトとして解決する）、少しでもずれて作成されれば衝突しません。横断スキャンの組み立ては `usecase/issue.rs`、各ストアの最大値取得は `infrastructure/issue_store.rs`、worktree の列挙は `usecase/session.rs` が担います。
+```
+<git-common-dir>/usagi/issue-numbers/
+├── .lock
+├── sequence.json
+└── reservations/
+    └── 0000000472.reserved
+```
+
+予約 marker と `sequence.json` は issue markdown より先に durable + atomic write します。予約直後に process が crash
+して issue ファイルが作られなくても、その番号は欠番として残り再利用されません。`sequence.json` が欠落・古い・JSON
+として破損している場合は、authority lock 内で「全 worktree の既存番号・予約 marker・読み取れた sequence」の最大値へ
+移行してから次を予約します。したがって、派生キャッシュ `index.json` や壊れた sequence を正として番号を戻しません。
+
+## 番号 identity と重複修復
+
+番号は CRUD の identity です。同じ `.usagi/issues/` に `NNN-*.md` が複数ある場合、`show` / `update` / `delete` と
+対応する MCP tool は **ambiguity error** で fail closed します。エラーは衝突した全 path を辞書順で列挙し、どの sibling
+も読み選ばず、書き換えず、削除しません。内部 error は番号と `PathBuf` 一覧を持つ typed
+`AmbiguousIssueNumber` なので、presentation も文字列推測なしで識別できます。
+
+重複は履歴を監査して次の手順で明示的に修復します。エラーに表示された exact path をそのまま対象にし、glob や
+`issue delete <番号>` は使いません。
+
+1. `git log --all -- .usagi/issues/NNN-first.md .usagi/issues/NNN-second.md` で、表示された各 path の起源と参照履歴を監査する。
+2. 元の番号に残す 1 ファイルを決める。
+3. `usagi issue create --title '<退避する issue の title>'` で未使用番号 `MMM` を予約し、生成された exact path を確認する。
+4. 退避する sibling の frontmatter/body を生成ファイルへ移し、`number: MMM` と filename の `MMM-` を一致させる。
+5. `git rm -- .usagi/issues/NNN-second.md` のように、退避元の exact path だけを削除する。
+6. `usagi issue show NNN` と `usagi issue show MMM` で両 identity を確認し、参照番号の変更が必要なら同じ migration で更新する。
+
+既存の重複を自動 renumber すると履歴上の参照先を誤るため、通常 CRUD は repair を代行しません。
 
 ## `index.json`（派生キャッシュ）
 

@@ -8,6 +8,7 @@
 //! Markdown files are meant to be committed and shared; `index.json` is a local
 //! rebuildable cache, so it is never relied upon for correctness — only speed.
 
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -20,6 +21,33 @@ use crate::infrastructure::repo_paths::STATE_DIR;
 use crate::infrastructure::store_lock::StoreLock;
 
 const ISSUES_DIR_NAME: &str = "issues";
+
+/// More than one markdown file claims the same issue number.
+///
+/// The exact paths are retained so callers can downcast the `anyhow::Error` and
+/// present a deterministic repair plan without guessing which sibling is real.
+#[derive(Debug)]
+pub struct AmbiguousIssueNumber {
+    pub number: u32,
+    pub files: Vec<PathBuf>,
+}
+
+impl fmt::Display for AmbiguousIssueNumber {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "issue #{} is ambiguous; refusing to choose among these files: {}",
+            self.number,
+            self.files
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+impl std::error::Error for AmbiguousIssueNumber {}
 
 #[derive(Debug, Deserialize)]
 struct IndexFile {
@@ -147,7 +175,8 @@ impl IssueStore {
 
     /// Read a single issue by number, or `None` if it does not exist.
     pub fn read(&self, number: u32) -> Result<Option<Issue>> {
-        let Some(path) = self.files_for(number)?.into_iter().next() else {
+        let files = self.unique_files_for(number)?;
+        let Some(path) = files.into_iter().next() else {
             return Ok(None);
         };
         Ok(Some(self.inner.read_existing_path(&path)?))
@@ -164,8 +193,9 @@ impl IssueStore {
     /// store's [`lock`](Self::lock). If the title changes, the new file is written
     /// before stale-named siblings for the same number are removed.
     pub fn write_locked(&self, _lock: &StoreLock, issue: &Issue) -> Result<()> {
+        let existing = self.unique_files_for(issue.number)?;
         let target = self.inner.write_markdown(issue)?;
-        for stale in self.files_for(issue.number)? {
+        for stale in existing {
             if stale != target {
                 fs::remove_file(&stale).context(format!("failed to remove {}", stale.display()))?;
             }
@@ -177,7 +207,7 @@ impl IssueStore {
     /// then refresh the index. Takes the store lock for the duration.
     pub fn remove(&self, number: u32) -> Result<bool> {
         let _lock = self.lock()?;
-        let files = self.files_for(number)?;
+        let files = self.unique_files_for(number)?;
         if files.is_empty() {
             return Ok(false);
         }
@@ -202,6 +232,15 @@ impl IssueStore {
     /// Every file that backs `number` (normally zero or one).
     fn files_for(&self, number: u32) -> Result<Vec<PathBuf>> {
         self.inner.files_for_key(&number)
+    }
+
+    fn unique_files_for(&self, number: u32) -> Result<Vec<PathBuf>> {
+        let mut files = self.files_for(number)?;
+        files.sort();
+        if files.len() > 1 {
+            return Err(AmbiguousIssueNumber { number, files }.into());
+        }
+        Ok(files)
     }
 }
 
@@ -288,6 +327,42 @@ mod tests {
         assert!(store.index_path().is_file());
         assert_eq!(store.read(1).unwrap().unwrap(), i);
         assert_eq!(store.max_number().unwrap(), 1);
+    }
+
+    #[test]
+    fn duplicate_number_read_write_and_remove_fail_closed_with_exact_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        fs::create_dir_all(store.dir()).unwrap();
+        let first = store.dir().join("007-first.md");
+        let second = store.dir().join("007-second.md");
+        fs::write(&first, issue(7, "First").to_markdown()).unwrap();
+        fs::write(&second, issue(7, "Second").to_markdown()).unwrap();
+
+        for error in [
+            store.read(7).unwrap_err(),
+            store.write(&issue(7, "Replacement")).unwrap_err(),
+            store.remove(7).unwrap_err(),
+        ] {
+            let message = error.to_string();
+            assert!(message.contains("issue #7 is ambiguous"));
+            assert!(message.contains(first.to_str().unwrap()));
+            assert!(message.contains(second.to_str().unwrap()));
+            let ambiguity = error.downcast_ref::<AmbiguousIssueNumber>().unwrap();
+            assert_eq!(ambiguity.number, 7);
+            assert_eq!(ambiguity.files, vec![first.clone(), second.clone()]);
+        }
+
+        assert_eq!(
+            fs::read_to_string(&first).unwrap(),
+            issue(7, "First").to_markdown()
+        );
+        assert_eq!(
+            fs::read_to_string(&second).unwrap(),
+            issue(7, "Second").to_markdown()
+        );
+        assert!(!store.dir().join("007-replacement.md").exists());
+        assert!(!store.index_path().exists());
     }
 
     #[test]

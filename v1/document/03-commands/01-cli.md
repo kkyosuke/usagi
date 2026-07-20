@@ -224,6 +224,7 @@ Nerd Font が未導入なら、Nerd Fonts の GitHub リリースから JetBrain
 
 - `create` / `list` / `show` / `update` / `search` は `--json` を付けると機械可読な JSON を出力します（スクリプトや MCP 連携向け。`delete` / `graph` は対象外。`list --json` はグループ化せず配列を返す）。
 - **関連の表現**: `--depends-on` はブロックする先行条件、`--related` はブロックしない緩い関連、`--parent` は所属（Epic ⊃ サブタスク）、`--milestone` は束ね。`update` の `--clear-parent` / `--clear-milestone` で解除します。
+- **番号の曖昧性**: 同番号の `NNN-*.md` が複数ある場合、`show` / `update` / `delete` は衝突した exact path を列挙する ambiguity error で停止し、どのファイルも暗黙に選択・変更しません。履歴監査と安全な renumber の手順は [番号 identity と重複修復](../data/03-issues.md#番号-identity-と重複修復) を参照してください。
 - **着手可能（ready）の可視化**: `list` / `search` は各 issue が ready かを示します。ready = `dependson` に挙げた issue が**すべて `done`** で、かつ自身が未 `done`。ブロック中の issue には未達の依存番号（`(blocked by 1, 3)`）を併記するので、いま着手できるタスクが一目で分かります。
 - **グループ化・グラフ・進捗**: `--group-by` は `status` / `priority` / `milestone` / `parent` を受け付け、グループごとに見出しと進捗サマリ（件数・完了率・ready 数・バー）を出します。`graph` は `dependson` の依存ツリーを描き、ダイヤモンドや循環は一度だけ展開して `↑` を付けます。
 - **グラフの状態グリフ**: `graph` は各ノードの先頭に進捗が一目で分かるグリフを付けます。`✓` 完了（`done`）、`○` 着手可能（ready）、`⊘` 依存未達でブロック中（blocked）。TUI の `issue graph` はこれに加えて色分けします（[02-tui.md](02-tui.md#issue)）。

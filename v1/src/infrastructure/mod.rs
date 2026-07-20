@@ -10,6 +10,7 @@ pub mod error_log;
 pub mod git;
 pub mod gitignore;
 pub mod history_store;
+pub mod issue_number_sequence;
 pub mod issue_store;
 pub mod json_file;
 pub mod markdown_file;
