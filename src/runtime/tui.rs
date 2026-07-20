@@ -1105,6 +1105,7 @@ fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
     // action row can still start a session name with that character.
     if (key.modifiers.control && key.code == KeyCode::Char('a'))
         || key.code == KeyCode::Char('\u{1}')
+        || key.code == KeyCode::Home
     {
         return Key::Char('\u{1}');
     }
@@ -1665,6 +1666,13 @@ mod tests {
             KeyEventKind::Press,
         ));
         assert_eq!(passthrough_key(&key, Vec::new()), Key::Char('\u{1}'));
+
+        let home = LiveInput::Key(KeyEvent::new(
+            KeyCode::Home,
+            Modifiers::default(),
+            KeyEventKind::Press,
+        ));
+        assert_eq!(passthrough_key(&home, Vec::new()), Key::Char('\u{1}'));
     }
 
     #[test]

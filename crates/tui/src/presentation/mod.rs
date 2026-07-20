@@ -1282,6 +1282,10 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         Key::Backspace => AppKey::Backspace,
         Key::Tab => AppKey::Tab,
         Key::Escape => AppKey::Escape,
+        // Runtime adapters preserve Ctrl-A as U+0001. Reclassify it at the
+        // management boundary; live panes do not reach here unless a Ctrl-O
+        // prefix has resolved an explicit local action.
+        Key::Char('\u{1}') => AppKey::CtrlA,
         Key::Char(character) => AppKey::Char(character),
         Key::Quit => AppKey::CtrlC,
         Key::CtrlQ => AppKey::CtrlQ,
@@ -2751,6 +2755,10 @@ mod tests {
         assert_eq!(
             app_event_from_key(Key::Char('x')),
             Some(AppEvent::Key(AppKey::Char('x')))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Char('\u{1}')),
+            Some(AppEvent::Key(AppKey::CtrlA))
         );
         assert_eq!(
             app_event_from_key(Key::Quit),
