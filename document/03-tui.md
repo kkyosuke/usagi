@@ -213,6 +213,14 @@ modal に安全な error を表示する。
 sidebar と session 選択 modal は daemon snapshot の `available` session だけを表示する。作成に失敗した
 reservation は durable state に残っていても選択対象にしない。
 
+`env` は現在 active な target（workspace root か session）の environment editor を開き、その target の
+永続化済み環境変数を読み込んで表示する。正本は notes・todos・decisions と同じ repository の `state.json`
+（workspace state store）で、root と各 session が独立した `name → value` の集合を持つ。editor では変数の
+追加・編集・削除ができ、保存すると集合全体が `state.json` に書き戻される（保存は差分ではなく全置換で、
+消した変数は取り除かれる）。読み込み中と保存中はその状態を表示し、保存中の再保存は受け付けない
+（二重送信の防止）。読み込みや保存が失敗した場合は editor に留まり、入力を失わずに安全な error を表示して
+再試行できる。`env` は引数を取らないため、余分な引数を与えた場合は editor を開かず安全な notice で拒否する。
+
 ## PR modal と browser effect
 
 `p` の PR modal は、focused `SessionId` の daemon PR snapshot だけを表示する。snapshot の revision が

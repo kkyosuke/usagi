@@ -1033,6 +1033,7 @@ mod tests {
             last_active: None,
             notes: Scratchpad::default(),
             prs: Vec::new(),
+            environment: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1049,6 +1050,7 @@ mod tests {
             .save(&usagi_core::domain::workspace_state::WorkspaceState {
                 sessions: vec![legacy_record("legacy", worktree.clone())],
                 root_notes: Scratchpad::default(),
+                root_environment: std::collections::BTreeMap::new(),
                 updated_at: Utc::now(),
             })
             .unwrap();
@@ -1091,6 +1093,7 @@ mod tests {
             .save(&usagi_core::domain::workspace_state::WorkspaceState {
                 sessions: vec![legacy_record("missing", repository.join("elsewhere"))],
                 root_notes: Scratchpad::default(),
+                root_environment: std::collections::BTreeMap::new(),
                 updated_at: Utc::now(),
             })
             .unwrap();
@@ -1118,6 +1121,7 @@ mod tests {
             .save(&usagi_core::domain::workspace_state::WorkspaceState {
                 sessions: vec![legacy_record("legacy", worktree.clone())],
                 root_notes: Scratchpad::default(),
+                root_environment: std::collections::BTreeMap::new(),
                 updated_at: Utc::now(),
             })
             .unwrap();
@@ -1193,6 +1197,7 @@ mod tests {
             .save(&usagi_core::domain::workspace_state::WorkspaceState {
                 sessions: vec![legacy_record("same", worktree.clone())],
                 root_notes: Scratchpad::default(),
+                root_environment: std::collections::BTreeMap::new(),
                 updated_at: Utc::now(),
             })
             .unwrap();

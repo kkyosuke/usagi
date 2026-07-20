@@ -49,8 +49,8 @@ use crate::presentation::views::workspace::{
 use crate::presentation::widgets::modal::{self, ConfirmationView};
 use crate::presentation::workspace_runtime::WorkspaceRuntime;
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, BackendEvent, Effect, NewRequest, Notice, OperationResult, Overlay,
-    PendingToken, PointerAction, SafeError, SafeMessage, Target,
+    AppEvent, AppKey, AppState, BackendEvent, Effect, EnvironmentEntry, NewRequest, Notice,
+    OperationResult, Overlay, PendingToken, PointerAction, SafeError, SafeMessage, Target,
 };
 use crate::usecase::application::pane::PaneKind;
 use crate::usecase::application::pane_runtime::Geometry;
@@ -192,6 +192,23 @@ pub trait DecisionCommandPort: Send {
         decision_id: UserDecisionId,
         answer: UserDecisionAnswer,
     ) -> BackendEvent;
+}
+
+/// Durable per-target environment boundary for the workspace runtime.
+///
+/// The controller keeps the editor's draft locally; this port is the only route
+/// that reads and writes the persisted environment for a [`Target`] (workspace
+/// root or session). Both operations project their result back through
+/// [`BackendEvent`] (`EnvironmentLoaded` / `EnvironmentError`), preserving the
+/// reducer's one-way event flow and keeping the editor's values through a save
+/// failure. Resolving a target's stable identity to its store key is the
+/// implementation's concern.
+pub trait EnvironmentStorePort: Send {
+    /// Read the persisted environment for `target`.
+    fn load(&mut self, target: Target) -> BackendEvent;
+    /// Persist the complete set of `entries` for `target`, replacing what was
+    /// stored. On success the saved set refluxes as `EnvironmentLoaded`.
+    fn save(&mut self, target: Target, entries: Vec<EnvironmentEntry>) -> BackendEvent;
 }
 
 /// Best-effort desktop-notification boundary for newly observed user decisions.
@@ -509,6 +526,37 @@ impl DecisionCommandPort for UnavailableDecisionCommandPort {
                 error_id: "decision-unavailable".to_owned(),
             },
         }
+    }
+}
+
+/// Environment fallback for the screen-graph compatibility path and embedders
+/// that inject no store. Production composition injects its state-backed
+/// counterpart; this keeps the editor safe (it stays open, showing the error)
+/// rather than silently discarding a load or save.
+struct UnavailableEnvironmentStore;
+impl EnvironmentStorePort for UnavailableEnvironmentStore {
+    #[coverage(off)]
+    fn load(&mut self, target: Target) -> BackendEvent {
+        BackendEvent::EnvironmentError {
+            target,
+            error: unavailable_environment_error(),
+        }
+    }
+
+    #[coverage(off)]
+    fn save(&mut self, target: Target, _entries: Vec<EnvironmentEntry>) -> BackendEvent {
+        BackendEvent::EnvironmentError {
+            target,
+            error: unavailable_environment_error(),
+        }
+    }
+}
+
+#[coverage(off)]
+fn unavailable_environment_error() -> SafeError {
+    SafeError {
+        message: SafeMessage::new("Environment is unavailable."),
+        error_id: "environment-unavailable".to_owned(),
     }
 }
 
@@ -1772,6 +1820,7 @@ fn render_controller_frame(
 fn dispatch_controller_effect(
     ui: &mut WorkspaceUi,
     decisions: &mut dyn DecisionCommandPort,
+    environment: &mut dyn EnvironmentStorePort,
     runtime: &mut WorkspaceRuntime,
     effect: &Effect,
     pending_targets: &mut std::collections::HashMap<OperationId, Target>,
@@ -1836,20 +1885,29 @@ fn dispatch_controller_effect(
             }
         }
         Effect::Detach => return ControllerFlow::Exit,
+        // Environment reads/writes go through the injected store port and reflux
+        // their result as a controller backend event, so the editor shows real
+        // values and a save is actually persisted (never a no-op here).
+        Effect::LoadEnvironment { target } => {
+            let _ = runtime.apply_event(AppEvent::Backend(environment.load(*target)));
+        }
+        Effect::SaveEnvironment { target, entries } => {
+            let _ = runtime.apply_event(AppEvent::Backend(
+                environment.save(*target, entries.clone()),
+            ));
+        }
         // RefreshSessions is reconciled every frame; SelectTab is mirrored by
         // `on_effect`; the PR/preview overlay effects are refluxed by
-        // `controller_overlay_events` before this executor runs. Notes /
-        // environment persistence needs a daemon store port this loop does not
-        // yet inject, and the non-session workspace commands and entry-surface
-        // effects have no Home executor, so they surface only as the reducer's
-        // safe notice for now.
+        // `controller_overlay_events` before this executor runs. Notes
+        // persistence needs a daemon store port this loop does not yet inject,
+        // and the non-session workspace commands and entry-surface effects have
+        // no Home executor, so they surface only as the reducer's safe notice
+        // for now.
         Effect::RefreshSessions { .. }
         | Effect::SelectTab { .. }
         | Effect::WorkspaceCommand { .. }
         | Effect::LoadNotes { .. }
         | Effect::SaveNotes { .. }
-        | Effect::LoadEnvironment { .. }
-        | Effect::SaveEnvironment { .. }
         | Effect::LoadPullRequests { .. }
         | Effect::LoadPreview { .. }
         | Effect::OpenPullRequest { .. }
@@ -2113,6 +2171,7 @@ fn drive_workspace_controller(
     session_commands: Box<dyn SessionCommandPort>,
     agent_port: Box<dyn AgentCommandPort>,
     mut decisions: Box<dyn DecisionCommandPort>,
+    mut environment: Box<dyn EnvironmentStorePort>,
     mut desktop_notifications: Box<dyn DesktopNotificationPort>,
     metrics_port: Box<dyn MetricsPort>,
     mut pr_port: Box<dyn PrSnapshotPort>,
@@ -2269,6 +2328,7 @@ fn drive_workspace_controller(
             if dispatch_controller_effect(
                 &mut ui,
                 decisions.as_mut(),
+                environment.as_mut(),
                 &mut runtime,
                 &effect,
                 &mut pending_targets,
@@ -2293,6 +2353,7 @@ pub fn run_workspace_controller(
     session_commands: Box<dyn SessionCommandPort>,
     agent_port: Box<dyn AgentCommandPort>,
     decisions: Box<dyn DecisionCommandPort>,
+    environment: Box<dyn EnvironmentStorePort>,
     desktop_notifications: Box<dyn DesktopNotificationPort>,
     metrics_port: Box<dyn MetricsPort>,
     pr_port: Box<dyn PrSnapshotPort>,
@@ -2304,6 +2365,7 @@ pub fn run_workspace_controller(
         session_commands,
         agent_port,
         decisions,
+        environment,
         desktop_notifications,
         metrics_port,
         pr_port,
@@ -2498,6 +2560,7 @@ fn open_snapshot_via_controller<'a, 'b>(
         session_commands.create(),
         agent_port,
         Box::new(UnavailableDecisionCommandPort),
+        Box::new(UnavailableEnvironmentStore),
         Box::new(NoDesktopNotifications),
         metrics_port,
         Box::new(UnavailablePrSnapshotPort),
@@ -2759,16 +2822,16 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 mod tests {
     use super::{
         AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Config, ConfigStep,
-        DefaultSettingsPort, Exit, Geometry, MetricsPort, MetricsPortFactory, NewStep,
-        NoDesktopNotifications, NoMetrics, NoMetricsFactory, SessionCommandPort,
-        SessionCommandPortFactory, SessionCommandResult, Start, TerminalAttach, TerminalChunk,
-        TerminalError, UnavailableBrowserOpener, UnavailableDecisionCommandPort,
-        UnavailablePrSnapshotPort, UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader,
-        WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
-        clear_terminal_selection_on_click, close_exited_panes, controller_terminal_view,
-        handle_terminal_pointer, key_to_terminal_bytes, new_project_notice, play_startup_splash,
-        render_controller_frame, render_home_snapshot, restore_open_panes, run as run_from_start,
-        run_with_settings,
+        ControllerFlow, DefaultSettingsPort, EnvironmentStorePort, Exit, Geometry, MetricsPort,
+        MetricsPortFactory, NewStep, NoDesktopNotifications, NoMetrics, NoMetricsFactory,
+        SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, Start, TerminalAttach,
+        TerminalChunk, TerminalError, UnavailableBrowserOpener, UnavailableDecisionCommandPort,
+        UnavailableEnvironmentStore, UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
+        WelcomeStep, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi,
+        WorkspaceView, app_event_from_key, clear_terminal_selection_on_click, close_exited_panes,
+        controller_terminal_view, dispatch_controller_effect, handle_terminal_pointer,
+        key_to_terminal_bytes, new_project_notice, play_startup_splash, render_controller_frame,
+        render_home_snapshot, restore_open_panes, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_controller, safe_session_error, step_config, step_new, terminal_geometry,
         welcome_action, write_banner,
@@ -2778,7 +2841,7 @@ mod tests {
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, NewRequest, PointerAction, Target,
+        AppEvent, AppKey, BackendEvent, Effect, EnvironmentEntry, NewRequest, PointerAction, Target,
     };
     use crate::usecase::application::pane::PaneKind;
     use crate::usecase::application::run as dispatch;
@@ -2940,8 +3003,10 @@ mod tests {
                 last_active: None,
                 notes: Scratchpad::default(),
                 prs: Vec::new(),
+                environment: std::collections::BTreeMap::new(),
             }],
             root_notes: Scratchpad::default(),
+            root_environment: std::collections::BTreeMap::new(),
             updated_at: now(),
         }
     }
@@ -2990,6 +3055,7 @@ mod tests {
                     last_active: None,
                     notes: Scratchpad::default(),
                     prs: Vec::new(),
+                    environment: std::collections::BTreeMap::new(),
                 }]),
                 SessionCommand::Remove { .. } => Some(Vec::new()),
                 _ => None,
@@ -3233,6 +3299,7 @@ mod tests {
             Box::new(UnavailableSessionCommandPort),
             Box::new(SuccessfulAgentPort(terminal)),
             Box::new(UnavailableDecisionCommandPort),
+            Box::new(UnavailableEnvironmentStore),
             Box::new(NoDesktopNotifications),
             Box::new(NoMetrics),
             Box::new(UnavailablePrSnapshotPort),
@@ -3284,6 +3351,7 @@ mod tests {
             WorkspaceState {
                 sessions: Vec::new(),
                 root_notes: Scratchpad::default(),
+                root_environment: std::collections::BTreeMap::new(),
                 updated_at: now(),
             },
         );
@@ -3313,6 +3381,7 @@ mod tests {
             Box::new(UnavailableSessionCommandPort),
             Box::new(SuccessfulAgentPort(terminal)),
             Box::new(UnavailableDecisionCommandPort),
+            Box::new(UnavailableEnvironmentStore),
             Box::new(NoDesktopNotifications),
             Box::new(NoMetrics),
             Box::new(UnavailablePrSnapshotPort),
@@ -3466,6 +3535,97 @@ mod tests {
         let _ = runtime.focus_terminal(Target::Session(session), terminal.clone());
         ui.start_terminal_session(terminal, terminal_geometry(20, 80));
         (ui, runtime)
+    }
+
+    /// Recording environment store: proves the production dispatch path drives a
+    /// real port and refluxes its result into the reducer (never the old no-op).
+    #[derive(Default)]
+    struct RecordingEnvironmentStore {
+        loaded: Vec<Target>,
+        saved: Vec<(Target, Vec<EnvironmentEntry>)>,
+        entries: Vec<EnvironmentEntry>,
+    }
+
+    impl EnvironmentStorePort for RecordingEnvironmentStore {
+        fn load(&mut self, target: Target) -> BackendEvent {
+            self.loaded.push(target);
+            BackendEvent::EnvironmentLoaded {
+                target,
+                entries: self.entries.clone(),
+            }
+        }
+
+        fn save(&mut self, target: Target, entries: Vec<EnvironmentEntry>) -> BackendEvent {
+            self.saved.push((target, entries.clone()));
+            BackendEvent::EnvironmentLoaded { target, entries }
+        }
+    }
+
+    #[test]
+    fn dispatch_controller_effect_wires_environment_load_and_save_to_the_store() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let mut decisions = UnavailableDecisionCommandPort;
+        let mut environment = RecordingEnvironmentStore {
+            entries: vec![EnvironmentEntry {
+                name: "TOKEN".to_owned(),
+                value: "abc".to_owned(),
+            }],
+            ..Default::default()
+        };
+        let mut pending = std::collections::HashMap::new();
+
+        // Opening the editor requests a read of the active (root) target.
+        let target = Target::Root(workspace);
+        let open = runtime.apply_event(AppEvent::Key(AppKey::OpenEnvironment));
+        assert_eq!(open, vec![Effect::LoadEnvironment { target }]);
+
+        // The dispatch arm consults the store (not a no-op) and refluxes its
+        // values back through the reducer.
+        for effect in &open {
+            assert_eq!(
+                dispatch_controller_effect(
+                    &mut ui,
+                    &mut decisions,
+                    &mut environment,
+                    &mut runtime,
+                    effect,
+                    &mut pending,
+                ),
+                ControllerFlow::Continue,
+            );
+        }
+        assert_eq!(environment.loaded, vec![target]);
+
+        // The reflux populated the editor and cleared loading, so a Save emits the
+        // persisted values — observable proof the load reached the reducer.
+        let save = runtime.apply_event(AppEvent::Key(AppKey::SaveEnvironment));
+        assert_eq!(
+            save,
+            vec![Effect::SaveEnvironment {
+                target,
+                entries: vec![EnvironmentEntry {
+                    name: "TOKEN".to_owned(),
+                    value: "abc".to_owned(),
+                }],
+            }]
+        );
+        for effect in &save {
+            let _ = dispatch_controller_effect(
+                &mut ui,
+                &mut decisions,
+                &mut environment,
+                &mut runtime,
+                effect,
+                &mut pending,
+            );
+        }
+        assert_eq!(environment.saved.len(), 1);
+        assert_eq!(environment.saved[0].0, target);
+        assert_eq!(environment.saved[0].1, environment.entries);
     }
 
     #[test]

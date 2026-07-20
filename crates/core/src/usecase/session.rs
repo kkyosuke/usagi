@@ -169,6 +169,7 @@ pub fn create(
         last_active: None,
         notes: Scratchpad::default(),
         prs: Vec::new(),
+        environment: std::collections::BTreeMap::new(),
     };
     if let Err(e) = record(store, session.clone(), now) {
         // Roll back the worktree so a failed create leaves nothing behind.
@@ -228,6 +229,7 @@ mod tests {
             last_active: None,
             notes: Scratchpad::default(),
             prs: Vec::new(),
+            environment: std::collections::BTreeMap::new(),
         }
     }
 

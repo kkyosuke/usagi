@@ -1,13 +1,13 @@
 ---
 number: 399
 title: feat(tui): Overview の env コマンドを environment editor の本番永続化まで接続する
-status: todo
+status: done
 priority: high
 labels: [tui, overview, controller, environment]
 dependson: []
 related: [244, 314, 340]
 created_at: 2026-07-20T04:42:47.419318+00:00
-updated_at: 2026-07-20T04:42:47.419318+00:00
+updated_at: 2026-07-20T07:57:56.854253+00:00
 ---
 
 ## 背景

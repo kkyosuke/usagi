@@ -15,6 +15,7 @@
 
 pub mod agent;
 pub mod client;
+pub mod environment;
 pub mod issue;
 pub mod memory;
 pub mod note;

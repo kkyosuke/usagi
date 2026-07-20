@@ -99,26 +99,37 @@ fn note_body(editor: &NoteEditor) -> Vec<String> {
 
 fn environment_body(editor: &EnvironmentEditor) -> Vec<String> {
     let mut lines = vec![modal::caption("workspace / session environment")];
-    if editor.entries().is_empty() {
-        lines.push(modal::empty_notice("(no environment variables)"));
-    }
-    lines.extend(
-        editor.entries().iter().take(MAX_ROWS).map(|entry| {
+    if editor.is_loading() {
+        // Still reading the persisted values; distinct from a loaded-but-empty
+        // environment so the reader knows nothing has refluxed yet.
+        lines.push(modal::empty_notice("(loading…)"));
+    } else {
+        if editor.entries().is_empty() {
+            lines.push(modal::empty_notice("(no environment variables)"));
+        }
+        lines.extend(editor.entries().iter().take(MAX_ROWS).map(|entry| {
             modal::content_line(&format!("{}={}", entry.name, entry.value), INNER_WIDTH)
-        }),
-    );
-    if editor.entries().len() > MAX_ROWS {
-        lines.push(modal::caption(&format!(
-            "… {} more",
-            editor.entries().len() - MAX_ROWS
-        )));
+        }));
+        if editor.entries().len() > MAX_ROWS {
+            lines.push(modal::caption(&format!(
+                "… {} more",
+                editor.entries().len() - MAX_ROWS
+            )));
+        }
     }
     if let Some(line) = error_line(editor.error().map(|error| error.message.as_str())) {
         lines.push(String::new());
         lines.push(line);
     }
     lines.push(String::new());
-    lines.push(modal::footer("Esc: close   Save: persist"));
+    // While a save is in flight the footer reflects it, and the reducer rejects
+    // a second Save until the owning port refluxes — no double-submit.
+    let footer = if editor.is_saving() {
+        "Esc: close   Saving…"
+    } else {
+        "Esc: close   Save: persist"
+    };
+    lines.push(modal::footer(footer));
     modal::fixed_body(lines, ENVIRONMENT_BODY_HEIGHT)
 }
 
@@ -264,12 +275,26 @@ mod tests {
         let workspace = WorkspaceId::new();
         let mut state = AppState::home(workspace, Vec::new());
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenEnvironment));
-        let empty_environment =
+        // Freshly opened: the read is still in flight, shown as loading (not the
+        // loaded-but-empty notice).
+        let loading_environment =
             render_environment_over(24, 30, &base(), state.environment_editor().unwrap());
-        let environment_height = empty_environment
+        let environment_height = loading_environment
             .iter()
             .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
             .count();
+        assert!(loading_environment.join("\n").contains("loading"));
+        assert!(!loading_environment.join("\n").contains("no environment"));
+        // An empty load resolves the loading state to the empty notice.
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentLoaded {
+                target: Target::Root(workspace),
+                entries: Vec::new(),
+            }),
+        );
+        let empty_environment =
+            render_environment_over(24, 30, &base(), state.environment_editor().unwrap());
         assert!(empty_environment.join("\n").contains("no environment"));
         let entries = (0..9)
             .map(|index| EnvironmentEntry {
@@ -284,6 +309,10 @@ mod tests {
                 entries,
             }),
         );
+        // A save in flight is reflected in the footer and guards re-submission.
+        let _ = update(&mut state, AppEvent::Key(AppKey::SaveEnvironment));
+        let saving = render_environment_over(40, 80, &base(), state.environment_editor().unwrap());
+        assert!(saving.join("\n").contains("Saving"));
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::EnvironmentError {
