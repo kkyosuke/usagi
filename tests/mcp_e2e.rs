@@ -5,6 +5,8 @@
 mod support;
 
 use std::fs;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use support::mcp::McpHarness;
@@ -144,7 +146,107 @@ fn production_agent_fixture_is_injected_without_cli_credentials() {
         response["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("not implemented")
+            .contains("caller provenance is unknown")
     );
     assert!(!mcp.fixture_log().exists());
+}
+
+#[test]
+fn production_dispatch_worker_complete_reaches_the_caller_inbox() {
+    let mut mcp = McpHarness::start();
+    let caller_credential = mcp.launch_caller();
+    mcp.restart_with_credential(&caller_credential);
+    mcp.replace_fixture_agent(
+        "codex",
+        r#"#!/bin/sh
+if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
+printf '%s\n%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"fixture-worker","version":"1"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_complete","arguments":{"summary":"fixture completed","result":{"commits":["abc123"],"changed_files":["fixture.rs"],"verification":"fixture green"}}}}' \
+  | "$USAGI_E2E_USAGI" mcp >> "$USAGI_MCP_FIXTURE_LOG"
+"#,
+    );
+
+    let dispatched = mcp.tool(
+        "session_dispatch",
+        &json!({
+            "session":{"name":"mcp-worker"},
+            "agent":{"runtime":"codex","model":"fixture-codex"},
+            "prompt":"complete through MCP"
+        }),
+    );
+    assert!(dispatched.get("error").is_none(), "{dispatched}");
+    let admission: serde_json::Value =
+        serde_json::from_str(dispatched["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(admission["run_id"].is_string());
+    assert!(admission["terminal"].is_object());
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let message = loop {
+        let inbox = mcp.tool("agent_inbox", &json!({"unread_only":true}));
+        assert!(inbox.get("error").is_none(), "{inbox}");
+        let body: serde_json::Value =
+            serde_json::from_str(inbox["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        if let Some(message) = body["messages"].as_array().and_then(|items| items.first()) {
+            break message.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "completion did not reach caller inbox"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(message["run_id"], admission["run_id"]);
+    assert_eq!(message["kind"], "completed");
+    assert_eq!(message["summary"], "fixture completed");
+    assert_eq!(message["result"]["commits"], json!(["abc123"]));
+
+    for (tool, arguments) in [
+        ("session_get", json!({"name":"mcp-worker"})),
+        ("agent_list", json!({"session":"mcp-worker"})),
+        ("agent_get", json!({"agent_id":admission["agent_id"]})),
+    ] {
+        let observed = mcp.tool(tool, &arguments);
+        assert!(observed.get("error").is_none(), "{tool}: {observed}");
+    }
+
+    mcp.replace_fixture_agent(
+        "codex",
+        r#"#!/bin/sh
+if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
+printf '%s\n%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"fixture-worker","version":"1"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_fail","arguments":{"summary":"fixture failed","error":"expected fixture error"}}}' \
+  | "$USAGI_E2E_USAGI" mcp >> "$USAGI_MCP_FIXTURE_LOG"
+"#,
+    );
+    let failed = mcp.tool(
+        "session_dispatch",
+        &json!({
+            "session":{"name":"mcp-failing-worker"},
+            "agent":{"runtime":"codex","model":"fixture-codex"},
+            "prompt":"fail through MCP"
+        }),
+    );
+    assert!(failed.get("error").is_none(), "{failed}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let inbox = mcp.tool("agent_inbox", &json!({}));
+        let body: serde_json::Value =
+            serde_json::from_str(inbox["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        if body["messages"].as_array().is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message["kind"] == "failed"
+                    && message["summary"] == "fixture failed: expected fixture error"
+            })
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "failure did not reach caller inbox"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(mcp.data_dir().join("daemon/dispatch.json").exists());
 }
