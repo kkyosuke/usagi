@@ -1,14 +1,14 @@
 ---
 number: 472
 title: fix(daemon): terminal output pipeline を bounded かつ frame-safe にする
-status: in-progress
+status: done
 priority: high
 labels: [review, v2, daemon, terminal, ipc]
 dependson: []
 related: [216, 218, 248, 251, 264, 271]
 parent: 453
 created_at: 2026-07-20T12:06:23.708368+00:00
-updated_at: 2026-07-20T20:42:08.480022+00:00
+updated_at: 2026-07-20T21:19:57.119932+00:00
 ---
 
 ## 問題・影響
