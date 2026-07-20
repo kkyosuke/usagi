@@ -290,6 +290,18 @@ impl<S, P, J, L> AgentRuntime<S, P, J, L> {
             .filter(|record| record.state == super::runtime::RuntimeState::Running)
             .map(|_| caller.operation)
     }
+
+    /// Resolves the durable dispatch identity authenticated by an MCP child.
+    /// The credential is daemon-minted process provision; no client supplied
+    /// agent or session name participates in this lookup.
+    pub fn mcp_dispatch_caller(&self, credential: &str) -> Option<CallerRef> {
+        let run_id = self.mcp_caller(credential)?;
+        let binding = self.dispatch.binding(run_id).ok()??;
+        Some(CallerRef {
+            session_id: binding.worker.session_id,
+            agent_id: binding.worker.agent_id,
+        })
+    }
 }
 
 impl<
@@ -861,6 +873,7 @@ impl<
         candidate: &CompletionFence,
         kind: InboxKind,
         summary: String,
+        result: Option<usagi_core::domain::agent::StructuredResult>,
     ) -> Result<(), ProtocolError> {
         let record = self
             .coordinator
@@ -899,7 +912,7 @@ impl<
                     from: binding.worker.clone(),
                     kind,
                     summary,
-                    result: None,
+                    result,
                     created_at: Utc::now(),
                     read: false,
                 },
@@ -913,7 +926,59 @@ impl<
         self.dispatch
             .transition_run(candidate.operation_id, status, Some(Utc::now()))
             .map_err(|_| dispatch_storage_error())?;
+        let agent_status = if kind == InboxKind::Completed {
+            AgentStatus::Idle
+        } else {
+            AgentStatus::Failed
+        };
+        self.dispatch
+            .transition_agent(binding.worker.agent_id, agent_status, None)
+            .map_err(|_| dispatch_storage_error())?;
         Ok(())
+    }
+
+    /// Authenticates and delivers a completion report from a provisioned MCP
+    /// child. An optional run ID is only an assertion about the authenticated
+    /// current run; it never selects a different destination.
+    pub fn report_from_mcp(
+        &mut self,
+        credential: &str,
+        requested_run: Option<OperationId>,
+        kind: InboxKind,
+        summary: String,
+        result: Option<usagi_core::domain::agent::StructuredResult>,
+    ) -> Result<CallerRef, ProtocolError> {
+        let caller = self.mcp_callers.get(credential).cloned().ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "agent caller provenance is unknown",
+            )
+        })?;
+        if requested_run.is_some_and(|run_id| run_id != caller.operation) {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "completion run does not match the authenticated worker",
+            ));
+        }
+        let fence = self
+            .coordinator
+            .record_for(&caller.runtime)
+            .map_err(map_runtime_error)?
+            .operation
+            .clone();
+        let binding = self
+            .dispatch
+            .binding(caller.operation)
+            .map_err(|_| dispatch_storage_error())?
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::OwnershipUnknown,
+                    "dispatch binding is unavailable",
+                )
+            })?;
+        let delivered_to = binding.caller.clone();
+        self.report(&caller.runtime, &fence, kind, summary, result)?;
+        Ok(delivered_to)
     }
 
     fn dispatch_terminal(
@@ -1880,6 +1945,12 @@ mod tests {
                 &FakeScope(Ok(configured_scope(worktree.path()))),
             )
             .unwrap();
+        let credential = runtime.mcp_callers.keys().next().cloned().unwrap();
+        assert_eq!(
+            runtime.mcp_dispatch_caller(&credential).unwrap().session_id,
+            Some(session)
+        );
+        assert!(runtime.mcp_dispatch_caller("forged").is_none());
         let runtime_ref = runtime
             .coordinator
             .runtime_for_terminal(&admission.terminal)
@@ -1893,16 +1964,58 @@ mod tests {
         let mut wrong = fence.clone();
         wrong.owner_daemon_generation = DaemonGeneration::new();
         runtime
-            .report(&runtime_ref, &wrong, InboxKind::Completed, "wrong".into())
+            .report(
+                &runtime_ref,
+                &wrong,
+                InboxKind::Completed,
+                "wrong".into(),
+                None,
+            )
             .unwrap();
         assert!(runtime.dispatch_store().inbox(&caller).unwrap().is_empty());
+        assert_eq!(
+            runtime
+                .report_from_mcp(
+                    &credential,
+                    Some(OperationId::new()),
+                    InboxKind::Completed,
+                    "wrong run".into(),
+                    None,
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+        let result = usagi_core::domain::agent::StructuredResult {
+            commits: vec!["abc".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            runtime
+                .report_from_mcp(
+                    &credential,
+                    None,
+                    InboxKind::Completed,
+                    "done".into(),
+                    Some(result.clone()),
+                )
+                .unwrap(),
+            caller
+        );
         runtime
-            .report(&runtime_ref, &fence, InboxKind::Completed, "done".into())
+            .report_from_mcp(
+                &credential,
+                None,
+                InboxKind::Completed,
+                "duplicate".into(),
+                None,
+            )
             .unwrap();
         runtime.exit(&admission.terminal, 0).unwrap();
         let inbox = runtime.dispatch_store().inbox(&caller).unwrap();
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].kind, InboxKind::Completed);
+        assert_eq!(inbox[0].result, Some(result));
     }
 
     #[test]

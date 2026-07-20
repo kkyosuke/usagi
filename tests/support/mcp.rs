@@ -11,11 +11,21 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use usagi_core::domain::agent::AgentProfileId;
+use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
+use usagi_core::usecase::client::{
+    AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest, IpcClient,
+    SessionAction,
+};
+use usagi_daemon::infrastructure::unix_transport::connect_current;
 
 pub struct McpHarness {
     workspace: tempfile::TempDir,
+    cwd: PathBuf,
     home: tempfile::TempDir,
     fixture_bin: PathBuf,
     fixture_log: PathBuf,
@@ -32,6 +42,15 @@ struct McpProcess {
 impl McpHarness {
     #[must_use]
     pub fn start() -> Self {
+        Self::start_at(None)
+    }
+
+    #[must_use]
+    pub fn start_in_session(name: &str) -> Self {
+        Self::start_at(Some(name))
+    }
+
+    fn start_at(session: Option<&str>) -> Self {
         let workspace = short_dir("usagi-mcp-workspace-");
         git(workspace.path(), &["init", "-q"]);
         git(
@@ -55,6 +74,13 @@ impl McpHarness {
             "[agents.codex]\nmodels = [\"fixture-codex\"]\n[agents.claude]\nmodels = [\"fixture-claude\"]\n",
         )
         .unwrap();
+        git(workspace.path(), &["add", ".usagi/config.toml"]);
+        git(workspace.path(), &["commit", "-qm", "fixture agent config"]);
+        let cwd = session.map_or_else(
+            || workspace.path().to_path_buf(),
+            |name| workspace.path().join(".usagi/sessions").join(name),
+        );
+        fs::create_dir_all(&cwd).unwrap();
 
         let path = format!(
             "{}:{}",
@@ -63,9 +89,10 @@ impl McpHarness {
         );
         let mut child = Command::new(env!("CARGO_BIN_EXE_usagi"))
             .arg("mcp")
-            .current_dir(workspace.path())
+            .current_dir(&cwd)
             .env("USAGI_HOME", home.path())
             .env("USAGI_MCP_FIXTURE_LOG", &fixture_log)
+            .env("USAGI_E2E_USAGI", env!("CARGO_BIN_EXE_usagi"))
             .env("PATH", path)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
@@ -80,6 +107,7 @@ impl McpHarness {
         let stdout = BufReader::new(child.stdout.take().unwrap());
         let mut harness = Self {
             workspace,
+            cwd,
             home,
             fixture_bin,
             fixture_log,
@@ -137,6 +165,11 @@ impl McpHarness {
     }
 
     #[must_use]
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+
+    #[must_use]
     pub fn data_dir(&self) -> PathBuf {
         usagi_core::infrastructure::paths::channel_data_dir(self.home.path())
     }
@@ -159,6 +192,118 @@ impl McpHarness {
         let executable = self.fixture_bin.join(runtime);
         fs::write(&executable, script).unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Launch a long-lived caller Agent through the shipping daemon and return
+    /// the opaque MCP credential injected into that exact runtime.
+    pub fn launch_caller(&mut self) -> String {
+        let created = self.tool("session_create", &json!({"name":"mcp-caller"}));
+        assert!(created.get("error").is_none(), "{created}");
+        let mut client = self.daemon_client();
+        let listed = client
+            .request(DaemonRequest::Session {
+                action: SessionAction::List,
+                operation_id: OperationId::new().to_string(),
+                payload: json!({}),
+            })
+            .unwrap();
+        let body = match listed {
+            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => body,
+        };
+        let workspace: WorkspaceId = serde_json::from_value(body["workspace_id"].clone()).unwrap();
+        let session: SessionId = serde_json::from_value(
+            body["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|session| session["name"] == "mcp-caller")
+                .unwrap()["session_id"]
+                .clone(),
+        )
+        .unwrap();
+        let launched = client
+            .request(DaemonRequest::Agent {
+                operation_id: OperationId::new().to_string(),
+                intent: AgentLaunchIntent {
+                    workspace,
+                    session: Some(session),
+                    profile: Some(AgentProfileId::new("codex").unwrap()),
+                },
+            })
+            .unwrap();
+        assert!(matches!(launched, DaemonReply::Accepted { .. }));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(log) = fs::read_to_string(&self.fixture_log)
+                && let Some(credential) = log
+                    .lines()
+                    .find_map(|line| line.strip_prefix("credential:"))
+            {
+                return credential.to_owned();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "caller credential was not provisioned"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Restart only the stdio MCP facade with one daemon-provisioned caller
+    /// credential. The already-running shipping daemon remains authoritative.
+    pub fn restart_with_credential(&mut self, credential: &str) {
+        let _ = self.process.child.kill();
+        let _ = self.process.child.wait();
+        let path = format!(
+            "{}:{}",
+            self.fixture_bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut child = Command::new(env!("CARGO_BIN_EXE_usagi"))
+            .arg("mcp")
+            .current_dir(self.workspace.path())
+            .env("USAGI_HOME", self.home.path())
+            .env("USAGI_MCP_FIXTURE_LOG", &self.fixture_log)
+            .env("USAGI_E2E_USAGI", env!("CARGO_BIN_EXE_usagi"))
+            .env("USAGI_MCP_CALLER_CREDENTIAL", credential)
+            .env("PATH", path)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        self.process = McpProcess {
+            stdin: child.stdin.take().unwrap(),
+            stdout: BufReader::new(child.stdout.take().unwrap()),
+            child,
+            next_id: 1,
+        };
+        let initialized = self.request(
+            "initialize",
+            &json!({"protocolVersion":"2025-06-18","clientInfo":{"name":"credential-e2e","version":"1"}}),
+        );
+        assert_eq!(initialized["result"]["serverInfo"]["name"], "usagi");
+    }
+
+    fn daemon_client(&self) -> IpcClient<std::os::unix::net::UnixStream> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(stream) = connect_current(&self.data_dir()) {
+                return IpcClient::connect(
+                    stream,
+                    "mcp-production-e2e".into(),
+                    OperationId::new().to_string(),
+                    ClientPolicy::cli(),
+                )
+                .unwrap();
+            }
+            assert!(Instant::now() < deadline, "daemon socket was not published");
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 }
 
@@ -198,7 +343,7 @@ fn git(repo: &Path, args: &[&str]) {
 }
 
 fn install_fixture_agent(bin: &Path, name: &str) {
-    let script = "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nprintf '%s\\n' \"$0 $*\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'fixture-ready\\n'\nwhile IFS= read -r line; do printf 'fixture-input:%s\\n' \"$line\"; done\n";
+    let script = "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nprintf '%s\\n' \"$0 $*\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'credential:%s\\n' \"$USAGI_MCP_CALLER_CREDENTIAL\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'fixture-ready\\n'\nwhile IFS= read -r line; do printf 'fixture-input:%s\\n' \"$line\"; done\n";
     let executable = bin.join(name);
     fs::write(&executable, script).unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();

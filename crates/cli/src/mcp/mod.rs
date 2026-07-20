@@ -4,7 +4,7 @@
 //!
 //! stdio 上の JSON-RPC 2.0 の serve ループ（`initialize` / `tools/list` / `tools/call`）は
 //! [`serve`] が担う。`tools/list` と `initialize` は実際に応答し、`tools/call` は tool を
-//! 名前で引いて呼ぶ（各 tool の `call` は未実装スタブなので今は「未実装」エラーを返す）。
+//! 名前で引いて呼ぶ。issue / memory tool は cwd の store を core usecase 経由で操作する。
 //! ロジックは usagi-core の usecase（issue / memory）と daemon への IPC（session）へ
 //! 委譲する方針で、CLI のコマンドハンドラと同じ core usecase を呼ぶ兄弟。
 

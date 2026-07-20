@@ -487,8 +487,9 @@ argv ─► clap 解析 ─► Command ─► Command::into_handler() ─► Box
 
 dispatch MCP の正本は本節である。`session_dispatch`、`session_get`、`agent_list`、`agent_get`、
 `agent_complete`、`agent_fail`、`agent_inbox` は tool schema と daemon IPC request 型を公開する。
-daemon に durable handler が compose されていない現在は、これらの request を副作用なしの明示エラーとして
-拒否する。既定 IPC adapter の成功エコーには落とさないため、MCP caller が処理済みと誤認することはない。
+daemon は private caller credential を live runtime と照合し、session lifecycle、Agent runtime、dispatch
+store と caller inbox を一つの durable 経路として compose する。credential の無い呼び出しや current run と
+一致しない完了報告は fail-closed で拒否し、payload の caller identity は信用しない。
 
 `session_dispatch` の新規 agent は workspace の `.usagi/config.toml` にある
 `[agents.claude].models` / `[agents.codex].models` allowlist だけから選ぶ。MCP server は起動時に

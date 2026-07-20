@@ -1,7 +1,92 @@
 //! memory 系 MCP tool（`.usagi/memory/` のエージェントメモリ操作）。CLI の `usagi` には
 //! 出さないエージェント向けの IF で、CLI コマンドと同じ core usecase を呼ぶ兄弟。
 
-use crate::mcp::tool::Tool;
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use usagi_core::domain::memory::{Memory, MemorySummary};
+use usagi_core::infrastructure::store::memory::MemoryStore;
+use usagi_core::usecase::memory::{self, MemoryFilter, MemoryPatch};
+
+use crate::mcp::tool::{Tool, ToolError};
+
+#[coverage(off)] // Production cwd resolution is exercised by the process E2E.
+fn store() -> MemoryStore {
+    MemoryStore::new(
+        std::env::current_dir().expect("MCP server already resolved its cwd at startup"),
+    )
+}
+
+fn parse<T: for<'de> Deserialize<'de>>(params: &str) -> Result<T, ToolError> {
+    serde_json::from_str(params).map_err(|error| invalid_params(&error))
+}
+
+fn invalid_params(error: &serde_json::Error) -> ToolError {
+    ToolError::InvalidParams(error.to_string())
+}
+
+fn output(value: &impl Serialize) -> String {
+    serde_json::to_string_pretty(value).expect("MCP wire views must serialize")
+}
+
+fn execution<T>(result: anyhow::Result<T>) -> Result<T, ToolError> {
+    result.map_err(|error| execution_error(&error))
+}
+
+fn execution_error(error: &anyhow::Error) -> ToolError {
+    ToolError::Execution(error.to_string())
+}
+
+#[derive(Serialize)]
+struct MemoryView<'a> {
+    name: &'a str,
+    title: &'a str,
+    #[serde(rename = "type")]
+    kind: usagi_core::domain::memory::MemoryType,
+    related: &'a [String],
+    created_at: chrono::DateTime<Utc>,
+    updated_at: chrono::DateTime<Utc>,
+    body: &'a str,
+}
+
+impl<'a> From<&'a Memory> for MemoryView<'a> {
+    fn from(memory: &'a Memory) -> Self {
+        Self {
+            name: &memory.name,
+            title: &memory.title,
+            kind: memory.kind,
+            related: &memory.related,
+            created_at: memory.created_at,
+            updated_at: memory.updated_at,
+            body: &memory.body,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct MemorySummaryView<'a> {
+    #[serde(flatten)]
+    summary: &'a MemorySummary,
+}
+
+#[derive(Deserialize)]
+struct SaveArgs {
+    name: String,
+    #[serde(flatten)]
+    patch: MemoryPatch,
+}
+
+#[derive(Deserialize)]
+struct NameArgs {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct SearchArgs {
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(flatten)]
+    filter: MemoryFilter,
+}
 
 /// memory 系 tool の一覧。
 #[must_use]
@@ -27,6 +112,16 @@ impl Tool for MemorySave {
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"},"title":{"type":"string"},"type":{"type":"string","enum":["user","feedback","project","reference"]},"related":{"type":"array","items":{"type":"string"}},"body":{"type":"string"}},"required":["name"]}"#
     }
+    fn call(&self, params: &str) -> Result<String, ToolError> {
+        let args: SaveArgs = parse(params)?;
+        let saved = execution(memory::save_partial(
+            &store(),
+            &args.name,
+            args.patch,
+            Utc::now(),
+        ))?;
+        Ok(output(&MemoryView::from(&saved)))
+    }
 }
 
 /// `memory_get` — メモリを取得する。
@@ -41,6 +136,14 @@ impl Tool for MemoryGet {
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#
+    }
+    fn call(&self, params: &str) -> Result<String, ToolError> {
+        let args: NameArgs = parse(params)?;
+        let memory = execution(memory::get(&store(), &args.name))?;
+        memory.as_ref().map_or_else(
+            || Ok("null".to_owned()),
+            |memory| Ok(output(&MemoryView::from(memory))),
+        )
     }
 }
 
@@ -57,6 +160,20 @@ impl Tool for MemorySearch {
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"query":{"type":"string"},"type":{"type":"string","enum":["user","feedback","project","reference"]}}}"#
     }
+    fn call(&self, params: &str) -> Result<String, ToolError> {
+        let args: SearchArgs = parse(params)?;
+        let memories = execution(memory::search(
+            &store(),
+            args.query.as_deref().unwrap_or(""),
+            &args.filter,
+        ))?;
+        Ok(output(
+            &memories
+                .iter()
+                .map(|summary| MemorySummaryView { summary })
+                .collect::<Vec<_>>(),
+        ))
+    }
 }
 
 /// `memory_delete` — メモリを削除する。
@@ -71,5 +188,12 @@ impl Tool for MemoryDelete {
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#
+    }
+    fn call(&self, params: &str) -> Result<String, ToolError> {
+        let args: NameArgs = parse(params)?;
+        let deleted = execution(memory::delete(&store(), &args.name))?;
+        Ok(output(
+            &serde_json::json!({"name": args.name, "deleted": deleted}),
+        ))
     }
 }
