@@ -194,6 +194,21 @@ pub trait DecisionCommandPort: Send {
     ) -> BackendEvent;
 }
 
+/// Best-effort desktop-notification boundary for newly observed user decisions.
+///
+/// The TUI never depends on an OS command: unsupported platforms and delivery
+/// failures are handled by the composition adapter, while the notice centre
+/// remains usable.
+pub trait DesktopNotificationPort {
+    fn notify(&mut self, title: &str, body: &str);
+}
+
+struct NoDesktopNotifications;
+impl DesktopNotificationPort for NoDesktopNotifications {
+    #[coverage(off)]
+    fn notify(&mut self, _: &str, _: &str) {}
+}
+
 /// Bridges the workspace [`AgentCommandPort`] into the [`TerminalStreamPort`]
 /// expected by a [`TerminalSession`], so the session coordinator stays free of
 /// the wider Agent launch vocabulary.
@@ -2063,6 +2078,45 @@ fn sidebar_pointer_event(
     }
 }
 
+#[coverage(off)] // Real-terminal resync composition; reducer state is unit-tested below the port.
+fn decision_ids(event: &BackendEvent) -> std::collections::BTreeSet<UserDecisionId> {
+    match event {
+        BackendEvent::Decisions { decisions, .. } => decisions
+            .iter()
+            .map(|decision| decision.decision_id)
+            .collect(),
+        _ => std::collections::BTreeSet::new(),
+    }
+}
+
+#[coverage(off)] // OS delivery stays behind the injected best-effort port.
+fn notify_new_decisions(
+    event: &BackendEvent,
+    notified: &mut std::collections::BTreeSet<UserDecisionId>,
+    notifications: &mut dyn DesktopNotificationPort,
+) {
+    let BackendEvent::Decisions { decisions, .. } = event else {
+        return;
+    };
+    for decision in decisions {
+        if !notified.insert(decision.decision_id) {
+            continue;
+        }
+        notifications.notify(
+            "usagi: decision needed",
+            &format!(
+                "{}: {}",
+                decision
+                    .owner
+                    .session_id
+                    .as_ref()
+                    .map_or_else(|| "workspace root".to_owned(), ToString::to_string),
+                decision.title
+            ),
+        );
+    }
+}
+
 /// Controller-driven real-terminal frame loop (`drain → poll → render → input →
 /// dispatch`). Home row state, live-pane availability, and the Home frame come
 /// from [`WorkspaceRuntime`]/`render_home`; the legacy [`WorkspaceUi`] is kept as
@@ -2078,6 +2132,7 @@ fn drive_workspace_controller(
     session_commands: Box<dyn SessionCommandPort>,
     agent_port: Box<dyn AgentCommandPort>,
     mut decisions: Box<dyn DecisionCommandPort>,
+    mut desktop_notifications: Box<dyn DesktopNotificationPort>,
     metrics_port: Box<dyn MetricsPort>,
     mut pr_port: Box<dyn PrSnapshotPort>,
     mut browser: Box<dyn BrowserOpener>,
@@ -2107,7 +2162,9 @@ fn drive_workspace_controller(
     let mut controls = LiveTerminalControls::default();
     // Seed the daemon-authoritative snapshot before the first frame so a
     // pending decision is visible without requiring a manual key binding.
-    let _ = runtime.apply_event(AppEvent::Backend(decisions.refresh(workspace_id)));
+    let initial = decisions.refresh(workspace_id);
+    let mut notified_decisions = decision_ids(&initial);
+    let _ = runtime.apply_event(AppEvent::Backend(initial));
     // Re-project already-live daemon terminals/Agents into tabs exactly once,
     // after the first frame is painted (below), so the opening frame is never
     // blocked on the daemon inventory round-trip.
@@ -2159,6 +2216,18 @@ fn drive_workspace_controller(
         }
         drain_pane_launches(&mut ui, geometry);
         let key = term.read_key()?;
+        // A tick is a bounded resync point. The daemon is authoritative and the
+        // reducer de-duplicates by stable ID, so reconnect and replay cannot
+        // create another notice or steal an already-owned modal.
+        if matches!(key, Key::Other) {
+            let event = decisions.refresh(workspace_id);
+            notify_new_decisions(
+                &event,
+                &mut notified_decisions,
+                desktop_notifications.as_mut(),
+            );
+            let _ = runtime.apply_event(AppEvent::Backend(event));
+        }
         if runtime.wants_live_input()
             && let Some(terminal) = runtime.focused_terminal()
             && let Some(bytes) = key_to_terminal_bytes(key.clone())
@@ -2191,7 +2260,17 @@ fn drive_workspace_controller(
         // A second click on the same cell within the window activates the row the
         // reducer resolves; otherwise the click just moves the cursor.
         let effects = if let Key::Click { column, row } = key {
-            runtime.apply_event(sidebar_pointer_event(&mut last_click, column, row))
+            // The notice centre occupies the right side of Home's top header.
+            // Keep it above the sidebar hit-test so a header click never moves
+            // the background selection, and let an open modal retain ownership.
+            if row == 0
+                && !runtime.state().unread_decision_ids().is_empty()
+                && usize::from(column) >= width.saturating_sub(28)
+            {
+                runtime.apply_event(AppEvent::Key(AppKey::OpenDecisions))
+            } else {
+                runtime.apply_event(sidebar_pointer_event(&mut last_click, column, row))
+            }
         } else {
             runtime.handle_key(key)
         };
@@ -2234,6 +2313,7 @@ pub fn run_workspace_controller(
     session_commands: Box<dyn SessionCommandPort>,
     agent_port: Box<dyn AgentCommandPort>,
     decisions: Box<dyn DecisionCommandPort>,
+    desktop_notifications: Box<dyn DesktopNotificationPort>,
     metrics_port: Box<dyn MetricsPort>,
     pr_port: Box<dyn PrSnapshotPort>,
     browser: Box<dyn BrowserOpener>,
@@ -2244,6 +2324,7 @@ pub fn run_workspace_controller(
         session_commands,
         agent_port,
         decisions,
+        desktop_notifications,
         metrics_port,
         pr_port,
         browser,
@@ -2437,6 +2518,7 @@ fn open_snapshot_via_controller<'a, 'b>(
         session_commands.create(),
         agent_port,
         Box::new(UnavailableDecisionCommandPort),
+        Box::new(NoDesktopNotifications),
         metrics_port,
         Box::new(UnavailablePrSnapshotPort),
         Box::new(UnavailableBrowserOpener),
@@ -2698,11 +2780,11 @@ mod tests {
     use super::{
         AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, BrowserOpener, Config,
         ConfigStep, DefaultSettingsPort, Exit, Geometry, MetricsPort, MetricsPortFactory, NewStep,
-        NoMetrics, NoMetricsFactory, SessionCommandPort, SessionCommandPortFactory,
-        SessionCommandResult, Start, TerminalAttach, TerminalChunk, TerminalError,
-        UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailablePrSnapshotPort,
-        UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceRuntime,
-        WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
+        NoDesktopNotifications, NoMetrics, NoMetricsFactory, SessionCommandPort,
+        SessionCommandPortFactory, SessionCommandResult, Start, TerminalAttach, TerminalChunk,
+        TerminalError, UnavailableBrowserOpener, UnavailableDecisionCommandPort,
+        UnavailablePrSnapshotPort, UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader,
+        WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
         clear_terminal_selection_on_click, close_exited_panes, controller_terminal_view,
         handle_terminal_pointer, key_to_terminal_bytes, new_project_notice, play_startup_splash,
         render_controller_frame, render_home_snapshot, restore_open_panes, run as run_from_start,
@@ -3171,6 +3253,7 @@ mod tests {
             Box::new(UnavailableSessionCommandPort),
             Box::new(SuccessfulAgentPort(terminal)),
             Box::new(UnavailableDecisionCommandPort),
+            Box::new(NoDesktopNotifications),
             Box::new(NoMetrics),
             Box::new(UnavailablePrSnapshotPort),
             Box::new(UnavailableBrowserOpener),
@@ -3250,6 +3333,7 @@ mod tests {
             Box::new(UnavailableSessionCommandPort),
             Box::new(SuccessfulAgentPort(terminal)),
             Box::new(UnavailableDecisionCommandPort),
+            Box::new(NoDesktopNotifications),
             Box::new(NoMetrics),
             Box::new(UnavailablePrSnapshotPort),
             Box::new(UnavailableBrowserOpener),

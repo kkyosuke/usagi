@@ -44,9 +44,9 @@ use usagi_tui::presentation::views::config::{self, AvailableAgentModels, Config}
 use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::GitDiff;
 use usagi_tui::presentation::{
-    self, AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, DecisionCommandPort, Exit,
-    MetricsPort, MetricsPortFactory, SessionCommandPort, SessionCommandPortFactory,
-    SessionCommandResult, Start, WorkspaceLoader, WorkspaceSnapshot,
+    self, AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, DecisionCommandPort,
+    DesktopNotificationPort, Exit, MetricsPort, MetricsPortFactory, SessionCommandPort,
+    SessionCommandPortFactory, SessionCommandResult, Start, WorkspaceLoader, WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::controller::{
     BackendEvent, NewRequest, Notice, SafeError, SafeMessage,
@@ -75,6 +75,34 @@ struct DaemonSessionCommandPort {
 /// The daemon remains the authority; this adapter only converts its safe
 /// snapshots and confirmations back into reducer events.
 struct DaemonDecisionCommandPort;
+
+/// Platform delivery is deliberately best-effort.  Fixed executable names and
+/// argument-vector spawning keep decision text out of a shell; a missing
+/// notification service must never stop the TUI.
+struct PlatformDesktopNotifier;
+
+impl DesktopNotificationPort for PlatformDesktopNotifier {
+    #[coverage(off)]
+    fn notify(&mut self, title: &str, body: &str) {
+        let mut command = if cfg!(target_os = "macos") {
+            let mut command = Command::new("osascript");
+            command
+                .arg("-e")
+                .arg("on run argv\n display notification (item 2 of argv) with title (item 1 of argv)\nend run")
+                .arg("--")
+                .arg(title)
+                .arg(body);
+            command
+        } else if cfg!(target_os = "linux") {
+            let mut command = Command::new("notify-send");
+            command.arg("--app-name=usagi").arg(title).arg(body);
+            command
+        } else {
+            return;
+        };
+        let _ = command.spawn();
+    }
+}
 
 impl DaemonDecisionCommandPort {
     #[coverage(off)]
@@ -1491,6 +1519,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
                     Box::new(DaemonSessionCommandPort::default()),
                     Box::new(DaemonAgentCommandPort::new()),
                     Box::new(DaemonDecisionCommandPort),
+                    Box::new(PlatformDesktopNotifier),
                     Box::new(DaemonMetricsPort::new()),
                     Box::new(DaemonPrSnapshotPort),
                     Box::new(PlatformBrowserOpener),
