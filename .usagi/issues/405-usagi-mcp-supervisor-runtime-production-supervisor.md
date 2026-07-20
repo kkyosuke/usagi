@@ -29,3 +29,12 @@ updated_at: 2026-07-20T04:54:26.630615+00:00
 - [ ] 各 action が durable な supervisor aggregate 状態を反映した結果を返す（エコー・偽 Ok を返さない）。
 - [ ] **production E2E**: `usagi mcp` から `supervisor_start`→`supervisor_get`/`supervisor_list`/`supervisor_events` で状態が観測できることを stdio→実 daemon→durable で固定。
 - [ ] docs（`07-mcp.md` に supervisor 系の記述が必要なら追加）。coverage 100%。
+- [ ] `Escalated` の解決意味論を確定する（下記「補足」参照）: reducer に ResolveEscalation で Escalated から遷移するイベントを追加するか、「解決＝新 run 起票」を明文化して `resume` choice を落とす。
+
+## 補足（2026-07-20 全体コードレビューで検証した追加根拠）
+
+domain 側にも「解決経路の欠如」がある（2f4dc5b6 時点で検証）。ResolveEscalation を配線する際は daemon の受け口だけでなく domain の遷移も必要になる:
+
+- `crates/core/src/domain/supervisor.rs:94` — `terminal()` が `Self::Escalated` を **terminal 状態**として列挙する（Escalated からの遷移が定義されていない）。
+- 一方 `escalate(...)`（fn :790）は `choices: vec!["resume".into(), "cancel".into()]`（:563-570）を積んでおり、**「resume できる」と提示しながら resume の遷移が存在しない**。
+- `SupervisorToolAction::ResolveEscalation` は `crates/core/src/usecase/client.rs:178` に定義済みだが、daemon 側の受け口はゼロ（`src/runtime/daemon.rs` は Pr/DispatchTool/Dispatch/Session/Agent の arm のみ :1084/:1163/:1331/:1446/:1535、`SupervisorTool` への言及なし — grep 0 件）。

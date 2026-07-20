@@ -31,6 +31,16 @@ updated_at: 2026-07-20T04:53:54.200783+00:00
 - [ ] `session_note_*` / `session_todo_*` / `session_decision_*`: session worktree の note/todo/decision ストア（core usecase）を読み書きする（session 内でのみ有効という現契約を維持）。
 - [ ] `session_pr` / `session_complete`: PR inventory / 完了報告の実データを返す。
 - [ ] `session_prompt`: 追加指示を対象 session の agent へ配送する backend を実装（launch queue / live queue、`SessionAction::Prompt` の `InvalidRequest` を実処理へ置換）。
+- [ ] `session_prompt` の入力検証を他 session tool と揃える（下記「補足」参照）。
 - [ ] `session_delegate_issue` / `session_delegate_brief`: issue→prompt 化 / brief ラップ → session 作成 → prompt 配送を 1 tool で完結。`session_prompt` backend の上に構築。
 - [ ] **production E2E**: `usagi mcp` から `session_create`→`session_prompt`（配送先の durable 確認）／`session_delegate_brief`→新 session 生成＋prompt キュー投入、`session_status` の観測を固定。
 - [ ] docs（`07-mcp.md`・orchestration guide の observe/delegate）を実挙動へ一致。coverage 100%。
+
+## 補足（2026-07-20 全体コードレビューで検証した追加根拠）
+
+`session_prompt` だけが legacy `agent_cli` の正規化・allowlist 検証を受けずに素通しになっている（2f4dc5b6 時点で検証）:
+
+- `crates/cli/src/mcp/serve.rs` の検証適用は 2 系統のみ: `session_dispatch` → `validate_agent`（:228-235）、`session_create | session_delegate_issue | session_delegate_brief` → `normalize_legacy_agent`（:237-243）。
+- `session_prompt` はどちらにも含まれず、`session_action`（:344）経由で `SessionAction::Prompt` に**無検証で** payload を渡す。一方 schema は `agent_cli`/`model` を公開している（`crates/cli/src/mcp/tools/session.rs:275`）。
+
+backend 実装時（`InvalidRequest` の実処理置換時）に、`session_prompt` にも create/delegate 系と同じ正規化・allowlist 検証を適用すること。
