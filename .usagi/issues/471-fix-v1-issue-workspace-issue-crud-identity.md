@@ -1,14 +1,14 @@
 ---
 number: 471
 title: fix(v1/issue): workspace 全体で issue 番号と CRUD identity を一意にする
-status: in-progress
+status: done
 priority: high
 labels: [review, v1, issue, concurrency, durability]
 dependson: []
 related: [23, 335, 404]
 parent: 453
 created_at: 2026-07-20T12:06:23.376287+00:00
-updated_at: 2026-07-20T20:50:01.137779+00:00
+updated_at: 2026-07-20T21:15:58.618026+00:00
 ---
 
 ## 問題・影響
