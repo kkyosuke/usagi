@@ -4225,6 +4225,10 @@ mod tests {
         unregister_calls: usize,
         created: Vec<NewRequest>,
         fail: bool,
+        /// Number of leading `create_workspace` calls that reject before the
+        /// loader starts succeeding, standing in for a pre-flight rejection
+        /// (e.g. the workspace already exists) that the user then corrects.
+        create_failures: usize,
         opened_at: Option<DateTime<Utc>>,
     }
 
@@ -4258,6 +4262,14 @@ mod tests {
 
         fn create_workspace(&mut self, request: &NewRequest) -> io::Result<WorkspaceSnapshot> {
             self.created.push(request.clone());
+            if self.create_failures > 0 {
+                self.create_failures -= 1;
+                // Mirror the real loader's pre-flight rejection: no workspace is
+                // created, so the caller keeps the draft and can retry.
+                return Err(io::Error::other(
+                    "this directory is already a registered workspace",
+                ));
+            }
             // Both modes resolve to a directory that is then opened like any
             // other workspace, mirroring the real loader.
             let path = match request {
@@ -4630,6 +4642,57 @@ mod tests {
         let text = last_new.join("\n");
         assert!(text.contains("open failed")); // the failure notice
         assert!(text.contains('x')); // the draft path is retained
+    }
+
+    #[test]
+    fn new_form_recovers_after_an_existing_workspace_rejection_and_retries() {
+        // The first create is rejected as if the workspace already existed; the
+        // user edits the path and the second create succeeds and opens.
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('e'), // Welcome → New
+            Key::Right,     // Clone → Existing
+            Key::Down,      // focus the directory path
+            Key::Char('x'), // path "x"
+            Key::Enter,     // create #1 → rejected (already registered)
+            Key::Char('y'), // fix the path → "xy" (draft was retained)
+            Key::Enter,     // create #2 → succeeds and opens
+            Key::CtrlQ,     // leave the workspace…
+            Key::Char('y'), // …confirm
+        ]);
+        let mut loader = FakeLoader {
+            create_failures: 1,
+            ..FakeLoader::default()
+        };
+        assert_eq!(
+            run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap(),
+            Exit::Quit
+        );
+        // Two attempts: the rejected "x" and the corrected "xy".
+        assert_eq!(
+            loader.created,
+            vec![
+                NewRequest::Existing {
+                    path: PathBuf::from("x"),
+                    name: "x".to_owned(),
+                },
+                NewRequest::Existing {
+                    path: PathBuf::from("xy"),
+                    name: "xy".to_owned(),
+                },
+            ]
+        );
+        // The rejection surfaced a safe notice on the retained New form…
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("already a registered workspace"))
+        );
+        // …and the corrected retry opened the freshly created workspace.
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("xy-session"))
+        );
     }
 
     #[test]

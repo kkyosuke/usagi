@@ -869,6 +869,24 @@ mod tests {
     }
 
     #[test]
+    fn to_request_rejects_a_directory_name_that_contains_a_separator() {
+        use crate::usecase::application::controller::NewValidationError;
+        let mut state = New::default();
+        state.focus_next(); // Url
+        type_str(&mut state, "https://github.com/owner/repo.git");
+        state.focus_next(); // Location
+        type_str(&mut state, "/projects");
+        state.focus_next(); // Directory (derived "repo")
+        // Editing appends a path separator, which would let the destination
+        // escape the chosen location; the form rejects it before submit.
+        type_str(&mut state, "/sub");
+        assert_eq!(
+            state.to_request().unwrap_err(),
+            NewValidationError::DirectoryInvalid
+        );
+    }
+
+    #[test]
     fn to_request_reports_the_first_missing_required_field() {
         use crate::usecase::application::controller::NewValidationError;
         // 既定の Clone フォームは URL 未入力。

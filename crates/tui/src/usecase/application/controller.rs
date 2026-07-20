@@ -1751,6 +1751,7 @@ pub enum NewValidationError {
     RepositoryRequired,
     LocationRequired,
     DirectoryRequired,
+    DirectoryInvalid,
     PathRequired,
     NameRequired,
 }
@@ -1763,6 +1764,7 @@ impl NewValidationError {
             Self::RepositoryRequired => "repository URL is required",
             Self::LocationRequired => "clone location is required",
             Self::DirectoryRequired => "directory name is required",
+            Self::DirectoryInvalid => "directory name must not contain path separators",
             Self::PathRequired => "directory path is required",
             Self::NameRequired => "workspace name is required",
         }
@@ -1782,6 +1784,9 @@ pub fn validate_new_form(mode: NewMode, form: &NewForm) -> Result<NewRequest, Ne
             let repository = required(&form.repository, NewValidationError::RepositoryRequired)?;
             let location = required(&form.location, NewValidationError::LocationRequired)?;
             let directory = required(&form.directory, NewValidationError::DirectoryRequired)?;
+            if is_invalid_directory_name(&directory) {
+                return Err(NewValidationError::DirectoryInvalid);
+            }
             let branch = trimmed(&form.branch);
             Ok(NewRequest::Clone {
                 repository,
@@ -1799,6 +1804,15 @@ pub fn validate_new_form(mode: NewMode, form: &NewForm) -> Result<NewRequest, Ne
 #[coverage(off)]
 fn required(value: &str, error: NewValidationError) -> Result<String, NewValidationError> {
     trimmed(value).ok_or(error)
+}
+
+/// A clone destination is created as a single child directory under the chosen
+/// location, so its name must not traverse (`.`/`..`) or contain a path
+/// separator. Rejecting these before submit keeps `location.join(directory)`
+/// from escaping the location.
+#[coverage(off)]
+fn is_invalid_directory_name(directory: &str) -> bool {
+    directory == "." || directory == ".." || directory.contains(['/', '\\'])
 }
 
 #[coverage(off)]
