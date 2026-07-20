@@ -1369,9 +1369,12 @@ fn home_row_lines_at(
                 )
             },
         );
-        // Draw the same Git summary columns as the legacy sidebar. The whole
-        // metadata row keeps Home's dim treatment; column widths reuse the shared
-        // `sidebar_metadata` so both render paths align identically.
+        // Draw the same Git summary columns as the legacy sidebar. A non-cursor
+        // Switch row is inactive even when its current-target marker or Git
+        // cells contain ANSI spans: compose its dim treatment after the spans so
+        // their resets cannot make the relative time bright. The cursor row
+        // keeps its established marker emphasis. Column widths still reuse the
+        // shared `sidebar_metadata` so both render paths align identically.
         let metadata = sidebar_metadata(
             metadata,
             home.git_diffs.get(&session.id),
@@ -1379,10 +1382,12 @@ fn home_row_lines_at(
             width,
             true,
         );
-        vec![
-            first,
-            widgets::pad_to_width(&Style::new().dim().paint(&metadata), width),
-        ]
+        let metadata = if home.mode == HomeMode::Switch && !selected {
+            widgets::dim_ansi(&metadata)
+        } else {
+            Style::new().dim().paint(&metadata)
+        };
+        vec![first, widgets::pad_to_width(&metadata, width)]
     } else {
         vec![first]
     }
@@ -2272,6 +2277,56 @@ mod tests {
         assert!(rendered.contains("\u{1b}[2mfirst\u{1b}[0m"));
         assert!(rendered.contains("\u{1b}[1;36msecond\u{1b}[0m"));
         assert!(rendered.contains("\u{1b}[2m+ new session\u{1b}[0m"));
+    }
+
+    #[test]
+    fn switch_dims_nonselected_session_metadata_after_ansi_role_resets() {
+        let workspace = WorkspaceId::new();
+        let active = SessionId::new();
+        let selected = SessionId::new();
+        let mut state = AppState::home(workspace, vec![active, selected]);
+        // Make `active` the current target, move the cursor to `selected`, then
+        // return to Switch. This is the transition that previously left `now`
+        // bright after the green current marker reset.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::CtrlO));
+        let mut active_session = projected_session(active, "active", "/work/active");
+        active_session.last_modified = Utc::now();
+        active_session.pr_summary = Some("#42 +1".to_owned());
+        let home = HomeProjection::from_state(
+            &state,
+            "work",
+            "/work",
+            &[
+                active_session,
+                projected_session(selected, "selected", "/work/selected"),
+            ],
+        )
+        .with_git_diffs(&BTreeMap::from([(
+            active,
+            GitDiff {
+                base: "origin/main".to_owned(),
+                ahead: 1,
+                behind: 2,
+                added: 3,
+                removed: 4,
+            },
+        )]));
+
+        let metadata = render_home(30, 100, &home)
+            .into_iter()
+            .find(|line| line.contains("now · #42 +1"))
+            .expect("active session metadata row");
+
+        assert!(metadata.contains("\u{1b}[2m now · #42 +1"));
+        assert!(metadata.contains("\u{1b}[2;36m↑1"));
+        assert!(metadata.contains("\u{1b}[2;35m↓2"));
+        assert!(metadata.contains("\u{1b}[2;32m+ 3"));
+        assert!(metadata.contains("\u{1b}[2;31m- 4"));
+        assert!(!metadata.contains("\u{1b}[0m now"));
     }
 
     #[test]
