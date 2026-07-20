@@ -459,25 +459,25 @@ impl TerminalSession {
     }
 
     fn fail_at(&mut self, error: TerminalError, now: Instant) {
-        if error == TerminalError::Unavailable {
-            self.subscription = None;
-            self.state = SessionState::Reconnecting;
-            self.retry_at = Some(now + retry_delay(self.retry_attempt));
-            self.retry_attempt = self.retry_attempt.saturating_add(1);
-            self.error = Some(error_message(error).to_owned());
-            return;
-        }
+        let state = match error {
+            TerminalError::Unavailable => {
+                self.subscription = None;
+                self.state = SessionState::Reconnecting;
+                self.retry_at = Some(now + retry_delay(self.retry_attempt));
+                self.retry_attempt = self.retry_attempt.saturating_add(1);
+                self.error = Some(error_message(error).to_owned());
+                return;
+            }
+            TerminalError::Orphaned => SessionState::Orphaned,
+            TerminalError::Exited => SessionState::Exited,
+            TerminalError::ResyncRequired | TerminalError::Stale => SessionState::Disconnected,
+        };
         if error != TerminalError::Exited {
             self.subscription = None;
         }
         self.retry_at = None;
         self.retry_attempt = 0;
-        self.state = match error {
-            TerminalError::Orphaned => SessionState::Orphaned,
-            TerminalError::Exited => SessionState::Exited,
-            TerminalError::ResyncRequired | TerminalError::Stale => SessionState::Disconnected,
-            TerminalError::Unavailable => unreachable!("unavailable handled above"),
-        };
+        self.state = state;
         self.error = Some(error_message(error).to_owned());
     }
 }
@@ -1071,7 +1071,9 @@ mod tests {
                 self.available()
             }
 
-            fn detach(&mut self, _: &TerminalRef, _: u64) {}
+            fn detach(&mut self, _: &TerminalRef, _: u64) {
+                let _ = self.available();
+            }
         }
 
         fn serve(listener: UnixListener, connections: usize) -> thread::JoinHandle<()> {
@@ -1100,13 +1102,16 @@ mod tests {
         assert_eq!(session.state(), SessionState::Reconnecting);
 
         std::fs::remove_file(&path).unwrap();
-        let restarted_server = serve(UnixListener::bind(&path).unwrap(), 2);
+        let restarted_server = serve(UnixListener::bind(&path).unwrap(), 5);
         port.next_attach = attach(2, 5, b"fresh", false);
         session.poll_at(&mut port, start + RETRY_INITIAL);
-        restarted_server.join().unwrap();
 
         assert_eq!(session.state(), SessionState::Live);
         assert_eq!(session.rows()[0], "fresh");
         assert_eq!(port.attached, vec![terminal.clone(), terminal]);
+        session.poll_at(&mut port, start + RETRY_INITIAL);
+        assert_eq!(session.send_input(&mut port, b"x"), Ok(()));
+        session.detach(&mut port);
+        restarted_server.join().unwrap();
     }
 }
