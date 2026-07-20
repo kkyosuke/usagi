@@ -1,13 +1,13 @@
 ---
 number: 409
 title: fix(tui): session 行の stable identity ダブルクリックで Closeup へ切り替える
-status: todo
+status: in-progress
 priority: high
 labels: [tui, mouse, controller, regression]
 dependson: []
 related: [395]
 created_at: 2026-07-20T05:19:32.173769+00:00
-updated_at: 2026-07-20T05:19:32.173769+00:00
+updated_at: 2026-07-20T05:25:41.225002+00:00
 ---
 
 ## 目的
