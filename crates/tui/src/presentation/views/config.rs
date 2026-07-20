@@ -1,5 +1,7 @@
 //! Config screen state and rendering.
 
+use std::time::Duration;
+
 use usagi_core::domain::settings::{DefaultModel, ModalSelectionMode, Settings, Theme};
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
@@ -9,6 +11,27 @@ use crate::presentation::widgets::select;
 
 const TITLE: &str = "Config";
 const FOOTER: &str = "Tab: scope  ↑↓: select  ←→: change  ●: unsaved  Enter: save  Esc: back";
+
+/// How long the `saved` confirmation stays on screen before the Config screen
+/// returns home on its own, with no key press. Short enough to feel immediate,
+/// long enough to read — a peer of the other screen-timing constants
+/// (`splash::ANIM_TICK`, `SIDEBAR_DOUBLE_CLICK`). This constant is the single
+/// source of truth for the Config save confirmation dwell.
+pub const SAVED_DISPLAY: Duration = Duration::from_millis(600);
+
+/// The Save action's lifecycle across a single save. The screen graph draws the
+/// `Saving` frame before the blocking write and holds the `Saved` frame for
+/// [`SAVED_DISPLAY`] before returning home; a failed write drops back to `Idle`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SavePhase {
+    /// No save in flight; the button reads `Save`.
+    #[default]
+    Idle,
+    /// A save has begun and the blocking write is about to run (loading).
+    Saving,
+    /// The write succeeded; the confirmation is on screen until the dwell ends.
+    Saved,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Field {
@@ -91,6 +114,7 @@ pub struct Config {
     workspace: ScopeSettings,
     available_models: AvailableAgentModels,
     notice: Option<String>,
+    save_phase: SavePhase,
 }
 
 impl Config {
@@ -136,6 +160,7 @@ impl Config {
             },
             available_models,
             notice: global_error.or(workspace_error),
+            save_phase: SavePhase::Idle,
         }
     }
 
@@ -266,10 +291,26 @@ impl Config {
         self.field == Field::Save && self.is_dirty()
     }
 
-    /// Save the selected scope when it is dirty. Returns true only after a
-    /// successful persistence, allowing the caller to close the screen.
-    pub fn save(&mut self, port: &mut dyn SettingsPort) -> bool {
+    /// Begin a save: enter the loading phase so the caller can draw a `Saving`
+    /// frame before the blocking write. Returns false — a no-op — unless the
+    /// focused Save row is dirty and no save is already in flight, which makes a
+    /// second Enter during a save (double press) safe.
+    pub fn begin_save(&mut self) -> bool {
+        if self.save_phase != SavePhase::Idle || !self.can_save() {
+            return false;
+        }
+        self.save_phase = SavePhase::Saving;
+        self.notice = None;
+        true
+    }
+
+    /// Persist the selected scope's dirty draft. On success it records the saved
+    /// value, enters the `Saved` phase, and returns true; on failure it drops
+    /// back to `Idle`, keeps the draft dirty, and surfaces a safe error so the
+    /// user can retry. Returns false without touching the port when not dirty.
+    pub fn commit_save(&mut self, port: &mut dyn SettingsPort) -> bool {
         if !self.is_dirty() {
+            self.save_phase = SavePhase::Idle;
             return false;
         }
         let scope = self.scope;
@@ -277,13 +318,31 @@ impl Config {
         match port.save(scope, &draft) {
             Ok(()) => {
                 self.current_mut().saved = draft;
+                self.save_phase = SavePhase::Saved;
                 self.notice = Some("saved".to_string());
                 true
             }
             Err(error) => {
+                self.save_phase = SavePhase::Idle;
                 self.notice = Some(format!("Save failed: {error}"));
                 false
             }
+        }
+    }
+
+    /// Clear the confirmation once the dwell ends and the screen returns home,
+    /// so a later visit to Config starts from a clean Save row.
+    pub fn reset_save(&mut self) {
+        self.save_phase = SavePhase::Idle;
+        self.notice = None;
+    }
+
+    /// The Save button's current label, driven by the save phase.
+    fn save_label(&self) -> &'static str {
+        match self.save_phase {
+            SavePhase::Idle => "Save",
+            SavePhase::Saving => "saving…",
+            SavePhase::Saved => "saved",
         }
     }
 
@@ -359,11 +418,7 @@ pub fn render(raw_height: usize, raw_width: usize, config: &Config) -> Vec<Strin
             mascot_screen::centered_line(
                 width,
                 &select::action(
-                    if config.notice() == Some("saved") {
-                        "saved"
-                    } else {
-                        "Save"
-                    },
+                    config.save_label(),
                     config.field() == Field::Save,
                     config.is_dirty(),
                 ),
@@ -441,6 +496,26 @@ mod tests {
         }
     }
 
+    /// Settings port that counts successful saves, used to prove a double press
+    /// persists exactly once.
+    #[derive(Default)]
+    struct CountingSettingsPort {
+        settings: Settings,
+        saves: usize,
+    }
+
+    impl SettingsPort for CountingSettingsPort {
+        fn read(&mut self, _scope: SettingsScope) -> io::Result<Settings> {
+            Ok(self.settings.clone())
+        }
+
+        fn save(&mut self, _scope: SettingsScope, settings: &Settings) -> io::Result<()> {
+            self.settings = settings.clone();
+            self.saves += 1;
+            Ok(())
+        }
+    }
+
     #[test]
     fn scopes_keep_independent_drafts_and_saved_values() {
         let mut port = FakeSettingsPort {
@@ -458,7 +533,7 @@ mod tests {
         let initial = render(24, 80, &config).join("\n");
         assert!(initial.contains("Theme") && initial.contains("light"));
         config.cycle_theme(true);
-        config.save(&mut port);
+        config.commit_save(&mut port);
         config.toggle_scope();
 
         assert_eq!(config.settings().theme, Theme::Dark);
@@ -469,7 +544,7 @@ mod tests {
         let workspace = render(24, 80, &config).join("\n");
         assert!(workspace.contains("Theme") && workspace.contains("dark"));
         config.cycle_theme(false);
-        config.save(&mut port);
+        config.commit_save(&mut port);
         assert_eq!(port.workspace.theme, Theme::System);
         config.toggle_scope();
         assert_eq!(config.scope(), SettingsScope::Global);
@@ -483,14 +558,14 @@ mod tests {
         };
         let mut config = Config::load(&mut port);
         config.cycle_theme(true);
-        config.save(&mut port);
+        config.commit_save(&mut port);
 
         assert_eq!(config.settings().theme, Theme::Dark);
         assert!(config.is_dirty());
         assert_eq!(config.notice(), Some("Save failed: disk unavailable"));
 
         port.fail_save = false;
-        config.save(&mut port);
+        config.commit_save(&mut port);
         assert!(!config.is_dirty());
         assert_eq!(port.global.theme, Theme::Dark);
     }
@@ -556,7 +631,8 @@ mod tests {
         config.next_field();
         config.next_field();
         assert!(config.can_save());
-        assert!(config.save(&mut port));
+        assert!(config.begin_save());
+        assert!(config.commit_save(&mut port));
         assert_eq!(config.notice(), Some("saved"));
         assert!(!config.is_dirty());
         assert!(render(24, 80, &config).join("\n").contains("[ saved ]"));
@@ -569,7 +645,7 @@ mod tests {
         config.previous_field();
         assert_eq!(config.field(), Field::Save);
         assert!(!config.cycle_selected(true));
-        assert!(!config.save(&mut port));
+        assert!(!config.begin_save());
 
         config.previous_field();
         assert_eq!(config.field(), Field::DefaultModel);
@@ -599,7 +675,8 @@ mod tests {
         config.cycle_selected(true);
         assert_eq!(config.settings().default_model, DefaultModel::Claude);
         config.next_field();
-        assert!(config.save(&mut port));
+        assert!(config.begin_save());
+        assert!(config.commit_save(&mut port));
         assert_eq!(port.global.default_model, DefaultModel::Claude);
         assert_eq!(config.global_default_model(), DefaultModel::Claude);
         // The saved modal interaction accessor reads the same global scope, used
@@ -655,5 +732,103 @@ mod tests {
         assert_eq!(config.field(), Field::Save);
         config.previous_field();
         assert_eq!(config.field(), Field::ModalSelectionMode);
+    }
+
+    /// Drive the Save row to the dirty state used by the phase tests.
+    fn dirty_on_save_row(port: &mut FakeSettingsPort) -> Config {
+        let mut config = Config::load(port);
+        config.cycle_theme(true);
+        config.next_field();
+        config.next_field();
+        config.next_field();
+        assert_eq!(config.field(), Field::Save);
+        assert!(config.can_save());
+        config
+    }
+
+    #[test]
+    fn save_moves_from_loading_to_saved_and_labels_each_phase() {
+        let mut port = FakeSettingsPort::default();
+        let mut config = dirty_on_save_row(&mut port);
+        assert!(render(24, 80, &config).join("\n").contains("[ Save ]"));
+
+        // begin_save enters the loading phase and clears any earlier notice.
+        assert!(config.begin_save());
+        assert!(config.is_dirty());
+        assert_eq!(config.notice(), None);
+        assert!(render(24, 80, &config).join("\n").contains("[ saving… ]"));
+
+        // commit_save persists, settles to Saved, and stops being dirty.
+        assert!(config.commit_save(&mut port));
+        assert_eq!(config.notice(), Some("saved"));
+        assert!(!config.is_dirty());
+        assert!(render(24, 80, &config).join("\n").contains("[ saved ]"));
+        assert_eq!(port.global.theme, Theme::Dark);
+    }
+
+    #[test]
+    fn begin_save_is_a_no_op_while_saving_so_a_double_press_saves_once() {
+        let mut port = CountingSettingsPort::default();
+        let mut config = {
+            let mut base = Config::load(&mut port);
+            base.cycle_theme(true);
+            base.next_field();
+            base.next_field();
+            base.next_field();
+            base
+        };
+        assert_eq!(config.field(), Field::Save);
+
+        assert!(config.begin_save());
+        // A second Enter while Saving is rejected — no re-trigger, no re-write.
+        assert!(!config.begin_save());
+        assert!(config.commit_save(&mut port));
+        // A press after the save settled cannot re-save the clean draft.
+        assert!(!config.begin_save());
+
+        assert_eq!(port.saves, 1);
+    }
+
+    #[test]
+    fn failed_save_stays_idle_and_dirty_for_retry() {
+        let mut port = FakeSettingsPort {
+            fail_save: true,
+            ..FakeSettingsPort::default()
+        };
+        let mut config = dirty_on_save_row(&mut port);
+
+        assert!(config.begin_save());
+        assert!(!config.commit_save(&mut port));
+        assert!(config.is_dirty());
+        assert_eq!(config.notice(), Some("Save failed: disk unavailable"));
+        // Back in Idle, the button reads Save so the user can retry.
+        assert!(render(24, 80, &config).join("\n").contains("[ Save ]"));
+
+        port.fail_save = false;
+        assert!(config.begin_save());
+        assert!(config.commit_save(&mut port));
+        assert!(!config.is_dirty());
+        assert!(render(24, 80, &config).join("\n").contains("[ saved ]"));
+    }
+
+    #[test]
+    fn reset_save_clears_the_confirmation_for_the_next_visit() {
+        let mut port = FakeSettingsPort::default();
+        let mut config = dirty_on_save_row(&mut port);
+        assert!(config.begin_save());
+        assert!(config.commit_save(&mut port));
+        assert_eq!(config.notice(), Some("saved"));
+
+        config.reset_save();
+        assert_eq!(config.notice(), None);
+        assert!(render(24, 80, &config).join("\n").contains("[ Save ]"));
+    }
+
+    #[test]
+    fn commit_save_without_a_dirty_draft_is_a_no_op() {
+        let mut port = FakeSettingsPort::default();
+        let mut config = Config::load(&mut port);
+        assert!(!config.commit_save(&mut port));
+        assert_eq!(config.notice(), None);
     }
 }

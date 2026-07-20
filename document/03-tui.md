@@ -36,6 +36,14 @@ Open / Recent と同じ経路で開いて Home へ遷移する。作成が失敗
 出して同画面に留まり、そのまま修正・再実行できる。作成の実行中は入力を読まないため、`Enter` の連打で
 作成が二重に走ることはない。`Esc` は Welcome へ戻り、`Ctrl+C` は終了する。
 
+Config は Theme・Modal mode・Agent model を scope（Global / Workspace）ごとに編集し、`↑↓` で行を、
+`←→` で値を切り替える。未保存の値には `●` が付く。dirty な Save 行で `Enter` を押すと保存フローが始まり、
+Save button 自体が **loading（`saving…`）** 表示に変わる。保存が成功すると同じ button が **`saved`** 表示へ変わり、
+短い確認表示ののち、ユーザー操作なしで直前の Welcome へ自動的に戻る。保存が失敗した場合は自動で戻らず Config に
+留まり、`Save failed: …` の notice を出す。draft は dirty のまま保たれるため、その場で確認・修正して再試行できる。
+保存の実行中は入力を読まず、保存中の再押下（連打）は無視されるため、保存が二重に走ることはない。`Esc` は
+Welcome へ戻り、`Ctrl+C` は終了する。
+
 フォーカス中で編集可能な 1 行入力は共通の block cursor を使う。挿入位置の Unicode scalar を
 入力値と同じ意味色の reverse-video で示し、空欄または行末では反転した空白 1 セルを示す。
 この表示は文字を横へ押し出さず、全角文字も 1 scalar 単位で扱う。非フォーカス値、読み取り専用値、
