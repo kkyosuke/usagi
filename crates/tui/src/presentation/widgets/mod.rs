@@ -322,7 +322,10 @@ pub fn dim_ansi(text: &str) -> String {
 
         let mut params = sequence
             .split(';')
-            .filter(|param| *param != "1" && *param != "2")
+            // `0` resets every attribute, including the dim attribute we add
+            // below. Drop it together with bold/dim so a nested span reset
+            // becomes a fresh dim style rather than `2;0` (which is bright).
+            .filter(|param| *param != "0" && *param != "1" && *param != "2")
             .collect::<Vec<_>>();
         params.insert(0, "2");
         output.push(ESC);
@@ -577,6 +580,7 @@ mod tests {
         assert!(dimmed.contains("\u{1b}[2;36mtab"));
         assert!(dimmed.contains("\u{1b}[2;31merror"));
         assert!(!dimmed.contains("[1;36m"));
+        assert!(!dimmed.contains("[2;0m"));
         assert!(dimmed.ends_with("\u{1b}[0m"));
     }
 

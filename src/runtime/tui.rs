@@ -1499,15 +1499,26 @@ struct PlatformBrowserOpener;
 impl BrowserOpener for PlatformBrowserOpener {
     #[coverage(off)]
     fn open(&mut self, url: &str) -> Result<(), String> {
-        let program = if cfg!(target_os = "macos") {
-            "open"
+        let mut command = if cfg!(target_os = "macos") {
+            let mut command = Command::new("open");
+            command.arg(url);
+            command
         } else if cfg!(target_os = "linux") {
-            "xdg-open"
+            let mut command = Command::new("xdg-open");
+            command.arg(url);
+            command
+        } else if cfg!(target_os = "windows") {
+            // `start` is a `cmd` builtin, so it is launched through `cmd /C`. Its
+            // first quoted argument is the (empty) window title `start` consumes,
+            // so a URL beginning with `"` is never mistaken for the title. The URL
+            // stays a distinct argv item — `cmd` does not re-parse it as a command.
+            let mut command = Command::new("cmd");
+            command.args(["/C", "start", "", url]);
+            command
         } else {
             return Err("browser opening is unsupported on this platform".to_owned());
         };
-        Command::new(program)
-            .arg(url)
+        command
             .spawn()
             .map(|_| ())
             .map_err(|_| "browser launch failed".to_owned())

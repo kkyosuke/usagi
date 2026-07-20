@@ -50,7 +50,7 @@ use crate::presentation::widgets::modal::{self, ConfirmationView};
 use crate::presentation::workspace_runtime::WorkspaceRuntime;
 use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, Effect, NewRequest, Notice, OperationResult, Overlay,
-    PendingToken, PointerAction, SafeError, SafeMessage, Target,
+    PendingToken, SafeError, SafeMessage, Target,
 };
 use crate::usecase::application::pane::PaneKind;
 use crate::usecase::application::pane_runtime::Geometry;
@@ -1229,7 +1229,16 @@ fn drain_session_completions(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntim
         ui.removing_session = None;
         let creating = ui.creating_session.take();
         match completion.result {
-            Ok(result) => apply_session_projection(ui, result.sessions, result.session_ids),
+            Ok(result) => {
+                let reconciled_snapshot = result.sessions.is_some();
+                apply_session_projection(ui, result.sessions, result.session_ids);
+                if reconciled_snapshot {
+                    // Preserve the snapshot boundary even when its stable ID list
+                    // is unchanged, so a click can never pair across reconciliation.
+                    let ids = ui.workspace.session_ids().to_vec();
+                    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Sessions(ids)));
+                }
+            }
             Err(message) => {
                 let safe = safe_session_error(&message);
                 if let Some(pending) = creating {
@@ -1341,24 +1350,16 @@ fn drain_pane_launches(ui: &mut WorkspaceUi, geometry: Geometry) {
 /// mascot via [`AppEvent::Tick`] — real resize dimensions come from `term.size()`
 /// and backend results from `DaemonBackend::drain_events()`, not from a `Key`.
 ///
-/// A sidebar [`Key::Click`] becomes an [`AppEvent::Pointer`] the reducer
-/// hit-tests against the live sidebar geometry; the shell no longer resolves the
-/// row. Returns `None` for input the Home reducer never consumes: raw PTY
-/// passthrough, terminal-viewport pointer drags (a shell + `TerminalSession`
-/// concern), and keys with no Home management meaning.
+/// Sidebar clicks need a monotonic timestamp and are adapted separately by
+/// [`sidebar_pointer_event`]. Returns `None` for input the Home reducer never
+/// consumes: raw PTY passthrough, pointer input, and keys with no Home management
+/// meaning.
 #[must_use]
 #[allow(clippy::needless_pass_by_value)]
 pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
     let app_key = match key {
         Key::Live(action) => return live_action_to_app_key(action).map(AppEvent::Key),
         Key::Other => return Some(AppEvent::Tick),
-        Key::Click { column, row } => {
-            return Some(AppEvent::Pointer {
-                column,
-                row,
-                action: PointerAction::Select,
-            });
-        }
         Key::Up => AppKey::Up,
         Key::Down => AppKey::Down,
         // Left/Right move the focus inside a horizontal choice (the Yes/No quit
@@ -1380,11 +1381,12 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         Key::Quit => AppKey::CtrlC,
         Key::CtrlQ => AppKey::CtrlQ,
         // Input the Home reducer never consumes: raw PTY passthrough, terminal
-        // pointer drags (a shell + `TerminalSession` concern), Ctrl-D (Open
-        // Workspace only), and the caret/selection keys that have meaning only
-        // inside a focused text field (End/Ctrl-E, Delete, Shift+arrows).
+        // pointer drags and clicks (a shell + `TerminalSession` concern), Ctrl-D
+        // (Open Workspace only), and the caret/selection keys that have meaning
+        // only inside a focused text field (End/Ctrl-E, Delete, Shift+arrows).
         Key::Passthrough(_)
         | Key::Pointer(_)
+        | Key::Click { .. }
         | Key::CtrlD
         | Key::End
         | Key::LineEnd
@@ -1664,7 +1666,7 @@ fn restore_open_panes(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, geom
     }
 }
 
-/// Close the focused pane tab (Ctrl-O x) and perform the daemon transport work
+/// Close the focused pane tab (Ctrl-O x / Ctrl-O Ctrl-X) and perform the daemon transport work
 /// the runtime reports: detach a live subscription, or drop a still-pending
 /// launch (both its queued work and its completion routing) so it cannot spawn a
 /// detached daemon terminal behind the vanished placeholder.
@@ -1693,10 +1695,13 @@ fn pane_launch_operation(launch: &PaneLaunch) -> OperationId {
     }
 }
 
-/// Drive a terminal-output pointer gesture: a drag begins or extends a selection
-/// against the visible cells, and a release copies it to the OS clipboard with
-/// safe feedback. `rows_len` / `scroll` describe the frame's projected viewport so
-/// the pointer maps back to the exact retained cell.
+/// Drive a terminal-output pointer gesture. A drag begins or extends a selection
+/// against the visible cells. A release copies a non-empty selection to the OS
+/// clipboard; a plain click that produced no selection instead opens the
+/// `http(s)` URL under the pointer in the browser (#389) — the two gestures are
+/// mutually exclusive, so a drag-to-copy never also opens a link. `rows_len` /
+/// `scroll` describe the frame's projected viewport so the pointer maps back to
+/// the exact retained cell.
 #[coverage(off)]
 #[allow(clippy::too_many_arguments)]
 fn handle_terminal_pointer(
@@ -1704,6 +1709,7 @@ fn handle_terminal_pointer(
     runtime: &WorkspaceRuntime,
     controls: &mut LiveTerminalControls,
     term: &mut dyn Terminal,
+    browser: &mut dyn BrowserOpener,
     height: usize,
     width: usize,
     rows_len: usize,
@@ -1732,6 +1738,20 @@ fn handle_terminal_pointer(
             if let Some(text) = controls.finish_drag() {
                 let result = term.copy_text(&text);
                 controls.record_copy(&text, result);
+                return;
+            }
+            // No selection was drawn, so this release is a plain click: open the
+            // link under it, if any. A click off any link is a harmless no-op.
+            let Some(terminal) = runtime.focused_terminal() else {
+                return;
+            };
+            let Some(point) =
+                terminal_point_at(height, width, rows_len, scroll, pointer.column, pointer.row)
+            else {
+                return;
+            };
+            if let Some(cells) = ui.terminal_cells(&terminal) {
+                controls.open_link_at(&cells, point, browser);
             }
         }
     }
@@ -1772,6 +1792,7 @@ fn intercept_live_terminal_control(
     runtime: &mut WorkspaceRuntime,
     controls: &mut LiveTerminalControls,
     term: &mut dyn Terminal,
+    browser: &mut dyn BrowserOpener,
     pending_targets: &mut std::collections::HashMap<OperationId, Target>,
     height: usize,
     width: usize,
@@ -1786,7 +1807,7 @@ fn intercept_live_terminal_control(
         }
         Key::Pointer(pointer) => {
             handle_terminal_pointer(
-                ui, runtime, controls, term, height, width, rows_len, scroll, *pointer,
+                ui, runtime, controls, term, browser, height, width, rows_len, scroll, *pointer,
             );
         }
         Key::Click { column, row } => {
@@ -2114,34 +2135,11 @@ fn drain_pane_completions_into_runtime(
     }
 }
 
-/// The maximum gap between two presses on the same sidebar cell that the shell
-/// promotes from a Select to an Activate pointer gesture.
-const SIDEBAR_DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
-
-/// Build the pointer event for a sidebar click, promoting a second press on the
-/// same cell within [`SIDEBAR_DOUBLE_CLICK`] to an Activate. The shell tracks
-/// only this timing window; the reducer owns the row hit-test.
-#[coverage(off)]
-fn sidebar_pointer_event(
-    last_click: &mut Option<(u16, u16, std::time::Instant)>,
-    column: u16,
-    row: u16,
-) -> AppEvent {
-    let now = std::time::Instant::now();
-    let doubled = last_click.is_some_and(|(last_column, last_row, at)| {
-        last_column == column && last_row == row && now.duration_since(at) <= SIDEBAR_DOUBLE_CLICK
-    });
-    *last_click = (!doubled).then_some((column, row, now));
-    let action = if doubled {
-        PointerAction::Activate
-    } else {
-        PointerAction::Select
-    };
-    AppEvent::Pointer {
-        column,
-        row,
-        action,
-    }
+/// Build the controller event for a sidebar click. The shell supplies the raw
+/// cell and an injected monotonic timestamp; stable identity and double-click
+/// detection remain controller responsibilities.
+fn sidebar_pointer_event(column: u16, row: u16, at: std::time::Duration) -> AppEvent {
+    AppEvent::Pointer { column, row, at }
 }
 
 #[coverage(off)] // Real-terminal resync composition; reducer state is unit-tested below the port.
@@ -2219,10 +2217,9 @@ fn drive_workspace_controller(
     let mut metrics_projection = MetricsProjection::default();
     let mut pending_targets: std::collections::HashMap<OperationId, Target> =
         std::collections::HashMap::new();
-    // The reducer hit-tests sidebar clicks against the last terminal geometry;
-    // the shell only tracks the double-click window that promotes a Select to an
-    // Activate, never the row itself.
-    let mut last_click: Option<(u16, u16, std::time::Instant)> = None;
+    // The reducer hit-tests sidebar clicks and owns stable-identity double-click
+    // state. The shell's clock is reduced to a deterministic elapsed timestamp.
+    let pointer_clock = std::time::Instant::now();
     // Live-terminal scroll offset, drag selection, and copy feedback the reducer
     // does not own (design §4.2).
     let mut controls = LiveTerminalControls::default();
@@ -2314,6 +2311,7 @@ fn drive_workspace_controller(
             &mut runtime,
             &mut controls,
             term,
+            browser.as_mut(),
             &mut pending_targets,
             height,
             width,
@@ -2322,8 +2320,6 @@ fn drive_workspace_controller(
         ) {
             continue;
         }
-        // A second click on the same cell within the window activates the row the
-        // reducer resolves; otherwise the click just moves the cursor.
         let effects = if let Key::Click { column, row } = key {
             // The notice centre occupies the right side of Home's top header.
             // Keep it above the sidebar hit-test so a header click never moves
@@ -2334,7 +2330,7 @@ fn drive_workspace_controller(
             {
                 runtime.apply_event(AppEvent::Key(AppKey::OpenDecisions))
             } else {
-                runtime.apply_event(sidebar_pointer_event(&mut last_click, column, row))
+                runtime.apply_event(sidebar_pointer_event(column, row, pointer_clock.elapsed()))
             }
         } else {
             runtime.handle_key(key)
@@ -2843,28 +2839,26 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 #[coverage(off)] // Test assertion branches are not product coverage targets.
 mod tests {
     use super::{
-        AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Config, ConfigStep,
-        DefaultSettingsPort, Exit, Geometry, MetricsPort, MetricsPortFactory, NewStep,
+        AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, BrowserOpener, Config,
+        ConfigStep, DefaultSettingsPort, Exit, Geometry, MetricsPort, MetricsPortFactory, NewStep,
         NoDesktopNotifications, NoMetrics, NoMetricsFactory, SessionCommandPort,
         SessionCommandPortFactory, SessionCommandResult, Start, TerminalAttach, TerminalChunk,
         TerminalError, UnavailableBrowserOpener, UnavailableDecisionCommandPort,
         UnavailablePrSnapshotPort, UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader,
         WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
         clear_terminal_selection_on_click, close_exited_panes, controller_terminal_view,
-        handle_terminal_pointer, key_to_terminal_bytes, new_project_notice, play_startup_splash,
-        render_controller_frame, render_home_snapshot, restore_open_panes, run as run_from_start,
-        run_with_settings,
+        handle_terminal_pointer, intercept_live_terminal_control, key_to_terminal_bytes,
+        new_project_notice, play_startup_splash, render_controller_frame, render_home_snapshot,
+        restore_open_panes, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
-        run_workspace_controller, safe_session_error, step_config, step_new, terminal_geometry,
-        welcome_action, write_banner,
+        run_workspace_controller, safe_session_error, sidebar_pointer_event, step_config, step_new,
+        terminal_geometry, welcome_action, write_banner,
     };
     use crate::presentation::live_terminal::LiveTerminalControls;
     use crate::presentation::views::config::AvailableAgentModels;
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
-    use crate::usecase::application::controller::{
-        AppEvent, AppKey, NewRequest, PointerAction, Target,
-    };
+    use crate::usecase::application::controller::{AppEvent, AppKey, NewRequest, Target};
     use crate::usecase::application::pane::PaneKind;
     use crate::usecase::application::run as dispatch;
     use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
@@ -2972,15 +2966,8 @@ mod tests {
         assert_eq!(app_event_from_key(Key::Other), Some(AppEvent::Tick));
         // Raw passthrough and terminal pointer drags never reach the Home reducer.
         assert_eq!(app_event_from_key(Key::Passthrough(vec![0x1b])), None);
-        // A sidebar click becomes a pointer event the reducer hit-tests.
-        assert_eq!(
-            app_event_from_key(Key::Click { column: 3, row: 4 }),
-            Some(AppEvent::Pointer {
-                column: 3,
-                row: 4,
-                action: PointerAction::Select,
-            })
-        );
+        // Sidebar clicks need the real runtime's injected monotonic timestamp.
+        assert_eq!(app_event_from_key(Key::Click { column: 3, row: 4 }), None);
         // Left/Right reach the reducer to move the Yes/No confirmation focus; the
         // reducer ignores them outside that overlay. Ctrl-D stays Open-only.
         assert_eq!(
@@ -3001,6 +2988,19 @@ mod tests {
         ] {
             assert_eq!(app_event_from_key(Key::Live(action)), None);
         }
+    }
+
+    #[test]
+    fn sidebar_pointer_adapter_preserves_coordinates_and_injected_time() {
+        let at = std::time::Duration::from_millis(1_234);
+        assert_eq!(
+            sidebar_pointer_event(3, 4, at),
+            AppEvent::Pointer {
+                column: 3,
+                row: 4,
+                at,
+            }
+        );
     }
 
     fn ws(name: &str) -> Workspace {
@@ -3458,6 +3458,58 @@ mod tests {
         );
     }
 
+    #[test]
+    #[coverage(off)]
+    fn session_snapshot_adapter_preserves_reconciliation_boundary_for_pointer_state() {
+        use crate::presentation::workspace_runtime::WorkspaceRuntime;
+        use crate::usecase::application::controller::{HomeMode, Route};
+
+        let snapshot = snapshot("demo");
+        let workspace_id = snapshot.workspace_id;
+        let session = snapshot.session_ids[0];
+        let records = snapshot.state.sessions.clone();
+        let view = WorkspaceView::with_runtime_ids(
+            snapshot.workspace,
+            snapshot.state,
+            snapshot.session_ids,
+        );
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace_id, vec![session]);
+        let _ = runtime.apply_event(AppEvent::Resize {
+            width: 100,
+            height: 30,
+        });
+        let _ = runtime.apply_event(sidebar_pointer_event(
+            5,
+            4,
+            std::time::Duration::from_millis(1_000),
+        ));
+
+        ui.session_completion_sender
+            .send(super::SessionCommandCompletion {
+                port: Box::new(UnavailableSessionCommandPort),
+                result: Ok(SessionCommandResult {
+                    message: "same snapshot".to_owned(),
+                    sessions: Some(records),
+                    session_ids: Some(vec![session]),
+                }),
+            })
+            .unwrap();
+        super::drain_session_completions(&mut ui, &mut runtime);
+        assert_eq!(runtime.state().sessions(), &[session]);
+        let _ = runtime.apply_event(sidebar_pointer_event(
+            5,
+            4,
+            std::time::Duration::from_millis(1_100),
+        ));
+
+        assert_eq!(runtime.state().active(), Target::Root(workspace_id));
+        assert!(matches!(
+            runtime.state().route(),
+            Route::Home(HomeMode::Switch)
+        ));
+    }
+
     /// A streaming agent port whose PTY attaches live from `replay`, then reports
     /// exit on the next poll when `exit_on_poll` is set. It records each detach so
     /// the auto-close path can be asserted end to end.
@@ -3581,6 +3633,85 @@ mod tests {
         assert!(runtime.active_pane().tabs().is_empty());
         assert!(!runtime.state().has_live_pane());
         assert_eq!(*detaches.lock().unwrap(), vec![5]);
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn close_tab_live_action_detaches_the_focused_terminal() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let detaches = Arc::new(Mutex::new(Vec::new()));
+        let (mut ui, mut runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(ScriptedAgentPort {
+                terminal,
+                subscription: 8,
+                replay: Vec::new(),
+                exit_on_poll: false,
+                detaches: Arc::clone(&detaches),
+            }),
+        );
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        let mut browser = UnavailableBrowserOpener;
+        let mut pending_targets = std::collections::HashMap::new();
+
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::CloseTab),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending_targets,
+            20,
+            80,
+            0,
+            0,
+        ));
+
+        assert!(runtime.active_pane().tabs().is_empty());
+        assert_eq!(*detaches.lock().unwrap(), vec![8]);
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn close_tab_live_action_cancels_the_focused_pending_launch() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.handle_key(Key::Down);
+        let _ = runtime.handle_key(Key::Enter);
+        let operation = OperationId::new();
+        let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
+        let _ = runtime.select_tab(crate::usecase::application::controller::TabDirection::Next);
+        let mut pending_targets = std::collections::HashMap::from([(operation, target)]);
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        let mut browser = UnavailableBrowserOpener;
+
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::CloseTab),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending_targets,
+            20,
+            80,
+            0,
+            0,
+        ));
+
+        assert!(runtime.active_pane().tabs().is_empty());
+        assert!(!pending_targets.contains_key(&operation));
     }
 
     /// A daemon inventory double for restore-on-open. It returns a fixed set of
@@ -3756,6 +3887,7 @@ mod tests {
             .expect("attached live rows")
             .len();
         let mut term = FakeTerminal::default();
+        let mut browser = RecordingBrowser::default();
         let mut controls = LiveTerminalControls::default();
         controls.sync_focus(Some(&terminal));
 
@@ -3771,6 +3903,7 @@ mod tests {
             &runtime,
             &mut controls,
             &mut term,
+            &mut browser,
             20,
             80,
             rows_len,
@@ -3783,6 +3916,7 @@ mod tests {
             &runtime,
             &mut controls,
             &mut term,
+            &mut browser,
             20,
             80,
             rows_len,
@@ -3794,6 +3928,7 @@ mod tests {
             &runtime,
             &mut controls,
             &mut term,
+            &mut browser,
             20,
             80,
             rows_len,
@@ -3817,6 +3952,94 @@ mod tests {
             projected.iter().any(|row| row.contains("\u{1b}[7mhello")),
             "selection highlight lost after release: {projected:?}"
         );
+        // A drag that copied a selection never also opens a link.
+        assert!(browser.opened.is_empty());
+    }
+
+    /// A recording [`BrowserOpener`] fake: it captures opened URLs so a pointer
+    /// test can assert what (if anything) a click launched, and never runs IO.
+    #[derive(Default)]
+    struct RecordingBrowser {
+        opened: Vec<String>,
+    }
+
+    impl BrowserOpener for RecordingBrowser {
+        #[coverage(off)]
+        fn open(&mut self, url: &str) -> Result<(), String> {
+            self.opened.push(url.to_owned());
+            Ok(())
+        }
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn a_plain_click_on_a_terminal_link_opens_it_without_touching_the_pty() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let (ui, runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(ScriptedAgentPort {
+                terminal: terminal.clone(),
+                subscription: 11,
+                replay: b"see https://example.com/x now".to_vec(),
+                exit_on_poll: false,
+                detaches: Arc::new(Mutex::new(Vec::new())),
+            }),
+        );
+        let rows_len = ui
+            .terminal_rows(&terminal, None)
+            .expect("attached live rows")
+            .len();
+        let mut term = FakeTerminal::default();
+        let mut browser = RecordingBrowser::default();
+        let mut controls = LiveTerminalControls::default();
+        controls.sync_focus(Some(&terminal));
+
+        // A press-release with no drag: the URL starts at content column 4, so
+        // frame column 37 + 4 = 41 lands on it. The click opens the whole link.
+        handle_terminal_pointer(
+            &ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            20,
+            80,
+            rows_len,
+            0,
+            PointerEvent {
+                kind: PointerKind::Up,
+                column: 41,
+                row: 5,
+            },
+        );
+        assert_eq!(browser.opened, vec!["https://example.com/x".to_owned()]);
+        // A pointer release is not keyboard input, so nothing was forwarded to the
+        // child PTY, and the clipboard was left alone.
+        assert!(term.copied.is_empty());
+
+        // A click on the leading prose (frame column 37 = content column 0) opens
+        // nothing.
+        handle_terminal_pointer(
+            &ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            20,
+            80,
+            rows_len,
+            0,
+            PointerEvent {
+                kind: PointerKind::Up,
+                column: 37,
+                row: 5,
+            },
+        );
+        assert_eq!(browser.opened.len(), 1);
     }
 
     #[test]
