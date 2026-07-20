@@ -67,10 +67,8 @@ fn write_daemon_outcome(
             revision,
             ..
         }) => {
-            writeln!(
-                out,
-                "accepted operation {operation_id} (revision {revision})"
-            )?;
+            let message = format!("accepted operation {operation_id} (revision {revision})");
+            writeln!(out, "{message}")?;
             Ok(ExitCode::SUCCESS)
         }
         Ok(DaemonReply::Ok(value)) => {
@@ -114,4 +112,42 @@ fn write_client_error(
 
 fn exit_code(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
+}
+
+#[cfg(test)]
+mod tests {
+    #![coverage(off)]
+
+    use std::io::{self, Write};
+
+    use usagi_core::usecase::client::DaemonReply;
+
+    use super::write_daemon_outcome;
+
+    struct BrokenWriter;
+
+    impl Write for BrokenWriter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("broken output"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn accepted_reply_propagates_output_failure() {
+        let result = write_daemon_outcome(
+            Ok(DaemonReply::Accepted {
+                operation_id: "operation".into(),
+                revision: 1,
+                body: serde_json::json!(null),
+            }),
+            &mut BrokenWriter,
+            &mut Vec::new(),
+        );
+
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Other);
+    }
 }
