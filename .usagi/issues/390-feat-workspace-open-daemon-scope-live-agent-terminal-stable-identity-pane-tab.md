@@ -1,13 +1,13 @@
 ---
 number: 390
 title: feat: workspace open 時に同一 daemon 上の scope 内 live Agent/Terminal を stable identity で pane tab へ復元する
-status: todo
+status: done
 priority: high
 labels: [tui, daemon, terminal, agent, orchestration, restore, design]
 dependson: []
 related: [193, 195, 256, 282, 350, 209, 254, 363, 367]
 created_at: 2026-07-20T01:41:38.171645+00:00
-updated_at: 2026-07-20T01:43:24.119182+00:00
+updated_at: 2026-07-20T03:32:06.373440+00:00
 ---
 
 ## 目的

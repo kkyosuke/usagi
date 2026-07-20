@@ -15,7 +15,9 @@ use serde_json::Value;
 use crate::domain::agent::{AgentProfileId, CallerRef, ModelSelector};
 use crate::domain::id::{AgentId, SessionId, TerminalRef, WorkspaceId};
 use crate::domain::pr_inventory::{PrEntry, PrInventory};
-use crate::domain::terminal_launch::{TerminalLaunchRequest, TerminalProfileId};
+use crate::domain::terminal_launch::{
+    TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
+};
 use crate::infrastructure::ipc::{
     Bootstrap, BuildIdentity, ClientHello, ClientId, DaemonGeneration, Envelope, EnvelopeKind,
     ErrorCode, ProtocolError, ProtocolRange, ProtocolVersion, ResponseOutcome, RetryMode,
@@ -295,7 +297,7 @@ pub enum TerminalRequest {
         intent: TerminalLaunchIntent,
     },
     Inventory {
-        scope: TerminalLaunchRequest,
+        scope: TerminalLaunchScope,
     },
     Attach {
         terminal: TerminalRef,

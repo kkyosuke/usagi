@@ -457,6 +457,56 @@ impl AgentCommandPort for DaemonAgentCommandPort {
     }
 
     #[coverage(off)]
+    fn list_terminals(
+        &mut self,
+    ) -> Result<
+        Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry>,
+        usagi_tui::usecase::application::terminal_session::TerminalError,
+    > {
+        use usagi_core::domain::session_lifecycle::SessionLifecycle;
+        use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalLaunchScope};
+        use usagi_tui::usecase::application::terminal_session::TerminalError;
+
+        let lifecycle = request_lifecycle_snapshot().map_err(|_| TerminalError::Unavailable)?;
+        // The client never invents a worktree identity: scopes come from the
+        // daemon snapshot — the published root worktree and each available
+        // session's worktree — and the daemon re-validates them. Sessions the
+        // snapshot does not list as available are skipped, so a stale or
+        // recreated session's old runtime is never rediscovered.
+        let mut scopes = vec![TerminalLaunchScope {
+            workspace_id: lifecycle.workspace_id,
+            session_id: None,
+            worktree_id: lifecycle.root_worktree_id,
+        }];
+        for managed in &lifecycle.sessions {
+            if managed.lifecycle == SessionLifecycle::Available {
+                scopes.push(TerminalLaunchScope {
+                    workspace_id: lifecycle.workspace_id,
+                    session_id: Some(managed.session_id),
+                    worktree_id: managed.worktree_id,
+                });
+            }
+        }
+        let mut entries = Vec::new();
+        for scope in scopes {
+            let body = self.terminal_request(
+                TerminalAction::Inventory,
+                TerminalRequest::Inventory { scope },
+            )?;
+            if let Some(list) = body.get("terminals").and_then(|value| value.as_array()) {
+                for item in list {
+                    if let Ok(entry) =
+                        serde_json::from_value::<TerminalInventoryEntry>(item.clone())
+                    {
+                        entries.push(entry);
+                    }
+                }
+            }
+        }
+        Ok(entries)
+    }
+
+    #[coverage(off)]
     fn attach_terminal(
         &mut self,
         terminal: &usagi_core::domain::id::TerminalRef,

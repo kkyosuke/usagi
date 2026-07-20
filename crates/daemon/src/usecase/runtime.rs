@@ -458,6 +458,31 @@ impl RuntimeCoordinator {
             .find(|record| record.runtime.terminal.fences(terminal))
             .map(|record| record.runtime.clone())
     }
+    /// Lists only Agent runtimes in the exact requested durable scope. Each
+    /// entry is tagged `Agent` and marked `live` only while the current daemon
+    /// generation still owns a running PTY, so a restoring client attaches to
+    /// running Agents and never to exited, reclaimed, or reconcile-required
+    /// records.
+    #[must_use]
+    pub fn inventory(
+        &self,
+        scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+    ) -> Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry> {
+        use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
+        self.records
+            .values()
+            .filter(|record| {
+                record.runtime.terminal.workspace_id == scope.workspace_id
+                    && record.runtime.terminal.session_id == scope.session_id
+                    && record.runtime.terminal.worktree_id == scope.worktree_id
+            })
+            .map(|record| TerminalInventoryEntry {
+                terminal: record.runtime.terminal.clone(),
+                kind: TerminalKind::Agent,
+                live: matches!(record.state, RuntimeState::Running),
+            })
+            .collect()
+    }
     /// Returns the immutable record only when the complete runtime reference
     /// fences it.  This exposes no ephemeral provision or terminal output.
     #[coverage(off)]
@@ -734,6 +759,51 @@ mod tests {
         assert_eq!(attached.snapshot.replay, b"hello");
         assert_eq!(c.occupied_slots(), 1);
     }
+    #[test]
+    fn inventory_lists_only_in_scope_agents_and_marks_live_until_exit() {
+        use usagi_core::domain::terminal_launch::{TerminalKind, TerminalLaunchScope};
+
+        let request = request();
+        let (runtime, fence) = refs(&request);
+        let mut c = RuntimeCoordinator::new(2, 1024, 2);
+        let mut store = Store::default();
+        let mut spawner = Spawner(Ok(process()));
+        launch(
+            &mut c,
+            &request,
+            runtime.clone(),
+            fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+
+        let scope = TerminalLaunchScope {
+            workspace_id: request.scope.workspace_id,
+            session_id: request.scope.session_id,
+            worktree_id: request.scope.worktree_id,
+        };
+        let live = c.inventory(&scope);
+        assert_eq!(live.len(), 1);
+        assert!(live[0].terminal.fences(&runtime.terminal));
+        assert_eq!(live[0].kind, TerminalKind::Agent);
+        assert!(live[0].live);
+
+        // A foreign session scope sees no agent.
+        let foreign = TerminalLaunchScope {
+            workspace_id: request.scope.workspace_id,
+            session_id: Some(SessionId::new()),
+            worktree_id: request.scope.worktree_id,
+        };
+        assert!(c.inventory(&foreign).is_empty());
+
+        // After the Agent exits it is no longer attachable (`live == false`).
+        c.exit(&runtime, 0, &mut store).unwrap();
+        let exited = c.inventory(&scope);
+        assert_eq!(exited.len(), 1);
+        assert!(!exited[0].live);
+    }
+
     #[derive(Default)]
     struct Writer(Vec<u8>);
     impl PtyWriter for Writer {

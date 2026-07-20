@@ -1,14 +1,14 @@
 ---
 number: 388
 title: feat(tui): workspace open 時に scope inventory を pane tab へ投影して live Agent/Terminal を復元する
-status: todo
+status: done
 priority: high
 labels: [tui, terminal, agent, restore, pane]
 dependson: [386]
 related: [193, 195, 256, 282, 367]
 parent: 390
 created_at: 2026-07-20T01:42:46.446935+00:00
-updated_at: 2026-07-20T01:42:46.446935+00:00
+updated_at: 2026-07-20T03:32:04.124170+00:00
 ---
 
 ## 目的

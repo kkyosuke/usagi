@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{
     agent::EnvironmentVariableName,
-    id::{SessionId, WorkspaceId, WorktreeId},
+    id::{SessionId, TerminalRef, WorkspaceId, WorktreeId},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -64,6 +64,29 @@ pub struct TerminalLaunchScope {
 pub struct TerminalLaunchRequest {
     pub profile_id: TerminalProfileId,
     pub scope: TerminalLaunchScope,
+}
+
+/// Which daemon owner produced an inventory entry. A client projects an
+/// `Agent` entry into an Agent pane tab and a `Terminal` entry into a generic
+/// terminal tab; both carry the same fenced [`TerminalRef`] stream identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalKind {
+    Terminal,
+    Agent,
+}
+
+/// One daemon-owned runtime in a requested scope, as returned by the terminal
+/// `Inventory` request. It carries only the fenced [`TerminalRef`], the owning
+/// [`TerminalKind`], and whether the current daemon generation still owns a
+/// running PTY that a client may attach to (`live`). It never carries argv,
+/// environment values, secrets, or provider transcript, so it is safe to send
+/// on the wire and to persist in a durable snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalInventoryEntry {
+    pub terminal: TerminalRef,
+    pub kind: TerminalKind,
+    pub live: bool,
 }
 
 /// Non-secret, immutable provenance saved before an external PTY spawn.

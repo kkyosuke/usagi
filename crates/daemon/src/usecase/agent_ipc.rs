@@ -140,6 +140,13 @@ pub trait AgentTerminalActor {
         action: TerminalAction,
         request: TerminalRequest,
     ) -> TerminalOutcome;
+    /// Lists the Agent runtimes this actor holds in the exact requested scope.
+    /// `SharedTerminalOwner` merges this with the generic terminal owner so a
+    /// client's `Inventory` request sees Agent and generic terminals together.
+    fn terminal_inventory(
+        &self,
+        scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+    ) -> Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry>;
     fn disconnect(&mut self, connection: ConnectionId);
 }
 
@@ -908,6 +915,13 @@ impl<S: super::runtime::RuntimeStore, P: PtySpawner + PtyWriter, J: OutputJourna
         )
     }
 
+    fn terminal_inventory(
+        &self,
+        scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+    ) -> Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry> {
+        self.coordinator.inventory(scope)
+    }
+
     fn disconnect(&mut self, connection: ConnectionId) {
         self.coordinator.disconnect(connection);
     }
@@ -936,6 +950,22 @@ impl<G: TerminalOwner, A: AgentTerminalActor> TerminalOwner for SharedTerminalOw
         action: TerminalAction,
         payload: Value,
     ) -> Result<Value, ProtocolError> {
+        // Inventory addresses no single terminal, so it is not routed by
+        // `handle_terminal`. Merge both owners' in-scope runtimes here so a
+        // restoring client discovers Agent and generic terminals together.
+        if matches!(action, TerminalAction::Inventory) {
+            let Ok(TerminalRequest::Inventory { scope }) =
+                serde_json::from_value::<TerminalRequest>(payload.clone())
+            else {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "invalid terminal inventory scope",
+                ));
+            };
+            let mut entries = self.generic.inventory(&scope);
+            entries.extend(self.agent.terminal_inventory(&scope));
+            return Ok(json!({ "terminals": entries }));
+        }
         let routed = match serde_json::from_value::<TerminalRequest>(payload.clone()) {
             Ok(request) => self
                 .agent
@@ -1199,11 +1229,13 @@ mod tests {
     }
 
     /// A minimal generic terminal owner double so the shared owner can be tested
-    /// without a real PTY. It records the requests it receives.
+    /// without a real PTY. It records the requests it receives and returns a
+    /// fixed inventory so the merge path can be exercised.
     #[derive(Default)]
     struct FakeGeneric {
         requests: usize,
         disconnects: usize,
+        inventory: Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry>,
     }
     impl TerminalOwner for FakeGeneric {
         fn request(
@@ -1216,6 +1248,12 @@ mod tests {
         ) -> Result<Value, ProtocolError> {
             self.requests += 1;
             Ok(json!({ "generic": true }))
+        }
+        fn inventory(
+            &self,
+            _: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+        ) -> Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry> {
+            self.inventory.clone()
         }
         fn disconnect(&mut self, _: ConnectionId) {
             self.disconnects += 1;
@@ -1831,17 +1869,11 @@ mod tests {
                 RequestId::new(),
                 TerminalAction::Inventory,
                 TerminalRequest::Inventory {
-                    scope: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
-                        profile_id: usagi_core::domain::terminal_launch::TerminalProfileId::new(
-                            "login-shell"
-                        )
-                        .unwrap(),
-                        scope: usagi_core::domain::terminal_launch::TerminalLaunchScope {
-                            workspace_id: WorkspaceId::new(),
-                            session_id: None,
-                            worktree_id: WorktreeId::new(),
-                        },
-                    }
+                    scope: usagi_core::domain::terminal_launch::TerminalLaunchScope {
+                        workspace_id: WorkspaceId::new(),
+                        session_id: None,
+                        worktree_id: WorktreeId::new(),
+                    },
                 },
             ),
             TerminalOutcome::NotOwned
@@ -1931,6 +1963,84 @@ mod tests {
         owner.disconnect(connection);
         assert_eq!(owner.generic.requests, 2);
         assert_eq!(owner.generic.disconnects, 1);
+    }
+
+    #[test]
+    fn shared_owner_inventory_merges_agent_and_generic_and_rejects_invalid_scope() {
+        use usagi_core::domain::terminal_launch::{
+            TerminalInventoryEntry, TerminalKind, TerminalLaunchScope,
+        };
+
+        let mut agent = runtime();
+        let operation = OperationId::new().to_string();
+        let admission = agent
+            .launch(&operation, &intent(None), &FakeScope(Ok(scope())))
+            .unwrap();
+        let agent_terminal = admission.terminal.clone();
+        // Query with the launched Agent's exact scope so it is in scope.
+        let inventory_scope = TerminalLaunchScope {
+            workspace_id: agent_terminal.workspace_id,
+            session_id: agent_terminal.session_id,
+            worktree_id: agent_terminal.worktree_id,
+        };
+        // A generic terminal the generic owner reports for the same scope.
+        let generic_terminal = TerminalRef {
+            daemon_generation: agent_terminal.daemon_generation,
+            terminal_id: TerminalId::new(),
+            workspace_id: agent_terminal.workspace_id,
+            session_id: agent_terminal.session_id,
+            worktree_id: agent_terminal.worktree_id,
+        };
+        let generic = FakeGeneric {
+            inventory: vec![TerminalInventoryEntry {
+                terminal: generic_terminal.clone(),
+                kind: TerminalKind::Terminal,
+                live: true,
+            }],
+            ..FakeGeneric::default()
+        };
+        let mut owner = SharedTerminalOwner::new(agent, generic);
+        let connection = ConnectionId::new();
+        let client = ClientId::new();
+
+        let reply = owner
+            .request(
+                connection,
+                client,
+                RequestId::new(),
+                TerminalAction::Inventory,
+                serde_json::to_value(TerminalRequest::Inventory {
+                    scope: inventory_scope,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let entries: Vec<TerminalInventoryEntry> =
+            serde_json::from_value(reply["terminals"].clone()).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|entry| {
+            entry.kind == TerminalKind::Terminal
+                && entry.terminal.fences(&generic_terminal)
+                && entry.live
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.kind == TerminalKind::Agent
+                && entry.terminal.fences(&agent_terminal)
+                && entry.live
+        }));
+
+        // A payload that is not a valid inventory request is a safe rejection,
+        // never a generic-owner fallback.
+        let error = owner
+            .request(
+                connection,
+                client,
+                RequestId::new(),
+                TerminalAction::Inventory,
+                json!({ "operation": "bogus" }),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
     }
 
     #[test]
