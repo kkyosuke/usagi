@@ -156,6 +156,7 @@ struct RootCodexProvisioner {
     sessions: SharedSessionRuntime,
     readiness: Arc<dyn AgentReadinessProbe>,
     mcp_command: PathBuf,
+    data_home: PathBuf,
 }
 impl CodexProvisioner for RootCodexProvisioner {
     fn provision(
@@ -169,9 +170,10 @@ impl CodexProvisioner for RootCodexProvisioner {
             .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
         Ok(CodexProvision {
             working_directory,
-            environment_allowlist: BTreeSet::<EnvironmentVariableName>::new(),
+            environment_allowlist: mcp_environment_allowlist(context),
             spawn: SpawnProvision::new(
-                [],
+                mcp_environment(context, &self.data_home)
+                    .map_err(|()| CodexProvisionFailure::MaterializationFailed)?,
                 context
                     .inject_mcp
                     .then(|| codex_mcp_arguments(&self.mcp_command))
@@ -186,6 +188,7 @@ struct RootClaudeProvisioner {
     sessions: SharedSessionRuntime,
     readiness: Arc<dyn AgentReadinessProbe>,
     mcp_command: PathBuf,
+    data_home: PathBuf,
 }
 impl ClaudeProvisioner for RootClaudeProvisioner {
     fn provision(
@@ -199,9 +202,10 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
         Ok(ClaudeProvision {
             working_directory,
-            environment_allowlist: BTreeSet::<EnvironmentVariableName>::new(),
+            environment_allowlist: mcp_environment_allowlist(context),
             spawn: SpawnProvision::new(
-                [],
+                mcp_environment(context, &self.data_home)
+                    .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?,
                 context
                     .inject_mcp
                     .then(|| claude_mcp_arguments(&self.mcp_command))
@@ -211,6 +215,35 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             ),
         })
     }
+}
+
+fn mcp_environment_allowlist(context: &ProvisionContext) -> BTreeSet<EnvironmentVariableName> {
+    context
+        .inject_mcp
+        .then(|| {
+            EnvironmentVariableName::new(usagi_core::infrastructure::paths::DATA_DIR_ENV)
+                .expect("literal environment variable name is valid")
+        })
+        .into_iter()
+        .collect()
+}
+
+fn mcp_environment(
+    context: &ProvisionContext,
+    data_home: &Path,
+) -> Result<Vec<(EnvironmentVariableName, String)>, ()> {
+    context
+        .inject_mcp
+        .then(|| {
+            Ok((
+                EnvironmentVariableName::new(usagi_core::infrastructure::paths::DATA_DIR_ENV)
+                    .expect("literal environment variable name is valid"),
+                data_home.to_str().ok_or(())?.to_owned(),
+            ))
+        })
+        .transpose()
+        .map(Option::into_iter)
+        .map(Iterator::collect)
 }
 
 /// Product-specific MCP launch arguments.  They stay ephemeral in
@@ -490,13 +523,7 @@ impl PtySpawner for AgentPty {
         // one-time process invocation.
         let mut argv = provision.arguments().to_vec();
         argv.extend(plan.argv.iter().cloned());
-        let mut environment = self.environment.clone();
-        environment.extend(
-            provision
-                .environment()
-                .iter()
-                .map(|(name, value)| (name.as_str().to_owned(), value.clone())),
-        );
+        let environment = provision.compose_environment(&self.environment);
         let pty = PtyTerminal::spawn_with(
             &plan.program,
             &argv,
@@ -889,6 +916,11 @@ fn open_agent_runtime(
     }
     let mut registry = AdapterRegistry::new();
     let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness);
+    let data_home = if cfg!(debug_assertions) {
+        data_dir.parent().unwrap_or(data_dir).to_path_buf()
+    } else {
+        data_dir.to_path_buf()
+    };
     // Duplicate registration cannot happen for the two literal profiles; a
     // failure here would only drop an adapter, so the launch would surface a
     // safe unknown-profile error rather than crash the daemon.
@@ -897,11 +929,13 @@ fn open_agent_runtime(
             sessions: Arc::clone(&sessions),
             readiness: Arc::clone(&readiness),
             mcp_command: mcp_command.clone(),
+            data_home: data_home.clone(),
         }),
         ClaudeAdapter::new(RootClaudeProvisioner {
             sessions,
             readiness,
             mcp_command,
+            data_home,
         }),
     );
     Arc::new(Mutex::new(AgentRuntime::with_dispatch(

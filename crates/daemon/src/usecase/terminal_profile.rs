@@ -14,10 +14,11 @@ use usagi_core::domain::{
 /// Public, non-secret terminal and shell-configuration inputs inherited by an
 /// interactive login shell. Values are used only for the live PTY and never
 /// written into the durable terminal record.
-pub const TERMINAL_ENVIRONMENT_VARIABLES: [&str; 14] = [
+pub const TERMINAL_ENVIRONMENT_VARIABLES: [&str; 15] = [
     "SHELL",
     "TERM",
     "PATH",
+    "HOME",
     "LANG",
     "LC_ALL",
     "LC_CTYPE",
@@ -147,6 +148,7 @@ mod tests {
                 ("SHELL".into(), "/bin/zsh".into()),
                 ("TERM".into(), "xterm-256color".into()),
                 ("PATH".into(), "/opt/homebrew/bin:/usr/bin".into()),
+                ("HOME".into(), "/Users/example".into()),
                 ("LANG".into(), "ja_JP.UTF-8".into()),
                 ("COLORTERM".into(), "truecolor".into()),
                 ("TERM_PROGRAM".into(), "Apple_Terminal".into()),
@@ -162,7 +164,7 @@ mod tests {
             resolved.snapshot.working_directory,
             PathBuf::from("/workspace")
         );
-        assert_eq!(resolved.environment.len(), 7);
+        assert_eq!(resolved.environment.len(), 8);
         assert_eq!(
             resolved
                 .environment
