@@ -1,14 +1,14 @@
 ---
 number: 469
 title: fix(v1/session): remove を context-preserving な二段階 teardown にする
-status: in-progress
+status: done
 priority: high
 labels: [review, v1, session, durability]
 dependson: []
 related: [49]
 parent: 453
 created_at: 2026-07-20T12:06:22.694501+00:00
-updated_at: 2026-07-20T21:35:35.086393+00:00
+updated_at: 2026-07-20T22:13:01.725597+00:00
 ---
 
 ## 問題・影響
