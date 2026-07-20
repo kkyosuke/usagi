@@ -836,6 +836,7 @@ mod tests {
             AgentStatus::Failed
         );
         assert_eq!(store.reconcile_incomplete_admissions().unwrap(), 0);
+        assert!(store.fail_admission(operation).unwrap());
         assert!(!store.fail_admission(OperationId::new()).unwrap());
 
         store
