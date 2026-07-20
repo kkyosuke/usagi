@@ -1,14 +1,14 @@
 ---
 number: 481
 title: fix(v2/cli): daemon request failure を非 0 exit で返す
-status: in-progress
+status: done
 priority: medium
 labels: [review, v2, cli, daemon]
 dependson: []
 related: [275]
 parent: 453
 created_at: 2026-07-20T12:06:48.193493+00:00
-updated_at: 2026-07-20T23:00:41.006988+00:00
+updated_at: 2026-07-20T23:10:40.135770+00:00
 ---
 
 ## 問題・影響
