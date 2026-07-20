@@ -78,7 +78,10 @@ projection である。cancel と escalation resolution は run 作成時に dae
 
 issue / memory の store 系 tool は、CLI 面と同じ `usagi-core` usecase に cwd と実時計を
 束縛する薄い adapter である。成功時は usecase の結果 JSON を MCP の text content に入れて
-返し、作成・更新・削除は応答前に cwd 配下の Markdown store と派生 index へ永続化される。
+返し、作成・更新・削除は応答前に cwd 配下の source Markdown へ永続化される。派生 index / TOC
+の refresh failure は committed source の成功応答を error に変えず、dirty marker により次の
+read で自己修復する。commit point と retry の正本は
+[2. アーキテクチャ](02-architecture.md#markdown-永続化の-commit-contract)を参照。
 `issue_get` / `memory_get` は対象が無ければ `null`、delete は `deleted: boolean` を返す。
 検索は query 省略で全件を返し、issue には `ready` / `unmet_deps` を付与する。
 

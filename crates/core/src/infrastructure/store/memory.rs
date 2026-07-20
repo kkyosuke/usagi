@@ -23,6 +23,7 @@ use crate::domain::memory::{Memory, MemorySummary};
 use crate::infrastructure::paths::STATE_DIR;
 use crate::infrastructure::persistence::markdown_store::{MarkdownEntry, MarkdownStore};
 use crate::infrastructure::persistence::store_lock::StoreLock;
+use crate::infrastructure::store::MutationOutcome;
 
 const MEMORY_DIR_NAME: &str = "memory";
 const TOC_FILE: &str = "MEMORY.md";
@@ -187,6 +188,16 @@ impl MemoryStore {
     /// Returns an error when `name` is not a single safe path component, or the
     /// backing file exists but cannot be read or parsed.
     pub fn read(&self, name: &str) -> Result<Option<Memory>> {
+        self.repair_derived_best_effort();
+        self.read_locked(name)
+    }
+
+    /// Read source while the caller already holds the store lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the name or source file is invalid.
+    pub fn read_locked(&self, name: &str) -> Result<Option<Memory>> {
         let path = self.dir().join(memory_file_name(name)?);
         match self.inner.read_existing_path(&path) {
             Ok(memory) => Ok(Some(memory)),
@@ -201,8 +212,8 @@ impl MemoryStore {
     /// # Errors
     ///
     /// Returns an error when the lock cannot be acquired, the name is unsafe, or
-    /// the write / reindex fails.
-    pub fn write(&self, memory: &Memory) -> Result<()> {
+    /// source cannot be committed. A derived refresh failure is in the outcome.
+    pub fn write(&self, memory: &Memory) -> Result<MutationOutcome<()>> {
         let lock = self.lock()?;
         self.write_locked(&lock, memory)
     }
@@ -212,10 +223,18 @@ impl MemoryStore {
     ///
     /// # Errors
     ///
-    /// Returns an error when the name is unsafe or the write / reindex fails.
-    pub fn write_locked(&self, _lock: &StoreLock, memory: &Memory) -> Result<()> {
+    /// Returns an error when the name is unsafe, source cannot be committed, or
+    /// the dirty marker cannot be scheduled.
+    pub fn write_locked(&self, _lock: &StoreLock, memory: &Memory) -> Result<MutationOutcome<()>> {
+        let rebuild_required = self.inner.derived_is_dirty();
+        self.inner.mark_derived_dirty()?;
         self.inner.write_markdown(memory)?;
-        self.inner.reindex_after_write(memory)
+        let refresh = if rebuild_required {
+            self.inner.rebuild_derived().map(|_| ())
+        } else {
+            self.inner.reindex_after_write(memory)
+        };
+        Ok(self.inner.finish_committed((), refresh))
     }
 
     /// Remove the memory with `name`, returning whether anything was deleted,
@@ -223,18 +242,43 @@ impl MemoryStore {
     ///
     /// # Errors
     ///
-    /// Returns an error when the lock cannot be acquired, the name is unsafe, the
-    /// file cannot be removed, or the reindex fails.
+    /// Returns an error when the lock cannot be acquired, the name is unsafe, or
+    /// source cannot be removed. Derived failure does not change the delete.
     pub fn remove(&self, name: &str) -> Result<bool> {
+        Ok(self.remove_with_outcome(name)?.value)
+    }
+
+    /// Remove a memory and report whether committed source left derived files
+    /// fresh or scheduled for rebuild.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only before the source removal commits.
+    pub fn remove_with_outcome(&self, name: &str) -> Result<MutationOutcome<bool>> {
         let _lock = self.lock()?;
         let path = self.dir().join(memory_file_name(name)?);
+        match fs::metadata(&path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let repair = self.inner.repair_derived_locked();
+                return Ok(self.inner.finish_committed(false, repair));
+            }
+            Err(error) => {
+                return Err(error).context(format!("failed to inspect {}", path.display()));
+            }
+        }
+        let rebuild_required = self.inner.derived_is_dirty();
+        self.inner.mark_derived_dirty()?;
         match fs::remove_file(&path) {
             Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(e).context(format!("failed to remove {}", path.display())),
         }
-        self.inner.reindex_after_remove(&name.to_string())?;
-        Ok(true)
+        let refresh = if rebuild_required {
+            self.inner.rebuild_derived().map(|_| ())
+        } else {
+            self.inner.reindex_after_remove(&name.to_string())
+        };
+        Ok(self.inner.finish_committed(true, refresh))
     }
 
     /// Metadata summaries for every memory.
@@ -244,7 +288,26 @@ impl MemoryStore {
     /// Returns an error when the index cannot be read and the markdown source
     /// cannot be rescanned.
     pub fn summaries(&self) -> Result<Vec<MemorySummary>> {
+        self.repair_derived_best_effort();
+        if self.inner.derived_is_dirty() {
+            return self.inner.source_summaries();
+        }
         self.inner.summaries()
+    }
+
+    #[coverage(off)]
+    fn repair_derived_best_effort(&self) {
+        if !self.inner.derived_is_dirty() {
+            return;
+        }
+        let repair = self
+            .lock()
+            .and_then(|_lock| self.inner.repair_derived_locked());
+        if let Err(error) = repair {
+            crate::infrastructure::error_log::ErrorLog::record(&format!(
+                "memory derived rebuild remains scheduled after read: {error:#}"
+            ));
+        }
     }
 }
 
@@ -284,6 +347,8 @@ fn is_memory_file(path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::domain::memory::MemoryType;
+    use crate::infrastructure::persistence::json_file::{AtomicWriteStage, fail_next_atomic_write};
+    use crate::infrastructure::store::DerivedState;
     use chrono::{TimeZone, Utc};
 
     fn memory(name: &str, title: &str) -> Memory {
@@ -722,5 +787,156 @@ mod tests {
         set_mtime(&path, 2_000);
 
         assert_eq!(store.summaries().unwrap()[0].title, "Updated title");
+    }
+
+    #[test]
+    fn derived_toc_failures_commit_create_and_self_heal_on_reopen() {
+        let _guard = crate::test_support::process_env_guard();
+        let logs = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var(crate::infrastructure::paths::DATA_DIR_ENV, logs.path());
+        }
+
+        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = MemoryStore::new(tmp.path());
+            let created = memory("created", "Created");
+            fail_next_atomic_write(&store.toc_path(), stage);
+
+            let outcome = store.write(&created).unwrap();
+            assert_eq!(outcome.derived, DerivedState::RebuildNeeded);
+            assert_eq!(store.scan().unwrap(), vec![created.clone()]);
+
+            let reopened = MemoryStore::new(tmp.path());
+            assert_eq!(reopened.read("created").unwrap(), Some(created.clone()));
+            assert!(reopened.toc_path().is_file());
+            assert_eq!(
+                reopened.write(&created).unwrap().derived,
+                DerivedState::Fresh
+            );
+            assert_eq!(reopened.scan().unwrap(), vec![created]);
+        }
+
+        unsafe {
+            std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
+        }
+    }
+
+    #[test]
+    fn derived_toc_failures_commit_update_and_retry_same_identity() {
+        let _guard = crate::test_support::process_env_guard();
+        let logs = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var(crate::infrastructure::paths::DATA_DIR_ENV, logs.path());
+        }
+
+        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = MemoryStore::new(tmp.path());
+            store.write(&memory("fact", "Old")).unwrap();
+            let updated = memory("fact", "Updated");
+            fail_next_atomic_write(&store.toc_path(), stage);
+
+            let outcome = store.write(&updated).unwrap();
+            assert_eq!(outcome.derived, DerivedState::RebuildNeeded);
+            assert_eq!(store.scan().unwrap(), vec![updated.clone()]);
+
+            let reopened = MemoryStore::new(tmp.path());
+            assert_eq!(reopened.read("fact").unwrap(), Some(updated.clone()));
+            assert_eq!(
+                reopened.write(&updated).unwrap().derived,
+                DerivedState::Fresh
+            );
+            assert_eq!(reopened.scan().unwrap(), vec![updated]);
+        }
+
+        unsafe {
+            std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
+        }
+    }
+
+    #[test]
+    fn derived_toc_failures_commit_remove_and_retry_without_double_delete() {
+        let _guard = crate::test_support::process_env_guard();
+        let logs = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var(crate::infrastructure::paths::DATA_DIR_ENV, logs.path());
+        }
+
+        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = MemoryStore::new(tmp.path());
+            store.write(&memory("doomed", "Doomed")).unwrap();
+            fail_next_atomic_write(&store.toc_path(), stage);
+
+            let outcome = store.remove_with_outcome("doomed").unwrap();
+            assert!(outcome.value);
+            assert_eq!(outcome.derived, DerivedState::RebuildNeeded);
+            assert!(store.scan().unwrap().is_empty());
+
+            let reopened = MemoryStore::new(tmp.path());
+            assert!(reopened.summaries().unwrap().is_empty());
+            let retry = reopened.remove_with_outcome("doomed").unwrap();
+            assert!(!retry.value);
+            assert_eq!(retry.derived, DerivedState::Fresh);
+        }
+
+        unsafe {
+            std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
+        }
+    }
+
+    #[test]
+    fn source_atomic_failure_returns_error_without_mutating_memory() {
+        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = MemoryStore::new(tmp.path());
+            let source = store.dir().join("fact.md");
+            fail_next_atomic_write(&source, stage);
+            assert!(store.write(&memory("fact", "Created")).is_err());
+            assert!(store.scan().unwrap().is_empty());
+
+            store.write(&memory("fact", "Old")).unwrap();
+            fail_next_atomic_write(&source, stage);
+            assert!(store.write(&memory("fact", "Updated")).is_err());
+            assert_eq!(store.read("fact").unwrap().unwrap().title, "Old");
+        }
+    }
+
+    #[test]
+    fn next_mutation_rebuilds_index_and_toc_when_derived_was_already_dirty() {
+        let _guard = crate::test_support::process_env_guard();
+        let logs = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var(crate::infrastructure::paths::DATA_DIR_ENV, logs.path());
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(tmp.path());
+        store.write(&memory("one", "One")).unwrap();
+        fail_next_atomic_write(&store.index_path(), AtomicWriteStage::Rename);
+        assert_eq!(
+            store.write(&memory("two", "Two")).unwrap().derived,
+            DerivedState::RebuildNeeded
+        );
+
+        assert_eq!(
+            store.write(&memory("three", "Three")).unwrap().derived,
+            DerivedState::Fresh
+        );
+        let names: Vec<_> = store
+            .summaries()
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.name)
+            .collect();
+        assert_eq!(names, vec!["one", "three", "two"]);
+        let toc = fs::read_to_string(store.toc_path()).unwrap();
+        assert!(toc.contains("one.md"));
+        assert!(toc.contains("two.md"));
+        assert!(toc.contains("three.md"));
+
+        unsafe {
+            std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
+        }
     }
 }

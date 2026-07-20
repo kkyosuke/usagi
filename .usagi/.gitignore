@@ -2,7 +2,9 @@
 !/.gitignore
 !/issues/
 /issues/index.json
+/issues/.derived-dirty
 /issues/.lock
 !/memory/
 /memory/index.json
+/memory/.derived-dirty
 /memory/.lock
