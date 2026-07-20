@@ -2601,7 +2601,6 @@ pub fn run_workspace_controller_with_backend(
 /// # Errors
 ///
 /// Returns terminal IO failures from the interactive loop.
-#[coverage(off)]
 pub fn run_workspace_controller_with_backend_and_settings(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
@@ -3202,21 +3201,22 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 mod tests {
     use super::{
         AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, BrowserOpener, Config,
-        ConfigStep, ControllerHost, DefaultSettingsPort, Exit, Geometry, MetricsPort,
-        MetricsPortFactory, NewStep, NoDesktopNotifications, NoMetrics, NoMetricsFactory,
-        SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, Start, TerminalAttach,
-        TerminalChunk, TerminalError, UnavailableBackendPort, UnavailableBrowserOpener,
-        UnavailableDecisionCommandPort, UnavailableEnvironmentStore, UnavailablePrSnapshotPort,
-        UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory, WelcomeStep,
-        WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
-        app_event_from_key, begin_terminal_selection_on_click, close_exited_panes,
-        controller_terminal_view, forward_live_terminal_input, handle_terminal_pointer,
-        intercept_live_terminal_control, key_to_terminal_bytes, new_project_notice,
-        play_startup_splash, render_controller_frame, render_home_snapshot, restore_open_panes,
-        run as run_from_start, run_with_settings,
+        ConfigStep, ControllerHost, DefaultSettingsPort, Exit, FixedBackendFactory, Geometry,
+        MetricsPort, MetricsPortFactory, NewStep, NoDesktopNotifications, NoMetrics,
+        NoMetricsFactory, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult,
+        Start, TerminalAttach, TerminalChunk, TerminalError, UnavailableAgentCommandPort,
+        UnavailableBackendPort, UnavailableBrowserOpener, UnavailableDecisionCommandPort,
+        UnavailableEnvironmentStore, UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
+        UnavailableSessionCommandPortFactory, WelcomeStep, WorkspaceLoader, WorkspaceRuntime,
+        WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
+        begin_terminal_selection_on_click, close_exited_panes, controller_terminal_view,
+        forward_live_terminal_input, handle_terminal_pointer, intercept_live_terminal_control,
+        key_to_terminal_bytes, new_project_notice, play_startup_splash, render_controller_frame,
+        render_home_snapshot, restore_open_panes, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
-        run_workspace_controller, safe_session_error, sidebar_pointer_event, step_config, step_new,
-        terminal_geometry, tick_session_refresh, welcome_action, write_banner,
+        run_workspace_controller, run_workspace_controller_with_backend_and_settings,
+        safe_session_error, sidebar_pointer_event, step_config, step_new, terminal_geometry,
+        tick_session_refresh, welcome_action, write_banner,
     };
     use crate::presentation::live_terminal::LiveTerminalControls;
     use crate::presentation::views::config::AvailableAgentModels;
@@ -3839,6 +3839,42 @@ mod tests {
                 .any(|frame| frame.join("\n").contains("←→/Tab: choose")),
             "quit confirmation frame is missing the choose shortcut"
         );
+    }
+
+    #[test]
+    fn direct_controller_entry_uses_the_resolved_workspace_settings() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char(':'),
+            Key::Char('i'),
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
+        let mut factory = FixedBackendFactory {
+            sessions: Some(Box::new(UnavailableSessionCommandPort)),
+            agent: Some(Box::new(UnavailableAgentCommandPort)),
+            metrics: Some(Box::new(NoMetrics)),
+            browser: Some(Box::new(UnavailableBrowserOpener)),
+        };
+        let settings = usagi_core::domain::settings::Settings {
+            modal_selection_mode: usagi_core::domain::settings::ModalSelectionMode::Prompt,
+            ..usagi_core::domain::settings::Settings::default()
+        };
+
+        assert_eq!(
+            run_workspace_controller_with_backend_and_settings(
+                &mut term,
+                snapshot("direct"),
+                &mut factory,
+                &settings,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+        assert!(term.frames.iter().any(|frame| {
+            let frame = frame.join("\n");
+            frame.contains("Overview") && frame.contains("Enter: run   Esc: close")
+        }));
     }
 
     #[test]
