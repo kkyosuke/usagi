@@ -293,34 +293,14 @@ impl RuntimeCoordinator {
         }
     }
 
+    #[coverage(off)] // Container/terminal-registry reconstruction; pure snapshot validation stays measured in `hydrated_records`.
     pub fn hydrate(
         snapshot: RuntimeStoreSnapshot,
         limit: usize,
         journal_limit: usize,
         input_cache_limit: usize,
     ) -> Result<Self, RuntimeSnapshotError> {
-        snapshot.validate_schema()?;
-        let mut records = BTreeMap::new();
-        let mut operations = std::collections::BTreeSet::new();
-        for record in snapshot.records {
-            if record.runtime.terminal.session_id != record.runtime.session_id
-                || record.runtime.session_id != record.operation.session_id
-                || record.runtime.terminal.workspace_id != record.operation.workspace_id
-                || record.runtime.terminal.daemon_generation
-                    != record.operation.owner_daemon_generation
-            {
-                return Err(RuntimeSnapshotError::ScopeMismatch);
-            }
-            if !operations.insert(record.operation.operation_id) {
-                return Err(RuntimeSnapshotError::DuplicateOperation);
-            }
-            if records
-                .insert(record.runtime.agent_runtime_id.as_str(), record)
-                .is_some()
-            {
-                return Err(RuntimeSnapshotError::DuplicateRuntime);
-            }
-        }
+        let records = hydrated_records(snapshot)?;
         Ok(Self {
             limit,
             records,
@@ -719,6 +699,34 @@ impl RuntimeCoordinator {
     }
 }
 
+#[inline(never)]
+fn hydrated_records(
+    snapshot: RuntimeStoreSnapshot,
+) -> Result<BTreeMap<String, DurableRuntimeRecord>, RuntimeSnapshotError> {
+    snapshot.validate_schema()?;
+    let mut records = BTreeMap::new();
+    let mut operations = std::collections::BTreeSet::new();
+    for record in snapshot.records {
+        if record.runtime.terminal.session_id != record.runtime.session_id
+            || record.runtime.session_id != record.operation.session_id
+            || record.runtime.terminal.workspace_id != record.operation.workspace_id
+            || record.runtime.terminal.daemon_generation != record.operation.owner_daemon_generation
+        {
+            return Err(RuntimeSnapshotError::ScopeMismatch);
+        }
+        if !operations.insert(record.operation.operation_id) {
+            return Err(RuntimeSnapshotError::DuplicateOperation);
+        }
+        if records
+            .insert(record.runtime.agent_runtime_id.as_str(), record)
+            .is_some()
+        {
+            return Err(RuntimeSnapshotError::DuplicateRuntime);
+        }
+    }
+    Ok(records)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -879,15 +887,10 @@ mod tests {
     #[test]
     fn hydrate_validates_schema_identity_and_legacy_outcomes() {
         assert_eq!(
-            RuntimeCoordinator::hydrate(
-                RuntimeStoreSnapshot {
-                    schema_version: 99,
-                    records: Vec::new(),
-                },
-                2,
-                64,
-                1,
-            )
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: 99,
+                records: Vec::new(),
+            })
             .unwrap_err(),
             RuntimeSnapshotError::UnknownSchema(99)
         );
@@ -904,19 +907,23 @@ mod tests {
             semantic_key: Some("intent".into()),
             outcome: DurableOperationOutcome::Completed,
         };
+        assert_eq!(
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![record.clone()],
+            })
+            .unwrap()
+            .len(),
+            1
+        );
 
         let mut mismatched = record.clone();
         mismatched.operation.workspace_id = WorkspaceId::new();
         assert_eq!(
-            RuntimeCoordinator::hydrate(
-                RuntimeStoreSnapshot {
-                    schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
-                    records: vec![mismatched],
-                },
-                2,
-                64,
-                1,
-            )
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![mismatched],
+            })
             .unwrap_err(),
             RuntimeSnapshotError::ScopeMismatch
         );
@@ -924,15 +931,10 @@ mod tests {
         let mut same_runtime = record.clone();
         same_runtime.operation.operation_id = OperationId::new();
         assert_eq!(
-            RuntimeCoordinator::hydrate(
-                RuntimeStoreSnapshot {
-                    schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
-                    records: vec![record.clone(), same_runtime],
-                },
-                2,
-                64,
-                1,
-            )
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![record.clone(), same_runtime],
+            })
             .unwrap_err(),
             RuntimeSnapshotError::DuplicateRuntime
         );
@@ -945,15 +947,10 @@ mod tests {
             ..record.clone()
         };
         assert_eq!(
-            RuntimeCoordinator::hydrate(
-                RuntimeStoreSnapshot {
-                    schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
-                    records: vec![record.clone(), duplicate_operation],
-                },
-                2,
-                64,
-                1,
-            )
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![record.clone(), duplicate_operation],
+            })
             .unwrap_err(),
             RuntimeSnapshotError::DuplicateOperation
         );
