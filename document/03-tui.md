@@ -145,7 +145,9 @@ Home sidebar は `main → divider → session* → + new session` の順序と 
 session は selected / active を main に縮退させ、空一覧でも main と作成 action は残る。
 
 Switch で `+ new session` を選び Enter（または `t`）を押すと、その行が `+ new: <name>` の
-inline 入力欄へ置き換わる。名前を入力して Enter を押すと通常の `session create <name>` と同じ daemon
+inline 入力欄へ置き換わる。置き換わった入力欄でも `+ new` affordance は静的な `+ new session` と同じ
+Success（緑）で描き、cursor `>` と入力中の名前は accent で描くため、静的行から入力欄へ移っても affordance の
+緑が途切れない。名前を入力して Enter を押すと通常の `session create <name>` と同じ daemon
 request を非同期に開始し、完了まで行の直前に session と同じ 2 行の skeleton を表示する。skeleton の activity glyph と session 名は同じ
 左から右へ流れる低速の wave で描き、静的な点滅にはしない。daemon が同一 `OperationId` と revision を持つ `session.created`
 完了 hook を返したときだけ、skeleton をその response 内の snapshot row に置き換えて loading を終了する。IME に依存しない `Ctrl-A` も

@@ -1322,9 +1322,11 @@ fn home_row_lines_at(
 /// Build the inline `+ new session` sidebar lines: the caret row, then any
 /// validation error wrapped to the sidebar `width` below it.
 ///
-/// The caret row shows the accent cursor, a `+` affordance, and a block caret on
-/// the typed name (`> + new: <name>`, documented in 03-tui.md); it stays a single
-/// clipped line since the name is the user's own bounded input. Any reducer
+/// The caret row shows the accent cursor `>`, the `+ new:` affordance in the
+/// Success (green) role so it stays visually continuous with the static green
+/// `+ new session` label (#302 / #362 / #376), and a block caret on the typed name
+/// (`> + new: <name>`, documented in 03-tui.md); it stays a single clipped line
+/// since the name is the user's own bounded input. Any reducer
 /// validation message is wrapped **as plain text** to the display width and each
 /// segment is then painted in the danger style — wrapping the styled string
 /// directly would miscount ANSI escapes as visible columns. Every line is padded
@@ -1335,8 +1337,16 @@ fn home_row_lines_at(
 /// length so the viewport's scroll math never diverges from what is drawn.
 fn new_session_input_lines(width: usize, draft: &CreateDraft) -> Vec<String> {
     let accent = Role::Accent.style().bold();
+    // The `+ new:` affordance keeps the Success (green) role of the static
+    // `+ new session` label so the colour is continuous when the row expands into
+    // its inline input; the cursor `>` and the name/block caret stay accent.
+    let affordance = Role::Success.style().bold();
     let caret = widgets::block_caret(&draft.name, draft.name.chars().count(), &accent);
-    let caret_line = format!("{} + new: {caret}", accent.paint(">"));
+    let caret_line = format!(
+        "{} {} {caret}",
+        accent.paint(">"),
+        affordance.paint("+ new:")
+    );
     let mut lines = vec![widgets::pad_to_width(
         &widgets::clip_to_width(&caret_line, width),
         width,
@@ -1700,6 +1710,26 @@ mod tests {
     }
 
     #[test]
+    fn render_home_paints_the_inline_new_affordance_success_not_accent() {
+        // The runtime path that actually draws the inline create form must keep the
+        // `+ new:` affordance in the Success (green) role and never fall to accent
+        // (cyan), matching the static `+ new session` colour (#302 / #362 / #376).
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        for character in "feature-x".chars() {
+            let _ = update(&mut state, AppEvent::Key(AppKey::Char(character)));
+        }
+        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        // Render with styles preserved (joined_home strips them).
+        let rendered = render_home(30, 100, &home).join("\n");
+        assert!(rendered.contains("\u{1b}[1;32m+ new:\u{1b}[0m"));
+        assert!(!rendered.contains("\u{1b}[1;36m+ new:"));
+        assert!(!rendered.contains("\u{1b}[36m+ new:"));
+    }
+
+    #[test]
     fn render_home_draws_a_create_validation_error_inline_on_the_new_session_row() {
         let workspace = WorkspaceId::new();
         let mut state = AppState::home(workspace, Vec::new());
@@ -1739,6 +1769,40 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert!(strip(&lines[0]).contains("+ new: feature-x"));
         assert_eq!(display_width(&lines[0]), 30);
+    }
+
+    #[test]
+    fn new_session_input_lines_paint_the_affordance_success_and_keep_the_cursor_and_name_accent() {
+        // The `+ new:` affordance is Success (green) so it stays continuous with the
+        // static green `+ new session` label; the cursor `>` and the typed name keep
+        // the accent (cyan) role for visibility.
+        let draft = CreateDraft {
+            name: "feature-x".into(),
+            error: None,
+        };
+        let caret = new_session_input_lines(30, &draft).remove(0);
+        // Affordance carries the Success SGR and never the accent one.
+        assert!(caret.contains("\u{1b}[1;32m+ new:\u{1b}[0m"));
+        assert!(!caret.contains("\u{1b}[1;36m+ new:"));
+        // Cursor `>` and the name span keep the accent bold role.
+        assert!(caret.contains("\u{1b}[1;36m>\u{1b}[0m"));
+        assert!(caret.contains("\u{1b}[1;36m"));
+        // Stripping styles still yields the documented caret text.
+        assert!(strip(&caret).contains("+ new: feature-x"));
+    }
+
+    #[test]
+    fn new_session_input_lines_keep_the_affordance_green_while_an_error_shows_danger() {
+        // A live validation error paints Danger below the caret, but the affordance
+        // above it stays Success (green) — the two roles coexist.
+        let draft = CreateDraft {
+            name: "ok".into(),
+            error: Some("invalid character".to_string()),
+        };
+        let lines = new_session_input_lines(24, &draft);
+        assert!(lines[0].contains("\u{1b}[1;32m+ new:\u{1b}[0m"));
+        assert!(!lines[0].contains("\u{1b}[1;36m+ new:"));
+        assert!(lines[1..].iter().any(|line| line.contains("\u{1b}[1;31m")));
     }
 
     #[test]
