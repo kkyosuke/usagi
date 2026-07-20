@@ -14,7 +14,8 @@ use super::{
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserDecisionOwner {
     pub workspace_id: WorkspaceId,
-    pub session_id: SessionId,
+    /// The managed-session scope, or `None` for the daemon-owned workspace root.
+    pub session_id: Option<SessionId>,
     pub caller: CallerRef,
     pub run_id: OperationId,
 }
@@ -108,7 +109,7 @@ mod tests {
             decision_id: UserDecisionId::new(),
             owner: UserDecisionOwner {
                 workspace_id: WorkspaceId::new(),
-                session_id: SessionId::new(),
+                session_id: Some(SessionId::new()),
                 caller: CallerRef {
                     session_id: Some(SessionId::new()),
                     agent_id: super::super::id::AgentId::new(),
@@ -167,6 +168,17 @@ mod tests {
             ),
             Err(UserDecisionError::Terminal)
         );
+    }
+
+    #[test]
+    fn root_scoped_owner_round_trips_without_a_session() {
+        let mut item = decision();
+        item.owner.session_id = None;
+
+        let encoded = serde_json::to_value(&item).unwrap();
+        let decoded: UserDecision = serde_json::from_value(encoded).unwrap();
+
+        assert_eq!(decoded.owner.session_id, None);
     }
 
     #[test]

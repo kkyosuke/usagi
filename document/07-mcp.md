@@ -23,6 +23,11 @@ stdio プロセスで、CLI からは隠している）。経路は入口面（C
 系は daemon への IPC リクエストになる（[2. アーキテクチャ](02-architecture.md)、
 [proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md)）。
 
+daemon-provisioned MCP child は private caller credential を IPC に forward する。`user_decision_*` は
+この credential を持つ live daemon Agent runtime だけが利用でき、手動の `usagi mcp` や credential の無い
+MCP caller は `ownership_unknown` で fail-closed となる。caller identity、session 名、cwd、path を
+tool payload や環境から補完して認可することはない。
+
 ## JSON-RPC メソッド
 
 serve ループが応答するメソッドは次のとおり。1 行 = 1 メッセージで、通知（`id` 無し）には
