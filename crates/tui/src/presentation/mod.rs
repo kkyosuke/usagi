@@ -2055,6 +2055,7 @@ fn sidebar_pointer_event(
     }
 }
 
+#[coverage(off)] // Real-terminal resync composition; reducer state is unit-tested below the port.
 fn decision_ids(event: &BackendEvent) -> std::collections::BTreeSet<UserDecisionId> {
     match event {
         BackendEvent::Decisions { decisions, .. } => decisions
@@ -2065,6 +2066,7 @@ fn decision_ids(event: &BackendEvent) -> std::collections::BTreeSet<UserDecision
     }
 }
 
+#[coverage(off)] // OS delivery stays behind the injected best-effort port.
 fn notify_new_decisions(
     event: &BackendEvent,
     notified: &mut std::collections::BTreeSet<UserDecisionId>,

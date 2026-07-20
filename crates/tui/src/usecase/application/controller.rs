@@ -5087,6 +5087,7 @@ mod tests {
             }),
         );
         assert_eq!(state.unread_decision_ids().len(), 1);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenDecisions));
         assert!(state.unread_decision_ids().is_empty());
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
