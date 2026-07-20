@@ -126,6 +126,16 @@ impl LiveTerminalControls {
         }
     }
 
+    /// Drop a retained selection after an ordinary click in the terminal
+    /// viewport. This is deliberately separate from [`Self::sync_focus`]: a
+    /// click clears only text selection, preserving scroll position and the
+    /// focused terminal.
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+        self.dragging = false;
+        self.feedback = Some("terminal selection cleared".to_owned());
+    }
+
     /// Record the outcome of writing `text` to the OS clipboard as feedback.
     pub fn record_copy(&mut self, text: &str, result: Result<(), String>) {
         self.feedback = Some(match result {
@@ -279,6 +289,30 @@ mod tests {
         let mut controls = LiveTerminalControls::default();
         controls.extend_selection(TerminalPoint { row: 0, column: 0 });
         assert!(controls.finish_drag().is_none());
+    }
+
+    #[test]
+    fn clearing_a_retained_selection_preserves_scroll_and_focus() {
+        let mut controls = LiveTerminalControls::default();
+        let terminal = terminal();
+        controls.sync_focus(Some(&terminal));
+        let _ = controls.project(rows(10), 5);
+        controls.scroll_up();
+        controls.begin_selection(TerminalSelection::begin(
+            vec!["hello".to_owned()],
+            TerminalPoint { row: 0, column: 0 },
+        ));
+        let _ = controls.finish_drag();
+
+        controls.clear_selection();
+
+        assert!(!controls.has_selection());
+        assert!(!controls.is_dragging());
+        assert_eq!(controls.project(rows(10), 5).scroll, 1);
+        assert_eq!(
+            controls.project(rows(10), 5).feedback.as_deref(),
+            Some("terminal selection cleared")
+        );
     }
 
     #[test]
