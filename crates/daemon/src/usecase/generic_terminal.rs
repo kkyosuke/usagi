@@ -23,8 +23,8 @@ use serde::{Deserialize, Serialize};
 use usagi_core::domain::{
     id::{CompletionFence, ConnectionId, TerminalRef},
     terminal_launch::{
-        DurableTerminalLaunchSnapshot, ResolvedTerminalLaunch, TerminalLaunchRequest,
-        TerminalLaunchValidationError,
+        DurableTerminalLaunchSnapshot, ResolvedTerminalLaunch, TerminalInventoryEntry,
+        TerminalKind, TerminalLaunchRequest, TerminalLaunchValidationError,
     },
 };
 
@@ -287,12 +287,16 @@ impl GenericTerminalCoordinator {
             records: self.records.values().cloned().collect(),
         }
     }
-    /// Lists only terminals in the exact requested durable scope.
+    /// Lists only terminals in the exact requested durable scope. Each entry is
+    /// tagged `Terminal` and marked `live` only while the current daemon
+    /// generation still owns a running PTY, so a restoring client attaches to
+    /// running terminals and never to exited, reclaimed, or reconcile-required
+    /// records.
     #[must_use]
     pub fn inventory(
         &self,
         scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
-    ) -> Vec<TerminalRef> {
+    ) -> Vec<TerminalInventoryEntry> {
         self.records
             .values()
             .filter(|record| {
@@ -300,7 +304,11 @@ impl GenericTerminalCoordinator {
                     && record.terminal.session_id == scope.session_id
                     && record.terminal.worktree_id == scope.worktree_id
             })
-            .map(|record| record.terminal.clone())
+            .map(|record| TerminalInventoryEntry {
+                terminal: record.terminal.clone(),
+                kind: TerminalKind::Terminal,
+                live: matches!(record.state, TerminalRuntimeState::Running),
+            })
             .collect()
     }
     #[must_use]

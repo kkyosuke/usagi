@@ -33,8 +33,14 @@ pub struct LiveTerminalControls {
     /// The furthest the current viewport can scroll, recomputed each frame from
     /// the retained rows so `scroll_up` cannot run past the top.
     max_scroll: usize,
-    /// The in-progress drag selection, snapshotted at its anchor.
+    /// The drag selection, snapshotted at its anchor. It is retained after the
+    /// mouse is released so the highlighted range stays on screen (and copyable)
+    /// until a new drag replaces it or focus changes.
     selection: Option<TerminalSelection>,
+    /// Whether a mouse drag is currently extending [`Self::selection`]. This
+    /// distinguishes "extend the live drag" from "start a fresh selection",
+    /// which `has_selection` alone cannot once a finished selection lingers.
+    dragging: bool,
     /// The presentation-safe feedback line shown in the right-pane footer.
     feedback: Option<String>,
 }
@@ -51,6 +57,7 @@ impl LiveTerminalControls {
         self.scroll = 0;
         self.max_scroll = 0;
         self.selection = None;
+        self.dragging = false;
         self.feedback = None;
     }
 
@@ -64,10 +71,11 @@ impl LiveTerminalControls {
         self.scroll = self.scroll.saturating_sub(1);
     }
 
-    /// Begin a drag selection, replacing any earlier one, and surface that a
-    /// selection has started.
+    /// Begin a drag selection, replacing any earlier (including finished) one,
+    /// and surface that a selection has started.
     pub fn begin_selection(&mut self, selection: TerminalSelection) {
         self.selection = Some(selection);
+        self.dragging = true;
         self.feedback = Some("terminal selection started".to_owned());
     }
 
@@ -78,30 +86,56 @@ impl LiveTerminalControls {
         }
     }
 
-    /// Whether a drag selection is in progress.
+    /// Whether a selection currently exists (either an active drag or a finished
+    /// one still highlighted on screen).
     #[must_use]
     pub const fn has_selection(&self) -> bool {
         self.selection.is_some()
     }
 
-    /// The in-progress selection, so the shell renders the highlighted rows.
+    /// Whether a mouse drag is actively extending the selection. The shell uses
+    /// this to decide whether a drag event extends the live selection or starts
+    /// a fresh one over a lingering, finished selection.
+    #[must_use]
+    pub const fn is_dragging(&self) -> bool {
+        self.dragging
+    }
+
+    /// The current selection, so the shell renders the highlighted rows. Kept
+    /// after the mouse is released so the range stays visible.
     #[must_use]
     pub const fn selection(&self) -> Option<&TerminalSelection> {
         self.selection.as_ref()
     }
 
-    /// Finish the selection and return the text to copy, or `None` (with safe
-    /// feedback) when nothing is selected — a stale release must never clear the
-    /// user's clipboard.
-    pub fn take_copy_text(&mut self) -> Option<String> {
-        let selection = self.selection.take()?;
-        let text = selection.text();
+    /// End an in-progress drag and return the finished selection's text to copy,
+    /// keeping the selection highlighted on screen. Returns `None` when no drag
+    /// was active (so a stray release never re-copies or clears the clipboard) or
+    /// when the selection is empty — an empty selection is dropped with safe
+    /// feedback instead of lingering as an invisible highlight.
+    pub fn finish_drag(&mut self) -> Option<String> {
+        if !self.dragging {
+            return None;
+        }
+        self.dragging = false;
+        let text = self.selection.as_ref()?.text();
         if text.is_empty() {
+            self.selection = None;
             self.feedback = Some("no terminal text is selected".to_owned());
             None
         } else {
             Some(text)
         }
+    }
+
+    /// Drop a retained selection after an ordinary click in the terminal
+    /// viewport. This is deliberately separate from [`Self::sync_focus`]: a
+    /// click clears only text selection, preserving scroll position and the
+    /// focused terminal.
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+        self.dragging = false;
+        self.feedback = Some("terminal selection cleared".to_owned());
     }
 
     /// Record the outcome of writing `text` to the OS clipboard as feedback.
@@ -127,7 +161,7 @@ impl LiveTerminalControls {
     /// shell or the child PTY. `browser` is the argv-based platform adapter, which
     /// never invokes a shell.
     ///
-    /// The caller only reaches this after [`take_copy_text`](Self::take_copy_text)
+    /// The caller only reaches this after [`finish_drag`](Self::finish_drag)
     /// yields nothing, so a non-empty drag selection copies and a plain click
     /// opens — the two gestures never both fire.
     pub fn open_link_at(
@@ -242,40 +276,90 @@ mod tests {
     }
 
     #[test]
-    fn begin_and_extend_build_the_copy_text() {
+    fn begin_and_extend_build_the_copy_text_and_keep_the_selection_after_release() {
         let mut controls = LiveTerminalControls::default();
         controls.begin_selection(TerminalSelection::begin(
             vec!["hello".to_owned(), "world".to_owned()],
             TerminalPoint { row: 0, column: 0 },
         ));
+        assert!(controls.is_dragging());
         assert_eq!(
             controls.project(rows(1), 1).feedback.as_deref(),
             Some("terminal selection started")
         );
         controls.extend_selection(TerminalPoint { row: 1, column: 4 });
-        // Extending without dropping the selection keeps it live for the shell to
-        // render the highlighted rows.
         assert!(controls.selection().is_some());
-        let text = controls.take_copy_text().expect("non-empty selection");
+        let text = controls.finish_drag().expect("non-empty selection");
         assert_eq!(text, "hello\nworld");
-        assert!(!controls.has_selection());
+        // Releasing copies but keeps the range highlighted; the drag is over.
+        assert!(controls.has_selection());
+        assert!(!controls.is_dragging());
+        // A stray release without a live drag must not re-copy the retained text.
+        assert!(controls.finish_drag().is_none());
+        assert!(controls.has_selection());
+    }
+
+    #[test]
+    fn a_new_drag_replaces_a_finished_selection() {
+        let mut controls = LiveTerminalControls::default();
+        controls.begin_selection(TerminalSelection::begin(
+            vec!["first".to_owned()],
+            TerminalPoint { row: 0, column: 0 },
+        ));
+        controls.extend_selection(TerminalPoint { row: 0, column: 4 });
+        assert_eq!(controls.finish_drag().as_deref(), Some("first"));
+        // A finished selection lingers; the next drag begins a fresh one instead
+        // of extending it.
+        assert!(controls.has_selection() && !controls.is_dragging());
+        controls.begin_selection(TerminalSelection::begin(
+            vec!["second".to_owned()],
+            TerminalPoint { row: 0, column: 0 },
+        ));
+        controls.extend_selection(TerminalPoint { row: 0, column: 2 });
+        assert_eq!(controls.finish_drag().as_deref(), Some("sec"));
     }
 
     #[test]
     fn extend_without_a_selection_is_inert() {
         let mut controls = LiveTerminalControls::default();
         controls.extend_selection(TerminalPoint { row: 0, column: 0 });
-        assert!(controls.take_copy_text().is_none());
+        assert!(controls.finish_drag().is_none());
     }
 
     #[test]
-    fn an_empty_selection_reports_feedback_without_clearing_the_clipboard() {
+    fn clearing_a_retained_selection_preserves_scroll_and_focus() {
+        let mut controls = LiveTerminalControls::default();
+        let terminal = terminal();
+        controls.sync_focus(Some(&terminal));
+        let _ = controls.project(rows(10), 5);
+        controls.scroll_up();
+        controls.begin_selection(TerminalSelection::begin(
+            vec!["hello".to_owned()],
+            TerminalPoint { row: 0, column: 0 },
+        ));
+        let _ = controls.finish_drag();
+
+        controls.clear_selection();
+
+        assert!(!controls.has_selection());
+        assert!(!controls.is_dragging());
+        assert_eq!(controls.project(rows(10), 5).scroll, 1);
+        assert_eq!(
+            controls.project(rows(10), 5).feedback.as_deref(),
+            Some("terminal selection cleared")
+        );
+    }
+
+    #[test]
+    fn an_empty_selection_is_dropped_with_feedback_without_clearing_the_clipboard() {
         let mut controls = LiveTerminalControls::default();
         controls.begin_selection(TerminalSelection::begin(
             vec!["text".to_owned()],
             TerminalPoint { row: 0, column: 9 },
         ));
-        assert!(controls.take_copy_text().is_none());
+        assert!(controls.finish_drag().is_none());
+        // An empty selection is not left lingering as an invisible highlight.
+        assert!(!controls.has_selection());
         assert_eq!(
             controls.project(rows(1), 1).feedback.as_deref(),
             Some("no terminal text is selected")

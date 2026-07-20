@@ -25,6 +25,16 @@ pub trait TerminalOwner {
         action: usagi_core::usecase::client::TerminalAction,
         payload: serde_json::Value,
     ) -> Result<serde_json::Value, ProtocolError>;
+    /// Lists the daemon-owned runtimes this owner holds in the exact requested
+    /// scope. The default owner holds none; the generic terminal owner returns
+    /// its running terminals. `SharedTerminalOwner` merges this with the Agent
+    /// owner so a client's `Inventory` request sees both kinds.
+    fn inventory(
+        &self,
+        _scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+    ) -> Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry> {
+        Vec::new()
+    }
     fn disconnect(&mut self, connection: usagi_core::domain::id::ConnectionId);
 }
 

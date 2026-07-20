@@ -143,6 +143,15 @@ output は `(start_offset, end_offset)` の連続範囲で表し、resume の cu
 `resync_required` を返す。`stale_target`、`ownership_unknown`、partial write を含む安全に証明
 できない結果は typed error であり、client は local PTY を生成しない。
 
+`inventory` は `WorkspaceId` / optional `SessionId`（None=root）/ `WorktreeId` の scope を送り、
+その scope に**完全一致**する daemon 所有 runtime を列挙する。daemon は generic terminal owner と
+Agent owner の両方に問い合わせて結果を merge するため、応答には**generic terminal と Agent terminal の
+両方**が含まれる。各エントリは完全な `TerminalRef`、`kind`（`terminal` / `agent`）、`live`（現 daemon
+generation が所有し attach 可能か）だけを持ち、argv・environment 値・secret・provider transcript は
+含めない。`exited`・reconcile 中・orphan の runtime は `live: false` として返り attachable にはならない。
+client はこの列挙で発見した live runtime にだけ、その `TerminalRef` で fenced に attach する
+（名前や path から terminal を推測しない）。workspace open 時の pane 復元でこの列挙を使う（[3. TUI](03-tui.md#workspace-open-時の-pane-復元) を正本とする）。
+
 ## Unix transport
 
 Unix socket は daemon 専用 adapter が管理する。endpoint は private data directory の generation

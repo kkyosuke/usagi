@@ -26,6 +26,7 @@ use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::AgentProfileId;
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, UserDecisionId, WorkspaceId};
 use usagi_core::domain::recent::Recent;
+use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
 use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::usecase::client::DaemonMetrics;
@@ -51,6 +52,7 @@ use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, Effect, NewRequest, Notice, OperationResult, Overlay,
     PendingToken, PointerAction, SafeError, SafeMessage, Target,
 };
+use crate::usecase::application::pane::PaneKind;
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort, canonical_browser_url};
 use crate::usecase::application::terminal_selection::TerminalSelection;
@@ -155,6 +157,22 @@ pub trait AgentCommandPort: Send {
 
     /// Release a daemon terminal subscription; it must not stop the process.
     fn detach_terminal(&mut self, _terminal: &TerminalRef, _subscription: u64) {}
+
+    /// List the daemon-owned runtimes in scope for this workspace so a freshly
+    /// opened controller can re-project the terminals and Agents that are still
+    /// live into pane tabs. The production adapter resolves the workspace root
+    /// and every available session scope and unions the daemon inventory.
+    ///
+    /// The default keeps embedders without a daemon safe: no runtime is
+    /// discovered, so opening a workspace simply starts with no restored panes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe daemon communication failure; the caller then restores
+    /// nothing rather than spawning anything locally.
+    fn list_terminals(&mut self) -> Result<Vec<TerminalInventoryEntry>, TerminalError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Daemon-authoritative durable decision boundary for the workspace runtime.
@@ -663,6 +681,22 @@ impl WorkspaceUi {
             let mut session = TerminalSession::new(terminal, geometry);
             session.connect(&mut AgentStreamPort(port));
             self.terminals.push(session);
+        }
+    }
+
+    /// Ask the daemon for the runtimes still live in this workspace's scopes.
+    /// A missing port (embedder) or a launch worker that has temporarily taken
+    /// it yields an empty inventory rather than an error, so restore simply
+    /// finds nothing. A daemon failure is surfaced so the caller restores
+    /// nothing instead of guessing.
+    fn list_open_terminals(&mut self) -> Result<Vec<TerminalInventoryEntry>, ()> {
+        match self
+            .agent
+            .as_mut()
+            .and_then(|agent| agent.port.as_deref_mut())
+        {
+            Some(port) => port.list_terminals().map_err(|_| ()),
+            None => Ok(Vec::new()),
         }
     }
 
@@ -1248,6 +1282,10 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         Key::Backspace => AppKey::Backspace,
         Key::Tab => AppKey::Tab,
         Key::Escape => AppKey::Escape,
+        // Runtime adapters preserve Ctrl-A as U+0001. Reclassify it at the
+        // management boundary; live panes do not reach here unless a Ctrl-O
+        // prefix has resolved an explicit local action.
+        Key::Char('\u{1}') => AppKey::CtrlA,
         Key::Char(character) => AppKey::Char(character),
         Key::Quit => AppKey::CtrlC,
         Key::CtrlQ => AppKey::CtrlQ,
@@ -1488,6 +1526,44 @@ fn shell_target_for_terminal(terminal: &TerminalRef) -> Target {
         .map_or(Target::Root(terminal.workspace_id), Target::Session)
 }
 
+/// Re-project the daemon-owned terminals and Agents that are still live in this
+/// workspace's scopes into pane tabs, once, when the workspace is opened.
+///
+/// The daemon inventory is the source of truth: only a runtime the current
+/// daemon generation still owns (`live`) is restored, each bound to its fenced
+/// [`TerminalRef`]. A dead process, a stale or recreated session, a scope
+/// mismatch, and a duplicate entry therefore never produce a spurious or a
+/// doubled tab — the daemon filters by scope and generation, `live` gates
+/// attachability, and `fences` dedupes. A runtime whose PTY master is
+/// unrestorable is reported non-live and skipped here; the session-level
+/// interrupted contract surfaces it instead. `complete_pane` never steals
+/// focus, so restore leaves the user on the active pane.
+fn restore_open_panes(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, geometry: Geometry) {
+    let Ok(entries) = ui.list_open_terminals() else {
+        // A daemon failure restores nothing and never spawns locally.
+        return;
+    };
+    let mut restored: Vec<TerminalRef> = Vec::new();
+    for entry in entries {
+        if !entry.live {
+            continue;
+        }
+        if restored.iter().any(|seen| seen.fences(&entry.terminal)) {
+            continue;
+        }
+        let target = shell_target_for_terminal(&entry.terminal);
+        let kind = match entry.kind {
+            TerminalKind::Agent => PaneKind::Agent,
+            TerminalKind::Terminal => PaneKind::Terminal,
+        };
+        let operation = OperationId::new();
+        let _ = runtime.request_pane(target, operation, kind);
+        let _ = runtime.complete_pane(target, operation, entry.terminal.clone());
+        ui.start_terminal_session(entry.terminal.clone(), geometry);
+        restored.push(entry.terminal);
+    }
+}
+
 /// Close the focused pane tab (Ctrl-O x) and perform the daemon transport work
 /// the runtime reports: detach a live subscription, or drop a still-pending
 /// launch (both its queued work and its completion routing) so it cannot spawn a
@@ -1548,14 +1624,16 @@ fn handle_terminal_pointer(
             else {
                 return;
             };
-            if controls.has_selection() {
+            if controls.is_dragging() {
                 controls.extend_selection(point);
             } else if let Some(cells) = ui.terminal_cells(&terminal) {
                 controls.begin_selection(TerminalSelection::begin(cells, point));
             }
         }
         PointerKind::Up => {
-            if let Some(text) = controls.take_copy_text() {
+            // Releasing the mouse copies the selection but keeps it highlighted:
+            // the range stays on screen until a new drag replaces it.
+            if let Some(text) = controls.finish_drag() {
                 let result = term.copy_text(&text);
                 controls.record_copy(&text, result);
                 return;
@@ -1575,6 +1653,29 @@ fn handle_terminal_pointer(
             }
         }
     }
+}
+
+/// Clear a finished terminal selection only when a normal left click lands in
+/// the live terminal's rendered content viewport. Sidebar, chrome, modal, and
+/// empty-selection clicks retain their existing ownership and handling.
+#[coverage(off)]
+fn clear_terminal_selection_on_click(
+    runtime: &WorkspaceRuntime,
+    controls: &mut LiveTerminalControls,
+    height: usize,
+    width: usize,
+    rows_len: usize,
+    scroll: usize,
+    pointer: (u16, u16),
+) -> bool {
+    if !runtime.wants_live_input()
+        || !controls.has_selection()
+        || terminal_point_at(height, width, rows_len, scroll, pointer.0, pointer.1).is_none()
+    {
+        return false;
+    }
+    controls.clear_selection();
+    true
 }
 
 /// Intercept the live-terminal view controls the Home reducer does not own —
@@ -1605,6 +1706,17 @@ fn intercept_live_terminal_control(
         Key::Pointer(pointer) => {
             handle_terminal_pointer(
                 ui, runtime, controls, term, browser, height, width, rows_len, scroll, *pointer,
+            );
+        }
+        Key::Click { column, row } => {
+            return clear_terminal_selection_on_click(
+                runtime,
+                controls,
+                height,
+                width,
+                rows_len,
+                scroll,
+                (*column, *row),
             );
         }
         _ => return false,
@@ -1996,6 +2108,10 @@ fn drive_workspace_controller(
     // Seed the daemon-authoritative snapshot before the first frame so a
     // pending decision is visible without requiring a manual key binding.
     let _ = runtime.apply_event(AppEvent::Backend(decisions.refresh(workspace_id)));
+    // Re-project already-live daemon terminals/Agents into tabs exactly once,
+    // after the first frame is painted (below), so the opening frame is never
+    // blocked on the daemon inventory round-trip.
+    let mut panes_restored = false;
     loop {
         drain_session_completions(&mut ui, &mut runtime);
         sync_runtime_sessions(&mut runtime, &ui);
@@ -2037,6 +2153,10 @@ fn drive_workspace_controller(
                 .map(|create| create.name.as_str()),
         );
         term.draw(&frame)?;
+        if !panes_restored {
+            panes_restored = true;
+            restore_open_panes(&mut ui, &mut runtime, geometry);
+        }
         drain_pane_launches(&mut ui, geometry);
         let key = term.read_key()?;
         if runtime.wants_live_input()
@@ -2582,10 +2702,11 @@ mod tests {
         SessionCommandResult, Start, TerminalAttach, TerminalChunk, TerminalError,
         UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailablePrSnapshotPort,
         UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceRuntime,
-        WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key, close_exited_panes,
-        controller_terminal_view, handle_terminal_pointer, key_to_terminal_bytes,
-        new_project_notice, play_startup_splash, render_controller_frame, render_home_snapshot,
-        run as run_from_start, run_with_settings,
+        WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
+        clear_terminal_selection_on_click, close_exited_panes, controller_terminal_view,
+        handle_terminal_pointer, key_to_terminal_bytes, new_project_notice, play_startup_splash,
+        render_controller_frame, render_home_snapshot, restore_open_panes, run as run_from_start,
+        run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_controller, safe_session_error, step_config, step_new, terminal_geometry,
         welcome_action, write_banner,
@@ -2599,6 +2720,7 @@ mod tests {
     };
     use crate::usecase::application::pane::PaneKind;
     use crate::usecase::application::run as dispatch;
+    use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
     use crate::usecase::application::{EntryScreen, Key, Terminal};
     use crate::usecase::overview::SessionCommand;
     use crate::usecase::terminal_input::{LiveTerminalAction, PointerEvent, PointerKind};
@@ -2613,6 +2735,7 @@ mod tests {
         DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
     };
     use usagi_core::domain::note::Scratchpad;
+    use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
 
     use usagi_core::domain::recent::{Recent, UniteOverview};
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
@@ -2653,6 +2776,10 @@ mod tests {
         assert_eq!(
             app_event_from_key(Key::Char('x')),
             Some(AppEvent::Key(AppKey::Char('x')))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Char('\u{1}')),
+            Some(AppEvent::Key(AppKey::CtrlA))
         );
         assert_eq!(
             app_event_from_key(Key::Quit),
@@ -3307,6 +3434,156 @@ mod tests {
         assert_eq!(*detaches.lock().unwrap(), vec![5]);
     }
 
+    /// A daemon inventory double for restore-on-open. It returns a fixed set of
+    /// in-scope runtimes and attaches successfully so a restored tab streams.
+    struct RestoreInventoryPort {
+        entries: Vec<TerminalInventoryEntry>,
+        fail: bool,
+    }
+    impl AgentCommandPort for RestoreInventoryPort {
+        fn launch(
+            &mut self,
+            _workspace: WorkspaceId,
+            _session: Option<SessionId>,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<TerminalRef, String> {
+            Err("restore never launches".to_owned())
+        }
+        fn list_terminals(&mut self) -> Result<Vec<TerminalInventoryEntry>, TerminalError> {
+            if self.fail {
+                Err(TerminalError::Unavailable)
+            } else {
+                Ok(self.entries.clone())
+            }
+        }
+        fn attach_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            _geometry: Geometry,
+        ) -> Result<TerminalAttach, TerminalError> {
+            Ok(TerminalAttach {
+                subscription: 1,
+                output_offset: 0,
+                replay: Vec::new(),
+                exited: false,
+            })
+        }
+        fn poll_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            _after_offset: u64,
+        ) -> Result<Vec<TerminalChunk>, TerminalError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn scoped_terminal_ref(workspace: WorkspaceId, session: Option<SessionId>) -> TerminalRef {
+        TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: session,
+            worktree_id: WorktreeId::new(),
+        }
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn restore_open_panes_projects_live_runtimes_and_skips_dead_and_duplicates() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let root_terminal = scoped_terminal_ref(workspace, None);
+        let root_agent = scoped_terminal_ref(workspace, None);
+        let session_terminal = scoped_terminal_ref(workspace, Some(session));
+        let dead = scoped_terminal_ref(workspace, None);
+        let entries = vec![
+            TerminalInventoryEntry {
+                terminal: root_terminal.clone(),
+                kind: TerminalKind::Terminal,
+                live: true,
+            },
+            TerminalInventoryEntry {
+                terminal: root_agent.clone(),
+                kind: TerminalKind::Agent,
+                live: true,
+            },
+            TerminalInventoryEntry {
+                terminal: session_terminal.clone(),
+                kind: TerminalKind::Terminal,
+                live: true,
+            },
+            // A dead process is reported non-live and must not become a tab.
+            TerminalInventoryEntry {
+                terminal: dead.clone(),
+                kind: TerminalKind::Terminal,
+                live: false,
+            },
+            // A duplicate of a live runtime must not double the tab.
+            TerminalInventoryEntry {
+                terminal: root_terminal.clone(),
+                kind: TerminalKind::Terminal,
+                live: true,
+            },
+        ];
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(RestoreInventoryPort {
+                    entries,
+                    fail: false,
+                }),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+
+        restore_open_panes(&mut ui, &mut runtime, terminal_geometry(20, 80));
+
+        // The active (root) pane shows exactly the two root runtimes, deduped.
+        assert_eq!(runtime.active_pane().tabs().len(), 2);
+        assert!(runtime.state().has_live_pane());
+        // Every live runtime is attached and streaming; the dead one is not.
+        assert!(ui.terminal_rows(&root_terminal, None).is_some());
+        assert!(ui.terminal_rows(&root_agent, None).is_some());
+        assert!(ui.terminal_rows(&session_terminal, None).is_some());
+        assert!(ui.terminal_rows(&dead, None).is_none());
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn restore_open_panes_restores_nothing_on_daemon_failure_or_without_a_port() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let live = TerminalInventoryEntry {
+            terminal: scoped_terminal_ref(workspace, None),
+            kind: TerminalKind::Terminal,
+            live: true,
+        };
+
+        // A daemon failure restores nothing (and never spawns locally).
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(RestoreInventoryPort {
+                    entries: vec![live],
+                    fail: true,
+                }),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        restore_open_panes(&mut ui, &mut runtime, terminal_geometry(20, 80));
+        assert!(runtime.active_pane().tabs().is_empty());
+        assert!(!runtime.state().has_live_pane());
+
+        // An embedder with no Agent port simply finds nothing to restore.
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        restore_open_panes(&mut ui, &mut runtime, terminal_geometry(20, 80));
+        assert!(runtime.active_pane().tabs().is_empty());
+    }
+
     #[test]
     #[coverage(off)]
     fn a_live_terminal_drag_selects_and_release_copies_to_the_clipboard() {
@@ -3384,6 +3661,17 @@ mod tests {
         );
 
         assert_eq!(term.copied, vec!["hello".to_owned()]);
+        // Releasing the mouse keeps the range highlighted instead of clearing it,
+        // and the projected rows still carry the reverse-video selection.
+        assert!(controls.has_selection());
+        assert!(!controls.is_dragging());
+        let projected = ui
+            .terminal_rows(&terminal, controls.selection())
+            .expect("selection rows");
+        assert!(
+            projected.iter().any(|row| row.contains("\u{1b}[7mhello")),
+            "selection highlight lost after release: {projected:?}"
+        );
         // A drag that copied a selection never also opens a link.
         assert!(browser.opened.is_empty());
     }
@@ -3472,6 +3760,103 @@ mod tests {
             },
         );
         assert_eq!(browser.opened.len(), 1);
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn a_normal_click_in_live_terminal_content_clears_only_the_retained_selection() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let (ui, runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(ScriptedAgentPort {
+                terminal: terminal.clone(),
+                subscription: 9,
+                replay: b"hello".to_vec(),
+                exit_on_poll: false,
+                detaches: Arc::new(Mutex::new(Vec::new())),
+            }),
+        );
+        let rows_len = ui
+            .terminal_rows(&terminal, None)
+            .expect("attached live rows")
+            .len();
+        let mut controls = LiveTerminalControls::default();
+        controls.sync_focus(Some(&terminal));
+        controls.begin_selection(TerminalSelection::begin(
+            ui.terminal_cells(&terminal).expect("terminal cells"),
+            TerminalPoint { row: 0, column: 0 },
+        ));
+        controls.extend_selection(TerminalPoint { row: 0, column: 4 });
+        let _ = controls.finish_drag();
+
+        // The right pane starts at column 37 and terminal content at row 5.
+        assert!(clear_terminal_selection_on_click(
+            &runtime,
+            &mut controls,
+            20,
+            80,
+            rows_len,
+            0,
+            (37, 5),
+        ));
+        assert!(!controls.has_selection());
+
+        // With no selection, a left-sidebar click is still left for sidebar
+        // navigation; the terminal interceptor must not consume it.
+        assert!(!clear_terminal_selection_on_click(
+            &runtime,
+            &mut controls,
+            20,
+            80,
+            rows_len,
+            0,
+            (5, 2),
+        ));
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn a_block_selection_over_padding_stays_visible_in_the_projected_rows() {
+        // Regression: agents draw space-padded, mostly-blank screens. A block
+        // drag across text, a blank line, and trailing padding must reach the
+        // projected rows as reverse-video, not be trimmed into an invisible
+        // selection (copy already worked from the snapshot cells).
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let (ui, _runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(ScriptedAgentPort {
+                terminal: terminal.clone(),
+                subscription: 9,
+                replay: b"ab\r\n\r\ncd".to_vec(),
+                exit_on_poll: false,
+                detaches: Arc::new(Mutex::new(Vec::new())),
+            }),
+        );
+        let cells = ui.terminal_cells(&terminal).expect("attached cells");
+        let mut selection = TerminalSelection::begin(cells, TerminalPoint { row: 0, column: 0 });
+        selection.extend(TerminalPoint { row: 1, column: 5 });
+        let rows = ui
+            .terminal_rows(&terminal, Some(&selection))
+            .expect("selection rows");
+        // Row 0's trailing padding and the blank row 1 are highlighted.
+        assert!(
+            rows[0].contains("\u{1b}[7m") && rows[0].contains("ab"),
+            "row 0 padding not highlighted: {:?}",
+            rows[0]
+        );
+        assert!(
+            rows[1].contains("\u{1b}[7m"),
+            "blank row 1 not highlighted: {:?}",
+            rows[1]
+        );
     }
 
     #[test]
@@ -4489,6 +4874,9 @@ mod tests {
             ),
             Err("terminal launch is unavailable".to_owned())
         );
+        // The default discovers no runtimes, so an embedder without a daemon
+        // simply opens a workspace with no restored panes.
+        assert_eq!(port.list_terminals(), Ok(Vec::new()));
     }
 
     #[test]

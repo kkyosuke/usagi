@@ -227,12 +227,25 @@ launch は reservation を永続化してから実 PTY を一度だけ spawn し
 owner を一つの shared terminal owner が `TerminalRef` の所有元へ routing する。connection close は当該
 connection の subscription だけを外し、Agent process・PTY・completion worker は kill しない。
 
+[`terminal inventory`](04-ipc.md#generic-terminal-request) request も shared terminal owner が処理し、
+generic owner と Agent owner の両方に scope を問い合わせて結果を merge する。したがって列挙には generic
+terminal と Agent terminal の両方が含まれ、各エントリは `TerminalRef`・`kind`・`live`（現 generation が所有し
+attach 可能か）だけを持つ。これは client が workspace open 時に live runtime を pane へ復元するための source of
+truth である（[3. TUI](03-tui.md#workspace-open-時の-pane-復元) を正本とする）。
+
 Codex / Claude の Agent launch は `McpWiring` capability を要求し、daemon 自身の絶対パスで `usagi mcp` を
 子 MCP server として起動する。製品ごとの MCP 設定は adapter provision が spawn 時だけに渡すため、設定 payload は
 public launch plan、durable snapshot、IPC response に残らない。注入した usagi MCP tool は agent が確認なしで
 呼べる。Codex は `approval_policy = never`（provision が渡す argv と `.codex/config.toml`）で MCP tool 呼び出しの
 確認プロンプトを出さない。Claude は注入した `usagi` server のツールだけを事前許可する（`--allowedTools mcp__usagi`）
 ため、他の MCP server・shell・ファイル編集・network の permission model は通常どおり維持され、無効化・緩和しない。
+
+daemon が起動した MCP child だけには、live Agent runtime に結び付く opaque な caller credential を
+private provision として渡す。`user_decision_*` はこの credential、daemon generation、terminal incarnation、
+dispatch binding を照合して owner を再構成し、workspace root は `session_id: None` の root scope として保存する。
+手動起動した `usagi mcp`、credential の欠落・偽造・失効、または stale runtime は owner を推測せず
+`ownership_unknown` で拒否し、decision state を変更しない。credential と private provision は durable snapshot、
+IPC、TUI、log に保存・公開しない。
 この事前許可も spawn 時 argv に限り、durable snapshot や IPC response には残らない。
 
 [`dispatch` request](04-ipc.md#dispatch-request) はこの launch 経路を再実装せずに合成する。daemon は session を lifecycle 経由で upsert し、worker Agent と `DispatchRun` / caller↔worker binding を durable registry に保存してから同じ runtime で prompt を起動する。PTY exit の durable commit 後、Completed / Failed inbox delivery が無ければ caller inbox に NoReport を一度だけ配送する。completion と exit は同じ `CompletionFence` を照合するため、late、duplicate、wrong-generation は state や inbox を変更しない。
