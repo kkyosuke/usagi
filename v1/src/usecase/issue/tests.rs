@@ -851,3 +851,42 @@ fn concurrent_creates_keep_distinct_numbers_with_no_lost_write() {
         assert!(store.read(2).unwrap().is_some());
     }
 }
+
+#[test]
+fn duplicate_number_get_update_and_delete_preserve_every_sibling() {
+    use crate::infrastructure::issue_store::AmbiguousIssueNumber;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let created = create(repo, new_issue("First")).unwrap();
+    let store = IssueStore::new(repo);
+    let first = store.dir().join(created.file_name());
+    let second = store.dir().join("001-second.md");
+    let mut duplicate = created.clone();
+    duplicate.title = "Second".to_string();
+    std::fs::write(&second, duplicate.to_markdown()).unwrap();
+    let first_before = std::fs::read_to_string(&first).unwrap();
+    let second_before = std::fs::read_to_string(&second).unwrap();
+
+    let errors = [
+        get(repo, 1).unwrap_err(),
+        update(
+            repo,
+            1,
+            IssueChanges {
+                status: Some(IssueStatus::Done),
+                ..Default::default()
+            },
+        )
+        .unwrap_err(),
+        delete(repo, 1).unwrap_err(),
+    ];
+    for error in errors {
+        let ambiguity = error.downcast_ref::<AmbiguousIssueNumber>().unwrap();
+        assert_eq!(ambiguity.number, 1);
+        assert_eq!(ambiguity.files, vec![first.clone(), second.clone()]);
+    }
+
+    assert_eq!(std::fs::read_to_string(&first).unwrap(), first_before);
+    assert_eq!(std::fs::read_to_string(&second).unwrap(), second_before);
+}

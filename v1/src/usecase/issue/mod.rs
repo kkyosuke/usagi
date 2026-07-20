@@ -13,6 +13,7 @@ use chrono::Utc;
 use serde::Deserialize;
 
 use crate::domain::issue::{Issue, IssuePriority, IssueStatus, IssueSummary};
+use crate::infrastructure::issue_number_sequence::IssueNumberSequence;
 use crate::infrastructure::issue_store::IssueStore;
 use crate::usecase::search;
 use crate::usecase::session;
@@ -150,15 +151,14 @@ impl ListedIssue {
 /// stored issue.
 pub fn create(repo_root: &Path, new: NewIssue) -> Result<Issue> {
     let store = IssueStore::new(repo_root);
-    // Hold this store's lock across number allocation AND the write so a
-    // concurrent `create` in another process cannot observe the same
-    // `max_number` and reuse the number — which would make its write delete the
-    // file this one just created. The lock is dropped when `write_locked`
-    // returns.
-    let lock = store.lock()?;
+    let workspace_root = session::workspace_root(repo_root);
+    let sequence = IssueNumberSequence::new(repo_root, &workspace_root);
+    // Reserve globally before touching this worktree's store. The reservation
+    // is durable even if this process crashes or the later markdown write fails.
+    let number = sequence.reserve(|| max_number_in_workspace(&workspace_root))?;
     let now = Utc::now();
     let issue = Issue {
-        number: next_number(repo_root)?,
+        number,
         title: new.title,
         status: IssueStatus::Todo,
         priority: new.priority,
@@ -171,11 +171,11 @@ pub fn create(repo_root: &Path, new: NewIssue) -> Result<Issue> {
         updated_at: now,
         body: new.body,
     };
-    store.write_locked(&lock, &issue)?;
+    store.write(&issue)?;
     Ok(issue)
 }
 
-/// The next issue number: one past the highest number anywhere in the workspace.
+/// The highest issue number currently present anywhere in the workspace.
 ///
 /// Issues live in each worktree's own `.usagi/issues/` (the workspace root and
 /// every session under `.usagi/sessions/<name>/`), so a new issue's number is
@@ -183,16 +183,14 @@ pub fn create(repo_root: &Path, new: NewIssue) -> Result<Issue> {
 /// sessions branched from the same point would both reuse the next number and
 /// collide when their branches merge into `main`.
 ///
-/// This is best-effort, not a lock: two sessions that create an issue at the
-/// very same instant can still pick the same number (resolved as an ordinary
-/// merge conflict), but creation that is even slightly staggered never does.
-fn next_number(repo_root: &Path) -> Result<u32> {
-    let workspace_root = session::workspace_root(repo_root);
-    let mut max = IssueStore::new(&workspace_root).max_number()?;
-    for root in session::session_roots(&workspace_root) {
+/// Called while the common [`IssueNumberSequence`] lock is held, so the scan and
+/// reservation form one process/worktree-global critical section.
+fn max_number_in_workspace(workspace_root: &Path) -> Result<u32> {
+    let mut max = IssueStore::new(workspace_root).max_number()?;
+    for root in session::session_roots(workspace_root) {
         max = max.max(IssueStore::new(&root).max_number()?);
     }
-    Ok(max + 1)
+    Ok(max)
 }
 
 /// Fetch a single issue by number.

@@ -176,6 +176,7 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 - **一覧は検索の特殊形として統合**しています。`issue_search` / `memory_search` は `query` を省略すると全件を返し（空クエリはすべてに一致）、`query` を与えると全文検索に絞り込みます。フィルタ（`status` / `type` など）は `query` の有無にかかわらず併用できます。別途の `issue_list` / `memory_list` tool はありません。
 - `dependson` はブロックする先行条件、`related` はブロックしない関連、`parent` は所属（Epic ⊃ サブタスク）、`milestone` は束ね。`issue_search` は `parent` / `milestone` でも絞り込めます。
 - `issue_update` の `parent` / `milestone` は三状態です: 省略すると変更なし、**`null` を明示すると解除**、値を渡すと設定します。
+- `issue_get` / `issue_update` / `issue_delete` は、同番号の markdown が複数あると衝突した exact path を列挙する tool error を返し、どの sibling も暗黙に選択・変更しません。明示的な repair/migration は [番号 identity と重複修復](../data/03-issues.md#番号-identity-と重複修復) の手順に従います。
 - `issue_search` は CLI と同じく **`dependson` がすべて `done` の issue を `ready: true`**
   とし、未達の依存番号を `unmet_deps` に入れて返します（着手可能なタスクの判別用）。
 - `ready: true`（引数）を渡すと着手可能な issue だけに絞り込みます。
