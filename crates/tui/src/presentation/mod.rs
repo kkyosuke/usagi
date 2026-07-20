@@ -109,6 +109,11 @@ pub trait AgentCommandPort: Send {
 
     /// Open a native terminal application rooted at `directory`. This is kept
     /// on the composition adapter so presentation code never spawns processes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a presentation-safe error when the platform terminal cannot be
+    /// opened.
     fn open_external_terminal(&mut self, _directory: &Path) -> Result<(), String> {
         Err("external terminal launch is unavailable".to_owned())
     }
