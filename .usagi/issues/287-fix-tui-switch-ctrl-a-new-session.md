@@ -1,14 +1,14 @@
 ---
 number: 287
 title: fix(tui): Switch Ctrl+A から + new session を実行可能にする
-status: todo
+status: in-progress
 priority: high
 labels: [tui, session, bug, parity]
 dependson: [258]
 related: [257, 260, 268, 269]
 parent: 227
 created_at: 2026-07-13T11:58:39.023157+00:00
-updated_at: 2026-07-13T11:58:39.023157+00:00
+updated_at: 2026-07-20T22:07:00.805416+00:00
 ---
 
 ## 背景
