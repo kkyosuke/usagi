@@ -6,6 +6,7 @@
 //! CLI / TUI / daemon のライブラリクレート間の依存を作らない。
 
 use std::io::Write;
+use std::process::ExitCode;
 
 use usagi_core::domain::AppInfo;
 use usagi_core::usecase::client::ClientPolicy;
@@ -15,7 +16,7 @@ mod runtime;
 mod tui_input;
 
 #[coverage(off)]
-fn main() -> std::io::Result<()> {
+fn main() -> std::io::Result<ExitCode> {
     let info = AppInfo {
         name: env!("CARGO_PKG_NAME"),
         version: env!("CARGO_PKG_VERSION"),
@@ -26,7 +27,7 @@ fn main() -> std::io::Result<()> {
     match args.get(1).and_then(|arg| arg.to_str()) {
         Some("daemon") => {
             let command = args.get(2).map(|arg| arg.to_string_lossy());
-            runtime::daemon::run(&mut stdout, command.as_deref(), &info)
+            runtime::daemon::run(&mut stdout, command.as_deref(), &info).map(|()| ExitCode::SUCCESS)
         }
         Some("mcp") => {
             let stdin = std::io::stdin();
@@ -36,15 +37,17 @@ fn main() -> std::io::Result<()> {
                     &mut stdout,
                     info.version,
                     &mut client,
-                ),
+                )
+                .map(|()| ExitCode::SUCCESS),
                 Err(error) => {
                     writeln!(std::io::stderr(), "daemon unavailable: {error}")?;
-                    Ok(())
+                    Ok(ExitCode::FAILURE)
                 }
             }
         }
         None if args.get(1).is_none() => {
             runtime::tui::launch(&mut stdout, &info, &EntryScreen::Welcome)
+                .map(|()| ExitCode::SUCCESS)
         }
         _ => {
             let mut stderr = std::io::stderr();
