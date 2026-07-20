@@ -43,16 +43,22 @@ use usagi_daemon::usecase::session_runtime::SystemGit;
 use usagi_tui::infrastructure::metrics::MetricsHook;
 use usagi_tui::presentation::frame::{Frame, FrameRenderer};
 use usagi_tui::presentation::views::config::{self, AvailableAgentModels, Config};
+use usagi_tui::presentation::views::pr_modal::PrModal;
 use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::GitDiff;
 use usagi_tui::presentation::{
-    self, AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, DecisionCommandPort,
-    DesktopNotificationPort, EnvironmentStorePort, Exit, MetricsPort, MetricsPortFactory,
-    SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, Start, WorkspaceLoader,
-    WorkspaceSnapshot,
+    self, AgentCommandPort, BannerScreenRunner, ControllerBackendComposition,
+    ControllerBackendFactory, ControllerHost, DecisionCommandPort, DesktopNotificationPort,
+    EnvironmentStorePort, Exit, MetricsPort, SessionCommandPort, SessionCommandResult, Start,
+    WorkspaceLoader, WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::controller::{
     BackendEvent, EnvironmentEntry, NewRequest, Notice, SafeError, SafeMessage, Target,
+};
+use usagi_tui::usecase::application::daemon_backend::{
+    Completions, DaemonBackend, DecisionPort as BackendDecisionPort,
+    OverlayPort as BackendOverlayPort, TargetStorePort as BackendTargetStorePort,
+    WorkspaceCommandPort as BackendWorkspaceCommandPort,
 };
 use usagi_tui::usecase::application::pane_runtime::Geometry;
 use usagi_tui::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
@@ -60,6 +66,7 @@ use usagi_tui::usecase::application::terminal_session::{
     TerminalAttach, TerminalChunk, TerminalError,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
+use usagi_tui::usecase::overview;
 use usagi_tui::usecase::overview::SessionCommand;
 use usagi_tui::usecase::terminal_input::{
     KeyCode, KeyEventKind, LiveInput, LiveInputClassifier, LiveInputOutput, Modifiers, RuntimeEvent,
@@ -321,6 +328,276 @@ impl EnvironmentStorePort for RepoEnvironmentStore {
     }
 }
 
+impl BackendTargetStorePort for RepoEnvironmentStore {
+    #[coverage(off)]
+    fn load_notes(&mut self, target: Target, completions: Completions) {
+        let event = match self.resolve(target) {
+            Some(scope) => match usagi_core::usecase::note::note(&self.store, scope) {
+                Ok(note) => BackendEvent::NotesLoaded {
+                    target,
+                    scratchpad: Scratchpad {
+                        note,
+                        ..Scratchpad::default()
+                    },
+                },
+                Err(error) => BackendEvent::NotesError {
+                    target,
+                    error: Self::safe_error(error),
+                },
+            },
+            None => BackendEvent::NotesError {
+                target,
+                error: Self::stale_target(),
+            },
+        };
+        completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
+    }
+
+    #[coverage(off)]
+    fn save_notes(&mut self, target: Target, scratchpad: Scratchpad, completions: Completions) {
+        let event = (|| -> Result<BackendEvent, SafeError> {
+            let session_name = match target {
+                Target::Root(_) => None,
+                Target::Session(id) => Some(
+                    self.session_names
+                        .iter()
+                        .find(|(known, _)| *known == id)
+                        .map(|(_, name)| name.clone())
+                        .ok_or_else(Self::stale_target)?,
+                ),
+            };
+            let _lock = self.store.lock().map_err(Self::safe_error)?;
+            let mut state = self
+                .store
+                .load()
+                .map_err(Self::safe_error)?
+                .unwrap_or_default();
+            match session_name {
+                None => state.root_notes = scratchpad.clone(),
+                Some(name) => {
+                    let record = state
+                        .sessions
+                        .iter_mut()
+                        .find(|record| record.name == name)
+                        .ok_or_else(Self::stale_target)?;
+                    record.notes = scratchpad.clone();
+                }
+            }
+            state.updated_at = Utc::now();
+            self.store.save(&state).map_err(Self::safe_error)?;
+            Ok(BackendEvent::NotesLoaded { target, scratchpad })
+        })()
+        .unwrap_or_else(|error| BackendEvent::NotesError { target, error });
+        completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
+    }
+
+    #[coverage(off)]
+    fn load_environment(&mut self, target: Target, completions: Completions) {
+        completions.emit(
+            usagi_tui::usecase::application::controller::AppEvent::Backend(
+                EnvironmentStorePort::load(self, target),
+            ),
+        );
+    }
+
+    #[coverage(off)]
+    fn save_environment(
+        &mut self,
+        target: Target,
+        entries: Vec<EnvironmentEntry>,
+        completions: Completions,
+    ) {
+        completions.emit(
+            usagi_tui::usecase::application::controller::AppEvent::Backend(
+                EnvironmentStorePort::save(self, target, entries),
+            ),
+        );
+    }
+}
+
+struct ProductionDecisionPort {
+    daemon: DaemonDecisionCommandPort,
+    notifier: PlatformDesktopNotifier,
+    notified: std::collections::BTreeSet<UserDecisionId>,
+}
+
+impl BackendDecisionPort for ProductionDecisionPort {
+    #[coverage(off)]
+    fn refresh(&mut self, workspace: WorkspaceId, completions: Completions) {
+        let event = self.daemon.refresh(workspace);
+        if let BackendEvent::Decisions { decisions, .. } = &event {
+            for decision in decisions {
+                if self.notified.insert(decision.decision_id) {
+                    self.notifier
+                        .notify("usagi: decision needed", &decision.title);
+                }
+            }
+        }
+        completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
+    }
+
+    #[coverage(off)]
+    fn resolve(
+        &mut self,
+        workspace: WorkspaceId,
+        decision_id: UserDecisionId,
+        answer: UserDecisionAnswer,
+        completions: Completions,
+    ) {
+        completions.emit(
+            usagi_tui::usecase::application::controller::AppEvent::Backend(self.daemon.resolve(
+                workspace,
+                decision_id,
+                answer,
+            )),
+        );
+    }
+}
+
+struct ProductionOverlayPort {
+    workspace_name: String,
+    root: PathBuf,
+    sessions: Vec<(usagi_core::domain::id::SessionId, String, PathBuf)>,
+    prs: DaemonPrSnapshotPort,
+    browser: PlatformBrowserOpener,
+}
+
+impl BackendOverlayPort for ProductionOverlayPort {
+    #[coverage(off)]
+    fn load_pull_requests(&mut self, target: Target, completions: Completions) {
+        let event = match target {
+            Target::Root(_) => BackendEvent::PullRequestsLoaded {
+                target,
+                prs: Vec::new(),
+            },
+            Target::Session(session) => match self.prs.snapshot(session) {
+                Ok(snapshot) => BackendEvent::PullRequestsLoaded {
+                    target,
+                    prs: PrModal::from_entries(&snapshot.entries).prs().to_vec(),
+                },
+                Err(message) => BackendEvent::PullRequestsError {
+                    target,
+                    error: SafeError {
+                        message: SafeMessage::new(message),
+                        error_id: "pr-load".to_owned(),
+                    },
+                },
+            },
+        };
+        completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
+    }
+
+    #[coverage(off)]
+    fn load_preview(&mut self, target: Target, completions: Completions) {
+        let lines = match target {
+            Target::Root(_) => vec![
+                format!("workspace: {}", self.workspace_name),
+                format!("path: {}", self.root.display()),
+            ],
+            Target::Session(id) => self
+                .sessions
+                .iter()
+                .find(|(known, _, _)| *known == id)
+                .map_or_else(
+                    || vec!["session is no longer available".to_owned()],
+                    |(_, name, path)| {
+                        vec![
+                            format!("session: {name}"),
+                            format!("path: {}", path.display()),
+                        ]
+                    },
+                ),
+        };
+        completions.emit(
+            usagi_tui::usecase::application::controller::AppEvent::Backend(
+                BackendEvent::PreviewLoaded { target, lines },
+            ),
+        );
+    }
+
+    #[coverage(off)]
+    fn open_pull_request(&mut self, url: String, completions: Completions) {
+        let event = match usagi_tui::usecase::application::pr::canonical_browser_url(&url) {
+            Some(url) => self.browser.open(&url).err().map(|message| {
+                BackendEvent::Notice(Notice::new(format!("Could not open browser: {message}")))
+            }),
+            None => Some(BackendEvent::Notice(Notice::new(
+                "Cannot open an invalid PR URL.",
+            ))),
+        };
+        if let Some(event) = event {
+            completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
+        }
+    }
+}
+
+struct ProductionWorkspaceCommands;
+
+impl BackendWorkspaceCommandPort for ProductionWorkspaceCommands {
+    #[coverage(off)]
+    fn execute(&mut self, _: WorkspaceId, command: overview::Command, completions: Completions) {
+        completions.emit(
+            usagi_tui::usecase::application::controller::AppEvent::Backend(BackendEvent::Notice(
+                Notice::new(format!("{} is not available", command.name())),
+            )),
+        );
+    }
+}
+
+struct ProductionBackendFactory;
+
+impl ControllerBackendFactory for ProductionBackendFactory {
+    #[coverage(off)]
+    fn create(
+        &mut self,
+        snapshot: &WorkspaceSnapshot,
+        host: ControllerHost,
+    ) -> ControllerBackendComposition {
+        let store = RepoEnvironmentStore::from_snapshot(snapshot);
+        let sessions = snapshot
+            .session_ids
+            .iter()
+            .copied()
+            .zip(snapshot.state.sessions.iter())
+            .map(|(id, record)| {
+                (
+                    id,
+                    record
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| record.name.clone()),
+                    record.root.clone(),
+                )
+            })
+            .collect();
+        let backend = DaemonBackend::new(
+            Box::new(host.clone()),
+            Box::new(host),
+            Box::new(store),
+            Box::new(ProductionWorkspaceCommands),
+        )
+        .with_decisions(Box::new(ProductionDecisionPort {
+            daemon: DaemonDecisionCommandPort,
+            notifier: PlatformDesktopNotifier,
+            notified: std::collections::BTreeSet::new(),
+        }))
+        .with_overlay(Box::new(ProductionOverlayPort {
+            workspace_name: snapshot.workspace.name.clone(),
+            root: snapshot.workspace.path.clone(),
+            sessions,
+            prs: DaemonPrSnapshotPort,
+            browser: PlatformBrowserOpener,
+        }));
+        ControllerBackendComposition {
+            backend,
+            session_commands: Box::new(DaemonSessionCommandPort::default()),
+            agent_commands: Box::new(DaemonAgentCommandPort::new()),
+            metrics: Box::new(DaemonMetricsPort::new()),
+            browser: Box::new(PlatformBrowserOpener),
+        }
+    }
+}
+
 struct DaemonMetricsPort {
     last_sample: Option<Instant>,
     latest: Option<DaemonMetrics>,
@@ -427,15 +704,6 @@ impl MetricsPort for DaemonMetricsPort {
     }
 }
 
-struct DaemonMetricsPortFactory;
-
-impl MetricsPortFactory for DaemonMetricsPortFactory {
-    #[coverage(off)]
-    fn create(&mut self) -> Box<dyn MetricsPort> {
-        Box::new(DaemonMetricsPort::new())
-    }
-}
-
 /// Root composition adapter for the only Agent launch authority: the daemon.
 ///
 /// Terminal streaming keeps one persistent daemon connection for its lifetime:
@@ -493,15 +761,6 @@ impl DaemonAgentCommandPort {
     }
 }
 
-struct DaemonAgentCommandPortFactory;
-
-impl AgentCommandPortFactory for DaemonAgentCommandPortFactory {
-    #[coverage(off)]
-    fn create(&mut self) -> Box<dyn AgentCommandPort> {
-        Box::new(DaemonAgentCommandPort::new())
-    }
-}
-
 /// Maps a typed client failure onto the safe terminal feedback the UI renders.
 /// No mapping authorizes a local PTY fallback.
 #[coverage(off)]
@@ -555,7 +814,25 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         workspace: WorkspaceId,
         session: Option<usagi_core::domain::id::SessionId>,
         geometry: usagi_tui::usecase::application::pane_runtime::Geometry,
+        arguments: &str,
     ) -> Result<usagi_core::domain::id::TerminalRef, String> {
+        if !matches!(arguments, "open" | "new") {
+            return Err("terminal accepts only `open` or `new`".to_owned());
+        }
+        if arguments == "open"
+            && let Some(existing) = self
+                .list_terminals()
+                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?
+                .into_iter()
+                .find(|entry| {
+                    entry.live
+                        && entry.kind == usagi_core::domain::terminal_launch::TerminalKind::Terminal
+                        && entry.terminal.workspace_id == workspace
+                        && entry.terminal.session_id == session
+                })
+        {
+            return Ok(existing.terminal);
+        }
         let lifecycle = request_lifecycle_snapshot()
             .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
         if lifecycle.workspace_id != workspace {
@@ -1033,15 +1310,6 @@ fn session_snapshot_result(
 ///
 /// screen graph（Welcome→Open / Recent）は 1 ループで複数の workspace を順に開くため、
 /// daemon の revision state を持ち越さないよう port を都度生成する。
-struct DaemonSessionCommandPortFactory;
-
-impl SessionCommandPortFactory for DaemonSessionCommandPortFactory {
-    #[coverage(off)]
-    fn create(&mut self) -> Box<dyn SessionCommandPort> {
-        Box::new(DaemonSessionCommandPort::default())
-    }
-}
-
 #[coverage(off)]
 fn request_lifecycle_snapshot() -> Result<LifecycleSnapshot, String> {
     let mut client =
@@ -1576,15 +1844,13 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
         let (workspaces, recent) = load_screen_graph_data(&storage, start)?;
         let mut loader = FsWorkspaceLoader { storage };
         let mut settings = PersistentSettingsPort::open()?;
-        let mut session_commands = DaemonSessionCommandPortFactory;
-        let mut agent_commands = DaemonAgentCommandPortFactory;
-        let mut metrics = DaemonMetricsPortFactory;
+        let mut backend_factory = ProductionBackendFactory;
         run_with_metrics_hook(|| {
             run_in_terminal(|terminal| {
                 if start == Start::Welcome {
                     presentation::play_startup_splash(terminal)?;
                 }
-                presentation::run_with_settings_and_agent_and_metrics_port_factory_and_model_availability(
+                presentation::run_screen_graph_with_backend(
                     terminal,
                     workspaces,
                     recent,
@@ -1592,10 +1858,8 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
                     start,
                     &mut loader,
                     &mut settings,
-                    &mut session_commands,
-                    &mut agent_commands,
+                    &mut backend_factory,
                     available_agent_models(),
-                    &mut metrics,
                 )
             })
         })?;
@@ -1704,20 +1968,13 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
     let mut loader = FsWorkspaceLoader::open_default()?;
     let snapshot = loader.open(path)?;
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-        let environment = Box::new(RepoEnvironmentStore::from_snapshot(&snapshot));
+        let mut backend_factory = ProductionBackendFactory;
         run_with_metrics_hook(|| {
             run_in_terminal(|terminal| {
-                presentation::run_workspace_controller(
+                presentation::run_workspace_controller_with_backend(
                     terminal,
                     snapshot,
-                    Box::new(DaemonSessionCommandPort::default()),
-                    Box::new(DaemonAgentCommandPort::new()),
-                    Box::new(DaemonDecisionCommandPort),
-                    environment,
-                    Box::new(PlatformDesktopNotifier),
-                    Box::new(DaemonMetricsPort::new()),
-                    Box::new(DaemonPrSnapshotPort),
-                    Box::new(PlatformBrowserOpener),
+                    &mut backend_factory,
                 )
             })
         })?;
@@ -1755,9 +2012,10 @@ pub(crate) fn launch(
 #[cfg(test)]
 mod tests {
     use super::{
-        EnvironmentStorePort, LifecycleSnapshot, PersistentSettingsPort, RepoEnvironmentStore,
-        Start, TerminalChunk, TerminalError, control_key, created_session_hook,
-        decode_terminal_poll, load_screen_graph_data, load_workspace_state, passthrough_key,
+        EnvironmentStorePort, LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory,
+        RepoEnvironmentStore, Start, TerminalChunk, TerminalError, control_key,
+        created_session_hook, decode_terminal_poll, load_screen_graph_data, load_workspace_state,
+        passthrough_key,
     };
     use chrono::Utc;
     use serde_json::json;
@@ -1766,13 +2024,19 @@ mod tests {
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
     use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycle};
     use usagi_core::domain::settings::{ModalSelectionMode, Settings};
+    use usagi_core::domain::workspace::Workspace;
     use usagi_core::domain::workspace_state::WorkspaceState;
     use usagi_core::infrastructure::paths::project_data_dir;
     use usagi_core::infrastructure::store::state::WorkspaceStateStore;
     use usagi_core::infrastructure::store::workspace::Storage;
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
+    use usagi_tui::presentation::{
+        ControllerBackendFactory, ControllerHost, ControllerHostAction, WorkspaceSnapshot,
+    };
     use usagi_tui::usecase::application::Key;
-    use usagi_tui::usecase::application::controller::{BackendEvent, EnvironmentEntry, Target};
+    use usagi_tui::usecase::application::controller::{
+        BackendEvent, Effect, EnvironmentEntry, Target,
+    };
     use usagi_tui::usecase::terminal_input::{
         KeyCode, KeyEvent, KeyEventKind, LiveInput, Modifiers,
     };
@@ -2231,5 +2495,57 @@ mod tests {
                 .modal_selection_mode,
             ModalSelectionMode::Prompt
         );
+    }
+
+    #[test]
+    fn production_backend_factory_preserves_terminal_arguments_and_completes_store_routes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace_id = WorkspaceId::new();
+        let snapshot = WorkspaceSnapshot::with_runtime_ids(
+            Workspace::new("demo", temporary.path()),
+            WorkspaceState::default(),
+            workspace_id,
+            Vec::new(),
+        );
+        let (host, actions) = ControllerHost::channel();
+        let mut factory = ProductionBackendFactory;
+        let mut composition = factory.create(&snapshot, host);
+        let operation_id = OperationId::new();
+
+        composition.backend.dispatch(Effect::OpenTerminal {
+            target: Target::Root(workspace_id),
+            operation_id,
+            arguments: "new".to_owned(),
+        });
+        assert!(matches!(
+            actions.recv().unwrap(),
+            ControllerHostAction::OpenTerminal(request)
+                if request.operation_id == operation_id && request.arguments == "new"
+        ));
+
+        composition.backend.dispatch(Effect::LoadNotes {
+            target: Target::Root(workspace_id),
+        });
+        composition.backend.dispatch(Effect::LoadEnvironment {
+            target: Target::Root(workspace_id),
+        });
+        composition.backend.dispatch(Effect::LoadPreview {
+            target: Target::Root(workspace_id),
+        });
+        let completions = composition.backend.drain_events();
+        assert!(matches!(
+            completions.as_slice(),
+            [
+                usagi_tui::usecase::application::controller::AppEvent::Backend(
+                    BackendEvent::NotesLoaded { .. }
+                ),
+                usagi_tui::usecase::application::controller::AppEvent::Backend(
+                    BackendEvent::EnvironmentLoaded { .. }
+                ),
+                usagi_tui::usecase::application::controller::AppEvent::Backend(
+                    BackendEvent::PreviewLoaded { .. }
+                )
+            ]
+        ));
     }
 }

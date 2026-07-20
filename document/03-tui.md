@@ -75,6 +75,20 @@ CJK / 全角を含んでもハイライト幅が見た目とずれない。
 management input](#home-と-target) 参照）。この境界は「テキスト入力にフォーカスがあるか」で切り分け、
 両者の意味が衝突しない。
 
+Home を開く入口は direct workspace、Welcome の Recent、Open の選択、New の作成成功で共通である。
+いずれも workspace snapshot を同じ production backend factory に渡し、factory が生成した
+`DaemonBackend` と同一の port set を使う。Home controller が発行した Effect は
+`DaemonBackend::dispatch` だけが解釈し、session / Agent / terminal、notes / environment、workspace command、
+decision、PR snapshot / preview、browser、desktop notification へ振り分ける。別の screen-graph executor や
+production fallback stub は持たない。
+
+各 Effect は実 action を 1 回開始するか、安全な明示 error completion を 1 件返す。session create は成功時も
+要求 token と作成された `SessionId` を持つ `OperationResult` を返す。失敗だけを返して成功を snapshot 更新に
+暗黙化しない。terminal の `open` は同じ target の live terminal を再利用し、`new` は新規起動するため、
+controller が正規化した引数を host まで保持する。notes と environment の保存は target の集合全体を永続化し、
+decision / PR / browser / notification は daemon または platform adapter の結果を controller へ還流する。
+従来 silent no-op だった操作も成功扱いせず、画面に安全な結果を返す。永続データの migration は発生しない。
+
 対話的な `usagi` / `usagi hop` の Welcome 起動時は、入力を読まずに 110ms 間隔で 13 フレームの
 スプラッシュを再生する。ピンクの usagi を先に表示し、`USAGI` を暗い緑から Success の太字へ
 フェードインしてから Welcome を描く。スプラッシュ中の打鍵は Welcome の最初の入力として残る。

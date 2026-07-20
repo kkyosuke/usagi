@@ -38,7 +38,6 @@ use crate::presentation::views::config::{self, AvailableAgentModels, Config};
 use crate::presentation::views::create_session_error_modal;
 use crate::presentation::views::new::{self, Field, New};
 use crate::presentation::views::open::{self, Open};
-use crate::presentation::views::pr_modal::PrModal;
 use crate::presentation::views::quit_modal;
 use crate::presentation::views::splash;
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
@@ -50,11 +49,20 @@ use crate::presentation::widgets::modal::{self, ConfirmationView};
 use crate::presentation::workspace_runtime::WorkspaceRuntime;
 use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, Effect, EnvironmentEntry, NewRequest, Notice,
-    OperationResult, Overlay, PendingToken, SafeError, SafeMessage, Target,
+    OperationResult, Overlay, PendingToken, Target,
+};
+#[cfg(test)]
+use crate::usecase::application::controller::{SafeError, SafeMessage};
+use crate::usecase::application::daemon_backend::{
+    AgentPort as BackendAgentPort, Completions, CreateSessionRequest, DaemonBackend,
+    DecisionPort as BackendDecisionPort, Flow as BackendFlow, LaunchAgentRequest,
+    OpenTerminalRequest, OverlayPort as BackendOverlayPort, RemoveSessionRequest,
+    SessionCommandPort as BackendSessionCommandPort, TargetStorePort as BackendTargetStorePort,
+    WorkspaceCommandPort as BackendWorkspaceCommandPort,
 };
 use crate::usecase::application::pane::PaneKind;
 use crate::usecase::application::pane_runtime::Geometry;
-use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort, canonical_browser_url};
+use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
 use crate::usecase::application::terminal_selection::TerminalSelection;
 use crate::usecase::application::terminal_session::{
     SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalSession, TerminalStreamPort,
@@ -94,6 +102,7 @@ pub trait AgentCommandPort: Send {
         _workspace: WorkspaceId,
         _session: Option<SessionId>,
         _geometry: Geometry,
+        _arguments: &str,
     ) -> Result<TerminalRef, String> {
         Err("terminal launch is unavailable".to_owned())
     }
@@ -220,7 +229,9 @@ pub trait DesktopNotificationPort {
     fn notify(&mut self, title: &str, body: &str);
 }
 
+#[cfg(test)]
 struct NoDesktopNotifications;
+#[cfg(test)]
 impl DesktopNotificationPort for NoDesktopNotifications {
     #[coverage(off)]
     fn notify(&mut self, _: &str, _: &str) {}
@@ -361,6 +372,149 @@ impl MetricsPortFactory for NoMetricsFactory {
 /// Workspace entry ごとに fresh daemon Agent launch port を作る factory。
 pub trait AgentCommandPortFactory {
     fn create(&mut self) -> Box<dyn AgentCommandPort>;
+}
+
+/// Actions whose stateful host remains in the terminal loop while
+/// [`DaemonBackend`] is the sole controller-effect dispatcher.
+pub enum ControllerHostAction {
+    Create(CreateSessionRequest, Completions),
+    Refresh(WorkspaceId, Completions),
+    Remove(RemoveSessionRequest, Completions),
+    LaunchAgent(LaunchAgentRequest),
+    OpenTerminal(OpenTerminalRequest),
+    SelectTab(crate::usecase::application::controller::TabDirection),
+}
+
+/// Cloneable adapter handed to the production backend factory. It contains no
+/// policy: each port call enqueues exactly one action for the terminal host.
+#[derive(Clone)]
+pub struct ControllerHost(Sender<ControllerHostAction>);
+
+impl ControllerHost {
+    /// Create the host adapter and the terminal loop's action receiver.
+    #[must_use]
+    pub fn channel() -> (Self, Receiver<ControllerHostAction>) {
+        let (sender, receiver) = mpsc::channel();
+        (Self(sender), receiver)
+    }
+}
+
+impl BackendSessionCommandPort for ControllerHost {
+    fn create(&mut self, request: CreateSessionRequest, completions: Completions) {
+        let _ = self
+            .0
+            .send(ControllerHostAction::Create(request, completions));
+    }
+
+    fn refresh(&mut self, workspace: WorkspaceId, completions: Completions) {
+        let _ = self
+            .0
+            .send(ControllerHostAction::Refresh(workspace, completions));
+    }
+
+    fn remove(&mut self, request: RemoveSessionRequest, completions: Completions) {
+        let _ = self
+            .0
+            .send(ControllerHostAction::Remove(request, completions));
+    }
+}
+
+impl BackendAgentPort for ControllerHost {
+    fn launch_agent(&mut self, request: LaunchAgentRequest) {
+        let _ = self.0.send(ControllerHostAction::LaunchAgent(request));
+    }
+
+    fn open_terminal(&mut self, request: OpenTerminalRequest) {
+        let _ = self.0.send(ControllerHostAction::OpenTerminal(request));
+    }
+
+    fn select_tab(&mut self, direction: crate::usecase::application::controller::TabDirection) {
+        let _ = self.0.send(ControllerHostAction::SelectTab(direction));
+    }
+}
+
+/// Complete production port set for one opened workspace.
+pub struct ControllerBackendComposition {
+    pub backend: DaemonBackend,
+    pub session_commands: Box<dyn SessionCommandPort>,
+    pub agent_commands: Box<dyn AgentCommandPort>,
+    pub metrics: Box<dyn MetricsPort>,
+    pub browser: Box<dyn BrowserOpener>,
+}
+
+/// Single factory used by direct launch and every screen-graph workspace entry.
+pub trait ControllerBackendFactory {
+    fn create(
+        &mut self,
+        snapshot: &WorkspaceSnapshot,
+        host: ControllerHost,
+    ) -> ControllerBackendComposition;
+}
+
+struct UnavailableBackendPort;
+
+fn unavailable_completion(completions: &Completions, message: &str) {
+    completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+        message,
+    ))));
+}
+
+impl BackendTargetStorePort for UnavailableBackendPort {
+    fn load_notes(&mut self, _: Target, completions: Completions) {
+        unavailable_completion(&completions, "notes are unavailable");
+    }
+    fn save_notes(
+        &mut self,
+        _: Target,
+        _: usagi_core::domain::note::Scratchpad,
+        completions: Completions,
+    ) {
+        unavailable_completion(&completions, "notes are unavailable");
+    }
+    fn load_environment(&mut self, _: Target, completions: Completions) {
+        unavailable_completion(&completions, "environment is unavailable");
+    }
+    fn save_environment(&mut self, _: Target, _: Vec<EnvironmentEntry>, completions: Completions) {
+        unavailable_completion(&completions, "environment is unavailable");
+    }
+}
+
+impl BackendWorkspaceCommandPort for UnavailableBackendPort {
+    fn execute(
+        &mut self,
+        _: WorkspaceId,
+        _: crate::usecase::overview::Command,
+        completions: Completions,
+    ) {
+        unavailable_completion(&completions, "workspace command is unavailable");
+    }
+}
+
+impl BackendDecisionPort for UnavailableBackendPort {
+    fn refresh(&mut self, _: WorkspaceId, completions: Completions) {
+        unavailable_completion(&completions, "user decisions are unavailable");
+    }
+    fn resolve(
+        &mut self,
+        _: WorkspaceId,
+        _: UserDecisionId,
+        _: UserDecisionAnswer,
+        completions: Completions,
+    ) {
+        unavailable_completion(&completions, "user decisions are unavailable");
+    }
+}
+
+impl BackendOverlayPort for UnavailableBackendPort {
+    fn load_pull_requests(&mut self, _: Target, completions: Completions) {
+        unavailable_completion(&completions, "Pull Request data is unavailable");
+    }
+    fn load_preview(&mut self, _: Target, completions: Completions) {
+        unavailable_completion(&completions, "preview is unavailable");
+    }
+    fn open_pull_request(&mut self, _: String, completions: Completions) {
+        unavailable_completion(&completions, "browser opening is unavailable");
+    }
 }
 
 /// 起動バナーを `out` に書き出す。
@@ -538,7 +692,9 @@ impl AgentCommandPort for UnavailableAgentCommandPort {
 
 /// Decision fallback for the screen-graph compatibility path. Production
 /// composition injects its daemon-backed counterpart.
+#[cfg(test)]
 struct UnavailableDecisionCommandPort;
+#[cfg(test)]
 impl DecisionCommandPort for UnavailableDecisionCommandPort {
     #[coverage(off)]
     fn refresh(&mut self, _workspace: WorkspaceId) -> BackendEvent {
@@ -567,7 +723,9 @@ impl DecisionCommandPort for UnavailableDecisionCommandPort {
 /// that inject no store. Production composition injects its state-backed
 /// counterpart; this keeps the editor safe (it stays open, showing the error)
 /// rather than silently discarding a load or save.
+#[cfg(test)]
 struct UnavailableEnvironmentStore;
+#[cfg(test)]
 impl EnvironmentStorePort for UnavailableEnvironmentStore {
     #[coverage(off)]
     fn load(&mut self, target: Target) -> BackendEvent {
@@ -587,6 +745,7 @@ impl EnvironmentStorePort for UnavailableEnvironmentStore {
 }
 
 #[coverage(off)]
+#[cfg(test)]
 fn unavailable_environment_error() -> SafeError {
     SafeError {
         message: SafeMessage::new("Environment is unavailable."),
@@ -596,7 +755,9 @@ fn unavailable_environment_error() -> SafeError {
 
 /// PR snapshot fallback for entry points that do not inject the daemon PR port
 /// (the Welcome/Open/Recent screen graph). The PR overlay shows a safe notice.
+#[cfg(test)]
 struct UnavailablePrSnapshotPort;
+#[cfg(test)]
 impl PrSnapshotPort for UnavailablePrSnapshotPort {
     #[coverage(off)] // Compatibility fallback for embedders without the daemon PR port.
     fn snapshot(
@@ -672,7 +833,6 @@ struct WorkspaceUi {
 /// the typed name shown in the sidebar's loading skeleton until the daemon's
 /// `session.created` row replaces it.
 struct PendingCreate {
-    token: PendingToken,
     name: String,
 }
 
@@ -687,6 +847,18 @@ struct AgentContext {
 struct SessionCommandCompletion {
     port: Box<dyn SessionCommandPort>,
     result: Result<SessionCommandResult, String>,
+    completion: SessionBackendCompletion,
+}
+
+enum SessionBackendCompletion {
+    Create {
+        token: PendingToken,
+        before: Vec<SessionId>,
+        completions: Completions,
+    },
+    Snapshot {
+        completions: Completions,
+    },
 }
 
 /// Completion of one non-blocking Agent / terminal launch. Keeping the port in
@@ -722,6 +894,7 @@ enum PaneLaunch {
         workspace: WorkspaceId,
         /// Absent for a workspace-root terminal.
         session: Option<SessionId>,
+        arguments: String,
     },
 }
 
@@ -1235,19 +1408,28 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
 /// port with its result so later commands still share the same daemon client
 /// state, and its authoritative snapshot reconciles the sidebar.
 #[coverage(off)]
-fn begin_session_command(ui: &mut WorkspaceUi, command: SessionCommand) {
+fn begin_session_command(
+    ui: &mut WorkspaceUi,
+    command: SessionCommand,
+    completion: SessionBackendCompletion,
+) -> bool {
     // A command owns the port until its worker returns it; a second request
     // while one is in flight is a no-op here (the controller overlay owns the
     // user-facing "already running" feedback).
     let Some(mut port) = ui.session_commands.take() else {
-        return;
+        return false;
     };
     let workspace = ui.workspace.record().clone();
     let sender = ui.session_completion_sender.clone();
     std::thread::spawn(move || {
         let result = port.execute(&workspace, None, command);
-        let _ = sender.send(SessionCommandCompletion { port, result });
+        let _ = sender.send(SessionCommandCompletion {
+            port,
+            result,
+            completion,
+        });
     });
+    true
 }
 
 /// The daemon-owned name for the session identified by `session`, if the current
@@ -1296,34 +1478,59 @@ fn apply_session_projection(
 /// controller [`BackendEvent::Notice`]. Both are distinct from an in-form local
 /// validation error.
 #[coverage(off)]
-fn drain_session_completions(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime) {
+fn drain_session_completions(ui: &mut WorkspaceUi) {
     while let Ok(completion) = ui.session_completions.try_recv() {
         ui.session_commands = Some(completion.port);
         ui.removing_session = None;
-        let creating = ui.creating_session.take();
+        ui.creating_session = None;
         match completion.result {
             Ok(result) => {
-                let reconciled_snapshot = result.sessions.is_some();
                 apply_session_projection(ui, result.sessions, result.session_ids);
-                if reconciled_snapshot {
-                    // Preserve the snapshot boundary even when its stable ID list
-                    // is unchanged, so a click can never pair across reconciliation.
-                    let ids = ui.workspace.session_ids().to_vec();
-                    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Sessions(ids)));
+                match completion.completion {
+                    SessionBackendCompletion::Create {
+                        token,
+                        before,
+                        completions,
+                    } => {
+                        let created = ui
+                            .workspace
+                            .session_ids()
+                            .iter()
+                            .copied()
+                            .find(|id| !before.contains(id));
+                        completions.emit(AppEvent::OperationResult(OperationResult {
+                            token,
+                            succeeded: created.is_some(),
+                            created,
+                            notice: Some(Notice::new(if created.is_some() {
+                                "session created"
+                            } else {
+                                "daemon did not return the created session"
+                            })),
+                        }));
+                    }
+                    SessionBackendCompletion::Snapshot { completions } => {
+                        completions.emit(AppEvent::Backend(BackendEvent::Sessions(
+                            ui.workspace.session_ids().to_vec(),
+                        )));
+                    }
                 }
             }
             Err(message) => {
                 let safe = safe_session_error(&message);
-                if let Some(pending) = creating {
-                    let _ = runtime.apply_event(AppEvent::OperationResult(OperationResult {
-                        token: pending.token,
+                match completion.completion {
+                    SessionBackendCompletion::Create {
+                        token, completions, ..
+                    } => completions.emit(AppEvent::OperationResult(OperationResult {
+                        token,
                         succeeded: false,
                         created: None,
                         notice: Some(Notice::new(safe)),
-                    }));
-                } else {
-                    let _ = runtime
-                        .apply_event(AppEvent::Backend(BackendEvent::Notice(Notice::new(safe))));
+                    })),
+                    SessionBackendCompletion::Snapshot { completions } => {
+                        completions
+                            .emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(safe))));
+                    }
                 }
             }
         }
@@ -1388,18 +1595,20 @@ fn drain_pane_launches(ui: &mut WorkspaceUi, geometry: Geometry) {
                 operation,
                 workspace,
                 session,
+                arguments,
             } => {
                 let Some(mut port) = ui.agent.as_mut().and_then(|agent| agent.port.take()) else {
                     ui.pane_launches.push(PaneLaunch::Terminal {
                         operation,
                         workspace,
                         session,
+                        arguments,
                     });
                     continue;
                 };
                 let sender = ui.pane_completion_sender.clone();
                 std::thread::spawn(move || {
-                    let result = port.launch_terminal(workspace, session, geometry);
+                    let result = port.launch_terminal(workspace, session, geometry, &arguments);
                     let _ = sender.send(PaneLaunchCompletion {
                         port,
                         outcome: PaneLaunchOutcome::Terminal { operation, result },
@@ -1563,13 +1772,6 @@ fn recent_path(recent: &Recent) -> Option<&Path> {
         Recent::Workspace(overview) => Some(&overview.workspace.path),
         Recent::Unite(_) => None,
     }
-}
-
-/// Loop control for the controller-driven workspace runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ControllerFlow {
-    Continue,
-    Exit,
 }
 
 /// Project the daemon-authoritative session records into the controller's Home
@@ -1955,236 +2157,123 @@ fn render_controller_frame(
     frame
 }
 
-/// Execute one controller [`Effect`] against the legacy daemon transport. Pane
-/// launches record their target so the completion can promote the matching tab.
+/// Apply actions already routed by [`DaemonBackend`] to the stateful terminal
+/// host. This layer owns no Effect matching and therefore cannot diverge from
+/// the backend's route matrix.
 #[coverage(off)]
-fn dispatch_controller_effect(
+#[allow(clippy::too_many_lines)]
+fn drain_controller_host_actions(
+    actions: &Receiver<ControllerHostAction>,
     ui: &mut WorkspaceUi,
-    decisions: &mut dyn DecisionCommandPort,
-    environment: &mut dyn EnvironmentStorePort,
     runtime: &mut WorkspaceRuntime,
-    effect: &Effect,
     pending_targets: &mut std::collections::HashMap<OperationId, Target>,
-) -> ControllerFlow {
-    match effect {
-        Effect::CreateSession { intent, token, .. } => {
-            ui.creating_session = Some(PendingCreate {
-                token: *token,
-                name: intent.name.clone(),
-            });
-            begin_session_command(
-                ui,
-                SessionCommand::Create {
-                    name: intent.name.clone(),
-                },
-            );
-        }
-        Effect::RemoveSession { session, force, .. } => {
-            if let Some(name) = session_name_for(ui, *session)
-                && ui.session_commands.is_some()
-            {
-                ui.removing_session = Some(*session);
-                begin_session_command(
+) {
+    while let Ok(action) = actions.try_recv() {
+        match action {
+            ControllerHostAction::Create(request, completions) => {
+                if ui.session_commands.is_none() {
+                    completions.emit(AppEvent::OperationResult(OperationResult {
+                        token: request.token,
+                        succeeded: false,
+                        created: None,
+                        notice: Some(Notice::new("session command is already running")),
+                    }));
+                    continue;
+                }
+                ui.creating_session = Some(PendingCreate {
+                    name: request.intent.name.clone(),
+                });
+                let before = ui.workspace.session_ids().to_vec();
+                let _ = begin_session_command(
                     ui,
-                    SessionCommand::Remove {
-                        name,
-                        force: *force,
+                    SessionCommand::Create {
+                        name: request.intent.name,
+                    },
+                    SessionBackendCompletion::Create {
+                        token: request.token,
+                        before,
+                        completions,
                     },
                 );
             }
-        }
-        Effect::LaunchAgent {
-            workspace,
-            session,
-            operation_id,
-            profile,
-        } => {
-            let target = session.map_or(Target::Root(*workspace), Target::Session);
-            pending_targets.insert(*operation_id, target);
-            ui.pane_launches.push(PaneLaunch::Agent {
-                operation: *operation_id,
-                workspace: *workspace,
-                session: *session,
-                profile: profile.clone(),
-            });
-        }
-        Effect::OpenTerminal {
-            target,
-            operation_id,
-            ..
-        } => {
-            // A terminal opens for any target, including the workspace root; the
-            // daemon resolves the root scope to the trusted repository root.
-            if let Some(agent) = ui.agent.as_ref() {
-                let workspace = agent.workspace;
-                pending_targets.insert(*operation_id, *target);
-                ui.pane_launches.push(PaneLaunch::Terminal {
-                    operation: *operation_id,
-                    workspace,
-                    session: target.session_id(),
+            ControllerHostAction::Refresh(_, completions) => {
+                let fallback = completions;
+                // A busy host cannot take another command; return an explicit result.
+                // The sink is moved into the worker only when the command starts.
+                if ui.session_commands.is_none() {
+                    fallback.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                        "session command is already running",
+                    ))));
+                } else {
+                    let _ = begin_session_command(
+                        ui,
+                        SessionCommand::List,
+                        SessionBackendCompletion::Snapshot {
+                            completions: fallback,
+                        },
+                    );
+                }
+            }
+            ControllerHostAction::Remove(request, completions) => {
+                if let Some(name) = session_name_for(ui, request.session)
+                    && ui.session_commands.is_some()
+                {
+                    ui.removing_session = Some(request.session);
+                    let _ = begin_session_command(
+                        ui,
+                        SessionCommand::Remove {
+                            name,
+                            force: request.force,
+                        },
+                        SessionBackendCompletion::Snapshot { completions },
+                    );
+                } else {
+                    completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                        "selected session is no longer available",
+                    ))));
+                }
+            }
+            ControllerHostAction::LaunchAgent(request) => {
+                let target = request
+                    .session
+                    .map_or(Target::Root(request.workspace), Target::Session);
+                pending_targets.insert(request.operation_id, target);
+                runtime.on_effect(&Effect::LaunchAgent {
+                    workspace: request.workspace,
+                    session: request.session,
+                    operation_id: request.operation_id,
+                    profile: request.profile.clone(),
+                });
+                ui.pane_launches.push(PaneLaunch::Agent {
+                    operation: request.operation_id,
+                    workspace: request.workspace,
+                    session: request.session,
+                    profile: request.profile,
                 });
             }
+            ControllerHostAction::OpenTerminal(request) => {
+                // A terminal opens for any target, including the workspace root; the
+                // daemon resolves the root scope to the trusted repository root.
+                if let Some(agent) = ui.agent.as_ref() {
+                    let workspace = agent.workspace;
+                    pending_targets.insert(request.operation_id, request.target);
+                    runtime.on_effect(&Effect::OpenTerminal {
+                        target: request.target,
+                        operation_id: request.operation_id,
+                        arguments: request.arguments.clone(),
+                    });
+                    ui.pane_launches.push(PaneLaunch::Terminal {
+                        operation: request.operation_id,
+                        workspace,
+                        session: request.target.session_id(),
+                        arguments: request.arguments,
+                    });
+                }
+            }
+            ControllerHostAction::SelectTab(direction) => {
+                runtime.on_effect(&Effect::SelectTab { direction });
+            }
         }
-        Effect::Detach => return ControllerFlow::Exit,
-        // Environment reads/writes go through the injected store port and reflux
-        // their result as a controller backend event, so the editor shows real
-        // values and a save is actually persisted (never a no-op here).
-        Effect::LoadEnvironment { target } => {
-            let _ = runtime.apply_event(AppEvent::Backend(environment.load(*target)));
-        }
-        Effect::SaveEnvironment { target, entries } => {
-            let _ = runtime.apply_event(AppEvent::Backend(
-                environment.save(*target, entries.clone()),
-            ));
-        }
-        // RefreshSessions is reconciled every frame; SelectTab is mirrored by
-        // `on_effect`; the PR/preview overlay effects are refluxed by
-        // `controller_overlay_events` before this executor runs. Notes
-        // persistence needs a daemon store port this loop does not yet inject,
-        // and the non-session workspace commands and entry-surface effects have
-        // no Home executor, so they surface only as the reducer's safe notice
-        // for now.
-        Effect::RefreshSessions { .. }
-        | Effect::SelectTab { .. }
-        | Effect::WorkspaceCommand { .. }
-        | Effect::LoadNotes { .. }
-        | Effect::SaveNotes { .. }
-        | Effect::LoadPullRequests { .. }
-        | Effect::LoadPreview { .. }
-        | Effect::OpenPullRequest { .. }
-        | Effect::AttachWorkspace { .. }
-        | Effect::CloneProject { .. }
-        | Effect::RegisterWorkspace { .. } => {}
-        Effect::RefreshDecisions { workspace } => {
-            let _ = runtime.apply_event(AppEvent::Backend(decisions.refresh(*workspace)));
-        }
-        Effect::ResolveDecision {
-            workspace,
-            decision_id,
-            answer,
-        } => {
-            let _ = runtime.apply_event(AppEvent::Backend(decisions.resolve(
-                *workspace,
-                *decision_id,
-                answer.clone(),
-            )));
-        }
-    }
-    ControllerFlow::Continue
-}
-
-/// Execute the Home PR/preview overlay effects against the legacy daemon
-/// transport and return the [`AppEvent`]s that reflux their result to the
-/// controller. Every other effect yields nothing here; it is handled by
-/// [`dispatch_controller_effect`]. This keeps the `effect -> execute -> event ->
-/// update()` loop single-directional while the live IO stays in the shell.
-#[coverage(off)]
-fn controller_overlay_events(
-    pr_port: &mut dyn PrSnapshotPort,
-    browser: &mut dyn BrowserOpener,
-    workspace_name: &str,
-    root_cwd: &Path,
-    sessions: &[ProjectedSession],
-    effect: &Effect,
-) -> Vec<AppEvent> {
-    match effect {
-        Effect::LoadPullRequests { target } => {
-            vec![AppEvent::Backend(controller_pull_requests(
-                pr_port, *target,
-            ))]
-        }
-        Effect::LoadPreview { target } => vec![AppEvent::Backend(BackendEvent::PreviewLoaded {
-            target: *target,
-            lines: controller_preview_lines(*target, workspace_name, root_cwd, sessions),
-        })],
-        Effect::OpenPullRequest { url } => controller_open_pull_request(browser, url)
-            .into_iter()
-            .map(AppEvent::Backend)
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// Fetch the PR list for `target` and project it into a controller backend event.
-/// The workspace root has no PR scope, so it resolves to an empty list.
-#[coverage(off)]
-fn controller_pull_requests(pr_port: &mut dyn PrSnapshotPort, target: Target) -> BackendEvent {
-    let Target::Session(session) = target else {
-        return BackendEvent::PullRequestsLoaded {
-            target,
-            prs: Vec::new(),
-        };
-    };
-    match pr_port.snapshot(session) {
-        Ok(snapshot) => BackendEvent::PullRequestsLoaded {
-            target,
-            prs: PrModal::from_entries(&snapshot.entries).prs().to_vec(),
-        },
-        Err(message) => BackendEvent::PullRequestsError {
-            target,
-            error: safe_overlay_error(&message, "pr-load"),
-        },
-    }
-}
-
-/// Build the Markdown preview lines for `target` from the projected sidebar data.
-/// This mirrors the pre-controller target summary (label, path, PR count).
-#[coverage(off)]
-fn controller_preview_lines(
-    target: Target,
-    workspace_name: &str,
-    root_cwd: &Path,
-    sessions: &[ProjectedSession],
-) -> Vec<String> {
-    match target {
-        Target::Root(_) => vec![
-            format!("workspace: {workspace_name}"),
-            format!("path: {}", root_cwd.display()),
-        ],
-        Target::Session(id) => sessions
-            .iter()
-            .find(|session| session.id == id)
-            .map_or_else(
-                || vec![format!("session: {workspace_name}")],
-                |session| {
-                    let mut lines = vec![
-                        format!("session: {}", session.label),
-                        format!("path: {}", session.cwd.display()),
-                    ];
-                    if let Some(summary) = &session.pr_summary {
-                        lines.push(summary.clone());
-                    }
-                    lines
-                },
-            ),
-    }
-}
-
-/// Open a selected PR URL in the browser, refluxing a safe notice on failure.
-#[coverage(off)]
-fn controller_open_pull_request(
-    browser: &mut dyn BrowserOpener,
-    url: &str,
-) -> Option<BackendEvent> {
-    let Some(url) = canonical_browser_url(url) else {
-        return Some(BackendEvent::Notice(Notice::new(
-            "Cannot open an invalid PR URL.",
-        )));
-    };
-    match browser.open(&url) {
-        Ok(()) => None,
-        Err(message) => Some(BackendEvent::Notice(Notice::new(format!(
-            "Could not open browser: {message}"
-        )))),
-    }
-}
-
-/// Wrap a port's already display-safe message as a [`SafeError`] for an overlay.
-#[coverage(off)]
-fn safe_overlay_error(message: &str, error_id: &str) -> SafeError {
-    SafeError {
-        message: SafeMessage::new(message),
-        error_id: error_id.to_owned(),
     }
 }
 
@@ -2235,45 +2324,6 @@ fn sidebar_pointer_event(column: u16, row: u16, at: std::time::Duration) -> AppE
     AppEvent::Pointer { column, row, at }
 }
 
-#[coverage(off)] // Real-terminal resync composition; reducer state is unit-tested below the port.
-fn decision_ids(event: &BackendEvent) -> std::collections::BTreeSet<UserDecisionId> {
-    match event {
-        BackendEvent::Decisions { decisions, .. } => decisions
-            .iter()
-            .map(|decision| decision.decision_id)
-            .collect(),
-        _ => std::collections::BTreeSet::new(),
-    }
-}
-
-#[coverage(off)] // OS delivery stays behind the injected best-effort port.
-fn notify_new_decisions(
-    event: &BackendEvent,
-    notified: &mut std::collections::BTreeSet<UserDecisionId>,
-    notifications: &mut dyn DesktopNotificationPort,
-) {
-    let BackendEvent::Decisions { decisions, .. } = event else {
-        return;
-    };
-    for decision in decisions {
-        if !notified.insert(decision.decision_id) {
-            continue;
-        }
-        notifications.notify(
-            "usagi: decision needed",
-            &format!(
-                "{}: {}",
-                decision
-                    .owner
-                    .session_id
-                    .as_ref()
-                    .map_or_else(|| "workspace root".to_owned(), ToString::to_string),
-                decision.title
-            ),
-        );
-    }
-}
-
 /// Controller-driven real-terminal frame loop (`drain → poll → render → input →
 /// dispatch`). Home row state, live-pane availability, and the Home frame come
 /// from [`WorkspaceRuntime`]/`render_home`; the legacy [`WorkspaceUi`] is kept as
@@ -2286,28 +2336,25 @@ fn notify_new_decisions(
 fn drive_workspace_controller(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
-    session_commands: Box<dyn SessionCommandPort>,
-    agent_port: Box<dyn AgentCommandPort>,
-    mut decisions: Box<dyn DecisionCommandPort>,
-    mut environment: Box<dyn EnvironmentStorePort>,
-    mut desktop_notifications: Box<dyn DesktopNotificationPort>,
-    metrics_port: Box<dyn MetricsPort>,
-    mut pr_port: Box<dyn PrSnapshotPort>,
-    mut browser: Box<dyn BrowserOpener>,
+    backend_factory: &mut dyn ControllerBackendFactory,
 ) -> io::Result<WorkspaceStep> {
     let workspace_id = snapshot.workspace_id;
     let session_ids = snapshot.session_ids.clone();
     let workspace_name = snapshot.workspace.name.clone();
     let root_cwd = snapshot.workspace.path.clone();
+    let (host, host_rx) = ControllerHost::channel();
+    let composition = backend_factory.create(&snapshot, host);
+    let mut backend = composition.backend;
+    let mut browser = composition.browser;
     let workspace =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, session_ids.clone());
-    let mut ui = WorkspaceUi::new(workspace, session_commands).with_agent_context(
+    let mut ui = WorkspaceUi::new(workspace, composition.session_commands).with_agent_context(
         workspace_id,
         session_ids.clone(),
-        agent_port,
+        composition.agent_commands,
     );
     let mut runtime = WorkspaceRuntime::new(workspace_id, session_ids);
-    let mut metrics_backend = MetricsBackend::new(metrics_port);
+    let mut metrics_backend = MetricsBackend::new(composition.metrics);
     let mut metrics_projection = MetricsProjection::default();
     let mut pending_targets: std::collections::HashMap<OperationId, Target> =
         std::collections::HashMap::new();
@@ -2319,15 +2366,19 @@ fn drive_workspace_controller(
     let mut controls = LiveTerminalControls::default();
     // Seed the daemon-authoritative snapshot before the first frame so a
     // pending decision is visible without requiring a manual key binding.
-    let initial = decisions.refresh(workspace_id);
-    let mut notified_decisions = decision_ids(&initial);
-    let _ = runtime.apply_event(AppEvent::Backend(initial));
+    let _ = backend.dispatch(Effect::RefreshDecisions {
+        workspace: workspace_id,
+    });
     // Re-project already-live daemon terminals/Agents into tabs exactly once,
     // after the first frame is painted (below), so the opening frame is never
     // blocked on the daemon inventory round-trip.
     let mut panes_restored = false;
     loop {
-        drain_session_completions(&mut ui, &mut runtime);
+        for event in backend.drain_events() {
+            let _ = runtime.apply_event(event);
+        }
+        drain_controller_host_actions(&host_rx, &mut ui, &mut runtime, &mut pending_targets);
+        drain_session_completions(&mut ui);
         sync_runtime_sessions(&mut runtime, &ui);
         let (height, width) = term.size()?;
         ui.set_terminal_size(height, width);
@@ -2377,13 +2428,9 @@ fn drive_workspace_controller(
         // reducer de-duplicates by stable ID, so reconnect and replay cannot
         // create another notice or steal an already-owned modal.
         if matches!(key, Key::Other) {
-            let event = decisions.refresh(workspace_id);
-            notify_new_decisions(
-                &event,
-                &mut notified_decisions,
-                desktop_notifications.as_mut(),
-            );
-            let _ = runtime.apply_event(AppEvent::Backend(event));
+            let _ = backend.dispatch(Effect::RefreshDecisions {
+                workspace: workspace_id,
+            });
         }
         if forward_live_terminal_input(&mut ui, &runtime, &mut controls, &key) {
             continue;
@@ -2422,26 +2469,7 @@ fn drive_workspace_controller(
             runtime.handle_key(key)
         };
         for effect in effects {
-            runtime.on_effect(&effect);
-            for event in controller_overlay_events(
-                pr_port.as_mut(),
-                browser.as_mut(),
-                &workspace_name,
-                &root_cwd,
-                &sessions,
-                &effect,
-            ) {
-                let _ = runtime.apply_event(event);
-            }
-            if dispatch_controller_effect(
-                &mut ui,
-                decisions.as_mut(),
-                environment.as_mut(),
-                &mut runtime,
-                &effect,
-                &mut pending_targets,
-            ) == ControllerFlow::Exit
-            {
+            if backend.dispatch(effect) == BackendFlow::Exit {
                 return Ok(WorkspaceStep::Quit);
             }
         }
@@ -2455,31 +2483,80 @@ fn drive_workspace_controller(
 /// Returns terminal IO failures from the interactive loop.
 #[coverage(off)]
 #[allow(clippy::too_many_arguments)]
+pub fn run_workspace_controller_with_backend(
+    term: &mut dyn Terminal,
+    snapshot: WorkspaceSnapshot,
+    backend_factory: &mut dyn ControllerBackendFactory,
+) -> io::Result<Exit> {
+    drive_workspace_controller(term, snapshot, backend_factory).map(|_| Exit::Quit)
+}
+
+struct FixedBackendFactory {
+    sessions: Option<Box<dyn SessionCommandPort>>,
+    agent: Option<Box<dyn AgentCommandPort>>,
+    metrics: Option<Box<dyn MetricsPort>>,
+    browser: Option<Box<dyn BrowserOpener>>,
+}
+
+impl ControllerBackendFactory for FixedBackendFactory {
+    fn create(
+        &mut self,
+        _: &WorkspaceSnapshot,
+        host: ControllerHost,
+    ) -> ControllerBackendComposition {
+        ControllerBackendComposition {
+            backend: DaemonBackend::new(
+                Box::new(host.clone()),
+                Box::new(host),
+                Box::new(UnavailableBackendPort),
+                Box::new(UnavailableBackendPort),
+            )
+            .with_decisions(Box::new(UnavailableBackendPort))
+            .with_overlay(Box::new(UnavailableBackendPort)),
+            session_commands: self
+                .sessions
+                .take()
+                .expect("fixed session port is created once"),
+            agent_commands: self.agent.take().expect("fixed agent port is created once"),
+            metrics: self
+                .metrics
+                .take()
+                .expect("fixed metrics port is created once"),
+            browser: self
+                .browser
+                .take()
+                .expect("fixed browser port is created once"),
+        }
+    }
+}
+
+/// Compatibility entry for embedders that still supply individual host ports.
+/// Production uses [`run_workspace_controller_with_backend`].
+///
+/// # Errors
+///
+/// Returns terminal IO failures from the interactive workspace loop.
+#[coverage(off)]
+#[allow(clippy::too_many_arguments)]
 pub fn run_workspace_controller(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
     session_commands: Box<dyn SessionCommandPort>,
     agent_port: Box<dyn AgentCommandPort>,
-    decisions: Box<dyn DecisionCommandPort>,
-    environment: Box<dyn EnvironmentStorePort>,
-    desktop_notifications: Box<dyn DesktopNotificationPort>,
-    metrics_port: Box<dyn MetricsPort>,
-    pr_port: Box<dyn PrSnapshotPort>,
+    _decisions: Box<dyn DecisionCommandPort>,
+    _environment: Box<dyn EnvironmentStorePort>,
+    _desktop_notifications: Box<dyn DesktopNotificationPort>,
+    metrics: Box<dyn MetricsPort>,
+    _pr_port: Box<dyn PrSnapshotPort>,
     browser: Box<dyn BrowserOpener>,
 ) -> io::Result<Exit> {
-    drive_workspace_controller(
-        term,
-        snapshot,
-        session_commands,
-        agent_port,
-        decisions,
-        environment,
-        desktop_notifications,
-        metrics_port,
-        pr_port,
-        browser,
-    )
-    .map(|_| Exit::Quit)
+    let mut factory = FixedBackendFactory {
+        sessions: Some(session_commands),
+        agent: Some(agent_port),
+        metrics: Some(metrics),
+        browser: Some(browser),
+    };
+    run_workspace_controller_with_backend(term, snapshot, &mut factory)
 }
 
 /// Open list 用に、registry の生値と recent projection を結び付ける。
@@ -2647,33 +2724,50 @@ pub fn run_with_settings_and_agent_and_metrics_port_factory_and_model_availabili
 /// fallback ports for the screen-graph entry points that do not inject a daemon
 /// Agent / metrics factory (`run_with_settings`).
 #[coverage(off)]
-fn open_snapshot_via_controller<'a, 'b>(
+fn open_snapshot_via_controller(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
-    session_commands: &mut dyn SessionCommandPortFactory,
-    agent_commands: Option<&mut (dyn AgentCommandPortFactory + 'a)>,
-    metrics: Option<&mut (dyn MetricsPortFactory + 'b)>,
+    backend_factory: &mut dyn ControllerBackendFactory,
 ) -> io::Result<WorkspaceStep> {
-    let agent_port = agent_commands.map_or_else(
-        || -> Box<dyn AgentCommandPort> { Box::new(UnavailableAgentCommandPort) },
-        AgentCommandPortFactory::create,
-    );
-    let metrics_port = metrics.map_or_else(
-        || -> Box<dyn MetricsPort> { Box::new(NoMetrics) },
-        MetricsPortFactory::create,
-    );
-    drive_workspace_controller(
-        term,
-        snapshot,
-        session_commands.create(),
-        agent_port,
-        Box::new(UnavailableDecisionCommandPort),
-        Box::new(UnavailableEnvironmentStore),
-        Box::new(NoDesktopNotifications),
-        metrics_port,
-        Box::new(UnavailablePrSnapshotPort),
-        Box::new(UnavailableBrowserOpener),
-    )
+    drive_workspace_controller(term, snapshot, backend_factory)
+}
+
+struct CompatibilityBackendFactory<'a, 'b, 'c> {
+    sessions: &'a mut dyn SessionCommandPortFactory,
+    agents: Option<&'b mut dyn AgentCommandPortFactory>,
+    metrics: Option<&'c mut dyn MetricsPortFactory>,
+}
+
+impl ControllerBackendFactory for CompatibilityBackendFactory<'_, '_, '_> {
+    fn create(
+        &mut self,
+        _: &WorkspaceSnapshot,
+        host: ControllerHost,
+    ) -> ControllerBackendComposition {
+        let agent_commands = self.agents.as_deref_mut().map_or_else(
+            || -> Box<dyn AgentCommandPort> { Box::new(UnavailableAgentCommandPort) },
+            AgentCommandPortFactory::create,
+        );
+        let metrics = self.metrics.as_deref_mut().map_or_else(
+            || -> Box<dyn MetricsPort> { Box::new(NoMetrics) },
+            MetricsPortFactory::create,
+        );
+        let backend = DaemonBackend::new(
+            Box::new(host.clone()),
+            Box::new(host),
+            Box::new(UnavailableBackendPort),
+            Box::new(UnavailableBackendPort),
+        )
+        .with_decisions(Box::new(UnavailableBackendPort))
+        .with_overlay(Box::new(UnavailableBackendPort));
+        ControllerBackendComposition {
+            backend,
+            session_commands: self.sessions.create(),
+            agent_commands,
+            metrics,
+            browser: Box::new(UnavailableBrowserOpener),
+        }
+    }
 }
 
 // The screen graph is an IO composition boundary.  Its choices are covered by
@@ -2692,6 +2786,43 @@ fn run_with_settings_inner(
     session_commands: &mut dyn SessionCommandPortFactory,
     mut agent_commands: Option<&mut dyn AgentCommandPortFactory>,
     mut metrics: Option<&mut dyn MetricsPortFactory>,
+    available_models: AvailableAgentModels,
+) -> io::Result<Exit> {
+    let mut backend_factory = CompatibilityBackendFactory {
+        sessions: session_commands,
+        agents: agent_commands.take(),
+        metrics: metrics.take(),
+    };
+    run_screen_graph_with_backend(
+        term,
+        workspaces,
+        recent,
+        now,
+        start,
+        loader,
+        settings,
+        &mut backend_factory,
+        available_models,
+    )
+}
+
+/// Production screen graph entry. Every Welcome/Open/Recent/New path creates
+/// its workspace runtime through the same backend factory as direct launch.
+///
+/// # Errors
+///
+/// Returns workspace loading, settings, or terminal IO failures.
+#[coverage(off)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn run_screen_graph_with_backend(
+    term: &mut dyn Terminal,
+    workspaces: Vec<Workspace>,
+    recent: Vec<Recent>,
+    now: DateTime<Utc>,
+    start: Start,
+    loader: &mut dyn WorkspaceLoader,
+    settings: &mut dyn SettingsPort,
+    backend_factory: &mut dyn ControllerBackendFactory,
     available_models: AvailableAgentModels,
 ) -> io::Result<Exit> {
     let mut welcome = Welcome::new(recent);
@@ -2731,13 +2862,8 @@ fn run_with_settings_inner(
                     let snapshot = loader.open(&path)?;
                     welcome.record_opened(&snapshot.workspace);
                     open.record_opened(&snapshot.workspace);
-                    let workspace_step = open_snapshot_via_controller(
-                        term,
-                        snapshot,
-                        session_commands,
-                        agent_commands.as_deref_mut(),
-                        metrics.as_deref_mut(),
-                    )?;
+                    let workspace_step =
+                        open_snapshot_via_controller(term, snapshot, backend_factory)?;
                     if workspace_step == WorkspaceStep::Quit {
                         return Ok(Exit::Quit);
                     }
@@ -2752,13 +2878,8 @@ fn run_with_settings_inner(
                         let snapshot = loader.open(&path)?;
                         welcome.record_opened(&snapshot.workspace);
                         open.record_opened(&snapshot.workspace);
-                        let workspace_step = open_snapshot_via_controller(
-                            term,
-                            snapshot,
-                            session_commands,
-                            agent_commands.as_deref_mut(),
-                            metrics.as_deref_mut(),
-                        )?;
+                        let workspace_step =
+                            open_snapshot_via_controller(term, snapshot, backend_factory)?;
                         if workspace_step == WorkspaceStep::Quit {
                             return Ok(Exit::Quit);
                         }
@@ -2782,13 +2903,8 @@ fn run_with_settings_inner(
                         new_form.set_notice(None);
                         welcome.record_opened(&snapshot.workspace);
                         open.record_opened(&snapshot.workspace);
-                        let workspace_step = open_snapshot_via_controller(
-                            term,
-                            snapshot,
-                            session_commands,
-                            agent_commands.as_deref_mut(),
-                            metrics.as_deref_mut(),
-                        )?;
+                        let workspace_step =
+                            open_snapshot_via_controller(term, snapshot, backend_factory)?;
                         if workspace_step == WorkspaceStep::Quit {
                             return Ok(Exit::Quit);
                         }
@@ -2941,18 +3057,17 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 mod tests {
     use super::{
         AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, BrowserOpener, Config,
-        ConfigStep, ControllerFlow, DefaultSettingsPort, EnvironmentStorePort, Exit, Geometry,
-        MetricsPort, MetricsPortFactory, NewStep, NoDesktopNotifications, NoMetrics,
-        NoMetricsFactory, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult,
-        Start, TerminalAttach, TerminalChunk, TerminalError, UnavailableBrowserOpener,
-        UnavailableDecisionCommandPort, UnavailableEnvironmentStore, UnavailablePrSnapshotPort,
-        UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory, WelcomeStep,
-        WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
-        app_event_from_key, clear_terminal_selection_on_click, close_exited_panes,
-        controller_terminal_view, dispatch_controller_effect, forward_live_terminal_input,
-        handle_terminal_pointer, intercept_live_terminal_control, key_to_terminal_bytes,
-        new_project_notice, play_startup_splash, render_controller_frame, render_home_snapshot,
-        restore_open_panes, run as run_from_start, run_with_settings,
+        ConfigStep, DefaultSettingsPort, Exit, Geometry, MetricsPort, MetricsPortFactory, NewStep,
+        NoDesktopNotifications, NoMetrics, NoMetricsFactory, SessionCommandPort,
+        SessionCommandPortFactory, SessionCommandResult, Start, TerminalAttach, TerminalChunk,
+        TerminalError, UnavailableBrowserOpener, UnavailableDecisionCommandPort,
+        UnavailableEnvironmentStore, UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
+        UnavailableSessionCommandPortFactory, WelcomeStep, WorkspaceLoader, WorkspaceRuntime,
+        WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
+        clear_terminal_selection_on_click, close_exited_panes, controller_terminal_view,
+        forward_live_terminal_input, handle_terminal_pointer, intercept_live_terminal_control,
+        key_to_terminal_bytes, new_project_notice, play_startup_splash, render_controller_frame,
+        render_home_snapshot, restore_open_panes, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_controller, safe_session_error, sidebar_pointer_event, step_config, step_new,
         terminal_geometry, welcome_action, write_banner,
@@ -2962,7 +3077,7 @@ mod tests {
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, BackendEvent, Effect, EnvironmentEntry, NewRequest, TabDirection, Target,
+        AppEvent, AppKey, NewRequest, PendingToken, TabDirection, Target,
     };
     use crate::usecase::application::pane::PaneKind;
     use crate::usecase::application::run as dispatch;
@@ -3535,39 +3650,86 @@ mod tests {
 
     #[test]
     #[coverage(off)]
-    fn drain_session_completions_surfaces_a_daemon_failure_as_a_safe_notice() {
-        use crate::presentation::workspace_runtime::WorkspaceRuntime;
-
+    fn drain_session_completions_refluxes_create_failure_with_its_token() {
         let snapshot = snapshot("demo");
-        let workspace_id = snapshot.workspace_id;
         let view = WorkspaceView::with_runtime_ids(
             snapshot.workspace,
             snapshot.state,
             snapshot.session_ids,
         );
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
-        let mut runtime = WorkspaceRuntime::new(workspace_id, Vec::new());
+        let token = PendingToken::from_raw(41);
 
         // A create worker returned a display-safe daemon rejection (e.g. a name the
         // daemon refuses). The legacy path used to drop this on the floor; it must
         // now reflux as a controller notice so the user sees the failure.
+        let (backend_completions, backend_receiver) =
+            crate::usecase::application::daemon_backend::Completions::channel();
         ui.session_completion_sender
             .send(super::SessionCommandCompletion {
                 port: Box::new(UnavailableSessionCommandPort),
                 result: Err("daemon refused the session".to_owned()),
+                completion: super::SessionBackendCompletion::Create {
+                    token,
+                    before: Vec::new(),
+                    completions: backend_completions,
+                },
             })
             .unwrap();
-        assert!(runtime.state().notice().is_none());
 
-        super::drain_session_completions(&mut ui, &mut runtime);
+        super::drain_session_completions(&mut ui);
+        assert!(matches!(
+            backend_receiver.recv().unwrap(),
+            AppEvent::OperationResult(result)
+                if result.token == token
+                    && !result.succeeded
+                    && result.created.is_none()
+                    && result.notice.as_ref().is_some_and(|notice| notice.message == "daemon refused the session")
+        ));
+    }
 
-        assert_eq!(
-            runtime
-                .state()
-                .notice()
-                .map(|notice| notice.message.as_str()),
-            Some("daemon refused the session"),
+    #[test]
+    #[coverage(off)]
+    fn drain_session_completions_refluxes_create_success_with_created_identity() {
+        let snapshot = snapshot("demo");
+        let existing = snapshot.session_ids[0];
+        let created = SessionId::new();
+        let mut records = snapshot.state.sessions.clone();
+        let mut new_record = records[0].clone();
+        new_record.name = "created".to_owned();
+        records.push(new_record);
+        let view = WorkspaceView::with_runtime_ids(
+            snapshot.workspace,
+            snapshot.state,
+            snapshot.session_ids,
         );
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let token = PendingToken::from_raw(42);
+        let (completions, receiver) =
+            crate::usecase::application::daemon_backend::Completions::channel();
+
+        ui.session_completion_sender
+            .send(super::SessionCommandCompletion {
+                port: Box::new(UnavailableSessionCommandPort),
+                result: Ok(SessionCommandResult {
+                    message: "created".to_owned(),
+                    sessions: Some(records),
+                    session_ids: Some(vec![existing, created]),
+                }),
+                completion: super::SessionBackendCompletion::Create {
+                    token,
+                    before: vec![existing],
+                    completions,
+                },
+            })
+            .unwrap();
+        super::drain_session_completions(&mut ui);
+
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            AppEvent::OperationResult(result)
+                if result.token == token && result.succeeded && result.created == Some(created)
+        ));
     }
 
     #[test]
@@ -3597,6 +3759,8 @@ mod tests {
             std::time::Duration::from_millis(1_000),
         ));
 
+        let (completions, receiver) =
+            crate::usecase::application::daemon_backend::Completions::channel();
         ui.session_completion_sender
             .send(super::SessionCommandCompletion {
                 port: Box::new(UnavailableSessionCommandPort),
@@ -3605,9 +3769,11 @@ mod tests {
                     sessions: Some(records),
                     session_ids: Some(vec![session]),
                 }),
+                completion: super::SessionBackendCompletion::Snapshot { completions },
             })
             .unwrap();
-        super::drain_session_completions(&mut ui, &mut runtime);
+        super::drain_session_completions(&mut ui);
+        let _ = runtime.apply_event(receiver.recv().unwrap());
         assert_eq!(runtime.state().sessions(), &[session]);
         let _ = runtime.apply_event(sidebar_pointer_event(
             5,
@@ -3715,97 +3881,6 @@ mod tests {
         let _ = runtime.focus_terminal(Target::Session(session), terminal.clone());
         ui.start_terminal_session(terminal, terminal_geometry(20, 80));
         (ui, runtime)
-    }
-
-    /// Recording environment store: proves the production dispatch path drives a
-    /// real port and refluxes its result into the reducer (never the old no-op).
-    #[derive(Default)]
-    struct RecordingEnvironmentStore {
-        loaded: Vec<Target>,
-        saved: Vec<(Target, Vec<EnvironmentEntry>)>,
-        entries: Vec<EnvironmentEntry>,
-    }
-
-    impl EnvironmentStorePort for RecordingEnvironmentStore {
-        fn load(&mut self, target: Target) -> BackendEvent {
-            self.loaded.push(target);
-            BackendEvent::EnvironmentLoaded {
-                target,
-                entries: self.entries.clone(),
-            }
-        }
-
-        fn save(&mut self, target: Target, entries: Vec<EnvironmentEntry>) -> BackendEvent {
-            self.saved.push((target, entries.clone()));
-            BackendEvent::EnvironmentLoaded { target, entries }
-        }
-    }
-
-    #[test]
-    fn dispatch_controller_effect_wires_environment_load_and_save_to_the_store() {
-        let workspace = WorkspaceId::new();
-        let session = SessionId::new();
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
-        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
-        let mut decisions = UnavailableDecisionCommandPort;
-        let mut environment = RecordingEnvironmentStore {
-            entries: vec![EnvironmentEntry {
-                name: "TOKEN".to_owned(),
-                value: "abc".to_owned(),
-            }],
-            ..Default::default()
-        };
-        let mut pending = std::collections::HashMap::new();
-
-        // Opening the editor requests a read of the active (root) target.
-        let target = Target::Root(workspace);
-        let open = runtime.apply_event(AppEvent::Key(AppKey::OpenEnvironment));
-        assert_eq!(open, vec![Effect::LoadEnvironment { target }]);
-
-        // The dispatch arm consults the store (not a no-op) and refluxes its
-        // values back through the reducer.
-        for effect in &open {
-            assert_eq!(
-                dispatch_controller_effect(
-                    &mut ui,
-                    &mut decisions,
-                    &mut environment,
-                    &mut runtime,
-                    effect,
-                    &mut pending,
-                ),
-                ControllerFlow::Continue,
-            );
-        }
-        assert_eq!(environment.loaded, vec![target]);
-
-        // The reflux populated the editor and cleared loading, so a Save emits the
-        // persisted values — observable proof the load reached the reducer.
-        let save = runtime.apply_event(AppEvent::Key(AppKey::SaveEnvironment));
-        assert_eq!(
-            save,
-            vec![Effect::SaveEnvironment {
-                target,
-                entries: vec![EnvironmentEntry {
-                    name: "TOKEN".to_owned(),
-                    value: "abc".to_owned(),
-                }],
-            }]
-        );
-        for effect in &save {
-            let _ = dispatch_controller_effect(
-                &mut ui,
-                &mut decisions,
-                &mut environment,
-                &mut runtime,
-                effect,
-                &mut pending,
-            );
-        }
-        assert_eq!(environment.saved.len(), 1);
-        assert_eq!(environment.saved[0].0, target);
-        assert_eq!(environment.saved[0].1, environment.entries);
     }
 
     #[test]
@@ -4582,6 +4657,7 @@ mod tests {
                 WorkspaceId::new(),
                 Some(SessionId::new()),
                 Geometry { cols: 80, rows: 24 },
+                "open",
             )
             .unwrap_err(),
             "terminal launch is unavailable"
@@ -5635,6 +5711,7 @@ mod tests {
                 WorkspaceId::new(),
                 Some(SessionId::new()),
                 Geometry { cols: 80, rows: 24 },
+                "open",
             ),
             Err("terminal launch is unavailable".to_owned())
         );
