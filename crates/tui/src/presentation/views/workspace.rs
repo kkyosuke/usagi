@@ -201,6 +201,11 @@ pub struct HomeProjection {
     /// owns input. The sidebar row renders it as a name-only caret in place of the
     /// static `+ new session` label; profile/model are never part of this flow.
     create_draft: Option<CreateDraft>,
+    /// Name of a create request the daemon is still fulfilling. Present exactly
+    /// while a create worker owns the port; the sidebar draws it as a two-line
+    /// loading skeleton just above `+ new session` (`document/03-tui.md`) until
+    /// the daemon's `session.created` row replaces it.
+    create_pending: Option<String>,
 }
 
 /// Left-sidebar draft for the inline new-session input.
@@ -285,7 +290,20 @@ impl HomeProjection {
                 name: form.name().to_owned(),
                 error: form.error().map(|notice| notice.message.clone()),
             }),
+            // Seeded by the shell's in-flight create via `with_create_pending`;
+            // the reducer never owns the pending name because its snapshot arrives
+            // through the daemon transport, not `AppState`.
+            create_pending: None,
         }
+    }
+
+    /// Attach the name of a create request the daemon is still fulfilling, so the
+    /// sidebar draws its loading skeleton. `None` while no create worker owns the
+    /// port.
+    #[must_use]
+    pub fn with_create_pending(mut self, name: Option<String>) -> Self {
+        self.create_pending = name;
+        self
     }
 
     /// Attach the runtime's persisted Overview / Closeup modal input so the
@@ -1100,21 +1118,38 @@ fn home_left_pane(
         0
     };
     let content_capacity = body_capacity.saturating_sub(mascot_rows);
-    let viewport_capacity = content_capacity;
+    // Reserve the loading skeleton's rows outside the selectable-row budget so a
+    // pending create draws just above `+ new session` without scrolling it off.
+    let skeleton_rows = if home.create_pending.is_some() {
+        CREATE_SKELETON_ROWS
+    } else {
+        0
+    };
+    let viewport_capacity = content_capacity.saturating_sub(skeleton_rows);
     let selected_index = rows
         .iter()
         .position(|row| *row == home.selected)
         .unwrap_or(0);
     let start = home_viewport_start(width, home, &rows, selected_index, viewport_capacity);
     let mut lines = Vec::with_capacity(height);
+    // Track only selectable-row lines against `viewport_capacity`; the skeleton
+    // lives in the space reserved above and never counts toward the break.
+    let mut row_line_count = 0;
     for row in &rows[start..] {
+        if matches!(row, Selection::NewSession)
+            && let Some(name) = home.create_pending.as_deref()
+        {
+            lines.extend(create_skeleton_lines(width, name, home.mascot_tick));
+        }
         let row_lines = home_row_lines_at(width, home, *row, columns, now);
-        if lines.len() + row_lines.len() > viewport_capacity {
+        if row_line_count + row_lines.len() > viewport_capacity {
             break;
         }
+        row_line_count += row_lines.len();
         lines.extend(row_lines);
-        if matches!(row, Selection::Target(Target::Root(_))) && lines.len() < viewport_capacity {
+        if matches!(row, Selection::Target(Target::Root(_))) && row_line_count < viewport_capacity {
             lines.push(sidebar_divider(width));
+            row_line_count += 1;
         }
     }
     lines.resize(content_capacity, String::new());
@@ -1153,6 +1188,40 @@ fn home_viewport_start(
         start += 1;
     }
     start
+}
+
+/// Rows the create loading skeleton occupies, matching a session row's height so
+/// the daemon's landed `session.created` row replaces it without shifting the
+/// sidebar.
+const CREATE_SKELETON_ROWS: usize = 2;
+
+/// Two-line loading skeleton for a create the daemon is still fulfilling, drawn
+/// just above `+ new session` (`document/03-tui.md`). The activity glyph and the
+/// typed name share one slow left-to-right wave — the same [`widgets::Shimmer`]
+/// sweep the removal skeleton and pending tabs use — so a pending create reads as
+/// loading, not a static row. `tick` is the shared sidebar mascot frame, so the
+/// wave advances only on `AppEvent::Tick`. The skeleton is never a cursor or
+/// current target, so it carries no marker.
+fn create_skeleton_lines(width: usize, name: &str, tick: u64) -> Vec<String> {
+    let wave = widgets::Shimmer {
+        style: Role::Feature.style().bold(),
+        base_style: Role::Feature.style().dim(),
+        speed: 4,
+    };
+    let frame = usize::try_from(tick).unwrap_or(usize::MAX);
+    vec![
+        widgets::pad_to_width(
+            &format!(
+                "  {}",
+                widgets::shimmer_text_with(&format!("+ {name}"), frame, wave)
+            ),
+            width,
+        ),
+        widgets::pad_to_width(
+            &format!("  {}", widgets::shimmer_text_with("creating…", frame, wave)),
+            width,
+        ),
+    ]
 }
 
 #[coverage(off)]
@@ -1510,9 +1579,10 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHROME_ROWS, CreateDraft, GIBIBYTE, GitDiff, HomeProjection, LEFT_WIDTH, MEBIBYTE,
-        ProjectedSession, TerminalViewProjection, Workspace, format_memory, load_style,
-        new_session_input_lines, render_home, terminal_point_at, with_footer_gap,
+        CHROME_ROWS, CREATE_SKELETON_ROWS, CreateDraft, GIBIBYTE, GitDiff, HomeProjection,
+        LEFT_WIDTH, MEBIBYTE, ProjectedSession, TerminalViewProjection, Workspace,
+        create_skeleton_lines, format_memory, load_style, new_session_input_lines, render_home,
+        terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Style};
     use crate::presentation::widgets::mascot::MascotSpeech;
@@ -1650,6 +1720,60 @@ mod tests {
             .map(|line| strip(line))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn create_skeleton_draws_two_padded_lines_that_wave_with_the_tick() {
+        let first = create_skeleton_lines(30, "atlas", 0);
+        assert_eq!(first.len(), CREATE_SKELETON_ROWS);
+        // Both lines are padded to the sidebar width and carry the typed name /
+        // the loading caption, so the skeleton reads as a session-height row.
+        assert!(first.iter().all(|line| display_width(line) == 30));
+        assert!(strip(&first[0]).contains("atlas"));
+        assert!(strip(&first[1]).contains("creating"));
+        // The sweep is animated, not a static blink: a later tick paints a
+        // different frame while keeping the same display width and text.
+        let later = create_skeleton_lines(30, "atlas", 12);
+        assert_ne!(first[0], later[0]);
+        assert!(strip(&later[0]).contains("atlas"));
+        assert_eq!(display_width(&later[0]), 30);
+    }
+
+    #[test]
+    fn home_pending_create_waves_a_skeleton_above_new_session() {
+        let workspace = WorkspaceId::new();
+        let state = AppState::home(workspace, Vec::new());
+        let home = HomeProjection::from_state(&state, "work", "/work", &[])
+            .with_create_pending(Some("atlas".to_owned()));
+        let lines = render_home(30, 100, &home)
+            .iter()
+            .map(|line| strip(line))
+            .collect::<Vec<_>>();
+
+        let skeleton = lines
+            .iter()
+            .position(|line| line.contains("atlas"))
+            .expect("pending create name is drawn as a skeleton row");
+        let new_session = lines
+            .iter()
+            .position(|line| line.contains("+ new session"))
+            .expect("the new-session affordance is still drawn");
+        // The skeleton sits just above `+ new session` and never replaces it.
+        assert!(skeleton < new_session);
+        assert!(lines[skeleton].contains("creating") || lines[skeleton + 1].contains("creating"));
+
+        // Absent a pending create, no skeleton or loading caption is drawn.
+        let quiet = render_home(
+            30,
+            100,
+            &HomeProjection::from_state(&state, "work", "/work", &[]),
+        )
+        .iter()
+        .map(|line| strip(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+        assert!(!quiet.contains("atlas"));
+        assert!(!quiet.contains("creating"));
     }
 
     #[test]
