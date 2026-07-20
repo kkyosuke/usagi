@@ -315,12 +315,15 @@ fn create_with_setup_runner(
     // logged, never rolled back (the worktree already exists for the user to fix).
     if let Err(error) = record(
         &store,
+        workspace_root,
         name,
         &dest_root,
         &worktrees,
-        agent,
-        origin,
-        started_from,
+        SessionMetadata {
+            agent,
+            origin,
+            started_from,
+        },
     ) {
         return Err(with_failed_create_rollback(
             workspace_root,
@@ -503,14 +506,19 @@ pub fn existing_branch_names(workspace_root: &Path) -> Vec<String> {
 /// Append the session to `<workspace>/.usagi/state.json`, creating the state
 /// when none exists yet. This is what lets a multi-repo, non-git root still
 /// track its sessions. Each worktree's git status is captured at record time.
-fn record(
-    store: &WorkspaceStore,
-    name: &str,
-    root: &Path,
-    worktrees: &[PathBuf],
+struct SessionMetadata {
     agent: SessionAgent,
     origin: SessionOrigin,
     started_from: Option<String>,
+}
+
+fn record(
+    store: &WorkspaceStore,
+    workspace_root: &Path,
+    name: &str,
+    root: &Path,
+    worktrees: &[PathBuf],
+    metadata: SessionMetadata,
 ) -> Result<()> {
     // The caller ([`create`]) holds the store lock across the whole operation,
     // so the load → append → save here is already serialised against any other
@@ -521,6 +529,7 @@ fn record(
     // multi-repo workspace); the shared helper classifies each against its own
     // repository's default branch, resolved once per repository.
     let worktree_states = workspace_state::inspect_worktrees(worktrees);
+    let worktree_provenance = capture_worktree_provenance(workspace_root, root, worktrees)?;
 
     // Normalise the model override before it is persisted and later interpolated
     // into a launch command: trim surrounding whitespace and drop a value that
@@ -529,8 +538,9 @@ fn record(
     // so old / hand-edited state stays readable. MCP orchestration performs the
     // dynamic CLI-model availability check before it reaches this write.
     let agent = SessionAgent {
-        cli: agent.cli,
-        model: agent
+        cli: metadata.agent.cli,
+        model: metadata
+            .agent
             .model
             .map(|m| m.trim().to_string())
             .filter(|m| !m.is_empty()),
@@ -545,15 +555,49 @@ fn record(
         note: None,
         label_id: None,
         agent,
-        origin,
-        started_from,
+        origin: metadata.origin,
+        started_from: metadata.started_from,
         root: root.to_path_buf(),
         worktrees: worktree_states,
+        worktree_provenance,
         created_at: now,
         last_active: None,
     });
     state.updated_at = now;
     store.save(&state)
+}
+
+fn capture_worktree_provenance(
+    workspace_root: &Path,
+    session_root: &Path,
+    worktrees: &[PathBuf],
+) -> Result<Vec<crate::domain::workspace_state::WorktreeProvenance>> {
+    let mut provenance = Vec::new();
+    for repo in tree::source_repos(workspace_root) {
+        let expected =
+            if repo == workspace_root {
+                session_root.to_path_buf()
+            } else {
+                session_root.join(repo.strip_prefix(workspace_root).with_context(|| {
+                    format!("repository {} is outside workspace", repo.display())
+                })?)
+            };
+        let worktree = worktrees
+            .iter()
+            .find(|worktree| **worktree == expected)
+            .ok_or_else(|| anyhow!("missing created worktree identity for {}", repo.display()))?;
+        provenance.push(crate::domain::workspace_state::WorktreeProvenance {
+            repo: fs::canonicalize(&repo)
+                .with_context(|| format!("failed to resolve repository {}", repo.display()))?,
+            worktree: fs::canonicalize(worktree).with_context(|| {
+                format!("failed to resolve created worktree {}", worktree.display())
+            })?,
+        });
+    }
+    if provenance.len() != worktrees.len() {
+        bail!("created worktree set does not match source repository set");
+    }
+    Ok(provenance)
 }
 
 /// Run `edit` against the session named `name`, then persist the change,
@@ -1299,7 +1343,8 @@ pub fn remove(
     if pending_phase == Some(SessionRemovalPhase::Orphaned) {
         bail!(
             "session \"{name}\" is quarantined as an orphaned pending removal; \
-             its ownership is unknown, so usagi will not force-delete it automatically"
+             its ownership is unknown, so usagi will not force-delete it automatically; \
+             inspect state.json and `git worktree list`, then clean up the confirmed paths manually"
         );
     }
 
@@ -1343,6 +1388,7 @@ pub fn remove(
                 .iter()
                 .map(|worktree| worktree_keyed_store::key(&worktree.path))
                 .collect(),
+            provenance: session.worktree_provenance.clone(),
             phase: SessionRemovalPhase::GitTeardown,
         });
         state.updated_at = Utc::now();
@@ -1361,13 +1407,29 @@ pub fn remove(
                  preserved; repair repository access and retry session remove: {error}"
             )
         })?;
-        reconcile::discard_session(&session.root, &branch_name(name), &repo_worktrees, force)
-            .map_err(|error| {
-                anyhow!(
-                    "session \"{name}\" removal is pending at git_teardown; context is \
-                     preserved; repair locked/dirty worktrees and retry session remove: {error}"
-                )
-            })?;
+        let discard = reconcile::discard_session(
+            &session.root,
+            &branch_name(name),
+            &state.pending_removals[pending_index].provenance,
+            &repo_worktrees,
+            force,
+        );
+        if let Err(error) = discard {
+            if error.downcast_ref::<reconcile::OwnershipError>().is_some() {
+                state.pending_removals[pending_index].phase = SessionRemovalPhase::Orphaned;
+                state.updated_at = Utc::now();
+                store.save(&state)?;
+                bail!(
+                    "session \"{name}\" ownership is ambiguous and has been quarantined; \
+                     no automatic force-remove effect was issued; inspect state.json and \
+                     `git worktree list`, then clean up confirmed paths manually: {error}"
+                );
+            }
+            return Err(anyhow!(
+                "session \"{name}\" removal is pending at git_teardown; context is \
+                 preserved; repair locked/dirty worktrees and retry session remove: {error}"
+            ));
+        }
         state.pending_removals[pending_index].phase = SessionRemovalPhase::ContextCleanup;
         state.updated_at = Utc::now();
         store.save(&state).map_err(|error| {
@@ -3068,6 +3130,7 @@ mod tests {
         let created = create(root.path(), "crashed").unwrap();
         let store = WorkspaceStore::new(root.path());
         let mut state = store.load().unwrap().unwrap();
+        let provenance = state.sessions[0].worktree_provenance.clone();
         state.pending_removals.push(PendingSessionRemoval {
             name: "crashed".into(),
             root: created.root.clone(),
@@ -3076,6 +3139,7 @@ mod tests {
                 .iter()
                 .map(|worktree| worktree_keyed_store::key(worktree))
                 .collect(),
+            provenance: provenance.clone(),
             phase: SessionRemovalPhase::GitTeardown,
         });
         store.save(&state).unwrap();
@@ -3083,6 +3147,7 @@ mod tests {
         reconcile::discard_session(
             &created.root,
             &branch_name("crashed"),
+            &provenance,
             &repo_worktrees,
             false,
         )
@@ -3114,17 +3179,35 @@ mod tests {
         fs::write(created.root.join("scratch.txt"), "uncommitted").unwrap();
 
         let repo_worktrees = reconcile::list_repo_worktrees(root.path()).unwrap();
+        let provenance = WorkspaceStore::new(root.path())
+            .load()
+            .unwrap()
+            .unwrap()
+            .sessions[0]
+            .worktree_provenance
+            .clone();
 
-        let err =
-            reconcile::discard_session(&created.root, &branch_name("wip"), &repo_worktrees, false)
-                .unwrap_err();
+        let err = reconcile::discard_session(
+            &created.root,
+            &branch_name("wip"),
+            &provenance,
+            &repo_worktrees,
+            false,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("git worktree remove failed"));
         assert!(created.root.exists());
         assert!(created.root.join("scratch.txt").exists());
 
         // Forced teardown discards the dirty worktree as before.
-        reconcile::discard_session(&created.root, &branch_name("wip"), &repo_worktrees, true)
-            .unwrap();
+        reconcile::discard_session(
+            &created.root,
+            &branch_name("wip"),
+            &provenance,
+            &repo_worktrees,
+            true,
+        )
+        .unwrap();
         assert!(!created.root.exists());
     }
 
@@ -3187,7 +3270,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_drops_a_ghost_session_whose_worktree_was_never_built() {
+    fn remove_quarantines_a_ghost_session_without_ownership_provenance() {
         use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorktreeState};
 
         let root = tempfile::tempdir().unwrap();
@@ -3222,19 +3305,22 @@ mod tests {
                 pr: Vec::new(),
                 updated_at: Utc::now(),
             }],
+            worktree_provenance: Vec::new(),
             created_at: Utc::now(),
             last_active: None,
         });
         store.save(&state).unwrap();
         assert_eq!(sessions_of(root.path()), vec!["ghost".to_string()]);
 
-        // Removal used to abort on the missing worktree (`git -C <gone> worktree
-        // list` fails), stranding the record forever. It now succeeds and drops
-        // the record.
-        let outcome = remove(root.path(), "ghost", false, noop_agent().as_ref()).unwrap();
-        assert!(outcome.removed);
-        assert!(outcome.dirty.is_empty());
-        assert!(sessions_of(root.path()).is_empty());
+        let error = remove(root.path(), "ghost", false, noop_agent().as_ref()).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("no recorded worktree provenance"));
+        assert_eq!(sessions_of(root.path()), vec!["ghost".to_string()]);
+        assert_eq!(
+            pending_of(root.path(), "ghost"),
+            Some(SessionRemovalPhase::Orphaned)
+        );
     }
 
     /// Forget session `name` in `state.json` while leaving its on-disk directory
@@ -3252,6 +3338,21 @@ mod tests {
             .status()
             .unwrap()
             .success()
+    }
+
+    fn session_provenance(
+        root: &Path,
+        name: &str,
+    ) -> Vec<crate::domain::workspace_state::WorktreeProvenance> {
+        WorkspaceStore::new(root)
+            .load()
+            .unwrap()
+            .unwrap()
+            .sessions
+            .into_iter()
+            .find(|session| session.name == name)
+            .unwrap()
+            .worktree_provenance
     }
 
     #[test]
@@ -3417,11 +3518,7 @@ mod tests {
     }
 
     #[test]
-    fn discard_session_unregisters_a_worktree_on_an_unexpected_branch() {
-        // A worktree sitting at the session path but on a branch other than the
-        // session name must still be unregistered when the session is torn down —
-        // matching on the branch alone left the registration behind, orphaned, the
-        // moment the directory was deleted (the bug above's root cause).
+    fn discard_session_rejects_a_recorded_path_on_an_unexpected_branch() {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
         let session_root = root.path().join(".usagi/sessions/odd");
@@ -3434,44 +3531,154 @@ mod tests {
             .success());
 
         let repo_worktrees = reconcile::list_repo_worktrees(root.path()).unwrap();
-        reconcile::discard_session(&session_root, "odd", &repo_worktrees, true).unwrap();
+        let provenance = vec![crate::domain::workspace_state::WorktreeProvenance {
+            repo: fs::canonicalize(root.path()).unwrap(),
+            worktree: fs::canonicalize(&session_root).unwrap(),
+        }];
+        let error =
+            reconcile::discard_session(&session_root, "odd", &provenance, &repo_worktrees, true)
+                .unwrap_err();
 
-        // The directory is gone *and* git keeps no dangling registration for it,
-        // so a later session named "odd" can reuse the path.
-        assert!(!session_root.exists());
-        let canon = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        let target = canon(&session_root);
-        let orphaned = git::list_worktrees(root.path())
-            .unwrap()
-            .iter()
-            .any(|wt| canon(&wt.path) == target);
-        assert!(!orphaned, "worktree registration was orphaned");
+        assert!(error.to_string().contains("ownership proof"));
+        assert!(session_root.exists());
     }
 
     #[test]
-    fn remove_deletes_the_branch_when_the_worktree_dir_vanished_out_of_band() {
-        // A recorded session whose worktree directory was deleted out-of-band (a
-        // crash, a manual `rm`, an external cleanup) leaves git with a dangling
-        // worktree registration that still holds the session branch checked out.
-        // Removing the session must still drop that branch — otherwise the branch
-        // (and its registration) outlive the session, and a later `create` of the
-        // same name fails forever on "branch already exists" with no record left
-        // to `remove`. This is the "name permanently unusable" failure.
+    fn remove_fail_closed_for_an_external_dirty_same_branch_worktree() {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
-        let created = create(root.path(), "stuck").unwrap();
-        // Delete just the directory, leaving the branch + registration behind.
-        fs::remove_dir_all(&created.root).unwrap();
-        assert!(branch_exists(root.path(), "usagi/stuck"));
+        let created = create(root.path(), "owned").unwrap();
+        let external_parent = tempfile::tempdir().unwrap();
+        let external = external_parent.path().join("same-branch");
+        assert!(git_cmd(root.path())
+            .args(["worktree", "add", "--force", "--force"])
+            .arg(&external)
+            .arg("usagi/owned")
+            .status()
+            .unwrap()
+            .success());
+        fs::write(external.join("external-wip.txt"), "keep me").unwrap();
 
-        let outcome = remove(root.path(), "stuck", false, noop_agent().as_ref()).unwrap();
-        assert!(outcome.removed);
-        // The orphaned branch is gone, so the name is reusable...
-        assert!(!branch_exists(root.path(), "usagi/stuck"));
-        assert!(sessions_of(root.path()).is_empty());
-        // ...and re-creating the session of the same name succeeds.
-        let recreated = create(root.path(), "stuck").unwrap();
-        assert_eq!(head_branch(&recreated.root), "usagi/stuck");
+        let error = remove(root.path(), "owned", true, noop_agent().as_ref()).unwrap_err();
+
+        assert!(error.to_string().contains("ownership proof"));
+        assert!(created.root.exists());
+        assert_eq!(
+            fs::read_to_string(external.join("external-wip.txt")).unwrap(),
+            "keep me"
+        );
+        assert_eq!(
+            pending_of(root.path(), "owned"),
+            Some(SessionRemovalPhase::Orphaned)
+        );
+    }
+
+    #[test]
+    fn remove_fail_closed_when_the_recorded_worktree_cannot_be_canonicalized() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "missing").unwrap();
+        fs::remove_dir_all(&created.root).unwrap();
+
+        let error = remove(root.path(), "missing", true, noop_agent().as_ref()).unwrap_err();
+
+        assert!(error.to_string().contains("cannot prove session root"));
+        assert!(branch_exists(root.path(), "usagi/missing"));
+        assert_eq!(
+            pending_of(root.path(), "missing"),
+            Some(SessionRemovalPhase::Orphaned)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_fail_closed_when_the_session_root_becomes_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "linked").unwrap();
+        let moved = root.path().join("moved-worktree");
+        fs::rename(&created.root, &moved).unwrap();
+        fs::write(moved.join("scratch.txt"), "keep me").unwrap();
+        symlink(&moved, &created.root).unwrap();
+
+        let error = remove(root.path(), "linked", true, noop_agent().as_ref()).unwrap_err();
+
+        assert!(error.to_string().contains("unambiguous directory"));
+        assert_eq!(
+            fs::read_to_string(moved.join("scratch.txt")).unwrap(),
+            "keep me"
+        );
+        assert!(created
+            .root
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn discard_preflight_rejects_a_same_branch_worktree_from_another_repo() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "cross-repo").unwrap();
+        let managed = root.path().join("moved-managed-worktree");
+        fs::rename(&created.root, &managed).unwrap();
+        fs::write(managed.join("managed-wip.txt"), "keep managed").unwrap();
+        let other = tempfile::tempdir().unwrap();
+        init_repo(other.path());
+        assert!(git_cmd(other.path())
+            .args(["worktree", "add", "-q", "-b", "usagi/cross-repo"])
+            .arg(&created.root)
+            .status()
+            .unwrap()
+            .success());
+        fs::write(created.root.join("foreign-wip.txt"), "keep foreign").unwrap();
+        let repo_worktrees = reconcile::list_repo_worktrees(root.path()).unwrap();
+        let provenance = session_provenance(root.path(), "cross-repo");
+
+        let error = reconcile::discard_session(
+            &created.root,
+            &branch_name("cross-repo"),
+            &provenance,
+            &repo_worktrees,
+            true,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("ownership proof"));
+        assert!(created.root.exists());
+        assert_eq!(
+            fs::read_to_string(created.root.join("foreign-wip.txt")).unwrap(),
+            "keep foreign"
+        );
+        assert_eq!(
+            fs::read_to_string(managed.join("managed-wip.txt")).unwrap(),
+            "keep managed"
+        );
+    }
+
+    #[test]
+    fn remove_quarantines_a_legacy_record_without_provenance() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "legacy").unwrap();
+        let store = WorkspaceStore::new(root.path());
+        let mut state = store.load().unwrap().unwrap();
+        state.sessions[0].worktree_provenance.clear();
+        store.save(&state).unwrap();
+
+        let error = remove(root.path(), "legacy", true, noop_agent().as_ref()).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("no recorded worktree provenance"));
+        assert!(created.root.exists());
+        assert_eq!(
+            pending_of(root.path(), "legacy"),
+            Some(SessionRemovalPhase::Orphaned)
+        );
     }
 
     #[test]
@@ -3480,6 +3687,8 @@ mod tests {
         // directory. Other tests temporarily redirect that directory, so hold
         // the shared environment guard while this cleanup runs.
         let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
         let a = create(root.path(), "a").unwrap();
@@ -3497,6 +3706,7 @@ mod tests {
             pending_of(root.path(), "b"),
             Some(SessionRemovalPhase::Orphaned)
         );
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 
     #[test]

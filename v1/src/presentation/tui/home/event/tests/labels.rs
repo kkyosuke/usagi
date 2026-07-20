@@ -39,6 +39,7 @@ fn session(name: &str, label: Option<&str>) -> SessionRecord {
         started_from: None,
         root: PathBuf::from(format!("/r/{name}")),
         worktrees: vec![worktree(Some(name), &format!("/r/{name}"))],
+        worktree_provenance: Vec::new(),
         created_at: Utc::now(),
         last_active: None,
     }

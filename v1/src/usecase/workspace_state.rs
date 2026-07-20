@@ -538,6 +538,7 @@ mod tests {
                 pr: Vec::new(),
                 updated_at: Utc::now(),
             }],
+            worktree_provenance: Vec::new(),
             created_at: Utc::now(),
             last_active: None,
         });
@@ -591,6 +592,7 @@ mod tests {
             started_from: None,
             root: wt_path.clone(),
             worktrees: vec![inspect_worktree(&wt_path, &base("main"))],
+            worktree_provenance: Vec::new(),
             created_at: Utc::now(),
             last_active: None,
         });
@@ -748,6 +750,7 @@ mod tests {
             started_from: None,
             root: PathBuf::from(name),
             worktrees: Vec::new(),
+            worktree_provenance: Vec::new(),
             created_at: Utc::now(),
             last_active: None,
         }
@@ -894,6 +897,7 @@ mod tests {
             started_from: None,
             root: root.clone(),
             worktrees: vec![wt(&root, vec![known.clone()]), wt(&second, Vec::new())],
+            worktree_provenance: Vec::new(),
             created_at: Utc::now(),
             last_active: None,
         });

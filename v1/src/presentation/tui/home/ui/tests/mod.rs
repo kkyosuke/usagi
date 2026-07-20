@@ -116,6 +116,7 @@ fn state_with_sessions(names: &[&str]) -> HomeState {
             started_from: None,
             root: PathBuf::from(format!("/ws/{n}")),
             worktrees: Vec::new(),
+            worktree_provenance: Vec::new(),
             created_at: Utc::now(),
             last_active: None,
         })
@@ -148,6 +149,7 @@ fn overview_state_with_note(note: &str) -> HomeState {
         started_from: None,
         root: PathBuf::from("/repo/.usagi/sessions/alpha"),
         worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
+        worktree_provenance: Vec::new(),
         created_at: Utc::now(),
         last_active: None,
     }]);

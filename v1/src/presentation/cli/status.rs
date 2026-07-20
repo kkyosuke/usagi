@@ -80,6 +80,7 @@ mod tests {
                 origin: Default::default(),
                 started_from: None,
                 root: PathBuf::from("/repo/.usagi/sessions/login"),
+                worktree_provenance: Vec::new(),
                 created_at: ts,
                 last_active: None,
                 worktrees: vec![

@@ -284,6 +284,7 @@ fn footer_and_palette_scope_to_the_cursor_group_in_unite_mode() {
             started_from: None,
             root: PathBuf::from("/wsB/.usagi/sessions/b1"),
             worktrees: Vec::new(),
+            worktree_provenance: Vec::new(),
             created_at: Utc::now(),
             last_active: None,
         }],

@@ -675,6 +675,11 @@ pub struct SessionRecord {
     pub root: PathBuf,
     /// One entry per repository that received a worktree, with its git status.
     pub worktrees: Vec<WorktreeState>,
+    /// Immutable repository/worktree identity captured after session creation.
+    /// Removal requires this evidence; legacy records without it are retained
+    /// for manual recovery rather than inferred from branch names or raw paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worktree_provenance: Vec<WorktreeProvenance>,
     /// When the session was created.
     pub created_at: DateTime<Utc>,
     /// When the session was last *touched*: switched to, or observed producing
@@ -684,6 +689,13 @@ pub struct SessionRecord {
     /// [`created_at`](Self::created_at) via [`last_active_or_created`](Self::last_active_or_created).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_active: Option<DateTime<Utc>>,
+}
+
+/// Canonical source-repository and managed-worktree identity recorded together.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeProvenance {
+    pub repo: PathBuf,
+    pub worktree: PathBuf,
 }
 
 /// Durable progress marker for a session removal transaction.
@@ -703,6 +715,9 @@ pub struct PendingSessionRemoval {
     /// Ancillary cleanup must use these after Git has removed the directories.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub worktrees: Vec<PathBuf>,
+    /// Ownership evidence copied from the session record before teardown.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provenance: Vec<WorktreeProvenance>,
     /// Last durably committed teardown boundary.
     pub phase: SessionRemovalPhase,
 }
@@ -887,11 +902,21 @@ mod tests {
             started_from: None,
             root: PathBuf::from("/tmp/s"),
             worktrees: vec![],
+            worktree_provenance: Vec::new(),
             created_at: Utc.timestamp_opt(0, 0).unwrap(),
             last_active: None,
         };
         let json = serde_json::to_string(&session).unwrap();
         assert!(!json.contains("agent"), "{json}");
+        assert!(!json.contains("worktree_provenance"), "{json}");
+
+        session.worktree_provenance = vec![WorktreeProvenance {
+            repo: PathBuf::from("/repo"),
+            worktree: PathBuf::from("/repo/.usagi/sessions/s"),
+        }];
+        let json = serde_json::to_string(&session).unwrap();
+        let restored: SessionRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.worktree_provenance, session.worktree_provenance);
 
         // A pinned CLI + model round-trips through the file.
         session.agent = SessionAgent {
@@ -955,6 +980,7 @@ mod tests {
             started_from: None,
             root: PathBuf::from("/tmp/s"),
             worktrees: vec![],
+            worktree_provenance: Vec::new(),
             created_at: Utc.timestamp_opt(0, 0).unwrap(),
             last_active: None,
         };
@@ -1029,6 +1055,7 @@ mod tests {
             started_from: None,
             root: PathBuf::from("/tmp/child"),
             worktrees: vec![],
+            worktree_provenance: Vec::new(),
             created_at: Utc.timestamp_opt(0, 0).unwrap(),
             last_active: None,
         };
@@ -1331,6 +1358,7 @@ mod tests {
             started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
+            worktree_provenance: Vec::new(),
             created_at: Utc::now(),
             last_active: None,
         });
@@ -1389,6 +1417,7 @@ mod tests {
             started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
+            worktree_provenance: Vec::new(),
             created_at: Utc::now(),
             last_active: None,
         });
@@ -1446,6 +1475,7 @@ mod tests {
             started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
+            worktree_provenance: Vec::new(),
             created_at: Utc::now(),
             last_active: None,
         });
@@ -1469,6 +1499,7 @@ mod tests {
             started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
+            worktree_provenance: Vec::new(),
             created_at: Utc::now(),
             last_active: None,
         };
@@ -1493,6 +1524,7 @@ mod tests {
             started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
+            worktree_provenance: Vec::new(),
             created_at: Utc::now(),
             last_active: None,
         });
@@ -1528,6 +1560,7 @@ mod tests {
             started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
+            worktree_provenance: Vec::new(),
             created_at: Utc::now(),
             last_active: None,
         });
@@ -1568,6 +1601,7 @@ mod tests {
             started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
+            worktree_provenance: Vec::new(),
             created_at: at,
             last_active: None,
         });
@@ -1638,6 +1672,7 @@ mod tests {
             started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
+            worktree_provenance: Vec::new(),
             created_at: created,
             last_active: None,
         };
@@ -1680,6 +1715,7 @@ mod tests {
             started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
+            worktree_provenance: Vec::new(),
             created_at: Utc::now(),
             last_active: None,
         });
