@@ -22,11 +22,16 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # 閾値は SSoT (scripts/coverage.sh) を lefthook と共有する。
+    # exclusion lint と閾値は scripts/coverage.sh を SSoT とする。
     - name: Load coverage config (SSoT)
       run: |
         . ./scripts/coverage.sh
         echo "COVERAGE_MIN=$COVERAGE_MIN" >> "$GITHUB_ENV"
+
+    - name: Enforce coverage(off) policy
+      run: |
+        . ./scripts/coverage.sh
+        coverage_off_lint
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@nightly
