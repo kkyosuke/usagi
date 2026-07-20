@@ -3057,17 +3057,18 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 mod tests {
     use super::{
         AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, BrowserOpener, Config,
-        ConfigStep, DefaultSettingsPort, Exit, Geometry, MetricsPort, MetricsPortFactory, NewStep,
-        NoDesktopNotifications, NoMetrics, NoMetricsFactory, SessionCommandPort,
-        SessionCommandPortFactory, SessionCommandResult, Start, TerminalAttach, TerminalChunk,
-        TerminalError, UnavailableBrowserOpener, UnavailableDecisionCommandPort,
-        UnavailableEnvironmentStore, UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
-        UnavailableSessionCommandPortFactory, WelcomeStep, WorkspaceLoader, WorkspaceRuntime,
-        WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
-        clear_terminal_selection_on_click, close_exited_panes, controller_terminal_view,
-        forward_live_terminal_input, handle_terminal_pointer, intercept_live_terminal_control,
-        key_to_terminal_bytes, new_project_notice, play_startup_splash, render_controller_frame,
-        render_home_snapshot, restore_open_panes, run as run_from_start, run_with_settings,
+        ConfigStep, ControllerHost, DefaultSettingsPort, Exit, Geometry, MetricsPort,
+        MetricsPortFactory, NewStep, NoDesktopNotifications, NoMetrics, NoMetricsFactory,
+        SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, Start, TerminalAttach,
+        TerminalChunk, TerminalError, UnavailableBackendPort, UnavailableBrowserOpener,
+        UnavailableDecisionCommandPort, UnavailableEnvironmentStore, UnavailablePrSnapshotPort,
+        UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory, WelcomeStep,
+        WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
+        app_event_from_key, clear_terminal_selection_on_click, close_exited_panes,
+        controller_terminal_view, forward_live_terminal_input, handle_terminal_pointer,
+        intercept_live_terminal_control, key_to_terminal_bytes, new_project_notice,
+        play_startup_splash, render_controller_frame, render_home_snapshot, restore_open_panes,
+        run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_controller, safe_session_error, sidebar_pointer_event, step_config, step_new,
         terminal_geometry, welcome_action, write_banner,
@@ -3077,8 +3078,10 @@ mod tests {
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, NewRequest, PendingToken, TabDirection, Target,
+        AppEvent, AppKey, Effect, EnvironmentEntry, NewRequest, PendingToken, SessionCreateIntent,
+        TabDirection, Target,
     };
+    use crate::usecase::application::daemon_backend::DaemonBackend;
     use crate::usecase::application::pane::PaneKind;
     use crate::usecase::application::run as dispatch;
     use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
@@ -3093,10 +3096,12 @@ mod tests {
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::agent::AgentProfileId;
     use usagi_core::domain::id::{
-        DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
+        DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, UserDecisionId,
+        WorkspaceId, WorktreeId,
     };
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
+    use usagi_core::domain::user_decision::UserDecisionAnswer;
     use usagi_core::usecase::settings::SettingsPort;
 
     use usagi_core::domain::recent::{Recent, UniteOverview};
@@ -3256,6 +3261,96 @@ mod tests {
 
     fn snapshot(name: &str) -> WorkspaceSnapshot {
         WorkspaceSnapshot::new(ws(name), state(name))
+    }
+
+    #[test]
+    fn backend_host_and_explicit_error_adapters_cover_the_full_route_matrix() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let (host, actions) = ControllerHost::channel();
+        let mut backend = DaemonBackend::new(
+            Box::new(host.clone()),
+            Box::new(host),
+            Box::new(UnavailableBackendPort),
+            Box::new(UnavailableBackendPort),
+        )
+        .with_decisions(Box::new(UnavailableBackendPort))
+        .with_overlay(Box::new(UnavailableBackendPort));
+
+        for effect in [
+            Effect::CreateSession {
+                workspace,
+                token: PendingToken::from_raw(1),
+                operation_id: OperationId::new(),
+                intent: SessionCreateIntent {
+                    name: "feature".to_owned(),
+                    profile: None,
+                    model: None,
+                },
+            },
+            Effect::RefreshSessions { workspace },
+            Effect::RemoveSession {
+                workspace,
+                session,
+                force: true,
+            },
+            Effect::LaunchAgent {
+                workspace,
+                session: Some(session),
+                operation_id: OperationId::new(),
+                profile: None,
+            },
+            Effect::OpenTerminal {
+                target,
+                operation_id: OperationId::new(),
+                arguments: "new".to_owned(),
+            },
+            Effect::SelectTab {
+                direction: TabDirection::Next,
+            },
+        ] {
+            backend.dispatch(effect);
+        }
+        assert_eq!(actions.try_iter().count(), 6);
+
+        for effect in [
+            Effect::LoadNotes { target },
+            Effect::SaveNotes {
+                target,
+                scratchpad: Scratchpad::default(),
+            },
+            Effect::LoadEnvironment { target },
+            Effect::SaveEnvironment {
+                target,
+                entries: vec![EnvironmentEntry {
+                    name: "KEY".to_owned(),
+                    value: "value".to_owned(),
+                }],
+            },
+            Effect::WorkspaceCommand {
+                workspace,
+                command: crate::usecase::overview::Command::Issue {
+                    arguments: "list".to_owned(),
+                },
+            },
+            Effect::RefreshDecisions { workspace },
+            Effect::ResolveDecision {
+                workspace,
+                decision_id: UserDecisionId::new(),
+                answer: UserDecisionAnswer::Freeform {
+                    text: "answer".to_owned(),
+                },
+            },
+            Effect::LoadPullRequests { target },
+            Effect::LoadPreview { target },
+            Effect::OpenPullRequest {
+                url: "https://github.com/o/r/pull/1".to_owned(),
+            },
+        ] {
+            backend.dispatch(effect);
+        }
+        assert_eq!(backend.drain_events().len(), 10);
     }
 
     type SessionCommandCall = (String, Option<String>, SessionCommand);
