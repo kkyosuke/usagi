@@ -51,9 +51,14 @@ tool は系統ごとに分かれ、`tools/list` に載る `name` と `inputSchem
 | tool | 実挙動 |
 |---|---|
 | `session_create` / `session_remove` / `session_recover_legacy` | daemon IPC を通じて session lifecycle store と worktree を操作する |
+| `session_list` / `session_status` | daemon の durable lifecycle snapshot を返す。`session_status` は agent phase と worktree の branch/status/dirty/merged も投影する |
+| `session_prompt` | `auto` / `queue` / `live` を daemon が解決し、次回 Agent launch 用の durable queue または live Agent PTY へ配送する |
+| `session_delegate_issue` / `session_delegate_brief` | session 作成と durable prompt queue 投入を 1 回の daemon request で完了する |
+| `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す |
+| `session_complete` | 認証済み session Agent の完了メッセージを workspace root coordinator へ `auto` 配送する |
+| `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child の session worktree にある machine-local scratchpad を core usecase 経由で読み書きする |
 | `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合して user-decision store を操作する |
-| `session_prompt` | daemon IPC へ到達し、daemon が `invalid_argument` を返す |
-| issue / memory と、上記以外の session tool | JSON-RPC internal error（`tool not yet implemented`）を返す |
+| issue / memory tool | JSON-RPC internal error（`tool not yet implemented`）を返す |
 | `session_dispatch` / `session_get` / `agent_*` / `supervisor_*` | daemon が明示的な JSON-RPC エラーを返し、durable effect は生じない |
 
 agent は durable effect を保証する行だけを実行手順に使う。daemon は handler の無い action の入力

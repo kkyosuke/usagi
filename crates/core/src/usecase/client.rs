@@ -251,9 +251,22 @@ pub enum SessionAction {
     /// is never part of daemon startup or a normal session refresh.
     RecoverLegacy,
     List,
+    Status,
     Overview,
     Setup,
     Prompt,
+    Complete,
+    Pr,
+    NoteGet,
+    NoteUpdate,
+    TodoList,
+    TodoAdd,
+    TodoUpdate,
+    TodoRemove,
+    DecisionList,
+    DecisionLog,
+    DelegateIssue,
+    DelegateBrief,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

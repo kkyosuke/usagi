@@ -47,6 +47,7 @@ pub enum SessionRuntimeError {
     SessionWorkspaceCreationFailed { name: String, detail: String },
     UnknownSession,
     ScopeUnavailable,
+    Delivery(String),
     Rejected,
     Storage,
 }
@@ -72,6 +73,7 @@ impl SessionRuntimeError {
             }
             Self::UnknownSession => "session was not found".into(),
             Self::ScopeUnavailable => "session scope is not available".into(),
+            Self::Delivery(message) => message.clone(),
             Self::Rejected => {
                 "could not create the session worktree; see the daemon log for details".into()
             }
@@ -231,10 +233,140 @@ impl<G: GitRunner> SessionRuntime<G> {
                     body: snapshot(&state, self.root_worktree_id),
                 })
             }
-            SessionAction::Setup | SessionAction::Prompt => {
-                Err(SessionRuntimeError::InvalidRequest)
-            }
+            SessionAction::Status => self.status(operation_id),
+            SessionAction::Setup
+            | SessionAction::Prompt
+            | SessionAction::Complete
+            | SessionAction::Pr
+            | SessionAction::NoteGet
+            | SessionAction::NoteUpdate
+            | SessionAction::TodoList
+            | SessionAction::TodoAdd
+            | SessionAction::TodoUpdate
+            | SessionAction::TodoRemove
+            | SessionAction::DecisionList
+            | SessionAction::DecisionLog
+            | SessionAction::DelegateIssue
+            | SessionAction::DelegateBrief => Err(SessionRuntimeError::InvalidRequest),
         }
+    }
+
+    fn status(&self, operation_id: &str) -> Result<SessionReply, SessionRuntimeError> {
+        let state = self.state()?;
+        let base = self
+            .git
+            .run(&self.repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .map_err(|_| SessionRuntimeError::Storage)?;
+        if !base.success {
+            return Err(SessionRuntimeError::Storage);
+        }
+        let base = base.stdout.trim();
+        let sessions = state
+            .sessions
+            .iter()
+            .filter(|session| {
+                session.lifecycle
+                    == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
+            })
+            .map(|session| {
+                let root = self
+                    .repo_root
+                    .join(STATE_DIR)
+                    .join(SESSIONS_DIR)
+                    .join(&session.name);
+                let porcelain = self
+                    .git
+                    .run(&root, &["status", "--porcelain"])
+                    .map_err(|_| SessionRuntimeError::Storage)?;
+                let branch = self
+                    .git
+                    .run(&root, &["rev-parse", "--abbrev-ref", "HEAD"])
+                    .map_err(|_| SessionRuntimeError::Storage)?;
+                let merged = self
+                    .git
+                    .run(&root, &["merge-base", "--is-ancestor", "HEAD", base])
+                    .map_err(|_| SessionRuntimeError::Storage)?;
+                if !porcelain.success || !branch.success {
+                    return Err(SessionRuntimeError::Storage);
+                }
+                let dirty = !porcelain.stdout.trim().is_empty();
+                let merged = merged.success;
+                let status = if dirty {
+                    "dirty"
+                } else if merged {
+                    "synced"
+                } else {
+                    "local"
+                };
+                Ok(json!({
+                    "name": session.name,
+                    "session_id": session.session_id,
+                    "lifecycle": session.lifecycle,
+                    "agent_phase": "none",
+                    "worktrees": [{
+                        "path": root,
+                        "branch": branch.stdout.trim(),
+                        "status": status,
+                        "dirty": dirty,
+                        "merged": merged,
+                    }],
+                }))
+            })
+            .collect::<Result<Vec<_>, SessionRuntimeError>>()?;
+        Ok(SessionReply {
+            operation_id: operation_id.to_owned(),
+            revision: state.state_revision,
+            body: json!({"workspace_id": state.workspace_id, "revision": state.state_revision, "sessions": sessions}),
+        })
+    }
+
+    /// Resolves an available session by its public name to its stable identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe storage or unknown-session error.
+    pub fn session_id(&self, name: &str) -> Result<SessionId, SessionRuntimeError> {
+        self.state()?
+            .sessions
+            .into_iter()
+            .find(|session| {
+                session.name == name
+                    && session.lifecycle
+                        == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
+            })
+            .map(|session| session.session_id)
+            .ok_or(SessionRuntimeError::UnknownSession)
+    }
+
+    /// Resolves an available stable session identity to its trusted worktree.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe storage or unknown-session error.
+    pub fn session_scope_by_id(
+        &self,
+        session_id: SessionId,
+    ) -> Result<SessionScope, SessionRuntimeError> {
+        let state = self.state()?;
+        let session = state
+            .sessions
+            .into_iter()
+            .find(|session| {
+                session.session_id == session_id
+                    && session.lifecycle
+                        == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
+            })
+            .ok_or(SessionRuntimeError::UnknownSession)?;
+        Ok(SessionScope {
+            workspace_id: state.workspace_id,
+            session_id,
+            worktree_id: session.worktree_id,
+            path: self
+                .repo_root
+                .join(STATE_DIR)
+                .join(SESSIONS_DIR)
+                .join(session.name),
+        })
     }
 
     /// # Errors

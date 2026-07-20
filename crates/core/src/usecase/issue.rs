@@ -83,6 +83,50 @@ pub fn get(store: &IssueStore, number: u32) -> Result<Option<Issue>> {
     store.read(number)
 }
 
+/// Renders a committed issue as a self-contained implementation prompt.
+#[must_use]
+pub fn to_prompt(issue: &Issue) -> String {
+    let list = |values: &[u32]| {
+        if values.is_empty() {
+            "なし".to_owned()
+        } else {
+            values
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
+    format!(
+        "あなたはこのセッションの worktree 内で issue #{number}「{title}」を実装します。\n\n\
+worktree は既に用意されています。リポジトリの開発ワークフローと規約に従ってください。\n\n\
+着手時に issue #{number} を in-progress に更新し、実装・テスト・ドキュメント更新・品質チェックを行ってください。\
+ PR を開く前に issue #{number} を done に更新し、その差分を同じ PR に含めてください。\n\n\
+## issue #{number}: {title}\n\n\
+- status: {status}\n- priority: {priority}\n- labels: {labels}\n- dependson: {dependson}\n- related: {related}\n- parent: {parent}\n- milestone: {milestone}\n\n{body}\n",
+        number = issue.number,
+        title = issue.title,
+        status = issue.status,
+        priority = issue.priority,
+        labels = if issue.labels.is_empty() {
+            "なし".to_owned()
+        } else {
+            issue.labels.join(", ")
+        },
+        dependson = list(&issue.dependson),
+        related = list(&issue.related),
+        parent = issue
+            .parent
+            .map_or_else(|| "なし".to_owned(), |value| value.to_string()),
+        milestone = issue.milestone.as_deref().unwrap_or("なし"),
+        body = if issue.body.trim().is_empty() {
+            "（本文なし）"
+        } else {
+            issue.body.trim()
+        },
+    )
+}
+
 /// Metadata summaries for every issue, in number order.
 ///
 /// # Errors
@@ -155,7 +199,7 @@ pub fn delete(store: &IssueStore, number: u32) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{IssuePatch, NewIssue, create, delete, get, list, update};
+    use super::{IssuePatch, NewIssue, create, delete, get, list, to_prompt, update};
     use crate::domain::issue::{IssuePriority, IssueStatus};
     use crate::infrastructure::store::issue::IssueStore;
     use chrono::{DateTime, TimeZone, Utc};
@@ -192,6 +236,37 @@ mod tests {
         assert_eq!(first.status, IssueStatus::Todo);
         assert_eq!(first.priority, IssuePriority::High);
         assert_eq!(first.created_at, ts(20));
+    }
+
+    #[test]
+    fn to_prompt_contains_workflow_metadata_and_body() {
+        let (_tmp, store) = store();
+        let issue = create(
+            &store,
+            NewIssue {
+                title: "wire sessions".into(),
+                priority: IssuePriority::High,
+                labels: vec!["mcp".into()],
+                dependson: vec![1, 2],
+                parent: Some(9),
+                body: "Implement it.".into(),
+                ..Default::default()
+            },
+            ts(20),
+        )
+        .unwrap();
+        let prompt = to_prompt(&issue);
+        assert!(prompt.contains("issue #1「wire sessions」"));
+        assert!(prompt.contains("labels: mcp"));
+        assert!(prompt.contains("dependson: 1, 2"));
+        assert!(prompt.contains("parent: 9"));
+        assert!(prompt.contains("Implement it."));
+        assert!(prompt.contains("PR を開く前に issue #1 を done"));
+
+        let empty = create(&store, NewIssue::default(), ts(21)).unwrap();
+        let empty_prompt = to_prompt(&empty);
+        assert!(empty_prompt.contains("labels: なし"));
+        assert!(empty_prompt.contains("（本文なし）"));
     }
 
     #[test]
