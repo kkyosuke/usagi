@@ -1580,7 +1580,7 @@ fn restore_open_panes(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, geom
     }
 }
 
-/// Close the focused pane tab (Ctrl-O x) and perform the daemon transport work
+/// Close the focused pane tab (Ctrl-O x / Ctrl-O Ctrl-X) and perform the daemon transport work
 /// the runtime reports: detach a live subscription, or drop a still-pending
 /// launch (both its queued work and its completion routing) so it cannot spawn a
 /// detached daemon terminal behind the vanished placeholder.
@@ -2761,9 +2761,9 @@ mod tests {
         UnavailablePrSnapshotPort, UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader,
         WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
         clear_terminal_selection_on_click, close_exited_panes, controller_terminal_view,
-        handle_terminal_pointer, key_to_terminal_bytes, new_project_notice, play_startup_splash,
-        render_controller_frame, render_home_snapshot, restore_open_panes, run as run_from_start,
-        run_with_settings,
+        handle_terminal_pointer, intercept_live_terminal_control, key_to_terminal_bytes,
+        new_project_notice, play_startup_splash, render_controller_frame, render_home_snapshot,
+        restore_open_panes, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_controller, safe_session_error, sidebar_pointer_event, step_config, step_new,
         terminal_geometry, welcome_action, write_banner,
@@ -3547,6 +3547,85 @@ mod tests {
         assert!(runtime.active_pane().tabs().is_empty());
         assert!(!runtime.state().has_live_pane());
         assert_eq!(*detaches.lock().unwrap(), vec![5]);
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn close_tab_live_action_detaches_the_focused_terminal() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let detaches = Arc::new(Mutex::new(Vec::new()));
+        let (mut ui, mut runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(ScriptedAgentPort {
+                terminal,
+                subscription: 8,
+                replay: Vec::new(),
+                exit_on_poll: false,
+                detaches: Arc::clone(&detaches),
+            }),
+        );
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        let mut browser = UnavailableBrowserOpener;
+        let mut pending_targets = std::collections::HashMap::new();
+
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::CloseTab),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending_targets,
+            20,
+            80,
+            0,
+            0,
+        ));
+
+        assert!(runtime.active_pane().tabs().is_empty());
+        assert_eq!(*detaches.lock().unwrap(), vec![8]);
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn close_tab_live_action_cancels_the_focused_pending_launch() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.handle_key(Key::Down);
+        let _ = runtime.handle_key(Key::Enter);
+        let operation = OperationId::new();
+        let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
+        let _ = runtime.select_tab(crate::usecase::application::controller::TabDirection::Next);
+        let mut pending_targets = std::collections::HashMap::from([(operation, target)]);
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        let mut browser = UnavailableBrowserOpener;
+
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::CloseTab),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending_targets,
+            20,
+            80,
+            0,
+            0,
+        ));
+
+        assert!(runtime.active_pane().tabs().is_empty());
+        assert!(!pending_targets.contains_key(&operation));
     }
 
     /// A daemon inventory double for restore-on-open. It returns a fixed set of
