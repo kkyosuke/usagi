@@ -44,9 +44,69 @@ pub struct DurableTerminalRecord {
     pub state: TerminalRuntimeState,
     pub process: Option<ProcessIdentity>,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalStoreSnapshot {
+    #[serde(default = "TerminalStoreSnapshot::current_schema_version")]
+    pub schema_version: u16,
     pub records: Vec<DurableTerminalRecord>,
+}
+impl Default for TerminalStoreSnapshot {
+    fn default() -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            records: Vec::new(),
+        }
+    }
+}
+impl TerminalStoreSnapshot {
+    pub const SCHEMA_VERSION: u16 = 1;
+
+    const fn current_schema_version() -> u16 {
+        Self::SCHEMA_VERSION
+    }
+
+    /// Validates and projects records whose PTY owner died with the previous daemon.
+    pub fn reconcile_after_daemon_restart(mut self) -> Result<(Self, usize), GenericTerminalError> {
+        self.validate()?;
+        let mut interrupted = 0;
+        for record in &mut self.records {
+            if matches!(
+                record.state,
+                TerminalRuntimeState::Reserved
+                    | TerminalRuntimeState::Running
+                    | TerminalRuntimeState::ReconcileRequired(_)
+            ) {
+                record.state = TerminalRuntimeState::ReconcileRequired(
+                    TerminalReconcileState::IdentityUnknown,
+                );
+                interrupted += 1;
+            }
+        }
+        Ok((self, interrupted))
+    }
+
+    fn validate(&self) -> Result<(), GenericTerminalError> {
+        if self.schema_version != Self::SCHEMA_VERSION {
+            return Err(GenericTerminalError::InvalidSnapshot);
+        }
+        let mut keys = std::collections::BTreeSet::new();
+        for record in &self.records {
+            let terminal = &record.terminal;
+            let scope = &record.launch.request.scope;
+            if record.launch.schema_version != DurableTerminalLaunchSnapshot::SCHEMA_VERSION
+                || !keys.insert(terminal.terminal_id.as_str())
+                || terminal.workspace_id != scope.workspace_id
+                || terminal.session_id != scope.session_id
+                || terminal.worktree_id != scope.worktree_id
+                || terminal.workspace_id != record.operation.workspace_id
+                || terminal.session_id != record.operation.session_id
+                || terminal.daemon_generation != record.operation.owner_daemon_generation
+            {
+                return Err(GenericTerminalError::InvalidSnapshot);
+            }
+        }
+        Ok(())
+    }
 }
 pub trait TerminalStore {
     type Error;
@@ -76,6 +136,7 @@ pub enum GenericTerminalError {
     ConcurrencyExhausted,
     Terminal(RegistryError),
     Store,
+    InvalidSnapshot,
     SpawnFailed,
     ReconcileRequired(TerminalReconcileState),
     UnknownTerminal,
@@ -97,6 +158,36 @@ impl GenericTerminalCoordinator {
             records: BTreeMap::new(),
             terminals: TerminalRegistry::new(journal_limit, input_cache_limit),
         }
+    }
+    pub fn from_snapshot(
+        limit: usize,
+        journal_limit: usize,
+        input_cache_limit: usize,
+        snapshot: TerminalStoreSnapshot,
+    ) -> Result<Self, GenericTerminalError> {
+        snapshot.validate()?;
+        if snapshot.records.iter().any(|record| {
+            matches!(
+                record.state,
+                TerminalRuntimeState::Reserved | TerminalRuntimeState::Running
+            ) || matches!(
+                record.state,
+                TerminalRuntimeState::ReconcileRequired(state)
+                    if state != TerminalReconcileState::IdentityUnknown
+            )
+        }) {
+            return Err(GenericTerminalError::InvalidSnapshot);
+        }
+        let records = snapshot
+            .records
+            .into_iter()
+            .map(|record| (record.terminal.terminal_id.as_str(), record))
+            .collect::<BTreeMap<_, _>>();
+        Ok(Self {
+            limit,
+            records,
+            terminals: TerminalRegistry::new(journal_limit, input_cache_limit),
+        })
     }
     pub fn launch<R: TerminalProfileResolver, S: TerminalStore, P: GenericPtySpawner>(
         &mut self,
@@ -227,6 +318,10 @@ impl GenericTerminalCoordinator {
             .resize(terminal, geometry)
             .map_err(GenericTerminalError::Terminal)
     }
+    /// Verifies durable ownership before an IPC adapter performs any PTY effect.
+    pub fn ensure_running(&self, terminal: &TerminalRef) -> Result<(), GenericTerminalError> {
+        self.running(terminal)
+    }
     pub fn input<W: PtyWriter>(
         &mut self,
         terminal: &TerminalRef,
@@ -284,6 +379,7 @@ impl GenericTerminalCoordinator {
     #[must_use]
     pub fn snapshot(&self) -> TerminalStoreSnapshot {
         TerminalStoreSnapshot {
+            schema_version: TerminalStoreSnapshot::SCHEMA_VERSION,
             records: self.records.values().cloned().collect(),
         }
     }
@@ -488,6 +584,38 @@ mod tests {
             start_identity: "start".into(),
             process_group: 7,
         }
+    }
+    #[test]
+    fn restart_projection_fences_reserved_records_and_rejects_unknown_launch_schema() {
+        let request = request();
+        let (terminal, fence) = refs(&request);
+        let mut coordinator = GenericTerminalCoordinator::new(1, 64, 1);
+        coordinator
+            .launch(
+                &request,
+                terminal,
+                fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver,
+                &mut Store::default(),
+                &mut Spawner(Ok(process())),
+            )
+            .unwrap();
+        let mut reserved = coordinator.snapshot();
+        reserved.records[0].state = TerminalRuntimeState::Reserved;
+        let (reserved, interrupted) = reserved.reconcile_after_daemon_restart().unwrap();
+        assert_eq!(interrupted, 1);
+        assert_eq!(
+            reserved.records[0].state,
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::IdentityUnknown)
+        );
+
+        let mut unknown = coordinator.snapshot();
+        unknown.records[0].launch.schema_version += 1;
+        assert_eq!(
+            unknown.reconcile_after_daemon_restart(),
+            Err(GenericTerminalError::InvalidSnapshot)
+        );
     }
     #[test]
     fn resolve_once_persists_without_env_and_disconnect_keeps_slot() {

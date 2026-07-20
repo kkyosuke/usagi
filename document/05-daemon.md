@@ -138,10 +138,18 @@ daemon generation の終了とともに消える。
 するため、途中の snapshot を公開せず、電源断後にも rename を永続化する。保存に失敗した場合は既存の
 snapshot を置換せず、失敗した temporary file を削除する。
 
-daemon restart 時は `agents.json` の未終端 runtime を `identity_unknown` の reconcile state に atomic に
-移す。死んだ daemon の PTY master は復元不能であり、PID だけでは child の所有権を証明できないため、この
-遷移は attach、input、kill、replacement spawn を行わない。`exited` runtime はそのまま残る。reconcile 件数と
-store failure は日次 error log に記録され、session lifecycle vocabulary は変更しない。
+daemon restart 時は `agents.json` と `terminals.json` を spawn admission より前に読む。両 snapshot の
+未終端 runtime を `identity_unknown` の reconcile state に atomic に移し、generic terminal は元の
+workspace / session / worktree / daemon generation / operation fence を保持したまま inventory に
+`live: false` として投影する。死んだ daemon の PTY master は復元不能であり、PID だけでは child の所有権を
+証明できないため、この遷移は attach、input、resize、kill、replacement spawn を行わない。`exited` runtime
+はそのまま残る。
+
+generic terminal の旧 snapshot は、次の terminal launch による保存でも削除しない。snapshot の JSON が破損、
+schema が未知、または record の scope / generation / operation fence が不整合なら daemon startup を
+fail-closed にし、PTY spawn と `terminals.json` の上書きを行わない。reconcile 件数と store failure は日次
+error log に記録され、session lifecycle vocabulary は変更しない。旧 PTY 自体は resume せず、利用者には
+inventory の `live: false` と typed safe error で非 live を明示する。
 
 ## failure logging
 
