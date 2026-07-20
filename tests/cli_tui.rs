@@ -2,10 +2,22 @@
 
 use std::ffi::OsStr;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
+
+use usagi_core::infrastructure::ipc::{
+    BuildIdentity, DaemonGeneration, Envelope, EnvelopeKind, ErrorCode, OperationId, ProtocolError,
+    ResponseOutcome, read_json_frame, write_json_frame,
+};
+use usagi_daemon::infrastructure::unix_transport::{
+    EndpointLocator, EndpointState, SecureUnixListener,
+};
 
 /// Daemon lifecycle tests spawn the same test binary as a background daemon.
 /// Serialize those starts so parallel integration tests cannot race its process
@@ -65,6 +77,115 @@ fn run_with_home(args: &[&OsStr], home: &Path) -> Output {
 
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[derive(Clone, Copy)]
+enum FakeDaemonReply {
+    CloseAfterRequest,
+    Error(ErrorCode, &'static str, &'static str),
+    Accepted,
+    Ok,
+}
+
+fn spawn_fake_daemon(home: &Path, reply: FakeDaemonReply) -> thread::JoinHandle<()> {
+    let data_dir = channel_data_dir(home);
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let generation = DaemonGeneration(format!("fake-{}", std::process::id()));
+    let listener = SecureUnixListener::bind(&data_dir, generation.clone()).unwrap();
+    thread::spawn(move || {
+        let mut stream = loop {
+            match listener.accept() {
+                Ok(stream) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("fake daemon accept failed: {error}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        let mut writer = stream.try_clone().unwrap();
+        let server = usagi_daemon::presentation::ipc::server_protocol(
+            generation,
+            "fake-connection".into(),
+            BuildIdentity {
+                version: env!("CARGO_PKG_VERSION").into(),
+                commit: "unknown".into(),
+                target: std::env::consts::ARCH.into(),
+            },
+        );
+        let hello = usagi_daemon::presentation::ipc::handshake(&mut stream, &mut writer, &server)
+            .unwrap()
+            .unwrap();
+        let request = read_json_frame::<Envelope>(&mut stream, 1_048_576)
+            .unwrap()
+            .unwrap();
+        if matches!(reply, FakeDaemonReply::CloseAfterRequest) {
+            return;
+        }
+        let EnvelopeKind::Request { request_id, .. } = request.kind else {
+            panic!("fake daemon expected a request envelope");
+        };
+        let (outcome, body) = match reply {
+            FakeDaemonReply::CloseAfterRequest => unreachable!(),
+            FakeDaemonReply::Error(code, message, error_id) => {
+                let mut error = ProtocolError::new(code, message);
+                error.error_id = error_id.into();
+                (ResponseOutcome::Error(error), serde_json::json!(null))
+            }
+            FakeDaemonReply::Accepted => (
+                ResponseOutcome::Accepted {
+                    operation_id: OperationId("fake-operation".into()),
+                    operation_revision: 7,
+                },
+                serde_json::json!({"accepted": true}),
+            ),
+            FakeDaemonReply::Ok => (ResponseOutcome::Ok, serde_json::json!({"result": "done"})),
+        };
+        write_json_frame(
+            &mut writer,
+            &Envelope {
+                protocol: hello.protocol,
+                daemon_generation: hello.daemon_generation,
+                kind: EnvelopeKind::Response {
+                    request_id,
+                    outcome,
+                    body,
+                },
+            },
+            1_048_576,
+        )
+        .unwrap();
+    })
+}
+
+fn install_absent_daemon_endpoint(home: &Path) {
+    let data_dir = channel_data_dir(home);
+    let daemon = data_dir.join("daemon");
+    let generation = DaemonGeneration("absent-generation".into());
+    let generation_dir = daemon.join("generations").join(&generation.0);
+    std::fs::create_dir_all(&generation_dir).unwrap();
+    for directory in [&daemon, &daemon.join("generations"), &generation_dir] {
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let socket = generation_dir.join("sock");
+    drop(UnixListener::bind(&socket).unwrap());
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let locator = daemon.join("current.json");
+    std::fs::write(
+        &locator,
+        serde_json::to_vec(&EndpointLocator {
+            generation,
+            endpoint: "generations/absent-generation/sock".into(),
+            state: EndpointState::Active,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::set_permissions(locator, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
 fn run_mcp(home: &Path, cwd: &Path, requests: &str) -> Output {
@@ -181,7 +302,7 @@ fn cli_daemon_request_autostarts_without_manual_daemon_start() {
         ],
         home.path(),
     );
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("session was not found"),
         "daemon request error: {}",
@@ -189,6 +310,94 @@ fn cli_daemon_request_autostarts_without_manual_daemon_start() {
     );
     assert_daemon_running(home.path());
     stop_daemon(home.path());
+}
+
+#[test]
+fn cli_daemon_reply_contract_maps_stdout_stderr_and_exit_code() {
+    struct Case {
+        name: &'static str,
+        reply: Option<FakeDaemonReply>,
+        exit_code: i32,
+        stdout: &'static str,
+        stderr: &'static str,
+    }
+
+    let cases = [
+        Case {
+            name: "daemon absent",
+            reply: None,
+            exit_code: 1,
+            stdout: "",
+            stderr: "daemon unavailable [unavailable]: daemon endpoint is unavailable\n",
+        },
+        Case {
+            name: "socket transport failure",
+            reply: Some(FakeDaemonReply::CloseAfterRequest),
+            exit_code: 1,
+            stdout: "",
+            stderr: "daemon request failed [unavailable]: daemon transport is unavailable\n",
+        },
+        Case {
+            name: "protocol rejection",
+            reply: Some(FakeDaemonReply::Error(
+                ErrorCode::ProtocolMismatch,
+                "protocol revision was rejected",
+                "protocol-481",
+            )),
+            exit_code: 1,
+            stdout: "",
+            stderr: "daemon request failed [protocol_mismatch; error_id=protocol-481]: protocol revision was rejected\n",
+        },
+        Case {
+            name: "stale application request",
+            reply: Some(FakeDaemonReply::Error(
+                ErrorCode::StaleTarget,
+                "request target is stale",
+                "stale-481",
+            )),
+            exit_code: 1,
+            stdout: "",
+            stderr: "daemon request failed [stale_target; error_id=stale-481]: request target is stale\n",
+        },
+        Case {
+            name: "accepted",
+            reply: Some(FakeDaemonReply::Accepted),
+            exit_code: 0,
+            stdout: "accepted operation fake-operation (revision 7)\n",
+            stderr: "",
+        },
+        Case {
+            name: "success",
+            reply: Some(FakeDaemonReply::Ok),
+            exit_code: 0,
+            stdout: "{\"result\":\"done\"}\n",
+            stderr: "",
+        },
+    ];
+
+    for case in cases {
+        let home = short_home();
+        let server = if let Some(reply) = case.reply {
+            Some(spawn_fake_daemon(home.path(), reply))
+        } else {
+            install_absent_daemon_endpoint(home.path());
+            None
+        };
+        let output = run_with_home(
+            &[
+                OsStr::new("session"),
+                OsStr::new("remove"),
+                OsStr::new("fixture"),
+            ],
+            home.path(),
+        );
+        assert_eq!(output.status.code(), Some(case.exit_code), "{}", case.name);
+        assert_eq!(stdout(&output), case.stdout, "{}", case.name);
+        assert_eq!(stderr(&output), case.stderr, "{}", case.name);
+        if let Some(server) = server {
+            server.join().unwrap();
+        }
+    }
 }
 
 #[test]

@@ -6,8 +6,8 @@
 //! ここに置くのは **ターミナルから `usagi <cmd>` で叩く人間向けコマンド** だけである。
 //! エージェント向けの issue / memory 操作は MCP 面（`crate::mcp`）が受け持ち、CLI には置かない。
 //!
-//! TUI を開くコマンドは [`RunOutcome::LaunchTui`] を返し、合成ルートが TUI 面へ接続する。
-//! それ以外のコマンドは出力後に [`RunOutcome::Exit`] を返す。
+//! TUI を開くコマンドは [`RunOutcome::LaunchTui`]、daemon command は
+//! [`RunOutcome::DaemonRequest`] を返し、合成ルートが各実行面と終了 status へ接続する。
 
 pub mod commands;
 pub mod hooks;
