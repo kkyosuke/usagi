@@ -413,6 +413,37 @@ mod tests {
     }
 
     #[test]
+    fn to_prompt_contains_workflow_metadata_and_body() {
+        let (_tmp, store) = store();
+        let issue = create(
+            &store,
+            NewIssue {
+                title: "wire sessions".into(),
+                priority: IssuePriority::High,
+                labels: vec!["mcp".into()],
+                dependson: vec![1, 2],
+                parent: Some(9),
+                body: "Implement it.".into(),
+                ..Default::default()
+            },
+            ts(20),
+        )
+        .unwrap();
+        let prompt = to_prompt(&issue);
+        assert!(prompt.contains("issue #1「wire sessions」"));
+        assert!(prompt.contains("labels: mcp"));
+        assert!(prompt.contains("dependson: 1, 2"));
+        assert!(prompt.contains("parent: 9"));
+        assert!(prompt.contains("Implement it."));
+        assert!(prompt.contains("issue #1 の status を `done`"));
+
+        let empty = create(&store, NewIssue::default(), ts(21)).unwrap();
+        let empty_prompt = to_prompt(&empty);
+        assert!(empty_prompt.contains("labels: なし"));
+        assert!(empty_prompt.contains("（本文なし）"));
+    }
+
+    #[test]
     fn create_reserves_distinct_numbers_for_concurrent_sibling_worktrees() {
         let tmp = tempfile::tempdir().unwrap();
         let common_git_dir = tmp.path().join("common.git");

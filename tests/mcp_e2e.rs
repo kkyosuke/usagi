@@ -48,6 +48,53 @@ fn production_session_create_reaches_daemon_and_durable_lifecycle() {
 }
 
 #[test]
+fn production_session_prompt_is_durable_and_status_observes_the_session() {
+    let mut mcp = McpHarness::start();
+    assert!(mcp.tool("session_create", &json!({"name":"prompt-target"}))["error"].is_null());
+    let response = mcp.tool(
+        "session_prompt",
+        &json!({"name":"prompt-target","prompt":"continue the task","mode":"queue"}),
+    );
+    assert!(response.get("error").is_none(), "{response}");
+    let delivered = tool_text(&response);
+    assert_eq!(delivered["delivered_to"], "queue");
+    assert_eq!(delivered["queued"], true);
+
+    let dispatch = fs::read_to_string(mcp.data_dir().join("daemon/dispatch.json")).unwrap();
+    assert!(dispatch.contains("continue the task"));
+    let status = tool_text(&mcp.tool("session_status", &json!({})));
+    let target = status["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["name"] == "prompt-target")
+        .unwrap();
+    assert_eq!(target["agent_phase"], "none");
+    assert_eq!(target["worktrees"][0]["dirty"], false);
+    assert!(target["worktrees"][0]["merged"].is_boolean());
+}
+
+#[test]
+fn production_delegate_brief_creates_a_session_and_queues_the_wrapped_prompt() {
+    let mut mcp = McpHarness::start();
+    let response = mcp.tool(
+        "session_delegate_brief",
+        &json!({"name":"brief-target","brief":"investigate flaky startup"}),
+    );
+    assert!(response.get("error").is_none(), "{response}");
+    let delegated = tool_text(&response);
+    assert_eq!(delegated["name"], "brief-target");
+    assert_eq!(delegated["delivered_to"], "queue");
+    assert!(
+        mcp.workspace()
+            .join(".usagi/sessions/brief-target/.git")
+            .exists()
+    );
+    let dispatch = fs::read_to_string(mcp.data_dir().join("daemon/dispatch.json")).unwrap();
+    assert!(dispatch.contains("investigate flaky startup"));
+}
+
+#[test]
 fn production_issue_writes_are_refused_at_the_workspace_root() {
     let mut mcp = McpHarness::start();
     let read = mcp.tool("issue_get", &json!({"number":1}));

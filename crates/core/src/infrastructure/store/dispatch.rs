@@ -35,6 +35,16 @@ struct Registry {
     agents: Vec<Agent>,
     runs: Vec<DispatchRun>,
     bindings: Vec<DispatchBinding>,
+    #[serde(default)]
+    prompts: Vec<QueuedPrompt>,
+}
+
+/// One prompt waiting for the next Agent launch in a durable session scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedPrompt {
+    pub session_id: Option<SessionId>,
+    pub prompt: String,
+    pub queued_at: DateTime<Utc>,
 }
 
 /// File-backed durable dispatch state rooted at the daemon state directory.
@@ -53,6 +63,65 @@ impl DispatchStore {
     #[must_use]
     pub fn registry_path(&self) -> PathBuf {
         self.dir.join(REGISTRY_FILE)
+    }
+
+    /// Replaces the next-launch prompt for a session. A single slot prevents a
+    /// caller retry from creating an unbounded duplicate queue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be locked, read, or written.
+    pub fn queue_prompt(
+        &self,
+        session_id: Option<SessionId>,
+        prompt: String,
+        queued_at: DateTime<Utc>,
+    ) -> Result<QueuedPrompt> {
+        self.mutate_registry(|registry| {
+            let queued = QueuedPrompt {
+                session_id,
+                prompt,
+                queued_at,
+            };
+            if let Some(existing) = registry
+                .prompts
+                .iter_mut()
+                .find(|item| item.session_id == session_id)
+            {
+                *existing = queued.clone();
+            } else {
+                registry.prompts.push(queued.clone());
+            }
+            queued
+        })
+    }
+
+    /// Reads, without consuming, the prompt waiting for a session launch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be read.
+    pub fn queued_prompt(&self, session_id: Option<SessionId>) -> Result<Option<QueuedPrompt>> {
+        Ok(self
+            .load_registry()?
+            .prompts
+            .into_iter()
+            .find(|item| item.session_id == session_id))
+    }
+
+    /// Removes a prompt only after its matching Agent launch succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be locked, read, or written.
+    pub fn consume_prompt(&self, session_id: Option<SessionId>) -> Result<Option<QueuedPrompt>> {
+        self.mutate_registry(|registry| {
+            registry
+                .prompts
+                .iter()
+                .position(|item| item.session_id == session_id)
+                .map(|index| registry.prompts.remove(index))
+        })
     }
 
     #[must_use]
@@ -467,6 +536,31 @@ mod tests {
         );
         assert_eq!(store.agents().unwrap().len(), 2);
         assert!(store.registry_path().is_file());
+    }
+
+    #[test]
+    fn prompt_queue_replaces_peeks_and_consumes_per_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let session = SessionId::new();
+        store
+            .queue_prompt(Some(session), "first".into(), now())
+            .unwrap();
+        store
+            .queue_prompt(Some(session), "second".into(), now())
+            .unwrap();
+        store.queue_prompt(None, "root".into(), now()).unwrap();
+        assert_eq!(
+            store.queued_prompt(Some(session)).unwrap().unwrap().prompt,
+            "second"
+        );
+        assert_eq!(
+            store.consume_prompt(Some(session)).unwrap().unwrap().prompt,
+            "second"
+        );
+        assert!(store.queued_prompt(Some(session)).unwrap().is_none());
+        assert_eq!(store.consume_prompt(None).unwrap().unwrap().prompt, "root");
+        assert!(store.consume_prompt(None).unwrap().is_none());
     }
 
     #[test]

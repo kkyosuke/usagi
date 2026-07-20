@@ -227,6 +227,7 @@ fn tools_call(
         .and_then(|p| p.get("arguments"))
         .cloned()
         .unwrap_or_else(|| json!({}));
+    attach_session_caller(name, &mut arguments);
     if name == "session_dispatch" {
         let Some(agent) = arguments.get("agent") else {
             return protocol::error(id, error_code::INVALID_PARAMS, "missing agent");
@@ -331,6 +332,26 @@ fn store_tool_call(id: Value, name: &str, arguments: &Value) -> Value {
     }
 }
 
+#[coverage(off)]
+fn attach_session_caller(name: &str, arguments: &mut Value) {
+    if matches!(
+        name,
+        "session_complete"
+            | "session_note_get"
+            | "session_note_update"
+            | "session_todo_list"
+            | "session_todo_add"
+            | "session_todo_update"
+            | "session_todo_remove"
+            | "session_decision_list"
+            | "session_decision_log"
+    ) && let Ok(credential) = std::env::var("USAGI_MCP_CALLER_CREDENTIAL")
+        && !credential.is_empty()
+    {
+        arguments["_caller_credential"] = Value::String(credential);
+    }
+}
+
 /// `resources/read` を処理する。`uri` を取り出して resource レジストリを引き、本文を
 /// `contents` に包んで返す。`uri` 欠落は `INVALID_PARAMS`、未知 URI は resource が無い旨の
 /// `INVALID_PARAMS` を返す。
@@ -353,10 +374,24 @@ fn resources_read(id: Value, params: Option<&Value>) -> Value {
 fn session_action(name: &str) -> Option<SessionAction> {
     match name {
         "session_create" => Some(SessionAction::Create),
+        "session_list" => Some(SessionAction::List),
+        "session_status" => Some(SessionAction::Status),
+        "session_complete" => Some(SessionAction::Complete),
+        "session_pr" => Some(SessionAction::Pr),
         "session_remove" => Some(SessionAction::Remove),
         "session_recover_legacy" => Some(SessionAction::RecoverLegacy),
         "session_setup" => Some(SessionAction::Setup),
         "session_prompt" => Some(SessionAction::Prompt),
+        "session_note_get" => Some(SessionAction::NoteGet),
+        "session_note_update" => Some(SessionAction::NoteUpdate),
+        "session_todo_list" => Some(SessionAction::TodoList),
+        "session_todo_add" => Some(SessionAction::TodoAdd),
+        "session_todo_update" => Some(SessionAction::TodoUpdate),
+        "session_todo_remove" => Some(SessionAction::TodoRemove),
+        "session_decision_list" => Some(SessionAction::DecisionList),
+        "session_decision_log" => Some(SessionAction::DecisionLog),
+        "session_delegate_issue" => Some(SessionAction::DelegateIssue),
+        "session_delegate_brief" => Some(SessionAction::DelegateBrief),
         _ => None,
     }
 }
@@ -647,6 +682,38 @@ mod tests {
                         "content"
                     })
             );
+        }
+    }
+
+    #[test]
+    fn observation_scratchpad_and_delegate_tools_route_to_the_daemon() {
+        for name in [
+            "session_list",
+            "session_status",
+            "session_complete",
+            "session_pr",
+            "session_note_get",
+            "session_note_update",
+            "session_todo_list",
+            "session_todo_add",
+            "session_todo_update",
+            "session_todo_remove",
+            "session_decision_list",
+            "session_decision_log",
+            "session_delegate_issue",
+            "session_delegate_brief",
+        ] {
+            let input = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{{}}}}}}"#
+            ) + "\n";
+            let mut out = Vec::new();
+            let mut client = RecordingClient {
+                reply: Ok(DaemonReply::Ok(serde_json::json!({"connected":true}))),
+                requests: vec![],
+            };
+            serve_with_client(input.as_bytes(), &mut out, "9.9.9", &mut client).unwrap();
+            assert_eq!(client.requests.len(), 1, "{name}");
+            assert!(String::from_utf8(out).unwrap().contains("connected"));
         }
     }
 

@@ -106,6 +106,19 @@ pub struct AgentAdmission {
     pub completed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptMode {
+    Auto,
+    Queue,
+    Live,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptDelivery {
+    pub delivered_to: &'static str,
+    pub queued: bool,
+}
+
 /// One durable Agent operation, replayed identically on resend/reconnect.
 #[derive(Debug, Clone)]
 struct AgentOperation {
@@ -298,6 +311,93 @@ impl<
     L: ExecutableLocator,
 > AgentRuntime<S, P, J, L>
 {
+    /// Resolves an authenticated MCP child to its owning managed session.
+    #[must_use]
+    pub fn caller_session(&self, credential: &str) -> Option<SessionId> {
+        let caller = self.mcp_callers.get(credential)?;
+        self.coordinator
+            .record_for(&caller.runtime)
+            .ok()
+            .filter(|record| record.state == super::runtime::RuntimeState::Running)
+            .and_then(|record| record.runtime.session_id)
+    }
+
+    /// Returns the durable runtime phase projected for one session.
+    #[must_use]
+    pub fn session_phase(&self, session: SessionId) -> &'static str {
+        use super::runtime::RuntimeState;
+        self.coordinator
+            .snapshot()
+            .records
+            .into_iter()
+            .filter(|record| record.runtime.session_id == Some(session))
+            .map(|record| match record.state {
+                RuntimeState::Running => (4, "running"),
+                RuntimeState::Reserved => (3, "ready"),
+                RuntimeState::SpawnFailed | RuntimeState::ReconcileRequired(_) => (2, "exited"),
+                RuntimeState::Exited | RuntimeState::Reclaimed => (1, "ended"),
+            })
+            .max_by_key(|(priority, _)| *priority)
+            .map_or("none", |(_, phase)| phase)
+    }
+
+    /// Sends to a running Agent PTY or records a durable next-launch prompt.
+    pub fn prompt(
+        &mut self,
+        session: Option<SessionId>,
+        prompt: &str,
+        mode: PromptMode,
+    ) -> Result<PromptDelivery, ProtocolError> {
+        if prompt.trim().is_empty() {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "prompt must not be empty",
+            ));
+        }
+        let live = self
+            .coordinator
+            .snapshot()
+            .records
+            .into_iter()
+            .find(|record| {
+                record.runtime.session_id == session
+                    && record.state == super::runtime::RuntimeState::Running
+            });
+        if matches!(mode, PromptMode::Live) && live.is_none() {
+            return Err(ProtocolError::new(
+                ErrorCode::Unavailable,
+                "target session has no live agent",
+            ));
+        }
+        if matches!(mode, PromptMode::Queue) && live.is_some() {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "target session already has a live agent; use auto or live",
+            ));
+        }
+        if let Some(record) = live
+            && !matches!(mode, PromptMode::Queue)
+        {
+            let mut bytes = prompt.as_bytes().to_vec();
+            bytes.push(b'\n');
+            self.pty.select_terminal(&record.runtime.terminal);
+            self.pty.write_all(&bytes).map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "live prompt delivery failed")
+            })?;
+            return Ok(PromptDelivery {
+                delivered_to: "live",
+                queued: false,
+            });
+        }
+        self.dispatch
+            .queue_prompt(session, prompt.to_owned(), Utc::now())
+            .map_err(|_| dispatch_storage_error())?;
+        Ok(PromptDelivery {
+            delivered_to: "queue",
+            queued: true,
+        })
+    }
+
     /// Admits one Agent launch.  The same producer `operation_id` with the same
     /// intent returns the same admission (no second spawn); the same id with a
     /// different intent is a typed idempotency conflict.
@@ -570,12 +670,16 @@ impl<
             lifecycle_attempt: 1,
             expected_revision: 0,
         };
+        let queued = self
+            .dispatch
+            .queued_prompt(intent.session)
+            .map_err(|_| dispatch_storage_error())?;
         let request = LaunchRequest {
             profile_id: profile_id.clone(),
             mode: LaunchMode::Interactive,
             model: None,
             resume: false,
-            initial_prompt: None,
+            initial_prompt: queued.as_ref().map(|item| item.prompt.clone()),
             scope: LaunchScope {
                 workspace_id: intent.workspace,
                 session_id: intent.session,
@@ -601,6 +705,11 @@ impl<
                 Some(credential.clone()),
             )
             .map_err(map_orchestration_error)?;
+        if queued.is_some() {
+            self.dispatch
+                .consume_prompt(intent.session)
+                .map_err(|_| dispatch_storage_error())?;
+        }
         let worker = self
             .dispatch
             .upsert_agent_by_runtime_model(
@@ -1401,6 +1510,56 @@ mod tests {
     }
 
     // ---- tests ---------------------------------------------------------------
+
+    #[test]
+    fn queued_prompt_is_consumed_by_launch_and_auto_then_delivers_live() {
+        let mut runtime = runtime();
+        let launch_intent = intent(None);
+        let session = launch_intent.session.unwrap();
+        assert_eq!(runtime.session_phase(session), "none");
+        let queued = runtime
+            .prompt(Some(session), "queued work", PromptMode::Auto)
+            .unwrap();
+        assert_eq!(queued.delivered_to, "queue");
+        assert!(
+            runtime
+                .dispatch
+                .queued_prompt(Some(session))
+                .unwrap()
+                .is_some()
+        );
+
+        runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &launch_intent,
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        assert_eq!(runtime.session_phase(session), "running");
+        assert!(
+            runtime
+                .dispatch
+                .queued_prompt(Some(session))
+                .unwrap()
+                .is_none()
+        );
+        let credential = runtime.mcp_callers.keys().next().unwrap().clone();
+        assert_eq!(runtime.caller_session(&credential), Some(session));
+
+        let live = runtime
+            .prompt(Some(session), "follow up", PromptMode::Auto)
+            .unwrap();
+        assert_eq!(live.delivered_to, "live");
+        assert_eq!(runtime.pty.writes, b"follow up\n");
+        assert!(
+            runtime
+                .prompt(Some(session), "later", PromptMode::Queue)
+                .is_err()
+        );
+        assert!(runtime.prompt(None, "now", PromptMode::Live).is_err());
+        assert!(runtime.prompt(None, "  ", PromptMode::Auto).is_err());
+    }
 
     #[test]
     fn end_to_end_launch_output_attach_input_detach_reattach_and_exit() {

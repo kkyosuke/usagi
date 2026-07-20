@@ -1047,7 +1047,7 @@ fn start_ipc_accept_loop(
                                         .get("kind")
                                         .and_then(serde_json::Value::as_str)
                                     {
-                                        Some("session") => dispatch_session(&session, request_id, &body, hello),
+                                        Some("session") => dispatch_session(&session, &agent_launch, &pr_inventory, request_id, &body, hello),
                                         Some("agent") => dispatch_agent(&agent_launch, &scope_sessions, request_id, &body, hello),
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &scope_sessions, request_id, &body, hello),
                                         Some("metrics") => dispatch_metrics(&metrics, request_id, &body, hello),
@@ -1828,6 +1828,8 @@ fn dispatch_metrics(
 
 fn dispatch_session(
     session: &SharedSessionRuntime,
+    agent: &SharedAgentRuntime,
+    pr_inventory: &SharedPrInventory,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -1847,10 +1849,14 @@ fn dispatch_session(
     let Some((action, operation_id, payload)) = request else {
         return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
     };
-    let result = session
-        .lock()
-        .map_err(|_| SessionRuntimeError::Storage)
-        .and_then(|mut session| session.handle(action, &operation_id, &payload));
+    let result = dispatch_session_action(
+        session,
+        agent,
+        pr_inventory,
+        action,
+        &operation_id,
+        &payload,
+    );
     match result {
         Ok(reply) => {
             let recovery_apply =
@@ -1879,9 +1885,22 @@ fn dispatch_session(
                 SessionAction::RecoverLegacy if recovery_apply => Some("session.legacy_recovered"),
                 SessionAction::RecoverLegacy
                 | SessionAction::List
+                | SessionAction::Status
                 | SessionAction::Overview
                 | SessionAction::Setup
-                | SessionAction::Prompt => None,
+                | SessionAction::Prompt
+                | SessionAction::Complete
+                | SessionAction::Pr
+                | SessionAction::NoteGet
+                | SessionAction::NoteUpdate
+                | SessionAction::TodoList
+                | SessionAction::TodoAdd
+                | SessionAction::TodoUpdate
+                | SessionAction::TodoRemove
+                | SessionAction::DecisionList
+                | SessionAction::DecisionLog
+                | SessionAction::DelegateIssue
+                | SessionAction::DelegateBrief => None,
             } && let Some(object) = body.as_object_mut()
             {
                 object.insert(
@@ -1911,6 +1930,298 @@ fn dispatch_session(
                 serde_json::json!(null),
             )
         }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn dispatch_session_action(
+    sessions: &SharedSessionRuntime,
+    agent: &SharedAgentRuntime,
+    pr_inventory: &SharedPrInventory,
+    action: usagi_core::usecase::client::SessionAction,
+    operation_id: &str,
+    payload: &serde_json::Value,
+) -> Result<usagi_daemon::usecase::session_runtime::SessionReply, SessionRuntimeError> {
+    use usagi_core::infrastructure::store::{issue::IssueStore, state::WorkspaceStateStore};
+    use usagi_core::usecase::client::SessionAction;
+    use usagi_core::usecase::{issue, note};
+    use usagi_daemon::usecase::agent_ipc::PromptMode;
+
+    let reply = |body: serde_json::Value| {
+        let revision = sessions
+            .lock()
+            .ok()
+            .and_then(|runtime| runtime.snapshot().ok())
+            .and_then(|snapshot| snapshot.get("revision").and_then(serde_json::Value::as_u64))
+            .unwrap_or_default();
+        Ok(usagi_daemon::usecase::session_runtime::SessionReply {
+            operation_id: operation_id.to_owned(),
+            revision,
+            body,
+        })
+    };
+    let string = |key: &str| {
+        payload
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or(SessionRuntimeError::InvalidRequest)
+    };
+    let caller_scope = || {
+        let credential = string("_caller_credential")?;
+        let session_id = agent
+            .lock()
+            .map_err(|_| SessionRuntimeError::Storage)?
+            .caller_session(credential)
+            .ok_or(SessionRuntimeError::ScopeUnavailable)?;
+        sessions
+            .lock()
+            .map_err(|_| SessionRuntimeError::Storage)?
+            .session_scope_by_id(session_id)
+    };
+    let named_session = |name: &str| {
+        sessions
+            .lock()
+            .map_err(|_| SessionRuntimeError::Storage)?
+            .session_id(name)
+    };
+
+    match action {
+        SessionAction::Status => {
+            let mut status = sessions
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .handle(action, operation_id, payload)?;
+            let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
+            if let Some(items) = status
+                .body
+                .get_mut("sessions")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for item in items {
+                    if let Some(id) = item
+                        .get("session_id")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok())
+                    {
+                        item["agent_phase"] = serde_json::json!(runtime.session_phase(id));
+                    }
+                }
+            }
+            Ok(status)
+        }
+        SessionAction::Prompt => {
+            let name = string("name")?;
+            let prompt = string("prompt")?;
+            let target = if name == ":root" {
+                None
+            } else {
+                Some(named_session(name)?)
+            };
+            let mode = match payload
+                .get("mode")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("auto")
+            {
+                "auto" => PromptMode::Auto,
+                "queue" => PromptMode::Queue,
+                "live" => PromptMode::Live,
+                _ => return Err(SessionRuntimeError::InvalidRequest),
+            };
+            let delivery = agent
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .prompt(target, prompt, mode)
+                .map_err(|error| SessionRuntimeError::Delivery(error.message))?;
+            reply(
+                serde_json::json!({"name": name, "delivered_to": delivery.delivered_to, "queued": delivery.queued}),
+            )
+        }
+        SessionAction::Complete => {
+            let message = string("message")?;
+            let scope = caller_scope()?;
+            let report = format!("Session {} completed:\n\n{message}", scope.session_id);
+            let delivery = agent
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .prompt(None, &report, PromptMode::Auto)
+                .map_err(|error| SessionRuntimeError::Delivery(error.message))?;
+            reply(
+                serde_json::json!({"session_id": scope.session_id, "reported_to": ":root", "delivered_to": delivery.delivered_to}),
+            )
+        }
+        SessionAction::Pr => {
+            let name = string("name")?;
+            let id = named_session(name)?;
+            let snapshot = pr_inventory
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .snapshot(id)
+                .map_err(|_| SessionRuntimeError::Storage)?;
+            let merged = snapshot
+                .entries
+                .iter()
+                .any(|entry| entry.state == usagi_core::domain::pr_inventory::PrState::Merged);
+            reply(
+                serde_json::json!({"name": name, "session_id": id, "revision": snapshot.revision, "merged": merged, "pr": snapshot.entries}),
+            )
+        }
+        SessionAction::NoteGet
+        | SessionAction::NoteUpdate
+        | SessionAction::TodoList
+        | SessionAction::TodoAdd
+        | SessionAction::TodoUpdate
+        | SessionAction::TodoRemove
+        | SessionAction::DecisionList
+        | SessionAction::DecisionLog => {
+            let scope = caller_scope()?;
+            let store = WorkspaceStateStore::new(&scope.path);
+            let target = note::Target::Root;
+            let body = match action {
+                SessionAction::NoteGet => {
+                    serde_json::json!({"note": note::note(&store, target).map_err(|_| SessionRuntimeError::Storage)?})
+                }
+                SessionAction::NoteUpdate => {
+                    let value = payload
+                        .get("note")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or(SessionRuntimeError::InvalidRequest)?;
+                    note::set_note(&store, target, value, chrono::Utc::now())
+                        .map_err(|_| SessionRuntimeError::Storage)?;
+                    serde_json::json!({"note": note::note(&store, target).map_err(|_| SessionRuntimeError::Storage)?})
+                }
+                SessionAction::TodoList => {
+                    serde_json::json!({"todos": note::todos(&store, target).map_err(|_| SessionRuntimeError::Storage)?})
+                }
+                SessionAction::TodoAdd => {
+                    let text = string("text")?;
+                    note::add_todo(&store, target, text, chrono::Utc::now())
+                        .map_err(|_| SessionRuntimeError::Storage)?;
+                    serde_json::json!({"todos": note::todos(&store, target).map_err(|_| SessionRuntimeError::Storage)?})
+                }
+                SessionAction::TodoUpdate => {
+                    let index = payload
+                        .get("index")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| usize::try_from(value).ok())
+                        .ok_or(SessionRuntimeError::InvalidRequest)?;
+                    let done = payload
+                        .get("done")
+                        .map(|value| value.as_bool().ok_or(SessionRuntimeError::InvalidRequest))
+                        .transpose()?;
+                    let text = payload
+                        .get("text")
+                        .map(|value| {
+                            value
+                                .as_str()
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                                .map(str::to_owned)
+                                .ok_or(SessionRuntimeError::InvalidRequest)
+                        })
+                        .transpose()?;
+                    if done.is_none() && text.is_none() {
+                        return Err(SessionRuntimeError::InvalidRequest);
+                    }
+                    if !note::update_todo(&store, target, index, done, text, chrono::Utc::now())
+                        .map_err(|_| SessionRuntimeError::Storage)?
+                    {
+                        return Err(SessionRuntimeError::InvalidRequest);
+                    }
+                    serde_json::json!({"todos": note::todos(&store, target).map_err(|_| SessionRuntimeError::Storage)?})
+                }
+                SessionAction::TodoRemove => {
+                    let index = payload
+                        .get("index")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| usize::try_from(value).ok())
+                        .ok_or(SessionRuntimeError::InvalidRequest)?;
+                    if !note::remove_todo(&store, target, index, chrono::Utc::now())
+                        .map_err(|_| SessionRuntimeError::Storage)?
+                    {
+                        return Err(SessionRuntimeError::InvalidRequest);
+                    }
+                    serde_json::json!({"todos": note::todos(&store, target).map_err(|_| SessionRuntimeError::Storage)?})
+                }
+                SessionAction::DecisionList => {
+                    serde_json::json!({"decisions": note::decisions(&store, target).map_err(|_| SessionRuntimeError::Storage)?})
+                }
+                SessionAction::DecisionLog => {
+                    let text = string("text")?;
+                    note::log_decision(&store, target, text, chrono::Utc::now())
+                        .map_err(|_| SessionRuntimeError::Storage)?;
+                    serde_json::json!({"decisions": note::decisions(&store, target).map_err(|_| SessionRuntimeError::Storage)?})
+                }
+                _ => unreachable!(),
+            };
+            reply(serde_json::json!({"session_id": scope.session_id, "scratchpad": body}))
+        }
+        SessionAction::DelegateIssue | SessionAction::DelegateBrief => {
+            let (name, prompt) = if action == SessionAction::DelegateIssue {
+                let number = payload
+                    .get("number")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or(SessionRuntimeError::InvalidRequest)?;
+                let root = sessions
+                    .lock()
+                    .map_err(|_| SessionRuntimeError::Storage)?
+                    .repository_root()
+                    .to_path_buf();
+                let issue = issue::get(&IssueStore::new(root), number)
+                    .map_err(|_| SessionRuntimeError::Storage)?
+                    .ok_or(SessionRuntimeError::InvalidRequest)?;
+                (
+                    payload
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map_or_else(|| format!("issue-{number}"), str::to_owned),
+                    issue::to_prompt(&issue),
+                )
+            } else {
+                let brief = string("brief")?;
+                let suffix = operation_id
+                    .chars()
+                    .filter(char::is_ascii_alphanumeric)
+                    .take(8)
+                    .collect::<String>();
+                let name = payload
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map_or_else(|| format!("triage-{suffix}"), str::to_owned);
+                (
+                    name,
+                    format!(
+                        "このセッションの worktree 内で次の依頼をトリアージし、必要なら issue 化して実装へつなげてください。リポジトリの規約に従ってください。\n\n{brief}"
+                    ),
+                )
+            };
+            let created = sessions
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .handle(
+                    SessionAction::Create,
+                    operation_id,
+                    &serde_json::json!({"name": name}),
+                )?;
+            let id = sessions
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .session_id(&name)?;
+            let delivery = agent
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .prompt(Some(id), &prompt, PromptMode::Queue)
+                .map_err(|error| SessionRuntimeError::Delivery(error.message))?;
+            reply(
+                serde_json::json!({"name": name, "session_id": id, "created": created.body, "delivered_to": delivery.delivered_to, "queued": delivery.queued}),
+            )
+        }
+        _ => sessions
+            .lock()
+            .map_err(|_| SessionRuntimeError::Storage)?
+            .handle(action, operation_id, payload),
     }
 }
 
