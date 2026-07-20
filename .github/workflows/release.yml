@@ -151,27 +151,42 @@ jobs:
 
       - name: Prepare artifact
         shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
+          set -euo pipefail
           mkdir -p dist
           cp "v1/target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" dist/
-          cp scripts/install.sh dist/
-          chmod +x dist/install.sh
           cd dist
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             ASSET_FILENAME="${{ matrix.asset_name }}.zip"
-            7z a "../$ASSET_FILENAME" *
-            echo "ASSET_FILENAME=$ASSET_FILENAME" >> $GITHUB_ENV
+            7z a "../$ASSET_FILENAME" "${{ matrix.artifact_name }}"
           else
             ASSET_FILENAME="${{ matrix.asset_name }}.tar.gz"
-            tar -czvf "../$ASSET_FILENAME" .
-            echo "ASSET_FILENAME=$ASSET_FILENAME" >> $GITHUB_ENV
+            tar -czvf "../$ASSET_FILENAME" "${{ matrix.artifact_name }}"
           fi
+          cd ..
+          if command -v sha256sum >/dev/null 2>&1; then
+            SHA256="$(sha256sum "$ASSET_FILENAME" | awk '{print $1}')"
+          else
+            SHA256="$(shasum -a 256 "$ASSET_FILENAME" | awk '{print $1}')"
+          fi
+          printf '%s  %s\n' "$SHA256" "$ASSET_FILENAME" > "$ASSET_FILENAME.sha256"
+          printf '%s\n' "$RELEASE_TAG" > "$ASSET_FILENAME.version"
+          {
+            echo "ASSET_FILENAME=$ASSET_FILENAME"
+            echo "CHECKSUM_FILENAME=$ASSET_FILENAME.sha256"
+            echo "VERSION_FILENAME=$ASSET_FILENAME.version"
+          } >> "$GITHUB_ENV"
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
-          files: ${{ env.ASSET_FILENAME }}
+          files: |
+            ${{ env.ASSET_FILENAME }}
+            ${{ env.CHECKSUM_FILENAME }}
+            ${{ env.VERSION_FILENAME }}
           body: ${{ needs.release-notes.outputs.notes }}
           generate_release_notes: true
         env:

@@ -1,116 +1,172 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
 
-# リポジトリ
-REPO="KKyosuke/usagi"
+readonly REPO="KKyosuke/usagi"
+readonly USAGI_DIR="${USAGI_HOME:-$HOME/.usagi}"
+readonly BIN_DIR="$USAGI_DIR/bin"
+readonly TARGET="$BIN_DIR/usagi"
+readonly LOCK_DIR="$USAGI_DIR/update.lock"
 
-# インストール先ディレクトリ
-USAGI_DIR="$HOME/.usagi"
-BIN_DIR="$USAGI_DIR/bin"
+STAGE_DIR=""
+LOCK_HELD=0
 
-# バイナリからバージョン文字列を取り出す（取得できなければ空文字）
-function read_version() {
-    local bin="$1"
+cleanup() {
+    local status=$?
+    if [ -n "$STAGE_DIR" ] && [ -d "$STAGE_DIR" ]; then
+        rm -rf -- "$STAGE_DIR"
+    fi
+    if [ "$LOCK_HELD" -eq 1 ] && [ -d "$LOCK_DIR" ]; then
+        rm -rf -- "$LOCK_DIR"
+    fi
+    exit "$status"
+}
+trap cleanup EXIT HUP INT TERM
+
+fail() {
+    echo "Error: $*" >&2
+    exit 1
+}
+
+read_version() {
+    local bin=$1 output
     [ -x "$bin" ] || return 0
-    # `usagi --version` は "usagi 0.0.1" の形式。バージョン部分のみ取り出す
-    "$bin" --version 2>/dev/null | awk '{print $NF}'
+    output="$($bin --version 2>/dev/null)" || return 0
+    printf '%s\n' "$output" | awk 'NF == 2 && $1 == "usagi" { print $2 }'
 }
 
-# OS/Arch 判別とダウンロード
-function download_binary() {
-    echo "Binary not found in current directory. Attempting to download..."
+acquire_lock() {
+    local attempt=0 owner=""
+    mkdir -p -- "$USAGI_DIR"
+    chmod 700 "$USAGI_DIR"
 
-    OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-    ARCH="$(uname -m)"
+    while ! mkdir -m 700 "$LOCK_DIR" 2>/dev/null; do
+        if [ -f "$LOCK_DIR/pid" ]; then
+            owner="$(sed -n '1p' "$LOCK_DIR/pid" 2>/dev/null || true)"
+        fi
+        case "$owner" in
+            ''|*[!0-9]*) ;;
+            *)
+                if ! kill -0 "$owner" 2>/dev/null; then
+                    rm -rf -- "$LOCK_DIR"
+                    owner=""
+                    continue
+                fi
+                ;;
+        esac
+        attempt=$((attempt + 1))
+        [ "$attempt" -lt 600 ] || fail "another usagi update is still running"
+        sleep 0.1
+    done
+    LOCK_HELD=1
+    printf '%s\n' "$$" > "$LOCK_DIR/pid"
+}
 
-    case "$OS" in
-      darwin) OS="macos" ;;
-      linux) OS="linux" ;;
-      *) echo "Unsupported OS: $OS"; exit 1 ;;
+platform_asset() {
+    local os arch
+    os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+    arch="$(uname -m)"
+    case "$os" in
+        darwin) os=macos ;;
+        linux) os=linux ;;
+        *) fail "unsupported OS: $os" ;;
     esac
-
-    case "$ARCH" in
-      x86_64) ARCH="amd64" ;;
-      aarch64|arm64) ARCH="arm64" ;;
-      *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+    case "$arch" in
+        x86_64) arch=amd64 ;;
+        aarch64|arm64) arch=arm64 ;;
+        *) fail "unsupported architecture: $arch" ;;
     esac
+    printf 'usagi-%s-%s.tar.gz\n' "$os" "$arch"
+}
 
-    ASSET_NAME="usagi-${OS}-${ARCH}.tar.gz"
-    URL="https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}"
-
-    echo "Downloading $ASSET_NAME from $URL..."
-    # テンポラリディレクトリで展開
-    TMP_DIR=$(mktemp -d)
-    # 終了時に確実に削除
-    trap 'rm -rf "$TMP_DIR"' EXIT
-
-    # ダウンロードと展開
-    curl -L "$URL" | tar -xz -C "$TMP_DIR"
-
-    # 展開されたディレクトリからバイナリを見つける
-    if [ -f "$TMP_DIR/usagi" ]; then
-        cp "$TMP_DIR/usagi" .
-    elif [ -f "$TMP_DIR/usagi.exe" ]; then
-        cp "$TMP_DIR/usagi.exe" .
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
     else
-        echo "Error: Binary not found in downloaded archive."
-        exit 1
+        fail "sha256sum or shasum is required"
     fi
 }
 
-# バイナリがカレントディレクトリにない場合、ダウンロードを試みる
-if [ ! -f "usagi" ] && [ ! -f "usagi.exe" ]; then
-    download_binary
-fi
+verify_checksum() {
+    local checksum_file=$1 archive=$2 asset=$3 hash listed extra actual
+    [ "$(wc -l < "$checksum_file" | tr -d ' ')" -eq 1 ] || fail "invalid checksum artifact for $asset"
+    read -r hash listed extra < "$checksum_file" || fail "invalid checksum artifact for $asset"
+    [ -z "${extra:-}" ] || fail "invalid checksum artifact for $asset"
+    case "$hash" in
+        *[!0-9a-fA-F]*|'') fail "invalid checksum artifact for $asset" ;;
+    esac
+    [ "${#hash}" -eq 64 ] || fail "invalid checksum artifact for $asset"
+    [ "$listed" = "$asset" ] || fail "checksum artifact names unexpected asset: $listed"
+    actual="$(sha256_of "$archive")"
+    [ "$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$hash" | tr '[:upper:]' '[:lower:]')" ] || \
+        fail "checksum mismatch for $asset"
+}
 
-# 既存インストールのバージョンを記録（アップデート判定用）
-OLD_VERSION="$(read_version "$BIN_DIR/usagi")"
+verify_archive() {
+    local archive=$1 entries details
+    entries="$(tar -tzf "$archive")" || fail "could not read $archive"
+    [ "$entries" = "usagi" ] || fail "archive must contain exactly one top-level usagi binary"
+    details="$(tar -tvzf "$archive")" || fail "could not inspect $archive"
+    case "$details" in
+        -*) ;;
+        *) fail "archive usagi entry must be a regular file" ;;
+    esac
+}
 
-# ディレクトリ作成
-echo "Creating directory $BIN_DIR..."
-mkdir -p "$BIN_DIR"
+verify_expected_version() {
+    local version_file=$1 candidate=$2 expected actual extra
+    [ "$(wc -l < "$version_file" | tr -d ' ')" -eq 1 ] || fail "invalid version artifact"
+    read -r expected extra < "$version_file" || fail "invalid version artifact"
+    [ -n "$expected" ] && [ -z "${extra:-}" ] || fail "invalid version artifact"
+    case "$expected" in
+        v*) expected=${expected#v} ;;
+    esac
+    actual="$(read_version "$candidate")"
+    [ -n "$actual" ] || fail "staged usagi did not report a valid version"
+    [ "$actual" = "$expected" ] || fail "staged usagi version $actual does not match release $expected"
+    printf '%s\n' "$actual"
+}
 
-# バイナリの移動 (カレントディレクトリにある想定)
-BINARY_NAME="usagi"
-if [ -f "usagi.exe" ]; then
-    BINARY_NAME="usagi.exe"
-fi
+acquire_lock
 
-if [ -f "$BINARY_NAME" ]; then
-    echo "Installing $BINARY_NAME to $BIN_DIR..."
-    mv "$BINARY_NAME" "$BIN_DIR/"
-else
-    # 予備的なチェック（リネームされていない場合）
-    SEARCHED_BIN=$(ls usagi usagi.exe 2>/dev/null | head -n 1)
-    if [ -n "$SEARCHED_BIN" ]; then
-        echo "Installing $SEARCHED_BIN as usagi to $BIN_DIR..."
-        mv "$SEARCHED_BIN" "$BIN_DIR/usagi"
-        BINARY_NAME="usagi"
-    else
-        echo "Error: usagi binary not found in current directory."
-        exit 1
-    fi
-fi
+ASSET_NAME="$(platform_asset)"
+BASE_URL="https://github.com/${REPO}/releases/latest/download"
 
-# 権限変更
-echo "Changing permissions for $BIN_DIR/$BINARY_NAME..."
-chmod +x "$BIN_DIR/$BINARY_NAME"
+mkdir -p -- "$BIN_DIR"
+chmod 700 "$BIN_DIR"
+STAGE_DIR="$(mktemp -d "$BIN_DIR/.update.XXXXXXXX")"
+chmod 700 "$STAGE_DIR"
 
-# 新しくインストールされたバージョン
-NEW_VERSION="$(read_version "$BIN_DIR/$BINARY_NAME")"
+ARCHIVE="$STAGE_DIR/$ASSET_NAME"
+CHECKSUM="$STAGE_DIR/$ASSET_NAME.sha256"
+VERSION_FILE="$STAGE_DIR/$ASSET_NAME.version"
 
-# インストール結果のメッセージと顔を決める
+echo "Downloading and verifying $ASSET_NAME..."
+curl -fsSL "$BASE_URL/$ASSET_NAME" -o "$ARCHIVE"
+curl -fsSL "$BASE_URL/$ASSET_NAME.sha256" -o "$CHECKSUM"
+curl -fsSL "$BASE_URL/$ASSET_NAME.version" -o "$VERSION_FILE"
+
+verify_checksum "$CHECKSUM" "$ARCHIVE" "$ASSET_NAME"
+verify_archive "$ARCHIVE"
+tar -xzf "$ARCHIVE" -C "$STAGE_DIR" -- usagi
+CANDIDATE="$STAGE_DIR/usagi"
+chmod 755 "$CANDIDATE"
+NEW_VERSION="$(verify_expected_version "$VERSION_FILE" "$CANDIDATE")"
+OLD_VERSION="$(read_version "$TARGET")"
+
+# STAGE_DIR is below BIN_DIR, so this rename stays on one filesystem. POSIX
+# rename either replaces TARGET atomically or leaves its bytes and mode intact.
+mv -f -- "$CANDIDATE" "$TARGET"
+
 if [ -z "$OLD_VERSION" ]; then
-    # 既存インストールなし → 新規
     MESSAGE="usagi v${NEW_VERSION} をインストールしたよ！ぴょん"
     FACE="( ◕ω◕)"
 elif [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
-    # 同じバージョン → 再インストール
     MESSAGE="usagi v${NEW_VERSION} は既に最新だよ！再インストールしたぴょん"
     FACE="( -ω-)"
 else
-    # バージョンが変わった → アップデート（度合いで顔が変わる）
     MESSAGE="usagi を v${OLD_VERSION} から v${NEW_VERSION} にぴょんしたよ！"
     OLD_MAJOR="${OLD_VERSION%%.*}"
     NEW_MAJOR="${NEW_VERSION%%.*}"
@@ -134,10 +190,9 @@ C_DIM=$'\033[2m'
 printf "\n"
 printf "   %s(\(\\%s\n" "$C_PINK" "$C_RST"
 printf "   %s%s%s  %s%s%s\n" "$C_PINK" "$FACE" "$C_RST" "$C_BOLD" "$MESSAGE" "$C_RST"
-printf "   %so_(\")(\")%s  %s→%s  %s%s/%s%s\n" "$C_PINK" "$C_RST" "$C_DIM" "$C_RST" "$C_CYAN" "$BIN_DIR" "$BINARY_NAME" "$C_RST"
+printf '   %so_(")(")%s  %s→%s  %s%s/usagi%s\n' "$C_PINK" "$C_RST" "$C_DIM" "$C_RST" "$C_CYAN" "$BIN_DIR" "$C_RST"
 printf "\n"
 
-# PATH 案内（まだ PATH に入っていない場合のみ）
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *)

@@ -31,9 +31,27 @@ pub fn install_command(repo_url: &str) -> Option<String> {
         .trim_end_matches('/')
         .trim_end_matches(".git")
         .strip_prefix("https://github.com/")?;
+    valid_github_slug(slug)?;
     Some(format!(
-        "curl -fsSL https://raw.githubusercontent.com/{slug}/main/scripts/install.sh | bash"
+        "set -o pipefail; cd /; curl -fsSL https://raw.githubusercontent.com/{slug}/main/scripts/install.sh | bash"
     ))
+}
+
+fn valid_github_slug(slug: &str) -> Option<()> {
+    let mut parts = slug.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if parts.next().is_some()
+        || owner.is_empty()
+        || repo.is_empty()
+        || !owner
+            .bytes()
+            .chain(repo.bytes())
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return None;
+    }
+    Some(())
 }
 
 /// Run the self-update through `runner`, returning whether it succeeded and the
@@ -103,7 +121,7 @@ mod tests {
     #[test]
     fn install_command_builds_the_raw_script_url_from_a_github_remote() {
         let expected =
-            "curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash"
+            "set -o pipefail; cd /; curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash"
                 .to_string();
         assert_eq!(
             install_command("https://github.com/KKyosuke/usagi"),
@@ -114,7 +132,7 @@ mod tests {
     #[test]
     fn install_command_trims_a_trailing_slash_and_git_suffix() {
         let expected =
-            "curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash"
+            "set -o pipefail; cd /; curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash"
                 .to_string();
         assert_eq!(
             install_command("https://github.com/KKyosuke/usagi.git"),
@@ -133,6 +151,11 @@ mod tests {
         // `raw.githubusercontent.com/https://…` URL that fails mid-download.
         assert_eq!(install_command("https://example.com/x"), None);
         assert_eq!(install_command("git@github.com:KKyosuke/usagi.git"), None);
+        assert_eq!(
+            install_command("https://github.com/KKyosuke/usagi;false"),
+            None
+        );
+        assert_eq!(install_command("https://github.com/owner/repo/extra"), None);
     }
 
     #[test]
