@@ -1,14 +1,14 @@
 ---
 number: 460
 title: fix(core): session lifecycle failure を durable failed outcome として replay する
-status: todo
+status: done
 priority: high
 labels: [review, v2, core, session, durability]
 dependson: []
 related: [217, 268, 343, 403, 458]
 parent: 453
 created_at: 2026-07-20T12:06:19.681814+00:00
-updated_at: 2026-07-20T12:35:30.004906+00:00
+updated_at: 2026-07-20T20:43:15.188234+00:00
 ---
 
 ## 問題・影響

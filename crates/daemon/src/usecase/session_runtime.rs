@@ -45,6 +45,7 @@ pub enum SessionRuntimeError {
     SessionBranchExists(String),
     SessionWorkspaceExists(String),
     SessionWorkspaceCreationFailed { name: String, detail: String },
+    DurableFailure(String),
     UnknownSession,
     ScopeUnavailable,
     Delivery(String),
@@ -71,9 +72,9 @@ impl SessionRuntimeError {
             Self::SessionWorkspaceCreationFailed { name, detail } => {
                 format!("cannot create session \"{name}\": {detail}")
             }
+            Self::DurableFailure(message) | Self::Delivery(message) => message.clone(),
             Self::UnknownSession => "session was not found".into(),
             Self::ScopeUnavailable => "session scope is not available".into(),
-            Self::Delivery(message) => message.clone(),
             Self::Rejected => {
                 "could not create the session worktree; see the daemon log for details".into()
             }
@@ -167,10 +168,16 @@ impl<G: GitRunner> SessionRuntime<G> {
         git: G,
     ) -> Result<Self, SessionRuntimeError> {
         let store = DaemonLifecycleStore::new(state_dir);
-        let repo_root = if let Some((repository_root, _)) = store
+        let repo_root = if let Some((repository_root, mut state)) = store
             .load_with_workspace()
             .map_err(|_| SessionRuntimeError::Storage)?
         {
+            let revision = state.state_revision;
+            if state.repair_legacy_failed_outcomes(Utc::now()) != 0 {
+                store
+                    .replace_if_revision(revision, &state)
+                    .map_err(|_| SessionRuntimeError::Storage)?;
+            }
             repository_root
         } else {
             let legacy_lifecycle =
@@ -435,11 +442,7 @@ impl<G: GitRunner> SessionRuntime<G> {
             if existing.semantic_key != semantic_key {
                 return Err(SessionRuntimeError::IdempotencyConflict);
             }
-            return Ok(SessionReply {
-                operation_id: operation_id.to_string(),
-                revision: existing.progress_revision,
-                body: self.snapshot()?,
-            });
+            return self.replay(&before, existing);
         }
         // A failed or otherwise retained lifecycle record still owns the
         // session name. Report that concrete conflict before asking the
@@ -494,30 +497,28 @@ impl<G: GitRunner> SessionRuntime<G> {
                 let branch_exists = error.contains("branch") && error.contains("already exists");
                 let workspace_exists = !branch_exists && error.contains("already exists");
                 let detail = worktree_failure_detail(&error);
+                let failure = if branch_exists {
+                    SessionRuntimeError::SessionBranchExists(name.clone())
+                } else if workspace_exists {
+                    SessionRuntimeError::SessionWorkspaceExists(name.clone())
+                } else {
+                    SessionRuntimeError::SessionWorkspaceCreationFailed {
+                        name: name.clone(),
+                        detail,
+                    }
+                };
                 let _ = self.store.apply(
                     self.generation,
                     LifecycleEvent::Failed {
                         fence,
                         failure: Failure {
                             stage: FailureStage::Create,
-                            summary: if branch_exists {
-                                "session branch already exists".into()
-                            } else if workspace_exists {
-                                "session workspace already exists".into()
-                            } else {
-                                "worktree creation failed".into()
-                            },
+                            summary: failure.safe_message(),
                         },
                     },
                     Utc::now(),
                 );
-                Err(if branch_exists {
-                    SessionRuntimeError::SessionBranchExists(name)
-                } else if workspace_exists {
-                    SessionRuntimeError::SessionWorkspaceExists(name)
-                } else {
-                    SessionRuntimeError::SessionWorkspaceCreationFailed { name, detail }
-                })
+                Err(failure)
             }
         }
     }
@@ -542,11 +543,7 @@ impl<G: GitRunner> SessionRuntime<G> {
             if existing.semantic_key != semantic_key {
                 return Err(SessionRuntimeError::IdempotencyConflict);
             }
-            return Ok(SessionReply {
-                operation_id: operation_id.to_string(),
-                revision: existing.progress_revision,
-                body: snapshot(&before, self.root_worktree_id),
-            });
+            return self.replay(&before, existing);
         }
         let session = before
             .sessions
@@ -598,20 +595,47 @@ impl<G: GitRunner> SessionRuntime<G> {
                 })
             }
             Err(_) => {
+                let failure = SessionRuntimeError::DurableFailure(
+                    "could not remove the session worktree; see the daemon log for details".into(),
+                );
                 let _ = self.store.apply(
                     self.generation,
                     LifecycleEvent::Failed {
                         fence,
                         failure: Failure {
                             stage: FailureStage::Delete,
-                            summary: "worktree removal failed".into(),
+                            summary: failure.safe_message(),
                         },
                     },
                     Utc::now(),
                 );
-                Err(SessionRuntimeError::Rejected)
+                Err(failure)
             }
         }
+    }
+
+    fn replay(
+        &self,
+        state: &WorkspaceLifecycleState,
+        operation: &OperationJournal,
+    ) -> Result<SessionReply, SessionRuntimeError> {
+        if operation.status != OperationStatus::Succeeded {
+            let summary = state
+                .sessions
+                .iter()
+                .find(|session| session.operation_id == Some(operation.operation_id))
+                .and_then(|session| session.failure.as_ref())
+                .map_or_else(
+                    || "session operation did not complete; explicit recovery required".into(),
+                    |failure| failure.summary.clone(),
+                );
+            return Err(SessionRuntimeError::DurableFailure(summary));
+        }
+        Ok(SessionReply {
+            operation_id: operation.operation_id.to_string(),
+            revision: operation.progress_revision,
+            body: snapshot(state, self.root_worktree_id),
+        })
     }
 
     fn state(&self) -> Result<WorkspaceLifecycleState, SessionRuntimeError> {
@@ -1102,6 +1126,11 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
+    struct OutcomeGit {
+        succeeds: bool,
+        calls: Arc<AtomicUsize>,
+    }
+
     type GitCall = (PathBuf, Vec<String>);
     type RecordingCalls = Arc<Mutex<Vec<GitCall>>>;
 
@@ -1135,6 +1164,16 @@ mod tests {
                 success: true,
                 stdout: String::new(),
                 stderr: String::new(),
+            })
+        }
+    }
+    impl GitRunner for OutcomeGit {
+        fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(GitOutput {
+                success: self.succeeds,
+                stdout: String::new(),
+                stderr: "injected effect failure".into(),
             })
         }
     }
@@ -1476,7 +1515,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .summary,
-            "session branch already exists"
+            error.safe_message()
         );
     }
 
@@ -1516,7 +1555,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .summary,
-            "session workspace already exists"
+            error.safe_message()
         );
     }
 
@@ -1668,6 +1707,135 @@ mod tests {
     }
 
     #[test]
+    fn failed_create_replays_the_same_failure_without_repeating_the_effect() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        let state_dir = tmp.path().join("daemon");
+        let operation = operation();
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let mut first = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &state_dir,
+            DaemonGeneration::new(),
+            OutcomeGit {
+                succeeds: false,
+                calls: Arc::clone(&first_calls),
+            },
+        )
+        .unwrap();
+
+        let failed = first
+            .handle(SessionAction::Create, &operation, &json!({"name":"one"}))
+            .unwrap_err();
+        let replayed = first
+            .handle(SessionAction::Create, &operation, &json!({"name":"one"}))
+            .unwrap_err();
+        assert_eq!(replayed.safe_message(), failed.safe_message());
+        assert_eq!(
+            first
+                .handle(SessionAction::Create, &operation, &json!({"name":"two"}))
+                .unwrap_err(),
+            SessionRuntimeError::IdempotencyConflict
+        );
+        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            first.state().unwrap().operations[0].status,
+            OperationStatus::Failed
+        );
+        drop(first);
+
+        let restart_calls = Arc::new(AtomicUsize::new(0));
+        let mut restarted = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &state_dir,
+            DaemonGeneration::new(),
+            OutcomeGit {
+                succeeds: true,
+                calls: Arc::clone(&restart_calls),
+            },
+        )
+        .unwrap();
+        let reopened = restarted
+            .handle(SessionAction::Create, &operation, &json!({"name":"one"}))
+            .unwrap_err();
+        assert_eq!(reopened.safe_message(), failed.safe_message());
+        assert_eq!(restart_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn failed_remove_replays_the_same_failure_without_repeating_the_effect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("daemon");
+        let create_calls = Arc::new(AtomicUsize::new(0));
+        let mut creator = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &state_dir,
+            DaemonGeneration::new(),
+            OutcomeGit {
+                succeeds: true,
+                calls: Arc::clone(&create_calls),
+            },
+        )
+        .unwrap();
+        creator
+            .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+            .unwrap();
+        let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
+        std::fs::create_dir_all(&session_root).unwrap();
+        std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+        drop(creator);
+
+        let operation = operation();
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let mut first = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &state_dir,
+            DaemonGeneration::new(),
+            OutcomeGit {
+                succeeds: false,
+                calls: Arc::clone(&first_calls),
+            },
+        )
+        .unwrap();
+        let failed = first
+            .handle(SessionAction::Remove, &operation, &json!({"name":"one"}))
+            .unwrap_err();
+        let replayed = first
+            .handle(SessionAction::Remove, &operation, &json!({"name":"one"}))
+            .unwrap_err();
+        assert_eq!(replayed.safe_message(), failed.safe_message());
+        assert_eq!(
+            first
+                .handle(SessionAction::Remove, &operation, &json!({"name":"two"}))
+                .unwrap_err(),
+            SessionRuntimeError::IdempotencyConflict
+        );
+        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            first.state().unwrap().operations[1].status,
+            OperationStatus::Failed
+        );
+        drop(first);
+
+        let restart_calls = Arc::new(AtomicUsize::new(0));
+        let mut restarted = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &state_dir,
+            DaemonGeneration::new(),
+            OutcomeGit {
+                succeeds: true,
+                calls: Arc::clone(&restart_calls),
+            },
+        )
+        .unwrap();
+        let reopened = restarted
+            .handle(SessionAction::Remove, &operation, &json!({"name":"one"}))
+            .unwrap_err();
+        assert_eq!(reopened.safe_message(), failed.safe_message());
+        assert_eq!(restart_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn resolver_requires_complete_available_scope_and_restart_reconciles_interrupted_work() {
         let (tmp, mut runtime) = runtime(FakeGit::ok());
         let created = runtime
@@ -1705,7 +1873,7 @@ mod tests {
                 Utc::now(),
             )
             .unwrap();
-        let restarted = SessionRuntime::open(
+        let mut restarted = SessionRuntime::open(
             tmp.path().to_path_buf(),
             &tmp.path().join("daemon"),
             DaemonGeneration::new(),
@@ -1721,6 +1889,65 @@ mod tests {
                 .unwrap()
                 .summary,
             "interrupted; explicit recovery required"
+        );
+        assert_eq!(
+            restarted.state().unwrap().operations[1].status,
+            OperationStatus::Failed
+        );
+        assert_eq!(
+            restarted
+                .handle(
+                    SessionAction::Create,
+                    &operation.to_string(),
+                    &json!({"name":"interrupted"})
+                )
+                .unwrap_err()
+                .safe_message(),
+            "interrupted; explicit recovery required"
+        );
+    }
+
+    #[test]
+    fn open_repairs_a_legacy_failed_session_and_replays_failure() {
+        let (tmp, mut runtime) = runtime(FakeGit::ok());
+        let operation = operation();
+        runtime
+            .handle(SessionAction::Create, &operation, &json!({"name":"legacy"}))
+            .unwrap();
+        let mut legacy = runtime.state().unwrap();
+        let revision = legacy.state_revision;
+        legacy.sessions[0].lifecycle = SessionLifecycle::Failed;
+        legacy.sessions[0].failure = Some(Failure {
+            stage: FailureStage::Create,
+            summary: "legacy create failed".into(),
+        });
+        legacy.sessions[0].operation_id = None;
+        legacy.operations[0].status = OperationStatus::Succeeded;
+        runtime
+            .store
+            .replace_if_revision(revision, &legacy)
+            .unwrap();
+        drop(runtime);
+
+        let mut reopened = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+        )
+        .unwrap();
+        let repaired = reopened.state().unwrap();
+        assert_eq!(repaired.operations[0].status, OperationStatus::Failed);
+        assert_eq!(
+            repaired.sessions[0].operation_id,
+            Some(repaired.operations[0].operation_id)
+        );
+        assert_eq!(
+            reopened
+                .handle(SessionAction::Create, &operation, &json!({"name":"legacy"}))
+                .unwrap_err()
+                .safe_message(),
+            "legacy create failed"
         );
     }
 

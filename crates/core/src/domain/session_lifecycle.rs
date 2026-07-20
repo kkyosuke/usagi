@@ -277,6 +277,60 @@ impl WorkspaceLifecycleState {
         }
         Ok(())
     }
+    /// Repairs snapshots written by the legacy reducer that marked a failed
+    /// session's operation as succeeded and detached the operation identity.
+    ///
+    /// The repair is deliberately fail-closed: the failed session remains
+    /// unavailable, and only the operation whose canonical action/target
+    /// matches the recorded failure is rewritten as a terminal failure.
+    #[must_use]
+    pub fn repair_legacy_failed_outcomes(&mut self, now: DateTime<Utc>) -> usize {
+        let mut repaired = 0;
+        for session_pos in 0..self.sessions.len() {
+            let session = &self.sessions[session_pos];
+            if session.lifecycle != SessionLifecycle::Failed {
+                continue;
+            }
+            let Some(failure) = &session.failure else {
+                continue;
+            };
+            let action = if failure.stage == FailureStage::Delete {
+                "remove"
+            } else {
+                "create"
+            };
+            let semantic_key = format!("{action}:{}", session.name);
+            let operation_pos = session
+                .operation_id
+                .and_then(|operation_id| {
+                    self.operations.iter().position(|operation| {
+                        operation.operation_id == operation_id
+                            && operation.semantic_key == semantic_key
+                            && operation.status == OperationStatus::Succeeded
+                    })
+                })
+                .or_else(|| {
+                    self.operations.iter().rposition(|operation| {
+                        operation.semantic_key == semantic_key
+                            && operation.status == OperationStatus::Succeeded
+                    })
+                });
+            let Some(operation_pos) = operation_pos else {
+                continue;
+            };
+            let operation = &mut self.operations[operation_pos];
+            if operation.status == OperationStatus::Succeeded {
+                operation.status = OperationStatus::Failed;
+                operation.progress_revision += 1;
+                self.sessions[session_pos].operation_id = Some(operation.operation_id);
+                repaired += 1;
+            }
+        }
+        if repaired != 0 {
+            self.changed(now);
+        }
+        repaired
+    }
     #[coverage(off)]
     fn changed(&mut self, now: DateTime<Utc>) {
         self.state_revision += 1;
@@ -392,16 +446,19 @@ pub fn reduce(
             }
             Ok(true)
         }),
-        LifecycleEvent::Failed { fence, failure } => complete(state, &fence, now, |s| {
-            s.lifecycle = SessionLifecycle::Failed;
-            s.failure = Some(failure);
-            Ok(false)
-        }),
+        LifecycleEvent::Failed { fence, failure } => fail(state, &fence, failure, now),
         LifecycleEvent::ReconcileInterrupted {
             session_id,
             operation_id,
             stage,
         } => {
+            let operation_pos = state
+                .operations
+                .iter()
+                .position(|operation| operation.operation_id == operation_id);
+            if operation_pos.is_some_and(|position| state.operations[position].status.terminal()) {
+                return Err(LifecycleError::StaleCompletion);
+            }
             let s = state
                 .sessions
                 .iter_mut()
@@ -413,6 +470,11 @@ pub fn reduce(
                 summary: "interrupted; explicit recovery required".into(),
             });
             s.changed_at = now;
+            if let Some(operation_pos) = operation_pos {
+                let operation = &mut state.operations[operation_pos];
+                operation.status = OperationStatus::Failed;
+                operation.progress_revision += 1;
+            }
             state.changed(now);
             Ok(())
         }
@@ -503,6 +565,25 @@ where
         s.operation_id = None;
         s.changed_at = now;
     }
+    state.changed(now);
+    Ok(())
+}
+
+#[coverage(off)]
+fn fail(
+    state: &mut WorkspaceLifecycleState,
+    fence: &CompletionFence,
+    failure: Failure,
+    now: DateTime<Utc>,
+) -> Result<(), LifecycleError> {
+    let (pos, operation_pos) = fenced_session(state, fence)?;
+    let session = &mut state.sessions[pos];
+    session.lifecycle = SessionLifecycle::Failed;
+    session.failure = Some(failure);
+    session.changed_at = now;
+    let operation = &mut state.operations[operation_pos];
+    operation.status = OperationStatus::Failed;
+    operation.progress_revision += 1;
     state.changed(now);
     Ok(())
 }
@@ -685,6 +766,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(state.sessions[0].lifecycle, SessionLifecycle::Failed);
+        assert_eq!(state.operations[0].status, OperationStatus::Failed);
         state.format = "legacy".into();
         assert_eq!(state.validate(), Err(LifecycleError::UnsupportedFormat));
     }
@@ -897,5 +979,71 @@ mod tests {
         )
         .unwrap();
         assert_eq!(available.sessions[0].lifecycle, SessionLifecycle::Failed);
+        assert_eq!(available.operations[1].status, OperationStatus::Failed);
+        assert_eq!(
+            available.sessions[0].operation_id,
+            Some(remove.operation_id)
+        );
+    }
+
+    #[test]
+    fn legacy_failed_session_repairs_the_matching_succeeded_operation() {
+        let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
+        let create = op();
+        reduce(
+            &mut state,
+            LifecycleEvent::ReserveCreate {
+                name: "legacy".into(),
+                operation: create.clone(),
+            },
+            now(),
+        )
+        .unwrap();
+        let create_fence = fence(&state, &state.sessions[0].clone(), &create);
+        reduce(
+            &mut state,
+            LifecycleEvent::CreateCompleted {
+                fence: create_fence,
+                setup_plan: None,
+            },
+            now(),
+        )
+        .unwrap();
+        let remove = OperationJournal {
+            semantic_key: "remove:legacy".into(),
+            ..op()
+        };
+        let session_id = state.sessions[0].session_id;
+        reduce(
+            &mut state,
+            LifecycleEvent::BeginRemove {
+                session_id,
+                operation: remove.clone(),
+                delete_plan: DeletePlan {
+                    targets: vec!["legacy".into()],
+                    force: false,
+                },
+            },
+            now(),
+        )
+        .unwrap();
+        // Recreate the contradictory shape emitted before durable failures:
+        // the session failed, while the matching operation said succeeded and
+        // the relationship between both records was cleared.
+        state.sessions[0].lifecycle = SessionLifecycle::Failed;
+        state.sessions[0].failure = Some(Failure {
+            stage: FailureStage::Delete,
+            summary: "worktree removal failed".into(),
+        });
+        state.sessions[0].operation_id = None;
+        state.operations[1].status = OperationStatus::Succeeded;
+        let revision = state.state_revision;
+
+        assert_eq!(state.repair_legacy_failed_outcomes(now()), 1);
+        assert_eq!(state.state_revision, revision + 1);
+        assert_eq!(state.operations[0].status, OperationStatus::Succeeded);
+        assert_eq!(state.operations[1].status, OperationStatus::Failed);
+        assert_eq!(state.sessions[0].operation_id, Some(remove.operation_id));
+        assert_eq!(state.repair_legacy_failed_outcomes(now()), 0);
     }
 }
