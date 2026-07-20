@@ -95,6 +95,55 @@ fn production_delegate_brief_creates_a_session_and_queues_the_wrapped_prompt() {
 }
 
 #[test]
+fn production_supervisor_tools_observe_one_durable_aggregate() {
+    let mut mcp = McpHarness::start();
+    let started = mcp.tool(
+        "supervisor_start",
+        &json!({
+            "root_task": "coordinate the production fixture",
+            "initial_task_dag": [{
+                "task_id": "inspect",
+                "dependencies": ["root"],
+                "instruction": "inspect without exposing this body",
+                "required_artifact_contract": "none"
+            }],
+            "idempotency_key": "production-supervisor-e2e"
+        }),
+    );
+    assert!(started.get("error").is_none(), "{started}");
+    let started: serde_json::Value =
+        serde_json::from_str(started["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let run_id = started["supervisor_run_id"].as_str().unwrap();
+    assert_eq!(started["state"], "running");
+    assert_eq!(started["tasks"].as_array().unwrap().len(), 2);
+    assert!(!started.to_string().contains("inspect without exposing"));
+
+    let fetched = mcp.tool("supervisor_get", &json!({"supervisor_run_id": run_id}));
+    let fetched: serde_json::Value =
+        serde_json::from_str(fetched["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(fetched["supervisor_run_id"], run_id);
+    assert_eq!(fetched["state_revision"], started["state_revision"]);
+
+    let listed = mcp.tool("supervisor_list", &json!({"limit": 10}));
+    let listed: serde_json::Value =
+        serde_json::from_str(listed["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(listed["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["runs"][0]["supervisor_run_id"], run_id);
+
+    let events = mcp.tool(
+        "supervisor_events",
+        &json!({"supervisor_run_id": run_id, "after_sequence": 0, "limit": 10}),
+    );
+    let events: serde_json::Value =
+        serde_json::from_str(events["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(events["events"].as_array().unwrap().len(), 3);
+    assert_eq!(events["next_sequence"], 4);
+
+    let durable_dir = mcp.data_dir().join("daemon/supervisor-runs");
+    assert!(fs::read_dir(durable_dir).unwrap().count() >= 2);
+}
+
+#[test]
 fn production_issue_writes_are_refused_at_the_workspace_root() {
     let mut mcp = McpHarness::start();
     let read = mcp.tool("issue_get", &json!({"number":1}));
