@@ -35,6 +35,8 @@ pub mod pane_runtime;
 pub mod pr;
 /// daemon-owned generic terminal launch / attach adapter for Closeup panes.
 pub mod terminal_launch;
+/// Pure http(s) URL detection and validation over the ANSI-free terminal grid.
+pub mod terminal_link;
 /// Minimal VT screen grid turning raw daemon PTY output into renderable rows.
 pub mod terminal_screen;
 /// Pure selection and text extraction for daemon-owned terminal output.
