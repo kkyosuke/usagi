@@ -64,6 +64,7 @@ fn escape_in_overview_closes_the_note_before_backing_out() {
         started_from: None,
         root: PathBuf::from("/ws/.usagi/sessions/alpha"),
         worktrees: vec![worktree(Some("alpha"), "/ws/alpha")],
+        worktree_provenance: Vec::new(),
         created_at: Utc::now(),
         last_active: None,
     }]);

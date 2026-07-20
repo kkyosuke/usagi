@@ -122,7 +122,7 @@
 | フィールド | 型 | 意味 |
 |---|---|---|
 | `sessions` | array | 作成済みセッションの一覧（`.usagi/sessions/` 配下）。**配列順がホーム画面の表示順**で、初期値は作成順、選択（Overview）の `K`/`J` で並び替えると入れ替えた順序がこの配列に永続化される（[design/home/02-layout.md](../design/home/02-layout.md#選択overview既定)）。古いファイルには無く、その場合は空として扱う |
-| `pending_removals` | array | 進行中または隔離中の session removal marker。要素は `{ "name": string, "root": path, "worktrees": path[], "phase": "git_teardown" \| "context_cleanup" \| "orphaned" }`。`worktrees` は teardown 前に正規化した ancillary cleanup key。`git_teardown` は recovery context を保持した Git teardown 中、`context_cleanup` は全 Git teardown 成功後の冪等 cleanup 中、`orphaned` は session record が無く所有権不明のため自動削除しない状態。空なら省略され、古いファイルでは空として扱う |
+| `pending_removals` | array | 進行中または隔離中の session removal marker。要素は `{ "name": string, "root": path, "worktrees": path[], "provenance": WorktreeProvenance[], "phase": "git_teardown" \| "context_cleanup" \| "orphaned" }`。`worktrees` は teardown 前に正規化した ancillary cleanup key、`provenance` は session record からコピーした source repo/worktree の canonical identity。`git_teardown` は recovery context を保持した Git teardown 中、`context_cleanup` は全 Git teardown 成功後の冪等 cleanup 中、`orphaned` は記録欠落または ownership proof の曖昧さにより自動削除しない状態。空なら省略され、古いファイルでは空として扱う |
 | `root_note` | string? | ワークスペース**ルート行（`⌂ root`）**に紐づく自由記述の**複数行メモ**（任意）。セッションが持つ `note` のルート版で、ルートはどのセッションにも属さないためトップレベルに置く。**見た目だけ**の付加情報で、未設定（既定）なら省略される |
 | `root_todos` | array | ルート行の**チェックリスト**（`SessionRecord.todos` のルート版）。要素は下記 `SessionTodo`。空（既定）なら省略される |
 | `root_decisions` | array | ルート行の**意思決定ログ**（`SessionRecord.decisions` のルート版）。要素は下記 `SessionDecision`。空（既定）なら省略される |
@@ -150,6 +150,7 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 | `started_from` | string? | このセッションが**どのセッションから開始されたか**（親セッション名）。作成したエージェントが動いていたセッション名を作成時に一度だけ記録し、以後変えない（同期でも書き換えない）。エージェントが MCP の `session_create` / `session_delegate_issue` を**あるセッションの中から**呼ぶと、そのセッション名が入る（セッションの親子関係＝系譜を再構成できる）。親が無い場合は省略（`null`）——人が TUI で作成したセッション、またはエージェントがワークスペースルート（どのセッションにも属さないコーディネータ）から作成したセッション。古い `state.json` にキーが無くても読める |
 | `root` | path | セッションツリーのルート（`<workspace>/.usagi/sessions/<name>`） |
 | `worktrees` | array&lt;WorktreeState&gt; | worktree を作成した各リポジトリの状態（下記） |
+| `worktree_provenance` | array&lt;WorktreeProvenance&gt; | 作成完了時に組で記録した `{ "repo": canonical path, "worktree": canonical path }`。削除時の ownership proof に使い、branch 名だけからは補完しない。キーの無い旧 record は読めるが自動削除の対象にならない |
 | `created_at` | RFC3339(UTC) | セッションの作成日時 |
 | `last_active` | RFC3339(UTC)? | このセッションを最後に触った日時（選択・集中でアクティブにした、または端末／Agent の活動を観測した）。ホーム画面の鮮度ドット（[design/home/02-layout.md](../design/home/02-layout.md#レイアウト)）の基準時刻で、放置するほど淡く沈む。未設定（既定。一度も触っていない）なら省略され、`created_at` にフォールバックする |
 
@@ -253,7 +254,7 @@ status は再計算した時点のスナップショットで、`sync` が走る
 
 > git 呼び出しはユーザー操作の区切り（画面遷移・ペイン離脱・コマンド実行）でのみ行い、常時ポーリングはしない。ホーム画面の background git sync は workspace root ごとに generation を持ち、遅れて完了した古い sync は新しい結果を上書きしない。統合(unite)表示では各 workspace root が独立した freshness/error 状態を持つ。git repository ではない root には意味のない syncing 表示を出さない。
 
-セッションの作成・削除時（`usecase/session` の `reconcile`）には、`.usagi/sessions/` 配下のディレクトリと `state.json` の記録を照合し、**記録のない孤児ディレクトリを未コミット変更の有無にかかわらず強制削除**してディスクと state の同期を保ちます。記録済みセッション本体の削除には引き続き `--force` のガードが効きます。詳細は [4. オーケストレーション](../04-orchestration.md) を参照。
+セッションの作成・削除時（`usecase/session` の `reconcile`）には、`.usagi/sessions/` 配下のディレクトリと `state.json` の記録を照合します。記録のない孤児ディレクトリや ownership proof が曖昧な記録は `orphaned` に隔離し、未コミット変更の有無にかかわらず自動削除しません。記録済みセッション本体の削除も、source repo・recorded worktree identity・canonical containment・branch がすべて一致した対象だけに effect を出し、その上で未コミット変更には `--force` のガードが効きます。詳細は [4. オーケストレーション](../04-orchestration.md) を参照。
 
 ```
 $ usagi status

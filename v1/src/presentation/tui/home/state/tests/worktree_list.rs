@@ -513,6 +513,7 @@ fn workspace_group_from_sessions_collapses_rows_with_labels_and_notes() {
             note: note.map(str::to_string),
             root: std::path::PathBuf::from(format!("/ws/.usagi/sessions/{name}")),
             worktrees: Vec::new(),
+            worktree_provenance: Vec::new(),
             created_at: chrono::Utc::now(),
             last_active: None,
         }
@@ -553,6 +554,7 @@ fn workspace_group_nests_sessions_under_their_started_from_parent() {
         note: None,
         root: std::path::PathBuf::from(format!("/ws/.usagi/sessions/{name}")),
         worktrees: Vec::new(),
+        worktree_provenance: Vec::new(),
         created_at: chrono::Utc::now(),
         last_active: None,
     };

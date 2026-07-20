@@ -280,6 +280,7 @@ mod tests {
             started_from: None,
             root: repo.path().join(".usagi/sessions").join(name),
             worktrees: vec![worktree(name, prs)],
+            worktree_provenance: Vec::new(),
             created_at: now,
             last_active: None,
         };

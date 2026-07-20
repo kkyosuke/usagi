@@ -423,6 +423,7 @@ mod tests {
             started_from: None,
             root,
             worktrees,
+            worktree_provenance: Vec::new(),
             todos: Vec::new(),
             decisions: Vec::new(),
             created_at: Utc::now(),

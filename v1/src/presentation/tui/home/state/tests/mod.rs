@@ -66,6 +66,7 @@ fn session_record(name: &str, worktrees: usize) -> SessionRecord {
         started_from: None,
         root: std::path::PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
         worktrees: (0..worktrees).map(|_| worktree(name)).collect(),
+        worktree_provenance: Vec::new(),
         created_at: Utc::now(),
         last_active: None,
     }

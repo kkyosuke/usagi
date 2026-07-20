@@ -666,6 +666,7 @@ mod tests {
                 pr: Vec::new(),
                 updated_at: chrono::Utc::now(),
             }],
+            worktree_provenance: Vec::new(),
             created_at: chrono::Utc::now(),
             last_active: None,
         });

@@ -465,6 +465,7 @@ pane への live follow-up も、pane が消失するとライブキューが fr
 - `state.json` に durable removal marker を保存してから全リポジトリの worktree とセッションブランチを取り外し、コピーされたファイルを削除します。全 Git teardown が成功した後だけ、各 worktree のエージェント会話履歴（例: Claude のトランスクリプト）と usagi が記録する agent phase・PR・prompt queue・pane context を消し、最後に session record を落とします。会話履歴を消す対象 CLI は、ワークスペースの実効設定（`agent_cli`）から解決します。
 - **未コミットの変更がある worktree は、既定では削除しません**。この場合 `removed: false` を返し、ブロック要因の
   worktree を `dirty` 配列で示します。`force: true`（任意引数、既定 `false`）を渡すとその変更を破棄して削除します。
+- `force: true` でも ownership proof は省略しません。作成時に記録した expected repository / canonical worktree identity、session root containment、branch がすべて一致する target だけを削除します。同一 branch の外部 worktree、別 repository、canonicalize / symlink / 旧 schema の曖昧さは effect 前に `orphaned` へ隔離し、エラーの manual cleanup 案内を返します。
 - 存在しないセッション名は実行エラー（`isError: true`）になります。
 - teardown / cleanup の途中失敗も実行エラーになり、session identity と recovery context は保持されます。`session_status` の `removal`（`git_teardown` / `context_cleanup`）とエラーの案内に従って原因を直し、同じ `session_remove` を再実行すると残りから冪等に再開します。通常セッションの `removal` は `null`、所有権不明の既存 orphan は `orphaned` で、自動 force delete されません。
 

@@ -21,6 +21,7 @@ fn session(name: &str) -> crate::domain::workspace_state::SessionRecord {
         started_from: None,
         root: PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
         worktrees: Vec::new(),
+        worktree_provenance: Vec::new(),
         created_at: Utc::now(),
         last_active: None,
     }

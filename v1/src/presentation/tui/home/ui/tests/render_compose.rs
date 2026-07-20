@@ -437,6 +437,7 @@ fn render_frame_edits_the_note_in_the_right_pane_not_a_full_screen_modal() {
         started_from: None,
         root: PathBuf::from("/repo/.usagi/sessions/alpha"),
         worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
+        worktree_provenance: Vec::new(),
         created_at: Utc::now(),
         last_active: None,
     };
@@ -495,6 +496,7 @@ fn note_overlay_renders_all_three_panes_at_once_and_marks_the_focus() {
         started_from: None,
         root: PathBuf::from("/repo/.usagi/sessions/alpha"),
         worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
+        worktree_provenance: Vec::new(),
         created_at: Utc::now(),
         last_active: None,
     };
@@ -560,6 +562,7 @@ fn todos_tab_marks_the_selection_and_shows_the_inline_input() {
         started_from: None,
         root: PathBuf::from("/repo/.usagi/sessions/alpha"),
         worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
+        worktree_provenance: Vec::new(),
         created_at: Utc::now(),
         last_active: None,
     }]);
@@ -612,6 +615,7 @@ fn note_overlay_todos_and_decisions_panes_show_placeholders_when_empty() {
         started_from: None,
         root: PathBuf::from("/repo/.usagi/sessions/alpha"),
         worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
+        worktree_provenance: Vec::new(),
         created_at: Utc::now(),
         last_active: None,
     };

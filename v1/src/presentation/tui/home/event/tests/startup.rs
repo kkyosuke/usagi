@@ -225,6 +225,7 @@ fn a_background_refresh_updates_the_session_list_exactly_once() {
                 started_from: None,
                 root: PathBuf::from(format!("/ws/.usagi/sessions/{n}")),
                 worktrees: vec![worktree(Some(n), &format!("/ws/{n}"))],
+                worktree_provenance: Vec::new(),
                 created_at: Utc::now(),
                 last_active: None,
             })
@@ -299,6 +300,7 @@ fn an_external_refresh_updates_the_sidebar_without_entering_switch() {
                 started_from: None,
                 root: PathBuf::from(format!("/ws/.usagi/sessions/{n}")),
                 worktrees: vec![worktree(Some(n), &format!("/ws/{n}"))],
+                worktree_provenance: Vec::new(),
                 created_at: Utc::now(),
                 last_active: None,
             })
@@ -349,6 +351,7 @@ fn a_background_refresh_routes_to_the_workspace_it_names() {
         started_from: None,
         root: PathBuf::from(format!("{root}/.usagi/sessions/{name}")),
         worktrees: vec![worktree(Some(name), &format!("{root}/{name}"))],
+        worktree_provenance: Vec::new(),
         created_at: Utc::now(),
         last_active: None,
     };

@@ -3354,6 +3354,7 @@ mod tests {
             started_from: None,
             root: root.clone(),
             worktrees: Vec::new(),
+            worktree_provenance: Vec::new(),
             created_at: Utc::now(),
             last_active: None,
         };

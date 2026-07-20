@@ -570,6 +570,7 @@ fn state_with_sessions(names: &[&str]) -> HomeState {
             started_from: None,
             root: PathBuf::from(format!("/ws/.usagi/sessions/{n}")),
             worktrees: vec![worktree(Some(n), &format!("/ws/{n}"))],
+            worktree_provenance: Vec::new(),
             created_at: Utc::now(),
             last_active: None,
         })

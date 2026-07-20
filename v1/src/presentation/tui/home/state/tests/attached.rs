@@ -298,6 +298,7 @@ fn multi_repo_session_collapses_to_one_row_with_an_aggregated_status() {
         started_from: None,
         root: PathBuf::from("/repo/.usagi/sessions/feature"),
         worktrees: vec![merged_a, merged_b, local_c],
+        worktree_provenance: Vec::new(),
         created_at: Utc::now(),
         last_active: None,
     }]);
@@ -331,6 +332,7 @@ fn a_session_with_no_worktrees_still_yields_a_row() {
         started_from: None,
         root: PathBuf::from("/repo/.usagi/sessions/empty"),
         worktrees: Vec::new(),
+        worktree_provenance: Vec::new(),
         created_at: Utc::now(),
         last_active: None,
     }]);
