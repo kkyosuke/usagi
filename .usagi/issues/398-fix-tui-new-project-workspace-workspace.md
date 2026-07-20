@@ -1,13 +1,13 @@
 ---
 number: 398
 title: fix(tui): New Project の workspace 作成を副作用前に事前検証し既存 workspace・不正パスを弾く
-status: in-progress
+status: done
 priority: high
 labels: [tui, core, bug, validation, ux]
 dependson: []
 related: [357, 370, 369, 375]
 created_at: 2026-07-20T04:39:41.206922+00:00
-updated_at: 2026-07-20T04:39:47.497648+00:00
+updated_at: 2026-07-20T05:01:44.785562+00:00
 ---
 
 ## 背景 / 問題
