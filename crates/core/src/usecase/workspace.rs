@@ -394,6 +394,7 @@ mod tests {
             last_active: None,
             notes: Scratchpad::default(),
             prs,
+            environment: std::collections::BTreeMap::new(),
         }
     }
 
@@ -602,6 +603,7 @@ mod tests {
                     session("two", &beta_root, vec![shared_files]),
                 ],
                 root_notes: Scratchpad::default(),
+                root_environment: std::collections::BTreeMap::new(),
                 updated_at: ts(9),
             })
             .unwrap();

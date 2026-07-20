@@ -9,6 +9,7 @@
 //! [`crate::domain::note`]) and joined in at the store / usecase layer, so this
 //! record stays a stable, dependency-light core.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -114,6 +115,13 @@ pub struct SessionRecord {
     /// arrives with the git layer).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prs: Vec<PrLink>,
+    /// The session's environment variables, edited through the Overview `env`
+    /// command and persisted so they survive restarts. A stable `name -> value`
+    /// map (sorted by name); empty (the default) is omitted from `state.json`.
+    /// Display / configuration only — this never changes the session's identity
+    /// or branches.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub environment: BTreeMap<String, String>,
 }
 
 impl SessionRecord {
