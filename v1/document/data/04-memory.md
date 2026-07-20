@@ -35,6 +35,11 @@ issue がタスク（やること）を管理するのに対し、メモリは**
 そのセッション自身の `.usagi/memory/` に書かれ、セッションのブランチに乗って PR 経由で `main` に流れます
 （ワークスペースのチェックアウトを未コミットで汚しません）。
 
+MCP の root coordinator はメモリを読み取り・検索できますが、git 追跡対象を root branch 上で未コミット変更にしないため
+`memory_save` / `memory_delete` は実行できません。更新は session worktree で行い、その branch の commit・PR に載せます。
+root に既存の未コミットメモリがある場合の移行手順は
+[MCP サーバの書き込みガードレール](../03-commands/03-mcp.md#root-に未コミットのメモリがある場合)を参照してください。
+
 ## メモリファイル（`<slug>.md`）
 
 上部に **frontmatter**（行ベースのメタデータ）、その下に自由記述の markdown 本文を持ちます。ファイル名は

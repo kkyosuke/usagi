@@ -476,14 +476,13 @@ pane への live follow-up も、pane が消失するとライブキューが fr
 
 `usagi mcp` は issue / memory をカレントの worktree に、session を workspace root に解決します（[概要](#概要)）。
 root で起動するとこの 2 つの対象が一致するため、その一致を「root で動いている」の判定に使い、**git 追跡下の issue
-ストア（`.usagi/issues/`）を汚す書き込み系 issue tool を拒否**します。**メモリストア（`.usagi/memory/`）は git 管理外**
-（`.usagi/.gitignore` で除外）のため、root で書き込んでも追跡ツリーは汚れず、`memory_save` / `memory_delete` は拒否
-しません。
+ストア（`.usagi/issues/`）とメモリストア（`.usagi/memory/`）を汚す書き込み系 tool を拒否**します。メモリの Markdown
+と `MEMORY.md` は issue と同じく git 共有対象であり、除外されるのは派生 `index.json` と `.lock` だけです。
 
 | tool | root（対象が一致） | セッション worktree |
 |---|---|---|
 | `issue_create` / `issue_update` / `issue_delete` | 拒否（`isError: true`） | 実行可 |
-| `memory_save` / `memory_delete` | 実行可（git 管理外） | 実行可 |
+| `memory_save` / `memory_delete` | 拒否（`isError: true`） | 実行可 |
 | `issue_get` / `issue_search` / `issue_to_prompt` | 実行可 | 実行可 |
 | `memory_get` / `memory_search` | 実行可 | 実行可 |
 | すべての `session_*` / `session_delegate_issue` / `session_delegate_brief` | 実行可 | 実行可 |
@@ -495,9 +494,18 @@ root で起動するとこの 2 つの対象が一致するため、その一致
   オーケストレーションに必要な `session_*`・`session_delegate_issue`・`session_delegate_brief` は root でも許可します。既存の issue を
   プロンプト化してセッションに委譲する、というコーディネータの主要な動線は root のまま回せます。
 - パスの一致は**正規化して比較**します（`canonicalize` でシンボリックリンクや `/tmp` ⇄ `/private/tmp` の差を吸収し、
-  正規化できないときは素の比較にフォールバック）。カレントが非正規パスでも root を取りこぼしません。
+  正規化できないときは素の比較にフォールバック）。カレントが非正規パスでも root を取りこぼしません。書き込みを
+  許可するのは `<workspace>/.usagi/sessions/<name>` と判定できる worktree だけで、それ以外の不明な context も安全側に
+  倒して拒否します。
 - 判定は合成層（`usagi.rs`）に閉じており、issue / memory / session の各サブサーバは無改変です。セッション worktree
   （対象が一致しない）では全 tool が従来どおり動作します（回帰なし）。
+
+### root に未コミットのメモリがある場合
+
+この変更は root に既にある未コミットの `.usagi/memory/*.md` や `MEMORY.md` を自動削除・破棄しません。まず
+`git status -- .usagi/memory` と `git diff -- .usagi/memory` で対象を確認し、作業用セッションを開いて、その session
+worktree の `.usagi/memory/` へ変更済みファイルと新規ファイルをコピーします。session 側で `git diff` を確認して
+commit・PR に載せ、内容が保全されたことを確認してから root 側の未コミット差分を整理してください。
 
 ## JSON-RPC プロトコル
 

@@ -40,19 +40,55 @@ const DELEGATE_BRIEF_TOOL: &str = "session_delegate_brief";
 /// sub-server).
 const COMPOSITE_TOOLS: [&str; 2] = [DELEGATE_ISSUE_TOOL, DELEGATE_BRIEF_TOOL];
 
-/// Issue tools that write to the repository's **git-tracked** `.usagi/issues/`
-/// store. When the server runs from the workspace root (`worktree ==
-/// workspace_root`) these are refused, so the root can never dirty the tracked
-/// repo — the technical enforcement of "root does not modify the tracked
-/// repository" (principle 2).
-///
-/// Memory writes (`memory_save` / `memory_delete`) are **not** listed: the memory
-/// store (`.usagi/memory/`) is git-ignored (see `.usagi/.gitignore`), so writing
-/// it at the root leaves the tracked tree clean and needs no guard. Read/format
-/// tools (`issue_get` / `issue_search` / `issue_to_prompt` / `memory_get` /
-/// `memory_search`) and every `session_*` tool likewise stay allowed, as they are
-/// what a coordinator needs and do not touch the tracked store.
-const ROOT_FORBIDDEN_TOOLS: [&str; 3] = ["issue_create", "issue_update", "issue_delete"];
+/// Tools that mutate either git-tracked store. Both `.usagi/issues/` and
+/// `.usagi/memory/` (Markdown files plus `MEMORY.md`) ride the current branch;
+/// only their derived indexes and lock files are ignored. Consequently these
+/// tools are allowed only from a recognised session worktree, never from the
+/// workspace root or an unknown path. Read/format and orchestration tools remain
+/// available to the root coordinator.
+const ROOT_FORBIDDEN_TOOLS: [&str; 5] = [
+    "issue_create",
+    "issue_update",
+    "issue_delete",
+    "memory_save",
+    "memory_delete",
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StoreMutationContext {
+    Root,
+    Session,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StoreMutationForbidden {
+    Root,
+    Unknown,
+}
+
+impl std::fmt::Display for StoreMutationForbidden {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Root => write!(
+                f,
+                "tracked store mutation is refused at the workspace root"
+            ),
+            Self::Unknown => write!(
+                f,
+                "tracked store mutation is refused because the current worktree is not a recognised session"
+            ),
+        }
+    }
+}
+
+fn authorize_store_mutation(context: StoreMutationContext) -> Result<(), StoreMutationForbidden> {
+    match context {
+        StoreMutationContext::Root => Err(StoreMutationForbidden::Root),
+        StoreMutationContext::Session => Ok(()),
+        StoreMutationContext::Unknown => Err(StoreMutationForbidden::Unknown),
+    }
+}
 
 /// Whether two paths name the same directory, comparing canonicalized forms (so a
 /// symlinked or `/tmp` ⇄ `/private/tmp` difference still matches) and falling back
@@ -66,6 +102,29 @@ fn same_dir(a: &Path, b: &Path) -> bool {
         )
 }
 
+fn store_mutation_context(worktree: &Path, workspace_root: &Path) -> StoreMutationContext {
+    if same_dir(worktree, workspace_root) {
+        return StoreMutationContext::Root;
+    }
+
+    let sessions = workspace_root.join(".usagi").join("sessions");
+    let (Ok(worktree), Ok(sessions)) = (
+        std::fs::canonicalize(worktree),
+        std::fs::canonicalize(sessions),
+    ) else {
+        return StoreMutationContext::Unknown;
+    };
+    let is_session = worktree
+        .strip_prefix(sessions)
+        .is_ok_and(|relative| relative.components().count() == 1);
+
+    if is_session {
+        StoreMutationContext::Session
+    } else {
+        StoreMutationContext::Unknown
+    }
+}
+
 /// A JSON-RPC server exposing the full `usagi` tool surface (issue + memory +
 /// session) for one workspace.
 pub struct UsagiMcpServer {
@@ -75,11 +134,9 @@ pub struct UsagiMcpServer {
     memory: MemoryMcpServer,
     /// Session orchestration tools for the workspace.
     session: SessionMcpServer,
-    /// True when the process runs from the workspace root (`worktree` and
-    /// `workspace_root` coincide). In that case the write-guardrail refuses the
-    /// issue-write tools that mutate the git-tracked store (see
-    /// [`ROOT_FORBIDDEN_TOOLS`]).
-    at_workspace_root: bool,
+    /// Whether tracked-store mutation is running at root, in a recognised
+    /// session, or in an unknown context. Only a session may mutate.
+    store_mutation_context: StoreMutationContext,
     /// The workspace root directory.
     workspace_root: PathBuf,
 }
@@ -99,7 +156,7 @@ impl UsagiMcpServer {
         runner: Box<dyn CommandRunner>,
         model_probe: Box<dyn AgentModelProbe>,
     ) -> Self {
-        let at_workspace_root = same_dir(&worktree, &workspace_root);
+        let store_mutation_context = store_mutation_context(&worktree, &workspace_root);
         Self {
             issue: IssueServer::new(&worktree),
             memory: MemoryMcpServer::new(&worktree),
@@ -110,7 +167,7 @@ impl UsagiMcpServer {
                 runner,
                 model_probe,
             ),
-            at_workspace_root,
+            store_mutation_context,
             workspace_root,
         }
     }
@@ -409,19 +466,17 @@ impl McpService for UsagiMcpServer {
     }
 
     fn call_tool(&self, name: &str, arguments: Value) -> Result<String, String> {
-        // Root guardrail: the issue store is git-tracked, so refuse the issue-write
-        // tools before routing when running at the workspace root. This keeps a
-        // coordinator running `usagi mcp` at the root from dirtying the tracked
-        // repo — those writes belong on a session's own branch. (Memory writes are
-        // not guarded: the memory store is git-ignored, so they leave the tracked
-        // tree clean.)
-        if self.at_workspace_root && ROOT_FORBIDDEN_TOOLS.contains(&name) {
-            return Err(format!(
-                "{name} is refused at the workspace root: it would modify the \
-                 git-tracked issue store. Run issue writes from inside a session \
-                 worktree (create or open one with session_create / \
+        // Guard before routing so malformed arguments cannot reach a mutating
+        // store. Only a recognised session context has write capability; root
+        // and unknown contexts fail closed with a typed policy error.
+        if ROOT_FORBIDDEN_TOOLS.contains(&name) {
+            if let Err(forbidden) = authorize_store_mutation(self.store_mutation_context) {
+                return Err(format!(
+                    "{name}: {forbidden}. Run issue and memory writes from inside a \
+                 session worktree (create or open one with session_create / \
                  session_delegate_issue) so the change rides that session's branch."
-            ));
+                ));
+            }
         }
         // The composite owns `session_delegate_issue` (it spans issue + session);
         // every other call is delegated to the first sub-server that advertises
@@ -982,9 +1037,9 @@ mod tests {
     }
 
     #[test]
-    fn root_refuses_the_issue_write_tools() {
+    fn root_refuses_all_tracked_store_write_tools() {
         // At the workspace root (worktree == workspace_root) every tool that
-        // mutates the git-tracked issue store is refused with the "run it from a
+        // mutates either git-tracked store is refused with the "run it from a
         // session" guidance, regardless of arguments — the guardrail fires before
         // the tool runs.
         let tmp = tempfile::tempdir().unwrap();
@@ -1031,10 +1086,9 @@ mod tests {
     }
 
     #[test]
-    fn root_allows_memory_writes_reads_and_session_tools() {
-        // The memory store is git-ignored, so memory writes are allowed at the
-        // root; the read/format issue+memory tools and all session tools stay
-        // usable there too — a coordinator polls and delegates from the root.
+    fn root_allows_store_reads_and_session_tools() {
+        // Read/format issue+memory tools and session tools stay usable at root —
+        // a coordinator still needs to inspect state, poll, and delegate there.
         let tmp = tempfile::tempdir().unwrap();
         let server = server_at(tmp.path());
         // Seed one issue straight through the sub-server (the composite refuses
@@ -1045,12 +1099,6 @@ mod tests {
             .unwrap();
 
         for (tool, args) in [
-            // Memory writes are not guarded (git-ignored store).
-            (
-                "memory_save",
-                json!({"name":"m","title":"m","body":"b","type":"project"}),
-            ),
-            ("memory_delete", json!({"name": "m"})),
             // Reads / formatting.
             ("issue_search", json!({})),
             ("issue_get", json!({"number": 1})),
@@ -1063,6 +1111,135 @@ mod tests {
             let result = call(&server, tool, args);
             assert_eq!(result["isError"], false, "{tool} must be allowed at root");
         }
+    }
+
+    #[test]
+    fn tracked_store_policy_preserves_git_state_and_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        crate::infrastructure::gitignore::write_usagi_gitignore(root.path()).unwrap();
+        let root_server = server_at(root.path());
+
+        // Seed both tracked stores beneath the guard, then commit a clean
+        // baseline that read tools can inspect and delete calls could mutate if
+        // they accidentally reached their sub-server.
+        root_server
+            .issue
+            .call_tool("issue_create", json!({"title": "seed"}))
+            .unwrap();
+        root_server
+            .memory
+            .call_tool(
+                "memory_save",
+                json!({"name":"seed","title":"seed","body":"b","type":"project"}),
+            )
+            .unwrap();
+        let run = |dir: &Path, args: &[&str]| {
+            assert!(git_cmd(dir).args(args).status().unwrap().success());
+        };
+        run(root.path(), &["add", ".usagi"]);
+        run(root.path(), &["commit", "-q", "-m", "seed stores"]);
+        let status = |dir: &Path| {
+            String::from_utf8(
+                git_cmd(dir)
+                    .args(["status", "--porcelain"])
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+        };
+        let clean = status(root.path());
+        assert!(clean.is_empty());
+
+        for (tool, args) in [
+            ("issue_create", json!({"title": "blocked"})),
+            ("issue_update", json!({"number": 1, "status": "done"})),
+            ("issue_delete", json!({"number": 1})),
+            (
+                "memory_save",
+                json!({"name":"blocked","title":"blocked","type":"project"}),
+            ),
+            ("memory_delete", json!({"name": "seed"})),
+        ] {
+            let result = call(&root_server, tool, args);
+            assert_eq!(result["isError"], true, "{tool} must fail at root");
+            assert_eq!(status(root.path()), clean, "{tool} changed root git state");
+        }
+
+        for (tool, args) in [
+            ("issue_search", json!({})),
+            ("issue_get", json!({"number": 1})),
+            ("issue_to_prompt", json!({"number": 1})),
+            ("memory_search", json!({})),
+            ("memory_get", json!({"name": "seed"})),
+        ] {
+            assert_eq!(call(&root_server, tool, args)["isError"], false, "{tool}");
+            assert_eq!(status(root.path()), clean, "{tool} changed root git state");
+        }
+
+        // A genuine Git worktree at the recognised session location retains
+        // memory write capability and records the tracked Markdown change on
+        // that session branch, not on root.
+        let session_path = root.path().join(".usagi/sessions/work");
+        let session_arg = session_path.to_string_lossy().into_owned();
+        run(
+            root.path(),
+            &["worktree", "add", "-q", "-b", "usagi/work", &session_arg],
+        );
+        let session_server = UsagiMcpServer::new(
+            session_path.clone(),
+            root.path().to_path_buf(),
+            Box::new(StubBackend::default()),
+            Box::new(FakeRunner(vec!["claude", "codex", "codex-fugu"])),
+            Box::new(AvailableModelProbe),
+        );
+        let saved = call(
+            &session_server,
+            "memory_save",
+            json!({"name":"session-note","title":"session","type":"project"}),
+        );
+        assert_eq!(saved["isError"], false);
+        assert!(status(&session_path).contains(".usagi/memory/"));
+        assert_eq!(status(root.path()), clean);
+
+        // A distinct but malformed context must not inherit session write
+        // capability merely because its path differs from workspace_root.
+        let unknown = root.path().join("elsewhere");
+        fs::create_dir_all(&unknown).unwrap();
+        let unknown_server = UsagiMcpServer::new(
+            unknown.clone(),
+            root.path().to_path_buf(),
+            Box::new(StubBackend::default()),
+            Box::new(FakeRunner(vec!["claude", "codex", "codex-fugu"])),
+            Box::new(AvailableModelProbe),
+        );
+        for (tool, args) in [
+            ("issue_create", json!({"title": "unknown"})),
+            ("issue_update", json!({"number": 1, "status": "done"})),
+            ("issue_delete", json!({"number": 1})),
+            (
+                "memory_save",
+                json!({"name":"unknown","title":"unknown","type":"project"}),
+            ),
+            ("memory_delete", json!({"name": "seed"})),
+        ] {
+            let result = call(&unknown_server, tool, args);
+            assert_eq!(result["isError"], true);
+            assert!(result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("not a recognised session"));
+            assert!(!unknown.join(".usagi").exists());
+        }
+
+        // Even a path with the expected spelling is unknown until the actual
+        // session worktree exists; malformed/nonexistent context cannot opt in.
+        let missing_session = root.path().join(".usagi/sessions/missing");
+        assert_eq!(
+            store_mutation_context(&missing_session, root.path()),
+            StoreMutationContext::Unknown
+        );
     }
 
     #[test]
