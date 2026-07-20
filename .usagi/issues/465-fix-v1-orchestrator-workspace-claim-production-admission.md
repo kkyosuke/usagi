@@ -1,14 +1,14 @@
 ---
 number: 465
 title: fix(v1/orchestrator): workspace claim を production admission で原子的に使う
-status: in-progress
+status: done
 priority: high
 labels: [review, v1, orchestration, concurrency]
 dependson: []
 related: [182, 183, 185]
 parent: 453
 created_at: 2026-07-20T12:06:21.362921+00:00
-updated_at: 2026-07-20T21:27:40.290930+00:00
+updated_at: 2026-07-20T22:04:52.935235+00:00
 ---
 
 ## 問題・影響
