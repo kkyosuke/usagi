@@ -1,14 +1,14 @@
 ---
 number: 463
 title: fix(tui): TerminalSession を reconnect し入力失敗を投影する
-status: todo
+status: in-progress
 priority: high
 labels: [review, v2, tui, terminal, resilience]
 dependson: []
 related: [216, 265, 303, 365, 385, 388]
 parent: 453
 created_at: 2026-07-20T12:06:20.675238+00:00
-updated_at: 2026-07-20T12:06:20.675238+00:00
+updated_at: 2026-07-20T21:53:32.453312+00:00
 ---
 
 ## 問題・影響

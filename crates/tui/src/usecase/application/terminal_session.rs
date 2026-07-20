@@ -11,6 +11,7 @@
 //! The daemon boundary is the injected [`TerminalStreamPort`], so the whole
 //! coordinator is exercised with a fake port in unit tests.
 
+use std::time::{Duration, Instant};
 use usagi_core::domain::id::TerminalRef;
 
 use super::pane_runtime::Geometry;
@@ -115,6 +116,8 @@ pub trait TerminalStreamPort {
 pub enum SessionState {
     /// Attached and streaming.
     Live,
+    /// The daemon transport is temporarily unavailable; attach will be retried.
+    Reconnecting,
     /// Not attached; a reconnect is required to resume.
     Disconnected,
     /// Ownership is unknown; input is disabled.
@@ -122,6 +125,51 @@ pub enum SessionState {
     /// The terminal process has exited; the final screen is retained.
     Exited,
 }
+
+/// Why a keystroke was not accepted by the daemon-owned terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalInputError {
+    /// There is no live, connection-owned subscription to fence the input.
+    NotLive(SessionState),
+    /// A live input request reached the port but failed.
+    Transport(TerminalError),
+}
+
+impl TerminalInputError {
+    /// Presentation-safe explanation that explicitly says the bytes were not delivered.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::NotLive(SessionState::Reconnecting) => {
+                "terminal is reconnecting; keystroke not delivered"
+            }
+            Self::NotLive(SessionState::Disconnected) => {
+                "terminal is disconnected; keystroke not delivered"
+            }
+            Self::NotLive(SessionState::Orphaned) | Self::Transport(TerminalError::Orphaned) => {
+                "terminal ownership is unknown; keystroke not delivered"
+            }
+            Self::NotLive(SessionState::Exited) | Self::Transport(TerminalError::Exited) => {
+                "terminal has exited; keystroke not delivered"
+            }
+            Self::NotLive(SessionState::Live) => {
+                "terminal subscription is unavailable; keystroke not delivered"
+            }
+            Self::Transport(TerminalError::ResyncRequired) => {
+                "terminal output is resynchronizing; keystroke not delivered"
+            }
+            Self::Transport(TerminalError::Unavailable) => {
+                "daemon unavailable; keystroke not delivered"
+            }
+            Self::Transport(TerminalError::Stale) => {
+                "terminal is no longer available; keystroke not delivered"
+            }
+        }
+    }
+}
+
+const RETRY_INITIAL: Duration = Duration::from_millis(100);
+const RETRY_MAX: Duration = Duration::from_secs(2);
 
 /// A polling view of one daemon-owned terminal and its rendered screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +187,8 @@ pub struct TerminalSession {
     input_seq: u64,
     state: SessionState,
     error: Option<String>,
+    retry_attempt: u32,
+    retry_at: Option<Instant>,
 }
 
 impl TerminalSession {
@@ -156,6 +206,8 @@ impl TerminalSession {
             input_seq: 0,
             state: SessionState::Disconnected,
             error: None,
+            retry_attempt: 0,
+            retry_at: None,
         }
     }
 
@@ -188,9 +240,10 @@ impl TerminalSession {
     pub fn display_rows(&self) -> Vec<String> {
         match self.state {
             SessionState::Live => self.screen.rows_with_cursor(),
-            SessionState::Disconnected | SessionState::Orphaned | SessionState::Exited => {
-                self.screen.rows()
-            }
+            SessionState::Reconnecting
+            | SessionState::Disconnected
+            | SessionState::Orphaned
+            | SessionState::Exited => self.screen.rows(),
         }
     }
 
@@ -199,9 +252,10 @@ impl TerminalSession {
     pub fn display_rows_with_scrollback(&self) -> Vec<String> {
         match self.state {
             SessionState::Live => self.screen.rows_with_scrollback_and_cursor(),
-            SessionState::Disconnected | SessionState::Orphaned | SessionState::Exited => {
-                self.screen.rows_with_scrollback()
-            }
+            SessionState::Reconnecting
+            | SessionState::Disconnected
+            | SessionState::Orphaned
+            | SessionState::Exited => self.screen.rows_with_scrollback(),
         }
     }
 
@@ -241,6 +295,12 @@ impl TerminalSession {
     /// same width as the right pane. A resize failure therefore cannot hide an
     /// otherwise attachable terminal.
     pub fn connect<P: TerminalStreamPort>(&mut self, port: &mut P) {
+        self.connect_at(port, Instant::now());
+    }
+
+    /// Connects at an injected monotonic instant. This is the deterministic
+    /// clock boundary used by reconnect tests.
+    pub fn connect_at<P: TerminalStreamPort>(&mut self, port: &mut P, now: Instant) {
         let resize_error = port.resize(&self.terminal, self.geometry).err();
         self.synchronized_geometry = resize_error.is_none().then_some(self.geometry);
         match port.attach(&self.terminal, self.geometry) {
@@ -258,7 +318,7 @@ impl TerminalSession {
                     ));
                 }
             }
-            Err(error) => self.fail(error),
+            Err(error) => self.fail_at(error, now),
         }
     }
 
@@ -266,13 +326,25 @@ impl TerminalSession {
     /// gap (retained output already trimmed) triggers a full reattach; the
     /// process having exited transitions to [`SessionState::Exited`].
     pub fn poll<P: TerminalStreamPort>(&mut self, port: &mut P) {
-        if self.state != SessionState::Live {
-            return;
-        }
-        match port.poll(&self.terminal, self.cursor) {
-            Ok(chunks) => self.apply(port, chunks),
-            Err(TerminalError::ResyncRequired) => self.connect(port),
-            Err(error) => self.fail(error),
+        self.poll_at(port, Instant::now());
+    }
+
+    /// Polls at an injected monotonic instant, retrying an unavailable daemon
+    /// only after the capped exponential backoff expires.
+    pub fn poll_at<P: TerminalStreamPort>(&mut self, port: &mut P, now: Instant) {
+        match self.state {
+            SessionState::Live => match port.poll(&self.terminal, self.cursor) {
+                Ok(chunks) => self.apply_at(port, chunks, now),
+                Err(TerminalError::ResyncRequired) => self.connect_at(port, now),
+                Err(error) => self.fail_at(error, now),
+            },
+            SessionState::Reconnecting if self.retry_at.is_some_and(|retry_at| now >= retry_at) => {
+                self.connect_at(port, now);
+            }
+            SessionState::Reconnecting
+            | SessionState::Disconnected
+            | SessionState::Orphaned
+            | SessionState::Exited => {}
         }
     }
 
@@ -313,15 +385,29 @@ impl TerminalSession {
         }
     }
 
-    /// Sends input bytes to the terminal exactly once.  Input is ignored unless
-    /// the session is live and attached.
-    pub fn send_input<P: TerminalStreamPort>(&mut self, port: &mut P, bytes: &[u8]) {
+    /// Sends input bytes to the terminal exactly once.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed outcome when no live subscription exists or when the
+    /// daemon rejects the input. Input is never silently discarded.
+    pub fn send_input<P: TerminalStreamPort>(
+        &mut self,
+        port: &mut P,
+        bytes: &[u8],
+    ) -> Result<(), TerminalInputError> {
         let (SessionState::Live, Some(subscription)) = (self.state, self.subscription) else {
-            return;
+            return Err(TerminalInputError::NotLive(self.state));
         };
         match port.input(&self.terminal, subscription, self.input_seq, bytes) {
-            Ok(()) => self.input_seq += 1,
-            Err(error) => self.fail(error),
+            Ok(()) => {
+                self.input_seq += 1;
+                Ok(())
+            }
+            Err(error) => {
+                self.fail_at(error, Instant::now());
+                Err(TerminalInputError::Transport(error))
+            }
         }
     }
 
@@ -331,16 +417,24 @@ impl TerminalSession {
             port.detach(&self.terminal, subscription);
         }
         self.state = SessionState::Disconnected;
+        self.retry_at = None;
+        self.retry_attempt = 0;
+        self.error = Some("terminal detached".to_owned());
     }
 
-    fn apply<P: TerminalStreamPort>(&mut self, port: &mut P, chunks: Vec<TerminalChunk>) {
+    fn apply_at<P: TerminalStreamPort>(
+        &mut self,
+        port: &mut P,
+        chunks: Vec<TerminalChunk>,
+        now: Instant,
+    ) {
         for chunk in chunks {
             let contiguous = chunk.start_offset == self.cursor
                 && chunk.end_offset >= chunk.start_offset
                 && chunk.end_offset - chunk.start_offset == chunk.data.len() as u64;
             if !contiguous {
                 // Lost or overlapping output: rebuild from an atomic snapshot.
-                self.connect(port);
+                self.connect_at(port, now);
                 return;
             }
             self.screen.advance(&chunk.data);
@@ -353,7 +447,10 @@ impl TerminalSession {
         self.screen.advance(&attach.replay);
         self.subscription = Some(attach.subscription);
         self.cursor = attach.output_offset;
+        self.input_seq = 0;
         self.error = None;
+        self.retry_attempt = 0;
+        self.retry_at = None;
         self.state = if attach.exited {
             SessionState::Exited
         } else {
@@ -361,22 +458,41 @@ impl TerminalSession {
         };
     }
 
-    fn fail(&mut self, error: TerminalError) {
+    fn fail_at(&mut self, error: TerminalError, now: Instant) {
+        if error == TerminalError::Unavailable {
+            self.subscription = None;
+            self.state = SessionState::Reconnecting;
+            self.retry_at = Some(now + retry_delay(self.retry_attempt));
+            self.retry_attempt = self.retry_attempt.saturating_add(1);
+            self.error = Some(error_message(error).to_owned());
+            return;
+        }
+        if error != TerminalError::Exited {
+            self.subscription = None;
+        }
+        self.retry_at = None;
+        self.retry_attempt = 0;
         self.state = match error {
             TerminalError::Orphaned => SessionState::Orphaned,
             TerminalError::Exited => SessionState::Exited,
-            TerminalError::ResyncRequired | TerminalError::Unavailable | TerminalError::Stale => {
-                SessionState::Disconnected
-            }
+            TerminalError::ResyncRequired | TerminalError::Stale => SessionState::Disconnected,
+            TerminalError::Unavailable => unreachable!("unavailable handled above"),
         };
         self.error = Some(error_message(error).to_owned());
     }
 }
 
+fn retry_delay(attempt: u32) -> Duration {
+    RETRY_INITIAL
+        .checked_mul(1_u32.checked_shl(attempt).unwrap_or(u32::MAX))
+        .unwrap_or(RETRY_MAX)
+        .min(RETRY_MAX)
+}
+
 fn error_message(error: TerminalError) -> &'static str {
     match error {
         TerminalError::ResyncRequired => "terminal output is resynchronizing",
-        TerminalError::Unavailable => "daemon disconnected; reconnect to continue",
+        TerminalError::Unavailable => "daemon unavailable; reconnecting",
         TerminalError::Stale => "terminal is no longer available",
         TerminalError::Orphaned => "terminal ownership is unknown; input is disabled",
         TerminalError::Exited => "terminal has exited",
@@ -418,6 +534,7 @@ mod tests {
         resized: Vec<Geometry>,
         resize_error: Option<TerminalError>,
         resize_count_at_attach: Vec<usize>,
+        attached_terminals: Vec<TerminalRef>,
     }
     impl TerminalStreamPort for FakePort {
         fn resize(&mut self, _: &TerminalRef, geometry: Geometry) -> Result<(), TerminalError> {
@@ -427,10 +544,11 @@ mod tests {
 
         fn attach(
             &mut self,
-            _: &TerminalRef,
+            terminal: &TerminalRef,
             _: Geometry,
         ) -> Result<TerminalAttach, TerminalError> {
             self.resize_count_at_attach.push(self.resized.len());
+            self.attached_terminals.push(terminal.clone());
             self.attach.remove(0)
         }
         fn poll(&mut self, _: &TerminalRef, _: u64) -> Result<Vec<TerminalChunk>, TerminalError> {
@@ -577,6 +695,7 @@ mod tests {
         );
 
         for state in [
+            SessionState::Reconnecting,
             SessionState::Disconnected,
             SessionState::Orphaned,
             SessionState::Exited,
@@ -616,13 +735,12 @@ mod tests {
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
-        assert_eq!(session.state(), SessionState::Disconnected);
+        assert_eq!(session.state(), SessionState::Reconnecting);
+        assert_eq!(session.error(), Some("daemon unavailable; reconnecting"));
         assert_eq!(
-            session.error(),
-            Some("daemon disconnected; reconnect to continue")
+            session.send_input(&mut port, b"ls\r"),
+            Err(TerminalInputError::NotLive(SessionState::Reconnecting))
         );
-        // Input is dropped while not live, and no bytes reach the port.
-        session.send_input(&mut port, b"ls\r");
         assert!(port.inputs.is_empty());
     }
 
@@ -643,7 +761,7 @@ mod tests {
         assert_eq!(
             session.error(),
             Some(
-                "terminal attached, but viewport synchronization failed: daemon disconnected; reconnect to continue"
+                "terminal attached, but viewport synchronization failed: daemon unavailable; reconnecting"
             )
         );
 
@@ -663,8 +781,8 @@ mod tests {
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
-        session.send_input(&mut port, b"l");
-        session.send_input(&mut port, b"s\r");
+        assert_eq!(session.send_input(&mut port, b"l"), Ok(()));
+        assert_eq!(session.send_input(&mut port, b"s\r"), Ok(()));
         assert_eq!(
             port.inputs,
             vec![(9, 0, b"l".to_vec()), (9, 1, b"s\r".to_vec())]
@@ -680,7 +798,10 @@ mod tests {
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
-        session.send_input(&mut port, b"x");
+        assert_eq!(
+            session.send_input(&mut port, b"x"),
+            Err(TerminalInputError::Transport(TerminalError::Stale))
+        );
         assert_eq!(session.state(), SessionState::Disconnected);
         assert_eq!(session.error(), Some("terminal is no longer available"));
     }
@@ -739,7 +860,7 @@ mod tests {
 
         // `poll` recovers this error before calling `fail`, but keep the
         // defensive terminal-state mapping covered as well.
-        session.fail(TerminalError::ResyncRequired);
+        session.fail_at(TerminalError::ResyncRequired, Instant::now());
         assert_eq!(session.state(), SessionState::Disconnected);
         assert_eq!(session.error(), Some("terminal output is resynchronizing"));
     }
@@ -795,5 +916,197 @@ mod tests {
         assert_eq!(session.state(), SessionState::Live);
         assert_eq!(session.rows()[0], "back");
         assert_eq!(session.terminal().terminal_id, session.terminal.terminal_id);
+    }
+
+    #[derive(Clone, Copy)]
+    struct FakeClock(Instant);
+
+    impl FakeClock {
+        fn advance(&mut self, duration: Duration) {
+            self.0 += duration;
+        }
+    }
+
+    #[test]
+    fn unavailable_retries_same_terminal_with_capped_backoff_and_resets_after_attach() {
+        let mut clock = FakeClock(Instant::now());
+        let mut port = FakePort {
+            attach: vec![
+                Err(TerminalError::Unavailable),
+                Err(TerminalError::Unavailable),
+                Err(TerminalError::Unavailable),
+                Err(TerminalError::Unavailable),
+                Err(TerminalError::Unavailable),
+                Err(TerminalError::Unavailable),
+                Err(TerminalError::Unavailable),
+                Ok(attach(7, 5, b"back", false)),
+            ],
+            ..FakePort::default()
+        };
+        let terminal = terminal();
+        let mut session = TerminalSession::new(terminal.clone(), geometry());
+
+        session.connect_at(&mut port, clock.0);
+        for delay in [100, 200, 400, 800, 1_600, 2_000, 2_000] {
+            clock.advance(Duration::from_millis(delay - 1));
+            session.poll_at(&mut port, clock.0);
+            clock.advance(Duration::from_millis(1));
+            session.poll_at(&mut port, clock.0);
+        }
+
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(session.rows()[0], "back");
+        assert!(
+            port.attached_terminals
+                .iter()
+                .all(|attached| attached == &terminal)
+        );
+        assert_eq!(session.retry_attempt, 0);
+        assert_eq!(session.retry_at, None);
+
+        port.polls.push(Err(TerminalError::Unavailable));
+        session.poll_at(&mut port, clock.0);
+        assert_eq!(session.retry_at, Some(clock.0 + Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn detach_cancels_a_scheduled_retry_and_non_live_input_is_typed() {
+        let mut clock = FakeClock(Instant::now());
+        let mut port = FakePort {
+            attach: vec![
+                Ok(attach(4, 0, b"", false)),
+                Ok(attach(5, 0, b"unexpected", false)),
+            ],
+            polls: vec![Err(TerminalError::Unavailable)],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect_at(&mut port, clock.0);
+        session.poll_at(&mut port, clock.0);
+        assert_eq!(session.state(), SessionState::Reconnecting);
+
+        session.detach(&mut port);
+        clock.advance(RETRY_MAX * 2);
+        session.poll_at(&mut port, clock.0);
+
+        assert_eq!(session.state(), SessionState::Disconnected);
+        assert_eq!(port.attached_terminals.len(), 1);
+        assert_eq!(session.retry_at, None);
+        assert_eq!(
+            session.send_input(&mut port, b"x"),
+            Err(TerminalInputError::NotLive(SessionState::Disconnected))
+        );
+    }
+
+    #[test]
+    fn every_input_failure_has_explicit_non_delivery_feedback() {
+        let outcomes = [
+            TerminalInputError::NotLive(SessionState::Live),
+            TerminalInputError::NotLive(SessionState::Reconnecting),
+            TerminalInputError::NotLive(SessionState::Disconnected),
+            TerminalInputError::NotLive(SessionState::Orphaned),
+            TerminalInputError::NotLive(SessionState::Exited),
+            TerminalInputError::Transport(TerminalError::ResyncRequired),
+            TerminalInputError::Transport(TerminalError::Unavailable),
+            TerminalInputError::Transport(TerminalError::Stale),
+            TerminalInputError::Transport(TerminalError::Orphaned),
+            TerminalInputError::Transport(TerminalError::Exited),
+        ];
+        for outcome in outcomes {
+            assert!(outcome.message().contains("not delivered"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_socket_restart_reconnects_and_resyncs_the_same_terminal() {
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::path::PathBuf;
+        use std::thread;
+
+        struct SocketPort {
+            path: PathBuf,
+            next_attach: TerminalAttach,
+            attached: Vec<TerminalRef>,
+        }
+
+        impl SocketPort {
+            fn available(&self) -> Result<(), TerminalError> {
+                UnixStream::connect(&self.path)
+                    .map(drop)
+                    .map_err(|_| TerminalError::Unavailable)
+            }
+        }
+
+        impl TerminalStreamPort for SocketPort {
+            fn resize(&mut self, _: &TerminalRef, _: Geometry) -> Result<(), TerminalError> {
+                self.available()
+            }
+
+            fn attach(
+                &mut self,
+                terminal: &TerminalRef,
+                _: Geometry,
+            ) -> Result<TerminalAttach, TerminalError> {
+                self.available()?;
+                self.attached.push(terminal.clone());
+                Ok(self.next_attach.clone())
+            }
+
+            fn poll(
+                &mut self,
+                _: &TerminalRef,
+                _: u64,
+            ) -> Result<Vec<TerminalChunk>, TerminalError> {
+                self.available().map(|()| Vec::new())
+            }
+
+            fn input(
+                &mut self,
+                _: &TerminalRef,
+                _: u64,
+                _: u64,
+                _: &[u8],
+            ) -> Result<(), TerminalError> {
+                self.available()
+            }
+
+            fn detach(&mut self, _: &TerminalRef, _: u64) {}
+        }
+
+        fn serve(listener: UnixListener, connections: usize) -> thread::JoinHandle<()> {
+            thread::spawn(move || {
+                for _ in 0..connections {
+                    listener.accept().expect("test socket accepts connection");
+                }
+            })
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("terminal.sock");
+        let first_server = serve(UnixListener::bind(&path).unwrap(), 2);
+        let terminal = terminal();
+        let mut port = SocketPort {
+            path: path.clone(),
+            next_attach: attach(1, 3, b"old", false),
+            attached: Vec::new(),
+        };
+        let start = Instant::now();
+        let mut session = TerminalSession::new(terminal.clone(), geometry());
+        session.connect_at(&mut port, start);
+        first_server.join().unwrap();
+
+        session.poll_at(&mut port, start);
+        assert_eq!(session.state(), SessionState::Reconnecting);
+
+        std::fs::remove_file(&path).unwrap();
+        let restarted_server = serve(UnixListener::bind(&path).unwrap(), 2);
+        port.next_attach = attach(2, 5, b"fresh", false);
+        session.poll_at(&mut port, start + RETRY_INITIAL);
+        restarted_server.join().unwrap();
+
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(session.rows()[0], "fresh");
+        assert_eq!(port.attached, vec![terminal.clone(), terminal]);
     }
 }
