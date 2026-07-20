@@ -88,6 +88,9 @@ pub struct PullRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Claim {
+    /// Canonical workspace path. The claims file is workspace-local, and this
+    /// durable discriminator makes accidental file reuse fail closed.
+    pub workspace: String,
     pub issue: u64,
     pub plan: String,
     pub owner: String,
