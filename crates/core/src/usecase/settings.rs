@@ -94,6 +94,9 @@ mod tests {
             global: Ok(global.clone()),
         };
         assert_eq!(read_for_workspace_entry(&mut readable), effective);
+        readable
+            .save(SettingsScope::Global, &Settings::default())
+            .unwrap();
 
         let mut broken_local = FakePort {
             workspace: Err(io::Error::other("corrupt local settings")),
