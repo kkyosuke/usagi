@@ -193,32 +193,21 @@ fn detail_lines(pr: &PrLink) -> Vec<String> {
     ]
 }
 
-/// 選択行が必ず収まる PR 一覧 viewport の半開区間 `(start, end)`。
-fn visible_bounds(state: &PrModal) -> (usize, usize) {
-    let len = state.prs.len();
-    let visible = len.min(MAX_VISIBLE);
-    let start = state
-        .selected
-        .saturating_sub(visible.saturating_sub(1))
-        .min(len.saturating_sub(visible));
-    (start, start + visible)
-}
-
 /// PR ポップアップのボディ（枠の内側の行）: 一覧・選択中の詳細・フッタ。
+///
+/// list shape の共通部品を使う: 選択追従の viewport は [`modal::list_window`]、
+/// `↑/↓ N more` を挟んだ scroll 描画は [`modal::scroll_window`] に委譲する。
 fn body(state: &PrModal) -> Vec<String> {
     let mut lines = vec![modal::caption("Pull requests")];
     if let Some(selected) = state.selected_pr() {
-        let (start, end) = visible_bounds(state);
-        if start > 0 {
-            lines.push(modal::scroll_above(start));
-        }
-        for (i, pr) in state.prs[start..end].iter().enumerate() {
-            let index = start + i;
-            lines.push(pr_row(pr, index == state.selected, INNER_WIDTH));
-        }
-        if end < state.prs.len() {
-            lines.push(modal::scroll_below(state.prs.len() - end));
-        }
+        let rows: Vec<String> = state
+            .prs
+            .iter()
+            .enumerate()
+            .map(|(index, pr)| pr_row(pr, index == state.selected, INNER_WIDTH))
+            .collect();
+        let (start, end) = modal::list_window(state.prs.len(), state.selected, MAX_VISIBLE);
+        lines.extend(modal::scroll_window(&rows, start, end));
         lines.push(String::new());
         lines.extend(detail_lines(selected));
     } else {

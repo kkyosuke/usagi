@@ -35,16 +35,14 @@ pub fn render_over(
         }
         body.push(String::new());
         for (index, option) in decision.options.iter().enumerate() {
-            // The decision picker keeps its plain `>` marker and single-space
-            // gutter; unifying it with the shared list cursor belongs to the
-            // list-component pass (#374), not this byte-identical foundation.
-            let marker = if index == editor.selected_option() {
-                ">"
-            } else {
-                " "
-            };
-            body.push(widgets::clip_to_width(
-                &format!(" {marker} {}", option.label),
+            // The decision picker shares the list shape's cursor with the other
+            // selection lists (#374): the danger `›` marker via `content_line`.
+            body.push(modal::content_line(
+                &format!(
+                    "{} {}",
+                    modal::selection_marker(index == editor.selected_option()),
+                    option.label
+                ),
                 INNER_WIDTH,
             ));
             if let Some(description) = &option.description {
@@ -76,13 +74,12 @@ pub fn render_over(
             body.push(modal::empty_notice("(none)"));
         }
         for (index, decision) in decisions.iter().enumerate() {
-            let marker = if index == overlay.selected() {
-                ">"
-            } else {
-                " "
-            };
-            body.push(widgets::clip_to_width(
-                &format!(" {marker} {}", decision.title),
+            body.push(modal::content_line(
+                &format!(
+                    "{} {}",
+                    modal::selection_marker(index == overlay.selected()),
+                    decision.title
+                ),
                 INNER_WIDTH,
             ));
         }

@@ -94,16 +94,10 @@ impl TextOverlay {
         // 先に差し引く。これにより通常サイズでは footer が clip されない。
         let body_height = BODY_HEIGHT.min(height.saturating_sub(2));
         let viewport = body_height.saturating_sub(4).max(1);
-        let start = self.scroll.min(lines.len().saturating_sub(1));
-        let end = start.saturating_add(viewport).min(lines.len());
-        let mut body = Vec::new();
-        if start > 0 {
-            body.push(modal::scroll_above(start));
-        }
-        body.extend(lines[start..end].iter().cloned());
-        if end < lines.len() {
-            body.push(modal::scroll_below(lines.len() - end));
-        }
+        // text-viewer shape: offset-anchored viewport + shared `↑/↓ N more`
+        // scroll rendering, the same emission the PR list uses.
+        let (start, end) = modal::viewport_window(lines.len(), self.scroll, viewport);
+        let mut body = modal::scroll_window(&lines, start, end);
         body.push(String::new());
         body.push(modal::footer(if self.dismiss_on_any_key {
             "Press any key to close"
