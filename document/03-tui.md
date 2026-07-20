@@ -469,7 +469,9 @@ workspace の root scope と各 available session scope に属する **live**（
 - **タイミング**: 初回 frame を paint した後に一度だけ、daemon の [`terminal inventory`](04-ipc.md#generic-terminal-request)
   を root と各 available session の scope について引く。初回 frame は inventory 応答を待たずに描画する。
 - **投影**: `live` な各エントリを、その `kind` に応じて Agent tab または Terminal tab として、`session_id`（None=root）
-  から導く target に投影し、完全な `TerminalRef` で fenced に attach する。復元は選択（focus）を奪わない。
+  から導く target に投影し、完全な `TerminalRef` で fenced に attach する。target ごとの最初の復元 tab を pane 内で
+  選択するため、その target の Closeup に入ると出力表示と通常入力配送を直ちに再開できる。復元は Home の selected / active
+  target や Switch mode を変更しない。
 - **source of truth は daemon の inventory** であり、TUI-local に pane 一覧を永続化しない。これにより別 client が
   起動した pane や、以前の TUI が保存しなかった runtime も一貫して復元できる。TUI-local resume state は表示・選択の
   復元候補に留める（下記 [resume data compatibility](#resume-data-compatibility)）。

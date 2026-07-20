@@ -279,6 +279,32 @@ fn key_to_terminal_bytes(key: Key) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// Forward one ordinary key to the focused Closeup terminal. Returns `true`
+/// when the live pane owned the key, including the busy/error case where the
+/// keystroke could not be delivered and a safe notice was recorded.
+#[coverage(off)]
+fn forward_live_terminal_input(
+    ui: &mut WorkspaceUi,
+    runtime: &WorkspaceRuntime,
+    controls: &mut LiveTerminalControls,
+    key: &Key,
+) -> bool {
+    let Some((terminal, bytes)) = runtime
+        .wants_live_input()
+        .then(|| runtime.focused_terminal())
+        .flatten()
+        .zip(key_to_terminal_bytes(key.clone()))
+    else {
+        return false;
+    };
+    // A launch worker temporarily owns the port; surface the dropped
+    // keystroke instead of swallowing it silently.
+    if !ui.send_terminal_bytes(&terminal, &bytes) {
+        controls.set_feedback("terminal is busy; keystroke dropped");
+    }
+    true
+}
+
 /// Pulls the latest safe daemon observation at a TUI redraw boundary.
 pub trait MetricsPort {
     fn latest(&mut self) -> Option<DaemonMetrics>;
@@ -1547,13 +1573,16 @@ fn shell_target_for_terminal(terminal: &TerminalRef) -> Target {
 ///
 /// The daemon inventory is the source of truth: only a runtime the current
 /// daemon generation still owns (`live`) is restored, each bound to its fenced
-/// [`TerminalRef`]. A dead process, a stale or recreated session, a scope
+/// [`TerminalRef`]. The first restored tab for each target becomes that pane's
+/// selected tab without changing the Home route or active target; entering
+/// Closeup can therefore display it and deliver ordinary input immediately.
+/// A dead process, a stale or recreated session, a scope
 /// mismatch, and a duplicate entry therefore never produce a spurious or a
 /// doubled tab — the daemon filters by scope and generation, `live` gates
 /// attachability, and `fences` dedupes. A runtime whose PTY master is
 /// unrestorable is reported non-live and skipped here; the session-level
-/// interrupted contract surfaces it instead. `complete_pane` never steals
-/// focus, so restore leaves the user on the active pane.
+/// interrupted contract surfaces it instead. Restore never changes the active
+/// Home target or enters Closeup on the user's behalf.
 fn restore_open_panes(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, geometry: Geometry) {
     let Ok(entries) = ui.list_open_terminals() else {
         // A daemon failure restores nothing and never spawns locally.
@@ -1572,9 +1601,16 @@ fn restore_open_panes(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, geom
             TerminalKind::Agent => PaneKind::Agent,
             TerminalKind::Terminal => PaneKind::Terminal,
         };
+        let select_restored = runtime
+            .panes()
+            .pane(target)
+            .is_none_or(|pane| pane.tabs().is_empty());
         let operation = OperationId::new();
         let _ = runtime.request_pane(target, operation, kind);
         let _ = runtime.complete_pane(target, operation, entry.terminal.clone());
+        if select_restored {
+            let _ = runtime.focus_terminal(target, entry.terminal.clone());
+        }
         ui.start_terminal_session(entry.terminal.clone(), geometry);
         restored.push(entry.terminal);
     }
@@ -2205,15 +2241,7 @@ fn drive_workspace_controller(
             );
             let _ = runtime.apply_event(AppEvent::Backend(event));
         }
-        if runtime.wants_live_input()
-            && let Some(terminal) = runtime.focused_terminal()
-            && let Some(bytes) = key_to_terminal_bytes(key.clone())
-        {
-            // A launch worker temporarily owns the port; surface the dropped
-            // keystroke instead of swallowing it silently.
-            if !ui.send_terminal_bytes(&terminal, &bytes) {
-                controls.set_feedback("terminal is busy; keystroke dropped");
-            }
+        if forward_live_terminal_input(&mut ui, &runtime, &mut controls, &key) {
             continue;
         }
         // Live-terminal view controls the reducer does not own (scroll, tab close,
@@ -2761,9 +2789,9 @@ mod tests {
         UnavailablePrSnapshotPort, UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader,
         WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
         clear_terminal_selection_on_click, close_exited_panes, controller_terminal_view,
-        handle_terminal_pointer, intercept_live_terminal_control, key_to_terminal_bytes,
-        new_project_notice, play_startup_splash, render_controller_frame, render_home_snapshot,
-        restore_open_panes, run as run_from_start, run_with_settings,
+        forward_live_terminal_input, handle_terminal_pointer, intercept_live_terminal_control,
+        key_to_terminal_bytes, new_project_notice, play_startup_splash, render_controller_frame,
+        render_home_snapshot, restore_open_panes, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_controller, safe_session_error, sidebar_pointer_event, step_config, step_new,
         terminal_geometry, welcome_action, write_banner,
@@ -2772,7 +2800,9 @@ mod tests {
     use crate::presentation::views::config::AvailableAgentModels;
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
-    use crate::usecase::application::controller::{AppEvent, AppKey, NewRequest, Target};
+    use crate::usecase::application::controller::{
+        AppEvent, AppKey, NewRequest, TabDirection, Target,
+    };
     use crate::usecase::application::pane::PaneKind;
     use crate::usecase::application::run as dispatch;
     use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
@@ -3630,9 +3660,12 @@ mod tests {
 
     /// A daemon inventory double for restore-on-open. It returns a fixed set of
     /// in-scope runtimes and attaches successfully so a restored tab streams.
+    type RecordedTerminalInputs = Arc<Mutex<Vec<(TerminalRef, Vec<u8>)>>>;
+
     struct RestoreInventoryPort {
         entries: Vec<TerminalInventoryEntry>,
         fail: bool,
+        inputs: RecordedTerminalInputs,
     }
     impl AgentCommandPort for RestoreInventoryPort {
         fn launch(
@@ -3668,6 +3701,19 @@ mod tests {
             _after_offset: u64,
         ) -> Result<Vec<TerminalChunk>, TerminalError> {
             Ok(Vec::new())
+        }
+        fn input_terminal(
+            &mut self,
+            terminal: &TerminalRef,
+            _subscription: u64,
+            _input_seq: u64,
+            bytes: &[u8],
+        ) -> Result<(), TerminalError> {
+            self.inputs
+                .lock()
+                .unwrap()
+                .push((terminal.clone(), bytes.to_vec()));
+            Ok(())
         }
     }
 
@@ -3727,6 +3773,7 @@ mod tests {
                 Box::new(RestoreInventoryPort {
                     entries,
                     fail: false,
+                    inputs: Arc::new(Mutex::new(Vec::new())),
                 }),
             );
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
@@ -3741,6 +3788,68 @@ mod tests {
         assert!(ui.terminal_rows(&root_agent, None).is_some());
         assert!(ui.terminal_rows(&session_terminal, None).is_some());
         assert!(ui.terminal_rows(&dead, None).is_none());
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn restored_terminal_and_agent_tabs_deliver_ordinary_closeup_input() {
+        let workspace = WorkspaceId::new();
+        let terminal = scoped_terminal_ref(workspace, None);
+        let agent = scoped_terminal_ref(workspace, None);
+        let inputs = Arc::new(Mutex::new(Vec::new()));
+        let entries = vec![
+            TerminalInventoryEntry {
+                terminal: terminal.clone(),
+                kind: TerminalKind::Terminal,
+                live: true,
+            },
+            TerminalInventoryEntry {
+                terminal: agent.clone(),
+                kind: TerminalKind::Agent,
+                live: true,
+            },
+        ];
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(
+                workspace,
+                Vec::new(),
+                Box::new(RestoreInventoryPort {
+                    entries,
+                    fail: false,
+                    inputs: inputs.clone(),
+                }),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let mut controls = LiveTerminalControls::default();
+
+        restore_open_panes(&mut ui, &mut runtime, terminal_geometry(20, 80));
+        // Inventory restoration stays in Switch, but preselects the first tab so
+        // entering Closeup has a concrete input owner instead of a target-only
+        // selection hidden behind a non-empty tab strip.
+        assert!(!runtime.wants_live_input());
+        assert_eq!(runtime.focused_terminal(), Some(terminal.clone()));
+        assert!(runtime.handle_key(Key::Enter).is_empty());
+        assert!(runtime.wants_live_input());
+        assert!(forward_live_terminal_input(
+            &mut ui,
+            &runtime,
+            &mut controls,
+            &Key::Char('x'),
+        ));
+
+        let _ = runtime.select_tab(TabDirection::Next);
+        assert_eq!(runtime.focused_terminal(), Some(agent.clone()));
+        assert!(forward_live_terminal_input(
+            &mut ui,
+            &runtime,
+            &mut controls,
+            &Key::Enter,
+        ));
+        assert_eq!(
+            *inputs.lock().unwrap(),
+            vec![(terminal, b"x".to_vec()), (agent, b"\r".to_vec())]
+        );
     }
 
     #[test]
@@ -3763,6 +3872,7 @@ mod tests {
                 Box::new(RestoreInventoryPort {
                     entries: vec![live],
                     fail: true,
+                    inputs: Arc::new(Mutex::new(Vec::new())),
                 }),
             );
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
