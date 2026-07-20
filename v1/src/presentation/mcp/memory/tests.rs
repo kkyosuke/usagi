@@ -68,6 +68,27 @@ fn save_get_round_trips() {
 }
 
 #[test]
+fn save_retry_after_derived_failure_keeps_one_source_identity() {
+    use crate::infrastructure::json_file::{fail_next_atomic_write, AtomicWriteStage};
+    use crate::infrastructure::memory_store::MemoryStore;
+
+    let _guard = crate::test_support::process_env_guard();
+    let logs = tempfile::tempdir().unwrap();
+    std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, logs.path());
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let store = MemoryStore::new(repo);
+    fail_next_atomic_write(&store.toc_path(), AtomicWriteStage::Rename);
+
+    assert!(save(repo, "retry fact", "A title").contains("retry-fact"));
+    assert!(save(repo, "retry fact", "A title").contains("retry-fact"));
+
+    assert_eq!(store.scan().unwrap().len(), 1);
+    assert_eq!(store.read("retry-fact").unwrap().unwrap().title, "A title");
+    std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+}
+
+#[test]
 fn get_returns_null_when_absent() {
     let tmp = tempfile::tempdir().unwrap();
     let got = call_tool(tmp.path(), "memory_get", json!({ "name": "nope" })).unwrap();

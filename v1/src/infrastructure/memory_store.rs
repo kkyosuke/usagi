@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::memory::{Memory, MemorySummary};
-use crate::infrastructure::markdown_store::{MarkdownEntry, MarkdownStore};
+use crate::infrastructure::markdown_store::{MarkdownEntry, MarkdownStore, MutationOutcome};
 use crate::infrastructure::repo_paths::STATE_DIR;
 use crate::infrastructure::store_lock::StoreLock;
 
@@ -163,6 +163,12 @@ impl MemoryStore {
 
     /// Read a single memory by name, or `None` if it does not exist.
     pub fn read(&self, name: &str) -> Result<Option<Memory>> {
+        self.repair_derived_best_effort();
+        self.read_locked(name)
+    }
+
+    /// Read source while the caller already holds this store's lock.
+    pub fn read_locked(&self, name: &str) -> Result<Option<Memory>> {
         let path = self.dir().join(memory_file_name(name)?);
         match self.inner.read_existing_path(&path) {
             Ok(memory) => Ok(Some(memory)),
@@ -173,35 +179,75 @@ impl MemoryStore {
 
     /// Write `memory` to disk and refresh the derived files, taking the store
     /// lock for the duration so concurrent writers serialise.
-    pub fn write(&self, memory: &Memory) -> Result<()> {
+    pub fn write(&self, memory: &Memory) -> Result<MutationOutcome<()>> {
         let lock = self.lock()?;
         self.write_locked(&lock, memory)
     }
 
     /// Like [`write`](Self::write) but assumes the caller already holds this
     /// store's [`lock`](Self::lock).
-    pub fn write_locked(&self, _lock: &StoreLock, memory: &Memory) -> Result<()> {
+    pub fn write_locked(&self, _lock: &StoreLock, memory: &Memory) -> Result<MutationOutcome<()>> {
+        let rebuild_required = self.inner.derived_is_dirty();
+        self.inner.mark_derived_dirty()?;
         self.inner.write_markdown(memory)?;
-        self.inner.reindex_after_write(memory)
+        let refresh = if rebuild_required {
+            self.inner.rebuild_derived().map(|_| ())
+        } else {
+            self.inner.reindex_after_write(memory)
+        };
+        Ok(self.inner.finish_committed((), refresh))
     }
 
     /// Remove the memory with `name`, returning whether anything was deleted,
     /// then refresh the derived files. Takes the store lock for the duration.
     pub fn remove(&self, name: &str) -> Result<bool> {
+        Ok(self.remove_with_outcome(name)?.value)
+    }
+
+    /// Remove source and report whether its derived files remain fresh.
+    pub fn remove_with_outcome(&self, name: &str) -> Result<MutationOutcome<bool>> {
         let _lock = self.lock()?;
         let path = self.dir().join(memory_file_name(name)?);
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(e) => return Err(e).context(format!("failed to remove {}", path.display())),
+        match fs::metadata(&path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let repair = self.inner.repair_derived_locked();
+                return Ok(self.inner.finish_committed(false, repair));
+            }
+            Err(e) => return Err(e).context(format!("failed to inspect {}", path.display())),
         }
-        self.inner.reindex_after_remove(&name.to_string())?;
-        Ok(true)
+        let rebuild_required = self.inner.derived_is_dirty();
+        self.inner.mark_derived_dirty()?;
+        fs::remove_file(&path).context(format!("failed to remove {}", path.display()))?;
+        let refresh = if rebuild_required {
+            self.inner.rebuild_derived().map(|_| ())
+        } else {
+            self.inner.reindex_after_remove(&name.to_string())
+        };
+        Ok(self.inner.finish_committed(true, refresh))
     }
 
     /// Metadata summaries for every memory.
     pub fn summaries(&self) -> Result<Vec<MemorySummary>> {
+        self.repair_derived_best_effort();
+        if self.inner.derived_is_dirty() {
+            return self.inner.source_summaries();
+        }
         self.inner.summaries()
+    }
+
+    fn repair_derived_best_effort(&self) {
+        if !self.inner.derived_is_dirty() {
+            return;
+        }
+        let repair = self
+            .lock()
+            .and_then(|_lock| self.inner.repair_derived_locked());
+        if let Err(error) = repair {
+            crate::infrastructure::error_log::ErrorLog::record(&format!(
+                "memory derived rebuild remains scheduled after read: {error:#}"
+            ));
+        }
     }
 }
 
@@ -245,6 +291,8 @@ fn is_memory_file(path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::domain::memory::MemoryType;
+    use crate::infrastructure::json_file::{fail_next_atomic_write, AtomicWriteStage};
+    use crate::infrastructure::markdown_store::DerivedState;
     use chrono::{TimeZone, Utc};
 
     fn memory(name: &str, title: &str) -> Memory {
@@ -647,5 +695,60 @@ mod tests {
         set_mtime(&path, 2_000);
 
         assert_eq!(store.summaries().unwrap()[0].title, "Updated title");
+    }
+
+    #[test]
+    fn derived_failure_commits_memory_mutations_and_reopen_repairs_them() {
+        let _guard = crate::test_support::process_env_guard();
+        let logs = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, logs.path());
+        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = MemoryStore::new(tmp.path());
+            let created = memory("fact", "Created");
+            fail_next_atomic_write(&store.toc_path(), stage);
+
+            let outcome = store.write(&created).unwrap();
+            assert_eq!(outcome.derived, DerivedState::RebuildNeeded);
+            assert_eq!(store.scan().unwrap(), vec![created.clone()]);
+
+            let updated = memory("fact", "Updated");
+            let reopened = MemoryStore::new(tmp.path());
+            assert_eq!(reopened.read("fact").unwrap(), Some(created));
+            fail_next_atomic_write(&reopened.toc_path(), stage);
+            assert_eq!(
+                reopened.write(&updated).unwrap().derived,
+                DerivedState::RebuildNeeded
+            );
+            assert_eq!(reopened.read("fact").unwrap(), Some(updated));
+
+            fail_next_atomic_write(&reopened.toc_path(), stage);
+            let removed = reopened.remove_with_outcome("fact").unwrap();
+            assert!(removed.value);
+            assert_eq!(removed.derived, DerivedState::RebuildNeeded);
+            let retry = MemoryStore::new(tmp.path())
+                .remove_with_outcome("fact")
+                .unwrap();
+            assert!(!retry.value);
+            assert_eq!(retry.derived, DerivedState::Fresh);
+        }
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn source_failure_does_not_mutate_memory_identity() {
+        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = MemoryStore::new(tmp.path());
+            let source = store.dir().join("fact.md");
+            fail_next_atomic_write(&source, stage);
+            assert!(store.write(&memory("fact", "Created")).is_err());
+            assert!(store.scan().unwrap().is_empty());
+
+            store.write(&memory("fact", "Old")).unwrap();
+            fail_next_atomic_write(&source, stage);
+            assert!(store.write(&memory("fact", "Updated")).is_err());
+            assert_eq!(store.read("fact").unwrap().unwrap().title, "Old");
+        }
     }
 }

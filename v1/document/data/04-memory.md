@@ -78,6 +78,7 @@ updated_at: 2026-06-17T00:00:00+00:00
 - frontmatter は `serde_yaml` 不採用の方針に合わせ、既知フィールドを対象にした軽量パーサで読み書きします。未知のキーは無視するので、フォーマットを後方互換に拡張できます。
 - 書き込みはアトミック（一時ファイル + `rename`）。**`name` が一意な識別子**なので、同じ名前への保存は同じファイルを上書きし、重複が生まれません（`created_at` は保持されます）。
 - 同一ストアに対する read-modify-write（既存メモリの読み取り→保存、`index.json` / `MEMORY.md` の更新）は、ストアごとの `.lock` ファイルに対するプロセス間排他ロック（advisory lock）で直列化します。MCP サーバと TUI が同じ `.usagi/memory/` を同時に書いても、保存と派生ファイル再構築が他プロセスと混ざらず、`created_at` の取り違えや目次の取りこぼしが起きません。
+- source Markdown の write/remove 前に `.derived-dirty` を durable に記録し、source の commit point と `index.json` / `MEMORY.md` の更新を分離します。source commit 後に派生ファイル更新が失敗しても操作は成功として返り、次の read または process reopen 後の read が source から両方を再生成します。source write が失敗した場合は memory の identity を変更しません。save/update/remove の再送は memory name に対して冪等です。
 
 ## `MEMORY.md`（目次）
 

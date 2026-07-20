@@ -19,6 +19,27 @@ use crate::infrastructure::json_file;
 /// Filename of the derived metadata cache shared by markdown-backed stores.
 /// Kept out of git by the rules in [`crate::infrastructure::gitignore`].
 pub(crate) const INDEX_FILE: &str = "index.json";
+pub(crate) const DIRTY_FILE: &str = ".derived-dirty";
+
+/// State of rebuildable files after a source-of-truth mutation committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DerivedState {
+    Fresh,
+    RebuildNeeded,
+}
+
+/// Successful source mutation together with the state of its derived files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationOutcome<T> {
+    pub value: T,
+    pub derived: DerivedState,
+}
+
+impl<T> MutationOutcome<T> {
+    pub const fn new(value: T, derived: DerivedState) -> Self {
+        Self { value, derived }
+    }
+}
 
 /// Store-specific behavior for one kind of markdown entry.
 pub(crate) trait MarkdownEntry: Sync {
@@ -76,6 +97,10 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
 
     pub(crate) fn index_path(&self) -> PathBuf {
         self.dir.join(INDEX_FILE)
+    }
+
+    fn dirty_path(&self) -> PathBuf {
+        self.dir.join(DIRTY_FILE)
     }
 
     /// Read and parse every entry markdown file, sorted by its store-specific key.
@@ -163,6 +188,51 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
         Ok(target)
     }
 
+    /// Schedule a rebuild durably before changing source Markdown.
+    pub(crate) fn mark_derived_dirty(&self) -> Result<()> {
+        fs::create_dir_all(&self.dir)
+            .context(format!("failed to create {}", self.dir.display()))?;
+        json_file::write_text_atomic(&self.dirty_path(), "rebuild from markdown\n")
+    }
+
+    /// Finish an already committed mutation without turning derived failure
+    /// into an error that callers might retry as an unapplied source mutation.
+    pub(crate) fn finish_committed<T>(&self, value: T, refresh: Result<()>) -> MutationOutcome<T> {
+        match refresh.and_then(|()| self.clear_derived_dirty()) {
+            Ok(()) => MutationOutcome::new(value, DerivedState::Fresh),
+            Err(error) => {
+                ErrorLog::record(&format!(
+                    "{} source committed but derived refresh failed; rebuild remains scheduled: {error:#}",
+                    E::NAME
+                ));
+                MutationOutcome::new(value, DerivedState::RebuildNeeded)
+            }
+        }
+    }
+
+    pub(crate) fn repair_derived_locked(&self) -> Result<()> {
+        if !self.derived_is_dirty() {
+            return Ok(());
+        }
+        self.rebuild_derived()?;
+        self.clear_derived_dirty()
+    }
+
+    pub(crate) fn derived_is_dirty(&self) -> bool {
+        self.dirty_path().exists()
+    }
+
+    fn clear_derived_dirty(&self) -> Result<()> {
+        match fs::remove_file(self.dirty_path()) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).context(format!(
+                "failed to clear derived rebuild marker {}",
+                self.dirty_path().display()
+            )),
+        }
+    }
+
     /// Patch the derived cache/extra files after `entry` was written. Falls back
     /// to a full rebuild when the cache is missing or unreadable.
     pub(crate) fn reindex_after_write(&self, entry: &E::Entry) -> Result<()> {
@@ -222,6 +292,11 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
         }
         self.write_derived(&summaries)?;
         Ok(summaries)
+    }
+
+    /// Read summaries directly from source, bypassing an unusable derived cache.
+    pub(crate) fn source_summaries(&self) -> Result<Vec<E::Summary>> {
+        Ok(self.scan_lenient()?.iter().map(E::summary).collect())
     }
 
     /// Load `index.json` only when it is fresh relative to the markdown files.

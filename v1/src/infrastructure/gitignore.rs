@@ -15,21 +15,22 @@ use crate::infrastructure::repo_paths::STATE_DIR;
 /// The self-contained `.gitignore` usagi writes inside each repository's
 /// `.usagi/` directory. Patterns are relative to `.usagi/`: ignore everything,
 /// but keep this `.gitignore` and the shared `issues/` and `memory/` directories
-/// tracked, while still excluding their rebuildable `index.json` caches and the
-/// per-store `.lock` files used for cross-process write locking.
+/// tracked, while still excluding their rebuildable `index.json` caches,
+/// `.derived-dirty` repair markers, and per-store `.lock` files used for
+/// cross-process write locking.
 ///
 /// Task issues and agent memories are meant to be committed and shared with the
 /// team; the machine-local state (`state.json`, `settings.json`, `history.json`,
 /// `sessions/`), the derived indexes, and the lock files stay ignored. Keeping
 /// the rules inside `.usagi/` leaves the repository-root `.gitignore` untouched.
 ///
-/// The `index.json` / `.lock` filenames are spelled out here for readability;
+/// The `index.json` / `.derived-dirty` / `.lock` filenames are spelled out here for readability;
 /// `gitignore_covers_the_derived_and_lock_files` asserts they stay in step with
 /// the constants that actually name those files
 /// ([`markdown_store::INDEX_FILE`](crate::infrastructure::markdown_store) /
 /// [`store_lock::LOCK_FILE_NAME`](crate::infrastructure::store_lock)), so renaming
 /// one without the other fails the test rather than leaking a file into git.
-pub const USAGI_GITIGNORE: &str = "/*\n!/.gitignore\n!/issues/\n/issues/index.json\n/issues/.lock\n!/memory/\n/memory/index.json\n/memory/.lock\n";
+pub const USAGI_GITIGNORE: &str = "/*\n!/.gitignore\n!/issues/\n/issues/index.json\n/issues/.lock\n/issues/.derived-dirty\n!/memory/\n/memory/index.json\n/memory/.lock\n/memory/.derived-dirty\n";
 
 /// Write [`USAGI_GITIGNORE`] to `<repo>/.usagi/.gitignore`, creating the
 /// directory when absent. Idempotent: if the file already holds the current
@@ -106,6 +107,7 @@ mod tests {
         // literal string above would not — leaking the file into git. Assert the
         // string still mentions each actual filename so that drift is caught here.
         assert!(USAGI_GITIGNORE.contains(markdown_store::INDEX_FILE));
+        assert!(USAGI_GITIGNORE.contains(markdown_store::DIRTY_FILE));
         assert!(USAGI_GITIGNORE.contains(store_lock::LOCK_FILE_NAME));
     }
 

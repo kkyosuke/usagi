@@ -151,6 +151,17 @@ impl ListedIssue {
 /// stored issue.
 pub fn create(repo_root: &Path, new: NewIssue) -> Result<Issue> {
     let store = IssueStore::new(repo_root);
+    // Serialize identity matching with the eventual source write. A retry after
+    // an ambiguous response finds the already committed request instead of
+    // reserving a second issue number.
+    let lock = store.lock()?;
+    if let Some(existing) = store
+        .scan_lenient()?
+        .into_iter()
+        .find(|issue| matches_new_issue_source(issue, &new))
+    {
+        return Ok(existing);
+    }
     let workspace_root = session::workspace_root(repo_root);
     let sequence = IssueNumberSequence::new(repo_root, &workspace_root);
     // Reserve globally before touching this worktree's store. The reservation
@@ -171,8 +182,22 @@ pub fn create(repo_root: &Path, new: NewIssue) -> Result<Issue> {
         updated_at: now,
         body: new.body,
     };
-    store.write(&issue)?;
+    store.write_locked(&lock, &issue)?;
     Ok(issue)
+}
+
+/// Match the durable content identity of an initial create request. The number
+/// and timestamps are assigned by the store and therefore excluded.
+fn matches_new_issue_source(issue: &Issue, new: &NewIssue) -> bool {
+    issue.status == IssueStatus::Todo
+        && issue.title == new.title
+        && issue.priority == new.priority
+        && issue.labels == new.labels
+        && issue.dependson == new.dependson
+        && issue.related == new.related
+        && issue.parent == new.parent
+        && issue.milestone == new.milestone
+        && issue.body == new.body
 }
 
 /// The highest issue number currently present anywhere in the workspace.
@@ -320,7 +345,7 @@ pub fn update(repo_root: &Path, number: u32, changes: IssueChanges) -> Result<Op
     // clobber this change — the lost update the store lock exists to prevent.
     // Mirrors `create` above.
     let lock = store.lock()?;
-    let Some(mut issue) = store.read(number)? else {
+    let Some(mut issue) = store.read_locked(number)? else {
         return Ok(None);
     };
     if let Some(title) = changes.title {

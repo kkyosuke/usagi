@@ -78,6 +78,7 @@ updated_at: 2026-06-14T00:00:00+00:00
 - frontmatter は `serde_yaml` 不採用の方針に合わせ、既知フィールドを対象にした軽量パーサで読み書きします。未知のキーは無視するので、フォーマットを後方互換に拡張できます。
 - 書き込みはアトミック（一時ファイル + `rename`）。タイトル変更でスラッグが変わった場合は、**先に新しいファイルを書いてから**同じ番号の旧ファイルを削除して 1 issue = 1 ファイルを保ちます（順序が逆だと書き込みの途中でクラッシュした場合に issue の実体ファイルが消えうるため）。
 - 同一ストアに対する read-modify-write（旧ファイル削除、`index.json` の更新）は、ストアごとの `.lock` ファイルに対するプロセス間排他ロック（advisory lock）で直列化します。採番は下記の workspace-global authority で別に直列化します。
+- source Markdown の write/remove 前に `.derived-dirty` を durable に記録し、source の commit point と派生 `index.json` の更新を分離します。source commit 後に index 更新が失敗しても操作は成功として返り、marker を残したまま次の read または process reopen 後の read が source から index を再生成します。source write が失敗した場合は issue の identity を変更しません。同一 create request の再送は既に commit 済みの内容を照合して同じ番号を返し、update/remove の再送は issue 番号に対して冪等です。
 
 ## 採番（ワークスペース横断）
 
