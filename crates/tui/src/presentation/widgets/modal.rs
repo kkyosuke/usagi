@@ -62,9 +62,15 @@ pub fn fixed_body(mut body: Vec<String>, body_height: usize) -> Vec<String> {
     body
 }
 
+/// The display width of [`BODY_INDENT`]. Views that reserve horizontal space
+/// around the indent — for example wrapping a message so its right margin
+/// mirrors this left indent — express that reservation in terms of this width
+/// instead of repeating the literal `2`.
+pub const BODY_INDENT_WIDTH: usize = 2;
+
 /// The two-column left margin shared by modal body rows. Content, captions,
 /// footers, and scroll indicators all indent by this so a modal reads as one
-/// column no matter which view composed it.
+/// column no matter which view composed it. Its width is [`BODY_INDENT_WIDTH`].
 const BODY_INDENT: &str = "  ";
 
 /// A dim, body-indented line. Captions, empty-state notices, and footers share
@@ -744,6 +750,13 @@ mod tests {
             subcommand_row("new", false),
             Style::new().dim().paint("        new")
         );
+    }
+
+    #[test]
+    fn body_indent_width_matches_the_indent_string() {
+        // Views reserve horizontal space in terms of BODY_INDENT_WIDTH; keep it
+        // equal to the actual indent so the reservation cannot drift.
+        assert_eq!(super::BODY_INDENT_WIDTH, display_width(super::BODY_INDENT));
     }
 
     #[test]

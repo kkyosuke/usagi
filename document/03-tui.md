@@ -164,7 +164,8 @@ daemon が受け付けた作成 request がその後に失敗したときは、H
 error modal で安全なメッセージを提示する。表示するのは安全化した safe message だけで、raw protocol /
 internal / secret detail は画面に出さない（daemon の stderr は先頭 1 行だけを安全に採り、multi-line や
 verbose な detail は漏らさない）。その safe message は dialog 幅に合わせて折り返し、途中で切り捨てず全文を
-表示する（box は行数に合わせて伸びる）。この dialog は skeleton・pending row を片付けたうえで開くため、
+表示する（box は行数に合わせて伸びる）。折り返しは左の 2 桁 indent と同じ幅を右にも確保するため、枠いっぱいに
+折り返した行でも枠の左右の内側余白は対称に保たれる。この dialog は skeleton・pending row を片付けたうえで開くため、
 `Enter` / `Esc` / `Ctrl+C` で閉じると Home（Switch）へ戻り、作成入力や中途半端な作成状態を残さない。作成
 フォームなど別の overlay が前面にある間に失敗が届いた場合は、その overlay を壊さず従来どおり notice へ退避する。
 これは入力段階の inline validation（未受付の名前を行の下に error 表示する挙動）とは別で、dialog は受付後の
