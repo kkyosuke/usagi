@@ -1,21 +1,21 @@
 ---
 number: 388
 title: feat(tui): workspace open 時に scope inventory を pane tab へ投影して live Agent/Terminal を復元する
-status: todo
+status: done
 priority: high
 labels: [tui, terminal, agent, restore, pane]
 dependson: [386]
 related: [193, 195, 256, 282, 367]
-parent: 385
+parent: 390
 created_at: 2026-07-20T01:42:46.446935+00:00
-updated_at: 2026-07-20T01:42:46.446935+00:00
+updated_at: 2026-07-20T03:32:04.124170+00:00
 ---
 
 ## 目的
 
 workspace open 時に、daemon の scope inventory（#386）を pane tab へ投影し、同一 daemon が生存所有する live Agent / Terminal を stable identity で復元する。session pane（`Target::Session`）と root pane（`Target::Root`）の両方を対象にする。
 
-親: #385。依存: #386。
+親: #390。依存: #386。
 
 ## 現状の問題
 

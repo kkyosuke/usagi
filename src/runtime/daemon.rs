@@ -414,6 +414,22 @@ impl AgentTerminalActor for SharedAgent {
             }
         }
     }
+    // Composition glue: locks the shared runtime and delegates. The merge,
+    // scope filtering, and redaction the inventory actually performs are
+    // verified by `SharedTerminalOwner`'s fake in `usagi_daemon::usecase::agent_ipc`
+    // (no test drives the real serve loop, which is where this lock wrapper is
+    // reached), so only the lock/poison delegation lives here.
+    #[coverage(off)]
+    fn terminal_inventory(
+        &self,
+        scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+    ) -> Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry> {
+        // A poisoned lock is a safe empty inventory, never a client fallback.
+        self.0
+            .lock()
+            .map(|agent| AgentTerminalActor::terminal_inventory(&*agent, scope))
+            .unwrap_or_default()
+    }
     fn disconnect(&mut self, connection: usagi_core::domain::id::ConnectionId) {
         if let Ok(mut agent) = self.0.lock() {
             AgentTerminalActor::disconnect(&mut *agent, connection);

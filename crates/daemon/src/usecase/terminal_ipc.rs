@@ -206,7 +206,7 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
                 Ok(json!({"terminal": terminal}))
             }
             (TerminalAction::Inventory, TerminalRequest::Inventory { scope }) => {
-                Ok(json!({"terminals": self.coordinator.inventory(&scope.scope)}))
+                Ok(json!({"terminals": self.coordinator.inventory(&scope)}))
             }
             (TerminalAction::Attach, TerminalRequest::Attach { terminal }) => self
                 .coordinator
@@ -292,6 +292,12 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
                 "terminal action does not match its payload",
             )),
         }
+    }
+    fn inventory(
+        &self,
+        scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+    ) -> Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry> {
+        self.coordinator.inventory(scope)
     }
     fn disconnect(&mut self, connection: ConnectionId) {
         self.coordinator.disconnect(connection);
@@ -648,5 +654,68 @@ mod tests {
         ));
 
         assert_eq!(error.code, ErrorCode::ResyncRequired);
+    }
+
+    #[test]
+    fn inventory_lists_only_in_scope_terminals_and_marks_live_until_exit() {
+        use usagi_core::domain::terminal_launch::TerminalKind;
+
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let worktree = WorktreeId::new();
+        let scope = TerminalLaunchScope {
+            workspace_id: workspace,
+            session_id: Some(session),
+            worktree_id: worktree,
+        };
+        let mut runtime = GenericTerminalRuntime::new(
+            DaemonGeneration::new(),
+            Resolver,
+            Store,
+            Pty::default(),
+            Scope {
+                scope: scope.clone(),
+                working_directory: PathBuf::from("/available-worktree"),
+            },
+        );
+        let terminal: TerminalRef = serde_json::from_value(
+            call(
+                &mut runtime,
+                ConnectionId::new(),
+                ClientId::new(),
+                TerminalAction::Launch,
+                TerminalRequest::Launch {
+                    intent: usagi_core::usecase::client::TerminalLaunchIntent {
+                        request: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
+                            profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                            scope: scope.clone(),
+                        },
+                        geometry: TerminalGeometry { cols: 80, rows: 24 },
+                    },
+                },
+            )["terminal"]
+                .clone(),
+        )
+        .unwrap();
+
+        let live = TerminalOwner::inventory(&runtime, &scope);
+        assert_eq!(live.len(), 1);
+        assert!(live[0].terminal.fences(&terminal));
+        assert_eq!(live[0].kind, TerminalKind::Terminal);
+        assert!(live[0].live);
+
+        // A different scope (foreign session) sees nothing.
+        let foreign = TerminalLaunchScope {
+            workspace_id: workspace,
+            session_id: Some(SessionId::new()),
+            worktree_id: worktree,
+        };
+        assert!(TerminalOwner::inventory(&runtime, &foreign).is_empty());
+
+        // After the terminal exits it is no longer attachable (`live == false`).
+        runtime.exit(&terminal, 0).unwrap();
+        let exited = TerminalOwner::inventory(&runtime, &scope);
+        assert_eq!(exited.len(), 1);
+        assert!(!exited[0].live);
     }
 }
