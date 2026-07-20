@@ -638,6 +638,10 @@ pub enum Feedback {
 }
 
 /// controller が所有する application state。
+// These bools are independent runtime flags (live-pane availability, forced
+// action modal, Ctrl-C grace, quit-confirmation focus), not a combinable state
+// machine, so a single enum would not model them.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppState {
     route: Route,
@@ -668,6 +672,11 @@ pub struct AppState {
     has_live_pane: bool,
     closeup_action_forced: bool,
     ctrl_c_grace: bool,
+    /// Focus of the quit confirmation's Yes/No buttons. `true` keeps Yes
+    /// focused; opening the overlay resets it. The presentation layer projects
+    /// this into a `ConfirmationModal`, keeping the shared widget out of this
+    /// usecase-layer state.
+    quit_confirm_selected: bool,
 }
 
 impl AppState {
@@ -703,6 +712,7 @@ impl AppState {
             has_live_pane: false,
             closeup_action_forced: false,
             ctrl_c_grace: false,
+            quit_confirm_selected: true,
         }
     }
 
@@ -866,6 +876,13 @@ impl AppState {
     #[coverage(off)]
     pub const fn ctrl_c_grace(&self) -> bool {
         self.ctrl_c_grace
+    }
+    /// Whether the quit confirmation currently focuses Yes. The presentation
+    /// layer reads this to draw the shared Yes/No buttons in the right state.
+    #[must_use]
+    #[coverage(off)]
+    pub const fn quit_confirm_selected(&self) -> bool {
+        self.quit_confirm_selected
     }
 
     #[coverage(off)]
@@ -1067,6 +1084,12 @@ pub enum AppKey {
     Up,
     /// cursor を次の row へ動かす。
     Down,
+    /// Move the focus left within a horizontal choice (the Yes/No confirmation).
+    /// Outside such an overlay it is inert.
+    Left,
+    /// Move the focus right within a horizontal choice (the Yes/No confirmation).
+    /// Outside such an overlay it is inert.
+    Right,
     /// selected target を active にし Closeup を開く。
     Enter,
     /// Move to the next field in a local form.
@@ -1186,6 +1209,8 @@ pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
         KeyCode::Escape => Some(AppKey::Escape),
         KeyCode::Up => Some(AppKey::Up),
         KeyCode::Down => Some(AppKey::Down),
+        KeyCode::Left => Some(AppKey::Left),
+        KeyCode::Right => Some(AppKey::Right),
         KeyCode::Char(character) if !key.modifiers.control => Some(AppKey::Char(character)),
         _ => None,
     }
@@ -2328,6 +2353,7 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
                 state.notice = Some(Notice::new("Ctrl-C ignored after leaving live pane"));
                 Vec::new()
             } else if state.has_live_pane {
+                state.quit_confirm_selected = true;
                 state.overlay = Some(Overlay::QuitConfirmation);
                 Vec::new()
             } else {
@@ -2335,6 +2361,7 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
             }
         }
         AppKey::CtrlQ | AppKey::OpenQuitConfirmation => {
+            state.quit_confirm_selected = true;
             state.overlay = Some(Overlay::QuitConfirmation);
             Vec::new()
         }
@@ -2375,12 +2402,27 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
     match overlay {
         Overlay::Decisions => update_decisions_overlay(state, key),
         Overlay::QuitConfirmation => match key {
-            AppKey::Char('y' | 'Y') | AppKey::Enter => {
+            // `y` forces detach and `n`/Esc forces stay regardless of focus;
+            // Enter commits whichever button is focused. Opening the overlay
+            // resets focus to Yes, so a bare Ctrl-Q + Enter still detaches.
+            AppKey::Char('y' | 'Y') => {
                 state.overlay = None;
                 vec![Effect::Detach]
             }
             AppKey::Char('n' | 'N') | AppKey::Escape => {
                 state.overlay = None;
+                Vec::new()
+            }
+            AppKey::Enter => {
+                state.overlay = None;
+                if state.quit_confirm_selected {
+                    vec![Effect::Detach]
+                } else {
+                    Vec::new()
+                }
+            }
+            AppKey::Left | AppKey::Right | AppKey::Tab => {
+                state.quit_confirm_selected = !state.quit_confirm_selected;
                 Vec::new()
             }
             _ => Vec::new(),
@@ -2595,6 +2637,8 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         | AppKey::CtrlP
         | AppKey::Escape
         | AppKey::Tab
+        | AppKey::Left
+        | AppKey::Right
         | AppKey::Backspace
         | AppKey::Home
         | AppKey::Char(_)
@@ -3819,6 +3863,8 @@ mod tests {
         let mut state = AppState::home(workspace, Vec::new());
         assert!(update(&mut state, AppEvent::Key(AppKey::CtrlQ)).is_empty());
         assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
+        // Opening the confirmation focuses Yes by default.
+        assert!(state.quit_confirm_selected());
         assert!(update(&mut state, AppEvent::Key(AppKey::Char('n'))).is_empty());
         assert_eq!(state.overlay(), None);
 
@@ -3827,6 +3873,55 @@ mod tests {
             update(&mut state, AppEvent::Key(AppKey::Enter)),
             vec![Effect::Detach]
         );
+    }
+
+    #[test]
+    fn quit_confirmation_focus_moves_and_enter_commits_the_selected_button() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+
+        // ←→/Tab all toggle the two-button focus, and re-opening resets to Yes.
+        for toggle in [AppKey::Left, AppKey::Right, AppKey::Tab] {
+            let _ = update(&mut state, AppEvent::Key(AppKey::CtrlQ));
+            assert!(state.quit_confirm_selected());
+            assert!(update(&mut state, AppEvent::Key(toggle)).is_empty());
+            assert!(!state.quit_confirm_selected());
+            assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
+            // Enter on the No button stays instead of detaching.
+            assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+            assert_eq!(state.overlay(), None);
+        }
+
+        // With No focused, `y` still forces detach and `n`/Esc still stay.
+        let _ = update(&mut state, AppEvent::Key(AppKey::CtrlQ));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Left));
+        assert!(!state.quit_confirm_selected());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Char('y'))),
+            vec![Effect::Detach]
+        );
+        assert_eq!(state.overlay(), None);
+
+        // Toggling back to Yes then Enter detaches.
+        let _ = update(&mut state, AppEvent::Key(AppKey::CtrlQ));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Left));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Right));
+        assert!(state.quit_confirm_selected());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Enter)),
+            vec![Effect::Detach]
+        );
+    }
+
+    #[test]
+    fn arrow_keys_are_inert_outside_the_quit_confirmation() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let before = state.selected();
+        assert!(update(&mut state, AppEvent::Key(AppKey::Left)).is_empty());
+        assert!(update(&mut state, AppEvent::Key(AppKey::Right)).is_empty());
+        assert_eq!(state.selected(), before);
+        assert_eq!(state.overlay(), None);
     }
 
     #[test]

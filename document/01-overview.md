@@ -122,8 +122,8 @@ reconciliation、Closeup/Switch への復帰は [TUI](03-tui.md#overview-と-mod
 
 Esc は最前面のモーダルを閉じる。Switch / Closeup の背景では mode や画面遷移を起こさない。Switch からの
 Open・Welcome への遷移と直接起動した `usagi open` の終了は、明示的な終了操作で行う。
-`q` は基底の Switch / Closeup で確認後に TUI を閉じ、daemon の実行は継続する。Ctrl-Q は確認後に
-workspace の live session を終了してから TUI を閉じる。Switch の Ctrl-C は TUI を終了しない。
+`q` は基底の Switch / Closeup で確認後に TUI を閉じ、daemon の実行は継続する。Ctrl-Q も確認 modal を開き、
+確認するとこの client を detach する（daemon の terminal や session は停止しない）。Switch の Ctrl-C は TUI を終了しない。
 terminal tab は daemon が所有する terminal だけを表示する。選択中の live terminal は PTY 出力を右ペインへ
 描画し、focus 中の通常キーをその PTY へ送るため、`ls` などを対話的に実行できる（`q` は shell へ渡り、終了には
 ならない）。tab 巡回や Switch への復帰は `Ctrl-O` prefix だけが所有し、その他の入力は live terminal へ渡す。
