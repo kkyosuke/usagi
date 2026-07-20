@@ -759,6 +759,8 @@ fn persist_pr_results(results: &[PrScanResult]) -> Vec<(PathBuf, Vec<PrLink>)> {
 const GH_TITLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often the title lookup re-polls whether `gh` has exited.
 const GH_TITLE_POLL: Duration = Duration::from_millis(50);
+const GH_TITLE_TERMINATE_GRACE: Duration = Duration::from_millis(250);
+const GH_TITLE_REAP_GRACE: Duration = Duration::from_millis(250);
 /// Cap on the bytes read from `gh`'s stdout — a PR title is a single short line.
 const GH_TITLE_MAX_BYTES: usize = 4 * 1024;
 
@@ -768,41 +770,36 @@ const GH_TITLE_MAX_BYTES: usize = 4 * 1024;
 /// [`crate::infrastructure::pr_title::resolve_titles`]; the argv it is handed and
 /// the parsing of what it returns are built and tested in that pure module, so
 /// this thin spawn is all that stays coverage-excluded. Reading stdout on its own
-/// thread while [`child_io::wait_with_timeout`] reaps the child mirrors the
-/// 1Password CLI harness so a wedged `gh` is killed rather than blocking forever.
+/// through the shared bounded process runner keeps execution, process-tree
+/// termination, reap, and pipe drain inside one wall-clock deadline.
 fn resolve_pr_title(argv: &[String]) -> Option<String> {
-    use crate::presentation::mcp::child_io::{read_capped, wait_with_timeout};
+    use crate::infrastructure::process::{self, Limits, Outcome};
     let (program, args) = argv.split_first()?;
-    let mut child = std::process::Command::new(program)
+    let mut command = std::process::Command::new(program);
+    command
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut out = child.stdout.take()?;
-    let reader = std::thread::spawn(move || read_capped(&mut out, GH_TITLE_MAX_BYTES));
-    let status = wait_with_timeout(&mut RealChild(child), GH_TITLE_TIMEOUT, GH_TITLE_POLL);
-    let stdout = reader.join().ok()?.ok()?.0;
-    status?
-        .success()
-        .then(|| String::from_utf8_lossy(&stdout).into_owned())
-}
-
-/// Adapts a real [`std::process::Child`] to [`child_io::WaitableChild`] so
-/// [`resolve_pr_title`] can wait on it with a timeout.
-struct RealChild(std::process::Child);
-
-impl crate::presentation::mcp::child_io::WaitableChild for RealChild {
-    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-        self.0.try_wait()
-    }
-    fn kill(&mut self) -> std::io::Result<()> {
-        self.0.kill()
-    }
-    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.0.wait()
-    }
+        .stderr(std::process::Stdio::null());
+    let Outcome::Exited(output) = process::run(
+        command,
+        None,
+        Limits {
+            timeout: GH_TITLE_TIMEOUT,
+            terminate_grace: GH_TITLE_TERMINATE_GRACE,
+            reap_grace: GH_TITLE_REAP_GRACE,
+            poll_interval: GH_TITLE_POLL,
+            stdout_cap: GH_TITLE_MAX_BYTES,
+            stderr_cap: 0,
+        },
+    )
+    .ok()?
+    else {
+        return None;
+    };
+    let stdout = output.stdout.ok()?;
+    (!stdout.truncated && output.status.success())
+        .then(|| String::from_utf8_lossy(&stdout.bytes).into_owned())
 }
 
 /// Update the watcher's per-pane PR cache, queue sidebar updates for the event

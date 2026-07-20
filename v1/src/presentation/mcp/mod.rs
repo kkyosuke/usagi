@@ -19,7 +19,6 @@
 //! is identical between them and lives here; each server only supplies the
 //! parts that differ via [`McpService`].
 
-pub mod child_io;
 pub mod issue;
 pub mod llm;
 pub mod memory;

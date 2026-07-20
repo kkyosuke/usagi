@@ -243,6 +243,25 @@ cargo test           # テスト
 
 コミット・push 前の品質チェック（`cargo fmt` / `cargo clippy --all-targets -- -D warnings` / `cargo test`）、ブランチ名・コミットメッセージ規約、CI の詳細は開発規約の正本 [document/06-conventions.md](document/06-conventions.md) を参照してください。
 
+### 短命 subprocess の timeout 契約
+
+Ollama MCP、1Password env resolver、PR title lookup、release tag fetch が起動する短命 command は、
+`infrastructure::process` の共通 runner が process と pipe の lifecycle を一括所有する。各 API の timeout は
+command の実行時間だけでなく、process tree の terminate、grace、force kill、reap、stdout/stderr drain を含む
+end-to-end の wall-clock deadline である。deadline 内に直接 child を reap できない場合は detached reaper が
+ownership を引き継ぎ、caller は cleanup 完了を待たずに timeout を返す。stdout/stderr は worker が並行して drain し、
+保持量の上限を超えた分は破棄するため、large output でも pipe capacity による deadlock を起こさない。
+
+platform ごとの差は次のとおり。
+
+| platform | terminate / reap 契約 | 制約 |
+|---|---|---|
+| Unix（macOS / Linux） | child を専用 process group で起動し、group へ `SIGTERM`、grace 後に `SIGKILL` を送る。直接 child は deadline 内で poll-reap し、未完了なら detached reaper が blocking reap を引き継ぐ | 別 session/process group へ明示的に離脱した descendant までは terminate できない。その descendant が pipe FD を保持しても caller は deadline で戻り、pipe worker は FD が閉じた時点で終了する |
+| Windows | new process group で起動し、stable Rust の child kill と detached reap で直接 child を有界 cleanup する | Job Object による process tree supervision は対象外であり、detached descendant の強制終了は保証しない |
+
+新しい短命 command call site は独自の `kill` + blocking `wait` や reader thread の unbounded `join` を実装せず、
+同じ runner に timeout、cleanup reserve、poll interval、stream cap を渡す。
+
 ### Git Hooks
 
 [lefthook](https://lefthook.dev) で Git hooks を管理しています。クローン後に一度だけ実行してください:
