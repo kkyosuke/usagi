@@ -11,7 +11,7 @@ use super::paths::STATE_DIR;
 ///
 /// Issues and memories are shared source files; derived indexes, locks,
 /// session worktrees, and other daemon-local metadata are not.
-pub const USAGI_GITIGNORE: &str = "/*\n!/.gitignore\n!/issues/\n/issues/index.json\n/issues/.lock\n!/memory/\n/memory/index.json\n/memory/.lock\n";
+pub const USAGI_GITIGNORE: &str = "/*\n!/.gitignore\n!/issues/\n/issues/index.json\n/issues/.derived-dirty\n/issues/.lock\n!/memory/\n/memory/index.json\n/memory/.derived-dirty\n/memory/.lock\n";
 
 /// Install the self-contained usagi ignore file and migrate obsolete root rules.
 ///

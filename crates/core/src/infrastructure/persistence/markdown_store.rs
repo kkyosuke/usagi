@@ -15,10 +15,12 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use super::json_file;
 use crate::infrastructure::error_log::ErrorLog;
+use crate::infrastructure::store::{DerivedState, MutationOutcome};
 
 /// Filename of the derived metadata cache shared by markdown-backed stores.
 /// Kept out of git by usagi's ignore rules.
 pub(crate) const INDEX_FILE: &str = "index.json";
+const DIRTY_FILE: &str = ".derived-dirty";
 
 /// Store-specific behavior for one kind of markdown entry.
 pub(crate) trait MarkdownEntry: Sync {
@@ -80,6 +82,11 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     #[coverage(off)]
     pub(crate) fn index_path(&self) -> PathBuf {
         self.dir.join(INDEX_FILE)
+    }
+
+    #[coverage(off)]
+    fn dirty_path(&self) -> PathBuf {
+        self.dir.join(DIRTY_FILE)
     }
 
     /// Read and parse every entry markdown file, sorted by its store-specific key.
@@ -176,6 +183,61 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
         Ok(target)
     }
 
+    /// Durably schedule a rebuild before changing source Markdown. A crash at
+    /// any later point leaves enough information for the next reader to repair
+    /// derived files from the source state that actually reached disk.
+    #[coverage(off)]
+    pub(crate) fn mark_derived_dirty(&self) -> Result<()> {
+        fs::create_dir_all(&self.dir)
+            .context(format!("failed to create {}", self.dir.display()))?;
+        json_file::write_text_atomic(&self.dirty_path(), "rebuild from markdown\n")
+    }
+
+    /// Convert a derived refresh result into the outcome of an already
+    /// committed source mutation. Derived errors are logged and retained as a
+    /// dirty marker; they never masquerade as an unapplied source error.
+    #[coverage(off)]
+    pub(crate) fn finish_committed<T>(&self, value: T, refresh: Result<()>) -> MutationOutcome<T> {
+        match refresh.and_then(|()| self.clear_derived_dirty()) {
+            Ok(()) => MutationOutcome::new(value, DerivedState::Fresh),
+            Err(error) => {
+                ErrorLog::record(&format!(
+                    "{} source committed but derived refresh failed; rebuild remains scheduled: {error:#}",
+                    E::NAME
+                ));
+                MutationOutcome::new(value, DerivedState::RebuildNeeded)
+            }
+        }
+    }
+
+    /// Repair a previously scheduled rebuild while the caller holds the store
+    /// lock. Missing markers make this a no-op.
+    #[coverage(off)]
+    pub(crate) fn repair_derived_locked(&self) -> Result<()> {
+        if !self.dirty_path().exists() {
+            return Ok(());
+        }
+        self.rebuild_derived()?;
+        self.clear_derived_dirty()
+    }
+
+    #[coverage(off)]
+    pub(crate) fn derived_is_dirty(&self) -> bool {
+        self.dirty_path().exists()
+    }
+
+    #[coverage(off)]
+    fn clear_derived_dirty(&self) -> Result<()> {
+        match fs::remove_file(self.dirty_path()) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).context(format!(
+                "failed to clear derived rebuild marker {}",
+                self.dirty_path().display()
+            )),
+        }
+    }
+
     /// Patch the derived cache/extra files after `entry` was written. Falls back
     /// to a full rebuild when the cache is missing or unreadable.
     #[coverage(off)]
@@ -216,6 +278,12 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
         }
     }
 
+    /// Build summaries directly from source without publishing derived files.
+    #[coverage(off)]
+    pub(crate) fn source_summaries(&self) -> Result<Vec<E::Summary>> {
+        Ok(self.scan_lenient()?.iter().map(E::summary).collect())
+    }
+
     /// Write `index.json` and any store-specific derived artifact.
     #[coverage(off)]
     pub(crate) fn write_derived(&self, summaries: &[E::Summary]) -> Result<()> {
@@ -235,7 +303,7 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     /// Rebuild all derived files from the markdown source of truth.
     #[coverage(off)]
     pub(crate) fn rebuild_derived(&self) -> Result<Vec<E::Summary>> {
-        let summaries: Vec<E::Summary> = self.scan_lenient()?.iter().map(E::summary).collect();
+        let summaries = self.source_summaries()?;
         if summaries.is_empty() && !self.dir.exists() {
             return Ok(summaries);
         }
