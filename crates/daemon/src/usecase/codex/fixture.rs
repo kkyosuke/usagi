@@ -325,6 +325,7 @@ fn runtime_reservation_uses_the_codex_resolver_before_pty_spawn_and_exits_normal
             &mut resolver,
             &mut store,
             &mut spawner,
+            None,
         )
         .unwrap();
 

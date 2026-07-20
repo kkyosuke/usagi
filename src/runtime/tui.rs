@@ -103,6 +103,7 @@ impl DecisionCommandPort for DaemonDecisionCommandPort {
                         action: DispatchToolAction::UserDecisionList,
                         operation_id: usagi_core::domain::id::OperationId::new().to_string(),
                         payload: serde_json::json!({}),
+                        caller_context: None,
                     })
                     .map_err(daemon_error_reason)?;
                 let DaemonReply::Ok(value) = reply else {
@@ -134,6 +135,7 @@ impl DecisionCommandPort for DaemonDecisionCommandPort {
                     action: DispatchToolAction::UserDecisionResolve,
                     operation_id: usagi_core::domain::id::OperationId::new().to_string(),
                     payload: serde_json::json!({"decision_id": decision_id, "answer": answer}),
+                    caller_context: None,
                 })
                 .map_err(daemon_error_reason)?
             {

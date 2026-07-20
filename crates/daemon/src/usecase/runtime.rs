@@ -129,6 +129,16 @@ impl SpawnProvision {
     pub fn arguments(&self) -> &[String] {
         &self.arguments
     }
+
+    /// Adds one ephemeral environment value after adapter provisioning.
+    #[coverage(off)]
+    pub fn insert_environment(
+        &mut self,
+        name: usagi_core::domain::agent::EnvironmentVariableName,
+        value: String,
+    ) {
+        self.environment.insert(name, value);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +216,7 @@ impl RuntimeCoordinator {
         adapter: &mut A,
         store: &mut S,
         spawner: &mut P,
+        mcp_credential: Option<String>,
     ) -> Result<(), RuntimeError> {
         self.validate_scope(&runtime, &operation)?;
         let key = runtime.agent_runtime_id.as_str();
@@ -215,7 +226,14 @@ impl RuntimeCoordinator {
         if self.occupied_slots() >= self.limit {
             return Err(RuntimeError::ConcurrencyExhausted);
         }
-        let resolved = adapter.resolve(request).map_err(RuntimeError::Adapter)?;
+        let mut resolved = adapter.resolve(request).map_err(RuntimeError::Adapter)?;
+        if let Some(credential) = mcp_credential {
+            let name = usagi_core::domain::agent::EnvironmentVariableName::new(
+                "USAGI_MCP_CALLER_CREDENTIAL",
+            )
+            .expect("literal environment variable name is valid");
+            resolved.provision.insert_environment(name, credential);
+        }
         let launch = resolved.snapshot;
         if launch.request != *request
             || launch.plan.profile_id != request.profile_id
@@ -682,6 +700,7 @@ mod tests {
             &mut Resolver::default(),
             store,
             spawner,
+            None,
         )
     }
     #[test]
@@ -998,7 +1017,8 @@ mod tests {
                 Geometry { cols: 80, rows: 24 },
                 &mut BadResolver,
                 &mut store,
-                &mut spawner
+                &mut spawner,
+                None
             ),
             Err(RuntimeError::ScopeMismatch)
         );
@@ -1063,7 +1083,8 @@ mod tests {
                 Geometry { cols: 80, rows: 24 },
                 &mut Resolver::default(),
                 &mut store,
-                &mut spawner
+                &mut spawner,
+                None
             ),
             Err(RuntimeError::ScopeMismatch)
         );
@@ -1075,7 +1096,8 @@ mod tests {
                 Geometry { cols: 80, rows: 24 },
                 &mut RejectingResolver,
                 &mut store,
-                &mut spawner
+                &mut spawner,
+                None
             ),
             Err(RuntimeError::Adapter(AdapterError::Validation(
                 LaunchValidationError::InvalidProgram
@@ -1090,7 +1112,8 @@ mod tests {
                 Geometry { cols: 80, rows: 24 },
                 &mut Resolver::default(),
                 &mut RejectingStore,
-                &mut spawner
+                &mut spawner,
+                None
             ),
             Err(RuntimeError::Store)
         );

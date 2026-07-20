@@ -67,6 +67,10 @@ pub enum DaemonRequest {
         action: DispatchToolAction,
         operation_id: String,
         payload: Value,
+        /// Opaque daemon-minted credential inherited only by a provisioned MCP
+        /// child. It is authentication material, never caller identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller_context: Option<McpCallerContext>,
     },
     /// MCP control and observation for a daemon-owned supervisor aggregate.
     /// Caller provenance is derived by the daemon from the IPC context; it is
@@ -76,6 +80,12 @@ pub enum DaemonRequest {
         operation_id: String,
         payload: Value,
     },
+}
+
+/// Opaque authentication presented by a daemon-provisioned MCP child.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpCallerContext {
+    pub credential: String,
 }
 
 /// Control vocabulary for the dedicated PR snapshot subscription.
