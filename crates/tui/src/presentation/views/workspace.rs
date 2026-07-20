@@ -1322,11 +1322,13 @@ fn home_row_lines_at(
 /// Build the inline `+ new session` sidebar lines: the caret row, then any
 /// validation error wrapped to the sidebar `width` below it.
 ///
-/// The caret row shows the accent cursor `>`, the `+ new:` affordance in the
-/// Success (green) role so it stays visually continuous with the static green
-/// `+ new session` label (#302 / #362 / #376), and a block caret on the typed name
-/// (`> + new: <name>`, documented in 03-tui.md); it stays a single clipped line
-/// since the name is the user's own bounded input. Any reducer
+/// The caret row shows the `+ new:` affordance in the Success (green) role so it
+/// stays visually continuous with the static green `+ new session` label
+/// (#302 / #362 / #376), followed by a block caret on the typed name
+/// (`+ new: <name>`, documented in 03-tui.md). No selection `>` chevron is drawn:
+/// the row already owns input, so the chevron is redundant here; a blank marker
+/// column keeps the affordance aligned with the static label. It stays a single
+/// clipped line since the name is the user's own bounded input. Any reducer
 /// validation message is wrapped **as plain text** to the display width and each
 /// segment is then painted in the danger style — wrapping the styled string
 /// directly would miscount ANSI escapes as visible columns. Every line is padded
@@ -1339,14 +1341,12 @@ fn new_session_input_lines(width: usize, draft: &CreateDraft) -> Vec<String> {
     let accent = Role::Accent.style().bold();
     // The `+ new:` affordance keeps the Success (green) role of the static
     // `+ new session` label so the colour is continuous when the row expands into
-    // its inline input; the cursor `>` and the name/block caret stay accent.
+    // its inline input; the name/block caret stays accent. No `>` selection chevron
+    // is drawn (the row owns input, so it is redundant), but a blank marker column
+    // keeps the affordance aligned with the static label.
     let affordance = Role::Success.style().bold();
     let caret = widgets::block_caret(&draft.name, draft.name.chars().count(), &accent);
-    let caret_line = format!(
-        "{} {} {caret}",
-        accent.paint(">"),
-        affordance.paint("+ new:")
-    );
+    let caret_line = format!("  {} {caret}", affordance.paint("+ new:"));
     let mut lines = vec![widgets::pad_to_width(
         &widgets::clip_to_width(&caret_line, width),
         width,
@@ -1772,10 +1772,10 @@ mod tests {
     }
 
     #[test]
-    fn new_session_input_lines_paint_the_affordance_success_and_keep_the_cursor_and_name_accent() {
+    fn new_session_input_lines_paint_the_affordance_success_and_keep_the_name_accent() {
         // The `+ new:` affordance is Success (green) so it stays continuous with the
-        // static green `+ new session` label; the cursor `>` and the typed name keep
-        // the accent (cyan) role for visibility.
+        // static green `+ new session` label; the typed name keeps the accent (cyan)
+        // role for visibility. No `>` selection chevron is drawn on the input row.
         let draft = CreateDraft {
             name: "feature-x".into(),
             error: None,
@@ -1784,11 +1784,13 @@ mod tests {
         // Affordance carries the Success SGR and never the accent one.
         assert!(caret.contains("\u{1b}[1;32m+ new:\u{1b}[0m"));
         assert!(!caret.contains("\u{1b}[1;36m+ new:"));
-        // Cursor `>` and the name span keep the accent bold role.
-        assert!(caret.contains("\u{1b}[1;36m>\u{1b}[0m"));
-        assert!(caret.contains("\u{1b}[1;36m"));
-        // Stripping styles still yields the documented caret text.
-        assert!(strip(&caret).contains("+ new: feature-x"));
+        // The name span keeps the accent bold role.
+        assert!(caret.contains("\u{1b}[1;36mfeature-x"));
+        // No selection chevron: the caret text starts at `+ new:` after a blank
+        // marker column, never with a `>`.
+        let stripped = strip(&caret);
+        assert!(stripped.starts_with("  + new: feature-x"));
+        assert!(!stripped.trim_start().starts_with('>'));
     }
 
     #[test]
