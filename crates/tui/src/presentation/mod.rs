@@ -2042,11 +2042,15 @@ fn handle_terminal_pointer(
     }
 }
 
-/// Clear a finished terminal selection only when a normal left click lands in
-/// the live terminal's rendered content viewport. Sidebar, chrome, modal, and
-/// empty-selection clicks retain their existing ownership and handling.
+/// Begin a terminal selection when a normal left click lands in the live
+/// terminal's rendered content viewport. This records the press cell as the
+/// drag anchor, before crossterm delivers the first [`PointerKind::Drag`] event.
+/// Sidebar, chrome, modal, and out-of-content clicks retain their existing
+/// ownership and handling.
 #[coverage(off)]
-fn clear_terminal_selection_on_click(
+#[allow(clippy::too_many_arguments)]
+fn begin_terminal_selection_on_click(
+    ui: &WorkspaceUi,
     runtime: &WorkspaceRuntime,
     controls: &mut LiveTerminalControls,
     height: usize,
@@ -2055,13 +2059,20 @@ fn clear_terminal_selection_on_click(
     scroll: usize,
     pointer: (u16, u16),
 ) -> bool {
-    if !runtime.wants_live_input()
-        || !controls.has_selection()
-        || terminal_point_at(height, width, rows_len, scroll, pointer.0, pointer.1).is_none()
-    {
+    if !runtime.wants_live_input() {
         return false;
     }
-    controls.clear_selection();
+    let Some(terminal) = runtime.focused_terminal() else {
+        return false;
+    };
+    let Some(point) = terminal_point_at(height, width, rows_len, scroll, pointer.0, pointer.1)
+    else {
+        return false;
+    };
+    let Some(cells) = ui.terminal_cells(&terminal) else {
+        return false;
+    };
+    controls.begin_selection(TerminalSelection::begin(cells, point));
     true
 }
 
@@ -2096,7 +2107,8 @@ fn intercept_live_terminal_control(
             );
         }
         Key::Click { column, row } => {
-            return clear_terminal_selection_on_click(
+            return begin_terminal_selection_on_click(
+                ui,
                 runtime,
                 controls,
                 height,
@@ -3064,7 +3076,7 @@ mod tests {
         UnavailableDecisionCommandPort, UnavailableEnvironmentStore, UnavailablePrSnapshotPort,
         UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory, WelcomeStep,
         WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
-        app_event_from_key, clear_terminal_selection_on_click, close_exited_panes,
+        app_event_from_key, begin_terminal_selection_on_click, close_exited_panes,
         controller_terminal_view, forward_live_terminal_input, handle_terminal_pointer,
         intercept_live_terminal_control, key_to_terminal_bytes, new_project_notice,
         play_startup_splash, render_controller_frame, render_home_snapshot, restore_open_panes,
@@ -4436,19 +4448,19 @@ mod tests {
             column,
             row: 5,
         };
-        handle_terminal_pointer(
+        assert!(begin_terminal_selection_on_click(
             &ui,
             &runtime,
             &mut controls,
-            &mut term,
-            &mut browser,
             20,
             80,
             rows_len,
             0,
-            drag(37),
-        );
+            (37, 5),
+        ));
         assert!(controls.has_selection());
+        // The next drag report lands at the final "o". The press cell above is
+        // still part of the copied range, so this must yield all of "hello".
         handle_terminal_pointer(
             &ui,
             &runtime,
@@ -4582,7 +4594,7 @@ mod tests {
 
     #[test]
     #[coverage(off)]
-    fn a_normal_click_in_live_terminal_content_clears_only_the_retained_selection() {
+    fn a_terminal_press_anchors_a_drag_at_its_start_cell() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let terminal = live_terminal_ref(workspace, session);
@@ -4604,15 +4616,11 @@ mod tests {
             .len();
         let mut controls = LiveTerminalControls::default();
         controls.sync_focus(Some(&terminal));
-        controls.begin_selection(TerminalSelection::begin(
-            ui.terminal_cells(&terminal).expect("terminal cells"),
-            TerminalPoint { row: 0, column: 0 },
-        ));
-        controls.extend_selection(TerminalPoint { row: 0, column: 4 });
-        let _ = controls.finish_drag();
-
-        // The right pane starts at column 37 and terminal content at row 5.
-        assert!(clear_terminal_selection_on_click(
+        // The right pane starts at column 37 and terminal content at row 5. The
+        // press anchors the selection at the first "h", before the first drag
+        // report reaches the controller.
+        assert!(begin_terminal_selection_on_click(
+            &ui,
             &runtime,
             &mut controls,
             20,
@@ -4621,11 +4629,16 @@ mod tests {
             0,
             (37, 5),
         ));
-        assert!(!controls.has_selection());
+        assert!(controls.is_dragging());
+        assert_eq!(
+            controls.selection().expect("selection started").anchor(),
+            TerminalPoint { row: 0, column: 0 }
+        );
 
-        // With no selection, a left-sidebar click is still left for sidebar
-        // navigation; the terminal interceptor must not consume it.
-        assert!(!clear_terminal_selection_on_click(
+        // A left-sidebar click remains with sidebar navigation; the terminal
+        // interceptor must not consume it.
+        assert!(!begin_terminal_selection_on_click(
+            &ui,
             &runtime,
             &mut controls,
             20,

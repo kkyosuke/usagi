@@ -443,7 +443,7 @@ primary screen から押し出された行は 10,000 行を上限とする local
 replay で履歴が短くなった場合は offset を有効範囲へ正規化する。`↑` / `↓` は scrollback 操作に予約せず、PTY の
 history navigation へそのまま送る。right pane の footer の直前には常に 1 行の空白を置く。
 
-出力は mouse drag により選択でき、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。drag 中も
+出力は mouse drag により選択でき、drag 開始時の press cell から終点までを含めて、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。drag 中も
 drag を離した後も、選択範囲は右ペインに reverse-video で示し続ける。選択は右ペイン content 内の通常左クリック、次の drag が
 新しい選択を始めるか、focus が別の terminal へ移るまで表示され続ける（release で即座に消えない）。この click は text selection
 だけを解除し、sidebar の navigation / activation、modal の入力所有、PTY への入力を変えない。選択の可視化は選択した桁全体に及び、行末の空白 padding や
