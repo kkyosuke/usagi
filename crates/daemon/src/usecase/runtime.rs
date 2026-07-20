@@ -961,11 +961,12 @@ mod tests {
         let mut legacy = record;
         legacy.semantic_key = None;
         legacy.outcome = DurableOperationOutcome::Accepted;
-        let (legacy, interrupted) = RuntimeStoreSnapshot {
-            schema_version: 1,
-            records: vec![legacy],
-        }
-        .reconcile_after_daemon_restart();
+        let legacy: RuntimeStoreSnapshot = serde_json::from_value(serde_json::json!({
+            "records": [legacy]
+        }))
+        .unwrap();
+        assert_eq!(legacy.schema_version, 1);
+        let (legacy, interrupted) = legacy.reconcile_after_daemon_restart();
         assert_eq!(interrupted, 0);
         assert_eq!(legacy.schema_version, RUNTIME_SNAPSHOT_SCHEMA_VERSION);
         assert_eq!(
