@@ -1,6 +1,6 @@
 # 7. MCP サーバ（agent 入口面）
 
-> [ドキュメント目次](README.md) ｜ ← 前へ [6. 開発規約](06-conventions.md)
+> [ドキュメント目次](README.md) ｜ ← 前へ [6. 開発規約](06-conventions.md) ｜ 次へ → [8. coverage exclusion inventory](08-coverage.md)
 
 `usagi mcp` は AI エージェント向けの入口面で、stdio 上の JSON-RPC 2.0 で tool と resource を
 公開する。面の責務・経路・daemon を権威とする反映フローの設計判断は

@@ -1,14 +1,14 @@
 ---
 number: 484
 title: test(coverage): coverage(off) の allowlist と CI enforcement を定義する
-status: todo
+status: done
 priority: medium
 labels: [review, v2, coverage, test]
 dependson: []
 related: [356, 360, 380]
 parent: 453
 created_at: 2026-07-20T12:06:49.167064+00:00
-updated_at: 2026-07-20T12:06:49.167064+00:00
+updated_at: 2026-07-20T23:16:24.332313+00:00
 ---
 
 ## 問題・影響
