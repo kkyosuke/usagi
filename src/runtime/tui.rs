@@ -896,6 +896,33 @@ impl AgentCommandPort for DaemonAgentCommandPort {
     }
 
     #[coverage(off)]
+    fn open_external_terminal(&mut self, directory: &Path) -> Result<(), String> {
+        let directory = directory.to_string_lossy().into_owned();
+        let argv = if cfg!(target_os = "macos") {
+            vec!["open", "-a", "Terminal", &directory]
+        } else if cfg!(target_os = "windows") {
+            vec!["wt", "-d", &directory]
+        } else if cfg!(unix) {
+            vec!["x-terminal-emulator", "--working-directory", &directory]
+        } else {
+            return Err(
+                "opening an external terminal is not supported on this platform".to_owned(),
+            );
+        };
+        let (command, arguments) = argv
+            .split_first()
+            .expect("external terminal command is never empty");
+        Command::new(command)
+            .args(arguments)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("failed to open external terminal: {error}"))
+    }
+
+    #[coverage(off)]
     fn list_terminals(
         &mut self,
     ) -> Result<

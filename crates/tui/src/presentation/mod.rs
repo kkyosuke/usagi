@@ -107,6 +107,12 @@ pub trait AgentCommandPort: Send {
         Err("terminal launch is unavailable".to_owned())
     }
 
+    /// Open a native terminal application rooted at `directory`. This is kept
+    /// on the composition adapter so presentation code never spawns processes.
+    fn open_external_terminal(&mut self, _directory: &Path) -> Result<(), String> {
+        Err("external terminal launch is unavailable".to_owned())
+    }
+
     /// Resize a daemon-owned terminal to the visible pane viewport.
     ///
     /// # Errors
@@ -382,6 +388,7 @@ pub enum ControllerHostAction {
     Remove(RemoveSessionRequest, Completions),
     LaunchAgent(LaunchAgentRequest),
     OpenTerminal(OpenTerminalRequest),
+    OpenExternalTerminal(Target),
     SelectTab(crate::usecase::application::controller::TabDirection),
 }
 
@@ -426,6 +433,12 @@ impl BackendAgentPort for ControllerHost {
 
     fn open_terminal(&mut self, request: OpenTerminalRequest) {
         let _ = self.0.send(ControllerHostAction::OpenTerminal(request));
+    }
+
+    fn open_external_terminal(&mut self, target: Target) {
+        let _ = self
+            .0
+            .send(ControllerHostAction::OpenExternalTerminal(target));
     }
 
     fn select_tab(&mut self, direction: crate::usecase::application::controller::TabDirection) {
@@ -2292,6 +2305,42 @@ fn drain_controller_host_actions(
                         session: request.target.session_id(),
                         arguments: request.arguments,
                     });
+                }
+            }
+            ControllerHostAction::OpenExternalTerminal(target) => {
+                let path = match target {
+                    Target::Root(_) => Some(ui.workspace.path().to_path_buf()),
+                    Target::Session(session) => ui
+                        .workspace
+                        .sessions()
+                        .iter()
+                        .zip(ui.workspace.session_ids())
+                        .find(|(_, id)| **id == session)
+                        .map(|(record, _)| record.root.clone()),
+                };
+                match (
+                    path,
+                    ui.agent
+                        .as_mut()
+                        .and_then(|agent| agent.port.as_deref_mut()),
+                ) {
+                    (Some(path), Some(port)) => {
+                        if let Err(error) = port.open_external_terminal(&path) {
+                            let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
+                                Notice::new(error),
+                            )));
+                        }
+                    }
+                    (None, _) => {
+                        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
+                            Notice::new("selected session is no longer available"),
+                        )));
+                    }
+                    (_, None) => {
+                        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
+                            Notice::new("external terminal launch is unavailable"),
+                        )));
+                    }
                 }
             }
             ControllerHostAction::SelectTab(direction) => {
