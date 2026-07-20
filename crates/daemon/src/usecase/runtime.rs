@@ -901,6 +901,13 @@ mod tests {
     #[test]
     fn hydrate_validates_schema_identity_and_legacy_outcomes() {
         assert_eq!(
+            RuntimeStoreSnapshot::default(),
+            RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: Vec::new(),
+            }
+        );
+        assert_eq!(
             hydrated_records(RuntimeStoreSnapshot {
                 schema_version: 99,
                 records: Vec::new(),
