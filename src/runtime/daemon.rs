@@ -538,11 +538,34 @@ impl TerminalPipelineMetrics {
 /// rendered plan, drains output to the Agent owner, and reaps the child to
 /// commit a durable exit — never a client-driven process.
 struct AgentPty {
-    terminals: BTreeMap<String, Arc<Mutex<PtyTerminal>>>,
+    terminals: BTreeMap<String, OwnedPty>,
     selected: Option<String>,
     observations: SyncSender<AgentPtyObservation>,
     metrics: Arc<TerminalPipelineMetrics>,
     environment: BTreeMap<String, String>,
+}
+
+struct OwnedPty {
+    terminal: TerminalRef,
+    pty: Arc<Mutex<PtyTerminal>>,
+}
+
+fn release_owned_pty(
+    terminals: &mut BTreeMap<String, OwnedPty>,
+    selected: &mut Option<String>,
+    terminal: &TerminalRef,
+) -> bool {
+    let key = terminal.terminal_id.as_str();
+    let owned = terminals
+        .get(&key)
+        .is_some_and(|entry| entry.terminal.fences(terminal));
+    if owned {
+        terminals.remove(&key);
+        if selected.as_ref() == Some(&key) {
+            *selected = None;
+        }
+    }
+    owned
 }
 impl AgentPty {
     fn new(
@@ -588,8 +611,13 @@ impl PtySpawner for AgentPty {
         let pid = pty.process_id().ok_or(SpawnFailure::Ambiguous)?;
         let reader = pty.reader().map_err(|_| SpawnFailure::Ambiguous)?;
         let pty = Arc::new(Mutex::new(pty));
-        self.terminals
-            .insert(terminal.terminal_id.as_str().clone(), Arc::clone(&pty));
+        self.terminals.insert(
+            terminal.terminal_id.as_str().clone(),
+            OwnedPty {
+                terminal: terminal.clone(),
+                pty: Arc::clone(&pty),
+            },
+        );
         let observations = self.observations.clone();
         let metrics = Arc::clone(&self.metrics);
         let output_terminal = terminal.clone();
@@ -643,10 +671,16 @@ impl PtyWriter for AgentPty {
     }
     #[coverage(off)] // Real PTY ioctl; the agent IPC fake verifies the fenced resize behavior.
     fn resize(&mut self, terminal: &TerminalRef, geometry: Geometry) -> Result<(), PtyWriteError> {
-        let Some(pty) = self.terminals.get(&terminal.terminal_id.as_str()) else {
+        let Some(entry) = self
+            .terminals
+            .get(&terminal.terminal_id.as_str())
+            .filter(|entry| entry.terminal.fences(terminal))
+        else {
             return Err(PtyWriteError { applied_prefix: 0 });
         };
-        pty.lock()
+        entry
+            .pty
+            .lock()
             .map_err(|_| PtyWriteError { applied_prefix: 0 })?
             .resize(geometry)
             .map_err(|_| PtyWriteError { applied_prefix: 0 })
@@ -659,9 +693,13 @@ impl PtyWriter for AgentPty {
             return Err(PtyWriteError { applied_prefix: 0 });
         };
         terminal
+            .pty
             .lock()
             .map_err(|_| PtyWriteError { applied_prefix: 0 })?
             .write_all(bytes)
+    }
+    fn release(&mut self, terminal: &TerminalRef) -> bool {
+        release_owned_pty(&mut self.terminals, &mut self.selected, terminal)
     }
 }
 
@@ -671,7 +709,7 @@ enum PtyObservation {
 }
 
 struct DaemonPty {
-    terminals: BTreeMap<String, Arc<Mutex<PtyTerminal>>>,
+    terminals: BTreeMap<String, OwnedPty>,
     selected: Option<String>,
     observations: SyncSender<PtyObservation>,
     metrics: Arc<TerminalPipelineMetrics>,
@@ -713,8 +751,13 @@ impl GenericPtySpawner for DaemonPty {
         let pid = pty.process_id().ok_or(SpawnFailure::Ambiguous)?;
         let reader = pty.reader().map_err(|_| SpawnFailure::Ambiguous)?;
         let pty = Arc::new(Mutex::new(pty));
-        self.terminals
-            .insert(terminal.terminal_id.as_str().clone(), Arc::clone(&pty));
+        self.terminals.insert(
+            terminal.terminal_id.as_str().clone(),
+            OwnedPty {
+                terminal: terminal.clone(),
+                pty: Arc::clone(&pty),
+            },
+        );
         let output_sender = self.observations.clone();
         let metrics = Arc::clone(&self.metrics);
         let output_terminal = terminal.clone();
@@ -772,10 +815,16 @@ impl PtyWriter for DaemonPty {
         terminal: &usagi_core::domain::id::TerminalRef,
         geometry: Geometry,
     ) -> Result<(), PtyWriteError> {
-        let Some(pty) = self.terminals.get(&terminal.terminal_id.as_str()) else {
+        let Some(entry) = self
+            .terminals
+            .get(&terminal.terminal_id.as_str())
+            .filter(|entry| entry.terminal.fences(terminal))
+        else {
             return Err(PtyWriteError { applied_prefix: 0 });
         };
-        pty.lock()
+        entry
+            .pty
+            .lock()
             .map_err(|_| PtyWriteError { applied_prefix: 0 })?
             .resize(geometry)
             .map_err(|_| PtyWriteError { applied_prefix: 0 })
@@ -788,9 +837,13 @@ impl PtyWriter for DaemonPty {
             return Err(PtyWriteError { applied_prefix: 0 });
         };
         terminal
+            .pty
             .lock()
             .map_err(|_| PtyWriteError { applied_prefix: 0 })?
             .write_all(bytes)
+    }
+    fn release(&mut self, terminal: &TerminalRef) -> bool {
+        release_owned_pty(&mut self.terminals, &mut self.selected, terminal)
     }
 }
 
@@ -3486,6 +3539,181 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One isolated process covers both real PTY transport owners.
+    fn exited_generic_and_agent_pty_transports_return_to_the_fd_baseline() {
+        const TERMINALS_PER_OWNER: usize = 24;
+        const FD_TOLERANCE: usize = 4;
+
+        if std::env::var_os("USAGI_PTY_RECLAIM_TEST_HELPER").is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "runtime::daemon::tests::exited_generic_and_agent_pty_transports_return_to_the_fd_baseline",
+                    "--nocapture",
+                ])
+                .env("USAGI_PTY_RECLAIM_TEST_HELPER", "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        let baseline = std::fs::read_dir("/dev/fd").unwrap().count();
+        let metrics = Arc::new(TerminalPipelineMetrics::default());
+        let (mut generic, generic_observations) = DaemonPty::new(Arc::clone(&metrics));
+        let (mut agent, agent_observations) = AgentPty::new(BTreeMap::new(), metrics);
+        let generation = DaemonGeneration::new();
+
+        let generic_scope = TerminalLaunchScope {
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+        };
+        let generic_request = TerminalLaunchRequest {
+            profile_id: TerminalProfileId::new("login-shell").unwrap(),
+            scope: generic_scope.clone(),
+        };
+        let generic_launch = usagi_core::domain::terminal_launch::ResolvedTerminalLaunch::new(
+            usagi_core::domain::terminal_launch::DurableTerminalLaunchSnapshot::new(
+                generic_request,
+                1,
+                "/bin/sh",
+                vec!["-c".to_owned(), "printf generic-final".to_owned()],
+                PathBuf::from("/"),
+                [],
+            )
+            .unwrap(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let generic_terminals = (0..TERMINALS_PER_OWNER)
+            .map(|_| TerminalRef {
+                daemon_generation: generation,
+                terminal_id: TerminalId::new(),
+                workspace_id: generic_scope.workspace_id,
+                session_id: generic_scope.session_id,
+                worktree_id: generic_scope.worktree_id,
+            })
+            .collect::<Vec<_>>();
+        for terminal in &generic_terminals {
+            generic
+                .spawn(&generic_launch, terminal, Geometry { cols: 80, rows: 24 })
+                .unwrap();
+        }
+        reclaim_generic_observations(&mut generic, &generic_observations, TERMINALS_PER_OWNER);
+        assert!(generic.terminals.is_empty());
+
+        let profile = AgentProfileId::new("codex").unwrap();
+        let agent_scope = usagi_core::domain::agent::LaunchScope {
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+        };
+        let agent_request = usagi_core::domain::agent::LaunchRequest {
+            profile_id: profile.clone(),
+            mode: usagi_core::domain::agent::LaunchMode::Interactive,
+            model: None,
+            resume: false,
+            initial_prompt: None,
+            scope: agent_scope.clone(),
+            required_capabilities: BTreeSet::new(),
+        };
+        let plan = usagi_core::domain::agent::LaunchPlan::new(
+            profile,
+            1,
+            "/bin/sh",
+            vec!["-c".to_owned(), "printf agent-final".to_owned()],
+            [],
+            PathBuf::from("/"),
+        )
+        .unwrap();
+        let agent_launch = DurableLaunchSnapshot::new(agent_request, plan);
+        let agent_terminals = (0..TERMINALS_PER_OWNER)
+            .map(|_| TerminalRef {
+                daemon_generation: generation,
+                terminal_id: TerminalId::new(),
+                workspace_id: agent_scope.workspace_id,
+                session_id: agent_scope.session_id,
+                worktree_id: agent_scope.worktree_id,
+            })
+            .collect::<Vec<_>>();
+        for terminal in &agent_terminals {
+            agent
+                .spawn(
+                    &agent_launch,
+                    &SpawnProvision::new([], Vec::new()),
+                    terminal,
+                )
+                .unwrap();
+        }
+        reclaim_agent_observations(&mut agent, &agent_observations, TERMINALS_PER_OWNER);
+        assert!(agent.terminals.is_empty());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let current = std::fs::read_dir("/dev/fd").unwrap().count();
+            if current <= baseline + FD_TOLERANCE {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "PTY FDs did not return near baseline"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    fn reclaim_generic_observations(
+        pty: &mut DaemonPty,
+        observations: &Receiver<PtyObservation>,
+        expected_exits: usize,
+    ) {
+        let mut output = BTreeSet::new();
+        let mut exits = 0;
+        while exits != expected_exits {
+            match observations.recv_timeout(Duration::from_secs(5)).unwrap() {
+                PtyObservation::Output(terminal, bytes) => {
+                    assert!(!bytes.is_empty());
+                    output.insert(terminal.terminal_id.as_str().clone());
+                }
+                PtyObservation::Exited(terminal, 0) => {
+                    assert!(output.contains(&terminal.terminal_id.as_str()));
+                    assert!(pty.release(&terminal));
+                    assert!(!pty.release(&terminal));
+                    exits += 1;
+                }
+                PtyObservation::Exited(_, status) => panic!("unexpected exit status {status}"),
+            }
+        }
+    }
+
+    fn reclaim_agent_observations(
+        pty: &mut AgentPty,
+        observations: &Receiver<AgentPtyObservation>,
+        expected_exits: usize,
+    ) {
+        let mut output = BTreeSet::new();
+        let mut exits = 0;
+        while exits != expected_exits {
+            match observations.recv_timeout(Duration::from_secs(5)).unwrap() {
+                AgentPtyObservation::Output(terminal, bytes) => {
+                    assert!(!bytes.is_empty());
+                    output.insert(terminal.terminal_id.as_str().clone());
+                }
+                AgentPtyObservation::Exited(terminal, 0) => {
+                    assert!(output.contains(&terminal.terminal_id.as_str()));
+                    assert!(pty.release(&terminal));
+                    assert!(!pty.release(&terminal));
+                    exits += 1;
+                }
+                AgentPtyObservation::Exited(_, status) => {
+                    panic!("unexpected exit status {status}");
+                }
+            }
+        }
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)] // PTY-to-IPC exit observation is one integration scenario.
     fn generic_terminal_exit_reaches_its_resume_response() {
         let directory = tempfile::tempdir().unwrap();
@@ -3559,17 +3787,86 @@ mod tests {
             .unwrap()["subscription"]
             .as_u64()
             .unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let racers = [
+            (
+                TerminalAction::Detach,
+                TerminalRequest::Detach {
+                    terminal: terminal.clone(),
+                    subscription,
+                },
+            ),
+            (
+                TerminalAction::Resize,
+                TerminalRequest::Resize {
+                    terminal: terminal.clone(),
+                    geometry: TerminalGeometry { cols: 81, rows: 25 },
+                },
+            ),
+            (
+                TerminalAction::Input,
+                TerminalRequest::Input {
+                    terminal: terminal.clone(),
+                    subscription,
+                    input_seq: 0,
+                    bytes: b"printf race\n".to_vec(),
+                },
+            ),
+        ]
+        .into_iter()
+        .map(|(action, request)| {
+            let runtime = Arc::clone(&runtime);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                runtime.lock().unwrap().request(
+                    connection,
+                    client,
+                    RequestId::new(),
+                    action,
+                    serde_json::to_value(request).unwrap(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+        for racer in racers {
+            if let Err(error) = racer.join().unwrap() {
+                assert_eq!(
+                    error.code,
+                    usagi_core::infrastructure::ipc::ErrorCode::StaleTarget
+                );
+            }
+        }
+
+        let exit_connection = ConnectionId::new();
+        let exit_client = ClientId::new();
+        let exit_subscription = runtime
+            .lock()
+            .unwrap()
+            .request(
+                exit_connection,
+                exit_client,
+                RequestId::new(),
+                TerminalAction::Attach,
+                serde_json::to_value(TerminalRequest::Attach {
+                    terminal: terminal.clone(),
+                })
+                .unwrap(),
+            )
+            .unwrap()["subscription"]
+            .as_u64()
+            .unwrap();
         runtime
             .lock()
             .unwrap()
             .request(
-                connection,
-                client,
+                exit_connection,
+                exit_client,
                 RequestId::new(),
                 TerminalAction::Input,
                 serde_json::to_value(TerminalRequest::Input {
                     terminal: terminal.clone(),
-                    subscription,
+                    subscription: exit_subscription,
                     input_seq: 0,
                     bytes: b"exit\n".to_vec(),
                 })
@@ -3600,6 +3897,7 @@ mod tests {
             assert!(Instant::now() < deadline, "terminal exit was not observed");
             std::thread::sleep(Duration::from_millis(10));
         }
+        assert!(runtime.lock().unwrap().exit(&terminal, 0).is_err());
     }
 
     #[test]

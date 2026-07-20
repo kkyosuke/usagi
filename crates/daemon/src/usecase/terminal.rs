@@ -151,6 +151,12 @@ pub trait PtyWriter {
     ) -> Result<(), PtyWriteError> {
         Ok(())
     }
+    /// Releases process-local transport ownership after the terminal exit has
+    /// been committed. Implementations must fence the complete terminal
+    /// identity and make repeated calls harmless.
+    fn release(&mut self, _terminal: &TerminalRef) -> bool {
+        false
+    }
     /// # Errors
     ///
     /// Returns the number of bytes that may have reached the PTY on failure.

@@ -460,11 +460,15 @@ impl GenericTerminalCoordinator {
             .ok_or(GenericTerminalError::UnknownTerminal)
     }
     fn running(&self, terminal: &TerminalRef) -> Result<(), GenericTerminalError> {
-        (self.record(terminal)?.state == TerminalRuntimeState::Running)
-            .then_some(())
-            .ok_or(GenericTerminalError::ReconcileRequired(
+        match self.record(terminal)?.state {
+            TerminalRuntimeState::Running => Ok(()),
+            TerminalRuntimeState::Exited | TerminalRuntimeState::Reclaimed => {
+                Err(GenericTerminalError::Terminal(RegistryError::Exited))
+            }
+            _ => Err(GenericTerminalError::ReconcileRequired(
                 TerminalReconcileState::IdentityUnknown,
-            ))
+            )),
+        }
     }
 
     /// Retained output remains readable after a terminal exits. Only launches,

@@ -693,11 +693,15 @@ impl RuntimeCoordinator {
     }
     #[coverage(off)]
     fn running(&self, runtime: &AgentRuntimeRef) -> Result<(), RuntimeError> {
-        (self.record(runtime)?.state == RuntimeState::Running)
-            .then_some(())
-            .ok_or(RuntimeError::ReconcileRequired(
+        match self.record(runtime)?.state {
+            RuntimeState::Running => Ok(()),
+            RuntimeState::Exited | RuntimeState::Reclaimed => {
+                Err(RuntimeError::Terminal(RegistryError::Exited))
+            }
+            _ => Err(RuntimeError::ReconcileRequired(
                 ReconcileState::IdentityUnknown,
-            ))
+            )),
+        }
     }
 }
 

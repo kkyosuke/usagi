@@ -199,7 +199,18 @@ output を drop せず、reader が EOF 後に exit を同じ queue へ送るた
 commit される。slow / absent client は polling cursor を持つだけで reader queue の consumer ではない。
 
 terminal resize は registry の revision と geometry を更新する。terminal exit は final output を append
-してから exited state を記録するため、ownership を early release しない。
+してから exited state を記録するため、ownership を early release しない。reader が child を reap し、owner が
+exit を registry と durable runtime record へ commit した後（exit 後の store write が失敗した場合は
+`persist_after_exit` を記録した後）、process-local transport map から完全な `TerminalRef` で fenced entry を
+exactly once で外す。これにより PTY master、writer、reader と child handle の FD は attachment の有無にかかわらず
+解放される。exit と競合または exit 後に届いた input / resize は別 incarnation の PTY へ fallback せず
+`stale_target`、duplicate exit は同じ typed failure となる。detach は subscription だけを冪等に処理し、transport
+entry の寿命を延ばさない。
+
+durable terminal record と bounded output journal は transport entry とは別の tombstone state である。exit 後も
+最終 status、offset、最大 64 KiB の replay window を attach / resume / resync に返す一方、PTY handle や FD は
+保持しない。したがって final replay の保持量は terminal 数に対する byte bound の範囲内であり、transport の
+回収を妨げない。
 
 generic shell terminal は root IPC server が全 connection で共有する ownership runtime へ渡す。runtime は
 generic terminal coordinator、trusted `login-shell` profile resolver、durable terminal store、実 PTY adapter
