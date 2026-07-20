@@ -5,7 +5,7 @@
 workspace を開き直したときに、その workspace/session/root scope に属する **生存中の** daemon-owned
 Agent / Terminal runtime を、stable identity で pane tab に復元する設計。実装契約が確定したら
 [3. TUI](../03-tui.md)・[4. daemon IPC](../04-ipc.md)・[5. daemon](../05-daemon.md) へ畳み込む。
-実装タスクは issue #385（epic）/ #386（daemon）/ #388（tui）で追跡する。
+実装タスクは issue #390（epic）/ #386（daemon）/ #388（tui）で追跡する。
 
 ## 目次
 
@@ -129,7 +129,7 @@ open workspace
 
 | issue | 層 | 内容 |
 |---|---|---|
-| #385 | epic | 目標・scope・不変条件・受け入れ条件の親 |
+| #390 | epic | 目標・scope・不変条件・受け入れ条件の親 |
 | #386 | daemon + core | `terminal inventory` を agent runtime terminal も含む scope-filtered な unified inventory にする |
 | #388 | tui | workspace open 時に scope inventory を pane tab へ投影する（#386 に依存） |
 

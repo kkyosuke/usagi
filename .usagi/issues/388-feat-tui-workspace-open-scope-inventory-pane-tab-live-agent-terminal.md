@@ -6,7 +6,7 @@ priority: high
 labels: [tui, terminal, agent, restore, pane]
 dependson: [386]
 related: [193, 195, 256, 282, 367]
-parent: 385
+parent: 390
 created_at: 2026-07-20T01:42:46.446935+00:00
 updated_at: 2026-07-20T01:42:46.446935+00:00
 ---
@@ -15,7 +15,7 @@ updated_at: 2026-07-20T01:42:46.446935+00:00
 
 workspace open 時に、daemon の scope inventory（#386）を pane tab へ投影し、同一 daemon が生存所有する live Agent / Terminal を stable identity で復元する。session pane（`Target::Session`）と root pane（`Target::Root`）の両方を対象にする。
 
-親: #385。依存: #386。
+親: #390。依存: #386。
 
 ## 現状の問題
 

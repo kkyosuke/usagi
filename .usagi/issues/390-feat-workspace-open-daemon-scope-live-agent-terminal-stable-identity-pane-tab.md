@@ -1,5 +1,5 @@
 ---
-number: 385
+number: 390
 title: feat: workspace open 時に同一 daemon 上の scope 内 live Agent/Terminal を stable identity で pane tab へ復元する
 status: todo
 priority: high

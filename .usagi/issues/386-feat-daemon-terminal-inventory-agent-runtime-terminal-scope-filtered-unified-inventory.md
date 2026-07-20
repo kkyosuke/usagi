@@ -6,16 +6,16 @@ priority: high
 labels: [daemon, terminal, agent, ipc, restore]
 dependson: []
 related: [195, 254, 350, 365, 367]
-parent: 385
+parent: 390
 created_at: 2026-07-20T01:42:10.613495+00:00
 updated_at: 2026-07-20T01:43:43.030253+00:00
 ---
 
 ## 目的
 
-`terminal inventory` request が、generic terminal だけでなく **Agent runtime が所有する terminal も含めて**、要求 scope（workspace / session / root）に属する daemon-owned runtime を列挙できるようにする。これは #385（restore-on-open）で TUI が open 時に tab を再投影するための source of truth を提供する。
+`terminal inventory` request が、generic terminal だけでなく **Agent runtime が所有する terminal も含めて**、要求 scope（workspace / session / root）に属する daemon-owned runtime を列挙できるようにする。これは #390（restore-on-open）で TUI が open 時に tab を再投影するための source of truth を提供する。
 
-親: #385。
+親: #390。
 
 ## 現状の問題
 
@@ -51,4 +51,4 @@ updated_at: 2026-07-20T01:43:43.030253+00:00
 
 ## 依存
 
-無し（既存 durable store / coordinator の上に構築）。#385 の前段。
+無し（既存 durable store / coordinator の上に構築）。#390 の前段。
