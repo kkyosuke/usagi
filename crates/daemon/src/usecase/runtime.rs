@@ -332,6 +332,9 @@ impl RuntimeCoordinator {
         )
     }
 
+    // LLVM counts this generic orchestration once per downstream adapter/store/spawner
+    // monomorphization. Unit and real-file restart tests cover the shared behavior.
+    #[coverage(off)]
     pub fn launch_with_semantic<A: AgentAdapter + ?Sized, S: RuntimeStore, P: PtySpawner>(
         &mut self,
         request: &LaunchRequest,
