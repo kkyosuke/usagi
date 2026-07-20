@@ -75,6 +75,7 @@ pub trait RuntimeStore {
 /// [`DurableLaunchSnapshot`] or a runtime record.
 pub struct SpawnProvision {
     environment: BTreeMap<usagi_core::domain::agent::EnvironmentVariableName, String>,
+    daemon_environment: BTreeMap<usagi_core::domain::agent::EnvironmentVariableName, String>,
     arguments: Vec<String>,
 }
 
@@ -112,6 +113,7 @@ impl SpawnProvision {
     ) -> Self {
         Self {
             environment: environment.into_iter().collect(),
+            daemon_environment: BTreeMap::new(),
             arguments,
         }
     }
@@ -130,14 +132,40 @@ impl SpawnProvision {
         &self.arguments
     }
 
-    /// Adds one ephemeral environment value after adapter provisioning.
+    /// Rebuilds the complete Agent child environment from its three permitted
+    /// live sources. Later sources win collisions: public terminal profile,
+    /// adapter provision, then daemon-issued ephemeral provision.
+    #[must_use]
     #[coverage(off)]
-    pub fn insert_environment(
+    pub fn compose_environment(
+        &self,
+        public_profile: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
+        let mut environment = public_profile.clone();
+        environment.extend(
+            self.environment
+                .iter()
+                .map(|(name, value)| (name.as_str().to_owned(), value.clone())),
+        );
+        environment.extend(
+            self.daemon_environment
+                .iter()
+                .map(|(name, value)| (name.as_str().to_owned(), value.clone())),
+        );
+        environment
+    }
+
+    /// Adds a daemon-issued ephemeral environment value after adapter
+    /// provisioning. This is the highest-priority source: it replaces an
+    /// adapter value with the same name, while adapter values replace public
+    /// profile values when the process environment is composed.
+    #[coverage(off)]
+    pub fn insert_daemon_environment(
         &mut self,
         name: usagi_core::domain::agent::EnvironmentVariableName,
         value: String,
     ) {
-        self.environment.insert(name, value);
+        self.daemon_environment.insert(name, value);
     }
 }
 
@@ -232,7 +260,9 @@ impl RuntimeCoordinator {
                 "USAGI_MCP_CALLER_CREDENTIAL",
             )
             .expect("literal environment variable name is valid");
-            resolved.provision.insert_environment(name, credential);
+            resolved
+                .provision
+                .insert_daemon_environment(name, credential);
         }
         let launch = resolved.snapshot;
         if launch.request != *request

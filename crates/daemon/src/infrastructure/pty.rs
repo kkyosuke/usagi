@@ -68,6 +68,10 @@ impl PtyTerminal {
     ) -> std::io::Result<Self> {
         let mut command = CommandBuilder::new(program);
         command.args(args);
+        // CommandBuilder starts with a snapshot of the daemon environment.
+        // The PTY boundary is the final authority: discard that ambient state
+        // before rebuilding the child environment from explicit live inputs.
+        command.env_clear();
         for (name, value) in environment {
             command.env(name, value);
         }
@@ -149,17 +153,43 @@ fn io_error(error: impl std::fmt::Display) -> std::io::Error {
 #[cfg(test)]
 mod tests {
     use super::PtyTerminal;
-    use crate::usecase::terminal::{Geometry, PtyWriter};
+    use crate::usecase::terminal::Geometry;
+    use std::io::Read;
+
+    fn run_with_ambient_sentinel(test_name: &str) -> bool {
+        if std::env::var_os("USAGI_PTY_TEST_HELPER").is_some() {
+            return true;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env("USAGI_PTY_TEST_HELPER", "1")
+            .env("USAGI_PTY_SENTINEL", "must-not-leak")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        false
+    }
+
+    fn output(terminal: &PtyTerminal) -> String {
+        let mut output = String::new();
+        terminal
+            .reader()
+            .unwrap()
+            .read_to_string(&mut output)
+            .unwrap();
+        output
+    }
 
     #[test]
     fn daemon_owns_shell_pty_until_it_reaps_the_child() {
-        let mut terminal = PtyTerminal::spawn(
+        let terminal = PtyTerminal::spawn_with(
             "/bin/sh",
+            &["-c".to_owned(), "exit 0".to_owned()],
+            &[],
             std::path::Path::new("/"),
             Geometry { cols: 80, rows: 24 },
         )
         .unwrap();
-        terminal.write_all(b"exit\n").unwrap();
         assert_eq!(terminal.wait().unwrap(), 0);
     }
 
@@ -177,5 +207,75 @@ mod tests {
         )
         .unwrap();
         assert_eq!(terminal.wait().unwrap(), 7);
+    }
+
+    #[test]
+    fn generic_child_receives_only_its_explicit_public_environment() {
+        if !run_with_ambient_sentinel(
+            "infrastructure::pty::tests::generic_child_receives_only_its_explicit_public_environment",
+        ) {
+            return;
+        }
+        let terminal = PtyTerminal::spawn_with(
+            "/bin/sh",
+            &[
+                "-c".to_owned(),
+                "printf '%s|%s|%s|%s' \"${USAGI_PTY_SENTINEL-unset}\" \"$PATH\" \"$HOME\" \"$TERM\""
+                    .to_owned(),
+            ],
+            &[
+                ("PATH".to_owned(), "/allowed/bin".to_owned()),
+                ("HOME".to_owned(), "/allowed/home".to_owned()),
+                ("TERM".to_owned(), "xterm-256color".to_owned()),
+            ],
+            std::path::Path::new("/"),
+            Geometry { cols: 80, rows: 24 },
+        )
+        .unwrap();
+
+        assert_eq!(
+            output(&terminal),
+            "unset|/allowed/bin|/allowed/home|xterm-256color"
+        );
+        assert_eq!(terminal.wait().unwrap(), 0);
+    }
+
+    #[test]
+    fn empty_environment_does_not_restore_ambient_values() {
+        if !run_with_ambient_sentinel(
+            "infrastructure::pty::tests::empty_environment_does_not_restore_ambient_values",
+        ) {
+            return;
+        }
+        let terminal = PtyTerminal::spawn_with(
+            "/bin/sh",
+            &["-c".to_owned(), "env".to_owned()],
+            &[],
+            std::path::Path::new("/"),
+            Geometry { cols: 80, rows: 24 },
+        )
+        .unwrap();
+
+        let child_output = output(&terminal);
+        assert!(!child_output.contains("USAGI_PTY_SENTINEL="));
+        assert_eq!(terminal.wait().unwrap(), 0);
+    }
+
+    #[test]
+    fn duplicate_environment_names_use_the_last_explicit_value() {
+        let terminal = PtyTerminal::spawn_with(
+            "/bin/sh",
+            &["-c".to_owned(), "printf %s \"$USAGI_PRIORITY\"".to_owned()],
+            &[
+                ("USAGI_PRIORITY".to_owned(), "profile".to_owned()),
+                ("USAGI_PRIORITY".to_owned(), "provision".to_owned()),
+            ],
+            std::path::Path::new("/"),
+            Geometry { cols: 80, rows: 24 },
+        )
+        .unwrap();
+
+        assert_eq!(output(&terminal), "provision");
+        assert_eq!(terminal.wait().unwrap(), 0);
     }
 }

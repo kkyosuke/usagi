@@ -79,18 +79,22 @@ fn fixture_repo() -> tempfile::TempDir {
     repo
 }
 
-fn write_codex(bin: &Path, ready_status: i32) {
+fn write_codex(bin: &Path, count: &Path, ready_status: i32) {
     fs::create_dir_all(bin).unwrap();
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit {ready_status}; fi\nprintf '%s\\n' spawn >> \"$USAGI_FIXTURE_COUNT\"\nprintf 'ready\\n'\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n"
+        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit {ready_status}; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nprintf '%s\\n' spawn >> \"{}\"\nprintf 'ready\\n'\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
+        count.display()
     );
     let path = bin.join("codex");
     fs::write(&path, script).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-fn write_shell(path: &Path) {
-    let script = "#!/bin/sh\nprintf '%s\\n' spawn >> \"$USAGI_FIXTURE_COUNT\"\nprintf 'shell-ready\\n'\nIFS= read line || exit 0\nprintf 'shell-input:%s\\n' \"$line\"\nexit 0\n";
+fn write_shell(path: &Path, count: &Path) {
+    let script = format!(
+        "#!/bin/sh\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nprintf '%s\\n' spawn >> \"{}\"\nprintf 'shell-ready\\n'\nIFS= read line || exit 0\nprintf 'shell-input:%s\\n' \"$line\"\nexit 0\n",
+        count.display()
+    );
     fs::write(path, script).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
@@ -106,13 +110,7 @@ impl Drop for Daemon {
     }
 }
 
-fn start_daemon(
-    repo: &Path,
-    home: &Path,
-    path: &Path,
-    count: &Path,
-    shell: Option<&Path>,
-) -> Daemon {
+fn start_daemon(repo: &Path, home: &Path, path: &Path, shell: Option<&Path>) -> Daemon {
     let data_dir = channel_data_dir(home);
     fs::create_dir(&data_dir).expect("daemon data directory exists before serve");
     fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap();
@@ -123,7 +121,7 @@ fn start_daemon(
         .current_dir(repo)
         .env("USAGI_HOME", home)
         .env("PATH", fixture_path)
-        .env("USAGI_FIXTURE_COUNT", count)
+        .env("USAGI_PTY_SENTINEL", "must-not-leak")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_COMMON_DIR")
@@ -235,6 +233,32 @@ fn attach(client: &mut impl DaemonClient, terminal: &TerminalRef) -> u64 {
     body["subscription"].as_u64().expect("subscription id")
 }
 
+fn wait_for_agent_completion(
+    client: &mut impl DaemonClient,
+    operation: &str,
+    workspace: WorkspaceId,
+    session: SessionId,
+    profile: Option<&str>,
+) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match client.request(DaemonRequest::Agent {
+            operation_id: operation.to_owned(),
+            intent: AgentLaunchIntent {
+                workspace,
+                session: Some(session),
+                profile: profile.map(|value| AgentProfileId::new(value).unwrap()),
+            },
+        }) {
+            Ok(DaemonReply::Ok(body)) if body["completed"] == true => return body,
+            Ok(DaemonReply::Accepted { .. }) => {}
+            other => panic!("unexpected final replay: {other:?}"),
+        }
+        assert!(Instant::now() < deadline, "fixture Agent did not exit");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn safe_readiness_error(error: ClientError) {
     let ClientError::Protocol(error) = error else {
         panic!("readiness failure must be a daemon protocol error");
@@ -258,8 +282,8 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
     let home = short_dir("usagi-");
     let bin = home.path().join("bin");
     let count = home.path().join("spawn-count");
-    write_codex(&bin, 0);
-    let _daemon = start_daemon(repo.path(), home.path(), &bin, &count, None);
+    write_codex(&bin, &count, 0);
+    let _daemon = start_daemon(repo.path(), home.path(), &bin, None);
     let data_dir = channel_data_dir(home.path());
     let mut first = client(&data_dir);
     let (workspace, session, _) = available_scope(&mut first);
@@ -296,27 +320,10 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
         })
         .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match reattached.request(DaemonRequest::Agent {
-            operation_id: operation.clone(),
-            intent: AgentLaunchIntent {
-                workspace,
-                session: Some(session),
-                profile: None,
-            },
-        }) {
-            Ok(DaemonReply::Ok(body)) if body["completed"] == true => {
-                let replay: TerminalRef = serde_json::from_value(body["terminal"].clone()).unwrap();
-                assert_eq!(replay, terminal);
-                break;
-            }
-            Ok(DaemonReply::Accepted { .. }) => {}
-            other => panic!("unexpected final replay: {other:?}"),
-        }
-        assert!(Instant::now() < deadline, "fixture Codex did not exit");
-        thread::sleep(Duration::from_millis(20));
-    }
+    let final_body =
+        wait_for_agent_completion(&mut reattached, &operation, workspace, session, None);
+    let replay: TerminalRef = serde_json::from_value(final_body["terminal"].clone()).unwrap();
+    assert_eq!(replay, terminal);
     let snapshot = reattached
         .request(DaemonRequest::Terminal {
             action: TerminalAction::Resync,
@@ -348,11 +355,13 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
         })
         .unwrap();
     assert_ne!(operation, explicit_operation);
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while fs::read_to_string(&count).map_or(0, |contents| contents.lines().count()) < 2 {
-        assert!(Instant::now() < deadline, "explicit Codex did not start");
-        thread::sleep(Duration::from_millis(20));
-    }
+    wait_for_agent_completion(
+        &mut reattached,
+        &explicit_operation,
+        workspace,
+        session,
+        Some("codex"),
+    );
     assert_eq!(fs::read_to_string(count).unwrap().lines().count(), 2);
 }
 
@@ -368,9 +377,9 @@ fn root_ipc_missing_or_not_authenticated_codex_is_safe_and_redacted() {
         let count = home.path().join("spawn-count");
         fs::create_dir(&bin).unwrap();
         if let Some(status) = ready_status {
-            write_codex(&bin, status);
+            write_codex(&bin, &count, status);
         }
-        let _daemon = start_daemon(repo.path(), home.path(), &bin, &count, None);
+        let _daemon = start_daemon(repo.path(), home.path(), &bin, None);
         let data_dir = channel_data_dir(home.path());
         let mut client = client(&data_dir);
         let (workspace, session, _) = available_scope(&mut client);
@@ -400,8 +409,8 @@ fn root_ipc_fixture_login_shell_is_fenced_and_replays_exit() {
     fs::create_dir(&bin).unwrap();
     let count = home.path().join("shell-spawn-count");
     let shell = bin.join("fixture-shell");
-    write_shell(&shell);
-    let _daemon = start_daemon(repo.path(), home.path(), &bin, &count, Some(&shell));
+    write_shell(&shell, &count);
+    let _daemon = start_daemon(repo.path(), home.path(), &bin, Some(&shell));
     let data_dir = channel_data_dir(home.path());
     let mut client = client(&data_dir);
     let (workspace, session, worktree) = available_scope(&mut client);

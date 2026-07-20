@@ -66,8 +66,8 @@ impl McpHarness {
         let fixture_bin = home.path().join("fixture-bin");
         let fixture_log = home.path().join("fixture-agent.log");
         fs::create_dir(&fixture_bin).unwrap();
-        install_fixture_agent(&fixture_bin, "codex");
-        install_fixture_agent(&fixture_bin, "claude");
+        install_fixture_agent(&fixture_bin, "codex", &fixture_log);
+        install_fixture_agent(&fixture_bin, "claude", &fixture_log);
         fs::create_dir(workspace.path().join(".usagi")).unwrap();
         fs::write(
             workspace.path().join(".usagi/config.toml"),
@@ -91,8 +91,6 @@ impl McpHarness {
             .arg("mcp")
             .current_dir(&cwd)
             .env("USAGI_HOME", home.path())
-            .env("USAGI_MCP_FIXTURE_LOG", &fixture_log)
-            .env("USAGI_E2E_USAGI", env!("CARGO_BIN_EXE_usagi"))
             .env("PATH", path)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
@@ -190,7 +188,11 @@ impl McpHarness {
     pub fn replace_fixture_agent(&self, runtime: &str, script: &str) {
         assert!(matches!(runtime, "codex" | "claude"));
         let executable = self.fixture_bin.join(runtime);
-        fs::write(&executable, script).unwrap();
+        fs::write(
+            &executable,
+            materialize_fixture_script(script, &self.fixture_log),
+        )
+        .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
@@ -263,8 +265,6 @@ impl McpHarness {
             .arg("mcp")
             .current_dir(self.workspace.path())
             .env("USAGI_HOME", self.home.path())
-            .env("USAGI_MCP_FIXTURE_LOG", &self.fixture_log)
-            .env("USAGI_E2E_USAGI", env!("CARGO_BIN_EXE_usagi"))
             .env("USAGI_MCP_CALLER_CREDENTIAL", credential)
             .env("PATH", path)
             .env_remove("GIT_DIR")
@@ -342,9 +342,15 @@ fn git(repo: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
-fn install_fixture_agent(bin: &Path, name: &str) {
+fn materialize_fixture_script(script: &str, log: &Path) -> String {
+    script
+        .replace("$USAGI_MCP_FIXTURE_LOG", log.to_str().unwrap())
+        .replace("$USAGI_E2E_USAGI", env!("CARGO_BIN_EXE_usagi"))
+}
+
+fn install_fixture_agent(bin: &Path, name: &str, log: &Path) {
     let script = "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nprintf '%s\\n' \"$0 $*\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'credential:%s\\n' \"$USAGI_MCP_CALLER_CREDENTIAL\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'fixture-ready\\n'\nwhile IFS= read -r line; do printf 'fixture-input:%s\\n' \"$line\"; done\n";
     let executable = bin.join(name);
-    fs::write(&executable, script).unwrap();
+    fs::write(&executable, materialize_fixture_script(script, log)).unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
 }

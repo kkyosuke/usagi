@@ -19,7 +19,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 use usagi_core::domain::agent::{
-    AgentProfile, AgentProfileId, DurableLaunchSnapshot, LaunchMode, LaunchPlan,
+    AgentProfile, AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName, LaunchMode,
+    LaunchPlan,
 };
 use usagi_core::domain::id::{
     ClientId, ConnectionId, DaemonGeneration, OperationId, RequestId, SessionId, TerminalRef,
@@ -103,10 +104,17 @@ impl PtySpawner for RealPtySpawner {
         let plan = &launch.plan;
         let mut argv = plan.argv.clone();
         argv.extend(provision.arguments().iter().cloned());
+        let environment = provision.compose_environment(
+            &self
+                .environment
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        );
         let pty = PtyTerminal::spawn_with(
             &plan.program,
             &argv,
-            &self.environment,
+            &environment.into_iter().collect::<Vec<_>>(),
             &plan.working_directory,
             Geometry { cols: 80, rows: 24 },
         )
@@ -198,13 +206,44 @@ impl AgentAdapter for ShellAdapter {
         .expect("shell plan is valid");
         Ok(ResolvedLaunch {
             snapshot: DurableLaunchSnapshot::new(request.clone(), plan),
-            provision: SpawnProvision::new([], Vec::new()),
+            provision: SpawnProvision::new(
+                [
+                    (
+                        EnvironmentVariableName::new("USAGI_ADAPTER_CREDENTIAL").unwrap(),
+                        "adapter-present".to_owned(),
+                    ),
+                    (
+                        EnvironmentVariableName::new("USAGI_PRIORITY").unwrap(),
+                        "adapter".to_owned(),
+                    ),
+                    (
+                        EnvironmentVariableName::new("USAGI_MCP_CALLER_CREDENTIAL").unwrap(),
+                        "adapter-forged".to_owned(),
+                    ),
+                ],
+                Vec::new(),
+            ),
         })
     }
 }
 
 #[test]
-fn real_shell_pty_streams_output_and_commits_a_durable_exit() {
+#[allow(clippy::too_many_lines)] // One real-PTY scenario covers spawn, output, and durable exit.
+fn agent_real_pty_rebuilds_the_allowlisted_environment_and_commits_exit() {
+    if std::env::var_os("USAGI_AGENT_PTY_TEST_HELPER").is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "agent_real_pty_rebuilds_the_allowlisted_environment_and_commits_exit",
+                "--nocapture",
+            ])
+            .env("USAGI_AGENT_PTY_TEST_HELPER", "1")
+            .env("USAGI_AGENT_PTY_SENTINEL", "must-not-leak")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
     let (sender, observations): (Sender<Observation>, Receiver<Observation>) = mpsc::channel();
     let profile = AgentProfile::new(
         AgentProfileId::new("claude").unwrap(),
@@ -219,7 +258,15 @@ fn real_shell_pty_streams_output_and_commits_a_durable_exit() {
             profile.clone(),
             Box::new(ShellAdapter {
                 profile,
-                script: "printf ready".to_owned(),
+                script: concat!(
+                    "printf '%s|%s|%s|%s|%s|%s' ",
+                    "\"${USAGI_AGENT_PTY_SENTINEL-unset}\" ",
+                    "\"$PATH\" \"$HOME\" \"$USAGI_ADAPTER_CREDENTIAL\" ",
+                    "\"$USAGI_PRIORITY\" ",
+                    "\"$(test \"$USAGI_MCP_CALLER_CREDENTIAL\" = adapter-forged && ",
+                    "printf adapter-forged || printf daemon-present)\""
+                )
+                .to_owned(),
             }),
         )
         .unwrap();
@@ -230,7 +277,11 @@ fn real_shell_pty_streams_output_and_commits_a_durable_exit() {
         MemoryJournal::default(),
         RealPtySpawner {
             observations: sender,
-            environment: Vec::new(),
+            environment: vec![
+                ("PATH".to_owned(), "/public/bin".to_owned()),
+                ("HOME".to_owned(), "/public/home".to_owned()),
+                ("USAGI_PRIORITY".to_owned(), "profile".to_owned()),
+            ],
         },
         AgentProfileId::new("claude").unwrap(),
         Geometry { cols: 80, rows: 24 },
@@ -285,7 +336,10 @@ fn real_shell_pty_streams_output_and_commits_a_durable_exit() {
         .iter()
         .map(|value| u8::try_from(value.as_u64().unwrap()).unwrap())
         .collect();
-    assert_eq!(bytes, b"ready");
+    assert_eq!(
+        bytes,
+        b"unset|/public/bin|/public/home|adapter-present|adapter|daemon-present"
+    );
 }
 
 // ---- fail-closed: the real Claude adapter when the binary is unavailable ----
