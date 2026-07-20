@@ -1,8 +1,9 @@
-//! Atomic durable decisions and their inbox-delivery outbox.
+//! Atomic durable decisions and their polling-delivery outbox.
 //!
 //! A resolve changes the decision and appends its delivery in one replaced JSON
-//! document under one lock.  A daemon consumer may subsequently materialize the
-//! event in the caller inbox; replaying this outbox is idempotent by decision ID.
+//! document under one lock. A daemon consumer validates the event against that
+//! record and clears the outbox atomically; the credential-fenced caller then
+//! reads the resolved record by decision ID.
 
 #![allow(clippy::missing_errors_doc)] // Store IO errors follow the shared store contract.
 
@@ -28,6 +29,10 @@ pub struct UserDecisionResolvedEvent {
     pub recipient: CallerRef,
     pub answer: UserDecisionAnswer,
     pub created_at: DateTime<Utc>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserDecisionDeliveryError {
+    Inconsistent,
 }
 #[derive(Default, Serialize, Deserialize)]
 struct State {
@@ -68,6 +73,24 @@ impl UserDecisionStore {
     }
     pub fn events(&self) -> Result<Vec<UserDecisionResolvedEvent>> {
         Ok(self.load()?.events)
+    }
+    pub fn consume_events(&self) -> Result<Result<usize, UserDecisionDeliveryError>> {
+        self.mutate(|state| {
+            let consistent = state.events.iter().all(|event| {
+                state.decisions.iter().any(|decision| {
+                    decision.decision_id == event.decision_id
+                        && decision.owner.caller == event.recipient
+                        && decision.status == UserDecisionStatus::Resolved
+                        && decision.answer.as_ref() == Some(&event.answer)
+                })
+            });
+            if !consistent {
+                return Err(UserDecisionDeliveryError::Inconsistent);
+            }
+            let consumed = state.events.len();
+            state.events.clear();
+            Ok(consumed)
+        })
     }
     pub fn create(
         &self,
@@ -220,7 +243,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(resolved.status, UserDecisionStatus::Resolved);
-        assert_eq!(store.events().unwrap().len(), 1);
+        let event = store.events().unwrap().pop().unwrap();
+        assert_eq!(event.decision_id, decision.decision_id);
+        assert_eq!(event.recipient, decision.owner.caller);
+        assert_eq!(store.consume_events().unwrap(), Ok(1));
+        assert_eq!(store.consume_events().unwrap(), Ok(0));
+        assert!(store.events().unwrap().is_empty());
         assert_eq!(
             store
                 .resolve(
@@ -242,6 +270,28 @@ mod tests {
                 .answer,
             resolved.answer
         );
+    }
+
+    #[test]
+    fn consumer_rejects_an_event_without_its_resolved_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let decision = item();
+        let state = serde_json::json!({
+            "decisions": [],
+            "events": [{
+                "decision_id": decision.decision_id,
+                "recipient": decision.owner.caller,
+                "answer": {"kind":"option", "option_id":"a"},
+                "created_at": Utc::now(),
+            }],
+        });
+        std::fs::write(store.path(), serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(
+            store.consume_events().unwrap(),
+            Err(UserDecisionDeliveryError::Inconsistent)
+        );
+        assert_eq!(store.events().unwrap().len(), 1);
     }
     #[test]
     fn foreign_or_terminal_changes_do_not_deliver() {

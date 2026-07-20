@@ -289,7 +289,7 @@ impl McpHarness {
         assert_eq!(initialized["result"]["serverInfo"]["name"], "usagi");
     }
 
-    fn daemon_client(&self) -> IpcClient<std::os::unix::net::UnixStream> {
+    pub fn daemon_client(&self) -> IpcClient<std::os::unix::net::UnixStream> {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let Ok(stream) = connect_current(&self.data_dir()) {

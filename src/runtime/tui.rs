@@ -32,8 +32,8 @@ use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
     AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonMetrics, DaemonReply,
-    DaemonRequest, DispatchToolAction, IpcClient, MetricsAction, PrAction, PrRequest,
-    SessionAction, TerminalAction, TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
+    DaemonRequest, IpcClient, MetricsAction, PrAction, PrRequest, SessionAction, TerminalAction,
+    TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
 };
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 use usagi_core::usecase::workspace as workspace_usecase;
@@ -127,11 +127,9 @@ impl DecisionCommandPort for DaemonDecisionCommandPort {
             (|| -> Result<Vec<usagi_core::domain::user_decision::UserDecision>, String> {
                 let mut client = Self::client()?;
                 let reply = client
-                    .request(DaemonRequest::DispatchTool {
-                        action: DispatchToolAction::UserDecisionList,
-                        operation_id: usagi_core::domain::id::OperationId::new().to_string(),
+                    .request(DaemonRequest::UserDecision {
+                        action: usagi_core::usecase::client::TuiUserDecisionAction::List,
                         payload: serde_json::json!({}),
-                        caller_context: None,
                     })
                     .map_err(daemon_error_reason)?;
                 let DaemonReply::Ok(value) = reply else {
@@ -159,11 +157,9 @@ impl DecisionCommandPort for DaemonDecisionCommandPort {
         let result = (|| -> Result<(), String> {
             let mut client = Self::client()?;
             match client
-                .request(DaemonRequest::DispatchTool {
-                    action: DispatchToolAction::UserDecisionResolve,
-                    operation_id: usagi_core::domain::id::OperationId::new().to_string(),
+                .request(DaemonRequest::UserDecision {
+                    action: usagi_core::usecase::client::TuiUserDecisionAction::Resolve,
                     payload: serde_json::json!({"decision_id": decision_id, "answer": answer}),
-                    caller_context: None,
                 })
                 .map_err(daemon_error_reason)?
             {

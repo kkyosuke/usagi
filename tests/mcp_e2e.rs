@@ -10,6 +10,16 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use support::mcp::McpHarness;
+use usagi_core::domain::{
+    agent::{AgentProfileId, CallerRef, ModelSelector},
+    id::{AgentId, OperationId, UserDecisionId, WorkspaceId},
+    user_decision::UserDecision,
+};
+use usagi_core::infrastructure::store::user_decision::UserDecisionStore;
+use usagi_core::usecase::client::{
+    DaemonClient, DaemonReply, DaemonRequest, DispatchAgentIntent, DispatchIntent,
+    TuiUserDecisionAction,
+};
 
 #[test]
 fn production_tools_list_fixes_the_47_tool_schema_contract() {
@@ -245,6 +255,140 @@ fn production_agent_fixture_is_injected_without_cli_credentials() {
             .contains("caller provenance is unknown")
     );
     assert!(!mcp.fixture_log().exists());
+    let response = mcp.tool("user_decision_list", &json!({}));
+    assert_eq!(response["error"]["code"], -32603);
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("decision caller provenance is unknown")
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One process-spanning round trip keeps every last-mile assertion visible.
+fn production_user_decision_round_trip_reaches_the_original_caller() {
+    let mcp = McpHarness::start();
+    let executable = env!("CARGO_BIN_EXE_usagi");
+    mcp.replace_fixture_agent(
+        "codex",
+        &format!(
+            r#"#!/bin/sh
+if [ "$1 $2" = "login status" ]; then exit 0; fi
+{{
+  printf '%s\n' '{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-06-18","clientInfo":{{"name":"decision-agent","version":"1"}}}}}}'
+  printf '%s\n' '{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"user_decision_request","arguments":{{"title":"Deploy?","prompt":"Choose","options":[{{"id":"yes","label":"Yes"}}]}}}}}}'
+}} | "{executable}" mcp >> "$USAGI_MCP_FIXTURE_LOG"
+while [ ! -f "$USAGI_MCP_FIXTURE_LOG.decision" ]; do sleep 1; done
+decision_id=$(sed -n '1p' "$USAGI_MCP_FIXTURE_LOG.decision")
+{{
+  printf '%s\n' '{{"jsonrpc":"2.0","id":3,"method":"initialize","params":{{"protocolVersion":"2025-06-18","clientInfo":{{"name":"decision-agent","version":"1"}}}}}}'
+  printf '{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"user_decision_get","arguments":{{"decision_id":"%s"}}}}}}\n' "$decision_id"
+}} | "{executable}" mcp >> "$USAGI_MCP_FIXTURE_LOG"
+"#,
+        ),
+    );
+
+    let lifecycle: serde_json::Value =
+        serde_json::from_slice(&fs::read(mcp.data_dir().join("daemon/sessions.json")).unwrap())
+            .unwrap();
+    let workspace: WorkspaceId =
+        serde_json::from_value(lifecycle["state"]["workspace_id"].clone()).unwrap();
+    let mut client = mcp.daemon_client();
+    let reply = client
+        .request(DaemonRequest::Dispatch {
+            operation_id: OperationId::new().to_string(),
+            intent: DispatchIntent {
+                workspace,
+                session_name: "decision-e2e".into(),
+                caller: CallerRef {
+                    session_id: None,
+                    agent_id: AgentId::new(),
+                },
+                agent: DispatchAgentIntent::New {
+                    runtime: AgentProfileId::new("codex").unwrap(),
+                    model: ModelSelector::new("fixture-codex").unwrap(),
+                },
+                prompt: "request a human decision".into(),
+            },
+        })
+        .unwrap();
+    assert!(matches!(reply, DaemonReply::Accepted { .. }));
+
+    let decision_path = mcp.data_dir().join("daemon/user-decisions.json");
+    wait_until(|| {
+        fs::read(&decision_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|state| !state["decisions"][0].is_null())
+    });
+    let state: serde_json::Value =
+        serde_json::from_slice(&fs::read(&decision_path).unwrap()).unwrap();
+    let decision: UserDecision = serde_json::from_value(state["decisions"][0].clone()).unwrap();
+    let decision_id: UserDecisionId = decision.decision_id;
+
+    let listed = client
+        .request(DaemonRequest::UserDecision {
+            action: TuiUserDecisionAction::List,
+            payload: json!({}),
+        })
+        .unwrap();
+    assert!(
+        matches!(listed, DaemonReply::Ok(ref body) if body["decisions"][0]["decision_id"] == json!(decision_id))
+    );
+    let resolved = client
+        .request(DaemonRequest::UserDecision {
+            action: TuiUserDecisionAction::Resolve,
+            payload: json!({"decision_id": decision_id, "answer": {"kind":"option", "option_id":"yes"}}),
+        })
+        .unwrap();
+    assert!(matches!(resolved, DaemonReply::Ok(ref body) if body["status"] == "resolved"));
+
+    let fetched = client
+        .request(DaemonRequest::UserDecision {
+            action: TuiUserDecisionAction::Get,
+            payload: json!({"decision_id": decision_id}),
+        })
+        .unwrap();
+    assert!(matches!(fetched, DaemonReply::Ok(ref body) if body["answer"]["option_id"] == "yes"));
+
+    let mut cancellable = decision.clone();
+    cancellable.decision_id = UserDecisionId::new();
+    cancellable.title = "Cancel me".into();
+    cancellable.idempotency_key = None;
+    let store = UserDecisionStore::new(mcp.data_dir().join("daemon"));
+    store.create(cancellable.clone()).unwrap().unwrap();
+    let cancelled = client
+        .request(DaemonRequest::UserDecision {
+            action: TuiUserDecisionAction::Cancel,
+            payload: json!({"decision_id": cancellable.decision_id}),
+        })
+        .unwrap();
+    assert!(matches!(cancelled, DaemonReply::Ok(ref body) if body["status"] == "cancelled"));
+
+    fs::write(
+        mcp.fixture_log().with_extension("log.decision"),
+        format!("{decision_id}\n"),
+    )
+    .unwrap();
+    wait_until(|| {
+        fs::read_to_string(mcp.fixture_log())
+            .is_ok_and(|output| output.contains("\\\"status\\\":\\\"resolved\\\""))
+    });
+    let durable: serde_json::Value =
+        serde_json::from_slice(&fs::read(decision_path).unwrap()).unwrap();
+    assert!(durable["events"].as_array().unwrap().is_empty());
+}
+
+fn wait_until(mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !condition() {
+        assert!(
+            Instant::now() < deadline,
+            "condition was not met before timeout"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[test]
