@@ -3,12 +3,15 @@
 //! A session mirrors the workspace under `.usagi/sessions/<name>/`: every git
 //! repository found becomes a fresh `git worktree` (on a new branch
 //! `usagi/<name>`, the session name under the `usagi/` namespace), while non-git
-//! files and directories are copied. The same
+//! regular files and directories are copied; symlinks and special files are
+//! rejected. The same
 //! recursive walk that builds the tree ([`build_dir`]) is reused to discover the
 //! source repositories a session spans ([`source_repos`]).
 
 use std::ffi::OsStr;
+use std::fmt;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -24,7 +27,9 @@ const SKIP: &[&str] = &[".git", STATE_DIR];
 /// A directory is a repository root when it directly contains a `.git` entry —
 /// a directory for a normal clone, or a file for a linked worktree.
 pub(super) fn is_repo_root(path: &Path) -> bool {
-    path.join(".git").exists()
+    fs::symlink_metadata(path.join(".git"))
+        .map(|metadata| metadata.is_dir() || metadata.is_file())
+        .unwrap_or(false)
 }
 
 /// A directory is a *linked worktree* when its `.git` is a file (a `gitdir:`
@@ -33,7 +38,122 @@ pub(super) fn is_repo_root(path: &Path) -> bool {
 /// `.workspace` — and must never be mirrored, branched, or descended into when
 /// building a session.
 pub(super) fn is_linked_worktree(path: &Path) -> bool {
-    path.join(".git").is_file()
+    fs::symlink_metadata(path.join(".git"))
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
+}
+
+/// A non-Git entry that cannot be mirrored without crossing the source or
+/// destination tree boundary.
+#[derive(Debug)]
+pub(super) enum TreeEntryError {
+    Symlink(PathBuf),
+    SpecialFile(PathBuf),
+    SourceEscape { path: PathBuf, root: PathBuf },
+    DestinationEscape { path: PathBuf, root: PathBuf },
+}
+
+impl fmt::Display for TreeEntryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Symlink(path) => write!(
+                f,
+                "refusing to copy symlink in non-Git workspace: {}",
+                path.display()
+            ),
+            Self::SpecialFile(path) => write!(
+                f,
+                "refusing to copy special file in non-Git workspace: {}",
+                path.display()
+            ),
+            Self::SourceEscape { path, root } => write!(
+                f,
+                "source entry {} escapes workspace root {}",
+                path.display(),
+                root.display()
+            ),
+            Self::DestinationEscape { path, root } => write!(
+                f,
+                "destination entry {} escapes session root {}",
+                path.display(),
+                root.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TreeEntryError {}
+
+/// Validate every entry the non-Git mirror will consume before creating any
+/// destination entry. Paths are derived relative to `src`, and symlinks and
+/// special files are rejected rather than followed or opened.
+pub(super) fn validate_copy_tree(src: &Path, dest: &Path) -> Result<()> {
+    let source_root = fs::canonicalize(src)
+        .with_context(|| format!("failed to resolve source root {}", src.display()))?;
+    validate_dir(src, src, &source_root, dest)
+}
+
+fn validate_dir(
+    dir: &Path,
+    lexical_root: &Path,
+    source_root: &Path,
+    dest_root: &Path,
+) -> Result<()> {
+    let canonical_dir =
+        fs::canonicalize(dir).with_context(|| format!("failed to resolve {}", dir.display()))?;
+    if !canonical_dir.starts_with(source_root) {
+        return Err(TreeEntryError::SourceEscape {
+            path: canonical_dir,
+            root: source_root.to_path_buf(),
+        }
+        .into());
+    }
+
+    for entry in sorted_entries(dir)? {
+        let name = entry.file_name();
+        if SKIP.iter().any(|s| OsStr::new(s) == name) {
+            continue;
+        }
+        let path = entry.path();
+        let relative =
+            path.strip_prefix(lexical_root)
+                .map_err(|_| TreeEntryError::SourceEscape {
+                    path: path.clone(),
+                    root: source_root.to_path_buf(),
+                })?;
+        let destination = dest_root.join(relative);
+        if !destination.starts_with(dest_root) {
+            return Err(TreeEntryError::DestinationEscape {
+                path: destination,
+                root: dest_root.to_path_buf(),
+            }
+            .into());
+        }
+
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("failed to inspect {}", path.display()))?;
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            return Err(TreeEntryError::Symlink(path).into());
+        }
+        if file_type.is_dir() {
+            if !is_linked_worktree(&path) && !is_repo_root(&path) {
+                validate_dir(&path, lexical_root, source_root, dest_root)?;
+            }
+        } else if !file_type.is_file() {
+            return Err(TreeEntryError::SpecialFile(path).into());
+        }
+    }
+    Ok(())
+}
+
+fn sorted_entries(dir: &Path) -> Result<Vec<fs::DirEntry>> {
+    let mut entries = fs::read_dir(dir)
+        .with_context(|| format!("failed to read {}", dir.display()))?
+        .collect::<std::io::Result<Vec<_>>>()
+        .with_context(|| format!("failed to read {}", dir.display()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    Ok(entries)
 }
 
 /// The ref a new session worktree in `repo` should branch from, per the repo's
@@ -53,8 +173,8 @@ pub(super) fn base_ref(repo: &Path) -> Option<String> {
 
 /// Recursively mirror `src` into the already-created `dest`: a git repository
 /// becomes a new worktree, a plain directory is recreated and descended into,
-/// and a plain file is copied. Existing linked worktrees
-/// ([`is_linked_worktree`]) are skipped entirely.
+/// and a plain file is copied. Symlinks and special files are rejected. Existing
+/// linked worktrees ([`is_linked_worktree`]) are skipped entirely.
 pub(super) fn build_dir(
     src: &Path,
     dest: &Path,
@@ -62,45 +182,136 @@ pub(super) fn build_dir(
     base_commit: Option<&str>,
     worktrees: &mut Vec<PathBuf>,
 ) -> Result<()> {
-    let mut entries = fs::read_dir(src)
-        .context(format!("failed to read {}", src.display()))?
-        .collect::<std::io::Result<Vec<_>>>()
-        .context(format!("failed to read {}", src.display()))?;
-    // A stable order keeps the created tree (and tests) deterministic.
-    entries.sort_by_key(|e| e.file_name());
+    let source_root = fs::canonicalize(src)
+        .with_context(|| format!("failed to resolve source root {}", src.display()))?;
+    let destination_root = fs::canonicalize(dest)
+        .with_context(|| format!("failed to resolve session root {}", dest.display()))?;
+    build_dir_inner(
+        src,
+        dest,
+        branch,
+        base_commit,
+        worktrees,
+        &source_root,
+        &destination_root,
+    )
+}
 
-    for entry in entries {
+fn build_dir_inner(
+    src: &Path,
+    dest: &Path,
+    branch: &str,
+    base_commit: Option<&str>,
+    worktrees: &mut Vec<PathBuf>,
+    source_root: &Path,
+    destination_root: &Path,
+) -> Result<()> {
+    let canonical_source =
+        fs::canonicalize(src).with_context(|| format!("failed to resolve {}", src.display()))?;
+    if !canonical_source.starts_with(source_root) {
+        return Err(TreeEntryError::SourceEscape {
+            path: canonical_source,
+            root: source_root.to_path_buf(),
+        }
+        .into());
+    }
+    let canonical_destination =
+        fs::canonicalize(dest).with_context(|| format!("failed to resolve {}", dest.display()))?;
+    if !canonical_destination.starts_with(destination_root) {
+        return Err(TreeEntryError::DestinationEscape {
+            path: canonical_destination,
+            root: destination_root.to_path_buf(),
+        }
+        .into());
+    }
+
+    for entry in sorted_entries(src)? {
         let name = entry.file_name();
         if SKIP.iter().any(|s| OsStr::new(s) == name) {
             continue;
         }
         let from = entry.path();
-        // An existing linked worktree is not a source repository: skip it
-        // outright rather than branch from it or descend into it.
-        if is_linked_worktree(&from) {
-            continue;
-        }
         let to = dest.join(&name);
-        let file_type = entry
-            .file_type()
-            .context(format!("failed to inspect {}", from.display()))?;
+        // Re-inspect immediately before each effect. The preflight validation
+        // catches a stable bad tree before construction starts; this second
+        // classification also refuses an entry replaced while the build runs.
+        let file_type = fs::symlink_metadata(&from)
+            .with_context(|| format!("failed to inspect {}", from.display()))?
+            .file_type();
 
-        if file_type.is_dir() {
+        if file_type.is_symlink() {
+            return Err(TreeEntryError::Symlink(from).into());
+        } else if file_type.is_dir() {
+            // An existing linked worktree is not a source repository: skip it
+            // outright rather than branch from it or descend into it.
+            if is_linked_worktree(&from) {
+                continue;
+            }
             if is_repo_root(&from) {
                 let configured_base = base_ref(&from);
                 let base = base_commit.or(configured_base.as_deref());
                 git::add_worktree(&from, &to, branch, base)?;
+                worktrees.push(to.clone());
                 git::init_submodules(&to)?;
-                worktrees.push(to);
             } else {
                 fs::create_dir_all(&to).context(format!("failed to create {}", to.display()))?;
-                build_dir(&from, &to, branch, base_commit, worktrees)?;
+                build_dir_inner(
+                    &from,
+                    &to,
+                    branch,
+                    base_commit,
+                    worktrees,
+                    source_root,
+                    destination_root,
+                )?;
             }
+        } else if file_type.is_file() {
+            copy_regular_file(&from, &to)?;
         } else {
-            fs::copy(&from, &to).context(format!("failed to copy {}", from.display()))?;
+            return Err(TreeEntryError::SpecialFile(from).into());
         }
     }
     Ok(())
+}
+
+fn copy_regular_file(from: &Path, to: &Path) -> Result<()> {
+    let mut source =
+        open_regular_file(from).with_context(|| format!("failed to open {}", from.display()))?;
+    if !source
+        .metadata()
+        .with_context(|| format!("failed to inspect {}", from.display()))?
+        .is_file()
+    {
+        return Err(TreeEntryError::SpecialFile(from.to_path_buf()).into());
+    }
+    let mut destination = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to)
+        .with_context(|| format!("failed to create {}", to.display()))?;
+    io::copy(&mut source, &mut destination)
+        .with_context(|| format!("failed to copy {}", from.display()))?;
+    let permissions = fs::symlink_metadata(from)
+        .with_context(|| format!("failed to inspect {}", from.display()))?
+        .permissions();
+    fs::set_permissions(to, permissions)
+        .with_context(|| format!("failed to set permissions on {}", to.display()))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_regular_file(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_regular_file(path: &Path) -> io::Result<fs::File> {
+    fs::File::open(path)
 }
 
 /// The source git repositories a session under `workspace_root` spans: the root

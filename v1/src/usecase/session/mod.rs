@@ -5,8 +5,9 @@
 //! recursively: every git repository found gets a fresh `git worktree` (on a new
 //! branch `usagi/<name>`, the session name under the [`BRANCH_PREFIX`] namespace)
 //! at its mirrored location under
-//! `.usagi/sessions/<name>/`, while non-git files and directories are copied
-//! there. This supports a single repository, or a tree containing several — e.g.
+//! `.usagi/sessions/<name>/`, while non-git regular files and directories are
+//! copied there. Symlinks and special files are rejected without being opened.
+//! This supports a single repository, or a tree containing several — e.g.
 //!
 //! ```text
 //! /root            (not a repo)
@@ -229,27 +230,45 @@ fn create_with_setup_runner(
     }
 
     let mut worktrees = Vec::new();
-    if tree::is_repo_root(workspace_root) {
+    let build_result = if tree::is_repo_root(workspace_root) {
         // The whole workspace is one repository: a single worktree at the root.
-        let parent = dest_root
-            .parent()
-            .expect("dest_root always has a .usagi/sessions parent");
-        fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
-        let configured_base = tree::base_ref(workspace_root);
-        let base = base_commit.or(configured_base.as_deref());
-        git::add_worktree(workspace_root, &dest_root, &branch, base)?;
-        git::init_submodules(&dest_root)?;
-        worktrees.push(dest_root.clone());
+        (|| {
+            let parent = dest_root
+                .parent()
+                .expect("dest_root always has a .usagi/sessions parent");
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+            let configured_base = tree::base_ref(workspace_root);
+            let base = base_commit.or(configured_base.as_deref());
+            git::add_worktree(workspace_root, &dest_root, &branch, base)?;
+            worktrees.push(dest_root.clone());
+            git::init_submodules(&dest_root)
+        })()
     } else {
-        fs::create_dir_all(&dest_root)
-            .context(format!("failed to create {}", dest_root.display()))?;
-        tree::build_dir(
+        (|| {
+            // Classify the complete non-Git tree before creating the session
+            // root. This rejects symlinks and special files without opening
+            // them, so FIFOs cannot block and no rejected tree is half-copied.
+            tree::validate_copy_tree(workspace_root, &dest_root)?;
+            fs::create_dir_all(&dest_root)
+                .with_context(|| format!("failed to create {}", dest_root.display()))?;
+            tree::build_dir(
+                workspace_root,
+                &dest_root,
+                &branch,
+                base_commit,
+                &mut worktrees,
+            )
+        })()
+    };
+    if let Err(error) = build_result {
+        return Err(with_failed_create_rollback(
             workspace_root,
             &dest_root,
             &branch,
-            base_commit,
-            &mut worktrees,
-        )?;
+            &worktrees,
+            error,
+        ));
     }
 
     // Symlink usagi's shipped skills into each worktree so the agent launched
@@ -282,7 +301,7 @@ fn create_with_setup_runner(
     // lock-acquire timeout. Recording first keeps reconcile from mistaking this
     // now-registered worktree for a stray while setup runs; a setup failure is
     // logged, never rolled back (the worktree already exists for the user to fix).
-    record(
+    if let Err(error) = record(
         &store,
         name,
         &dest_root,
@@ -290,7 +309,15 @@ fn create_with_setup_runner(
         agent,
         origin,
         started_from,
-    )?;
+    ) {
+        return Err(with_failed_create_rollback(
+            workspace_root,
+            &dest_root,
+            &branch,
+            &worktrees,
+            error,
+        ));
+    }
     drop(_lock);
 
     run_setup_commands(&dest_root, name, &local_settings, setup_runner);
@@ -318,6 +345,68 @@ pub(crate) fn source_repositories(workspace_root: &Path) -> Vec<PathBuf> {
 /// Configured base ref used by ordinary session creation for `repo`.
 pub(crate) fn configured_base_ref(repo: &Path) -> Option<String> {
     tree::base_ref(repo)
+}
+
+/// Roll back every physical effect made before a failed create was recorded.
+/// Only worktrees observed at paths this attempt created are removed, so a
+/// same-named branch that predated the attempt in another repository is kept.
+fn with_failed_create_rollback(
+    workspace_root: &Path,
+    dest_root: &Path,
+    branch: &str,
+    created_worktrees: &[PathBuf],
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let canonical = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let created: Vec<PathBuf> = created_worktrees
+        .iter()
+        .map(|path| canonical(path))
+        .collect();
+    let mut cleanup_errors = Vec::new();
+
+    for repo in tree::source_repos(workspace_root) {
+        match git::list_worktrees(&repo) {
+            Ok(worktrees) => {
+                let mut removed_from_repo = false;
+                for worktree in worktrees {
+                    if created
+                        .iter()
+                        .any(|path| *path == canonical(&worktree.path))
+                    {
+                        removed_from_repo = true;
+                        if let Err(cleanup) = git::remove_worktree(&repo, &worktree.path, true) {
+                            cleanup_errors.push(cleanup.to_string());
+                        }
+                    }
+                }
+                if removed_from_repo {
+                    let _ = git::prune_worktrees(&repo);
+                    if let Err(cleanup) = git::delete_branch(&repo, branch) {
+                        cleanup_errors.push(cleanup.to_string());
+                    }
+                }
+            }
+            Err(cleanup) => cleanup_errors.push(cleanup.to_string()),
+        }
+    }
+
+    if dest_root.exists() {
+        if let Err(cleanup) = fs::remove_dir_all(dest_root) {
+            cleanup_errors.push(format!(
+                "failed to remove {}: {cleanup}",
+                dest_root.display()
+            ));
+        }
+    }
+
+    if cleanup_errors.is_empty() {
+        error
+    } else {
+        error.context(format!(
+            "session creation also failed to roll back cleanly: {}",
+            cleanup_errors.join("; ")
+        ))
+    }
 }
 
 /// Run the workspace's configured setup commands in the newly-created session
@@ -1689,6 +1778,122 @@ mod tests {
     }
 
     #[test]
+    fn create_copies_regular_files_and_directories_in_a_non_git_tree() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("nested/deeper")).unwrap();
+        fs::write(root.path().join("top.txt"), "top").unwrap();
+        fs::write(root.path().join("nested/deeper/file.txt"), "nested").unwrap();
+
+        let created = create(root.path(), "safe").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(created.root.join("top.txt")).unwrap(),
+            "top"
+        );
+        assert_eq!(
+            fs::read_to_string(created.root.join("nested/deeper/file.txt")).unwrap(),
+            "nested"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_rejects_file_directory_and_dangling_symlinks_without_copying_targets() {
+        use std::os::unix::fs::symlink;
+
+        for case in ["file", "directory", "dangling"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().join("workspace");
+            fs::create_dir_all(&root).unwrap();
+            let link = root.join("link");
+            match case {
+                "file" => {
+                    let secret = tmp.path().join("external-secret");
+                    fs::write(&secret, "do not copy").unwrap();
+                    symlink(secret, &link).unwrap();
+                }
+                "directory" => {
+                    let external = tmp.path().join("external-directory");
+                    fs::create_dir_all(&external).unwrap();
+                    fs::write(external.join("secret"), "do not traverse").unwrap();
+                    symlink(external, &link).unwrap();
+                }
+                "dangling" => symlink(tmp.path().join("missing"), &link).unwrap(),
+                _ => unreachable!(),
+            }
+
+            let error = create(&root, "blocked").unwrap_err();
+            assert!(matches!(
+                error.downcast_ref::<tree::TreeEntryError>(),
+                Some(tree::TreeEntryError::Symlink(path)) if path == &link
+            ));
+            assert!(!root.join(".usagi/sessions/blocked").exists());
+            assert!(sessions_of(&root).is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_rejects_a_fifo_within_a_wall_clock_bound() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::time::{Duration, Instant};
+
+        let root = tempfile::tempdir().unwrap();
+        let fifo = root.path().join("pipe");
+        let fifo_path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+
+        let started = Instant::now();
+        let error = create(root.path(), "blocked").unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(matches!(
+            error.downcast_ref::<tree::TreeEntryError>(),
+            Some(tree::TreeEntryError::SpecialFile(path)) if path == &fifo
+        ));
+        assert!(!root.path().join(".usagi/sessions/blocked").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_rejects_a_unix_socket_without_leaving_a_session() {
+        use std::os::unix::net::UnixListener;
+
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("service.sock");
+        let _listener = UnixListener::bind(&socket).unwrap();
+
+        let error = create(root.path(), "blocked").unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<tree::TreeEntryError>(),
+            Some(tree::TreeEntryError::SpecialFile(path)) if path == &socket
+        ));
+        assert!(!root.path().join(".usagi/sessions/blocked").exists());
+    }
+
+    #[test]
+    fn create_rolls_back_a_worktree_when_a_later_repository_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("app-a");
+        let second = root.path().join("app-b");
+        init_repo(&first);
+        init_repo(&second);
+        assert!(git_cmd(&second)
+            .args(["branch", "usagi/partial"])
+            .status()
+            .unwrap()
+            .success());
+
+        let error = create(root.path(), "partial").unwrap_err();
+        assert!(error.to_string().contains("git worktree add failed"));
+        assert!(!root.path().join(".usagi/sessions/partial").exists());
+        assert!(!branch_exists(&first, "usagi/partial"));
+        // This branch existed before the attempt and must not be rolled back.
+        assert!(branch_exists(&second, "usagi/partial"));
+        assert!(sessions_of(root.path()).is_empty());
+    }
+
+    #[test]
     fn source_repos_skips_linked_worktrees() {
         let root = tempfile::tempdir().unwrap();
         init_repo(&root.path().join("app"));
@@ -1759,6 +1964,8 @@ mod tests {
         let err = create(root.path(), "bad-state").unwrap_err();
         assert!(err.to_string().contains("failed to parse"));
         assert!(err.to_string().contains("state.json"));
+        assert!(!root.path().join(".usagi/sessions/bad-state").exists());
+        assert!(!branch_exists(root.path(), "usagi/bad-state"));
     }
 
     #[test]
