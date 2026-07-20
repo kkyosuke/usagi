@@ -538,10 +538,11 @@ struct WorkspaceUi {
     session_completion_sender: Sender<SessionCommandCompletion>,
     /// Session displayed as a removal skeleton until its daemon command returns.
     removing_session: Option<SessionId>,
-    /// Controller token of an in-flight create, so its completion can reflux a
-    /// failure to the reducer as an [`OperationResult`]. `Some` only while a
-    /// create worker owns the port.
-    creating_session: Option<PendingToken>,
+    /// An in-flight create's controller token and the name drawn in its sidebar
+    /// skeleton (`document/03-tui.md`). Its completion can reflux a failure to
+    /// the reducer as an [`OperationResult`]. `Some` only while a create worker
+    /// owns the port, so the skeleton clears the frame the daemon row lands.
+    creating_session: Option<PendingCreate>,
     agent: Option<AgentContext>,
     pane_launches: Vec<PaneLaunch>,
     pane_completions: Receiver<PaneLaunchCompletion>,
@@ -550,6 +551,14 @@ struct WorkspaceUi {
     /// one per live terminal tab.  Detached/closed tabs are pruned lazily.
     terminals: Vec<TerminalSession>,
     terminal_size: (usize, usize),
+}
+
+/// A create request in flight: the controller token used to reflux a failure and
+/// the typed name shown in the sidebar's loading skeleton until the daemon's
+/// `session.created` row replaces it.
+struct PendingCreate {
+    token: PendingToken,
+    name: String,
 }
 
 struct AgentContext {
@@ -1101,9 +1110,9 @@ fn drain_session_completions(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntim
             Ok(result) => apply_session_projection(ui, result.sessions, result.session_ids),
             Err(message) => {
                 let safe = safe_session_error(&message);
-                if let Some(token) = creating {
+                if let Some(pending) = creating {
                     let _ = runtime.apply_event(AppEvent::OperationResult(OperationResult {
-                        token,
+                        token: pending.token,
                         succeeded: false,
                         created: None,
                         notice: Some(Notice::new(safe)),
@@ -1597,6 +1606,7 @@ fn render_controller_frame(
     metrics: Option<usagi_core::usecase::client::DaemonMetrics>,
     git_diffs: &BTreeMap<SessionId, GitDiff>,
     terminal_view: Option<TerminalViewProjection>,
+    create_pending: Option<&str>,
 ) -> Vec<String> {
     let projection =
         HomeProjection::from_state(runtime.state(), workspace_name, root_cwd, sessions)
@@ -1604,6 +1614,7 @@ fn render_controller_frame(
             .with_metrics(metrics)
             .with_git_diffs(git_diffs)
             .with_terminal_view(terminal_view)
+            .with_create_pending(create_pending.map(str::to_owned))
             .with_overlay_modals(
                 runtime.overview_modal().cloned(),
                 runtime.closeup_modal().cloned(),
@@ -1640,7 +1651,10 @@ fn dispatch_controller_effect(
 ) -> ControllerFlow {
     match effect {
         Effect::CreateSession { intent, token, .. } => {
-            ui.creating_session = Some(*token);
+            ui.creating_session = Some(PendingCreate {
+                token: *token,
+                name: intent.name.clone(),
+            });
             begin_session_command(
                 ui,
                 SessionCommand::Create {
@@ -1999,6 +2013,9 @@ fn drive_workspace_controller(
             metrics_projection.metrics(),
             metrics_projection.git_diffs(),
             terminal_view,
+            ui.creating_session
+                .as_ref()
+                .map(|create| create.name.as_str()),
         );
         term.draw(&frame)?;
         drain_pane_launches(&mut ui, geometry);
@@ -2836,8 +2853,9 @@ mod tests {
 
         // Base Home frame: workspace name and session row render.
         let runtime = WorkspaceRuntime::new(workspace, vec![session]);
-        let base =
-            render_controller_frame(20, 80, &runtime, "atlas", root, sessions, None, &git, None);
+        let base = render_controller_frame(
+            20, 80, &runtime, "atlas", root, sessions, None, &git, None, None,
+        );
         assert!(base.join("\n").contains("atlas"));
         assert!(base.join("\n").contains("alpha"));
 
@@ -2850,8 +2868,18 @@ mod tests {
         for character in ['b', 'e', 't', 'a'] {
             let _ = creating.handle_key(Key::Char(character));
         }
-        let create =
-            render_controller_frame(20, 80, &creating, "atlas", root, &[], None, &git, None);
+        let create = render_controller_frame(
+            20,
+            80,
+            &creating,
+            "atlas",
+            root,
+            &[],
+            None,
+            &git,
+            None,
+            None,
+        );
         assert!(create.join("\n").contains("beta"));
         assert!(!create.join("\n").contains("New session"));
 
@@ -2859,8 +2887,9 @@ mod tests {
         // render, defaulting to Yes focused.
         let mut quitting = WorkspaceRuntime::new(workspace, vec![session]);
         let _ = quitting.apply_event(AppEvent::Key(AppKey::CtrlQ));
-        let quit =
-            render_controller_frame(20, 80, &quitting, "atlas", root, sessions, None, &git, None);
+        let quit = render_controller_frame(
+            20, 80, &quitting, "atlas", root, sessions, None, &git, None, None,
+        );
         let quit_text = quit.join("\n");
         assert!(quit_text.contains("Detach from this workspace?"));
         assert!(quit_text.contains("[ yes ]"));
@@ -2870,8 +2899,9 @@ mod tests {
         // The runtime's persisted Overview palette renders through this path.
         let mut palette = WorkspaceRuntime::new(workspace, vec![session]);
         let _ = palette.handle_key(Key::Char(':'));
-        let overview =
-            render_controller_frame(20, 80, &palette, "atlas", root, sessions, None, &git, None);
+        let overview = render_controller_frame(
+            20, 80, &palette, "atlas", root, sessions, None, &git, None, None,
+        );
         assert!(overview.join("\n").contains("Overview"));
 
         // Create-failure dialog: a failed create OperationResult opens it, and
@@ -2893,9 +2923,85 @@ mod tests {
             notice: Some(Notice::new("worktree path already exists")),
         }));
         let failure =
-            render_controller_frame(20, 80, &failing, "atlas", root, &[], None, &git, None);
+            render_controller_frame(20, 80, &failing, "atlas", root, &[], None, &git, None, None);
         assert!(failure.join("\n").contains("Session create failed"));
         assert!(failure.join("\n").contains("worktree path already exists"));
+    }
+
+    #[test]
+    fn render_controller_frame_draws_a_waving_pending_create_skeleton() {
+        // Once a create request is in flight, the shell threads its name here and
+        // the sidebar draws a two-line loading skeleton just above `+ new
+        // session` (document/03-tui.md). The sweep paints each cell with its own
+        // SGR run, so compare on ANSI-stripped text.
+        let strip = |frame: &[String]| {
+            frame
+                .iter()
+                .map(|line| {
+                    let mut out = String::new();
+                    let mut chars = line.chars();
+                    while let Some(ch) = chars.next() {
+                        if ch == '\u{1b}' {
+                            for c in chars.by_ref() {
+                                if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
+                                    break;
+                                }
+                            }
+                        } else {
+                            out.push(ch);
+                        }
+                    }
+                    out
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let workspace = WorkspaceId::new();
+        let git = std::collections::BTreeMap::new();
+        let root = std::path::Path::new("/work");
+
+        let idle = WorkspaceRuntime::new(workspace, Vec::new());
+        let pending = render_controller_frame(
+            20,
+            80,
+            &idle,
+            "atlas",
+            root,
+            &[],
+            None,
+            &git,
+            None,
+            Some("beta"),
+        );
+        let pending_text = strip(&pending);
+        assert!(pending_text.contains("+ beta"));
+        assert!(pending_text.contains("creating"));
+
+        // No pending create means no skeleton or loading caption.
+        let quiet =
+            render_controller_frame(20, 80, &idle, "atlas", root, &[], None, &git, None, None);
+        let quiet_text = strip(&quiet);
+        assert!(!quiet_text.contains("beta"));
+        assert!(!quiet_text.contains("creating"));
+
+        // The wave advances with the mascot tick rather than blinking statically.
+        let mut ticked = WorkspaceRuntime::new(workspace, Vec::new());
+        for _ in 0..12 {
+            let _ = ticked.apply_event(AppEvent::Tick);
+        }
+        let pending_ticked = render_controller_frame(
+            20,
+            80,
+            &ticked,
+            "atlas",
+            root,
+            &[],
+            None,
+            &git,
+            None,
+            Some("beta"),
+        );
+        assert_ne!(pending, pending_ticked);
     }
 
     #[test]
