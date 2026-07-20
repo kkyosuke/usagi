@@ -1535,14 +1535,16 @@ fn handle_terminal_pointer(
             else {
                 return;
             };
-            if controls.has_selection() {
+            if controls.is_dragging() {
                 controls.extend_selection(point);
             } else if let Some(cells) = ui.terminal_cells(&terminal) {
                 controls.begin_selection(TerminalSelection::begin(cells, point));
             }
         }
         PointerKind::Up => {
-            if let Some(text) = controls.take_copy_text() {
+            // Releasing the mouse copies the selection but keeps it highlighted:
+            // the range stays on screen until a new drag replaces it.
+            if let Some(text) = controls.finish_drag() {
                 let result = term.copy_text(&text);
                 controls.record_copy(&text, result);
             }
@@ -3254,6 +3256,17 @@ mod tests {
         );
 
         assert_eq!(term.copied, vec!["hello".to_owned()]);
+        // Releasing the mouse keeps the range highlighted instead of clearing it,
+        // and the projected rows still carry the reverse-video selection.
+        assert!(controls.has_selection());
+        assert!(!controls.is_dragging());
+        let projected = ui
+            .terminal_rows(&terminal, controls.selection())
+            .expect("selection rows");
+        assert!(
+            projected.iter().any(|row| row.contains("\u{1b}[7mhello")),
+            "selection highlight lost after release: {projected:?}"
+        );
     }
 
     #[test]
