@@ -100,6 +100,23 @@ impl TerminalStore for FileTerminalStore {
     }
 }
 
+impl FileTerminalStore {
+    /// Loads and fences terminal records which outlived their PTY-owning daemon.
+    /// Invalid bytes or schema never reach launch admission and are not replaced.
+    fn load_reconciled(&mut self) -> std::io::Result<(TerminalStoreSnapshot, usize)> {
+        let snapshot = json_file::read::<TerminalStoreSnapshot>(&self.0)
+            .map_err(std::io::Error::other)?
+            .unwrap_or_default();
+        let (snapshot, interrupted) = snapshot
+            .reconcile_after_daemon_restart()
+            .map_err(|_| std::io::Error::other("invalid generic terminal snapshot"))?;
+        if interrupted != 0 {
+            self.save(snapshot.clone())?;
+        }
+        Ok((snapshot, interrupted))
+    }
+}
+
 /// Persists the durable Agent runtime snapshot next to the terminal store.
 struct FileRuntimeStore(PathBuf);
 impl RuntimeStore for FileRuntimeStore {
@@ -825,7 +842,7 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         trusted_repository_root(&runtime)?,
         pty,
         Arc::clone(&runtime),
-    );
+    )?;
     start_terminal_observer(
         Arc::clone(&terminal),
         observations,
@@ -984,16 +1001,26 @@ fn new_terminal_runtime(
     repo_root: PathBuf,
     pty: DaemonPty,
     sessions: SharedSessionRuntime,
-) -> SharedTerminalRuntime {
-    Arc::new(Mutex::new(GenericTerminalRuntime::new(
+) -> std::io::Result<SharedTerminalRuntime> {
+    let mut store = FileTerminalStore(data_dir.join("daemon").join("terminals.json"));
+    let (snapshot, interrupted) = store.load_reconciled()?;
+    if interrupted != 0 {
+        ErrorLog::record(&format!(
+            "daemon startup reconciled {interrupted} generic terminal(s) as identity_unknown"
+        ));
+    }
+    let runtime = GenericTerminalRuntime::from_snapshot(
         generation,
         TrustedLoginShell {
             profile: LoginShellProfile::new(terminal_environment(), repo_root),
         },
-        FileTerminalStore(data_dir.join("daemon").join("terminals.json")),
+        store,
         pty,
         SharedTerminalScopeResolver(sessions),
-    )))
+        snapshot,
+    )
+    .map_err(|_| std::io::Error::other("invalid generic terminal snapshot"))?;
+    Ok(Arc::new(Mutex::new(runtime)))
 }
 
 fn start_terminal_observer<S, Q>(
@@ -3140,6 +3167,48 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct RestartEffects {
+        spawns: usize,
+        selections: usize,
+        resizes: usize,
+        writes: usize,
+    }
+
+    struct RestartPty(Arc<Mutex<RestartEffects>>);
+
+    impl GenericPtySpawner for RestartPty {
+        fn spawn(
+            &mut self,
+            _: &usagi_core::domain::terminal_launch::ResolvedTerminalLaunch,
+            _: &TerminalRef,
+            _: Geometry,
+        ) -> Result<ProcessIdentity, SpawnFailure> {
+            self.0.lock().unwrap().spawns += 1;
+            Ok(ProcessIdentity {
+                pid: 7,
+                start_identity: "restart-test".to_owned(),
+                process_group: 7,
+            })
+        }
+    }
+
+    impl PtyWriter for RestartPty {
+        fn select_terminal(&mut self, _: &TerminalRef) {
+            self.0.lock().unwrap().selections += 1;
+        }
+
+        fn resize(&mut self, _: &TerminalRef, _: Geometry) -> Result<(), PtyWriteError> {
+            self.0.lock().unwrap().resizes += 1;
+            Ok(())
+        }
+
+        fn write_all(&mut self, _: &[u8]) -> Result<(), PtyWriteError> {
+            self.0.lock().unwrap().writes += 1;
+            Ok(())
+        }
+    }
+
     #[test]
     fn generic_pty_reports_child_exit_after_the_shell_exits() {
         let directory = tempfile::tempdir().unwrap();
@@ -3352,6 +3421,185 @@ mod tests {
             serde_json::from_slice::<TerminalStoreSnapshot>(&std::fs::read(path).unwrap()).unwrap(),
             snapshot
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Two daemon instances and every fenced effect form one restart contract.
+    fn generic_terminal_restart_hydrates_inventory_and_preserves_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("terminals.json");
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let worktree = WorktreeId::new();
+        let scope = TerminalLaunchScope {
+            workspace_id: workspace,
+            session_id: Some(session),
+            worktree_id: worktree,
+        };
+        let request = TerminalLaunchRequest {
+            profile_id: TerminalProfileId::new("login-shell").unwrap(),
+            scope: scope.clone(),
+        };
+        let first_effects = Arc::new(Mutex::new(RestartEffects::default()));
+        let mut first = GenericTerminalRuntime::new(
+            DaemonGeneration::new(),
+            TrustedLoginShell {
+                profile: LoginShellProfile::new(BTreeMap::new(), dir.path().to_path_buf()),
+            },
+            FileTerminalStore(path.clone()),
+            RestartPty(Arc::clone(&first_effects)),
+            TestTerminalScope {
+                scope: scope.clone(),
+                working_directory: dir.path().to_path_buf(),
+            },
+        );
+        let old_terminal: TerminalRef = serde_json::from_value(
+            first
+                .request(
+                    ConnectionId::new(),
+                    ClientId::new(),
+                    RequestId::new(),
+                    TerminalAction::Launch,
+                    serde_json::to_value(TerminalRequest::Launch {
+                        intent: TerminalLaunchIntent {
+                            request: request.clone(),
+                            geometry: TerminalGeometry { cols: 80, rows: 24 },
+                        },
+                    })
+                    .unwrap(),
+                )
+                .unwrap()["terminal"]
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(first_effects.lock().unwrap().spawns, 1);
+        drop(first);
+
+        let before_restart: TerminalStoreSnapshot =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let old_record = before_restart.records[0].clone();
+        let second_effects = Arc::new(Mutex::new(RestartEffects::default()));
+        let mut second_store = FileTerminalStore(path.clone());
+        let (reconciled, interrupted) = second_store.load_reconciled().unwrap();
+        assert_eq!(interrupted, 1);
+        let mut second = GenericTerminalRuntime::from_snapshot(
+            DaemonGeneration::new(),
+            TrustedLoginShell {
+                profile: LoginShellProfile::new(BTreeMap::new(), dir.path().to_path_buf()),
+            },
+            second_store,
+            RestartPty(Arc::clone(&second_effects)),
+            TestTerminalScope {
+                scope: scope.clone(),
+                working_directory: dir.path().to_path_buf(),
+            },
+            reconciled,
+        )
+        .unwrap();
+
+        let inventory = TerminalOwner::inventory(&second, &scope);
+        assert_eq!(inventory.len(), 1);
+        assert!(inventory[0].terminal.fences(&old_terminal));
+        assert!(!inventory[0].live);
+        for (action, request) in [
+            (
+                TerminalAction::Attach,
+                TerminalRequest::Attach {
+                    terminal: old_terminal.clone(),
+                },
+            ),
+            (
+                TerminalAction::Resize,
+                TerminalRequest::Resize {
+                    terminal: old_terminal.clone(),
+                    geometry: TerminalGeometry {
+                        cols: 100,
+                        rows: 40,
+                    },
+                },
+            ),
+            (
+                TerminalAction::Input,
+                TerminalRequest::Input {
+                    terminal: old_terminal.clone(),
+                    subscription: 1,
+                    input_seq: 0,
+                    bytes: b"must-not-run".to_vec(),
+                },
+            ),
+        ] {
+            let error = second
+                .request(
+                    ConnectionId::new(),
+                    ClientId::new(),
+                    RequestId::new(),
+                    action,
+                    serde_json::to_value(request).unwrap(),
+                )
+                .unwrap_err();
+            assert_eq!(
+                error.code,
+                usagi_core::infrastructure::ipc::ErrorCode::OwnershipUnknown
+            );
+        }
+        assert_eq!(*second_effects.lock().unwrap(), RestartEffects::default());
+
+        let new_terminal: TerminalRef = serde_json::from_value(
+            second
+                .request(
+                    ConnectionId::new(),
+                    ClientId::new(),
+                    RequestId::new(),
+                    TerminalAction::Launch,
+                    serde_json::to_value(TerminalRequest::Launch {
+                        intent: TerminalLaunchIntent {
+                            request,
+                            geometry: TerminalGeometry { cols: 80, rows: 24 },
+                        },
+                    })
+                    .unwrap(),
+                )
+                .unwrap()["terminal"]
+                .clone(),
+        )
+        .unwrap();
+        assert!(!new_terminal.fences(&old_terminal));
+        assert_eq!(second_effects.lock().unwrap().spawns, 1);
+
+        let after_launch: TerminalStoreSnapshot =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(after_launch.records.len(), 2);
+        let retained = after_launch
+            .records
+            .iter()
+            .find(|record| record.terminal.fences(&old_terminal))
+            .unwrap();
+        assert_eq!(retained.terminal, old_record.terminal);
+        assert_eq!(retained.operation, old_record.operation);
+        assert_eq!(retained.launch, old_record.launch);
+        assert_eq!(
+            retained.state,
+            usagi_daemon::usecase::terminal::TerminalRuntimeState::ReconcileRequired(
+                usagi_daemon::usecase::terminal::TerminalReconcileState::IdentityUnknown,
+            )
+        );
+    }
+
+    #[test]
+    fn corrupt_or_unknown_terminal_snapshot_fails_closed_without_effect_or_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("terminals.json");
+        let effects = Arc::new(Mutex::new(RestartEffects::default()));
+        for bytes in [
+            b"{broken".as_slice(),
+            br#"{"schema_version":999,"records":[]}"#.as_slice(),
+        ] {
+            std::fs::write(&path, bytes).unwrap();
+            let preserved = std::fs::read(&path).unwrap();
+            assert!(FileTerminalStore(path.clone()).load_reconciled().is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), preserved);
+            assert_eq!(*effects.lock().unwrap(), RestartEffects::default());
+        }
     }
 
     #[test]

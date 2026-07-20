@@ -152,6 +152,12 @@ generation が所有し attach 可能か）だけを持ち、argv・environment 
 client はこの列挙で発見した live runtime にだけ、その `TerminalRef` で fenced に attach する
 （名前や path から terminal を推測しない）。workspace open 時の pane 復元でこの列挙を使う（[3. TUI](03-tui.md#workspace-open-時の-pane-復元) を正本とする）。
 
+daemon restart 後も `inventory` は `terminals.json` から復元した generic terminal record を同じ scope と
+`TerminalRef` のまま返す。ただし旧 daemon の PTY master は復元しないため、未終端 record は
+`identity_unknown`、`live: false` となる。旧 ref の attach、resume、resync、input、resize、detach は
+typed safe error となり、別 terminal の PTY effect や暗黙の replacement spawn を起こさない。restart 時の
+永続化・破損時の扱いは [5. daemon](05-daemon.md#daemon-data-directory) を正本とする。
+
 ## Unix transport
 
 Unix socket は daemon 専用 adapter が管理する。endpoint は private data directory の generation

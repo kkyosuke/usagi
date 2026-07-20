@@ -113,6 +113,23 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
             scope,
         }
     }
+    pub fn from_snapshot(
+        generation: DaemonGeneration,
+        resolver: R,
+        store: S,
+        pty: P,
+        scope: Q,
+        snapshot: super::generic_terminal::TerminalStoreSnapshot,
+    ) -> Result<Self, GenericTerminalError> {
+        Ok(Self {
+            generation,
+            coordinator: GenericTerminalCoordinator::from_snapshot(16, 64 * 1024, 64, snapshot)?,
+            resolver,
+            store,
+            pty,
+            scope,
+        })
+    }
     pub fn output(
         &mut self,
         terminal: &TerminalRef,
@@ -245,6 +262,9 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
                 },
             ) => {
                 let geometry = geometry(size)?;
+                self.coordinator
+                    .ensure_running(&terminal)
+                    .map_err(map_error)?;
                 self.pty.resize(&terminal, geometry).map_err(|_| {
                     ProtocolError::new(ErrorCode::Unavailable, "terminal resize failed")
                 })?;
@@ -313,6 +333,7 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q>
         input: InputRequest,
         bytes: &[u8],
     ) -> Result<super::terminal::InputAck, GenericTerminalError> {
+        self.coordinator.ensure_running(terminal)?;
         self.pty.select_terminal(terminal);
         self.coordinator
             .input(terminal, input, bytes, &mut self.pty)
@@ -339,9 +360,9 @@ fn map_error(error: GenericTerminalError) -> ProtocolError {
         | GenericTerminalError::TerminalGenerationMismatch
         | GenericTerminalError::Terminal(_) => ErrorCode::StaleTarget,
         GenericTerminalError::ConcurrencyExhausted => ErrorCode::ResourceExhausted,
-        GenericTerminalError::ReconcileRequired(_) | GenericTerminalError::Store => {
-            ErrorCode::OwnershipUnknown
-        }
+        GenericTerminalError::ReconcileRequired(_)
+        | GenericTerminalError::Store
+        | GenericTerminalError::InvalidSnapshot => ErrorCode::OwnershipUnknown,
         GenericTerminalError::SpawnFailed => ErrorCode::Unavailable,
         GenericTerminalError::Launch(_) | GenericTerminalError::ScopeMismatch => {
             ErrorCode::InvalidArgument
