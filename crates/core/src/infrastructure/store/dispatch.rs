@@ -37,6 +37,24 @@ struct Registry {
     bindings: Vec<DispatchBinding>,
     #[serde(default)]
     prompts: Vec<QueuedPrompt>,
+    #[serde(default)]
+    admissions: Vec<AgentAdmissionReservation>,
+}
+
+/// Durable, secret-free proof that an Agent operation was prepared before its
+/// one permitted spawn attempt.  The opaque credential value is deliberately
+/// absent; only its daemon-minted ephemeral provenance is recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentAdmissionReservation {
+    pub operation_id: OperationId,
+    pub semantic_key: String,
+    pub credential_provenance: CredentialProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialProvenance {
+    DaemonMintedEphemeral,
 }
 
 /// One prompt waiting for the next Agent launch in a durable session scope.
@@ -208,6 +226,166 @@ impl DispatchStore {
     /// Returns an error when the registry cannot be read.
     pub fn runs(&self) -> Result<Vec<DispatchRun>> {
         Ok(self.load_registry()?.runs)
+    }
+
+    /// Reads one run by its durable operation identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be read.
+    pub fn run(&self, operation_id: OperationId) -> Result<Option<DispatchRun>> {
+        Ok(self
+            .load_registry()?
+            .runs
+            .into_iter()
+            .find(|run| run.run_id == operation_id))
+    }
+
+    /// Reads the durable admission fence for one operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be read.
+    pub fn admission(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<Option<AgentAdmissionReservation>> {
+        Ok(self
+            .load_registry()?
+            .admissions
+            .into_iter()
+            .find(|admission| admission.operation_id == operation_id))
+    }
+
+    /// Atomically reserves every dispatch-side fact required to authorize one
+    /// spawn.  Retrying an existing reservation never rewrites its provenance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be locked, read, or written.
+    pub fn reserve_admission(
+        &self,
+        agent: Agent,
+        run: DispatchRun,
+        binding: DispatchBinding,
+        admission: AgentAdmissionReservation,
+    ) -> Result<AgentAdmissionReservation> {
+        self.mutate_registry(|registry| {
+            if let Some(existing) = registry
+                .admissions
+                .iter()
+                .find(|item| item.operation_id == admission.operation_id)
+            {
+                return existing.clone();
+            }
+            if let Some(existing) = registry
+                .agents
+                .iter_mut()
+                .find(|item| item.agent_id == agent.agent_id)
+            {
+                *existing = agent;
+            } else {
+                registry.agents.push(agent);
+            }
+            registry.runs.push(run);
+            registry.bindings.push(binding);
+            registry.admissions.push(admission.clone());
+            admission
+        })
+    }
+
+    /// Atomically publishes a prepared admission as live only after the PTY
+    /// spawn and runtime commit both succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be locked, read, or written.
+    pub fn commit_admission(&self, operation_id: OperationId) -> Result<bool> {
+        self.mutate_registry(|registry| {
+            let Some(run) = registry
+                .runs
+                .iter_mut()
+                .find(|run| run.run_id == operation_id && run.status == RunStatus::Preparing)
+            else {
+                return false;
+            };
+            run.status = RunStatus::Running;
+            if let Some(agent) = registry
+                .agents
+                .iter_mut()
+                .find(|agent| agent.agent_id == run.agent_id)
+            {
+                agent.status = AgentStatus::Running;
+            }
+            true
+        })
+    }
+
+    /// Records the safe terminal result of a compensated or interrupted
+    /// admission. This is best-effort after a store failure; the still-durable
+    /// `Preparing` state is also reconciled fail-closed on restart.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be locked, read, or written.
+    pub fn fail_admission(&self, operation_id: OperationId) -> Result<bool> {
+        self.mutate_registry(|registry| {
+            let Some(run) = registry
+                .runs
+                .iter_mut()
+                .find(|run| run.run_id == operation_id)
+            else {
+                return false;
+            };
+            run.status = RunStatus::Failed;
+            run.ended_at = Some(Utc::now());
+            if let Some(agent) = registry
+                .agents
+                .iter_mut()
+                .find(|agent| agent.agent_id == run.agent_id)
+            {
+                agent.status = AgentStatus::Failed;
+                agent.current_run = None;
+            }
+            true
+        })
+    }
+
+    /// Fails every run which was still non-terminal when the daemon lost its
+    /// in-memory credential and PTY ownership.  Such an admission is never a
+    /// reason to spawn a replacement after restart.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be locked, read, or written.
+    pub fn reconcile_incomplete_admissions(&self) -> Result<usize> {
+        self.mutate_registry(|registry| {
+            let mut reconciled = 0;
+            for admission in &registry.admissions {
+                let Some(run) = registry
+                    .runs
+                    .iter_mut()
+                    .find(|run| run.run_id == admission.operation_id)
+                else {
+                    continue;
+                };
+                if !matches!(run.status, RunStatus::Preparing | RunStatus::Running) {
+                    continue;
+                }
+                run.status = RunStatus::Failed;
+                run.ended_at = Some(Utc::now());
+                if let Some(agent) = registry
+                    .agents
+                    .iter_mut()
+                    .find(|agent| agent.agent_id == run.agent_id)
+                {
+                    agent.status = AgentStatus::Failed;
+                    agent.current_run = None;
+                }
+                reconciled += 1;
+            }
+            reconciled
+        })
     }
 
     /// Adds or replaces a run by `run_id`.
@@ -561,6 +739,60 @@ mod tests {
         assert!(store.queued_prompt(Some(session)).unwrap().is_none());
         assert_eq!(store.consume_prompt(None).unwrap().unwrap().prompt, "root");
         assert!(store.consume_prompt(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn admission_reservation_is_atomic_secret_free_and_reconciles_incomplete_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, agent_id, caller) = ids();
+        let operation = OperationId::new();
+        let mut worker = agent(session, agent_id);
+        worker.status = AgentStatus::Starting;
+        worker.current_run = Some(operation);
+        let run = DispatchRun {
+            run_id: operation,
+            agent_id,
+            prompt: "work".into(),
+            started_at: now(),
+            ended_at: None,
+            status: RunStatus::Preparing,
+        };
+        let binding = DispatchBinding {
+            run_id: operation,
+            caller,
+            worker: WorkerRef {
+                session_id: Some(session),
+                agent_id,
+            },
+        };
+        let reservation = AgentAdmissionReservation {
+            operation_id: operation,
+            semantic_key: "intent".into(),
+            credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+        };
+
+        assert_eq!(
+            store
+                .reserve_admission(worker, run, binding.clone(), reservation.clone())
+                .unwrap(),
+            reservation
+        );
+        assert_eq!(store.admission(operation).unwrap(), Some(reservation));
+        assert_eq!(store.binding(operation).unwrap(), Some(binding));
+        let serialized = fs::read_to_string(store.registry_path()).unwrap();
+        assert!(serialized.contains("daemon_minted_ephemeral"));
+        assert!(!serialized.contains("USAGI_MCP_CALLER_CREDENTIAL"));
+
+        assert!(store.commit_admission(operation).unwrap());
+        assert_eq!(store.runs().unwrap()[0].status, RunStatus::Running);
+        assert_eq!(store.reconcile_incomplete_admissions().unwrap(), 1);
+        assert_eq!(store.runs().unwrap()[0].status, RunStatus::Failed);
+        assert_eq!(
+            store.agent(agent_id).unwrap().unwrap().status,
+            AgentStatus::Failed
+        );
+        assert_eq!(store.reconcile_incomplete_admissions().unwrap(), 0);
     }
 
     #[test]

@@ -1,14 +1,14 @@
 ---
 number: 474
 title: fix(daemon): Agent admission を durable-before-spawn にする
-status: todo
+status: in-progress
 priority: high
 labels: [review, v2, daemon, agent, durability]
 dependson: []
 related: [271, 321, 322, 383]
 parent: 453
 created_at: 2026-07-20T12:06:24.378704+00:00
-updated_at: 2026-07-20T12:06:24.378704+00:00
+updated_at: 2026-07-20T21:20:47.644040+00:00
 ---
 
 ## 問題・影響

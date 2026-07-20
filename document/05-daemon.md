@@ -278,6 +278,38 @@ launch は reservation を永続化してから実 PTY を一度だけ spawn し
 owner を一つの shared terminal owner が `TerminalRef` の所有元へ routing する。connection close は当該
 connection の subscription だけを外し、Agent process・PTY・completion worker は kill しない。
 
+### Agent admission transaction
+
+Agent admission transaction の正本は本節である。daemon は一つの operation に対し、次の順序を崩さない。
+
+```text
+validate
+  -> prepare dispatch reservation
+  -> register ephemeral credential in memory
+  -> prepare runtime reservation
+  -> spawn once
+  -> commit runtime + dispatch as Running
+       | failure after spawn
+       v
+     terminate process group -> reap child -> persist Failed / reconcile-required
+```
+
+| phase | durable state | process / credential |
+|---|---|---|
+| prepare | operation、`Preparing` run、binding、`Starting` agent、terminal/runtime fence、semantic key、credential provenance を保存する | process は存在しない。daemon-minted secret を in-memory caller registry に登録する |
+| spawn | prepare 済み operation だけが一度だけ PTY child を起動する | secret は spawn provision にだけ存在し、child の最初の MCP call より前に caller registry が利用可能である |
+| commit | runtime process identity と `Running` run/agent を保存する | commit 完了後だけ admission success を返す |
+| compensate | post-spawn の runtime/dispatch 保存失敗を safe failure または reconcile-required として保存する | exact terminal owner が process を terminate して reap する。terminate/reap を証明できなければ orphan-running として fail closed する |
+
+同じ operation の retry は保存済み semantic key と outcome を replay し、異なる intent は
+`idempotency_conflict` になる。`Preparing` / `Starting` は成功 outcome ではなく、daemon restart 時に
+`Failed` / ownership unknown へ reconcile される。admission metadata を持たない legacy run、または runtime
+ownership を証明できない incomplete record も新しい child を spawn せず、unknown/failed として扱う。
+
+credential の durable form は `daemon_minted_ephemeral` という provenance だけである。opaque secret 自体は
+dispatch registry、runtime snapshot、IPC、terminal journal、log のいずれにも保存しない。daemon restart では
+in-memory caller registry が空になるため、旧 credential は必ず失効する。
+
 restart 後の Agent owner は hydrate 済み operation を admission より先に照合する。同じ semantic intent は保存済み
 accepted / completed / safe failure を replay し、同じ `OperationId` の異なる intent は
 `idempotency_conflict` にする。新規 launch の snapshot write は hydrate 済み全 record を含むため、過去の terminal、
