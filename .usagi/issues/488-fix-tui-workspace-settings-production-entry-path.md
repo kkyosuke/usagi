@@ -1,14 +1,14 @@
 ---
 number: 488
 title: fix(tui): workspace settings を全 production entry path に注入する
-status: todo
+status: done
 priority: medium
 labels: [review, v2, tui, settings]
 dependson: []
 related: [296, 315, 397]
 parent: 453
 created_at: 2026-07-20T12:06:50.486704+00:00
-updated_at: 2026-07-20T12:06:50.486704+00:00
+updated_at: 2026-07-20T23:27:40.853055+00:00
 ---
 
 ## 問題・影響

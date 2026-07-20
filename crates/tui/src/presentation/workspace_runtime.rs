@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef};
+use usagi_core::domain::settings::ModalSelectionMode;
 use usagi_core::usecase::client::DaemonMetrics;
 
 use crate::presentation::views::closeup_modal::CloseupModal;
@@ -58,6 +59,7 @@ pub struct WorkspaceRuntime {
     /// Persisted input state for the Closeup action modal. Present only while the
     /// controller's [`Overlay::Closeup`] is open.
     closeup_modal: Option<CloseupModal>,
+    modal_selection_mode: ModalSelectionMode,
     /// User-interaction count captured when each pane launch was requested. A
     /// completion may focus its tab only while the count is unchanged, mirroring
     /// the controller's create-session gate
@@ -72,6 +74,17 @@ impl WorkspaceRuntime {
     /// root, matching [`AppState::home`].
     #[must_use]
     pub fn new(workspace: usagi_core::domain::id::WorkspaceId, sessions: Vec<SessionId>) -> Self {
+        Self::with_selection_mode(workspace, sessions, ModalSelectionMode::Action)
+    }
+
+    /// Start a Home runtime using the effective settings resolved for this
+    /// workspace entry.
+    #[must_use]
+    pub fn with_selection_mode(
+        workspace: usagi_core::domain::id::WorkspaceId,
+        sessions: Vec<SessionId>,
+        modal_selection_mode: ModalSelectionMode,
+    ) -> Self {
         let state = AppState::home(workspace, sessions);
         let panes = PaneRegistry::new(state.active());
         Self {
@@ -79,6 +92,7 @@ impl WorkspaceRuntime {
             panes,
             overview_modal: None,
             closeup_modal: None,
+            modal_selection_mode,
             pane_focus_at_request: BTreeMap::new(),
         }
     }
@@ -319,13 +333,16 @@ impl WorkspaceRuntime {
     /// its caret and filter never leak into the next time it opens.
     fn sync_overlay_modals(&mut self) {
         if self.state.overlay() == Some(Overlay::Overview) {
-            self.overview_modal.get_or_insert_with(OverviewModal::new);
+            self.overview_modal.get_or_insert_with(|| {
+                OverviewModal::with_selection_mode(self.modal_selection_mode)
+            });
         } else {
             self.overview_modal = None;
         }
         if self.state.overlay() == Some(Overlay::Closeup) {
-            self.closeup_modal
-                .get_or_insert_with(|| CloseupModal::new(String::new()));
+            self.closeup_modal.get_or_insert_with(|| {
+                CloseupModal::with_selection_mode(String::new(), self.modal_selection_mode)
+            });
         } else {
             self.closeup_modal = None;
         }
@@ -657,6 +674,29 @@ mod tests {
     use usagi_core::domain::id::{
         DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
     };
+    use usagi_core::domain::settings::ModalSelectionMode;
+
+    #[test]
+    fn effective_prompt_mode_is_used_for_both_workspace_modals() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = WorkspaceRuntime::with_selection_mode(
+            workspace,
+            Vec::new(),
+            ModalSelectionMode::Prompt,
+        );
+
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenOverview));
+        assert_eq!(
+            runtime.overview_modal().unwrap().selection_mode(),
+            ModalSelectionMode::Prompt
+        );
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::Escape));
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenCloseupOverlay));
+        assert_eq!(
+            runtime.closeup_modal().unwrap().selection_mode(),
+            ModalSelectionMode::Prompt
+        );
+    }
 
     fn terminal_ref(workspace: WorkspaceId, session: SessionId) -> TerminalRef {
         TerminalRef {

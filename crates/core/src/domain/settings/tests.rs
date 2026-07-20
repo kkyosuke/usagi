@@ -1,4 +1,4 @@
-use super::{DefaultModel, ModalSelectionMode, Settings, Theme};
+use super::{DefaultModel, LocalSettings, ModalSelectionMode, Settings, Theme};
 
 #[test]
 fn theme_default_is_system() {
@@ -100,4 +100,52 @@ fn modal_selection_mode_tokens_round_trip_and_unknown_values_use_action() {
         serde_json::from_str::<ModalSelectionMode>("\"future_mode\"").unwrap(),
         ModalSelectionMode::Action
     );
+}
+
+#[test]
+fn local_settings_overlay_only_explicit_fields() {
+    let global = Settings {
+        theme: Theme::Dark,
+        modal_selection_mode: ModalSelectionMode::Action,
+        default_model: DefaultModel::Claude,
+    };
+    let local = LocalSettings {
+        modal_selection_mode: Some(ModalSelectionMode::Prompt),
+        ..LocalSettings::default()
+    };
+
+    assert_eq!(
+        global.with_local(&local),
+        Settings {
+            theme: Theme::Dark,
+            modal_selection_mode: ModalSelectionMode::Prompt,
+            default_model: DefaultModel::Claude,
+        }
+    );
+}
+
+#[test]
+fn local_settings_missing_and_unknown_values_defer_to_global() {
+    let local: LocalSettings = serde_json::from_str(
+        r#"{"theme":"future","modal_selection_mode":"future","default_model":"future"}"#,
+    )
+    .unwrap();
+    assert_eq!(local, LocalSettings::default());
+    assert_eq!(
+        serde_json::from_str::<LocalSettings>("{}").unwrap(),
+        LocalSettings::default()
+    );
+}
+
+#[test]
+fn full_settings_convert_to_explicit_local_overrides() {
+    let settings = Settings {
+        theme: Theme::Light,
+        modal_selection_mode: ModalSelectionMode::Prompt,
+        default_model: DefaultModel::Claude,
+    };
+    let local = LocalSettings::from(&settings);
+    assert_eq!(Settings::default().with_local(&local), settings);
+    assert!(format!("{local:?}").contains("Prompt"));
+    assert_eq!(local.clone(), local);
 }
