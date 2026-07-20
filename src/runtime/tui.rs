@@ -895,7 +895,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         }
     }
 
-    #[coverage(off)]
+    #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=crates/tui/src/presentation/mod.rs::agent_command_port_terminal_methods_are_safe_by_default
     fn open_external_terminal(&mut self, directory: &Path) -> Result<(), String> {
         let directory = directory.to_string_lossy().into_owned();
         let argv = if cfg!(target_os = "macos") {
