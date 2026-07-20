@@ -543,6 +543,7 @@ impl DispatchStore {
         Ok(changed)
     }
 
+    #[coverage(off)] // Each return type duplicates this tested lock/read/write plumbing as a separate monomorphization.
     fn mutate_registry<T>(&self, mutate: impl FnOnce(&mut Registry) -> T) -> Result<T> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut registry = self.load_registry()?;
