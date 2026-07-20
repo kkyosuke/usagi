@@ -1,19 +1,22 @@
-# pattern<TAB>layer<TAB>reason<TAB>commands separated by |
-# First match wins. Keep explicit Rust module exceptions above generic rules.
-src/usecase/daemon_attach.rs	usecase	daemon_attach coordinates daemon and session behavior	cargo test --lib usecase::daemon_attach::|cargo test --lib usecase::session::
-src/infrastructure/git/*	infrastructure	git integration affects session/worktree orchestration	cargo test --lib infrastructure::git::|cargo test --lib usecase::session::|cargo test --workspace --quiet
-src/infrastructure/storage.rs	infrastructure	storage is shared persistence infrastructure	cargo test --lib infrastructure::storage::|cargo test --test storage_test|cargo test --workspace --quiet
-src/infrastructure/*store*.rs	infrastructure	shared stores affect multiple use cases	cargo test --lib {module}::|cargo test --workspace --quiet
-src/domain/*	domain	domain module changed	cargo test --lib {module}::
-src/usecase/*	usecase	usecase module changed	cargo test --lib {module}::|{domain_command}
-src/infrastructure/*	infrastructure	infrastructure module changed	cargo test --lib {module}::|{usecase_command}
-src/presentation/*	presentation	presentation surface changed	cargo test --lib {module}::|{usecase_command}
-tests/support/*	integration	shared integration harness affects its consumer tests	cargo test --test mcp_e2e|cargo test --workspace --quiet
-tests/*.rs	integration	integration test target changed	cargo test --test {test}
-third_party/vt100/*	third_party	vendored terminal parser affects terminal and TUI behavior	cargo test --manifest-path third_party/vt100/Cargo.toml|cargo test --lib infrastructure::terminal::|cargo test --test tui_e2e|cargo test --workspace --quiet
-*.md	docs	documentation changed; Rust gate can be skipped for docs-only changes	lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' 'v1/README.md' 'v1/document/**/*.md' '.agents/**/*.md' '.github/**/*.md'
-document/*.md	docs	documentation changed; Rust gate can be skipped for docs-only changes	lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' 'v1/README.md' 'v1/document/**/*.md' '.agents/**/*.md' '.github/**/*.md'
-v1/document/*.md	docs	documentation changed; Rust gate can be skipped for docs-only changes	lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' 'v1/README.md' 'v1/document/**/*.md' '.agents/**/*.md' '.github/**/*.md'
-.agents/*.md	docs	agent workflow documentation changed; Rust gate can be skipped for docs-only changes	lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' 'v1/README.md' 'v1/document/**/*.md' '.agents/**/*.md' '.github/**/*.md'
-.github/*.md	docs	GitHub documentation changed; Rust gate can be skipped for docs-only changes	lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' 'v1/README.md' 'v1/document/**/*.md' '.agents/**/*.md' '.github/**/*.md'
-v1/*	v1	retained v1 implementation still ships releases; run the v1 suite via its own manifest	cargo clippy --all-targets --manifest-path v1/Cargo.toml -- -D warnings|cargo test --manifest-path v1/Cargo.toml --quiet
+# pattern<TAB>area<TAB>reason<TAB>commands separated by |<TAB>reachable witness path
+# First match wins. Keep exceptions above generic rules. `--validate-map` checks every witness.
+crates/core/tests/*.rs	core	usagi-core integration test target changed	cargo test -p usagi-core --test {test}	crates/core/tests/agent_contract.rs
+crates/core/src/test_support.rs	shared-test	shared usagi-core test support affects consumers	cargo test -p usagi-core|cargo test --workspace --quiet	crates/core/src/test_support.rs
+crates/core/src/infrastructure/ipc/*	shared-protocol	shared IPC protocol affects multiple workspace packages	cargo test -p usagi-core|cargo test --workspace --quiet	crates/core/src/infrastructure/ipc/mod.rs
+crates/core/src/*	core	usagi-core source changed	cargo test -p usagi-core	crates/core/src/lib.rs
+crates/daemon/tests/*.rs	daemon	usagi-daemon integration test target changed	cargo test -p usagi-daemon --test {test}	crates/daemon/tests/agent_real_pty.rs
+crates/daemon/src/test_support.rs	shared-test	shared usagi-daemon test support affects consumers	cargo test -p usagi-daemon|cargo test --workspace --quiet	crates/daemon/src/test_support.rs
+crates/daemon/src/*	daemon	usagi-daemon source changed	cargo test -p usagi-daemon	crates/daemon/src/lib.rs
+crates/tui/tests/*.rs	tui	usagi-tui integration test target changed	cargo test -p usagi-tui --test {test}	crates/tui/tests/parity_suite.rs
+crates/tui/src/*	tui	usagi-tui source changed	cargo test -p usagi-tui	crates/tui/src/lib.rs
+crates/cli/src/*	cli	usagi-cli source changed	cargo test -p usagi-cli	crates/cli/src/lib.rs
+src/runtime/cli.rs	root-runtime	root CLI runtime changed	cargo test -p usagi --bin usagi	src/runtime/cli.rs
+src/runtime/daemon.rs	root-runtime	root daemon runtime changed	cargo test -p usagi --bin usagi	src/runtime/daemon.rs
+src/runtime/tui.rs	root-runtime	root TUI runtime changed	cargo test -p usagi --bin usagi	src/runtime/tui.rs
+src/runtime/*	root-runtime	root composition runtime changed	cargo test -p usagi --bin usagi	src/runtime/bootstrap.rs
+src/tui_input.rs	root-runtime	root terminal input adapter changed	cargo test -p usagi --bin usagi	src/tui_input.rs
+tests/support/*	shared-test	shared root integration harness affects consumer tests	cargo test --workspace --quiet	tests/support/mod.rs
+tests/*.rs	root-integration	root integration test target changed	cargo test -p usagi --test {test}	tests/agent_ipc_e2e.rs
+v1/third_party/vt100/*	v1	vendored v1 terminal parser affects terminal and TUI behavior	cargo test --manifest-path v1/third_party/vt100/Cargo.toml|cargo test --manifest-path v1/Cargo.toml --test tui_e2e|cargo test --manifest-path v1/Cargo.toml --quiet	v1/third_party/vt100/src/lib.rs
+*.md	docs	documentation changed; Rust gate can be skipped for docs-only changes	lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' 'v1/README.md' 'v1/document/**/*.md' '.agents/**/*.md' '.github/**/*.md'	README.md
+v1/*	v1	retained v1 implementation still ships releases; run the v1 suite via its own manifest	cargo clippy --all-targets --manifest-path v1/Cargo.toml -- -D warnings|cargo test --manifest-path v1/Cargo.toml --quiet	v1/src/main.rs

@@ -214,12 +214,38 @@ fn read_real_pty() { /* OS call only */ }
 `base` の既定値は `HEAD` で、`git diff` の変更 path、選定理由、近いテストコマンドを表示する。path とテストの
 対応表は `scripts/recommend-tests.tsv` が正本である。
 
+v2 の主要な対応は次のとおり。crate の integration test は package 全体ではなく、そのファイル名と同じ
+`--test <target>` を選ぶ。root runtime は合成ルートの bin target、root integration test は同名 test target を選ぶ。
+
+| 変更 path | 推奨 test |
+|---|---|
+| `crates/core/src/*` | `cargo test -p usagi-core` |
+| `crates/daemon/src/*` | `cargo test -p usagi-daemon` |
+| `crates/tui/src/*` | `cargo test -p usagi-tui` |
+| `crates/cli/src/*` | `cargo test -p usagi-cli` |
+| `crates/{core,daemon,tui}/tests/<target>.rs` | `cargo test -p <package> --test <target>` |
+| `src/runtime/*` / `src/tui_input.rs` | `cargo test -p usagi --bin usagi` |
+| `tests/<target>.rs` | `cargo test -p usagi --test <target>` |
+
 ```bash
 scripts/recommend-tests.sh origin/main
 ```
 
 推奨された selected tests は CI の full gate の代替ではない。未知の path、空 diff、複数クレートにまたがる変更、
-共有基盤の変更は fail-safe に `cargo test --workspace --quiet` を含める。コミット・push 前には、この節の出力にかかわらず
+共有基盤の変更は fail-safe に `cargo test --workspace --quiet` を含め、出力の `Fallback reasons` にその根拠を表示する。
+共有基盤には全階層の Cargo manifest / lockfile、`crates/core/src/infrastructure/ipc/*` の共有 IPC protocol、
+crate/root の test support、build/test script・hook・CI workflow を含む。既知 path でも複数の責務領域にまたがれば full fallback
+とする。同じ領域の複数 path が同じ command を選んだ場合は 1 件に正規化する。
+
+対応表を編集したときは fixture test に加えて `--validate-map` を実行する。各 rule の witness が先行 rule に shadow されず、
+推奨 command の v2 package と test/bin target が Cargo metadata に実在することを検証する。
+
+```bash
+scripts/recommend-tests.sh --validate-map
+bash scripts/tests/recommend-tests.sh
+```
+
+コミット・push 前には、この節の出力にかかわらず
 [品質チェック](#品質チェックリスク比例の-gate)の該当 gate（commit 前の Lint / selected tests、push 前の Markdown link check）を実行し、
 最終的な full gate は PR CI の green で確認する。
 
