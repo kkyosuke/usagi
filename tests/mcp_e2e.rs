@@ -278,7 +278,7 @@ if [ "$1 $2" = "login status" ]; then exit 0; fi
 credential_forwarded=false
 approval_disabled=false
 while [ "$#" -gt 0 ]; do
-  if [ "$1" = "-c" ] && [ "$2" = 'mcp_servers.usagi.env_vars = ["USAGI_MCP_CALLER_CREDENTIAL"]' ]; then
+  if [ "$1" = "-c" ] && [ "$2" = 'mcp_servers.usagi.env_vars = ["USAGI_HOME", "USAGI_MCP_CALLER_CREDENTIAL"]' ]; then
     credential_forwarded=true
   fi
   if [ "$1" = "-c" ] && [ "$2" = 'mcp_servers.usagi.default_tools_approval_mode = "approve"' ]; then

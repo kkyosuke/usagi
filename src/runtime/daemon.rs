@@ -3362,7 +3362,6 @@ mod tests {
         assert_eq!(
             codex_mcp_arguments(command).unwrap(),
             [
-                "-c",
                 "mcp_servers.usagi.command = \"/opt/usagi/bin/usagi\"",
                 "-c",
                 "mcp_servers.usagi.args = [\"mcp\"]",
