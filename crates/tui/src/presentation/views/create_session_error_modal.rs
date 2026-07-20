@@ -27,7 +27,13 @@ pub fn render_over(height: usize, width: usize, base: &[String], message: &str) 
     // terminal shows the whole safe message rather than a clipped first line.
     let (_, normalized_width) = widgets::normalize_size(height, width);
     let inner_width = modal::modal_inner_width(normalized_width, INNER_WIDTH);
-    let wrap_width = inner_width.saturating_sub(2);
+    // Each message row carries a two-column left indent (matching the dismiss
+    // hint). `boxed` then adds one box column on each side, so a row that fills
+    // `inner_width` would sit three columns from the left border but only one
+    // from the right. Reserve the same indent width on the right by wrapping to
+    // `inner_width - 2 * BODY_INDENT_WIDTH`, so the widest row keeps symmetric
+    // three-column padding on both sides.
+    let wrap_width = inner_width.saturating_sub(2 * modal::BODY_INDENT_WIDTH);
 
     let danger = Role::Danger.style().bold();
     // Wrap the plain message, then paint each row: `wrap_to_width` measures ANSI
@@ -55,7 +61,9 @@ pub fn render_over(height: usize, width: usize, base: &[String], message: &str) 
 #[cfg(test)]
 mod tests {
     use super::{INNER_WIDTH, render_over};
-    use crate::presentation::widgets::{display_width, modal, normalize_size, wrap_to_width};
+    use crate::presentation::widgets::{
+        display_width, modal, normalize_size, strip_ansi, wrap_to_width,
+    };
     use crate::usecase::application::controller::{
         AppEvent, AppKey, AppState, Effect, Notice, OperationResult, Overlay, update,
     };
@@ -69,7 +77,8 @@ mod tests {
     /// can assert against the exact segments the dialog draws.
     fn wrap_width_for(height: usize, width: usize) -> usize {
         let (_, normalized) = normalize_size(height, width);
-        modal::modal_inner_width(normalized, INNER_WIDTH).saturating_sub(2)
+        modal::modal_inner_width(normalized, INNER_WIDTH)
+            .saturating_sub(2 * modal::BODY_INDENT_WIDTH)
     }
 
     #[test]
@@ -105,6 +114,52 @@ mod tests {
         // The box grew to hold each message row: no ellipsis clip leaked in.
         assert!(!text.contains('…'));
         assert!(frame.iter().all(|line| display_width(line) <= 80));
+    }
+
+    /// The interior padding of a rendered box row: spaces between the left `│`
+    /// and the first non-space glyph, and between the last non-space glyph and
+    /// the right `│`. ANSI is stripped first so only visible columns count.
+    fn interior_padding(row: &str) -> (usize, usize) {
+        let plain = strip_ansi(row);
+        let left = plain.find('│').expect("row has a left border");
+        let right = plain.rfind('│').expect("row has a right border");
+        let interior: &str = &plain[left + '│'.len_utf8()..right];
+        let leading = interior.len() - interior.trim_start_matches(' ').len();
+        let trailing = interior.len() - interior.trim_end_matches(' ').len();
+        (leading, trailing)
+    }
+
+    #[test]
+    fn keeps_symmetric_left_and_right_padding_on_the_widest_wrapped_row() {
+        // A message long enough to wrap and fill the box width. The old wrap of
+        // `inner_width - 2` let a filled row touch the right border (3 columns of
+        // left padding, 1 of right); the symmetric wrap keeps both sides equal.
+        let message = "x".repeat(200);
+        let base = vec![String::new(); 24];
+        let frame = render_over(24, 80, &base, &message);
+
+        // The rows carrying the wrapped message are the ones with box content.
+        let message_rows: Vec<&String> = frame
+            .iter()
+            .filter(|row| strip_ansi(row).contains('x'))
+            .collect();
+        assert!(message_rows.len() >= 2, "expected the message to wrap");
+
+        let widest = message_rows
+            .iter()
+            .map(|row| interior_padding(row))
+            .max_by_key(|&(left, _)| left)
+            .unwrap();
+        // The message rows are drawn at the widest fill, so left and right
+        // interior padding match: box column (1) + body indent (2) on each side.
+        for row in &message_rows {
+            let (left, right) = interior_padding(row);
+            // Left and right interior padding match: box column (1) + body
+            // indent (2) on each side.
+            assert_eq!(left, 1 + modal::BODY_INDENT_WIDTH);
+            assert_eq!(right, left);
+        }
+        assert_eq!(widest.0, widest.1);
     }
 
     #[test]
