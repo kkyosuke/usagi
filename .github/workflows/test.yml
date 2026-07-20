@@ -72,3 +72,9 @@ jobs:
 
     - name: Test v1 release-version detector
       run: bash scripts/tests/v1-version-changed.sh
+
+    - name: Test verified installer transaction
+      run: bash scripts/tests/install.sh
+
+    - name: Test release verification artifacts
+      run: bash scripts/tests/release-verification-artifacts.sh

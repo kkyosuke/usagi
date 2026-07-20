@@ -470,9 +470,13 @@ argv ─► clap 解析 ─► Command ─► Command::into_handler() ─► Box
   （`clap_complete::Shell`）の補完スクリプトを生成して標準出力へ出す。定義が唯一の真実なので
   補完候補は CLI の実態と一致する。ただし静的ジェネレータの仕様上、`hide = true` の内部コマンド
   （`hop` / `agent-phase` / `guard-workspace`）も補完候補には含まれる（`--help` には出ない）。
-- **`update`** は実装済み: GitHub Releases の最新バイナリを、配布済みの `scripts/install.sh` 経由で
-  download して `~/.usagi/bin/` へ導入する。CLI は trusted な installer command の要求だけを返し、
-  network / subprocess の実 IO は合成ルートが実行する。更新後のバイナリは次回の `usagi` 起動から使われる。
+- **`update`** は実装済み: GitHub Releases の platform 固有 archive と SHA-256・release version artifact を、
+  `scripts/install.sh` 経由で mode 0700 の private staging へ download する。installer は archive が path traversal /
+  symlink / unexpected entry を含まず単一の通常ファイル `usagi` だけを持つこと、checksum、candidate version を検証する。
+  更新全体を user-local lock で直列化し、検証後に `~/.usagi/bin` と同じ filesystem 上の atomic rename で置換するため、
+  途中失敗では旧 binary の bytes と mode が変わらない。CLI は trusted な installer command の要求だけを返し、network /
+  subprocess の実 IO は合成ルートが実行する。installer は inherited CWD の binary を参照せず、検証 artifact のない旧 release
+  へ fallback しない。更新後のバイナリは次回の `usagi` 起動から使われる。
 - **内部フックコマンド**: usagi はエージェント起動時に、Claude の `PreToolUse` フックへ
   `usagi guard-workspace`（worktree 外へのツール呼び出しを拒否）を、Stop フックへ
   `usagi agent-phase <phase>`（ライフサイクル phase 報告）を配線する。この 2 つは人間向けでは

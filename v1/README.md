@@ -84,7 +84,7 @@
 ビルド済みバイナリを 1 行でダウンロードしてインストールできます:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash
+bash -c 'set -o pipefail; cd /; curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash'
 ```
 
 `~/.usagi/bin` にインストールされます。表示される案内に従って PATH を通してください:
@@ -93,29 +93,12 @@ curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install
 export PATH="$PATH:$HOME/.usagi/bin"
 ```
 
-同じコマンドを再実行すると、常に最新リリースを取得して既存のバイナリを置き換えます（アップデート）。インストール後はバージョンの変化に応じて「新規インストール / アップデート / 再インストール」を判別したメッセージが表示されます。
+同じコマンドを再実行すると、常に最新リリースを取得して既存のバイナリを置き換えます（アップデート）。installer は platform 固有 archive と公開された SHA-256・release version artifact を private staging へ取得し、archive が単一の通常ファイル `usagi` だけを含むことと candidate の version を検証してから atomic rename します。検証 artifact のない旧 release、破損・改変された archive、version 不一致では既存 binary を変更しません。起動 directory の `./usagi` / `./usagi.exe` は install 元として扱いません。
 
 新しいリリースがあるときは、ホーム画面のマスコット（うさぎ）が吹き出しで知らせます。**うさぎをクリック → 確認モーダルで `y`** を選ぶと、このインストールスクリプトをバックグラウンドで再実行してアップデートできます（反映するには usagi の再起動が必要）。詳細は [アップデート確認モーダル](document/design/home/05-overlays.md#アップデート確認モーダル) を参照してください。
 
-プラットフォームを指定してアーカイブから直接インストールすることもできます:
-
-#### macOS (Apple Silicon)
-```bash
-curl -L https://github.com/KKyosuke/usagi/releases/latest/download/usagi-macos-arm64.tar.gz | tar -xz && ./install.sh && rm install.sh
-```
-
-#### macOS (Intel)
-```bash
-curl -L https://github.com/KKyosuke/usagi/releases/latest/download/usagi-macos-amd64.tar.gz | tar -xz && ./install.sh && rm install.sh
-```
-
-#### Linux (AMD64)
-```bash
-curl -L https://github.com/KKyosuke/usagi/releases/latest/download/usagi-linux-amd64.tar.gz | tar -xz && ./install.sh && rm install.sh
-```
-
 #### Windows (AMD64)
-[Releases](https://github.com/KKyosuke/usagi/releases) ページから `usagi-windows-amd64.zip` をダウンロードして展開し、Git Bash で `install.sh` を実行するか、バイナリを手動で PATH に追加してください。
+[Releases](https://github.com/KKyosuke/usagi/releases) ページから `usagi-windows-amd64.zip` と同名の `.sha256` / `.version` をダウンロードし、checksum と binary の `--version` を確認してから手動で PATH に追加してください。Unix installer に local archive を暗黙に渡す方法はありません。
 
 ### From Source
 

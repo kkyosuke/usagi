@@ -53,7 +53,7 @@ pub(crate) fn dispatch(
             }
         },
         RunOutcome::SelfUpdate { command } => {
-            let result = std::process::Command::new("sh")
+            let result = std::process::Command::new("bash")
                 .arg("-c")
                 .arg(command)
                 .output()?;

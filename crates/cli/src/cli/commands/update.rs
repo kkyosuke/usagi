@@ -24,15 +24,32 @@ impl Run for Update {
 }
 
 /// Build the documented installer invocation for a GitHub repository URL.
-#[coverage(off)]
 fn install_command(repository: &str) -> Option<String> {
     let slug = repository
         .trim_end_matches('/')
         .trim_end_matches(".git")
         .strip_prefix("https://github.com/")?;
+    valid_github_slug(slug)?;
     Some(format!(
-        "curl -fsSL https://raw.githubusercontent.com/{slug}/main/scripts/install.sh | bash"
+        "set -o pipefail; cd /; curl -fsSL https://raw.githubusercontent.com/{slug}/main/scripts/install.sh | bash"
     ))
+}
+
+fn valid_github_slug(slug: &str) -> Option<()> {
+    let mut parts = slug.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if parts.next().is_some()
+        || owner.is_empty()
+        || repo.is_empty()
+        || !owner
+            .bytes()
+            .chain(repo.bytes())
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return None;
+    }
+    Some(())
 }
 
 #[cfg(test)]
@@ -44,9 +61,11 @@ mod tests {
     fn installer_command_uses_the_release_downloading_script() {
         assert_eq!(
             install_command("https://github.com/KKyosuke/usagi.git"),
-            Some("curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash".into())
+            Some("set -o pipefail; cd /; curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash".into())
         );
         assert_eq!(install_command("https://example.com/usagi"), None);
+        assert_eq!(install_command("https://github.com/owner/repo;false"), None);
+        assert_eq!(install_command("https://github.com/owner/repo/extra"), None);
     }
 
     #[test]

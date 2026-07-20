@@ -1,14 +1,14 @@
 ---
 number: 461
 title: fix(update): verified staging と atomic replace で self-update を保護する
-status: todo
+status: done
 priority: high
 labels: [review, v1, v2, security, release]
 dependson: []
 related: []
 parent: 453
 created_at: 2026-07-20T12:06:19.993200+00:00
-updated_at: 2026-07-20T12:06:19.993200+00:00
+updated_at: 2026-07-20T13:29:59.918154+00:00
 ---
 
 ## 問題・影響

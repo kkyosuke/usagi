@@ -253,7 +253,7 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 2. `v1/Cargo.toml` の `version` を上げる PR を作成し `main` にマージする（`create-release-pr.yml` の手動実行でも作成できる）。
 3. 以降は自動で進む:
    - `auto-release.yml` が `main` への `v1/Cargo.toml` 変更 push を検知し、version が前コミットから変わっていれば `v<version>` タグを対象にリリースを起動する。
-   - reusable な `release.yml` が呼ばれ、4 プラットフォーム（Linux / macOS amd64・arm64 / Windows）で v1 のバイナリをビルドし、`v<version>` タグと GitHub Release を作成して成果物を添付する。
+   - reusable な `release.yml` が呼ばれ、4 プラットフォーム（Linux / macOS amd64・arm64 / Windows）で v1 のバイナリをビルドし、`v<version>` タグと GitHub Release を作成して成果物を添付する。各 archive には同名の `.sha256` と `.version` verification artifact を添付する。installer は両 artifact を必須とし、存在しない旧 release へ無検証 fallback しない。
 
 > version が変わらない push、または同名タグが既に存在する場合はスキップされる。
 
@@ -263,6 +263,6 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 |---|---|---|
 | `.github/workflows/create-release-pr.yml` | 手動（`workflow_dispatch`） | 指定 version へ `v1/Cargo.toml` を更新するリリース PR を作成する |
 | `.github/workflows/auto-release.yml` | `main` への `v1/Cargo.toml` 変更 push | version 変更を検知し `release.yml` を呼び出す |
-| `.github/workflows/release.yml` | `v*` タグ push / `workflow_call` | リリースノート生成・v1 のビルド・GitHub Release 作成 |
+| `.github/workflows/release.yml` | `v*` タグ push / `workflow_call` | リリースノート生成・v1 のビルド・SHA-256 / version artifact 生成・GitHub Release 作成 |
 
 `release.yml` は `v*` タグの手動 push でも従来どおり動作する（`workflow_call` は追加のトリガー）。
