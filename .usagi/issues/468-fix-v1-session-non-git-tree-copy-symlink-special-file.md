@@ -1,14 +1,14 @@
 ---
 number: 468
 title: fix(v1/session): non-Git tree copy で symlink と special file を安全に扱う
-status: todo
+status: done
 priority: high
 labels: [review, v1, session, security, filesystem]
 dependson: []
 related: [49, 250]
 parent: 453
 created_at: 2026-07-20T12:06:22.373929+00:00
-updated_at: 2026-07-20T12:06:22.373929+00:00
+updated_at: 2026-07-20T21:18:30.860029+00:00
 ---
 
 ## 問題・影響
