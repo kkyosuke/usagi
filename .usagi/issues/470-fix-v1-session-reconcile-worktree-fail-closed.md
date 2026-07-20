@@ -1,14 +1,14 @@
 ---
 number: 470
 title: fix(v1/session): reconcile の worktree 所有権判定を fail closed にする
-status: in-progress
+status: done
 priority: high
 labels: [review, v1, session, git, security]
 dependson: []
 related: [49]
 parent: 453
 created_at: 2026-07-20T12:06:23.049718+00:00
-updated_at: 2026-07-20T22:20:47.420119+00:00
+updated_at: 2026-07-20T22:58:59.160839+00:00
 ---
 
 ## 問題・影響
