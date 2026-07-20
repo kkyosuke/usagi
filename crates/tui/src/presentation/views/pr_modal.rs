@@ -12,7 +12,7 @@ use usagi_core::domain::pr_inventory::PrEntry;
 use usagi_core::domain::pullrequest::{PrLink, PrState};
 
 use crate::presentation::theme::{Role, Style};
-use crate::presentation::widgets::{self, modal};
+use crate::presentation::widgets::modal;
 
 /// モーダルの枠の内側（内容）幅。
 const INNER_WIDTH: usize = 58;
@@ -163,11 +163,7 @@ fn state_label(pr: &PrLink) -> (&'static str, Style) {
 
 /// 1 PR 行: 選択中は `›` マーカー、`#番号`（warning）、状態バッジ、タイトル。幅に切り詰める。
 fn pr_row(pr: &PrLink, selected: bool, inner: usize) -> String {
-    let marker = if selected {
-        Role::Danger.style().bold().paint("›")
-    } else {
-        " ".to_string()
-    };
+    let marker = modal::selection_marker(selected);
     let number = Role::Warning
         .style()
         .bold()
@@ -175,22 +171,25 @@ fn pr_row(pr: &PrLink, selected: bool, inner: usize) -> String {
     let (label, style) = state_label(pr);
     let badge = style.paint(&format!("{label:<10}"));
     let title = pr.title.as_deref().unwrap_or("(no title)");
-    widgets::clip_to_width(&format!("  {marker} {number} {badge} {title}"), inner)
+    modal::content_line(&format!("{marker} {number} {badge} {title}"), inner)
 }
 
 /// 選択中 PR の詳細ブロック（状態・URL）。
 fn detail_lines(pr: &PrLink) -> Vec<String> {
     let (label, style) = state_label(pr);
     vec![
-        format!(
-            "  {} {}",
-            Role::Warning
-                .style()
-                .bold()
-                .paint(&format!("#{}", pr.number)),
-            style.paint(label),
+        modal::content_line(
+            &format!(
+                "{} {}",
+                Role::Warning
+                    .style()
+                    .bold()
+                    .paint(&format!("#{}", pr.number)),
+                style.paint(label),
+            ),
+            INNER_WIDTH,
         ),
-        Style::new().dim().paint(&format!("  {}", pr.url)),
+        modal::caption(&pr.url),
     ]
 }
 
@@ -207,53 +206,46 @@ fn visible_bounds(state: &PrModal) -> (usize, usize) {
 
 /// PR ポップアップのボディ（枠の内側の行）: 一覧・選択中の詳細・フッタ。
 fn body(state: &PrModal) -> Vec<String> {
-    let mut lines = vec![Style::new().dim().paint("  Pull requests")];
+    let mut lines = vec![modal::caption("Pull requests")];
     if let Some(selected) = state.selected_pr() {
         let (start, end) = visible_bounds(state);
         if start > 0 {
-            lines.push(Style::new().dim().paint(&format!("  ↑ {start} more")));
+            lines.push(modal::scroll_above(start));
         }
         for (i, pr) in state.prs[start..end].iter().enumerate() {
             let index = start + i;
             lines.push(pr_row(pr, index == state.selected, INNER_WIDTH));
         }
         if end < state.prs.len() {
-            lines.push(
-                Style::new()
-                    .dim()
-                    .paint(&format!("  ↓ {} more", state.prs.len() - end)),
-            );
+            lines.push(modal::scroll_below(state.prs.len() - end));
         }
         lines.push(String::new());
         lines.extend(detail_lines(selected));
     } else {
         lines.push(String::new());
-        lines.push(Style::new().dim().paint("  no pull requests"));
+        lines.push(modal::empty_notice("no pull requests"));
     }
     lines.push(String::new());
-    lines.push(
-        Style::new()
-            .dim()
-            .paint("  ↑↓ select   Enter: open   Esc: close"),
-    );
-    modal::fixed_body(lines, BODY_HEIGHT)
+    lines.push(modal::footer("↑↓ select   Enter: open   Esc: close"));
+    lines
 }
 
 /// 生の端末サイズに対する pull request modal 1 フレーム分の行。中央に浮かぶ枠付きダイアログとして
-/// 描く（枠と中央寄せは [`modal::render_modal`] に委譲）。サイズ 0 は 80×24 にフォールバック。
+/// 描く（枠・中央寄せ・body 予約は [`modal::render_body`] に委譲）。サイズ 0 は 80×24 にフォールバック。
 #[must_use]
 pub fn render(raw_height: usize, raw_width: usize, state: &PrModal) -> Vec<String> {
-    modal::render_modal(
+    modal::render_body(
         raw_height,
         raw_width,
         "Pull Request",
         INNER_WIDTH,
-        &body(state),
+        BODY_HEIGHT,
+        body(state),
     )
 }
 
 /// `base` の workspace フレームを背景に残し、pull request modal を中央に合成する。
-/// サイズ 0 は 80×24 にフォールバックする。
+/// 小端末では [`modal::render_body_over`] が背景の帯を残す。サイズ 0 は 80×24 にフォールバックする。
 #[must_use]
 pub fn render_over(
     raw_height: usize,
@@ -261,24 +253,21 @@ pub fn render_over(
     base: &[String],
     state: &PrModal,
 ) -> Vec<String> {
-    let (height, _) = widgets::normalize_size(raw_height, raw_width);
-    // Preserve a sliver of the workspace behind this fixed-height overlay on
-    // small terminals; normal terminals retain the complete reserved body.
-    let body = modal::fixed_body(body(state), BODY_HEIGHT.min(height.saturating_sub(4)));
-    modal::render_over(
+    modal::render_body_over(
         raw_height,
         raw_width,
         base,
         "Pull Request",
         INNER_WIDTH,
-        &body,
+        BODY_HEIGHT,
+        body(state),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{PrModal, render, render_over};
-    use crate::presentation::widgets::display_width;
+    use crate::presentation::widgets::{display_width, strip_ansi};
     use usagi_core::domain::pullrequest::PrLink;
 
     #[test]
@@ -294,27 +283,10 @@ mod tests {
         assert_eq!(empty, populated);
     }
 
-    fn strip(line: &str) -> String {
-        let mut out = String::new();
-        let mut chars = line.chars();
-        while let Some(ch) = chars.next() {
-            if ch == '\u{1b}' {
-                for c in chars.by_ref() {
-                    if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
-                        break;
-                    }
-                }
-                continue;
-            }
-            out.push(ch);
-        }
-        out
-    }
-
     fn joined(state: &PrModal) -> String {
         render(24, 80, state)
             .iter()
-            .map(|l| strip(l))
+            .map(|l| strip_ansi(l))
             .collect::<Vec<_>>()
             .join("\n")
     }

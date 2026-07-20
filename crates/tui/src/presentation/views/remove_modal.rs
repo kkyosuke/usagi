@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 
 use usagi_core::domain::session::SessionRecord;
 
-use crate::presentation::theme::{Role, Style};
+use crate::presentation::theme::Role;
 use crate::presentation::widgets::{self, modal};
 
 const INNER_WIDTH: usize = 52;
@@ -118,28 +118,22 @@ pub fn same_incarnation(left: &SessionRecord, right: &SessionRecord) -> bool {
 }
 
 fn row(entry: &SessionRecord, cursor: bool, selected: bool, width: usize) -> String {
-    let marker = if cursor {
-        Role::Danger.style().bold().paint("›")
-    } else {
-        " ".to_owned()
-    };
+    let marker = modal::selection_marker(cursor);
     let check = if selected {
         Role::Success.style().paint("[x]")
     } else {
         "[ ]".to_owned()
     };
     let label = widgets::clip_to_width(entry.display_label(), width.saturating_sub(8));
-    format!("  {marker} {check} {label}")
+    modal::content_line(&format!("{marker} {check} {label}"), width)
 }
 
 fn body(state: &RemoveModal) -> Vec<String> {
-    let mut lines = vec![
-        Style::new()
-            .dim()
-            .paint("  Space: select   Enter: remove   Esc: cancel"),
-    ];
+    // The removal checklist is the one modal whose help hint leads the body
+    // instead of closing it.
+    let mut lines = vec![modal::footer("Space: select   Enter: remove   Esc: cancel")];
     if state.is_empty() {
-        lines.push(Style::new().dim().paint("  no sessions to remove"));
+        lines.push(modal::empty_notice("no sessions to remove"));
     } else {
         for (index, entry) in state.entries.iter().enumerate() {
             lines.push(row(
@@ -156,7 +150,7 @@ fn body(state: &RemoveModal) -> Vec<String> {
         None if state.force => Role::Danger.style().paint("  force removal enabled"),
         None => String::new(),
     });
-    modal::fixed_body(lines, BODY_HEIGHT)
+    lines
 }
 
 #[must_use]
@@ -166,15 +160,14 @@ pub fn render_over(
     base: &[String],
     state: &RemoveModal,
 ) -> Vec<String> {
-    let (height, _) = widgets::normalize_size(raw_height, raw_width);
-    let body = modal::fixed_body(body(state), BODY_HEIGHT.min(height.saturating_sub(4)));
-    modal::render_over(
+    modal::render_body_over(
         raw_height,
         raw_width,
         base,
         "Remove sessions",
         INNER_WIDTH,
-        &body,
+        BODY_HEIGHT,
+        body(state),
     )
 }
 

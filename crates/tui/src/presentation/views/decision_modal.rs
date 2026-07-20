@@ -20,26 +20,24 @@ pub fn render_over(
 ) -> Vec<String> {
     let (title, body) = if let Some(editor) = overlay.editor() {
         let decision = editor.decision();
-        let mut body = vec![
-            Role::Accent
-                .style()
-                .bold()
-                .paint(&format!("  {}", decision.title)),
-        ];
+        let mut body = vec![modal::heading(&decision.title)];
         body.extend(
             decision
                 .prompt
                 .lines()
-                .map(|line| widgets::clip_to_width(&format!("  {line}"), INNER_WIDTH)),
+                .map(|line| modal::content_line(line, INNER_WIDTH)),
         );
         if let Some(deadline) = decision.expires_at {
-            body.push(Style::new().dim().paint(&format!(
-                "  expires: {}",
+            body.push(modal::caption(&format!(
+                "expires: {}",
                 deadline.format("%Y-%m-%d %H:%M UTC")
             )));
         }
         body.push(String::new());
         for (index, option) in decision.options.iter().enumerate() {
+            // The decision picker keeps its plain `>` marker and single-space
+            // gutter; unifying it with the shared list cursor belongs to the
+            // list-component pass (#374), not this byte-identical foundation.
             let marker = if index == editor.selected_option() {
                 ">"
             } else {
@@ -58,8 +56,8 @@ pub fn render_over(
         }
         if decision.allow_freeform {
             body.push(String::new());
-            body.push(widgets::clip_to_width(
-                &format!("  freeform: {}", editor.freeform()),
+            body.push(modal::content_line(
+                &format!("freeform: {}", editor.freeform()),
                 INNER_WIDTH,
             ));
         }
@@ -70,20 +68,12 @@ pub fn render_over(
                     .paint(&format!("  {}", error.message.as_str())),
             );
         }
-        body.push(
-            Style::new()
-                .dim()
-                .paint("  ↑↓: select   Enter: submit   Esc: back"),
-        );
+        body.push(modal::footer("↑↓: select   Enter: submit   Esc: back"));
         ("User decision", body)
     } else {
-        let mut body = vec![
-            Style::new()
-                .dim()
-                .paint("  Pending decisions for this workspace"),
-        ];
+        let mut body = vec![modal::caption("Pending decisions for this workspace")];
         if decisions.is_empty() {
-            body.push(Style::new().dim().paint("  (none)"));
+            body.push(modal::empty_notice("(none)"));
         }
         for (index, decision) in decisions.iter().enumerate() {
             let marker = if index == overlay.selected() {
@@ -97,11 +87,7 @@ pub fn render_over(
             ));
         }
         body.push(String::new());
-        body.push(
-            Style::new()
-                .dim()
-                .paint("  ↑↓: select   Enter: open   Esc: close"),
-        );
+        body.push(modal::footer("↑↓: select   Enter: open   Esc: close"));
         ("Pending decisions", body)
     };
     modal::render_over(

@@ -1,13 +1,13 @@
 ---
 number: 372
 title: refactor(tui): modal 共通 body-composition kit（footer/heading/empty/scroll/indent）を widgets/modal.rs に集約する
-status: todo
+status: done
 priority: medium
 labels: [tui, ui, modal, refactor]
 dependson: []
 related: [261, 317, 244, 243]
 created_at: 2026-07-19T22:00:10.433708+00:00
-updated_at: 2026-07-19T22:00:10.433708+00:00
+updated_at: 2026-07-19T23:17:45.645500+00:00
 ---
 
 ## 目的

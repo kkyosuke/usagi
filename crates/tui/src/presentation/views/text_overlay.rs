@@ -98,18 +98,14 @@ impl TextOverlay {
         let end = start.saturating_add(viewport).min(lines.len());
         let mut body = Vec::new();
         if start > 0 {
-            body.push(Style::new().dim().paint(&format!("↑ {start} lines")));
+            body.push(modal::scroll_above(start));
         }
         body.extend(lines[start..end].iter().cloned());
         if end < lines.len() {
-            body.push(
-                Style::new()
-                    .dim()
-                    .paint(&format!("↓ {} more", lines.len() - end)),
-            );
+            body.push(modal::scroll_below(lines.len() - end));
         }
         body.push(String::new());
-        body.push(Style::new().dim().paint(if self.dismiss_on_any_key {
+        body.push(modal::footer(if self.dismiss_on_any_key {
             "Press any key to close"
         } else {
             "↑↓ scroll   Esc: close"
@@ -169,6 +165,10 @@ mod tests {
         assert!(text.contains("line 12"));
         assert!(!text.contains("line 0"));
         assert!(text.contains("Esc: close"));
+        // Scroll indicators use the shared `↑/↓ N more` wording (unified with
+        // the PR list; the viewer previously said `↑ N lines`).
+        assert!(text.contains("↑ 12 more"));
+        assert!(text.contains("more"));
         modal.scroll_up();
         assert_eq!(modal.scroll(), 11);
     }
