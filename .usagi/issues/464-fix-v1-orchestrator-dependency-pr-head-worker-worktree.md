@@ -1,14 +1,14 @@
 ---
 number: 464
 title: fix(v1/orchestrator): dependency PR head を worker worktree の基点にする
-status: todo
+status: in-progress
 priority: high
 labels: [review, v1, orchestration, git]
 dependson: []
 related: [182, 186]
 parent: 453
 created_at: 2026-07-20T12:06:21.033487+00:00
-updated_at: 2026-07-20T12:06:21.033487+00:00
+updated_at: 2026-07-20T20:42:06.545703+00:00
 ---
 
 ## 問題・影響

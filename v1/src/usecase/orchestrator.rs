@@ -9,6 +9,7 @@ use chrono::{DateTime, Duration, Utc};
 use crate::domain::agent_phase::AgentPhase;
 use crate::domain::orchestrator::{Base, Event, EventKind, Lease, NodeState, Plan, PullRequest};
 use crate::domain::workspace_state::{SessionAgent, SessionOrigin};
+use crate::infrastructure::git;
 use crate::infrastructure::orchestrator_event::{self, WorkerBinding};
 use crate::infrastructure::orchestrator_store::OrchestratorStore;
 use crate::infrastructure::{agent_prompt_store, error_log, issue_store::IssueStore};
@@ -60,6 +61,67 @@ pub struct TickOutcome {
     pub owner_queued: usize,
     pub acknowledgements: usize,
 }
+
+/// A dependency base that cannot safely be used for worker creation.
+#[derive(Debug)]
+enum DependencyBaseError {
+    RepositoryCount(usize),
+    Fetch {
+        commit: String,
+        source: anyhow::Error,
+    },
+    Missing(String),
+    Moved {
+        reference: String,
+        expected: String,
+        actual: String,
+    },
+    CheckoutMismatch {
+        worktree: PathBuf,
+        expected: String,
+        actual: String,
+    },
+}
+
+impl std::fmt::Display for DependencyBaseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RepositoryCount(count) => write!(
+                formatter,
+                "dependency base requires exactly one source repository, found {count}"
+            ),
+            Self::Fetch { commit, source } => {
+                write!(
+                    formatter,
+                    "failed to fetch dependency base {commit}: {source:#}"
+                )
+            }
+            Self::Missing(commit) => write!(
+                formatter,
+                "dependency base commit {commit} is unavailable after fetch"
+            ),
+            Self::Moved {
+                reference,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "dependency base {reference} moved from {expected} to {actual}"
+            ),
+            Self::CheckoutMismatch {
+                worktree,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "worker worktree {} checked out {actual}, expected {expected}",
+                worktree.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DependencyBaseError {}
 
 pub fn work_ready(plan: &Plan, issue: u64) -> Option<Base> {
     let node = plan.nodes.get(&issue)?;
@@ -263,6 +325,7 @@ pub fn reconcile_workspace_tick(
             result = reconcile(&result.plan, &observation, LEASE_DURATION);
         }
 
+        resolve_delegate_bases(workspace, &mut result.plan, &mut result.actions);
         let saved = store.save_plan(&result.plan, Some(stamped.revision), now)?;
         for event_id in &result.acknowledgements {
             if store.acknowledge_event(&result.plan.id, event_id)? {
@@ -274,15 +337,95 @@ pub fn reconcile_workspace_tick(
             queue_owner_prompt(&owner_worktree, &result.plan, &result.actions)?;
             outcome.owner_queued += 1;
         }
-        let delegated = dispatch_actions(workspace, &owner_worktree, &result.plan, result.actions)?;
+        let (delegated, blocked) =
+            dispatch_actions(workspace, &owner_worktree, &result.plan, result.actions)?;
+        if !blocked.is_empty() {
+            for issue in blocked {
+                block_delegation(&mut result.plan, issue);
+            }
+            store.save_plan(&result.plan, Some(saved.revision), now)?;
+        }
         outcome.delegated += delegated;
         slots_remaining = slots_remaining.saturating_sub(delegated);
-        let _ = saved;
         if slots_remaining == 0 {
             continue;
         }
     }
     Ok(outcome)
+}
+
+fn resolve_delegate_bases(workspace: &Path, plan: &mut Plan, actions: &mut Vec<Action>) {
+    actions.retain_mut(|action| {
+        let Action::Delegate { issue, base, .. } = action else {
+            return true;
+        };
+        match resolve_dependency_base(workspace, base) {
+            Ok(resolved) => {
+                *base = resolved.clone();
+                plan.nodes.get_mut(issue).unwrap().base = Some(resolved);
+                true
+            }
+            Err(error) => {
+                error_log::ErrorLog::record(&format!(
+                    "orchestrator {} blocked issue #{}: {error}",
+                    plan.id, issue
+                ));
+                block_delegation(plan, *issue);
+                false
+            }
+        }
+    });
+}
+
+fn resolve_dependency_base(
+    workspace: &Path,
+    base: &Base,
+) -> std::result::Result<Base, DependencyBaseError> {
+    let repositories = session::source_repositories(workspace);
+    let [repo] = repositories.as_slice() else {
+        return Err(DependencyBaseError::RepositoryCount(repositories.len()));
+    };
+
+    let is_default_base = base.reference == "main" && base.commit == "main";
+    let revision = if is_default_base {
+        session::configured_base_ref(repo).unwrap_or_else(|| base.commit.clone())
+    } else {
+        base.commit.clone()
+    };
+    let expected = match git::resolve_commit(repo, &revision) {
+        Some(commit) => commit,
+        None => {
+            git::fetch(repo).map_err(|source| DependencyBaseError::Fetch {
+                commit: revision.clone(),
+                source,
+            })?;
+            git::resolve_commit(repo, &revision)
+                .ok_or_else(|| DependencyBaseError::Missing(revision.clone()))?
+        }
+    };
+    if !is_default_base {
+        let actual = git::resolve_commit(repo, &base.reference)
+            .ok_or_else(|| DependencyBaseError::Missing(base.reference.clone()))?;
+        if actual != expected {
+            return Err(DependencyBaseError::Moved {
+                reference: base.reference.clone(),
+                expected,
+                actual,
+            });
+        }
+    }
+    Ok(Base {
+        reference: base.reference.clone(),
+        commit: expected,
+    })
+}
+
+fn block_delegation(plan: &mut Plan, issue: u64) {
+    if let Some(node) = plan.nodes.get_mut(&issue) {
+        node.state = NodeState::Blocked;
+        node.lease = None;
+        node.worker = None;
+    }
 }
 
 fn observe(workspace: &Path, plan: &Plan, now: DateTime<Utc>) -> Result<Observation> {
@@ -336,8 +479,9 @@ fn dispatch_actions(
     owner_worktree: &Path,
     plan: &Plan,
     actions: Vec<Action>,
-) -> Result<usize> {
+) -> Result<(usize, Vec<u64>)> {
     let mut delegated = 0;
+    let mut blocked = Vec::new();
     for action in actions {
         let Action::Delegate {
             issue,
@@ -351,6 +495,9 @@ fn dispatch_actions(
         match delegate_worker(workspace, owner_worktree, plan, issue, generation, &base) {
             Ok(()) => delegated += 1,
             Err(error) => {
+                if error.downcast_ref::<DependencyBaseError>().is_some() {
+                    blocked.push(issue);
+                }
                 error_log::ErrorLog::record(&format!(
                     "orchestrator {} failed to delegate issue #{}: {error:#}",
                     plan.id, issue
@@ -358,7 +505,7 @@ fn dispatch_actions(
             }
         }
     }
-    Ok(delegated)
+    Ok((delegated, blocked))
 }
 
 fn delegate_worker(
@@ -370,12 +517,13 @@ fn delegate_worker(
     base: &Base,
 ) -> Result<()> {
     let name = worker_session_name(&plan.owner, issue_number);
-    let created = match session::create_with_agent(
+    let created = match session::create_with_agent_at_base(
         workspace,
         &name,
         SessionAgent::default(),
         SessionOrigin::Mcp,
         Some(plan.owner.clone()),
+        &base.commit,
     ) {
         Ok(created) => created,
         Err(error) if error.to_string().contains("already exists") => {
@@ -397,6 +545,19 @@ fn delegate_worker(
         }
         Err(error) => return Err(error),
     };
+    for worktree in &created.worktrees {
+        let actual = git::worktree_status(worktree)
+            .map(|status| status.head)
+            .unwrap_or_default();
+        if actual != base.commit {
+            return Err(DependencyBaseError::CheckoutMismatch {
+                worktree: worktree.clone(),
+                expected: base.commit.clone(),
+                actual,
+            }
+            .into());
+        }
+    }
     let binding = WorkerBinding {
         workspace: workspace.to_path_buf(),
         plan: plan.id.clone(),
@@ -538,6 +699,19 @@ mod tests {
             .unwrap()
             .success());
     }
+    fn git_output(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
     fn init_repo(dir: &Path) {
         git(dir, &["init", "-q", "-b", "main"]);
         git(dir, &["config", "user.email", "t@example.com"]);
@@ -545,6 +719,13 @@ mod tests {
         std::fs::write(dir.join("README.md"), "root\n").unwrap();
         git(dir, &["add", "."]);
         git(dir, &["commit", "-q", "-m", "init"]);
+    }
+    fn immutable_head_base(dir: &Path) -> Base {
+        let commit = git_output(dir, &["rev-parse", "HEAD"]);
+        Base {
+            reference: commit.clone(),
+            commit,
+        }
     }
     fn set_worktree_status(root: &Path, name: &str, status: BranchStatus) {
         let store = WorkspaceStore::new(root);
@@ -1103,7 +1284,168 @@ mod tests {
         assert!(agent_prompt_store::take(&worker.root)
             .unwrap()
             .contains("Do not create sub-sessions"));
+        assert_eq!(
+            git_output(&worker.root, &["rev-parse", "HEAD"]),
+            git_output(tmp.path(), &["rev-parse", "main"])
+        );
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn dependency_pr_head_is_the_worker_checkout_and_prompt_base() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        crate::usecase::issue::create(
+            tmp.path(),
+            crate::usecase::issue::NewIssue {
+                title: "Dependent work".into(),
+                priority: Default::default(),
+                labels: Vec::new(),
+                dependson: vec![2],
+                related: Vec::new(),
+                parent: None,
+                milestone: None,
+                body: String::new(),
+            },
+        )
+        .unwrap();
+        git(tmp.path(), &["switch", "-q", "-c", "dependency"]);
+        std::fs::write(tmp.path().join("sentinel.txt"), "dependency only\n").unwrap();
+        git(tmp.path(), &["add", "sentinel.txt"]);
+        git(tmp.path(), &["commit", "-q", "-m", "sentinel"]);
+        let dependency_head = git_output(tmp.path(), &["rev-parse", "HEAD"]);
+        git(tmp.path(), &["switch", "-q", "main"]);
+
+        let mut dependent = node(1, NodeState::Runnable);
+        dependent.dependencies = vec![2];
+        let mut dependency = node(2, NodeState::PrOpen);
+        dependency.pull_request = Some(PullRequest {
+            number: 2,
+            url: "https://example.test/pr/2".into(),
+            head: dependency_head.clone(),
+            merged: false,
+        });
+        let mut plan = plan(dependent);
+        plan.nodes.insert(2, dependency);
+        let store = OrchestratorStore::new(tmp.path());
+        store.save_plan(&plan, None, now()).unwrap();
+
+        let outcome = reconcile_workspace_tick(tmp.path(), 1, now()).unwrap();
+
+        assert_eq!(outcome.delegated, 1);
+        let worker = session::list(tmp.path())
+            .unwrap()
+            .into_iter()
+            .find(|session| session.name == "owner-issue-1")
+            .unwrap();
+        assert_eq!(
+            git_output(&worker.root, &["rev-parse", "HEAD"]),
+            dependency_head
+        );
+        assert_eq!(
+            std::fs::read_to_string(worker.root.join("sentinel.txt")).unwrap(),
+            "dependency only\n"
+        );
+        let prompt = agent_prompt_store::take(&worker.root).unwrap();
+        assert!(prompt.contains(&format!("- base commit: {}", dependency_head)));
+        let saved = store.load_plan("p").unwrap().unwrap();
+        assert_eq!(
+            saved.value.nodes[&1].base.as_ref().unwrap().commit,
+            dependency_head
+        );
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn missing_and_unfetchable_dependency_heads_block_before_session_creation() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        for with_origin in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            init_repo(tmp.path());
+            let _remote = if with_origin {
+                let remote = tempfile::tempdir().unwrap();
+                git(remote.path(), &["init", "-q", "--bare"]);
+                let remote_path = remote.path().to_string_lossy().to_string();
+                git(tmp.path(), &["remote", "add", "origin", &remote_path]);
+                Some(remote)
+            } else {
+                None
+            };
+            let mut dependent = node(1, NodeState::Runnable);
+            dependent.dependencies = vec![2];
+            let mut dependency = node(2, NodeState::PrOpen);
+            dependency.pull_request = Some(PullRequest {
+                number: 2,
+                url: "https://example.test/pr/2".into(),
+                head: "1111111111111111111111111111111111111111".into(),
+                merged: false,
+            });
+            let mut plan = plan(dependent);
+            plan.nodes.insert(2, dependency);
+            let store = OrchestratorStore::new(tmp.path());
+            store.save_plan(&plan, None, now()).unwrap();
+
+            let unresolved = work_ready(&plan, 1).unwrap();
+            let error = resolve_dependency_base(tmp.path(), &unresolved).unwrap_err();
+            assert!(matches!(
+                (with_origin, error),
+                (true, DependencyBaseError::Missing(_))
+                    | (false, DependencyBaseError::Fetch { .. })
+            ));
+
+            let outcome = reconcile_workspace_tick(tmp.path(), 1, now()).unwrap();
+
+            assert_eq!(outcome.delegated, 0);
+            assert!(session::list(tmp.path()).unwrap().is_empty());
+            assert_eq!(
+                store.load_plan("p").unwrap().unwrap().value.nodes[&1].state,
+                NodeState::Blocked
+            );
+        }
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn moved_dependency_head_is_typed_and_blocks_the_action() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        git(tmp.path(), &["switch", "-q", "-c", "dependency"]);
+        let old = git_output(tmp.path(), &["rev-parse", "HEAD"]);
+        std::fs::write(tmp.path().join("moved.txt"), "moved\n").unwrap();
+        git(tmp.path(), &["add", "moved.txt"]);
+        git(tmp.path(), &["commit", "-q", "-m", "move head"]);
+
+        let mut plan = plan(node(1, NodeState::Delegating));
+        let mut actions = vec![Action::Delegate {
+            id: "delegate-1".into(),
+            issue: 1,
+            generation: 1,
+            base: Base {
+                reference: "dependency".into(),
+                commit: old.clone(),
+            },
+        }];
+        assert!(matches!(
+            resolve_dependency_base(
+                tmp.path(),
+                &Base {
+                    reference: "dependency".into(),
+                    commit: old.clone(),
+                }
+            ),
+            Err(DependencyBaseError::Moved { .. })
+        ));
+
+        resolve_delegate_bases(tmp.path(), &mut plan, &mut actions);
+
+        assert!(actions.is_empty());
+        assert_eq!(plan.nodes[&1].state, NodeState::Blocked);
+        assert!(session::list(tmp.path()).unwrap().is_empty());
     }
 
     #[test]
@@ -1386,13 +1728,14 @@ mod tests {
             Some("owner".into()),
         )
         .unwrap();
+        let commit = git_output(tmp.path(), &["rev-parse", "HEAD"]);
         let action = Action::Delegate {
             id: "delegate-1".into(),
             issue: 1,
             generation: 2,
             base: Base {
-                reference: "main".into(),
-                commit: "abc".into(),
+                reference: commit.clone(),
+                commit,
             },
         };
 
@@ -1404,7 +1747,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(delegated, 1);
+        assert_eq!(delegated, (1, Vec::new()));
         let binding = orchestrator_event::binding(&existing.root)
             .unwrap()
             .unwrap();
@@ -1443,7 +1786,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(delegated, 0);
+        assert_eq!(delegated, (0, Vec::new()));
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 
@@ -1504,10 +1847,7 @@ mod tests {
             &plan(node(1, NodeState::Running)),
             1,
             0,
-            &Base {
-                reference: "main".into(),
-                commit: "abc".into(),
-            },
+            &immutable_head_base(tmp.path()),
         )
         .unwrap_err();
         assert!(!error.to_string().is_empty());
@@ -1521,10 +1861,7 @@ mod tests {
             &plan(node(1, NodeState::Running)),
             1,
             0,
-            &Base {
-                reference: "main".into(),
-                commit: "abc".into(),
-            },
+            &immutable_head_base(tmp.path()),
         )
         .unwrap_err();
         assert!(error.to_string().contains("failed to read"));
@@ -1553,10 +1890,7 @@ mod tests {
             &plan(node(1, NodeState::Running)),
             1,
             0,
-            &Base {
-                reference: "main".into(),
-                commit: "abc".into(),
-            },
+            &immutable_head_base(tmp.path()),
         )
         .unwrap_err();
         assert!(!error.to_string().is_empty());
@@ -1578,16 +1912,16 @@ mod tests {
             &plan(node(1, NodeState::Running)),
             1,
             0,
-            &Base {
-                reference: "main".into(),
-                commit: "abc".into(),
-            },
+            &immutable_head_base(tmp.path()),
         )
         .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("session \"owner-issue-1\" already exists but is not recorded"));
+        assert!(
+            error
+                .to_string()
+                .contains("session \"owner-issue-1\" already exists but is not recorded"),
+            "{error:#}"
+        );
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 
@@ -1606,10 +1940,7 @@ mod tests {
             &plan(node(1, NodeState::Running)),
             1,
             0,
-            &Base {
-                reference: "main".into(),
-                commit: "abc".into(),
-            },
+            &immutable_head_base(tmp.path()),
         )
         .unwrap_err();
 

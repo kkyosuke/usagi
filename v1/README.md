@@ -191,6 +191,8 @@ cargo run -- issue update 2 --status done
 
 `list` / `search` は依存（`--depends-on`）がすべて `done` になった「着手可能」な issue を `ready` と表示し、ブロック中のものには未達の依存番号を併記します。詳細は [document/03-commands/01-cli.md](document/03-commands/01-cli.md#usagi-issue)。
 
+durable orchestrator が未 merge の dependency PR を基点に後続 worker を dispatch する場合、PR head を immutable commit に解決し、その commit から worker worktree を作成します。worker 起動前に実際の `HEAD` が解決済み commit と一致することを検証し、prompt の base provenance にも同じ commit を記録します。head が不在・移動済み、または fetch 不能なら issue を blocked として worker を起動しません。この契約は新規 dispatch に適用され、既存 session は rebase しません。
+
 ### メモリを蓄積する
 
 セッションをまたいで覚えておきたい知識は `usagi memory` で管理できます（`<repo>/.usagi/memory/` に frontmatter 付き markdown で保存。issue と同じく git で共有されます）。issue がタスクを管理するのに対し、メモリはユーザーの好み・作業指針・プロジェクト固有の前提・外部リソースへのポインタといった、コードや git からは読み取れない事実を蓄積します:

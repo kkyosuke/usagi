@@ -59,6 +59,7 @@ pub(super) fn build_dir(
     src: &Path,
     dest: &Path,
     branch: &str,
+    base_commit: Option<&str>,
     worktrees: &mut Vec<PathBuf>,
 ) -> Result<()> {
     let mut entries = fs::read_dir(src)
@@ -86,13 +87,14 @@ pub(super) fn build_dir(
 
         if file_type.is_dir() {
             if is_repo_root(&from) {
-                let base = base_ref(&from);
-                git::add_worktree(&from, &to, branch, base.as_deref())?;
+                let configured_base = base_ref(&from);
+                let base = base_commit.or(configured_base.as_deref());
+                git::add_worktree(&from, &to, branch, base)?;
                 git::init_submodules(&to)?;
                 worktrees.push(to);
             } else {
                 fs::create_dir_all(&to).context(format!("failed to create {}", to.display()))?;
-                build_dir(&from, &to, branch, worktrees)?;
+                build_dir(&from, &to, branch, base_commit, worktrees)?;
             }
         } else {
             fs::copy(&from, &to).context(format!("failed to copy {}", from.display()))?;
