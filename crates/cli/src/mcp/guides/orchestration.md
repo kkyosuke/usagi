@@ -12,16 +12,89 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 - **root/coordinator は git 追跡ファイルを直接書かない**。実装や backlog の変更は対象 session
   の worktree で行う。
 
-## 接続済みの lifecycle 操作
+## 接続済みの操作
 
 | 操作 | tool | durable effect |
 |---|---|---|
 | session 作成 | `session_create` | daemon が session を lifecycle store に記録し、git worktree を作る |
+| 一覧・進捗観測 | `session_list` / `session_status` | lifecycle snapshot と agent phase・worktree の dirty/merged を返す |
+| 追加指示 | `session_prompt` | live Agent PTY または durable next-launch queue へ prompt を配送する |
+| 委譲 | `session_delegate_issue` / `session_delegate_brief` | session 作成と prompt queue 投入を不可分に行う |
+| PR 観測 | `session_pr` | daemon-owned PR inventory と merged 集約を返す |
+| 完了報告 | `session_complete` | 呼び出し元 session を credential から復元し root coordinator へ報告する |
+| scratchpad | `session_note_*` / `session_todo_*` / `session_decision_*` | 呼び出し元 session worktree の machine-local store を操作する |
 | session 破棄 | `session_remove` | daemon が worktree を破棄し、lifecycle store を更新する |
 | legacy state の検査・採用 | `session_recover_legacy` | 既定は検査だけを行い、`apply: true` のときだけ daemon lifecycle state へ採用する |
+| worker dispatch | `session_dispatch` | session を作成または再利用し、worker PTY と run/binding を durable に記録する |
+| worker の観測 | `session_get` / `agent_list` / `agent_get` | dispatch store の agent と run を返す |
+| worker の報告 | `agent_complete` / `agent_fail` | authenticated current run の報告を保存済み caller inbox へ配送する |
+| caller の受信 | `agent_inbox` | authenticated caller 自身の durable inbox を返す |
 
-`tools/list` に載るほかの名前は、このガイドの dispatch・observe・complete 手順には使わない。
-MCP の成功応答だけから durable effect を推測せず、上表の操作に限定する。
+## observe と prompt
+
+`session_list` は durable session identity の軽量一覧、`session_status` は Git 観測を含む詳細一覧である。
+coordinator は session の生存を `session_status`、成果の統合を `session_pr` の `merged` で判定する。
+
+`session_prompt` の `mode` は `auto`（既定）/ `queue` / `live` である。`auto` は live Agent が
+あれば PTY へ送り、無ければ daemon の durable next-launch queue に保存する。`queue` は live Agent が
+いると配送されない prompt を作らないためエラーになり、`live` は live Agent が無ければエラーになる。
+
+```json
+{"jsonrpc":"2.0","id":3,"method":"tools/call",
+ "params":{"name":"session_prompt","arguments":{"name":"issue-403","prompt":"追加の回帰テストも固定してください"}}}
+```
+
+## delegate
+
+committed issue は `session_delegate_issue`、事前 issue の無い依頼は `session_delegate_brief` を使う。
+どちらも daemon が worktree を作成した後、同じ session identity の queue へ初回 prompt を保存してから
+成功を返す。途中で session 作成が失敗した場合は queue 投入を行わない。
+
+```json
+{"jsonrpc":"2.0","id":4,"method":"tools/call",
+ "params":{"name":"session_delegate_brief","arguments":{"name":"triage-cache","brief":"cache invalidation を調査する"}}}
+```
+
+dispatch/agent tool は daemon が Agent 起動時に注入した private caller credential を必要とする。手動で
+起動した credential の無い `usagi mcp` からは利用できない。
+
+## worker を dispatch する
+
+`session_dispatch` は session 名と worker selector、prompt を受け取る。session は存在すれば再利用し、
+無ければ作成する。新規 worker の runtime/model は `tools/list` の schema に列挙された組だけを使う。
+
+```json
+{"name":"session_dispatch","arguments":{"session":{"name":"issue-123"},
+ "agent":{"runtime":"codex","model":"gpt-5"},"prompt":"issue #123 を実装する"}}
+```
+
+成功応答には durable `run_id`、`agent_id`、daemon-owned `terminal` が入る。既存 worker を再利用する場合は
+`agent` を `{"id":"<agent_id>"}` にする。
+
+## worker を観測する
+
+`session_get {"name":"issue-123"}` は session 内の agent と現在または最後の task を返す。
+`agent_list` は `session` / `status` で任意に絞り込み、`agent_get {"agent_id":"..."}` はその agent の
+run 履歴を返す。これらは daemon の dispatch store を読み、MCP server のローカル推測を返さない。
+
+## 完了または失敗を報告する
+
+worker は終了前に `agent_complete` または `agent_fail` を呼ぶ。宛先は指定しない。daemon が credential の
+current run と dispatch 時の binding を照合し、元 caller の inbox へ一度だけ配送する。
+
+```json
+{"name":"agent_complete","arguments":{"summary":"実装と検証が完了",
+ "result":{"pr":"https://example.test/pr/123","commits":["abc123"],
+ "changed_files":["src/example.rs"],"verification":"cargo test: green"}}}
+```
+
+`run_id` は通常省略する。指定した場合は authenticated current run と一致することの assertion として扱い、
+別 run の選択には使わない。失敗時は `agent_fail` に `summary` と任意の `error` を渡す。
+
+## caller inbox を読む
+
+caller は `agent_inbox {"unread_only":true}` で自分宛ての報告を読む。`since` には RFC 3339 timestamp を
+指定できる。worker が報告せず終了した場合も daemon が `no_report` を配送する。
 
 ## session を作成する
 

@@ -31,7 +31,7 @@ use usagi_core::infrastructure::store::dispatch::DispatchStore;
 use usagi_core::infrastructure::store::pr_inventory::PrInventoryStore;
 use usagi_core::infrastructure::store::user_decision::UserDecisionStore;
 use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
-use usagi_core::usecase::client::{DaemonRequest, DispatchToolAction};
+use usagi_core::usecase::client::{DaemonRequest, DispatchToolAction, SupervisorToolAction};
 use usagi_daemon::infrastructure::pty::PtyTerminal;
 use usagi_daemon::infrastructure::unix_transport::{SecureUnixListener, ensure_private_dir};
 use usagi_daemon::presentation::DaemonEnv;
@@ -55,6 +55,9 @@ use usagi_daemon::usecase::runtime::{
     OutputJournal, ProvisionContext, PtySpawner, RuntimeStore, RuntimeStoreSnapshot, SpawnProvision,
 };
 use usagi_daemon::usecase::session_runtime::{SessionRuntime, SessionRuntimeError, SystemGit};
+use usagi_daemon::usecase::supervisor_runtime::{
+    DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime,
+};
 use usagi_daemon::usecase::terminal::{Geometry, Output, PtyWriteError, PtyWriter, SpawnFailure};
 use usagi_daemon::usecase::terminal_ipc::{
     GenericTerminalRuntime, ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
@@ -384,6 +387,14 @@ fn available_worktree(snapshot: &serde_json::Value, session: SessionId) -> Optio
 
 type RootAgentRuntime = AgentRuntime<FileRuntimeStore, AgentPty, DiscardJournal>;
 type SharedAgentRuntime = Arc<Mutex<RootAgentRuntime>>;
+type SharedSupervisorRuntime = Arc<Mutex<SupervisorRuntime>>;
+
+struct DeferredDecisionWaker;
+impl DecisionWaker for DeferredDecisionWaker {
+    fn wake(&mut self, _: &DecisionWake) -> anyhow::Result<()> {
+        anyhow::bail!("parent agent wake adapter is unavailable")
+    }
+}
 
 /// Locks the shared Agent owner for one terminal request; a poisoned lock is a
 /// safe unavailable error rather than a client-side fallback.
@@ -829,10 +840,19 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         agent_pty,
         mcp_command,
     );
+    let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(&data_dir.join("daemon"))));
+    if let Ok(runtime) = supervisor.lock()
+        && let Err(error) = runtime.tick_all(chrono::Utc::now(), &mut DeferredDecisionWaker)
+    {
+        ErrorLog::record(&format!(
+            "supervisor startup reconciliation deferred: {error}"
+        ));
+    }
     start_agent_observer(
         Arc::clone(&agent),
         agent_observations,
         Arc::clone(&pr_inventory),
+        Arc::clone(&supervisor),
     )?;
     start_ipc_accept_loop(
         listener,
@@ -843,6 +863,7 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         pr_inventory,
         Arc::new(UserDecisionStore::new(data_dir.join("daemon"))),
         Arc::new(Mutex::new(ProcessMetrics { previous: None })),
+        supervisor,
     )
 }
 
@@ -896,6 +917,7 @@ fn start_agent_observer(
     agent: SharedAgentRuntime,
     observations: Receiver<AgentPtyObservation>,
     pr_inventory: SharedPrInventory,
+    supervisor: SharedSupervisorRuntime,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("usagi-agent-observer".to_string())
@@ -918,6 +940,14 @@ fn start_agent_observer(
                     }
                     AgentPtyObservation::Exited(reference, status) => {
                         let _ = agent.exit(&reference, status);
+                        if let Ok(runtime) = supervisor.lock()
+                            && let Err(error) =
+                                runtime.tick_all(chrono::Utc::now(), &mut DeferredDecisionWaker)
+                        {
+                            ErrorLog::record(&format!(
+                                "supervisor completion reconciliation deferred: {error}"
+                            ));
+                        }
                     }
                 }
             }
@@ -1010,6 +1040,7 @@ fn start_ipc_accept_loop(
     pr_inventory: SharedPrInventory,
     decisions: Arc<UserDecisionStore>,
     metrics: SharedProcessMetrics,
+    supervisor: SharedSupervisorRuntime,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("usagi-ipc".to_string())
@@ -1026,6 +1057,7 @@ fn start_ipc_accept_loop(
                         let pr_inventory = Arc::clone(&pr_inventory);
                         let decisions = Arc::clone(&decisions);
                         let metrics = Arc::clone(&metrics);
+                        let supervisor = Arc::clone(&supervisor);
                         let _ = std::thread::Builder::new()
                             .name("usagi-ipc-client".to_string())
                             .spawn(move || {
@@ -1043,16 +1075,17 @@ fn start_ipc_accept_loop(
                                     &mut writer,
                                     &server,
                                     &mut owner,
-                                    |request_id, body, hello| match body
+                                    |request_id, body, hello, connection, _client| match body
                                         .get("kind")
                                         .and_then(serde_json::Value::as_str)
                                     {
-                                        Some("session") => dispatch_session(&session, request_id, &body, hello),
+                                        Some("session") => dispatch_session(&session, &agent_launch, &pr_inventory, request_id, &body, hello),
                                         Some("agent") => dispatch_agent(&agent_launch, &scope_sessions, request_id, &body, hello),
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &scope_sessions, request_id, &body, hello),
                                         Some("metrics") => dispatch_metrics(&metrics, request_id, &body, hello),
                                         Some("pr") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
-                                        Some("dispatch_tool") => dispatch_user_decision(&agent_launch, &scope_sessions, &decisions, request_id, &body, hello),
+                                        Some("dispatch_tool") => dispatch_dispatch_tool(&agent_launch, &scope_sessions, &decisions, request_id, &body, hello),
+                                        Some("supervisor_tool") => dispatch_supervisor_tool(&supervisor, connection, request_id, &body, hello),
                                         _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
                                     },
                                 );
@@ -1066,6 +1099,656 @@ fn start_ipc_accept_loop(
             }
         })
         .map(|_| ())
+}
+
+fn dispatch_dispatch_tool(
+    agent: &SharedAgentRuntime,
+    sessions: &SharedSessionRuntime,
+    decisions: &UserDecisionStore,
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    body: &serde_json::Value,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    let action = serde_json::from_value::<DaemonRequest>(body.clone())
+        .ok()
+        .and_then(|request| match request {
+            DaemonRequest::DispatchTool { action, .. } => Some(action),
+            _ => None,
+        });
+    if action.is_some_and(|action| {
+        matches!(
+            action,
+            DispatchToolAction::Dispatch
+                | DispatchToolAction::SessionGet
+                | DispatchToolAction::AgentList
+                | DispatchToolAction::AgentGet
+                | DispatchToolAction::AgentComplete
+                | DispatchToolAction::AgentFail
+                | DispatchToolAction::AgentInbox
+        )
+    }) {
+        dispatch_agent_tool(agent, sessions, request_id, body, hello)
+    } else {
+        dispatch_user_decision(agent, sessions, decisions, request_id, body, hello)
+    }
+}
+
+#[allow(clippy::too_many_lines)] // One handler keeps authentication and durable routing atomic.
+fn dispatch_agent_tool(
+    agent: &SharedAgentRuntime,
+    sessions: &SharedSessionRuntime,
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    body: &serde_json::Value,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    use chrono::{DateTime, Utc};
+    use usagi_core::domain::agent::{
+        AgentProfileId, AgentStatus, InboxKind, ModelSelector, StructuredResult,
+    };
+    use usagi_core::domain::id::{AgentId, OperationId};
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
+    use usagi_core::usecase::client::{DispatchAgentIntent, DispatchIntent};
+
+    #[derive(Deserialize)]
+    struct SessionPayload {
+        name: String,
+    }
+    #[derive(Deserialize)]
+    struct DispatchPayload {
+        session: SessionPayload,
+        agent: serde_json::Value,
+        prompt: String,
+    }
+    #[derive(Deserialize)]
+    struct AgentIdPayload {
+        agent_id: AgentId,
+    }
+    #[derive(Deserialize)]
+    struct ReportPayload {
+        summary: String,
+        #[serde(default)]
+        result: Option<StructuredResult>,
+        #[serde(default)]
+        error: Option<String>,
+        #[serde(default)]
+        run_id: Option<OperationId>,
+    }
+    #[derive(Deserialize)]
+    struct InboxPayload {
+        #[serde(default)]
+        since: Option<DateTime<Utc>>,
+        #[serde(default)]
+        unread_only: bool,
+    }
+
+    let parsed = serde_json::from_value::<DaemonRequest>(body.clone())
+        .ok()
+        .and_then(|request| match request {
+            DaemonRequest::DispatchTool {
+                action,
+                operation_id,
+                payload,
+                caller_context,
+            } => Some((action, operation_id, payload, caller_context)),
+            _ => None,
+        });
+    let Some((action, operation_id, payload, caller_context)) = parsed else {
+        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+    };
+    let response = (|| -> Result<(ResponseOutcome, serde_json::Value), ProtocolError> {
+        let credential = caller_context
+            .as_ref()
+            .filter(|context| !context.credential.is_empty())
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::OwnershipUnknown,
+                    "agent caller provenance is unknown",
+                )
+            })?;
+        let snapshot = sessions
+            .lock()
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
+            })?
+            .snapshot()
+            .map_err(|_| {
+                ProtocolError::new(
+                    ErrorCode::Unavailable,
+                    "daemon could not read managed sessions",
+                )
+            })?;
+        let workspace = snapshot
+            .get("workspace_id")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .ok_or_else(|| {
+                ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
+            })?;
+        let mut runtime = agent.lock().map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+        })?;
+        let caller = runtime
+            .mcp_dispatch_caller(&credential.credential)
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::OwnershipUnknown,
+                    "agent caller provenance is unknown",
+                )
+            })?;
+        let store = runtime.dispatch_store();
+        let task_for = |agent_id: AgentId| -> Result<serde_json::Value, ProtocolError> {
+            let mut runs = store
+                .runs()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable")
+                })?
+                .into_iter()
+                .filter(|run| run.agent_id == agent_id)
+                .collect::<Vec<_>>();
+            runs.sort_by_key(|run| run.started_at);
+            Ok(runs
+                .last()
+                .map_or(serde_json::Value::Null, |run| serde_json::json!(run)))
+        };
+        match action {
+            DispatchToolAction::Dispatch => {
+                let input = serde_json::from_value::<DispatchPayload>(payload).map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid session_dispatch payload",
+                    )
+                })?;
+                let selected = if let Some(id) = input.agent.get("id") {
+                    if input.agent.as_object().is_none_or(|value| value.len() != 1) {
+                        return Err(ProtocolError::new(
+                            ErrorCode::InvalidArgument,
+                            "agent selector must use exactly one branch",
+                        ));
+                    }
+                    DispatchAgentIntent::Existing {
+                        agent_id: serde_json::from_value(id.clone()).map_err(|_| {
+                            ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent id")
+                        })?,
+                    }
+                } else {
+                    let object = input
+                        .agent
+                        .as_object()
+                        .filter(|value| value.len() == 2)
+                        .ok_or_else(|| {
+                            ProtocolError::new(
+                                ErrorCode::InvalidArgument,
+                                "agent selector must use exactly one branch",
+                            )
+                        })?;
+                    let runtime = object
+                        .get("runtime")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value::<AgentProfileId>(value).ok())
+                        .ok_or_else(|| {
+                            ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent runtime")
+                        })?;
+                    let model = object
+                        .get("model")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value::<ModelSelector>(value).ok())
+                        .ok_or_else(|| {
+                            ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent model")
+                        })?;
+                    DispatchAgentIntent::New { runtime, model }
+                };
+                let session_name = input.session.name;
+                let session_id = if let Some(id) = session_id_by_name(&snapshot, &session_name) {
+                    id
+                } else {
+                    drop(runtime);
+                    let created = sessions
+                        .lock()
+                        .map_err(|_| {
+                            ProtocolError::new(
+                                ErrorCode::Unavailable,
+                                "session runtime is unavailable",
+                            )
+                        })?
+                        .handle(
+                            usagi_core::usecase::client::SessionAction::Create,
+                            &operation_id,
+                            &serde_json::json!({"name": session_name}),
+                        )
+                        .map_err(|error| {
+                            ProtocolError::new(ErrorCode::InvalidArgument, error.safe_message())
+                        })?;
+                    let id = session_id_by_name(&created.body, &session_name).ok_or_else(|| {
+                        ProtocolError::new(
+                            ErrorCode::Unavailable,
+                            "created session is not available",
+                        )
+                    })?;
+                    runtime = agent.lock().map_err(|_| {
+                        ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                    })?;
+                    id
+                };
+                let scope = SharedScopeResolver(Arc::clone(sessions));
+                let admission = runtime.dispatch(
+                    &operation_id,
+                    &DispatchIntent {
+                        workspace,
+                        session_name: session_name.clone(),
+                        caller,
+                        agent: selected,
+                        prompt: input.prompt,
+                    },
+                    session_id,
+                    &scope,
+                )?;
+                let run_id = OperationId::parse(&admission.operation_id)
+                    .map_err(|_| ProtocolError::new(ErrorCode::Internal, "invalid admitted run"))?;
+                let run = runtime
+                    .dispatch_store()
+                    .runs()
+                    .map_err(|_| {
+                        ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable")
+                    })?
+                    .into_iter()
+                    .find(|run| run.run_id == run_id)
+                    .ok_or_else(|| {
+                        ProtocolError::new(
+                            ErrorCode::Unavailable,
+                            "admitted dispatch is unavailable",
+                        )
+                    })?;
+                Ok((
+                    ResponseOutcome::Accepted {
+                        operation_id: usagi_core::infrastructure::ipc::OperationId(
+                            admission.operation_id.clone(),
+                        ),
+                        operation_revision: admission.revision,
+                    },
+                    serde_json::json!({"run_id": admission.operation_id, "session": session_name, "agent_id": run.agent_id, "terminal": admission.terminal, "completed": admission.completed}),
+                ))
+            }
+            DispatchToolAction::SessionGet => {
+                let input = serde_json::from_value::<SessionPayload>(payload).map_err(|_| {
+                    ProtocolError::new(ErrorCode::InvalidArgument, "invalid session_get payload")
+                })?;
+                let session_id = session_id_by_name(&snapshot, &input.name).ok_or_else(|| {
+                    ProtocolError::new(ErrorCode::InvalidArgument, "session was not found")
+                })?;
+                let agents = store.agents().map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable"))?.into_iter().filter(|item| item.session_id == Some(session_id)).map(|item| Ok(serde_json::json!({"agent_id": item.agent_id, "runtime": item.runtime, "model": item.model, "status": item.status, "task": task_for(item.agent_id)?}))).collect::<Result<Vec<_>, ProtocolError>>()?;
+                Ok((
+                    ResponseOutcome::Ok,
+                    serde_json::json!({"session": input.name, "agents": agents}),
+                ))
+            }
+            DispatchToolAction::AgentList => {
+                let session = payload
+                    .get("session")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|name| {
+                        session_id_by_name(&snapshot, name).ok_or_else(|| {
+                            ProtocolError::new(ErrorCode::InvalidArgument, "session was not found")
+                        })
+                    })
+                    .transpose()?;
+                let status = payload
+                    .get("status")
+                    .cloned()
+                    .map(serde_json::from_value::<AgentStatus>)
+                    .transpose()
+                    .map_err(|_| {
+                        ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent status")
+                    })?;
+                let agents = store.agents().map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable"))?.into_iter().filter(|item| session.is_none_or(|id| item.session_id == Some(id)) && status.is_none_or(|value| item.status == value)).map(|item| Ok(serde_json::json!({"agent_id": item.agent_id, "session_id": item.session_id, "runtime": item.runtime, "model": item.model, "status": item.status, "task": task_for(item.agent_id)?}))).collect::<Result<Vec<_>, ProtocolError>>()?;
+                Ok((ResponseOutcome::Ok, serde_json::json!({"agents": agents})))
+            }
+            DispatchToolAction::AgentGet => {
+                let input = serde_json::from_value::<AgentIdPayload>(payload).map_err(|_| {
+                    ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent_get payload")
+                })?;
+                let item = store
+                    .agent(input.agent_id)
+                    .map_err(|_| {
+                        ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable")
+                    })?
+                    .ok_or_else(|| {
+                        ProtocolError::new(ErrorCode::InvalidArgument, "agent was not found")
+                    })?;
+                let runs = store
+                    .runs()
+                    .map_err(|_| {
+                        ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable")
+                    })?
+                    .into_iter()
+                    .filter(|run| run.agent_id == item.agent_id)
+                    .collect::<Vec<_>>();
+                Ok((
+                    ResponseOutcome::Ok,
+                    serde_json::json!({"agent": item, "runs": runs}),
+                ))
+            }
+            DispatchToolAction::AgentComplete | DispatchToolAction::AgentFail => {
+                let input = serde_json::from_value::<ReportPayload>(payload).map_err(|_| {
+                    ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent report payload")
+                })?;
+                if input.summary.trim().is_empty() {
+                    return Err(ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "report summary must not be empty",
+                    ));
+                }
+                let kind = if action == DispatchToolAction::AgentComplete {
+                    InboxKind::Completed
+                } else {
+                    InboxKind::Failed
+                };
+                let summary = input
+                    .error
+                    .filter(|_| kind == InboxKind::Failed)
+                    .map_or(input.summary.clone(), |error| {
+                        format!("{}: {error}", input.summary)
+                    });
+                let delivered = runtime.report_from_mcp(
+                    &credential.credential,
+                    input.run_id,
+                    kind,
+                    summary,
+                    input.result,
+                )?;
+                Ok((
+                    ResponseOutcome::Ok,
+                    serde_json::json!({"delivered_to": delivered}),
+                ))
+            }
+            DispatchToolAction::AgentInbox => {
+                let input = serde_json::from_value::<InboxPayload>(payload).map_err(|_| {
+                    ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent_inbox payload")
+                })?;
+                let messages = store
+                    .inbox(&caller)
+                    .map_err(|_| {
+                        ProtocolError::new(ErrorCode::Unavailable, "dispatch inbox is unavailable")
+                    })?
+                    .into_iter()
+                    .filter(|message| !input.unread_only || !message.read)
+                    .filter(|message| input.since.is_none_or(|since| message.created_at > since))
+                    .collect::<Vec<_>>();
+                Ok((
+                    ResponseOutcome::Ok,
+                    serde_json::json!({"messages": messages}),
+                ))
+            }
+            _ => Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "invalid agent tool action",
+            )),
+        }
+    })();
+    match response {
+        Ok((outcome, body)) => envelope(hello, request_id, outcome, body),
+        Err(error) => envelope(
+            hello,
+            request_id,
+            usagi_core::infrastructure::ipc::ResponseOutcome::Error(error),
+            serde_json::Value::Null,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn dispatch_supervisor_tool(
+    runtime: &SharedSupervisorRuntime,
+    connection: usagi_core::domain::id::ConnectionId,
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    body: &serde_json::Value,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    use chrono::Utc;
+    use usagi_core::domain::{
+        id::OperationId,
+        supervisor::{EscalationDecision, SupervisorRunId, SupervisorRunState},
+    };
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
+
+    #[derive(Deserialize)]
+    struct StartPayload {
+        root_task: String,
+        #[serde(default)]
+        initial_task_dag: Vec<InitialTask>,
+        policy_selector: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct RunPayload {
+        supervisor_run_id: SupervisorRunId,
+    }
+    #[derive(Deserialize)]
+    struct ListPayload {
+        state: Option<SupervisorRunState>,
+        caller: Option<String>,
+        session: Option<String>,
+        cursor: Option<String>,
+        #[serde(default = "default_page_limit")]
+        limit: usize,
+    }
+    #[derive(Deserialize)]
+    struct CancelPayload {
+        supervisor_run_id: SupervisorRunId,
+        reason: String,
+    }
+    #[derive(Deserialize)]
+    struct ResolvePayload {
+        supervisor_run_id: SupervisorRunId,
+        escalation_id: OperationId,
+        decision: EscalationDecision,
+    }
+    #[derive(Deserialize)]
+    struct EventsPayload {
+        supervisor_run_id: SupervisorRunId,
+        #[serde(default)]
+        after_sequence: u64,
+        #[serde(default = "default_page_limit")]
+        limit: usize,
+    }
+
+    fn default_page_limit() -> usize {
+        50
+    }
+
+    let parsed = serde_json::from_value::<DaemonRequest>(body.clone());
+    let Ok(DaemonRequest::SupervisorTool {
+        action,
+        operation_id,
+        payload,
+    }) = parsed
+    else {
+        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+    };
+    let caller = format!("ipc-connection:{connection}");
+    let result = runtime
+        .lock()
+        .map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "supervisor runtime is unavailable")
+        })
+        .and_then(|runtime| match action {
+            SupervisorToolAction::Start => {
+                let input: StartPayload = serde_json::from_value(payload).map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid supervisor_start payload",
+                    )
+                })?;
+                let started = runtime
+                    .start(
+                        &caller,
+                        &operation_id,
+                        input.root_task,
+                        input.initial_task_dag,
+                        input.policy_selector,
+                        Utc::now(),
+                    )
+                    .map_err(supervisor_error)?;
+                runtime
+                    .tick(
+                        started.supervisor_run_id,
+                        Utc::now(),
+                        &mut DeferredDecisionWaker,
+                    )
+                    .map_err(supervisor_error)?;
+                serde_json::to_value(
+                    runtime
+                        .get(&caller, started.supervisor_run_id)
+                        .map_err(supervisor_error)?
+                        .ok_or_else(|| {
+                            ProtocolError::new(
+                                ErrorCode::Internal,
+                                "started supervisor run disappeared",
+                            )
+                        })?,
+                )
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Internal, "supervisor response encoding failed")
+                })
+            }
+            SupervisorToolAction::Get => {
+                let input: RunPayload = serde_json::from_value(payload).map_err(|_| {
+                    ProtocolError::new(ErrorCode::InvalidArgument, "invalid supervisor_get payload")
+                })?;
+                serde_json::to_value(
+                    runtime
+                        .get(&caller, input.supervisor_run_id)
+                        .map_err(supervisor_error)?
+                        .ok_or_else(|| {
+                            ProtocolError::new(
+                                ErrorCode::OwnershipUnknown,
+                                "supervisor run is unavailable to this caller",
+                            )
+                        })?,
+                )
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Internal, "supervisor response encoding failed")
+                })
+            }
+            SupervisorToolAction::List => {
+                let input: ListPayload = serde_json::from_value(payload).map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid supervisor_list payload",
+                    )
+                })?;
+                if input.limit == 0
+                    || input.limit > 100
+                    || input.session.is_some()
+                    || input.caller.as_ref().is_some_and(|value| value != &caller)
+                {
+                    return Err(ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid supervisor_list filter",
+                    ));
+                }
+                let offset = input
+                    .cursor
+                    .as_deref()
+                    .unwrap_or("0")
+                    .parse::<usize>()
+                    .map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::InvalidArgument,
+                            "invalid supervisor_list cursor",
+                        )
+                    })?;
+                let runs = runtime
+                    .list(&caller, input.state)
+                    .map_err(supervisor_error)?;
+                let page: Vec<_> = runs.iter().skip(offset).take(input.limit).collect();
+                let next_cursor =
+                    (offset + page.len() < runs.len()).then(|| (offset + page.len()).to_string());
+                Ok(serde_json::json!({"runs": page, "next_cursor": next_cursor}))
+            }
+            SupervisorToolAction::Cancel => {
+                let input: CancelPayload = serde_json::from_value(payload).map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid supervisor_cancel payload",
+                    )
+                })?;
+                serde_json::to_value(
+                    runtime
+                        .cancel(&caller, input.supervisor_run_id, input.reason, Utc::now())
+                        .map_err(supervisor_error)?,
+                )
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Internal, "supervisor response encoding failed")
+                })
+            }
+            SupervisorToolAction::ResolveEscalation => {
+                let input: ResolvePayload = serde_json::from_value(payload).map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid supervisor_resolve_escalation payload",
+                    )
+                })?;
+                serde_json::to_value(
+                    runtime
+                        .resolve_escalation(
+                            &caller,
+                            input.supervisor_run_id,
+                            input.escalation_id,
+                            input.decision,
+                            Utc::now(),
+                        )
+                        .map_err(supervisor_error)?,
+                )
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Internal, "supervisor response encoding failed")
+                })
+            }
+            SupervisorToolAction::Events => {
+                let input: EventsPayload = serde_json::from_value(payload).map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid supervisor_events payload",
+                    )
+                })?;
+                if input.limit == 0 || input.limit > 100 {
+                    return Err(ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid supervisor_events limit",
+                    ));
+                }
+                let (events, cursor) = runtime
+                    .events(
+                        &caller,
+                        input.supervisor_run_id,
+                        input.after_sequence,
+                        input.limit,
+                    )
+                    .map_err(supervisor_error)?;
+                Ok(serde_json::json!({"events": events, "next_sequence": cursor.next_sequence}))
+            }
+        });
+    match result {
+        Ok(value) => envelope(hello, request_id, ResponseOutcome::Ok, value),
+        Err(error) => envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Error(error),
+            serde_json::json!(null),
+        ),
+    }
+}
+
+fn supervisor_error(error: anyhow::Error) -> usagi_core::infrastructure::ipc::ProtocolError {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+    let message = error.to_string();
+    drop(error);
+    let code = if message.contains("reused") {
+        ErrorCode::IdempotencyConflict
+    } else if message.contains("does not exist") {
+        ErrorCode::OwnershipUnknown
+    } else {
+        ErrorCode::InvalidArgument
+    };
+    ProtocolError::new(code, message)
 }
 
 /// PR events are deliberately only hints; the IPC request always returns this
@@ -1434,6 +2117,8 @@ fn dispatch_metrics(
 
 fn dispatch_session(
     session: &SharedSessionRuntime,
+    agent: &SharedAgentRuntime,
+    pr_inventory: &SharedPrInventory,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -1453,10 +2138,14 @@ fn dispatch_session(
     let Some((action, operation_id, payload)) = request else {
         return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
     };
-    let result = session
-        .lock()
-        .map_err(|_| SessionRuntimeError::Storage)
-        .and_then(|mut session| session.handle(action, &operation_id, &payload));
+    let result = dispatch_session_action(
+        session,
+        agent,
+        pr_inventory,
+        action,
+        &operation_id,
+        &payload,
+    );
     match result {
         Ok(reply) => {
             let recovery_apply =
@@ -1485,9 +2174,22 @@ fn dispatch_session(
                 SessionAction::RecoverLegacy if recovery_apply => Some("session.legacy_recovered"),
                 SessionAction::RecoverLegacy
                 | SessionAction::List
+                | SessionAction::Status
                 | SessionAction::Overview
                 | SessionAction::Setup
-                | SessionAction::Prompt => None,
+                | SessionAction::Prompt
+                | SessionAction::Complete
+                | SessionAction::Pr
+                | SessionAction::NoteGet
+                | SessionAction::NoteUpdate
+                | SessionAction::TodoList
+                | SessionAction::TodoAdd
+                | SessionAction::TodoUpdate
+                | SessionAction::TodoRemove
+                | SessionAction::DecisionList
+                | SessionAction::DecisionLog
+                | SessionAction::DelegateIssue
+                | SessionAction::DelegateBrief => None,
             } && let Some(object) = body.as_object_mut()
             {
                 object.insert(
@@ -1517,6 +2219,298 @@ fn dispatch_session(
                 serde_json::json!(null),
             )
         }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn dispatch_session_action(
+    sessions: &SharedSessionRuntime,
+    agent: &SharedAgentRuntime,
+    pr_inventory: &SharedPrInventory,
+    action: usagi_core::usecase::client::SessionAction,
+    operation_id: &str,
+    payload: &serde_json::Value,
+) -> Result<usagi_daemon::usecase::session_runtime::SessionReply, SessionRuntimeError> {
+    use usagi_core::infrastructure::store::{issue::IssueStore, state::WorkspaceStateStore};
+    use usagi_core::usecase::client::SessionAction;
+    use usagi_core::usecase::{issue, note};
+    use usagi_daemon::usecase::agent_ipc::PromptMode;
+
+    let reply = |body: serde_json::Value| {
+        let revision = sessions
+            .lock()
+            .ok()
+            .and_then(|runtime| runtime.snapshot().ok())
+            .and_then(|snapshot| snapshot.get("revision").and_then(serde_json::Value::as_u64))
+            .unwrap_or_default();
+        Ok(usagi_daemon::usecase::session_runtime::SessionReply {
+            operation_id: operation_id.to_owned(),
+            revision,
+            body,
+        })
+    };
+    let string = |key: &str| {
+        payload
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or(SessionRuntimeError::InvalidRequest)
+    };
+    let caller_scope = || {
+        let credential = string("_caller_credential")?;
+        let session_id = agent
+            .lock()
+            .map_err(|_| SessionRuntimeError::Storage)?
+            .caller_session(credential)
+            .ok_or(SessionRuntimeError::ScopeUnavailable)?;
+        sessions
+            .lock()
+            .map_err(|_| SessionRuntimeError::Storage)?
+            .session_scope_by_id(session_id)
+    };
+    let named_session = |name: &str| {
+        sessions
+            .lock()
+            .map_err(|_| SessionRuntimeError::Storage)?
+            .session_id(name)
+    };
+
+    match action {
+        SessionAction::Status => {
+            let mut status = sessions
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .handle(action, operation_id, payload)?;
+            let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
+            if let Some(items) = status
+                .body
+                .get_mut("sessions")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for item in items {
+                    if let Some(id) = item
+                        .get("session_id")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok())
+                    {
+                        item["agent_phase"] = serde_json::json!(runtime.session_phase(id));
+                    }
+                }
+            }
+            Ok(status)
+        }
+        SessionAction::Prompt => {
+            let name = string("name")?;
+            let prompt = string("prompt")?;
+            let target = if name == ":root" {
+                None
+            } else {
+                Some(named_session(name)?)
+            };
+            let mode = match payload
+                .get("mode")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("auto")
+            {
+                "auto" => PromptMode::Auto,
+                "queue" => PromptMode::Queue,
+                "live" => PromptMode::Live,
+                _ => return Err(SessionRuntimeError::InvalidRequest),
+            };
+            let delivery = agent
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .prompt(target, prompt, mode)
+                .map_err(|error| SessionRuntimeError::Delivery(error.message))?;
+            reply(
+                serde_json::json!({"name": name, "delivered_to": delivery.delivered_to, "queued": delivery.queued}),
+            )
+        }
+        SessionAction::Complete => {
+            let message = string("message")?;
+            let scope = caller_scope()?;
+            let report = format!("Session {} completed:\n\n{message}", scope.session_id);
+            let delivery = agent
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .prompt(None, &report, PromptMode::Auto)
+                .map_err(|error| SessionRuntimeError::Delivery(error.message))?;
+            reply(
+                serde_json::json!({"session_id": scope.session_id, "reported_to": ":root", "delivered_to": delivery.delivered_to}),
+            )
+        }
+        SessionAction::Pr => {
+            let name = string("name")?;
+            let id = named_session(name)?;
+            let snapshot = pr_inventory
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .snapshot(id)
+                .map_err(|_| SessionRuntimeError::Storage)?;
+            let merged = snapshot
+                .entries
+                .iter()
+                .any(|entry| entry.state == usagi_core::domain::pr_inventory::PrState::Merged);
+            reply(
+                serde_json::json!({"name": name, "session_id": id, "revision": snapshot.revision, "merged": merged, "pr": snapshot.entries}),
+            )
+        }
+        SessionAction::NoteGet
+        | SessionAction::NoteUpdate
+        | SessionAction::TodoList
+        | SessionAction::TodoAdd
+        | SessionAction::TodoUpdate
+        | SessionAction::TodoRemove
+        | SessionAction::DecisionList
+        | SessionAction::DecisionLog => {
+            let scope = caller_scope()?;
+            let store = WorkspaceStateStore::new(&scope.path);
+            let target = note::Target::Root;
+            let body = match action {
+                SessionAction::NoteGet => {
+                    serde_json::json!({"note": note::note(&store, target).map_err(|_| SessionRuntimeError::Storage)?})
+                }
+                SessionAction::NoteUpdate => {
+                    let value = payload
+                        .get("note")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or(SessionRuntimeError::InvalidRequest)?;
+                    note::set_note(&store, target, value, chrono::Utc::now())
+                        .map_err(|_| SessionRuntimeError::Storage)?;
+                    serde_json::json!({"note": note::note(&store, target).map_err(|_| SessionRuntimeError::Storage)?})
+                }
+                SessionAction::TodoList => {
+                    serde_json::json!({"todos": note::todos(&store, target).map_err(|_| SessionRuntimeError::Storage)?})
+                }
+                SessionAction::TodoAdd => {
+                    let text = string("text")?;
+                    note::add_todo(&store, target, text, chrono::Utc::now())
+                        .map_err(|_| SessionRuntimeError::Storage)?;
+                    serde_json::json!({"todos": note::todos(&store, target).map_err(|_| SessionRuntimeError::Storage)?})
+                }
+                SessionAction::TodoUpdate => {
+                    let index = payload
+                        .get("index")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| usize::try_from(value).ok())
+                        .ok_or(SessionRuntimeError::InvalidRequest)?;
+                    let done = payload
+                        .get("done")
+                        .map(|value| value.as_bool().ok_or(SessionRuntimeError::InvalidRequest))
+                        .transpose()?;
+                    let text = payload
+                        .get("text")
+                        .map(|value| {
+                            value
+                                .as_str()
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                                .map(str::to_owned)
+                                .ok_or(SessionRuntimeError::InvalidRequest)
+                        })
+                        .transpose()?;
+                    if done.is_none() && text.is_none() {
+                        return Err(SessionRuntimeError::InvalidRequest);
+                    }
+                    if !note::update_todo(&store, target, index, done, text, chrono::Utc::now())
+                        .map_err(|_| SessionRuntimeError::Storage)?
+                    {
+                        return Err(SessionRuntimeError::InvalidRequest);
+                    }
+                    serde_json::json!({"todos": note::todos(&store, target).map_err(|_| SessionRuntimeError::Storage)?})
+                }
+                SessionAction::TodoRemove => {
+                    let index = payload
+                        .get("index")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| usize::try_from(value).ok())
+                        .ok_or(SessionRuntimeError::InvalidRequest)?;
+                    if !note::remove_todo(&store, target, index, chrono::Utc::now())
+                        .map_err(|_| SessionRuntimeError::Storage)?
+                    {
+                        return Err(SessionRuntimeError::InvalidRequest);
+                    }
+                    serde_json::json!({"todos": note::todos(&store, target).map_err(|_| SessionRuntimeError::Storage)?})
+                }
+                SessionAction::DecisionList => {
+                    serde_json::json!({"decisions": note::decisions(&store, target).map_err(|_| SessionRuntimeError::Storage)?})
+                }
+                SessionAction::DecisionLog => {
+                    let text = string("text")?;
+                    note::log_decision(&store, target, text, chrono::Utc::now())
+                        .map_err(|_| SessionRuntimeError::Storage)?;
+                    serde_json::json!({"decisions": note::decisions(&store, target).map_err(|_| SessionRuntimeError::Storage)?})
+                }
+                _ => unreachable!(),
+            };
+            reply(serde_json::json!({"session_id": scope.session_id, "scratchpad": body}))
+        }
+        SessionAction::DelegateIssue | SessionAction::DelegateBrief => {
+            let (name, prompt) = if action == SessionAction::DelegateIssue {
+                let number = payload
+                    .get("number")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or(SessionRuntimeError::InvalidRequest)?;
+                let root = sessions
+                    .lock()
+                    .map_err(|_| SessionRuntimeError::Storage)?
+                    .repository_root()
+                    .to_path_buf();
+                let issue = issue::get(&IssueStore::new(root), number)
+                    .map_err(|_| SessionRuntimeError::Storage)?
+                    .ok_or(SessionRuntimeError::InvalidRequest)?;
+                (
+                    payload
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map_or_else(|| format!("issue-{number}"), str::to_owned),
+                    issue::to_prompt(&issue),
+                )
+            } else {
+                let brief = string("brief")?;
+                let suffix = operation_id
+                    .chars()
+                    .filter(char::is_ascii_alphanumeric)
+                    .take(8)
+                    .collect::<String>();
+                let name = payload
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map_or_else(|| format!("triage-{suffix}"), str::to_owned);
+                (
+                    name,
+                    format!(
+                        "このセッションの worktree 内で次の依頼をトリアージし、必要なら issue 化して実装へつなげてください。リポジトリの規約に従ってください。\n\n{brief}"
+                    ),
+                )
+            };
+            let created = sessions
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .handle(
+                    SessionAction::Create,
+                    operation_id,
+                    &serde_json::json!({"name": name}),
+                )?;
+            let id = sessions
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .session_id(&name)?;
+            let delivery = agent
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .prompt(Some(id), &prompt, PromptMode::Queue)
+                .map_err(|error| SessionRuntimeError::Delivery(error.message))?;
+            reply(
+                serde_json::json!({"name": name, "session_id": id, "created": created.body, "delivered_to": delivery.delivered_to, "queued": delivery.queued}),
+            )
+        }
+        _ => sessions
+            .lock()
+            .map_err(|_| SessionRuntimeError::Storage)?
+            .handle(action, operation_id, payload),
     }
 }
 

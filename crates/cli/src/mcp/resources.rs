@@ -117,7 +117,9 @@ mod tests {
         assert_eq!(contents[0]["mimeType"], "text/markdown");
         let text = contents[0]["text"].as_str().unwrap();
         assert!(text.contains("session_create"));
-        assert!(!text.contains("session_delegate_brief"));
+        assert!(text.contains("session_status"));
+        assert!(text.contains("session_prompt"));
+        assert!(text.contains("session_delegate_brief"));
     }
 
     #[test]

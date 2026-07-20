@@ -5,6 +5,7 @@
 //! `handle_line`（str → 応答文字列 or なし）に純粋なルーティングを閉じ込め、`serve` は
 //! 実 IO（stdin/stdout）の反復だけを担う。実 IO は合成ルートが注入するため、ルーティングは
 //! ユニットテストできる。`tools/call` は実装済み tool を対応する store / daemon 経路へ送り、
+//! issue / memory は cwd の core store usecase、session 系は daemon client へ接続し、
 //! tool 個別または daemon のエラーを JSON-RPC エラーへ変換する。
 
 use std::io::{self, BufRead, Write};
@@ -226,6 +227,7 @@ fn tools_call(
         .and_then(|p| p.get("arguments"))
         .cloned()
         .unwrap_or_else(|| json!({}));
+    attach_session_caller(name, &mut arguments);
     if name == "session_dispatch" {
         let Some(agent) = arguments.get("agent") else {
             return protocol::error(id, error_code::INVALID_PARAMS, "missing agent");
@@ -301,18 +303,52 @@ fn tools_call(
             Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
         };
     }
+    store_tool_call(id, name, &arguments)
+}
+
+#[coverage(off)]
+fn store_tool_call(id: Value, name: &str, arguments: &Value) -> Value {
     match dispatch(name, &arguments.to_string()) {
+        Ok(result) => protocol::success(
+            id,
+            json!({"content":[{"type":"text","text":result}], "isError": false}),
+        ),
         Err(ToolError::UnknownTool(tool)) => protocol::error(
             id,
             error_code::METHOD_NOT_FOUND,
             &format!("unknown tool: {tool}"),
         ),
-        // 全 tool が未実装スタブ。将来 Ok(result) を返す tool は MCP の content に包む。
-        _ => protocol::error(
+        Err(ToolError::InvalidParams(message)) => {
+            protocol::error(id, error_code::INVALID_PARAMS, &message)
+        }
+        Err(ToolError::Execution(message)) => {
+            protocol::error(id, error_code::INTERNAL_ERROR, &message)
+        }
+        Err(ToolError::Unimplemented(_)) => protocol::error(
             id,
             error_code::INTERNAL_ERROR,
             &format!("tool not yet implemented: {name}"),
         ),
+    }
+}
+
+#[coverage(off)]
+fn attach_session_caller(name: &str, arguments: &mut Value) {
+    if matches!(
+        name,
+        "session_complete"
+            | "session_note_get"
+            | "session_note_update"
+            | "session_todo_list"
+            | "session_todo_add"
+            | "session_todo_update"
+            | "session_todo_remove"
+            | "session_decision_list"
+            | "session_decision_log"
+    ) && let Ok(credential) = std::env::var("USAGI_MCP_CALLER_CREDENTIAL")
+        && !credential.is_empty()
+    {
+        arguments["_caller_credential"] = Value::String(credential);
     }
 }
 
@@ -338,10 +374,24 @@ fn resources_read(id: Value, params: Option<&Value>) -> Value {
 fn session_action(name: &str) -> Option<SessionAction> {
     match name {
         "session_create" => Some(SessionAction::Create),
+        "session_list" => Some(SessionAction::List),
+        "session_status" => Some(SessionAction::Status),
+        "session_complete" => Some(SessionAction::Complete),
+        "session_pr" => Some(SessionAction::Pr),
         "session_remove" => Some(SessionAction::Remove),
         "session_recover_legacy" => Some(SessionAction::RecoverLegacy),
         "session_setup" => Some(SessionAction::Setup),
         "session_prompt" => Some(SessionAction::Prompt),
+        "session_note_get" => Some(SessionAction::NoteGet),
+        "session_note_update" => Some(SessionAction::NoteUpdate),
+        "session_todo_list" => Some(SessionAction::TodoList),
+        "session_todo_add" => Some(SessionAction::TodoAdd),
+        "session_todo_update" => Some(SessionAction::TodoUpdate),
+        "session_todo_remove" => Some(SessionAction::TodoRemove),
+        "session_decision_list" => Some(SessionAction::DecisionList),
+        "session_decision_log" => Some(SessionAction::DecisionLog),
+        "session_delegate_issue" => Some(SessionAction::DelegateIssue),
+        "session_delegate_brief" => Some(SessionAction::DelegateBrief),
         _ => None,
     }
 }
@@ -449,14 +499,24 @@ mod tests {
     }
 
     #[test]
-    fn tools_call_known_tool_reports_unimplemented() {
-        let v = call(r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"issue_create","arguments":{"title":"x"}}}"#).unwrap();
-        assert_eq!(v["error"]["code"], -32603);
+    fn tools_call_store_tool_returns_content() {
+        let v = call(r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"issue_get","arguments":{"number":4294967295}}}"#).unwrap();
+        assert_eq!(v["result"]["content"][0]["text"], "null");
+        assert_eq!(v["result"]["isError"], false);
+    }
+
+    #[test]
+    fn tools_call_store_tool_maps_invalid_arguments_and_execution_errors() {
+        let invalid = call(r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"issue_get","arguments":{}}}"#).unwrap();
+        assert_eq!(invalid["error"]["code"], -32602);
+
+        let missing = call(r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"issue_to_prompt","arguments":{"number":4294967295}}}"#).unwrap();
+        assert_eq!(missing["error"]["code"], -32603);
         assert!(
-            v["error"]["message"]
+            missing["error"]["message"]
                 .as_str()
                 .unwrap()
-                .contains("issue_create")
+                .contains("no issue")
         );
     }
 
@@ -622,6 +682,38 @@ mod tests {
                         "content"
                     })
             );
+        }
+    }
+
+    #[test]
+    fn observation_scratchpad_and_delegate_tools_route_to_the_daemon() {
+        for name in [
+            "session_list",
+            "session_status",
+            "session_complete",
+            "session_pr",
+            "session_note_get",
+            "session_note_update",
+            "session_todo_list",
+            "session_todo_add",
+            "session_todo_update",
+            "session_todo_remove",
+            "session_decision_list",
+            "session_decision_log",
+            "session_delegate_issue",
+            "session_delegate_brief",
+        ] {
+            let input = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{{}}}}}}"#
+            ) + "\n";
+            let mut out = Vec::new();
+            let mut client = RecordingClient {
+                reply: Ok(DaemonReply::Ok(serde_json::json!({"connected":true}))),
+                requests: vec![],
+            };
+            serve_with_client(input.as_bytes(), &mut out, "9.9.9", &mut client).unwrap();
+            assert_eq!(client.requests.len(), 1, "{name}");
+            assert!(String::from_utf8(out).unwrap().contains("connected"));
         }
     }
 

@@ -106,6 +106,19 @@ pub struct AgentAdmission {
     pub completed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptMode {
+    Auto,
+    Queue,
+    Live,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptDelivery {
+    pub delivered_to: &'static str,
+    pub queued: bool,
+}
+
 /// One durable Agent operation, replayed identically on resend/reconnect.
 #[derive(Debug, Clone)]
 struct AgentOperation {
@@ -277,6 +290,18 @@ impl<S, P, J, L> AgentRuntime<S, P, J, L> {
             .filter(|record| record.state == super::runtime::RuntimeState::Running)
             .map(|_| caller.operation)
     }
+
+    /// Resolves the durable dispatch identity authenticated by an MCP child.
+    /// The credential is daemon-minted process provision; no client supplied
+    /// agent or session name participates in this lookup.
+    pub fn mcp_dispatch_caller(&self, credential: &str) -> Option<CallerRef> {
+        let run_id = self.mcp_caller(credential)?;
+        let binding = self.dispatch.binding(run_id).ok()??;
+        Some(CallerRef {
+            session_id: binding.worker.session_id,
+            agent_id: binding.worker.agent_id,
+        })
+    }
 }
 
 impl<
@@ -286,6 +311,93 @@ impl<
     L: ExecutableLocator,
 > AgentRuntime<S, P, J, L>
 {
+    /// Resolves an authenticated MCP child to its owning managed session.
+    #[must_use]
+    pub fn caller_session(&self, credential: &str) -> Option<SessionId> {
+        let caller = self.mcp_callers.get(credential)?;
+        self.coordinator
+            .record_for(&caller.runtime)
+            .ok()
+            .filter(|record| record.state == super::runtime::RuntimeState::Running)
+            .and_then(|record| record.runtime.session_id)
+    }
+
+    /// Returns the durable runtime phase projected for one session.
+    #[must_use]
+    pub fn session_phase(&self, session: SessionId) -> &'static str {
+        use super::runtime::RuntimeState;
+        self.coordinator
+            .snapshot()
+            .records
+            .into_iter()
+            .filter(|record| record.runtime.session_id == Some(session))
+            .map(|record| match record.state {
+                RuntimeState::Running => (4, "running"),
+                RuntimeState::Reserved => (3, "ready"),
+                RuntimeState::SpawnFailed | RuntimeState::ReconcileRequired(_) => (2, "exited"),
+                RuntimeState::Exited | RuntimeState::Reclaimed => (1, "ended"),
+            })
+            .max_by_key(|(priority, _)| *priority)
+            .map_or("none", |(_, phase)| phase)
+    }
+
+    /// Sends to a running Agent PTY or records a durable next-launch prompt.
+    pub fn prompt(
+        &mut self,
+        session: Option<SessionId>,
+        prompt: &str,
+        mode: PromptMode,
+    ) -> Result<PromptDelivery, ProtocolError> {
+        if prompt.trim().is_empty() {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "prompt must not be empty",
+            ));
+        }
+        let live = self
+            .coordinator
+            .snapshot()
+            .records
+            .into_iter()
+            .find(|record| {
+                record.runtime.session_id == session
+                    && record.state == super::runtime::RuntimeState::Running
+            });
+        if matches!(mode, PromptMode::Live) && live.is_none() {
+            return Err(ProtocolError::new(
+                ErrorCode::Unavailable,
+                "target session has no live agent",
+            ));
+        }
+        if matches!(mode, PromptMode::Queue) && live.is_some() {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "target session already has a live agent; use auto or live",
+            ));
+        }
+        if let Some(record) = live
+            && !matches!(mode, PromptMode::Queue)
+        {
+            let mut bytes = prompt.as_bytes().to_vec();
+            bytes.push(b'\n');
+            self.pty.select_terminal(&record.runtime.terminal);
+            self.pty.write_all(&bytes).map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "live prompt delivery failed")
+            })?;
+            return Ok(PromptDelivery {
+                delivered_to: "live",
+                queued: false,
+            });
+        }
+        self.dispatch
+            .queue_prompt(session, prompt.to_owned(), Utc::now())
+            .map_err(|_| dispatch_storage_error())?;
+        Ok(PromptDelivery {
+            delivered_to: "queue",
+            queued: true,
+        })
+    }
+
     /// Admits one Agent launch.  The same producer `operation_id` with the same
     /// intent returns the same admission (no second spawn); the same id with a
     /// different intent is a typed idempotency conflict.
@@ -558,12 +670,16 @@ impl<
             lifecycle_attempt: 1,
             expected_revision: 0,
         };
+        let queued = self
+            .dispatch
+            .queued_prompt(intent.session)
+            .map_err(|_| dispatch_storage_error())?;
         let request = LaunchRequest {
             profile_id: profile_id.clone(),
             mode: LaunchMode::Interactive,
             model: None,
             resume: false,
-            initial_prompt: None,
+            initial_prompt: queued.as_ref().map(|item| item.prompt.clone()),
             scope: LaunchScope {
                 workspace_id: intent.workspace,
                 session_id: intent.session,
@@ -589,6 +705,11 @@ impl<
                 Some(credential.clone()),
             )
             .map_err(map_orchestration_error)?;
+        if queued.is_some() {
+            self.dispatch
+                .consume_prompt(intent.session)
+                .map_err(|_| dispatch_storage_error())?;
+        }
         let worker = self
             .dispatch
             .upsert_agent_by_runtime_model(
@@ -752,6 +873,7 @@ impl<
         candidate: &CompletionFence,
         kind: InboxKind,
         summary: String,
+        result: Option<usagi_core::domain::agent::StructuredResult>,
     ) -> Result<(), ProtocolError> {
         let record = self
             .coordinator
@@ -790,7 +912,7 @@ impl<
                     from: binding.worker.clone(),
                     kind,
                     summary,
-                    result: None,
+                    result,
                     created_at: Utc::now(),
                     read: false,
                 },
@@ -804,7 +926,59 @@ impl<
         self.dispatch
             .transition_run(candidate.operation_id, status, Some(Utc::now()))
             .map_err(|_| dispatch_storage_error())?;
+        let agent_status = if kind == InboxKind::Completed {
+            AgentStatus::Idle
+        } else {
+            AgentStatus::Failed
+        };
+        self.dispatch
+            .transition_agent(binding.worker.agent_id, agent_status, None)
+            .map_err(|_| dispatch_storage_error())?;
         Ok(())
+    }
+
+    /// Authenticates and delivers a completion report from a provisioned MCP
+    /// child. An optional run ID is only an assertion about the authenticated
+    /// current run; it never selects a different destination.
+    pub fn report_from_mcp(
+        &mut self,
+        credential: &str,
+        requested_run: Option<OperationId>,
+        kind: InboxKind,
+        summary: String,
+        result: Option<usagi_core::domain::agent::StructuredResult>,
+    ) -> Result<CallerRef, ProtocolError> {
+        let caller = self.mcp_callers.get(credential).cloned().ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "agent caller provenance is unknown",
+            )
+        })?;
+        if requested_run.is_some_and(|run_id| run_id != caller.operation) {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "completion run does not match the authenticated worker",
+            ));
+        }
+        let fence = self
+            .coordinator
+            .record_for(&caller.runtime)
+            .map_err(map_runtime_error)?
+            .operation
+            .clone();
+        let binding = self
+            .dispatch
+            .binding(caller.operation)
+            .map_err(|_| dispatch_storage_error())?
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::OwnershipUnknown,
+                    "dispatch binding is unavailable",
+                )
+            })?;
+        let delivered_to = binding.caller.clone();
+        self.report(&caller.runtime, &fence, kind, summary, result)?;
+        Ok(delivered_to)
     }
 
     fn dispatch_terminal(
@@ -1338,6 +1512,56 @@ mod tests {
     // ---- tests ---------------------------------------------------------------
 
     #[test]
+    fn queued_prompt_is_consumed_by_launch_and_auto_then_delivers_live() {
+        let mut runtime = runtime();
+        let launch_intent = intent(None);
+        let session = launch_intent.session.unwrap();
+        assert_eq!(runtime.session_phase(session), "none");
+        let queued = runtime
+            .prompt(Some(session), "queued work", PromptMode::Auto)
+            .unwrap();
+        assert_eq!(queued.delivered_to, "queue");
+        assert!(
+            runtime
+                .dispatch
+                .queued_prompt(Some(session))
+                .unwrap()
+                .is_some()
+        );
+
+        runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &launch_intent,
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        assert_eq!(runtime.session_phase(session), "running");
+        assert!(
+            runtime
+                .dispatch
+                .queued_prompt(Some(session))
+                .unwrap()
+                .is_none()
+        );
+        let credential = runtime.mcp_callers.keys().next().unwrap().clone();
+        assert_eq!(runtime.caller_session(&credential), Some(session));
+
+        let live = runtime
+            .prompt(Some(session), "follow up", PromptMode::Auto)
+            .unwrap();
+        assert_eq!(live.delivered_to, "live");
+        assert_eq!(runtime.pty.writes, b"follow up\n");
+        assert!(
+            runtime
+                .prompt(Some(session), "later", PromptMode::Queue)
+                .is_err()
+        );
+        assert!(runtime.prompt(None, "now", PromptMode::Live).is_err());
+        assert!(runtime.prompt(None, "  ", PromptMode::Auto).is_err());
+    }
+
+    #[test]
     fn end_to_end_launch_output_attach_input_detach_reattach_and_exit() {
         let mut runtime = runtime();
         let fake_scope = FakeScope(Ok(scope()));
@@ -1721,6 +1945,12 @@ mod tests {
                 &FakeScope(Ok(configured_scope(worktree.path()))),
             )
             .unwrap();
+        let credential = runtime.mcp_callers.keys().next().cloned().unwrap();
+        assert_eq!(
+            runtime.mcp_dispatch_caller(&credential).unwrap().session_id,
+            Some(session)
+        );
+        assert!(runtime.mcp_dispatch_caller("forged").is_none());
         let runtime_ref = runtime
             .coordinator
             .runtime_for_terminal(&admission.terminal)
@@ -1734,16 +1964,58 @@ mod tests {
         let mut wrong = fence.clone();
         wrong.owner_daemon_generation = DaemonGeneration::new();
         runtime
-            .report(&runtime_ref, &wrong, InboxKind::Completed, "wrong".into())
+            .report(
+                &runtime_ref,
+                &wrong,
+                InboxKind::Completed,
+                "wrong".into(),
+                None,
+            )
             .unwrap();
         assert!(runtime.dispatch_store().inbox(&caller).unwrap().is_empty());
+        assert_eq!(
+            runtime
+                .report_from_mcp(
+                    &credential,
+                    Some(OperationId::new()),
+                    InboxKind::Completed,
+                    "wrong run".into(),
+                    None,
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+        let result = usagi_core::domain::agent::StructuredResult {
+            commits: vec!["abc".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            runtime
+                .report_from_mcp(
+                    &credential,
+                    None,
+                    InboxKind::Completed,
+                    "done".into(),
+                    Some(result.clone()),
+                )
+                .unwrap(),
+            caller
+        );
         runtime
-            .report(&runtime_ref, &fence, InboxKind::Completed, "done".into())
+            .report_from_mcp(
+                &credential,
+                None,
+                InboxKind::Completed,
+                "duplicate".into(),
+                None,
+            )
             .unwrap();
         runtime.exit(&admission.terminal, 0).unwrap();
         let inbox = runtime.dispatch_store().inbox(&caller).unwrap();
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].kind, InboxKind::Completed);
+        assert_eq!(inbox[0].result, Some(result));
     }
 
     #[test]

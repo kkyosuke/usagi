@@ -268,7 +268,13 @@ pub fn handle_connection_with_terminal_and<R: Read, W: Write, T: TerminalOwner, 
     dispatch_request: D,
 ) -> io::Result<()>
 where
-    D: Fn(usagi_core::infrastructure::ipc::RequestId, serde_json::Value, &ServerHello) -> Envelope,
+    D: Fn(
+        usagi_core::infrastructure::ipc::RequestId,
+        serde_json::Value,
+        &ServerHello,
+        usagi_core::domain::id::ConnectionId,
+        usagi_core::domain::id::ClientId,
+    ) -> Envelope,
 {
     let Some(hello) = handshake(reader, writer, server)? else {
         return Ok(());
@@ -310,7 +316,8 @@ where
                     )),
                 }
             } else {
-                let dispatched = dispatch_request(request_id.clone(), body.clone(), &hello);
+                let dispatched =
+                    dispatch_request(request_id.clone(), body.clone(), &hello, connection, client);
                 // Session, agent, and metrics dispatchers each own their
                 // outcome.  Replacing a session error with `Ok(null)` makes a
                 // client mistake the error body for a lifecycle snapshot.
@@ -495,7 +502,7 @@ mod tests {
             &mut output,
             &server(),
             &mut NoopTerminal,
-            |request_id, _, hello| Envelope {
+            |request_id, _, hello, _, _| Envelope {
                 protocol: hello.protocol,
                 daemon_generation: hello.daemon_generation.clone(),
                 kind: EnvelopeKind::Response {

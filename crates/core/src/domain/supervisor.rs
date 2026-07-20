@@ -174,6 +174,7 @@ impl Default for ExecutionPolicy {
 /// separate authorized-decision feature resolves it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EscalationRecord {
+    pub escalation_id: OperationId,
     pub reason: String,
     pub blocking_task_id: Option<TaskId>,
     pub safe_evidence: String,
@@ -259,6 +260,18 @@ pub enum SupervisorEventKind {
         safe_evidence: String,
         choices: Vec<String>,
     },
+    ResolveEscalation {
+        escalation_id: OperationId,
+        decision: EscalationDecision,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EscalationDecision {
+    Resume,
+    Cancel,
+    Fail,
 }
 
 /// Append-only event envelope.  `event_id` is the idempotency key.
@@ -310,8 +323,28 @@ impl SupervisorRun {
         policy_revision: String,
         now: DateTime<Utc>,
     ) -> Self {
+        Self::new_with_id(
+            SupervisorRunId::new(),
+            root_caller_ref,
+            root_task_digest,
+            root_input_digest,
+            policy_revision,
+            now,
+        )
+    }
+
+    #[must_use]
+    #[coverage(off)]
+    pub fn new_with_id(
+        supervisor_run_id: SupervisorRunId,
+        root_caller_ref: String,
+        root_task_digest: String,
+        root_input_digest: String,
+        policy_revision: String,
+        now: DateTime<Utc>,
+    ) -> Self {
         Self {
-            supervisor_run_id: SupervisorRunId::new(),
+            supervisor_run_id,
             root_caller_ref,
             root_task_digest,
             root_input_digest,
@@ -348,6 +381,8 @@ impl SupervisorRun {
             state: self.state,
             terminal_at: self.terminal_at,
             terminal_reason: self.terminal_reason.clone(),
+            policy: self.policy.clone(),
+            escalation: self.escalation.clone(),
             tasks: self.tasks.values().map(TaskQuery::from).collect(),
             provenance: self.provenance.values().cloned().collect(),
         }
@@ -355,17 +390,19 @@ impl SupervisorRun {
 }
 
 /// Query view that excludes task instructions and runtime command lines.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SupervisorRunQuery {
     pub supervisor_run_id: SupervisorRunId,
     pub state_revision: u64,
     pub state: SupervisorRunState,
     pub terminal_at: Option<DateTime<Utc>>,
     pub terminal_reason: Option<String>,
+    pub policy: ExecutionPolicy,
+    pub escalation: Option<EscalationRecord>,
     pub tasks: Vec<TaskQuery>,
     pub provenance: Vec<RunProvenance>,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TaskQuery {
     pub task_id: TaskId,
     pub parent_task_id: Option<TaskId>,
@@ -437,7 +474,8 @@ pub fn reduce(run: &mut SupervisorRun, event: &SupervisorEvent) -> Result<(), Su
             actual: event.sequence,
         });
     }
-    if run.state.terminal() {
+    if run.state.terminal() && !matches!(event.kind, SupervisorEventKind::ResolveEscalation { .. })
+    {
         return Err(SupervisorError::TerminalRun);
     }
     let mut next = run.clone();
@@ -502,12 +540,17 @@ pub fn reduce(run: &mut SupervisorRun, event: &SupervisorEvent) -> Result<(), Su
             choices,
         } => escalate(
             &mut next,
+            event.event_id,
             task_id.clone(),
             reason.clone(),
             safe_evidence.clone(),
             choices.clone(),
             event.observed_at,
         ),
+        SupervisorEventKind::ResolveEscalation {
+            escalation_id,
+            decision,
+        } => resolve_escalation(&mut next, *escalation_id, *decision, event.observed_at)?,
     }
     next.state_revision = event.sequence;
     next.updated_at = event.observed_at;
@@ -563,6 +606,7 @@ fn dispatch(
     if let Err(SupervisorError::PolicyDenied(reason)) = admit_dispatch(run, task_id, &provenance) {
         escalate(
             run,
+            OperationId::new(),
             Some(task_id.clone()),
             reason,
             "policy limits are evaluated from the durable run snapshot".into(),
@@ -757,6 +801,7 @@ fn verification_result(
     } else {
         escalate(
             run,
+            event.event_id,
             Some(task_id.clone()),
             "artifact verification failed".into(),
             digest.into(),
@@ -789,6 +834,7 @@ fn cancel(
 }
 fn escalate(
     run: &mut SupervisorRun,
+    escalation_id: OperationId,
     task_id: Option<TaskId>,
     reason: String,
     safe_evidence: String,
@@ -796,6 +842,7 @@ fn escalate(
     now: DateTime<Utc>,
 ) {
     run.escalation = Some(EscalationRecord {
+        escalation_id,
         reason: reason.clone(),
         blocking_task_id: task_id,
         safe_evidence,
@@ -805,6 +852,36 @@ fn escalate(
     run.state = SupervisorRunState::Escalated;
     run.terminal_at = Some(now);
     run.terminal_reason = Some(reason);
+}
+
+fn resolve_escalation(
+    run: &mut SupervisorRun,
+    escalation_id: OperationId,
+    decision: EscalationDecision,
+    now: DateTime<Utc>,
+) -> Result<(), SupervisorError> {
+    let escalation = run
+        .escalation
+        .as_ref()
+        .ok_or(SupervisorError::InvalidTransition)?;
+    if escalation.escalation_id != escalation_id {
+        return Err(SupervisorError::ProvenanceMismatch);
+    }
+    run.escalation = None;
+    match decision {
+        EscalationDecision::Resume => {
+            run.state = SupervisorRunState::Running;
+            run.terminal_at = None;
+            run.terminal_reason = None;
+        }
+        EscalationDecision::Cancel => cancel(run, None, "escalation cancelled", now)?,
+        EscalationDecision::Fail => {
+            run.state = SupervisorRunState::Failed;
+            run.terminal_at = Some(now);
+            run.terminal_reason = Some("escalation resolved as failure".into());
+        }
+    }
+    Ok(())
 }
 fn project_ready(tasks: &mut BTreeMap<TaskId, TaskNode>) {
     let ready: Vec<_> = tasks
@@ -1713,5 +1790,92 @@ mod tests {
             ),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn escalation_resolution_is_fenced_and_applies_each_authorized_decision() {
+        fn escalated() -> SupervisorRun {
+            let mut run = SupervisorRun::new(
+                "caller".into(),
+                "task".into(),
+                "input".into(),
+                "policy".into(),
+                now(),
+            );
+            reduce(
+                &mut run,
+                &event(
+                    1,
+                    SupervisorEventKind::Escalate {
+                        task_id: None,
+                        reason: "needs authority".into(),
+                        safe_evidence: "safe".into(),
+                        choices: vec!["resume".into(), "cancel".into(), "fail".into()],
+                    },
+                ),
+            )
+            .unwrap();
+            run
+        }
+
+        let mut resumed = escalated();
+        let escalation_id = resumed.escalation.as_ref().unwrap().escalation_id;
+        assert_eq!(
+            reduce(
+                &mut resumed,
+                &event(
+                    2,
+                    SupervisorEventKind::ResolveEscalation {
+                        escalation_id: OperationId::new(),
+                        decision: EscalationDecision::Resume,
+                    },
+                ),
+            ),
+            Err(SupervisorError::ProvenanceMismatch)
+        );
+        reduce(
+            &mut resumed,
+            &event(
+                2,
+                SupervisorEventKind::ResolveEscalation {
+                    escalation_id,
+                    decision: EscalationDecision::Resume,
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(resumed.state, SupervisorRunState::Running);
+        assert!(resumed.escalation.is_none());
+        assert!(resumed.terminal_at.is_none());
+
+        let mut cancelled = escalated();
+        let escalation_id = cancelled.escalation.as_ref().unwrap().escalation_id;
+        reduce(
+            &mut cancelled,
+            &event(
+                2,
+                SupervisorEventKind::ResolveEscalation {
+                    escalation_id,
+                    decision: EscalationDecision::Cancel,
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(cancelled.state, SupervisorRunState::Cancelled);
+
+        let mut failed = escalated();
+        let escalation_id = failed.escalation.as_ref().unwrap().escalation_id;
+        reduce(
+            &mut failed,
+            &event(
+                2,
+                SupervisorEventKind::ResolveEscalation {
+                    escalation_id,
+                    decision: EscalationDecision::Fail,
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(failed.state, SupervisorRunState::Failed);
     }
 }
