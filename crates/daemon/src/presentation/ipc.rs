@@ -86,18 +86,28 @@ pub fn dispatch(
     body: serde_json::Value,
     hello: &ServerHello,
 ) -> Envelope {
-    let outcome = body
-        .get("kind")
-        .and_then(serde_json::Value::as_str)
-        .filter(|kind| matches!(*kind, "session" | "agent" | "dispatch"))
-        .and_then(|_| body.get("operation_id"))
-        .and_then(serde_json::Value::as_str)
-        .map_or(ResponseOutcome::Ok, |operation_id| {
-            ResponseOutcome::Accepted {
-                operation_id: OperationId(operation_id.to_owned()),
-                operation_revision: 1,
-            }
-        });
+    let kind = body.get("kind").and_then(serde_json::Value::as_str);
+    let (outcome, body) = if matches!(kind, Some("dispatch_tool" | "supervisor_tool")) {
+        (
+            ResponseOutcome::Error(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "daemon tool action is not implemented",
+            )),
+            json!(null),
+        )
+    } else {
+        let outcome = kind
+            .filter(|kind| matches!(*kind, "session" | "agent" | "dispatch"))
+            .and_then(|_| body.get("operation_id"))
+            .and_then(serde_json::Value::as_str)
+            .map_or(ResponseOutcome::Ok, |operation_id| {
+                ResponseOutcome::Accepted {
+                    operation_id: OperationId(operation_id.to_owned()),
+                    operation_revision: 1,
+                }
+            });
+        (outcome, body)
+    };
     Envelope {
         protocol: hello.protocol,
         daemon_generation: hello.daemon_generation.clone(),
@@ -659,9 +669,48 @@ mod tests {
             json!({"x": 1}),
             &hello,
         );
-        assert!(
-            matches!(reply.kind, EnvelopeKind::Response { request_id: usagi_core::infrastructure::ipc::RequestId(ref value), .. } if value == "r")
-        );
+        assert!(matches!(
+            reply.kind,
+            EnvelopeKind::Response {
+                request_id: usagi_core::infrastructure::ipc::RequestId(ref value),
+                outcome: ResponseOutcome::Ok,
+                body,
+            } if value == "r" && body == json!({"x": 1})
+        ));
+    }
+
+    #[test]
+    fn dispatch_rejects_unimplemented_daemon_tool_families_without_echoing() {
+        let hello = handshake(
+            &mut Cursor::new({
+                let mut bytes = Vec::new();
+                write_json_frame(&mut bytes, &hello(), 1024).unwrap();
+                bytes
+            }),
+            &mut Vec::new(),
+            &server(),
+        )
+        .unwrap()
+        .unwrap();
+        for kind in ["dispatch_tool", "supervisor_tool"] {
+            let reply = dispatch(
+                usagi_core::infrastructure::ipc::RequestId("r".into()),
+                json!({"kind": kind, "action": "placeholder", "secret": "do not echo"}),
+                &hello,
+            );
+            assert!(matches!(
+                reply.kind,
+                EnvelopeKind::Response {
+                    outcome: ResponseOutcome::Error(ProtocolError {
+                        code: ErrorCode::InvalidArgument,
+                        ref message,
+                        ..
+                    }),
+                    body,
+                    ..
+                } if message.contains("not implemented") && body.is_null()
+            ));
+        }
     }
 
     #[test]

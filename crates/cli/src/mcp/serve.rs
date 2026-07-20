@@ -4,8 +4,8 @@
 //!
 //! `handle_line`（str → 応答文字列 or なし）に純粋なルーティングを閉じ込め、`serve` は
 //! 実 IO（stdin/stdout）の反復だけを担う。実 IO は合成ルートが注入するため、ルーティングは
-//! ユニットテストできる。tool 本体は未実装スタブなので、`tools/call` はどの tool も
-//! 「未実装」エラーを返し、`tools/list` と `initialize` は実際に応答する。
+//! ユニットテストできる。`tools/call` は実装済み tool を対応する store / daemon 経路へ送り、
+//! tool 個別または daemon のエラーを JSON-RPC エラーへ変換する。
 
 use std::io::{self, BufRead, Write};
 
@@ -210,8 +210,8 @@ fn tools_list_result(snapshot: &RuntimeModelSnapshot) -> Value {
     json!({ "tools": tools })
 }
 
-/// `tools/call` を処理する。現状は全 tool が未実装スタブのため、存在すれば「未実装」、
-/// 無ければ「method not found」を返す。
+/// `tools/call` を処理する。実装済み tool を store / daemon 経路へ送り、未実装 tool と
+/// daemon の protocol error は JSON-RPC エラーとして返す。
 #[coverage(off)]
 fn tools_call(
     id: Value,
@@ -719,6 +719,65 @@ mod tests {
             assert!(
                 matches!(&client.requests[0], DaemonRequest::DispatchTool { action: actual, .. } if *actual == action)
             );
+        }
+    }
+
+    #[test]
+    fn unimplemented_daemon_tools_return_json_rpc_errors() {
+        for name in [
+            "session_dispatch",
+            "session_get",
+            "agent_list",
+            "agent_get",
+            "agent_complete",
+            "agent_fail",
+            "agent_inbox",
+            "supervisor_start",
+            "supervisor_get",
+            "supervisor_list",
+            "supervisor_cancel",
+            "supervisor_resolve_escalation",
+            "supervisor_events",
+        ] {
+            let arguments = if name == "session_dispatch" {
+                r#"{"agent":{"runtime":"claude","model":"sonnet"}}"#
+            } else {
+                "{}"
+            };
+            let input = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#
+            ) + "\n";
+            let mut out = Vec::new();
+            let mut client = RecordingClient {
+                reply: Err(ClientError::Protocol(
+                    usagi_core::infrastructure::ipc::ProtocolError::new(
+                        usagi_core::infrastructure::ipc::ErrorCode::InvalidArgument,
+                        "daemon tool action is not implemented",
+                    ),
+                )),
+                requests: vec![],
+            };
+            let snapshot = RuntimeModelSnapshot::capture(
+                &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
+                &FakeLocator(&["claude"]),
+            );
+            serve_with_client_and_snapshot(
+                input.as_bytes(),
+                &mut out,
+                "9.9.9",
+                &mut client,
+                &snapshot,
+            )
+            .unwrap();
+            let response: Value = serde_json::from_slice(&out).unwrap();
+            assert_eq!(response["error"]["code"], -32603, "{name}");
+            assert!(
+                response["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("not implemented")),
+                "{name}"
+            );
+            assert_eq!(client.requests.len(), 1, "{name}");
         }
     }
 

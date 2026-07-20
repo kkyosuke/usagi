@@ -59,6 +59,12 @@ tool は系統ごとに分かれ、`tools/list` に載る `name` と `inputSchem
 agent は durable effect を保証する行だけを実行手順に使う。特に汎用応答を agent dispatch や supervisor
 開始の成功として扱わない。
 
+daemon に durable handler が無い tool action は成功として扱わない。現在、dispatch 系の
+`session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` /
+`agent_inbox` と supervisor 系の `supervisor_start` / `supervisor_get` / `supervisor_list` /
+`supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` は、`tools/call` で
+明示的な JSON-RPC エラーを返す。daemon は入力 payload を成功応答としてエコーせず、副作用も生じない。
+
 ## resource 面
 
 resource は**静的テキスト**（`uri` / `name` / `description` / `mimeType` / `text`）で、agent は
