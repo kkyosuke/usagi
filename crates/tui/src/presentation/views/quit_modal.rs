@@ -5,7 +5,7 @@
 //! focus, so this surface only projects that focus onto the shared confirmation
 //! renderer the shell composites over a `render_home` frame.
 
-use crate::presentation::theme::{Color, Role, Style};
+use crate::presentation::theme::{Color, Style};
 use crate::presentation::widgets::modal::{self, ConfirmationModal, ConfirmationView};
 
 const INNER_WIDTH: usize = 48;
@@ -30,13 +30,14 @@ pub fn render_over(
         width,
         base,
         ConfirmationModal::from_confirm_selected(confirm_selected),
-        ConfirmationView {
-            title: &title,
-            inner_width: INNER_WIDTH,
+        // Defaults (danger confirm, warning cancel, `[ yes ] [ no ]`, shared
+        // Enter/y … Esc/n … ←→/Tab hints) reproduce the current Quit frame.
+        ConfirmationView::confirmation(
+            &title,
+            INNER_WIDTH,
             heading,
-            message: "Sessions keep running in the background.",
-            confirm_role: Role::Danger,
-        },
+            "Sessions keep running in the background.",
+        ),
     )
 }
 

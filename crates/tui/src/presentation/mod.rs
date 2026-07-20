@@ -32,7 +32,7 @@ use usagi_core::usecase::client::DaemonMetrics;
 
 use crate::presentation::live_terminal::LiveTerminalControls;
 use crate::presentation::metrics::{MetricsBackend, MetricsProjection};
-use crate::presentation::theme::{Color, Role, Style};
+use crate::presentation::theme::{Color, Style};
 use crate::presentation::views::config::{self, AvailableAgentModels, Config};
 use crate::presentation::views::create_session_error_modal;
 use crate::presentation::views::new::{self, Field, New};
@@ -1283,30 +1283,55 @@ fn terminal_geometry(height: usize, width: usize) -> Geometry {
 #[coverage(off)]
 fn render_open(height: usize, width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
     let base = open::render(height, width, open, now);
-    let Some(path) = open.unregistering_path() else {
-        return base;
-    };
-    let title = Style::new()
-        .fg(Color::White)
-        .bold()
-        .paint("Unregister workspace");
-    let heading = Style::new()
-        .fg(Color::White)
-        .bold()
-        .paint(&format!("Unregister {}?", path.display()));
-    modal::render_confirmation_over(
-        height,
-        width,
-        &base,
-        open.unregister_confirmation(),
-        ConfirmationView {
-            title: &title,
-            inner_width: 52,
-            heading,
-            message: "Only the registry entry is removed. Files stay.",
-            confirm_role: Role::Danger,
-        },
-    )
+    if let Some(path) = open.unregistering_path() {
+        let title = Style::new()
+            .fg(Color::White)
+            .bold()
+            .paint("Unregister workspace");
+        let heading = Style::new()
+            .fg(Color::White)
+            .bold()
+            .paint(&format!("Unregister {}?", path.display()));
+        return modal::render_confirmation_over(
+            height,
+            width,
+            &base,
+            open.unregister_confirmation(),
+            ConfirmationView::confirmation(
+                &title,
+                52,
+                heading,
+                "Only the registry entry is removed. Files stay.",
+            ),
+        );
+    }
+    // The cleanup prompt has no Yes/No focus toggle (y/Enter removes, n/Esc
+    // cancels), so it flows through the shared confirmation renderer as a
+    // compact, button-less variant. The state argument is unused when compact.
+    if open.cleanup_confirming() {
+        let title = Style::new()
+            .fg(Color::White)
+            .bold()
+            .paint("Clean up registry");
+        let heading = Style::new()
+            .fg(Color::White)
+            .bold()
+            .paint("Remove missing registry entries?");
+        return modal::render_confirmation_over(
+            height,
+            width,
+            &base,
+            modal::ConfirmationModal::new(),
+            ConfirmationView::confirmation(
+                &title,
+                52,
+                heading,
+                "Registry entries whose folder is gone are removed.",
+            )
+            .compact("y: remove   n/Esc: cancel"),
+        );
+    }
+    base
 }
 
 /// Recent が指す単体 workspace path。Unite の runtime は今回の対象外なので開かない。

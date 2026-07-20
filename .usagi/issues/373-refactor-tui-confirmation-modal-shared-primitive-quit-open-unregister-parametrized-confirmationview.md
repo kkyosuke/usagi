@@ -1,13 +1,13 @@
 ---
 number: 373
 title: refactor(tui): confirmation modal を shared primitive に統一する（Quit / open unregister を parametrized ConfirmationView へ）
-status: todo
+status: done
 priority: medium
 labels: [tui, ui, modal, refactor]
 dependson: [372]
 related: [261, 317]
 created_at: 2026-07-19T22:00:36.754451+00:00
-updated_at: 2026-07-19T22:00:36.754451+00:00
+updated_at: 2026-07-20T01:19:52.482110+00:00
 ---
 
 ## 目的

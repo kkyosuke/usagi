@@ -245,7 +245,24 @@ Home 背景との合成範囲を越えない。
 - **Overview の action-mode footer**: インデントの無かった footer を、他の footer と同じ 2 桁インデントへ揃えた。
 - **共通マーカー**: `›` は `selection_marker` の 1 経路に集約し、`widgets/select.rs` の focus カーソルも再利用する。
 
-confirmation（Quit / open）の button・文言統一は本 kit の上に別途載せる（別 issue）。
+### 共通 confirmation component
+
+Yes/No の確認は `widgets/modal.rs` の `render_confirmation_over` 1 経路で描く。表示内容は
+`ConfirmationView` に集約し、`ConfirmationView::confirmation(title, inner_width, heading, message)` が
+標準の既定（danger の confirm・warning の cancel・`[ yes ] [ no ]` ボタン・`Enter/y: yes   Esc/n: no
+  ←→/Tab: choose` の footer）を組む。呼び出し側は公開フィールドで label・role・footer 文言を差し替え、
+`.compact(hints)` で単一キー hint の button なし variant（focus トグルを持たない prompt 用）に切り替える。
+footer 行は body-composition kit の `footer` helper を通す。
+
+| 経路 | variant | footer hints |
+|---|---|---|
+| Home の Quit（detach 確認） | Yes/No ボタン（既定） | `Enter/y: yes   Esc/n: no   ←→/Tab: choose` |
+| open の Unregister workspace | Yes/No ボタン（既定） | 同上 |
+| open の registry cleanup | compact（ボタンなし） | `y: remove   n/Esc: cancel` |
+
+ボタン付き variant の Yes/No 選択状態は `ConfirmationModal` が持ち、compact variant は選択状態を
+持たない（state 引数を読まない）。open の cleanup は list 本文に手組みしていた `y/n` prompt を廃し、
+unregister と同じ overlay 経路で合成する。
 
 ### 形別コンポーネント
 
@@ -427,6 +444,6 @@ terminal input を送らない。
 
 `q` は確認後に TUI だけを閉じ、daemon-owned terminal は継続する。`Ctrl-Q` も同様に detach 確認 modal を
 開き、確認するとこの TUI client だけが detach する（daemon-owned の terminal や operation は停止しない）。
-確認 modal は共通の Yes/No renderer（`widgets::modal` の `render_confirmation_over`）で `[ yes ] [ no ]` を
-表示し、`Enter`（選択中のボタンを確定）、左右・Tab（Yes/No 選択の切替）、`y`（detach）、`n` / Esc（留まる）
-で操作できる。
+確認 modal は[共通 confirmation component](#共通-confirmation-component)（`render_confirmation_over`）の
+Yes/No variant で `[ yes ] [ no ]` を表示し、`Enter`（選択中のボタンを確定）、左右・Tab（Yes/No 選択の切替）、
+`y`（detach）、`n` / Esc（留まる）で操作できる。
