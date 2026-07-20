@@ -1,14 +1,14 @@
 ---
 number: 475
 title: fix(daemon): real PTY partial write の applied_prefix を正確に返す
-status: todo
+status: in-progress
 priority: high
 labels: [review, v2, daemon, pty, ipc]
 dependson: []
 related: [218, 264, 271]
 parent: 453
 created_at: 2026-07-20T12:06:24.693479+00:00
-updated_at: 2026-07-20T12:06:24.693479+00:00
+updated_at: 2026-07-20T21:49:49.060337+00:00
 ---
 
 ## 問題・影響
