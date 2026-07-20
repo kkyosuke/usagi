@@ -419,7 +419,7 @@ impl WorkspaceRuntime {
         effects
     }
 
-    /// Close the focused pane tab (Ctrl-O x). Returns the daemon transport work
+    /// Close the focused pane tab (Ctrl-O x / Ctrl-O Ctrl-X). Returns the daemon transport work
     /// the shell must perform for the removed tab: `detach` a live terminal's
     /// client subscription, or `cancel` a still-pending launch before it spawns a
     /// detached daemon terminal. A target selection (no tab) is a no-op. The

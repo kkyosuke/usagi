@@ -44,9 +44,9 @@ use usagi_tui::presentation::views::config::{self, AvailableAgentModels, Config}
 use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::GitDiff;
 use usagi_tui::presentation::{
-    self, AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, DecisionCommandPort, Exit,
-    MetricsPort, MetricsPortFactory, SessionCommandPort, SessionCommandPortFactory,
-    SessionCommandResult, Start, WorkspaceLoader, WorkspaceSnapshot,
+    self, AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, DecisionCommandPort,
+    DesktopNotificationPort, Exit, MetricsPort, MetricsPortFactory, SessionCommandPort,
+    SessionCommandPortFactory, SessionCommandResult, Start, WorkspaceLoader, WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::controller::{
     BackendEvent, NewRequest, Notice, SafeError, SafeMessage,
@@ -75,6 +75,34 @@ struct DaemonSessionCommandPort {
 /// The daemon remains the authority; this adapter only converts its safe
 /// snapshots and confirmations back into reducer events.
 struct DaemonDecisionCommandPort;
+
+/// Platform delivery is deliberately best-effort.  Fixed executable names and
+/// argument-vector spawning keep decision text out of a shell; a missing
+/// notification service must never stop the TUI.
+struct PlatformDesktopNotifier;
+
+impl DesktopNotificationPort for PlatformDesktopNotifier {
+    #[coverage(off)]
+    fn notify(&mut self, title: &str, body: &str) {
+        let mut command = if cfg!(target_os = "macos") {
+            let mut command = Command::new("osascript");
+            command
+                .arg("-e")
+                .arg("on run argv\n display notification (item 2 of argv) with title (item 1 of argv)\nend run")
+                .arg("--")
+                .arg(title)
+                .arg(body);
+            command
+        } else if cfg!(target_os = "linux") {
+            let mut command = Command::new("notify-send");
+            command.arg("--app-name=usagi").arg(title).arg(body);
+            command
+        } else {
+            return;
+        };
+        let _ = command.spawn();
+    }
+}
 
 impl DaemonDecisionCommandPort {
     #[coverage(off)]
@@ -1105,6 +1133,7 @@ fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
     // action row can still start a session name with that character.
     if (key.modifiers.control && key.code == KeyCode::Char('a'))
         || key.code == KeyCode::Char('\u{1}')
+        || key.code == KeyCode::Home
     {
         return Key::Char('\u{1}');
     }
@@ -1451,15 +1480,26 @@ struct PlatformBrowserOpener;
 impl BrowserOpener for PlatformBrowserOpener {
     #[coverage(off)]
     fn open(&mut self, url: &str) -> Result<(), String> {
-        let program = if cfg!(target_os = "macos") {
-            "open"
+        let mut command = if cfg!(target_os = "macos") {
+            let mut command = Command::new("open");
+            command.arg(url);
+            command
         } else if cfg!(target_os = "linux") {
-            "xdg-open"
+            let mut command = Command::new("xdg-open");
+            command.arg(url);
+            command
+        } else if cfg!(target_os = "windows") {
+            // `start` is a `cmd` builtin, so it is launched through `cmd /C`. Its
+            // first quoted argument is the (empty) window title `start` consumes,
+            // so a URL beginning with `"` is never mistaken for the title. The URL
+            // stays a distinct argv item — `cmd` does not re-parse it as a command.
+            let mut command = Command::new("cmd");
+            command.args(["/C", "start", "", url]);
+            command
         } else {
             return Err("browser opening is unsupported on this platform".to_owned());
         };
-        Command::new(program)
-            .arg(url)
+        command
             .spawn()
             .map(|_| ())
             .map_err(|_| "browser launch failed".to_owned())
@@ -1479,6 +1519,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
                     Box::new(DaemonSessionCommandPort::default()),
                     Box::new(DaemonAgentCommandPort::new()),
                     Box::new(DaemonDecisionCommandPort),
+                    Box::new(PlatformDesktopNotifier),
                     Box::new(DaemonMetricsPort::new()),
                     Box::new(DaemonPrSnapshotPort),
                     Box::new(PlatformBrowserOpener),
@@ -1665,6 +1706,13 @@ mod tests {
             KeyEventKind::Press,
         ));
         assert_eq!(passthrough_key(&key, Vec::new()), Key::Char('\u{1}'));
+
+        let home = LiveInput::Key(KeyEvent::new(
+            KeyCode::Home,
+            Modifiers::default(),
+            KeyEventKind::Press,
+        ));
+        assert_eq!(passthrough_key(&home, Vec::new()), Key::Char('\u{1}'));
     }
 
     #[test]

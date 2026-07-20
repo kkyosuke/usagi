@@ -649,6 +649,7 @@ pub struct AppState {
     note_editor: Option<NoteEditor>,
     environment_editor: Option<EnvironmentEditor>,
     decisions: Vec<UserDecision>,
+    unread_decisions: std::collections::BTreeSet<UserDecisionId>,
     decision_overlay: Option<DecisionOverlayState>,
     pr_overlay: Option<PrOverlay>,
     preview_overlay: Option<PreviewOverlay>,
@@ -669,6 +670,10 @@ pub struct AppState {
     interaction_count: u64,
     mascot_tick: u64,
     size: Option<(u16, u16)>,
+    /// Last session press eligible to become the first half of a double click.
+    /// The controller owns this stable identity after hit-testing; the shell
+    /// supplies only coordinates and a monotonic timestamp.
+    pending_session_click: Option<(SessionId, std::time::Duration)>,
     has_live_pane: bool,
     closeup_action_forced: bool,
     ctrl_c_grace: bool,
@@ -691,6 +696,7 @@ impl AppState {
             note_editor: None,
             environment_editor: None,
             decisions: Vec::new(),
+            unread_decisions: std::collections::BTreeSet::new(),
             decision_overlay: None,
             pr_overlay: None,
             preview_overlay: None,
@@ -709,6 +715,7 @@ impl AppState {
             interaction_count: 0,
             mascot_tick: 0,
             size: None,
+            pending_session_click: None,
             has_live_pane: false,
             closeup_action_forced: false,
             ctrl_c_grace: false,
@@ -763,6 +770,12 @@ impl AppState {
     #[coverage(off)]
     pub fn decisions(&self) -> &[UserDecision] {
         &self.decisions
+    }
+    /// Pending decisions the user has not opened from the notice centre yet.
+    #[must_use]
+    #[coverage(off)]
+    pub fn unread_decision_ids(&self) -> &std::collections::BTreeSet<UserDecisionId> {
+        &self.unread_decisions
     }
     /// Open decision list/editor state, if its overlay is visible.
     #[must_use]
@@ -1241,24 +1254,16 @@ pub enum AppEvent {
     OperationResult(OperationResult),
     /// A pointer gesture over the Home sidebar, in 0-based terminal cells. The
     /// reducer resolves the row with the same viewport geometry the frame draws
-    /// and either moves the cursor or activates the row. A click outside the
-    /// sidebar body is inert. Terminal-pane drag and copy stay a shell +
+    /// and either moves the cursor or, for two presses on the same stable
+    /// session identity within 400ms, activates that session. A click outside
+    /// the sidebar body clears the pending press and is otherwise inert.
+    /// Terminal-pane drag and copy stay a shell +
     /// `TerminalSession` concern and never reach this vocabulary.
     Pointer {
         column: u16,
         row: u16,
-        action: PointerAction,
+        at: std::time::Duration,
     },
-}
-
-/// How a resolved sidebar pointer gesture acts on the row it lands on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PointerAction {
-    /// Move the navigation cursor to the clicked row (a single click).
-    Select,
-    /// Move the cursor to the clicked row and activate it as Enter would (a
-    /// double click): a target opens Closeup, `+ new session` opens the form.
-    Activate,
 }
 
 impl From<RuntimeEvent<BackendEvent>> for AppEvent {
@@ -2085,6 +2090,19 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                         && decision.status == UserDecisionStatus::Pending
                 })
                 .collect();
+            state.unread_decisions.retain(|id| {
+                state
+                    .decisions
+                    .iter()
+                    .any(|decision| decision.decision_id == *id)
+            });
+            state.unread_decisions.extend(
+                state
+                    .decisions
+                    .iter()
+                    .filter(|decision| !previously_known.contains(&decision.decision_id))
+                    .map(|decision| decision.decision_id),
+            );
             reconcile_decision_overlay(state);
             // A snapshot is authoritative, but must not repeatedly steal focus
             // after the user dismissed its already-known rows.  A first snapshot
@@ -2114,6 +2132,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state
                 .decisions
                 .retain(|decision| decision.decision_id != decision_id);
+            state.unread_decisions.remove(&decision_id);
             reconcile_decision_overlay(state);
             Vec::new()
         }
@@ -2134,7 +2153,10 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             Vec::new()
         }
         AppEvent::Backend(event) if update_editor_backend(state, &event) => Vec::new(),
-        AppEvent::Key(key) => update_key(state, key),
+        AppEvent::Key(key) => {
+            state.pending_session_click = None;
+            update_key(state, key)
+        }
         AppEvent::LivePaneAvailability(has_live_pane) => {
             // The runtime samples this level on every event; only an actual edge
             // may move the grace one-shot or the Closeup overlay. A repeated
@@ -2160,11 +2182,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state.size = Some((width, height));
             Vec::new()
         }
-        AppEvent::Pointer {
-            column,
-            row,
-            action,
-        } => update_pointer(state, column, row, action),
+        AppEvent::Pointer { column, row, at } => update_pointer(state, column, row, at),
         // A live input is classified by `LiveInputClassifier` before reaching
         // this reducer. It still clears a pending grace, because grace is an
         // event-based one-shot rather than a timeout.
@@ -2188,6 +2206,9 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             | BackendEvent::PreviewError { .. },
         ) => Vec::new(),
         AppEvent::Backend(BackendEvent::Sessions(sessions)) => {
+            // Never combine a press from before an authoritative snapshot with
+            // one after it, even when the same stable ID remains visible.
+            state.pending_session_click = None;
             state.sessions = sessions;
             state
                 .runtimes
@@ -2585,6 +2606,7 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
 fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     match key {
         AppKey::OpenDecisions | AppKey::Char('d') => {
+            state.unread_decisions.clear();
             state.overlay = Some(Overlay::Decisions);
             state.decision_overlay = Some(DecisionOverlayState {
                 selected: 0,
@@ -3056,27 +3078,47 @@ fn parse_close_force(arguments: &str) -> Option<bool> {
         .map(|request| request.force)
 }
 
-/// Resolve a Home sidebar pointer gesture and apply it. An open overlay (a modal
-/// or the inline create form) owns the pointer, so a background click is inert; a
-/// click that misses the sidebar body is likewise inert. Otherwise the cursor
-/// moves to the row, and an [`Activate`](PointerAction::Activate) gesture also
-/// activates it exactly as pressing Enter on the row would.
+/// Maximum elapsed time between presses on one stable session identity.
+const SIDEBAR_DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Resolve a Home sidebar press and apply it. An open overlay (a modal or the
+/// inline create form) owns the pointer, so a background click is inert and
+/// invalidates any earlier first press. Root, `+ new session`, and misses retain
+/// their single-click selection behavior but cannot become double clicks.
 fn update_pointer(
     state: &mut AppState,
     column: u16,
     row: u16,
-    action: PointerAction,
+    at: std::time::Duration,
 ) -> Vec<Effect> {
     if state.overlay.is_some() {
+        state.pending_session_click = None;
         return Vec::new();
     }
     let Some(selection) = state.sidebar_selection_at(column, row) else {
+        state.pending_session_click = None;
         return Vec::new();
     };
     state.select_row(selection);
-    match action {
-        PointerAction::Select => Vec::new(),
-        PointerAction::Activate => activate_selected(state),
+    let Selection::Target(Target::Session(session)) = selection else {
+        state.pending_session_click = None;
+        return Vec::new();
+    };
+    let doubled = state
+        .pending_session_click
+        .is_some_and(|(previous, previous_at)| {
+            previous == session
+                && at
+                    .checked_sub(previous_at)
+                    .is_some_and(|elapsed| elapsed <= SIDEBAR_DOUBLE_CLICK)
+        });
+    if doubled {
+        // Consume both presses so a third press starts a fresh pair.
+        state.pending_session_click = None;
+        activate_selected(state)
+    } else {
+        state.pending_session_click = Some((session, at));
+        Vec::new()
     }
 }
 
@@ -3096,6 +3138,10 @@ fn activate_selected(state: &mut AppState) -> Vec<Effect> {
 
 #[coverage(off)]
 fn open_create_session(state: &mut AppState) -> Vec<Effect> {
+    // Ctrl-A opens this persistent sidebar action directly, so keep the visual
+    // cursor and the inline form on the same `+ new session` row. The active
+    // target remains unchanged.
+    state.selected = Selection::NewSession;
     state.create_session = Some(CreateSessionForm::new(state.session_names.clone()));
     state.overlay = Some(Overlay::CreateSession);
     Vec::new()
@@ -3201,13 +3247,13 @@ mod tests {
         state
     }
 
-    fn click(state: &mut AppState, column: u16, row: u16) -> Selection {
+    fn click_at(state: &mut AppState, column: u16, row: u16, at_ms: u64) -> Selection {
         let _ = update(
             state,
             AppEvent::Pointer {
                 column,
                 row,
-                action: PointerAction::Select,
+                at: std::time::Duration::from_millis(at_ms),
             },
         );
         state.selected()
@@ -3223,18 +3269,18 @@ mod tests {
         // the divider (row 3), the session's two lines (rows 4-5), then the action
         // row (row 6). Each click moves the navigation cursor to that row.
         assert_eq!(
-            click(&mut state, 5, 2),
+            click_at(&mut state, 5, 2, 0),
             Selection::Target(Target::Root(workspace))
         );
         assert_eq!(
-            click(&mut state, 5, 4),
+            click_at(&mut state, 5, 4, 1_000),
             Selection::Target(Target::Session(session))
         );
         assert_eq!(
-            click(&mut state, 5, 5),
+            click_at(&mut state, 5, 5, 2_000),
             Selection::Target(Target::Session(session))
         );
-        assert_eq!(click(&mut state, 5, 6), Selection::NewSession);
+        assert_eq!(click_at(&mut state, 5, 6, 3_000), Selection::NewSession);
 
         // The divider under Root and a click below every rendered row select
         // nothing new: the cursor stays where it last landed.
@@ -3244,12 +3290,12 @@ mod tests {
             AppEvent::Pointer {
                 column: 5,
                 row: 3,
-                action: PointerAction::Select,
+                at: std::time::Duration::from_millis(4_000),
             },
         );
         assert!(effects.is_empty());
         assert_eq!(state.selected(), before);
-        let _ = click(&mut state, 5, 8);
+        let _ = click_at(&mut state, 5, 8, 5_000);
         assert_eq!(state.selected(), before);
     }
 
@@ -3264,7 +3310,7 @@ mod tests {
                 AppEvent::Pointer {
                     column: 5,
                     row: 2,
-                    action: PointerAction::Select,
+                    at: std::time::Duration::ZERO,
                 },
             )
             .is_empty()
@@ -3281,12 +3327,12 @@ mod tests {
             (5, 0),  // header row
             (5, 1),  // spacer row
         ] {
-            let _ = click(&mut state, column, row);
+            let _ = click_at(&mut state, column, row, u64::from(row));
             assert_eq!(state.selected(), root);
         }
         // Zero dimensions fall back to 80x24, so a mid-sidebar click still lands.
         let mut zeroed = sized_home(workspace, Vec::new(), 0, 0);
-        assert_eq!(click(&mut zeroed, 5, 2), root);
+        assert_eq!(click_at(&mut zeroed, 5, 2, 0), root);
         // A viewport at or under the chrome, and a click past the content
         // capacity, both resolve to nothing.
         let tiny = sized_home(workspace, Vec::new(), 100, 2);
@@ -3331,55 +3377,119 @@ mod tests {
             .sidebar_selection_at(5, 4)
             .expect("the tail row is addressable once scrolled");
         assert_eq!(hit, Selection::NewSession);
-        let _ = click(&mut state, 5, 4);
+        let _ = click_at(&mut state, 5, 4, 0);
         assert_eq!(state.selected(), Selection::NewSession);
     }
 
     #[test]
-    fn pointer_activate_matches_enter_on_the_resolved_row() {
+    fn session_pointer_single_click_selects_and_double_click_matches_enter() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let mut state = sized_home(workspace, vec![session], 100, 30);
 
-        // Double-clicking a session activates it into Closeup, as Enter would.
-        let effects = update(
-            &mut state,
-            AppEvent::Pointer {
-                column: 5,
-                row: 4,
-                action: PointerAction::Activate,
-            },
+        assert_eq!(
+            click_at(&mut state, 5, 4, 1_000),
+            Selection::Target(Target::Session(session))
         );
-        assert!(effects.is_empty());
+        assert_eq!(state.active(), Target::Root(workspace));
+        assert!(matches!(state.route(), Route::Home(HomeMode::Switch)));
+        assert_eq!(state.overlay(), None);
+
+        // The inclusive 400ms boundary is the same activation path as Enter.
+        assert_eq!(
+            click_at(&mut state, 5, 4, 1_400),
+            Selection::Target(Target::Session(session))
+        );
         assert_eq!(state.active(), Target::Session(session));
         assert!(matches!(state.route(), Route::Home(HomeMode::Closeup)));
+        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+    }
 
-        // Double-clicking `+ new session` opens the create form. With no sessions
-        // the action row sits below Root (row 2) and its divider (row 3), at row 4.
-        let mut creating = sized_home(workspace, Vec::new(), 100, 30);
-        let _ = update(
-            &mut creating,
-            AppEvent::Pointer {
-                column: 5,
-                row: 4,
-                action: PointerAction::Activate,
-            },
-        );
-        assert_eq!(creating.selected(), Selection::NewSession);
-        assert_eq!(creating.overlay(), Some(Overlay::CreateSession));
+    #[test]
+    fn session_pointer_outside_window_starts_a_new_pair_and_regressed_time_is_safe() {
+        let (workspace, session, _) = ids();
+        let mut state = sized_home(workspace, vec![session], 100, 30);
+        let _ = click_at(&mut state, 5, 4, 1_000);
+        let _ = click_at(&mut state, 5, 4, 1_401);
+        assert_eq!(state.active(), Target::Root(workspace));
+        let _ = click_at(&mut state, 5, 4, 1_200);
+        assert_eq!(state.active(), Target::Root(workspace));
+        let _ = click_at(&mut state, 5, 4, 1_600);
+        assert_eq!(state.active(), Target::Session(session));
+    }
 
-        // An activate that misses the sidebar body neither selects nor activates.
-        let mut missed = sized_home(workspace, vec![session], 100, 30);
+    #[test]
+    fn non_session_pointer_hits_invalidate_the_pending_session_press() {
+        let (workspace, session, _) = ids();
+        for (column, row) in [(5, 2), (5, 6), (5, 3), (90, 4)] {
+            let mut state = sized_home(workspace, vec![session], 100, 30);
+            let _ = click_at(&mut state, 5, 4, 1_000);
+            let _ = click_at(&mut state, column, row, 1_100);
+            let _ = click_at(&mut state, 5, 4, 1_200);
+            assert_eq!(state.active(), Target::Root(workspace));
+        }
+    }
+
+    #[test]
+    fn another_session_and_scrolled_same_cell_do_not_activate() {
+        let workspace = WorkspaceId::new();
+        let sessions: Vec<SessionId> = (0..6).map(|_| SessionId::new()).collect();
+        let mut other = sized_home(workspace, sessions[..2].to_vec(), 100, 30);
+        let _ = click_at(&mut other, 5, 4, 1_000);
+        let _ = click_at(&mut other, 5, 6, 1_100);
+        assert_eq!(other.active(), Target::Root(workspace));
+
+        let mut scrolled = sized_home(workspace, sessions.clone(), 100, 14);
+        let mut tail = scrolled.clone();
+        tail.selected = Selection::NewSession;
+        let (row, first, second) = (2_u16..14)
+            .find_map(|row| {
+                match (
+                    scrolled.sidebar_selection_at(5, row),
+                    tail.sidebar_selection_at(5, row),
+                ) {
+                    (
+                        Some(Selection::Target(Target::Session(first))),
+                        Some(Selection::Target(Target::Session(second))),
+                    ) if first != second => Some((row, first, second)),
+                    _ => None,
+                }
+            })
+            .expect("scrolling replaces a visible session cell with another identity");
+        let _ = click_at(&mut scrolled, 5, row, 1_000);
+        scrolled.selected = Selection::NewSession;
+        assert_ne!(first, second);
+        let _ = click_at(&mut scrolled, 5, row, 1_100);
+        assert_eq!(scrolled.active(), Target::Root(workspace));
+    }
+
+    #[test]
+    fn session_snapshot_invalidates_pending_press_even_when_identity_remains() {
+        let (workspace, session, _) = ids();
+        let mut state = sized_home(workspace, vec![session], 100, 30);
+        let _ = click_at(&mut state, 5, 4, 1_000);
         let _ = update(
-            &mut missed,
-            AppEvent::Pointer {
-                column: 90,
-                row: 4,
-                action: PointerAction::Activate,
-            },
+            &mut state,
+            AppEvent::Backend(BackendEvent::Sessions(vec![session])),
         );
-        assert_eq!(missed.active(), Target::Root(workspace));
-        assert!(matches!(missed.route(), Route::Home(HomeMode::Switch)));
+        let _ = click_at(&mut state, 5, 4, 1_100);
+        assert_eq!(state.active(), Target::Root(workspace));
+        let _ = click_at(&mut state, 5, 4, 1_500);
+        assert_eq!(state.active(), Target::Session(session));
+    }
+
+    #[test]
+    fn consumed_double_click_does_not_turn_a_third_press_into_activation() {
+        let (workspace, session, _) = ids();
+        let mut state = sized_home(workspace, vec![session], 100, 30);
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+        let _ = click_at(&mut state, 5, 4, 1_000);
+        let _ = click_at(&mut state, 5, 4, 1_100);
+        assert_eq!(state.active(), Target::Session(session));
+        state.active = Target::Root(workspace);
+        state.route = Route::Home(HomeMode::Switch);
+        let _ = click_at(&mut state, 5, 4, 1_200);
+        assert_eq!(state.active(), Target::Root(workspace));
     }
 
     #[test]
@@ -3391,17 +3501,37 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
         assert_eq!(state.overlay(), Some(Overlay::Overview));
         let before = state.selected();
+        state.pending_session_click = Some((session, std::time::Duration::from_millis(1_000)));
         let effects = update(
             &mut state,
             AppEvent::Pointer {
                 column: 5,
                 row: 4,
-                action: PointerAction::Activate,
+                at: std::time::Duration::from_millis(1_100),
             },
         );
         assert!(effects.is_empty());
         assert_eq!(state.selected(), before);
         assert_eq!(state.overlay(), Some(Overlay::Overview));
+        assert!(state.pending_session_click.is_none());
+        state.overlay = None;
+        let _ = click_at(&mut state, 5, 4, 1_200);
+        assert_eq!(state.active(), Target::Root(workspace));
+
+        // The inline create form owns the same background pointer boundary.
+        state.overlay = Some(Overlay::CreateSession);
+        let _ = update(
+            &mut state,
+            AppEvent::Pointer {
+                column: 5,
+                row: 4,
+                at: std::time::Duration::from_millis(1_300),
+            },
+        );
+        assert!(state.pending_session_click.is_none());
+        state.overlay = None;
+        let _ = click_at(&mut state, 5, 4, 1_400);
+        assert_eq!(state.active(), Target::Root(workspace));
     }
 
     #[test]
@@ -4072,6 +4202,7 @@ mod tests {
         let mut state = AppState::home(workspace, Vec::new());
         let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));
         assert_eq!(state.active(), Target::Root(workspace));
+        assert_eq!(state.selected(), Selection::NewSession);
         assert_eq!(state.overlay(), Some(Overlay::CreateSession));
         assert_eq!(state.create_session_form().unwrap().name(), "");
         // Home / Tab while the name-only form owns input must not retrigger create
@@ -5063,6 +5194,10 @@ mod tests {
                 decisions: vec![decision.clone()],
             }),
         );
+        assert_eq!(state.unread_decision_ids().len(), 1);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDecisions));
+        assert!(state.unread_decision_ids().is_empty());
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         assert_eq!(
             update(&mut state, AppEvent::Key(AppKey::SubmitDecision)),
@@ -5207,6 +5342,7 @@ mod tests {
         );
         assert_eq!(state.overlay(), Some(Overlay::Decisions));
         assert!(state.decision_overlay().is_some());
+        assert_eq!(state.unread_decision_ids().len(), 1);
 
         // Dismissal changes only UI state. A duplicate/resync snapshot must not
         // steal focus again, while a genuinely new pending row may notify.

@@ -17,6 +17,8 @@
 use usagi_core::domain::id::TerminalRef;
 
 use crate::presentation::views::workspace::TerminalViewProjection;
+use crate::usecase::application::pr::BrowserOpener;
+use crate::usecase::application::terminal_link::{url_at, validate_url};
 use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
 
 /// Scroll, selection, and feedback for the focused live terminal, owned by the
@@ -126,6 +128,16 @@ impl LiveTerminalControls {
         }
     }
 
+    /// Drop a retained selection after an ordinary click in the terminal
+    /// viewport. This is deliberately separate from [`Self::sync_focus`]: a
+    /// click clears only text selection, preserving scroll position and the
+    /// focused terminal.
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+        self.dragging = false;
+        self.feedback = Some("terminal selection cleared".to_owned());
+    }
+
     /// Record the outcome of writing `text` to the OS clipboard as feedback.
     pub fn record_copy(&mut self, text: &str, result: Result<(), String>) {
         self.feedback = Some(match result {
@@ -136,6 +148,38 @@ impl LiveTerminalControls {
             }
             Err(message) => message,
         });
+    }
+
+    /// Open the `http(s)` URL under a plain terminal click through the injected
+    /// browser, recording presentation-safe feedback on success or failure.
+    ///
+    /// The click cell is hit-tested against the snapshotted `cells` with the pure
+    /// #387 detector ([`url_at`]) and re-validated ([`validate_url`]) immediately
+    /// before spawning, so an ANSI/control sequence can never reach a browser
+    /// argument. A click that lands off any link is a silent no-op (`false`): it
+    /// opens nothing and leaves feedback untouched, so it does not disturb the
+    /// shell or the child PTY. `browser` is the argv-based platform adapter, which
+    /// never invokes a shell.
+    ///
+    /// The caller only reaches this after [`finish_drag`](Self::finish_drag)
+    /// yields nothing, so a non-empty drag selection copies and a plain click
+    /// opens — the two gestures never both fire.
+    pub fn open_link_at(
+        &mut self,
+        cells: &[String],
+        point: TerminalPoint,
+        browser: &mut dyn BrowserOpener,
+    ) -> bool {
+        let Some(url) = url_at(cells, point)
+            .and_then(|candidate| validate_url(&candidate).ok().map(str::to_owned))
+        else {
+            return false;
+        };
+        self.feedback = Some(match browser.open(&url) {
+            Ok(()) => format!("opened {url}"),
+            Err(message) => format!("Could not open browser: {message}"),
+        });
+        true
     }
 
     /// Replace the feedback line with a presentation-safe message.
@@ -160,6 +204,7 @@ impl LiveTerminalControls {
 #[cfg(test)]
 mod tests {
     use super::LiveTerminalControls;
+    use crate::usecase::application::pr::BrowserOpener;
     use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
     use usagi_core::domain::id::{
         DaemonGeneration, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
@@ -282,6 +327,30 @@ mod tests {
     }
 
     #[test]
+    fn clearing_a_retained_selection_preserves_scroll_and_focus() {
+        let mut controls = LiveTerminalControls::default();
+        let terminal = terminal();
+        controls.sync_focus(Some(&terminal));
+        let _ = controls.project(rows(10), 5);
+        controls.scroll_up();
+        controls.begin_selection(TerminalSelection::begin(
+            vec!["hello".to_owned()],
+            TerminalPoint { row: 0, column: 0 },
+        ));
+        let _ = controls.finish_drag();
+
+        controls.clear_selection();
+
+        assert!(!controls.has_selection());
+        assert!(!controls.is_dragging());
+        assert_eq!(controls.project(rows(10), 5).scroll, 1);
+        assert_eq!(
+            controls.project(rows(10), 5).feedback.as_deref(),
+            Some("terminal selection cleared")
+        );
+    }
+
+    #[test]
     fn an_empty_selection_is_dropped_with_feedback_without_clearing_the_clipboard() {
         let mut controls = LiveTerminalControls::default();
         controls.begin_selection(TerminalSelection::begin(
@@ -324,6 +393,105 @@ mod tests {
         assert_eq!(
             controls.project(rows(1), 1).feedback.as_deref(),
             Some("terminal is busy")
+        );
+    }
+
+    #[derive(Default)]
+    struct FakeBrowser {
+        opened: Vec<String>,
+        error: Option<String>,
+    }
+
+    impl BrowserOpener for FakeBrowser {
+        #[coverage(off)]
+        fn open(&mut self, url: &str) -> Result<(), String> {
+            if let Some(error) = &self.error {
+                return Err(error.clone());
+            }
+            self.opened.push(url.to_owned());
+            Ok(())
+        }
+    }
+
+    fn viewport() -> Vec<String> {
+        vec!["see https://example.com/x now".to_owned()]
+    }
+
+    #[test]
+    fn a_click_on_a_link_opens_it_and_reports_it() {
+        let mut controls = LiveTerminalControls::default();
+        let mut browser = FakeBrowser::default();
+        // Cols 4..=24 sit on the URL; a click anywhere along it opens the whole
+        // link and reports it once.
+        assert!(controls.open_link_at(
+            &viewport(),
+            TerminalPoint { row: 0, column: 10 },
+            &mut browser
+        ));
+        assert_eq!(browser.opened, vec!["https://example.com/x".to_owned()]);
+        assert_eq!(
+            controls.project(rows(1), 1).feedback.as_deref(),
+            Some("opened https://example.com/x")
+        );
+    }
+
+    #[test]
+    fn the_same_link_opens_every_time_it_is_clicked() {
+        let mut controls = LiveTerminalControls::default();
+        let mut browser = FakeBrowser::default();
+        let point = TerminalPoint { row: 0, column: 4 };
+        assert!(controls.open_link_at(&viewport(), point, &mut browser));
+        assert!(controls.open_link_at(&viewport(), point, &mut browser));
+        // Detection reads the grid each time, so no state is consumed: a repeat
+        // click opens the link again.
+        assert_eq!(
+            browser.opened,
+            vec![
+                "https://example.com/x".to_owned(),
+                "https://example.com/x".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_click_off_any_link_opens_nothing_and_leaves_feedback_untouched() {
+        let mut controls = LiveTerminalControls::default();
+        controls.set_feedback("earlier");
+        let mut browser = FakeBrowser::default();
+        // The leading "see" word and the trailing blank padding are not links.
+        assert!(!controls.open_link_at(
+            &viewport(),
+            TerminalPoint { row: 0, column: 0 },
+            &mut browser
+        ));
+        assert!(!controls.open_link_at(
+            &viewport(),
+            TerminalPoint { row: 0, column: 28 },
+            &mut browser
+        ));
+        assert!(browser.opened.is_empty());
+        assert_eq!(
+            controls.project(rows(1), 1).feedback.as_deref(),
+            Some("earlier")
+        );
+    }
+
+    #[test]
+    fn a_browser_launch_failure_reports_a_safe_notice() {
+        let mut controls = LiveTerminalControls::default();
+        let mut browser = FakeBrowser {
+            error: Some("browser launch failed".to_owned()),
+            ..FakeBrowser::default()
+        };
+        assert!(controls.open_link_at(
+            &viewport(),
+            TerminalPoint { row: 0, column: 5 },
+            &mut browser
+        ));
+        assert!(browser.opened.is_empty());
+        assert_eq!(
+            controls.project(rows(1), 1).feedback.as_deref(),
+            Some("Could not open browser: browser launch failed")
         );
     }
 }
