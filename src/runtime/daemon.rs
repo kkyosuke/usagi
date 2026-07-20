@@ -652,12 +652,19 @@ impl PtySpawner for AgentPty {
 
     fn terminate_reap(&mut self, terminal: &TerminalRef) -> Result<(), TerminateReapError> {
         let key = terminal.terminal_id.as_str();
-        let pty = self.terminals.get(&key).ok_or(TerminateReapError)?;
+        let pty = Arc::clone(
+            &self
+                .terminals
+                .get(&key)
+                .filter(|entry| entry.terminal.fences(terminal))
+                .ok_or(TerminateReapError)?
+                .pty,
+        );
         pty.lock()
             .map_err(|_| TerminateReapError)?
             .terminate_reap()
             .map_err(|_| TerminateReapError)?;
-        self.terminals.remove(&key);
+        release_owned_pty(&mut self.terminals, &mut self.selected, terminal);
         Ok(())
     }
 }
