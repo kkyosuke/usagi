@@ -396,8 +396,10 @@ enum ConfigStep {
     Quit,
     /// welcome へ戻る。
     Back,
-    /// Persisted successfully; show the confirmation frame, then return home.
-    Saved,
+    /// A save has begun (loading). The screen graph draws the `saving…` frame,
+    /// writes, then on success holds the `saved` frame before returning home; a
+    /// failed write stays on Config with an error for retry.
+    Save,
 }
 
 /// New 画面でキー `key` を処理した結果の遷移。
@@ -858,11 +860,11 @@ fn welcome_action(action: MenuAction) -> WelcomeStep {
     }
 }
 
-/// Config 画面のキー処理。Save は dirty な Save 行でのみ有効で、成功後は confirmation
-/// frame を表示して welcome へ戻る。
+/// Config 画面のキー処理。Save は dirty な Save 行でのみ有効で、Enter は save フローを
+/// 開始（loading）する。保存中の再入力は `begin_save` が弾く。
 #[coverage(off)]
 #[allow(clippy::needless_pass_by_value)]
-fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -> ConfigStep {
+fn step_config(config: &mut Config, key: Key, _settings: &mut dyn SettingsPort) -> ConfigStep {
     match key {
         Key::Tab => {
             config.toggle_scope();
@@ -884,13 +886,10 @@ fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -
             config.cycle_selected(true);
             ConfigStep::Stay
         }
-        Key::Enter if config.can_save() => {
-            if config.save(settings) {
-                ConfigStep::Saved
-            } else {
-                ConfigStep::Stay
-            }
-        }
+        // Enter begins the save flow (loading). `begin_save` is a no-op unless a
+        // dirty Save row is focused with no save already in flight, so a rapid
+        // second Enter cannot start a second save.
+        Key::Enter if config.begin_save() => ConfigStep::Save,
         Key::Escape => ConfigStep::Back,
         Key::Quit | Key::CtrlQ => ConfigStep::Quit,
         _ => ConfigStep::Stay,
@@ -2656,10 +2655,21 @@ fn run_with_settings_inner(
                 ConfigStep::Stay => {}
                 ConfigStep::Quit => return Ok(Exit::Quit),
                 ConfigStep::Back => screen = Screen::Welcome,
-                ConfigStep::Saved => {
+                ConfigStep::Save => {
+                    // Draw the loading frame (button reads `saving…`) before the
+                    // blocking write so the save is visible.
                     let (height, width) = term.size()?;
                     term.draw(&config::render(height, width, &config_form))?;
-                    screen = Screen::Welcome;
+                    if config_form.commit_save(settings) {
+                        // Hold the `saved` confirmation briefly, then return home
+                        // with no key press. A failed write skips this and leaves
+                        // Config on screen with the error for retry.
+                        let (height, width) = term.size()?;
+                        term.draw(&config::render(height, width, &config_form))?;
+                        term.wait(config::SAVED_DISPLAY)?;
+                        config_form.reset_save();
+                        screen = Screen::Welcome;
+                    }
                 }
             },
         }
@@ -2786,8 +2796,9 @@ mod tests {
         NoDesktopNotifications, NoMetrics, NoMetricsFactory, SessionCommandPort,
         SessionCommandPortFactory, SessionCommandResult, Start, TerminalAttach, TerminalChunk,
         TerminalError, UnavailableBrowserOpener, UnavailableDecisionCommandPort,
-        UnavailablePrSnapshotPort, UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader,
-        WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
+        UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
+        UnavailableSessionCommandPortFactory, WelcomeStep, WorkspaceLoader, WorkspaceRuntime,
+        WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
         clear_terminal_selection_on_click, close_exited_panes, controller_terminal_view,
         forward_live_terminal_input, handle_terminal_pointer, intercept_live_terminal_control,
         key_to_terminal_bytes, new_project_notice, play_startup_splash, render_controller_frame,
@@ -2821,6 +2832,7 @@ mod tests {
     };
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
+    use usagi_core::usecase::settings::SettingsPort;
 
     use usagi_core::domain::recent::{Recent, UniteOverview};
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
@@ -4555,10 +4567,145 @@ mod tests {
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
+        // Enter on the dirty Save row begins the save flow (loading).
         assert!(matches!(
             step_config(&mut config, Key::Enter, &mut settings),
-            ConfigStep::Saved
+            ConfigStep::Save
         ));
+        // A second Enter while Saving is a no-op, so it stays on the screen.
+        assert!(matches!(
+            step_config(&mut config, Key::Enter, &mut settings),
+            ConfigStep::Stay
+        ));
+    }
+
+    /// Settings port that records saves and can be told to fail, for the Config
+    /// save screen-graph tests.
+    #[derive(Default)]
+    struct RecordingSettingsPort {
+        saves: usize,
+        fail_save: bool,
+    }
+
+    impl SettingsPort for RecordingSettingsPort {
+        #[coverage(off)]
+        fn read(
+            &mut self,
+            _scope: usagi_core::usecase::settings::SettingsScope,
+        ) -> io::Result<usagi_core::domain::settings::Settings> {
+            Ok(usagi_core::domain::settings::Settings::default())
+        }
+
+        #[coverage(off)]
+        fn save(
+            &mut self,
+            _scope: usagi_core::usecase::settings::SettingsScope,
+            _settings: &usagi_core::domain::settings::Settings,
+        ) -> io::Result<()> {
+            if self.fail_save {
+                return Err(io::Error::other("disk unavailable"));
+            }
+            self.saves += 1;
+            Ok(())
+        }
+    }
+
+    // Focus the dirty Save row from Config: cycle the theme, then step down to
+    // Save (Theme → Modal mode → Agent model → Save).
+    const CONFIG_SAVE_KEYS: [Key; 5] = [Key::Right, Key::Down, Key::Down, Key::Down, Key::Enter];
+
+    #[test]
+    fn config_save_shows_loading_then_saved_then_returns_home_on_its_own() {
+        let keys: Vec<Key> = CONFIG_SAVE_KEYS
+            .iter()
+            .cloned()
+            .chain(std::iter::once(Key::Quit)) // now on Welcome; quit to end the loop
+            .collect();
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut loader = FakeLoader::default();
+        let mut settings = RecordingSettingsPort::default();
+        let mut sessions = UnavailableSessionCommandPortFactory;
+
+        assert_eq!(
+            run_with_settings(
+                &mut term,
+                Vec::new(),
+                Vec::new(),
+                now(),
+                Start::Config,
+                &mut loader,
+                &mut settings,
+                &mut sessions,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        // Exactly one write, and exactly one confirmation dwell — the screen
+        // returned home on the timer, with no extra key press.
+        assert_eq!(settings.saves, 1);
+        assert_eq!(
+            term.waits,
+            vec![crate::presentation::views::config::SAVED_DISPLAY]
+        );
+
+        // Frames appear in order: the `saving…` loading frame, then the `saved`
+        // confirmation, then the Welcome `Menu` reached without a key press.
+        let joined: Vec<String> = term.frames.iter().map(|frame| frame.join("\n")).collect();
+        let saving = joined
+            .iter()
+            .position(|frame| frame.contains("saving…"))
+            .expect("a loading frame is drawn");
+        let saved = joined
+            .iter()
+            .position(|frame| frame.contains("[ saved ]"))
+            .expect("a saved confirmation frame is drawn");
+        let menu = joined
+            .iter()
+            .rposition(|frame| frame.contains("Menu"))
+            .expect("the Welcome menu is drawn after returning home");
+        assert!(saving < saved && saved < menu);
+    }
+
+    #[test]
+    fn config_save_failure_stays_on_the_screen_without_dwelling_or_returning() {
+        let keys: Vec<Key> = CONFIG_SAVE_KEYS
+            .iter()
+            .cloned()
+            .chain([Key::Escape, Key::Quit]) // still on Config; Esc back, then quit
+            .collect();
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut loader = FakeLoader::default();
+        let mut settings = RecordingSettingsPort {
+            fail_save: true,
+            ..RecordingSettingsPort::default()
+        };
+        let mut sessions = UnavailableSessionCommandPortFactory;
+
+        assert_eq!(
+            run_with_settings(
+                &mut term,
+                Vec::new(),
+                Vec::new(),
+                now(),
+                Start::Config,
+                &mut loader,
+                &mut settings,
+                &mut sessions,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        // A failed write neither dwells nor auto-returns.
+        assert_eq!(settings.saves, 0);
+        assert!(term.waits.is_empty());
+
+        let joined: Vec<String> = term.frames.iter().map(|frame| frame.join("\n")).collect();
+        // The error is surfaced on the Config screen and no `saved` confirmation
+        // is ever shown.
+        assert!(joined.iter().any(|frame| frame.contains("Save failed")));
+        assert!(joined.iter().all(|frame| !frame.contains("[ saved ]")));
     }
 
     #[test]
