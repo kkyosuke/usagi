@@ -1,14 +1,14 @@
 ---
 number: 482
 title: fix(mcp): JSON-RPC 2.0 validation と protocol negotiation を実装する
-status: todo
+status: done
 priority: medium
 labels: [review, v2, mcp, protocol]
 dependson: []
 related: [400, 407]
 parent: 453
 created_at: 2026-07-20T12:06:48.514964+00:00
-updated_at: 2026-07-20T12:06:48.514964+00:00
+updated_at: 2026-07-20T23:22:35.434494+00:00
 ---
 
 ## 問題・影響
