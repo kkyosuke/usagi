@@ -820,6 +820,35 @@ mod tests {
                 .operation_id,
             operation
         );
+        let different_operation = OperationId::new();
+        let mut replacement = agent(session, agent_id);
+        replacement.status = AgentStatus::Starting;
+        replacement.current_run = Some(different_operation);
+        let mut different_binding = binding.clone();
+        different_binding.run_id = different_operation;
+        let different_reservation = AgentAdmissionReservation {
+            operation_id: different_operation,
+            semantic_key: "different-intent".into(),
+            credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+        };
+        assert_eq!(
+            store
+                .reserve_admission(
+                    replacement,
+                    DispatchRun {
+                        run_id: different_operation,
+                        agent_id,
+                        prompt: "different work".into(),
+                        started_at: now(),
+                        ended_at: None,
+                        status: RunStatus::Preparing,
+                    },
+                    different_binding,
+                    different_reservation.clone(),
+                )
+                .unwrap(),
+            different_reservation
+        );
         assert_eq!(store.admission(operation).unwrap(), Some(reservation));
         assert_eq!(store.binding(operation).unwrap(), Some(binding));
         let serialized = fs::read_to_string(store.registry_path()).unwrap();
@@ -829,7 +858,7 @@ mod tests {
         assert!(store.commit_admission(operation).unwrap());
         assert!(!store.commit_admission(operation).unwrap());
         assert_eq!(store.runs().unwrap()[0].status, RunStatus::Running);
-        assert_eq!(store.reconcile_incomplete_admissions().unwrap(), 1);
+        assert_eq!(store.reconcile_incomplete_admissions().unwrap(), 2);
         assert_eq!(store.runs().unwrap()[0].status, RunStatus::Failed);
         assert_eq!(
             store.agent(agent_id).unwrap().unwrap().status,
