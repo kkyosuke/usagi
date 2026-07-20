@@ -12,7 +12,12 @@
 //! supported. Scrollback is retained locally with a bounded history for the
 //! pane viewport.
 
+use std::collections::HashSet;
+
 use unicode_width::UnicodeWidthChar;
+
+use super::terminal_link::scan_links;
+use super::terminal_selection::TerminalPoint;
 
 // Kept in sync with `presentation::frame::TERMINAL_CURSOR_MARKER`.  This
 // use-case module deliberately does not depend on presentation, while the
@@ -188,11 +193,22 @@ impl TerminalScreen {
     /// Renders retained scrollback followed by the visible terminal grid.
     #[must_use]
     pub fn rows_with_scrollback(&self) -> Vec<String> {
+        let links = self.link_cells();
+        let scrollback_len = self.scrollback.len();
         let mut rows: Vec<_> = self
             .scrollback
             .iter()
-            .map(|row| render_row(row, None, ""))
-            .chain(self.grid.iter().map(|row| render_row(row, None, "")))
+            .enumerate()
+            .map(|(row, cells)| render_row_selected(cells, None, "", None, Some((row, &links))))
+            .chain(self.grid.iter().enumerate().map(|(index, cells)| {
+                render_row_selected(
+                    cells,
+                    None,
+                    "",
+                    None,
+                    Some((scrollback_len + index, &links)),
+                )
+            }))
             .collect();
         // The visible grid is fixed-height, but its unused tail is not terminal
         // content. Dropping it lets the live viewport stay anchored to the last
@@ -203,18 +219,46 @@ impl TerminalScreen {
         rows
     }
 
+    /// Grid cells — retained scrollback then the visible grid, joined untrimmed so
+    /// their row indices match the render iteration above — that sit on an
+    /// `http(s)` URL. Rendering underlines these to mark links clickable (#389);
+    /// detection is the pure #387 core over the ANSI-free grid.
+    fn link_cells(&self) -> HashSet<TerminalPoint> {
+        let viewport: Vec<String> = self
+            .scrollback
+            .iter()
+            .chain(&self.grid)
+            .map(|row| {
+                row.iter()
+                    .filter(|cell| !cell.continuation)
+                    .map(|cell| cell.ch)
+                    .collect()
+            })
+            .collect();
+        scan_links(&viewport).cells
+    }
+
     /// Renders retained scrollback and the visible grid with the current PTY
     /// cursor as an inverted cell.
     #[must_use]
     #[coverage(off)] // Iterator closure instrumentation is emitted twice by coverage builds.
     pub fn rows_with_scrollback_and_cursor(&self) -> Vec<String> {
+        let links = self.link_cells();
+        let scrollback_len = self.scrollback.len();
         let mut rows: Vec<_> = self
             .scrollback
             .iter()
-            .map(|row| render_row(row, None, ""))
-            .chain(self.grid.iter().enumerate().map(|(row, cells)| {
-                let cursor = (row == self.cursor_row).then_some(self.cursor_col);
-                render_row(cells, cursor, &self.style)
+            .enumerate()
+            .map(|(row, cells)| render_row_selected(cells, None, "", None, Some((row, &links))))
+            .chain(self.grid.iter().enumerate().map(|(index, cells)| {
+                let cursor = (index == self.cursor_row).then_some(self.cursor_col);
+                render_row_selected(
+                    cells,
+                    cursor,
+                    &self.style,
+                    None,
+                    Some((scrollback_len + index, &links)),
+                )
             }))
             .collect();
         while rows.last().is_some_and(String::is_empty) {
@@ -236,17 +280,30 @@ impl TerminalScreen {
         } else {
             (focus, anchor)
         };
+        let links = self.link_cells();
         let mut rows: Vec<_> = self
             .scrollback
             .iter()
             .enumerate()
             .map(|(row, cells)| {
-                render_row_selected(cells, None, "", selection_for(row, first, last))
+                render_row_selected(
+                    cells,
+                    None,
+                    "",
+                    selection_for(row, first, last),
+                    Some((row, &links)),
+                )
             })
             .chain(self.grid.iter().enumerate().map(|(index, cells)| {
                 let row = self.scrollback.len() + index;
                 let cursor = (index == self.cursor_row).then_some(self.cursor_col);
-                render_row_selected(cells, cursor, &self.style, selection_for(row, first, last))
+                render_row_selected(
+                    cells,
+                    cursor,
+                    &self.style,
+                    selection_for(row, first, last),
+                    Some((row, &links)),
+                )
             }))
             .collect();
         while rows.last().is_some_and(String::is_empty) {
@@ -710,7 +767,7 @@ fn resize_buffer(buffer: &mut ScreenBuffer, rows: usize, cols: usize, old_rows: 
 }
 
 fn render_row(row: &[Cell], cursor: Option<usize>, cursor_style: &str) -> String {
-    render_row_selected(row, cursor, cursor_style, None)
+    render_row_selected(row, cursor, cursor_style, None, None)
 }
 
 fn selection_for(
@@ -729,7 +786,13 @@ fn render_row_selected(
     cursor: Option<usize>,
     cursor_style: &str,
     selection: Option<(usize, usize)>,
+    links: Option<(usize, &HashSet<TerminalPoint>)>,
 ) -> String {
+    // A cell sits on a detected link when its (row, column) is in the scanned
+    // set; such cells render underlined to mark them clickable (#389).
+    let is_link = |column: usize| {
+        links.is_some_and(|(row, set)| set.contains(&TerminalPoint { row, column }))
+    };
     let cursor = cursor.filter(|column| *column < row.len());
     // A selection extends the rendered extent past the row's trailing blanks so
     // selected padding — and fully blank lines that fall inside a multi-row
@@ -775,6 +838,9 @@ fn render_row_selected(
         };
         if selected {
             style.push_str("\u{1b}[7m");
+        }
+        if is_link(column) {
+            style.push_str("\u{1b}[4m");
         }
         if style != active {
             if !active.is_empty() {
@@ -893,6 +959,27 @@ mod tests {
         assert_eq!(
             screen.rows_with_scrollback_and_cursor_selection((0, 1), (0, 2)),
             vec!["A\u{1b}[7mあ\u{1b}[0mB"]
+        );
+    }
+
+    #[test]
+    fn detected_links_render_underlined_and_compose_with_selection() {
+        let mut screen = TerminalScreen::new(2, 20);
+        screen.advance(b"see https://a.io");
+        // The URL cells (cols 4..=15) are underlined so the link reads as
+        // clickable; the surrounding "see " prose carries no styling.
+        assert_eq!(
+            screen.rows_with_scrollback(),
+            vec!["see \u{1b}[4mhttps://a.io\u{1b}[0m"]
+        );
+        // Selecting the first URL cell keeps the underline and adds the selection
+        // inverse on that cell, so the two affordances coexist. The live cursor
+        // (col 16, just past the text) still renders as its reverse-video cell.
+        assert_eq!(
+            screen.rows_with_scrollback_and_cursor_selection((0, 4), (0, 4)),
+            vec![
+                "see \u{1b}[7m\u{1b}[4mh\u{1b}[0m\u{1b}[4mttps://a.io\u{1b}[0m\u{1b}[7m\u{e0001} \u{1b}[0m"
+            ]
         );
     }
 

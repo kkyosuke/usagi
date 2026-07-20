@@ -295,6 +295,11 @@ fn is_ctrl_p(key: &KeyEvent) -> bool {
         || (matches!(key.code, KeyCode::Char('p')) && is_only_control(key.modifiers))
 }
 
+fn is_ctrl_x(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('\u{18}'))
+        || (matches!(key.code, KeyCode::Char('x')) && is_only_control(key.modifiers))
+}
+
 fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
     if is_ctrl_o(key) {
         return Some(LiveTerminalAction::Switch);
@@ -307,6 +312,9 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
     }
     if is_ctrl_p(key) {
         return Some(LiveTerminalAction::PreviousTab);
+    }
+    if is_ctrl_x(key) {
+        return Some(LiveTerminalAction::CloseTab);
     }
     // Plain follow-ups for the live-terminal view controls the Home reducer does
     // not own: scroll the retained PTY output and close the focused tab. A
@@ -579,6 +587,14 @@ mod tests {
                 action: LiveTerminalAction::CloseTab,
             },
             Case {
+                follow_up: ctrl('x'),
+                action: LiveTerminalAction::CloseTab,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('\u{18}')),
+                action: LiveTerminalAction::CloseTab,
+            },
+            Case {
                 follow_up: key(KeyCode::Char('u')),
                 action: LiveTerminalAction::ScrollUp,
             },
@@ -616,6 +632,14 @@ mod tests {
             assert_eq!(
                 LiveInputClassifier::default().classify(T0, key(KeyCode::Char(character))),
                 LiveInputOutput::Passthrough(character.to_string().into_bytes())
+            );
+        }
+        // Ctrl-X is reserved only as a leader follow-up. Both common decoder
+        // forms remain a single PTY control byte when there is no Ctrl-O leader.
+        for input in [ctrl('x'), key(KeyCode::Char('\u{18}'))] {
+            assert_eq!(
+                LiveInputClassifier::default().classify(T0, input),
+                LiveInputOutput::Passthrough(vec![0x18])
             );
         }
     }

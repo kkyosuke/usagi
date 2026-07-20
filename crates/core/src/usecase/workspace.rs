@@ -154,6 +154,106 @@ pub fn recent(storage: &Storage) -> Result<Vec<Recent>> {
         .collect())
 }
 
+/// The kind of New-project operation being pre-validated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewWorkspaceKind {
+    /// Clone a repository into a fresh destination directory.
+    Clone,
+    /// Register an existing directory as a workspace.
+    Existing,
+}
+
+/// The filesystem classification of a candidate workspace path.
+///
+/// The composition root probes the real filesystem and hands the result to
+/// [`preflight_new_workspace`], keeping that decision pure and testable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceProbe {
+    /// Nothing exists at the path.
+    Missing,
+    /// A directory exists at the path.
+    Directory,
+    /// Something that is not a directory (a file, symlink target, …) exists.
+    NonDirectory,
+}
+
+/// Why a New-project request cannot proceed to creation.
+///
+/// Each variant carries a short, user-facing, side-effect-free
+/// [`message`](Self::message) safe to show in the New form's notice slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewWorkspaceError {
+    /// A Clone destination already exists on disk.
+    CloneDestinationExists,
+    /// An Existing path does not exist.
+    ExistingPathMissing,
+    /// An Existing path exists but is not a directory.
+    ExistingPathNotDirectory,
+    /// The target directory is already a registered workspace.
+    AlreadyRegistered,
+}
+
+impl NewWorkspaceError {
+    /// A one-line, safe, actionable message for the New form's notice slot.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::CloneDestinationExists => {
+                "a directory already exists at the clone destination; choose another location or name"
+            }
+            Self::ExistingPathMissing => "directory not found; enter a path that exists",
+            Self::ExistingPathNotDirectory => "path is not a directory; choose a directory",
+            Self::AlreadyRegistered => "this directory is already a registered workspace",
+        }
+    }
+}
+
+/// Whether `path` is already a registered workspace, using the same identity as
+/// [`register`]: exact [`Path`] equality (no normalization). Callers trim their
+/// input before building the path, so leading/trailing whitespace does not
+/// defeat the match.
+#[must_use]
+pub fn is_registered(workspaces: &[Workspace], path: &Path) -> bool {
+    workspaces.iter().any(|workspace| workspace.path == path)
+}
+
+/// Decide whether a New-project request may proceed to creation, without any
+/// side effect.
+///
+/// The composition root supplies the filesystem `probe` of the target path and
+/// whether the target is already `registered` (see [`is_registered`]). This
+/// function performs no IO so it can be unit tested exhaustively; the caller
+/// runs it *before* creating directories, cloning, or writing the registry, so
+/// a rejection leaves the filesystem and registry untouched.
+///
+/// # Errors
+///
+/// Returns a [`NewWorkspaceError`] when the target is already registered, a
+/// Clone destination already exists, or an Existing path is missing or not a
+/// directory.
+pub fn preflight_new_workspace(
+    kind: NewWorkspaceKind,
+    registered: bool,
+    probe: WorkspaceProbe,
+) -> Result<(), NewWorkspaceError> {
+    if registered {
+        return Err(NewWorkspaceError::AlreadyRegistered);
+    }
+    match kind {
+        NewWorkspaceKind::Clone => match probe {
+            WorkspaceProbe::Missing => Ok(()),
+            WorkspaceProbe::Directory | WorkspaceProbe::NonDirectory => {
+                Err(NewWorkspaceError::CloneDestinationExists)
+            }
+        },
+        NewWorkspaceKind::Existing => match probe {
+            WorkspaceProbe::Directory => Ok(()),
+            WorkspaceProbe::Missing => Err(NewWorkspaceError::ExistingPathMissing),
+            WorkspaceProbe::NonDirectory => Err(NewWorkspaceError::ExistingPathNotDirectory),
+        },
+    }
+}
+
 #[coverage(off)]
 fn resolve_or_register(
     workspaces: &mut Vec<Workspace>,
@@ -248,7 +348,10 @@ mod tests {
 
     use chrono::{DateTime, TimeZone, Utc};
 
-    use super::{open, recent, register, remove};
+    use super::{
+        NewWorkspaceError, NewWorkspaceKind, WorkspaceProbe, is_registered, open,
+        preflight_new_workspace, recent, register, remove,
+    };
     use crate::domain::issue::{Issue, IssuePriority, IssueStatus};
     use crate::domain::note::Scratchpad;
     use crate::domain::pullrequest::PrLink;
@@ -579,5 +682,103 @@ mod tests {
         fs::write(storage.dir().join("workspaces.json"), "{ broken").unwrap();
 
         assert!(recent(&storage).is_err());
+    }
+
+    #[test]
+    fn is_registered_matches_an_existing_path_exactly() {
+        let entries = [
+            workspace("app", "/projects/app", ts(3)),
+            workspace("lib", "/projects/lib", ts(4)),
+        ];
+
+        assert!(is_registered(&entries, Path::new("/projects/app")));
+        assert!(is_registered(&entries, Path::new("/projects/lib")));
+        assert!(!is_registered(&entries, Path::new("/projects/other")));
+    }
+
+    #[test]
+    fn is_registered_does_not_normalize_trailing_whitespace() {
+        // The caller trims its input before building the path; core keeps exact
+        // identity so a raw trailing-space path is intentionally not a match.
+        let entries = [workspace("app", "/projects/app", ts(3))];
+
+        assert!(!is_registered(&entries, Path::new("/projects/app ")));
+        // After trimming (the caller's job) it matches.
+        assert!(is_registered(&entries, Path::new("/projects/app".trim())));
+    }
+
+    #[test]
+    fn is_registered_matches_unicode_paths_exactly() {
+        let entries = [workspace("プロジェクト", "/projects/プロジェクト", ts(3))];
+
+        assert!(is_registered(&entries, Path::new("/projects/プロジェクト")));
+        assert!(!is_registered(&entries, Path::new("/projects/project")));
+    }
+
+    #[test]
+    fn preflight_rejects_an_already_registered_target_in_either_mode() {
+        for kind in [NewWorkspaceKind::Clone, NewWorkspaceKind::Existing] {
+            // A registered target is rejected regardless of its probe result.
+            for probe in [
+                WorkspaceProbe::Missing,
+                WorkspaceProbe::Directory,
+                WorkspaceProbe::NonDirectory,
+            ] {
+                assert_eq!(
+                    preflight_new_workspace(kind, true, probe),
+                    Err(NewWorkspaceError::AlreadyRegistered),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn preflight_clone_allows_a_missing_destination_and_rejects_an_existing_one() {
+        assert_eq!(
+            preflight_new_workspace(NewWorkspaceKind::Clone, false, WorkspaceProbe::Missing),
+            Ok(()),
+        );
+        assert_eq!(
+            preflight_new_workspace(NewWorkspaceKind::Clone, false, WorkspaceProbe::Directory),
+            Err(NewWorkspaceError::CloneDestinationExists),
+        );
+        assert_eq!(
+            preflight_new_workspace(NewWorkspaceKind::Clone, false, WorkspaceProbe::NonDirectory),
+            Err(NewWorkspaceError::CloneDestinationExists),
+        );
+    }
+
+    #[test]
+    fn preflight_existing_requires_an_existing_directory() {
+        assert_eq!(
+            preflight_new_workspace(NewWorkspaceKind::Existing, false, WorkspaceProbe::Directory),
+            Ok(()),
+        );
+        assert_eq!(
+            preflight_new_workspace(NewWorkspaceKind::Existing, false, WorkspaceProbe::Missing),
+            Err(NewWorkspaceError::ExistingPathMissing),
+        );
+        assert_eq!(
+            preflight_new_workspace(
+                NewWorkspaceKind::Existing,
+                false,
+                WorkspaceProbe::NonDirectory,
+            ),
+            Err(NewWorkspaceError::ExistingPathNotDirectory),
+        );
+    }
+
+    #[test]
+    fn new_workspace_error_messages_are_one_line_and_specific() {
+        for error in [
+            NewWorkspaceError::CloneDestinationExists,
+            NewWorkspaceError::ExistingPathMissing,
+            NewWorkspaceError::ExistingPathNotDirectory,
+            NewWorkspaceError::AlreadyRegistered,
+        ] {
+            let message = error.message();
+            assert!(!message.is_empty());
+            assert!(!message.contains('\n'));
+        }
     }
 }

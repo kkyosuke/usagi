@@ -374,6 +374,45 @@ impl New {
         }
     }
 
+    /// 選択をキャレットから 1 文字左へ広げる（`Shift`+`←`）。
+    pub fn select_left(&mut self) {
+        let field = self.focus();
+        if let Some(input) = self.field_mut(field) {
+            input.select_left();
+        }
+    }
+
+    /// 選択をキャレットから 1 文字右へ広げる（`Shift`+`→`）。
+    pub fn select_right(&mut self) {
+        let field = self.focus();
+        if let Some(input) = self.field_mut(field) {
+            input.select_right();
+        }
+    }
+
+    /// 選択を行頭まで広げる（`Shift`+`Home`）。
+    pub fn select_home(&mut self) {
+        let field = self.focus();
+        if let Some(input) = self.field_mut(field) {
+            input.select_home();
+        }
+    }
+
+    /// 選択を行末まで広げる（`Shift`+`End`）。
+    pub fn select_end(&mut self) {
+        let field = self.focus();
+        if let Some(input) = self.field_mut(field) {
+            input.select_end();
+        }
+    }
+
+    /// フォーカス中フィールドの選択範囲（正規化した `start..end` のバイト範囲）。
+    /// モード選択や選択なしでは `None`。描画側が反転ハイライトに使う。
+    #[must_use]
+    pub fn focus_selection(&self) -> Option<(usize, usize)> {
+        self.focused_input().and_then(TextInput::selection)
+    }
+
     /// テキストが変わったフィールドの自動導出をやり直す。URL はディレクトリを、パスは名前を
     /// 導出する。ディレクトリ・名前は手編集済みか（非空 ⇒ dirty）を追い、空にすると自動導出へ
     /// 戻る（エディタが候補を復活させる挙動に合わせる）。
@@ -450,18 +489,19 @@ fn suggest_name(path: &str) -> String {
 }
 
 /// フォーカス中の入力欄のテキスト。共通 block cursor を使い、編集位置の 1 文字を
-/// reverse-video で示す。空・行末は反転空白 1 つになる。
-fn caret_text(value: &str, cursor: usize) -> String {
+/// reverse-video で示す。選択範囲があればまとめて反転する。空・行末は反転空白 1 つになる。
+fn caret_text(value: &str, cursor: usize, selection: Option<(usize, usize)>) -> String {
     let accent = Role::Accent.style().bold();
-    widgets::block_caret(value, cursor, &accent)
+    widgets::block_caret_with_selection(value, cursor, selection, &accent)
 }
 
 /// 1 入力行: フォーカス中は `>` カーソル、値（空なら dim のプレースホルダ）、フォーカス中は
-/// キャレットを描く。
+/// キャレットと選択を描く。`selection` はフォーカス中フィールドの範囲で、非フォーカス行は無視する。
 fn input_line(
     block_pad: &str,
     value: &str,
     cursor: usize,
+    selection: Option<(usize, usize)>,
     placeholder: &str,
     focused: bool,
 ) -> String {
@@ -472,12 +512,12 @@ fn input_line(
     };
     let body = if value.is_empty() {
         if focused {
-            caret_text("", 0)
+            caret_text("", 0, None)
         } else {
             Style::new().dim().italic().paint(placeholder)
         }
     } else if focused {
-        caret_text(value, cursor)
+        caret_text(value, cursor, selection)
     } else {
         Role::Accent.style().paint(value)
     };
@@ -518,23 +558,26 @@ fn field_lines(
     label: &str,
     value: &str,
     cursor: usize,
+    selection: Option<(usize, usize)>,
     placeholder: &str,
     focused: bool,
 ) -> Vec<String> {
     vec![
         format!("{block_pad}{}", Style::new().dim().paint(label)),
-        input_line(block_pad, value, cursor, placeholder, focused),
+        input_line(block_pad, value, cursor, selection, placeholder, focused),
     ]
 }
 
 /// Clone モードのフィールド（URL / Location / Directory / Branch）。
 fn clone_fields(block_pad: &str, state: &New) -> Vec<String> {
     let caret = state.focus_cursor();
+    let selection = state.focus_selection();
     let mut lines = field_lines(
         block_pad,
         "Repository URL",
         state.url(),
         caret,
+        selection,
         "https://github.com/owner/repo.git",
         state.focus() == Field::Url,
     );
@@ -544,6 +587,7 @@ fn clone_fields(block_pad: &str, state: &New) -> Vec<String> {
         "Location",
         state.location(),
         caret,
+        selection,
         "where to create the project",
         state.focus() == Field::Location,
     ));
@@ -553,6 +597,7 @@ fn clone_fields(block_pad: &str, state: &New) -> Vec<String> {
         "Directory",
         state.directory(),
         caret,
+        selection,
         "derived from the URL",
         state.focus() == Field::Directory,
     ));
@@ -562,6 +607,7 @@ fn clone_fields(block_pad: &str, state: &New) -> Vec<String> {
         "Branch (optional)",
         state.branch(),
         caret,
+        selection,
         "repository default",
         state.focus() == Field::Branch,
     ));
@@ -571,11 +617,13 @@ fn clone_fields(block_pad: &str, state: &New) -> Vec<String> {
 /// Existing モードのフィールド（Directory path / Name）。
 fn existing_fields(block_pad: &str, state: &New) -> Vec<String> {
     let caret = state.focus_cursor();
+    let selection = state.focus_selection();
     let mut lines = field_lines(
         block_pad,
         "Directory",
         state.path(),
         caret,
+        selection,
         "/path/to/an/existing/project",
         state.focus() == Field::Path,
     );
@@ -585,6 +633,7 @@ fn existing_fields(block_pad: &str, state: &New) -> Vec<String> {
         "Name",
         state.name(),
         caret,
+        selection,
         "derived from the directory",
         state.focus() == Field::Name,
     ));
@@ -830,6 +879,41 @@ mod tests {
     }
 
     #[test]
+    fn shift_motion_selects_within_the_focused_field_and_typing_replaces_it() {
+        let mut state = New::default();
+        state.focus_next(); // Url
+        type_str(&mut state, "abcd");
+        state.cursor_home();
+        state.select_right();
+        state.select_right(); // "ab" selected
+        assert_eq!(state.focus_selection(), Some((0, 2)));
+        state.insert_char('X'); // replace the selection
+        assert_eq!(state.url(), "Xcd");
+        assert_eq!(state.focus_selection(), None);
+
+        // select_home / select_end reach the edges; delete_forward drops the range.
+        state.cursor_end(); // "Xcd", caret at 3
+        state.select_home(); // anchor 3, caret 0 → whole line selected
+        assert_eq!(state.focus_selection(), Some((0, 3)));
+        state.delete_forward();
+        assert_eq!(state.url(), "");
+
+        // select_left normalizes when the caret is before the anchor.
+        type_str(&mut state, "hi");
+        state.select_left();
+        assert_eq!(state.focus_selection(), Some((1, 2)));
+
+        // Mode focus has no text field, so selection is inert and reports None.
+        state.focus_prev(); // Mode
+        assert_eq!(state.focus(), Field::Mode);
+        state.select_left();
+        state.select_right();
+        state.select_home();
+        state.select_end();
+        assert_eq!(state.focus_selection(), None);
+    }
+
+    #[test]
     fn to_request_builds_a_clone_request_from_a_complete_form() {
         use crate::usecase::application::controller::NewRequest;
         let mut state = New::default();
@@ -865,6 +949,24 @@ mod tests {
                 path: std::path::PathBuf::from("/home/user/my-app"),
                 name: "my-app-fork".to_owned(),
             }
+        );
+    }
+
+    #[test]
+    fn to_request_rejects_a_directory_name_that_contains_a_separator() {
+        use crate::usecase::application::controller::NewValidationError;
+        let mut state = New::default();
+        state.focus_next(); // Url
+        type_str(&mut state, "https://github.com/owner/repo.git");
+        state.focus_next(); // Location
+        type_str(&mut state, "/projects");
+        state.focus_next(); // Directory (derived "repo")
+        // Editing appends a path separator, which would let the destination
+        // escape the chosen location; the form rejects it before submit.
+        type_str(&mut state, "/sub");
+        assert_eq!(
+            state.to_request().unwrap_err(),
+            NewValidationError::DirectoryInvalid
         );
     }
 

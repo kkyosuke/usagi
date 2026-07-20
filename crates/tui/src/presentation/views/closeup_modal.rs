@@ -122,14 +122,57 @@ impl CloseupModal {
         self.expanded = false;
     }
 
-    /// Move the prompt caret left in Prompt mode.
+    /// Forward-delete one character at the prompt caret in Prompt mode.
+    pub fn delete_forward(&mut self) {
+        self.input.delete_forward();
+        self.selected = 0;
+        self.expanded = false;
+    }
+
+    /// Move the prompt caret left in Prompt mode. Clears any selection.
     pub fn cursor_left(&mut self) {
         self.input.move_left();
     }
 
-    /// Move the prompt caret right in Prompt mode.
+    /// Move the prompt caret right in Prompt mode. Clears any selection.
     pub fn cursor_right(&mut self) {
         self.input.move_right();
+    }
+
+    /// Move the prompt caret to the start of the line (Home / Ctrl-A).
+    pub fn cursor_home(&mut self) {
+        self.input.move_home();
+    }
+
+    /// Move the prompt caret to the end of the line (End / Ctrl-E).
+    pub fn cursor_end(&mut self) {
+        self.input.move_end();
+    }
+
+    /// Extend the selection one character left (Shift+Left).
+    pub fn select_left(&mut self) {
+        self.input.select_left();
+    }
+
+    /// Extend the selection one character right (Shift+Right).
+    pub fn select_right(&mut self) {
+        self.input.select_right();
+    }
+
+    /// Extend the selection to the start of the line (Shift+Home).
+    pub fn select_home(&mut self) {
+        self.input.select_home();
+    }
+
+    /// Extend the selection to the end of the line (Shift+End).
+    pub fn select_end(&mut self) {
+        self.input.select_end();
+    }
+
+    /// The prompt input's selection range, if any. Used by the renderer.
+    #[must_use]
+    pub fn selection(&self) -> Option<(usize, usize)> {
+        self.input.selection()
     }
 
     /// Complete the selected command or an unambiguous supported subcommand.
@@ -254,7 +297,11 @@ fn body(state: &CloseupModal) -> Vec<String> {
             vec![
                 Style::new().dim().paint("Type a command:"),
                 String::new(),
-                modal::prompt_line(state.input.value(), state.input.cursor()),
+                modal::prompt_line(
+                    state.input.value(),
+                    state.input.cursor(),
+                    state.input.selection(),
+                ),
                 String::new(),
                 modal::footer("Enter: run   Esc: back"),
             ],
@@ -263,7 +310,11 @@ fn body(state: &CloseupModal) -> Vec<String> {
     }
     let mut lines = vec![
         Style::new().dim().paint("Run a command:  (type to filter)"),
-        modal::prompt_line(state.input.value(), state.input.cursor()),
+        modal::prompt_line(
+            state.input.value(),
+            state.input.cursor(),
+            state.input.selection(),
+        ),
         String::new(),
     ];
     for (i, action) in state.matches().iter().enumerate() {
@@ -444,6 +495,34 @@ mod tests {
         modal.cursor_left();
         modal.cursor_right();
         assert_eq!(modal.submission(), "ab");
+    }
+
+    #[test]
+    fn prompt_home_end_and_selection_edit_the_input() {
+        let mut modal = CloseupModal::with_selection_mode("s", ModalSelectionMode::Prompt);
+        for character in "close".chars() {
+            modal.insert_char(character);
+        }
+        modal.cursor_home();
+        modal.select_right();
+        modal.select_right();
+        assert_eq!(modal.selection(), Some((0, 2)));
+        modal.select_end();
+        assert_eq!(modal.selection(), Some((0, 5)));
+        modal.delete_forward(); // drops the whole selection
+        assert_eq!(modal.submission(), "");
+        assert_eq!(modal.selection(), None);
+
+        for character in "abc".chars() {
+            modal.insert_char(character);
+        }
+        modal.cursor_end();
+        modal.select_home(); // anchor 3, caret 0
+        assert_eq!(modal.selection(), Some((0, 3)));
+        modal.select_right(); // caret 1, shrinking the range from the left edge
+        assert_eq!(modal.selection(), Some((1, 3)));
+        modal.cursor_home(); // a non-selecting move clears the selection
+        assert_eq!(modal.selection(), None);
     }
 
     #[test]

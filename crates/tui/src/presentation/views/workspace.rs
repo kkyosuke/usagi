@@ -1198,7 +1198,9 @@ fn home_left_pane(
     }
     let footer = match home.mode {
         HomeMode::Switch => "[switch] ↑↓ select / Enter closeup",
-        HomeMode::Closeup => "[closeup] Ctrl-O then: o switch / a/Ctrl-A actions / n/p tabs",
+        HomeMode::Closeup => {
+            "[closeup] Ctrl-O: x/Ctrl-X close / o switch / a/Ctrl-A actions / n/p tabs"
+        }
     };
     lines.push(
         Style::new()
@@ -2280,7 +2282,8 @@ mod tests {
         let closeup_text = joined_home(&closeup);
         assert!(closeup_text.contains("| 同じ名前"));
         assert!(!closeup_text.contains("\u{f0907} 同じ名前"));
-        assert!(closeup_text.contains("[closeup] Ctrl-O then"));
+        assert!(closeup_text.contains("[closeup] Ctrl-O:"));
+        assert!(closeup_text.contains("x/Ctrl-X close"));
         let closeup_rendered = render_home(30, 100, &closeup).join("\n");
         assert!(closeup_rendered.contains("\u{1b}[1;36m同じ名前\u{1b}[0m"));
         assert!(closeup_rendered.contains("\u{1b}[36m同じ名前\u{1b}[0m"));
