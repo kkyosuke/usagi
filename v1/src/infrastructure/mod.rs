@@ -21,6 +21,7 @@ pub mod orchestrator_event;
 pub mod orchestrator_store;
 pub mod pr_link_store;
 pub mod pr_title;
+pub mod process;
 pub mod pty;
 pub mod pty_exit;
 pub mod release;

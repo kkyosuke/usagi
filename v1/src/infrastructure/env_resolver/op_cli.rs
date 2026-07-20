@@ -13,10 +13,12 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use super::collect_resolved;
-use crate::presentation::mcp::child_io::{read_capped, wait_with_timeout, WaitableChild};
+use crate::infrastructure::process::{self, Limits, Outcome};
 
 const OP_TIMEOUT: Duration = Duration::from_secs(30);
 const OP_POLL: Duration = Duration::from_millis(50);
+const OP_TERMINATE_GRACE: Duration = Duration::from_millis(250);
+const OP_REAP_GRACE: Duration = Duration::from_millis(250);
 const MAX_OP_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_OP_STDERR_BYTES: usize = 4 * 1024;
 
@@ -95,67 +97,42 @@ fn op_read(reference: &str, service_account_token: Option<&str>) -> Result<Strin
     if let Some(token) = service_account_token {
         command.env("OP_SERVICE_ACCOUNT_TOKEN", token);
     }
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("failed to start op: {e}"))?;
-
-    let mut out = child
-        .stdout
-        .take()
-        .ok_or_else(|| "failed to open op stdout".to_string())?;
-    let mut err = child
-        .stderr
-        .take()
-        .ok_or_else(|| "failed to open op stderr".to_string())?;
-    let out_reader = std::thread::spawn(move || read_capped(&mut out, MAX_OP_OUTPUT_BYTES));
-    let err_reader = std::thread::spawn(move || read_capped(&mut err, MAX_OP_STDERR_BYTES));
-
-    let status = wait_with_timeout(&mut RealChild(child), OP_TIMEOUT, OP_POLL);
-    let stdout_result = out_reader
-        .join()
-        .unwrap_or_else(|_| Ok((Vec::new(), false)));
-    let stderr_result = err_reader
-        .join()
-        .unwrap_or_else(|_| Ok((Vec::new(), false)));
-
-    let Some(status) = status else {
+    let outcome = process::run(
+        command,
+        None,
+        Limits {
+            timeout: OP_TIMEOUT,
+            terminate_grace: OP_TERMINATE_GRACE,
+            reap_grace: OP_REAP_GRACE,
+            poll_interval: OP_POLL,
+            stdout_cap: MAX_OP_OUTPUT_BYTES,
+            stderr_cap: MAX_OP_STDERR_BYTES,
+        },
+    )
+    .map_err(|e| format!("failed to start op: {e}"))?;
+    let Outcome::Exited(output) = outcome else {
         return Err(format!(
-            "op did not finish within {OP_TIMEOUT:?} and was terminated"
+            "op exceeded its {OP_TIMEOUT:?} end-to-end deadline"
         ));
     };
-    let (stdout, stdout_truncated) =
-        stdout_result.map_err(|e| format!("failed to read op output: {e}"))?;
-    let (stderr, stderr_truncated) = stderr_result.unwrap_or((Vec::new(), false));
-    if !status.success() {
-        let mut detail = String::from_utf8_lossy(&stderr).trim().to_string();
-        if stderr_truncated {
+    let stdout = output
+        .stdout
+        .map_err(|e| format!("failed to read op output: {e}"))?;
+    let stderr = output.stderr.unwrap_or_default();
+    if !output.status.success() {
+        let mut detail = String::from_utf8_lossy(&stderr.bytes).trim().to_string();
+        if stderr.truncated {
             detail.push_str(" …(truncated)");
         }
         if detail.is_empty() {
             detail = "no stderr".to_string();
         }
-        return Err(format!("op exited with {status}: {detail}"));
+        return Err(format!("op exited with {}: {detail}", output.status));
     }
 
-    let mut text = String::from_utf8_lossy(&stdout).to_string();
-    if stdout_truncated {
+    let mut text = String::from_utf8_lossy(&stdout.bytes).to_string();
+    if stdout.truncated {
         text.push_str(" …(truncated)");
     }
     Ok(text.trim_end_matches(['\n', '\r']).to_string())
-}
-
-struct RealChild(std::process::Child);
-
-impl WaitableChild for RealChild {
-    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-        self.0.try_wait()
-    }
-
-    fn kill(&mut self) -> std::io::Result<()> {
-        self.0.kill()
-    }
-
-    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.0.wait()
-    }
 }

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser, Subcommand};
 
-use usagi::presentation::mcp::child_io::{read_capped, wait_with_timeout, WaitableChild};
+use usagi::infrastructure::process::{self, Limits, Outcome};
 use usagi::presentation::mcp::llm::LlmBackend;
 use usagi::presentation::mcp::session::{AgentBackend, LaunchPromptDelivery};
 use usagi::usecase::session;
@@ -114,8 +114,12 @@ impl AgentBackend for CliAgentBackend {
 /// stop a wedged model or unreachable server from blocking the MCP call (and the
 /// agent waiting on it) forever.
 const ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-/// How often the wait loop re-polls the child while it runs.
+/// How often the subprocess lifecycle is re-polled.
 const ASK_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+/// Cleanup is reserved inside [`ASK_TIMEOUT`], keeping the MCP call's complete
+/// terminate/reap/drain lifecycle within that wall-clock budget.
+const ASK_TERMINATE_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+const ASK_REAP_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 /// Largest prompt (system + user) sent to `ollama`, so a pathological input
 /// cannot exhaust memory before the model even runs.
 const MAX_INPUT_BYTES: usize = 256 * 1024;
@@ -154,91 +158,44 @@ impl LlmBackend for OllamaBackend {
             ));
         }
 
-        let mut child = std::process::Command::new("ollama")
+        let mut command = std::process::Command::new("ollama");
+        command
             .arg("run")
             .arg(&self.model)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("failed to start ollama: {e}"))?;
-
-        // Spawn the stdin writer and the stdout/stderr drains *all up front*,
-        // before waiting, so no single full pipe can deadlock: while we feed up to
-        // 256 KiB of prompt, ollama's output is drained concurrently, and vice
-        // versa. (Writing the whole prompt before starting to drain would deadlock
-        // if ollama emitted enough output to fill its stdout pipe before consuming
-        // all of stdin.) Dropping `stdin` at the end of the writer thread closes it
-        // so ollama sees EOF and begins generating.
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "failed to open ollama stdin".to_string())?;
-        let input = full.into_bytes();
-        let stdin_writer = std::thread::spawn(move || {
-            use std::io::Write as _;
-            let _ = stdin.write_all(&input);
-        });
-
-        let mut out = child
-            .stdout
-            .take()
-            .ok_or_else(|| "failed to open ollama stdout".to_string())?;
-        let mut err = child
-            .stderr
-            .take()
-            .ok_or_else(|| "failed to open ollama stderr".to_string())?;
-        let out_reader = std::thread::spawn(move || read_capped(&mut out, MAX_OUTPUT_BYTES));
-        let err_reader = std::thread::spawn(move || read_capped(&mut err, MAX_STDERR_BYTES));
-
-        let status = wait_with_timeout(&mut RealChild(child), ASK_TIMEOUT, ASK_POLL);
-        // The writer thread finishes when the prompt is written, or when a killed
-        // ollama closes its stdin read-end (write_all then errors out) — so this
-        // join never hangs.
-        let _ = stdin_writer.join();
-        let stdout_result = out_reader
-            .join()
-            .unwrap_or_else(|_| Ok((Vec::new(), false)));
-        let stderr_result = err_reader
-            .join()
-            .unwrap_or_else(|_| Ok((Vec::new(), false)));
-
-        let Some(status) = status else {
+            .stderr(std::process::Stdio::piped());
+        let outcome = process::run(
+            command,
+            Some(full.into_bytes()),
+            Limits {
+                timeout: ASK_TIMEOUT,
+                terminate_grace: ASK_TERMINATE_GRACE,
+                reap_grace: ASK_REAP_GRACE,
+                poll_interval: ASK_POLL,
+                stdout_cap: MAX_OUTPUT_BYTES,
+                stderr_cap: MAX_STDERR_BYTES,
+            },
+        )
+        .map_err(|e| format!("failed to start ollama: {e}"))?;
+        let Outcome::Exited(output) = outcome else {
             return Err(format!(
-                "ollama did not finish within {ASK_TIMEOUT:?} and was terminated"
+                "ollama exceeded its {ASK_TIMEOUT:?} end-to-end deadline"
             ));
         };
         // A failed stdout read must not be reported as a complete (empty) reply.
-        let (stdout, _) =
-            stdout_result.map_err(|e| format!("failed to read ollama output: {e}"))?;
-        let (stderr, stderr_truncated) = stderr_result.unwrap_or((Vec::new(), false));
-        if !status.success() {
-            let mut detail = String::from_utf8_lossy(&stderr).trim().to_string();
-            if stderr_truncated {
+        let stdout = output
+            .stdout
+            .map_err(|e| format!("failed to read ollama output: {e}"))?;
+        let stderr = output.stderr.unwrap_or_default();
+        if !output.status.success() {
+            let mut detail = String::from_utf8_lossy(&stderr.bytes).trim().to_string();
+            if stderr.truncated {
                 detail.push_str(" …(truncated)");
             }
-            return Err(format!("ollama exited with {status}: {detail}"));
+            return Err(format!("ollama exited with {}: {detail}", output.status));
         }
-        Ok(String::from_utf8_lossy(&stdout).trim().to_string())
-    }
-}
-
-/// The production [`WaitableChild`] for [`wait_with_timeout`]: a thin newtype over
-/// a live `ollama run` child that delegates the three lifecycle calls to
-/// `std::process::Child`. The wait-loop decision logic lives (and is tested) in
-/// [`usagi::presentation::mcp::child_io`]; this real-process delegation stays here
-/// at the composition root, like the MCP backends above.
-struct RealChild(std::process::Child);
-
-impl WaitableChild for RealChild {
-    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-        self.0.try_wait()
-    }
-    fn kill(&mut self) -> std::io::Result<()> {
-        self.0.kill()
-    }
-    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.0.wait()
+        Ok(String::from_utf8_lossy(&stdout.bytes).trim().to_string())
     }
 }
 
