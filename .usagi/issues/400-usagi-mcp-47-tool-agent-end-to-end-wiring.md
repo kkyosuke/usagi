@@ -1,13 +1,13 @@
 ---
 number: 400
 title: usagi mcp: 公開 47 tool を agent から最終処理まで接続する（end-to-end wiring・親)
-status: todo
+status: done
 priority: high
 labels: [mcp, epic]
 dependson: []
 related: []
 created_at: 2026-07-20T04:52:42.569498+00:00
-updated_at: 2026-07-20T04:56:14.754028+00:00
+updated_at: 2026-07-20T21:23:02.275350+00:00
 ---
 
 ## 背景と問題
