@@ -55,12 +55,15 @@ impl MetricsBroker {
     /// sample; a disconnected client is removed immediately.
     pub fn publish(&mut self, sampled_at_ms: u64) {
         let snapshot = DaemonMetrics {
-            schema_version: 1,
+            schema_version: 2,
             sampled_at_ms,
             cpu_percent_hundredths: 0,
             resident_memory_bytes: 0,
             active_subscribers: u32::try_from(self.subscribers.len()).unwrap_or(u32::MAX),
             dropped_updates: self.dropped_updates,
+            terminal_dropped_bytes: 0,
+            terminal_coalesced_bytes: 0,
+            terminal_backpressured_bytes: 0,
         };
         self.subscribers.retain(|_, subscriber| {
             match subscriber.sender.try_send(snapshot.clone()) {

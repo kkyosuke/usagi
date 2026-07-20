@@ -9,8 +9,8 @@ use std::io::{Read, Write};
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -58,7 +58,9 @@ use usagi_daemon::usecase::session_runtime::{SessionRuntime, SessionRuntimeError
 use usagi_daemon::usecase::supervisor_runtime::{
     DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime,
 };
-use usagi_daemon::usecase::terminal::{Geometry, Output, PtyWriteError, PtyWriter, SpawnFailure};
+use usagi_daemon::usecase::terminal::{
+    Geometry, Output, PtyWriteError, PtyWriter, SpawnFailure, output_pipeline_counters,
+};
 use usagi_daemon::usecase::terminal_ipc::{
     GenericTerminalRuntime, ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
 };
@@ -503,23 +505,45 @@ enum AgentPtyObservation {
     Exited(TerminalRef, i32),
 }
 
+const PTY_OBSERVATION_QUEUE_ITEMS: usize = 64;
+
+/// Process-local counters for the bounded PTY-to-registry pipeline. They only
+/// contain byte counts; terminal output and terminal identities are never
+/// recorded in metrics or logs.
+#[derive(Default)]
+struct TerminalPipelineMetrics {
+    backpressured_bytes: AtomicU64,
+}
+
+impl TerminalPipelineMetrics {
+    fn observe_backpressure(&self, bytes: usize) {
+        self.backpressured_bytes
+            .fetch_add(u64::try_from(bytes).unwrap_or(u64::MAX), Ordering::Relaxed);
+    }
+}
+
 /// The daemon-owned PTY spawner/writer for Agent runtimes.  It spawns the real
 /// rendered plan, drains output to the Agent owner, and reaps the child to
 /// commit a durable exit — never a client-driven process.
 struct AgentPty {
     terminals: BTreeMap<String, Arc<Mutex<PtyTerminal>>>,
     selected: Option<String>,
-    observations: Sender<AgentPtyObservation>,
+    observations: SyncSender<AgentPtyObservation>,
+    metrics: Arc<TerminalPipelineMetrics>,
     environment: BTreeMap<String, String>,
 }
 impl AgentPty {
-    fn new(environment: BTreeMap<String, String>) -> (Self, Receiver<AgentPtyObservation>) {
-        let (observations, receiver) = mpsc::channel();
+    fn new(
+        environment: BTreeMap<String, String>,
+        metrics: Arc<TerminalPipelineMetrics>,
+    ) -> (Self, Receiver<AgentPtyObservation>) {
+        let (observations, receiver) = mpsc::sync_channel(PTY_OBSERVATION_QUEUE_ITEMS);
         (
             Self {
                 terminals: BTreeMap::new(),
                 selected: None,
                 observations,
+                metrics,
                 environment,
             },
             receiver,
@@ -555,6 +579,7 @@ impl PtySpawner for AgentPty {
         self.terminals
             .insert(terminal.terminal_id.as_str().clone(), Arc::clone(&pty));
         let observations = self.observations.clone();
+        let metrics = Arc::clone(&self.metrics);
         let output_terminal = terminal.clone();
         let exit_pty = Arc::clone(&pty);
         std::thread::spawn(move || {
@@ -564,13 +589,9 @@ impl PtySpawner for AgentPty {
                 if count == 0 {
                     break;
                 }
-                if observations
-                    .send(AgentPtyObservation::Output(
-                        output_terminal.clone(),
-                        bytes[..count].to_vec(),
-                    ))
-                    .is_err()
-                {
+                let observation =
+                    AgentPtyObservation::Output(output_terminal.clone(), bytes[..count].to_vec());
+                if send_agent_observation(&observations, observation, count, &metrics).is_err() {
                     return;
                 }
             }
@@ -586,6 +607,22 @@ impl PtySpawner for AgentPty {
             start_identity: "daemon-owned-agent-pty".to_owned(),
             process_group: pid,
         })
+    }
+}
+
+fn send_agent_observation(
+    sender: &SyncSender<AgentPtyObservation>,
+    observation: AgentPtyObservation,
+    bytes: usize,
+    metrics: &TerminalPipelineMetrics,
+) -> Result<(), ()> {
+    match sender.try_send(observation) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(observation)) => {
+            metrics.observe_backpressure(bytes);
+            sender.send(observation).map_err(|_| ())
+        }
+        Err(TrySendError::Disconnected(_)) => Err(()),
     }
 }
 impl PtyWriter for AgentPty {
@@ -624,16 +661,18 @@ enum PtyObservation {
 struct DaemonPty {
     terminals: BTreeMap<String, Arc<Mutex<PtyTerminal>>>,
     selected: Option<String>,
-    observations: Sender<PtyObservation>,
+    observations: SyncSender<PtyObservation>,
+    metrics: Arc<TerminalPipelineMetrics>,
 }
 impl DaemonPty {
-    fn new() -> (Self, Receiver<PtyObservation>) {
-        let (observations, receiver) = mpsc::channel();
+    fn new(metrics: Arc<TerminalPipelineMetrics>) -> (Self, Receiver<PtyObservation>) {
+        let (observations, receiver) = mpsc::sync_channel(PTY_OBSERVATION_QUEUE_ITEMS);
         (
             Self {
                 terminals: BTreeMap::new(),
                 selected: None,
                 observations,
+                metrics,
             },
             receiver,
         )
@@ -665,6 +704,7 @@ impl GenericPtySpawner for DaemonPty {
         self.terminals
             .insert(terminal.terminal_id.as_str().clone(), Arc::clone(&pty));
         let output_sender = self.observations.clone();
+        let metrics = Arc::clone(&self.metrics);
         let output_terminal = terminal.clone();
         let exit_pty = Arc::clone(&pty);
         std::thread::spawn(move || {
@@ -674,13 +714,9 @@ impl GenericPtySpawner for DaemonPty {
                 if count == 0 {
                     break;
                 }
-                if output_sender
-                    .send(PtyObservation::Output(
-                        output_terminal.clone(),
-                        bytes[..count].to_vec(),
-                    ))
-                    .is_err()
-                {
+                let observation =
+                    PtyObservation::Output(output_terminal.clone(), bytes[..count].to_vec());
+                if send_pty_observation(&output_sender, observation, count, &metrics).is_err() {
                     break;
                 }
             }
@@ -696,6 +732,22 @@ impl GenericPtySpawner for DaemonPty {
             start_identity: "daemon-owned-pty".to_owned(),
             process_group: pid,
         })
+    }
+}
+
+fn send_pty_observation(
+    sender: &SyncSender<PtyObservation>,
+    observation: PtyObservation,
+    bytes: usize,
+    metrics: &TerminalPipelineMetrics,
+) -> Result<(), ()> {
+    match sender.try_send(observation) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(observation)) => {
+            metrics.observe_backpressure(bytes);
+            sender.send(observation).map_err(|_| ())
+        }
+        Err(TrySendError::Disconnected(_)) => Err(()),
     }
 }
 impl PtyWriter for DaemonPty {
@@ -758,6 +810,7 @@ type SharedPrInventory = Arc<Mutex<OutputPrProjector<PrInventoryStore>>>;
 /// Samples daemon-owned process resources between metrics requests.
 struct ProcessMetrics {
     previous: Option<(Instant, u64)>,
+    terminal: Arc<TerminalPipelineMetrics>,
 }
 
 impl ProcessMetrics {
@@ -862,7 +915,8 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
     let pr_inventory = Arc::new(Mutex::new(OutputPrProjector::new(PrInventoryStore::new(
         data_dir.join("daemon"),
     ))));
-    let (pty, observations) = DaemonPty::new();
+    let pipeline_metrics = Arc::new(TerminalPipelineMetrics::default());
+    let (pty, observations) = DaemonPty::new(Arc::clone(&pipeline_metrics));
     let terminal = new_terminal_runtime(
         data_dir,
         daemon_generation,
@@ -875,7 +929,8 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         observations,
         Arc::clone(&pr_inventory),
     )?;
-    let (agent_pty, agent_observations) = AgentPty::new(terminal_environment());
+    let (agent_pty, agent_observations) =
+        AgentPty::new(terminal_environment(), Arc::clone(&pipeline_metrics));
     let mcp_command = std::env::current_exe()?;
     let agent = open_agent_runtime(
         data_dir,
@@ -909,7 +964,10 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         agent,
         pr_inventory,
         decisions,
-        Arc::new(Mutex::new(ProcessMetrics { previous: None })),
+        Arc::new(Mutex::new(ProcessMetrics {
+            previous: None,
+            terminal: pipeline_metrics,
+        })),
         supervisor,
     )
 }
@@ -2198,9 +2256,18 @@ fn dispatch_metrics(
     _body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
-    let (cpu_percent_hundredths, resident_memory_bytes) = metrics
-        .lock()
-        .map_or((0, 0), |mut metrics| metrics.snapshot());
+    let (cpu_percent_hundredths, resident_memory_bytes, dropped, coalesced, backpressured) =
+        metrics.lock().map_or((0, 0, 0, 0, 0), |mut metrics| {
+            let (cpu, memory) = metrics.snapshot();
+            let retention = output_pipeline_counters();
+            (
+                cpu,
+                memory,
+                retention.dropped_bytes,
+                retention.coalesced_bytes,
+                metrics.terminal.backpressured_bytes.load(Ordering::Relaxed),
+            )
+        });
     let sampled_at_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| {
@@ -2211,12 +2278,15 @@ fn dispatch_metrics(
         request_id,
         usagi_core::infrastructure::ipc::ResponseOutcome::Ok,
         serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "sampled_at_ms": sampled_at_ms,
             "cpu_percent_hundredths": cpu_percent_hundredths,
             "resident_memory_bytes": resident_memory_bytes,
             "active_subscribers": 0,
             "dropped_updates": 0,
+            "terminal_dropped_bytes": dropped,
+            "terminal_coalesced_bytes": coalesced,
+            "terminal_backpressured_bytes": backpressured,
         }),
     )
 }
@@ -3329,7 +3399,8 @@ mod tests {
         }
         .resolve(&request)
         .unwrap();
-        let (mut pty, observations) = DaemonPty::new();
+        let metrics = Arc::new(TerminalPipelineMetrics::default());
+        let (mut pty, observations) = DaemonPty::new(metrics);
 
         pty.spawn(&launch, &terminal, Geometry { cols: 80, rows: 24 })
             .unwrap();
@@ -3351,6 +3422,57 @@ mod tests {
     }
 
     #[test]
+    fn full_pty_observation_queue_backpressures_without_reordering() {
+        let metrics = Arc::new(TerminalPipelineMetrics::default());
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+        };
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender
+            .send(PtyObservation::Output(terminal.clone(), vec![1]))
+            .unwrap();
+        let blocked_sender = sender.clone();
+        let blocked_metrics = Arc::clone(&metrics);
+        let blocked_terminal = terminal.clone();
+        let producer = std::thread::spawn(move || {
+            send_pty_observation(
+                &blocked_sender,
+                PtyObservation::Output(blocked_terminal.clone(), vec![2; 7]),
+                7,
+                &blocked_metrics,
+            )
+            .unwrap();
+            blocked_sender
+                .send(PtyObservation::Exited(blocked_terminal, 0))
+                .unwrap();
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while metrics.backpressured_bytes.load(Ordering::Relaxed) == 0 && Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        assert_eq!(metrics.backpressured_bytes.load(Ordering::Relaxed), 7);
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            PtyObservation::Output(_, bytes) if bytes == [1]
+        ));
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            PtyObservation::Output(_, bytes) if bytes == [2; 7]
+        ));
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            PtyObservation::Exited(actual, 0) if actual == terminal
+        ));
+        producer.join().unwrap();
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)] // PTY-to-IPC exit observation is one integration scenario.
     fn generic_terminal_exit_reaches_its_resume_response() {
         let directory = tempfile::tempdir().unwrap();
@@ -3362,7 +3484,8 @@ mod tests {
             session_id: Some(session),
             worktree_id: worktree,
         };
-        let (pty, observations) = DaemonPty::new();
+        let metrics = Arc::new(TerminalPipelineMetrics::default());
+        let (pty, observations) = DaemonPty::new(metrics);
         let runtime = Arc::new(Mutex::new(GenericTerminalRuntime::new(
             DaemonGeneration::new(),
             TrustedLoginShell {

@@ -6,9 +6,36 @@
 //! serial turn.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use usagi_core::domain::id::{ClientId, ConnectionId, RequestId, TerminalRef};
+
+/// Maximum terminal bytes retained for attach/resync and incremental replay.
+///
+/// A JSON byte array can require four payload bytes per terminal byte. Keeping
+/// this window at 64 KiB leaves ample room for the response envelope and
+/// terminal identity inside the protocol's one MiB frame limit.
+pub const MAX_RETAINED_OUTPUT_BYTES: usize = 64 * 1024;
+
+static RETENTION_DROPPED_BYTES: AtomicU64 = AtomicU64::new(0);
+static RETENTION_COALESCED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Process-local terminal retention counters. Values are byte counts only and
+/// never contain terminal output or identity data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputPipelineCounters {
+    pub dropped_bytes: u64,
+    pub coalesced_bytes: u64,
+}
+
+#[must_use]
+pub fn output_pipeline_counters() -> OutputPipelineCounters {
+    OutputPipelineCounters {
+        dropped_bytes: RETENTION_DROPPED_BYTES.load(Ordering::Relaxed),
+        coalesced_bytes: RETENTION_COALESCED_BYTES.load(Ordering::Relaxed),
+    }
+}
 
 /// The durable process state shared by every daemon-owned terminal.
 ///
@@ -56,6 +83,8 @@ pub struct Geometry {
 pub struct Snapshot {
     pub terminal: TerminalRef,
     pub revision: u64,
+    /// Offset of the first byte in `replay`.
+    pub base_offset: u64,
     pub output_offset: u64,
     pub geometry: Geometry,
     pub replay: Vec<u8>,
@@ -166,7 +195,6 @@ struct Entry {
     journal: VecDeque<Output>,
     retained_bytes: usize,
     next_offset: u64,
-    replay: Vec<u8>,
     exited: Option<i32>,
     attachments: BTreeMap<u64, ConnectionId>,
     next_subscription: u64,
@@ -196,7 +224,7 @@ impl TerminalRegistry {
     pub fn new(journal_limit: usize, input_cache_limit: usize) -> Self {
         Self {
             entries: BTreeMap::new(),
-            journal_limit,
+            journal_limit: journal_limit.min(MAX_RETAINED_OUTPUT_BYTES),
             input_cache_limit,
         }
     }
@@ -224,7 +252,6 @@ impl TerminalRegistry {
                 journal: VecDeque::new(),
                 retained_bytes: 0,
                 next_offset: 0,
-                replay: Vec::new(),
                 exited: None,
                 attachments: BTreeMap::new(),
                 next_subscription: 1,
@@ -245,6 +272,16 @@ impl TerminalRegistry {
         connection: ConnectionId,
     ) -> Result<Attached, RegistryError> {
         let entry = self.entry_mut(reference)?;
+        if let Some(subscription) = entry
+            .attachments
+            .iter()
+            .find_map(|(subscription, owner)| (*owner == connection).then_some(*subscription))
+        {
+            return Ok(Attached {
+                subscription,
+                snapshot: snapshot(entry),
+            });
+        }
         let subscription = entry.next_subscription;
         entry.next_subscription += 1;
         entry.attachments.insert(subscription, connection);
@@ -302,21 +339,56 @@ impl TerminalRegistry {
         let entry = self.entry_mut(reference)?;
         let start_offset = entry.next_offset;
         entry.next_offset += data.len() as u64;
-        entry.replay.extend_from_slice(&data);
         let output = Output {
             terminal: entry.reference.clone(),
             start_offset,
             end_offset: entry.next_offset,
             data,
         };
-        entry.retained_bytes += output.data.len();
-        entry.journal.push_back(output.clone());
-        while entry.retained_bytes > limit {
-            let removed = entry
-                .journal
-                .pop_front()
-                .expect("retained output has a journal segment");
-            entry.retained_bytes -= removed.data.len();
+        if output.data.len() >= limit {
+            let dropped = entry
+                .retained_bytes
+                .saturating_add(output.data.len().saturating_sub(limit));
+            RETENTION_DROPPED_BYTES.fetch_add(
+                u64::try_from(dropped).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+            entry.journal.clear();
+            entry.retained_bytes = limit;
+            if limit != 0 {
+                entry.journal.push_back(Output {
+                    terminal: output.terminal.clone(),
+                    start_offset: output.end_offset - limit as u64,
+                    end_offset: output.end_offset,
+                    data: output.data[output.data.len() - limit..].to_vec(),
+                });
+            }
+        } else {
+            entry.retained_bytes += output.data.len();
+            if let Some(tail) = entry.journal.back_mut() {
+                tail.end_offset = output.end_offset;
+                tail.data.extend_from_slice(&output.data);
+                RETENTION_COALESCED_BYTES.fetch_add(
+                    u64::try_from(output.data.len()).unwrap_or(u64::MAX),
+                    Ordering::Relaxed,
+                );
+            } else {
+                entry.journal.push_back(output.clone());
+            }
+            if entry.retained_bytes > limit {
+                let overflow = entry.retained_bytes - limit;
+                let front = entry
+                    .journal
+                    .front_mut()
+                    .expect("retained output has a journal segment");
+                front.data.drain(..overflow);
+                front.start_offset += overflow as u64;
+                entry.retained_bytes -= overflow;
+                RETENTION_DROPPED_BYTES.fetch_add(
+                    u64::try_from(overflow).unwrap_or(u64::MAX),
+                    Ordering::Relaxed,
+                );
+            }
         }
         Ok(output)
     }
@@ -337,14 +409,26 @@ impl TerminalRegistry {
             .journal
             .front()
             .map_or(entry.next_offset, |segment| segment.start_offset);
-        if offset < oldest {
+        if offset < oldest || offset > entry.next_offset {
             return Err(RegistryError::ResyncRequired);
         }
         Ok(entry
             .journal
             .iter()
             .filter(|segment| segment.end_offset > offset)
-            .cloned()
+            .map(|segment| {
+                if segment.start_offset >= offset {
+                    return segment.clone();
+                }
+                let remaining = usize::try_from(segment.end_offset - offset).unwrap_or(0);
+                let consumed = segment.data.len().saturating_sub(remaining);
+                Output {
+                    terminal: segment.terminal.clone(),
+                    start_offset: offset,
+                    end_offset: segment.end_offset,
+                    data: segment.data[consumed..].to_vec(),
+                }
+            })
             .collect())
     }
 
@@ -459,12 +543,21 @@ fn key(reference: &TerminalRef) -> String {
 }
 #[coverage(off)]
 fn snapshot(entry: &Entry) -> Snapshot {
+    let base_offset = entry
+        .journal
+        .front()
+        .map_or(entry.next_offset, |segment| segment.start_offset);
+    let mut replay = Vec::with_capacity(entry.retained_bytes);
+    for segment in &entry.journal {
+        replay.extend_from_slice(&segment.data);
+    }
     Snapshot {
         terminal: entry.reference.clone(),
         revision: entry.revision,
+        base_offset,
         output_offset: entry.next_offset,
         geometry: entry.geometry,
-        replay: entry.replay.clone(),
+        replay,
         exited: entry.exited,
     }
 }
@@ -475,6 +568,7 @@ mod tests {
     use usagi_core::domain::id::{
         DaemonGeneration, SessionId, TerminalId, WorkspaceId, WorktreeId,
     };
+    use usagi_core::infrastructure::ipc::{DEFAULT_MAX_FRAME_BYTES, write_json_frame};
 
     #[derive(Default)]
     struct Writer {
@@ -528,6 +622,10 @@ mod tests {
         let c = ConnectionId::new();
         let attached = registry.attach(&r, c).unwrap();
         assert_eq!(attached.snapshot.output_offset, 0);
+        assert_eq!(
+            registry.attach(&r, c).unwrap().subscription,
+            attached.subscription
+        );
         registry.disconnect(c);
         assert!(registry.snapshot(&r).is_ok());
         assert_eq!(
@@ -574,6 +672,88 @@ mod tests {
             Err(RegistryError::ResyncRequired)
         );
         assert_eq!(registry.replay_from(&r, 3).unwrap()[0].data, b"def");
+        assert_eq!(registry.replay_from(&r, 4).unwrap()[0].data, b"ef");
+        assert_eq!(
+            registry.replay_from(&r, 7),
+            Err(RegistryError::ResyncRequired)
+        );
+        let snapshot = registry.snapshot(&r).unwrap();
+        assert_eq!(snapshot.base_offset, 2);
+        assert_eq!(snapshot.output_offset, 6);
+        assert_eq!(snapshot.replay, b"cdef");
+    }
+    #[test]
+    fn oversized_output_retains_an_exact_frame_safe_tail() {
+        let r = reference();
+        let mut registry = TerminalRegistry::new(usize::MAX, 1);
+        registry
+            .register(r.clone(), Geometry { cols: 80, rows: 24 })
+            .unwrap();
+        let bytes = vec![7; MAX_RETAINED_OUTPUT_BYTES + 17];
+        let output = registry.append_output(&r, bytes.clone()).unwrap();
+        assert_eq!(output.data, bytes);
+        let snapshot = registry.snapshot(&r).unwrap();
+        assert_eq!(snapshot.base_offset, 17);
+        assert_eq!(snapshot.output_offset, bytes.len() as u64);
+        assert_eq!(snapshot.replay.len(), MAX_RETAINED_OUTPUT_BYTES);
+        assert_eq!(
+            registry.replay_from(&r, 17).unwrap()[0].data.len(),
+            MAX_RETAINED_OUTPUT_BYTES
+        );
+        assert_eq!(
+            registry.replay_from(&r, 16),
+            Err(RegistryError::ResyncRequired)
+        );
+    }
+    #[test]
+    fn multi_megabyte_producers_keep_attach_and_resume_frames_bounded() {
+        let counters_before = output_pipeline_counters();
+        let first = reference();
+        let second = reference();
+        let mut registry = TerminalRegistry::new(MAX_RETAINED_OUTPUT_BYTES, 1);
+        for terminal in [&first, &second] {
+            registry
+                .register(terminal.clone(), Geometry { cols: 80, rows: 24 })
+                .unwrap();
+        }
+        let chunk = vec![b'x'; 4096];
+        for _ in 0..300 {
+            registry.append_output(&first, chunk.clone()).unwrap();
+            registry.append_output(&second, chunk.clone()).unwrap();
+        }
+
+        for terminal in [&first, &second] {
+            let connection = ConnectionId::new();
+            let attached = registry.attach(terminal, connection).unwrap();
+            for _ in 0..8 {
+                let reattached = registry.attach(terminal, connection).unwrap();
+                assert_eq!(reattached.subscription, attached.subscription);
+                assert_eq!(
+                    reattached.snapshot.output_offset,
+                    attached.snapshot.output_offset
+                );
+            }
+            assert_eq!(attached.snapshot.replay.len(), MAX_RETAINED_OUTPUT_BYTES);
+            assert_eq!(
+                attached.snapshot.base_offset + attached.snapshot.replay.len() as u64,
+                attached.snapshot.output_offset
+            );
+            let mut frame = Vec::new();
+            write_json_frame(&mut frame, &attached, DEFAULT_MAX_FRAME_BYTES).unwrap();
+            assert!(frame.len() < DEFAULT_MAX_FRAME_BYTES);
+
+            let cursor = attached.snapshot.base_offset + 123;
+            let resumed = registry.replay_from(terminal, cursor).unwrap();
+            assert_eq!(resumed.len(), 1);
+            assert_eq!(resumed[0].start_offset, cursor);
+            assert_eq!(resumed[0].end_offset, attached.snapshot.output_offset);
+            let mut frame = Vec::new();
+            write_json_frame(&mut frame, &resumed, DEFAULT_MAX_FRAME_BYTES).unwrap();
+            assert!(frame.len() < DEFAULT_MAX_FRAME_BYTES);
+        }
+        let counters_after = output_pipeline_counters();
+        assert!(counters_after.dropped_bytes > counters_before.dropped_bytes);
+        assert!(counters_after.coalesced_bytes > counters_before.coalesced_bytes);
     }
     #[test]
     fn input_is_acked_only_once_after_write_and_partial_is_ambiguous() {

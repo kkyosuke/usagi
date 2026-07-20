@@ -245,6 +245,11 @@ impl TerminalSession {
         self.synchronized_geometry = resize_error.is_none().then_some(self.geometry);
         match port.attach(&self.terminal, self.geometry) {
             Ok(attach) => {
+                if let Some(previous) = self.subscription
+                    && previous != attach.subscription
+                {
+                    port.detach(&self.terminal, previous);
+                }
                 self.replace(&attach);
                 if let Some(error) = resize_error {
                     self.error = Some(format!(

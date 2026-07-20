@@ -687,7 +687,16 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         let output_offset = snapshot["output_offset"]
             .as_u64()
             .ok_or(TerminalError::Unavailable)?;
-        let replay = serde_json::from_value(snapshot["replay"].clone()).unwrap_or_default();
+        let base_offset = snapshot["base_offset"]
+            .as_u64()
+            .ok_or(TerminalError::Unavailable)?;
+        let replay: Vec<u8> =
+            serde_json::from_value(snapshot["replay"].clone()).unwrap_or_default();
+        if base_offset.checked_add(u64::try_from(replay.len()).unwrap_or(u64::MAX))
+            != Some(output_offset)
+        {
+            return Err(TerminalError::Unavailable);
+        }
         // `exited` is `Option<i32>`: null while the process is still running.
         let exited = !snapshot["exited"].is_null();
         Ok(TerminalAttach {
