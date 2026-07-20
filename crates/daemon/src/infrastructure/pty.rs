@@ -18,7 +18,26 @@ use crate::usecase::terminal::{Geometry, PtyWriteError, PtyWriter};
 pub struct PtyTerminal {
     master: Box<dyn MasterPty + Send>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
-    writer: Mutex<Box<dyn Write + Send>>,
+    writer: Mutex<AppliedPrefixWriter<Box<dyn Write + Send>>>,
+}
+
+struct AppliedPrefixWriter<W> {
+    inner: W,
+}
+
+impl<W: Write> PtyWriter for AppliedPrefixWriter<W> {
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
+        let mut applied_prefix = 0;
+        while applied_prefix < bytes.len() {
+            match self.inner.write(&bytes[applied_prefix..]) {
+                Ok(0) => return Err(PtyWriteError { applied_prefix }),
+                Ok(written) => applied_prefix += written,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return Err(PtyWriteError { applied_prefix }),
+            }
+        }
+        Ok(())
+    }
 }
 
 impl PtyTerminal {
@@ -82,7 +101,7 @@ impl PtyTerminal {
         Ok(Self {
             master: pair.master,
             child: Mutex::new(child),
-            writer: Mutex::new(writer),
+            writer: Mutex::new(AppliedPrefixWriter { inner: writer }),
         })
     }
 
@@ -158,7 +177,6 @@ impl PtyWriter for PtyTerminal {
             .lock()
             .map_err(|_| PtyWriteError { applied_prefix: 0 })?
             .write_all(bytes)
-            .map_err(|_| PtyWriteError { applied_prefix: 0 })
     }
 }
 
@@ -168,9 +186,82 @@ fn io_error(error: impl std::fmt::Display) -> std::io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::PtyTerminal;
-    use crate::usecase::terminal::Geometry;
-    use std::io::Read;
+    use super::{AppliedPrefixWriter, PtyTerminal};
+    use crate::usecase::terminal::{Geometry, InputAck, InputRequest, PtyWriter, TerminalRegistry};
+    use std::collections::VecDeque;
+    use std::io::{Error, ErrorKind, Read, Write};
+    use usagi_core::domain::id::{
+        ClientId, ConnectionId, DaemonGeneration, RequestId, SessionId, TerminalId, TerminalRef,
+        WorkspaceId, WorktreeId,
+    };
+
+    enum WriteStep {
+        Bytes(usize),
+        Interrupted,
+        Error,
+        Zero,
+    }
+
+    struct ScriptedWriter {
+        steps: VecDeque<WriteStep>,
+        written: Vec<u8>,
+        calls: usize,
+    }
+
+    impl ScriptedWriter {
+        fn new(steps: impl IntoIterator<Item = WriteStep>) -> Self {
+            Self {
+                steps: steps.into_iter().collect(),
+                written: Vec::new(),
+                calls: 0,
+            }
+        }
+    }
+
+    impl Write for ScriptedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.calls += 1;
+            match self.steps.pop_front().expect("scripted write step") {
+                WriteStep::Bytes(count) => {
+                    assert!(count <= bytes.len());
+                    self.written.extend_from_slice(&bytes[..count]);
+                    Ok(count)
+                }
+                WriteStep::Interrupted => Err(Error::from(ErrorKind::Interrupted)),
+                WriteStep::Error => Err(Error::other("scripted failure")),
+                WriteStep::Zero => Ok(0),
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn reference() -> TerminalRef {
+        TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+        }
+    }
+
+    fn input(
+        subscription: u64,
+        connection: ConnectionId,
+        client: ClientId,
+        request: RequestId,
+    ) -> InputRequest {
+        InputRequest {
+            subscription,
+            connection,
+            client,
+            request,
+            input_seq: 0,
+        }
+    }
 
     fn run_with_ambient_sentinel(test_name: &str) -> bool {
         if std::env::var_os("USAGI_PTY_TEST_HELPER").is_some() {
@@ -293,5 +384,123 @@ mod tests {
 
         assert_eq!(output(&terminal), "provision");
         assert_eq!(terminal.wait().unwrap(), 0);
+    }
+
+    #[test]
+    fn partial_writes_report_the_exact_applied_prefix() {
+        let mut writer = AppliedPrefixWriter {
+            inner: ScriptedWriter::new([
+                WriteStep::Bytes(2),
+                WriteStep::Bytes(1),
+                WriteStep::Error,
+            ]),
+        };
+
+        assert_eq!(
+            writer.write_all(b"hello"),
+            Err(crate::usecase::terminal::PtyWriteError { applied_prefix: 3 })
+        );
+        assert_eq!(writer.inner.written, b"hel");
+    }
+
+    #[test]
+    fn interrupted_write_retries_without_losing_progress() {
+        let mut writer = AppliedPrefixWriter {
+            inner: ScriptedWriter::new([
+                WriteStep::Bytes(2),
+                WriteStep::Interrupted,
+                WriteStep::Bytes(3),
+            ]),
+        };
+
+        assert_eq!(writer.write_all(b"hello"), Ok(()));
+        assert_eq!(writer.inner.written, b"hello");
+        assert_eq!(writer.inner.calls, 3);
+    }
+
+    #[test]
+    fn write_zero_reports_the_prefix_already_applied() {
+        let mut writer = AppliedPrefixWriter {
+            inner: ScriptedWriter::new([WriteStep::Bytes(2), WriteStep::Zero]),
+        };
+
+        assert_eq!(
+            writer.write_all(b"hello"),
+            Err(crate::usecase::terminal::PtyWriteError { applied_prefix: 2 })
+        );
+        assert_eq!(writer.inner.written, b"he");
+    }
+
+    #[test]
+    fn full_write_succeeds_after_multiple_partials() {
+        let mut writer = AppliedPrefixWriter {
+            inner: ScriptedWriter::new([
+                WriteStep::Bytes(1),
+                WriteStep::Bytes(2),
+                WriteStep::Bytes(2),
+            ]),
+        };
+
+        assert_eq!(writer.write_all(b"hello"), Ok(()));
+        assert_eq!(writer.inner.written, b"hello");
+    }
+
+    #[test]
+    fn real_pty_write_path_preserves_safe_and_ambiguous_operation_replay() {
+        let terminal = reference();
+        let mut registry = TerminalRegistry::new(4, 2);
+        registry
+            .register(terminal.clone(), Geometry { cols: 80, rows: 24 })
+            .unwrap();
+        let connection = ConnectionId::new();
+        let client = ClientId::new();
+        let subscription = registry.attach(&terminal, connection).unwrap().subscription;
+
+        let ambiguous_request = RequestId::new();
+        let ambiguous_input = input(subscription, connection, client, ambiguous_request);
+        let mut partial = AppliedPrefixWriter {
+            inner: ScriptedWriter::new([WriteStep::Bytes(2), WriteStep::Error]),
+        };
+        assert_eq!(
+            registry
+                .write_input(&terminal, ambiguous_input, b"hello", &mut partial)
+                .unwrap(),
+            InputAck::Ambiguous { applied_prefix: 2 }
+        );
+        assert_eq!(partial.inner.written, b"he");
+        assert_eq!(
+            registry
+                .write_input(&terminal, ambiguous_input, b"hello", &mut partial)
+                .unwrap(),
+            InputAck::Cached(Box::new(InputAck::Ambiguous { applied_prefix: 2 }))
+        );
+        assert_eq!(partial.inner.written, b"he");
+
+        let mut safe_registry = TerminalRegistry::new(4, 2);
+        safe_registry
+            .register(terminal.clone(), Geometry { cols: 80, rows: 24 })
+            .unwrap();
+        let safe_subscription = safe_registry
+            .attach(&terminal, connection)
+            .unwrap()
+            .subscription;
+        let safe_request = RequestId::new();
+        let safe_input = input(safe_subscription, connection, client, safe_request);
+        let mut failed = AppliedPrefixWriter {
+            inner: ScriptedWriter::new([WriteStep::Error]),
+        };
+        assert_eq!(
+            safe_registry
+                .write_input(&terminal, safe_input, b"hello", &mut failed)
+                .unwrap(),
+            InputAck::Failed
+        );
+        assert_eq!(
+            safe_registry
+                .write_input(&terminal, safe_input, b"hello", &mut failed)
+                .unwrap(),
+            InputAck::Cached(Box::new(InputAck::Failed))
+        );
+        assert!(failed.inner.written.is_empty());
     }
 }

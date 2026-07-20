@@ -27,6 +27,13 @@ pub fn delete_branch(repo: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether the exact local branch exists. Teardown checks this before deletion
+/// so retrying a partially removed multi-repository session treats an already
+/// deleted branch as success without masking real `git branch -D` failures.
+pub fn branch_exists(repo: &Path, branch: &str) -> bool {
+    rev_exists(repo, &format!("refs/heads/{branch}"))
+}
+
 /// Determine the repository's default branch (e.g. `main`).
 ///
 /// Prefers the remote's HEAD (`origin/HEAD`); falls back to the current branch

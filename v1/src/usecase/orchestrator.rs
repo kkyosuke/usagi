@@ -7,11 +7,13 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 
 use crate::domain::agent_phase::AgentPhase;
-use crate::domain::orchestrator::{Base, Event, EventKind, Lease, NodeState, Plan, PullRequest};
+use crate::domain::orchestrator::{
+    Base, Claim, Event, EventKind, Lease, NodeState, Plan, PullRequest,
+};
 use crate::domain::workspace_state::{SessionAgent, SessionOrigin};
 use crate::infrastructure::git;
 use crate::infrastructure::orchestrator_event::{self, WorkerBinding};
-use crate::infrastructure::orchestrator_store::OrchestratorStore;
+use crate::infrastructure::orchestrator_store::{ClaimOutcome, OrchestratorStore};
 use crate::infrastructure::{agent_prompt_store, error_log, issue_store::IssueStore};
 use crate::usecase::{issue, session};
 
@@ -60,6 +62,9 @@ pub struct TickOutcome {
     pub delegated: usize,
     pub owner_queued: usize,
     pub acknowledgements: usize,
+    /// Claims that rejected this tick's delegate actions. No worker/session or
+    /// prompt side effect has happened for these actions.
+    pub busy: Vec<Claim>,
 }
 
 /// A dependency base that cannot safely be used for worker creation.
@@ -304,7 +309,7 @@ pub fn reconcile_workspace_tick(
             .load_plan(&plan_id)?
             .context("orchestrator plan disappeared during tick")?;
         outcome.plans += 1;
-        let observation = observe(workspace, &stamped.value, now)?;
+        let mut observation = observe(workspace, &stamped.value, now)?;
         let plan_active = stamped
             .value
             .nodes
@@ -320,30 +325,53 @@ pub fn reconcile_workspace_tick(
 
         let reobserved = reobserve_absent(&result.actions);
         if !reobserved.is_empty() {
-            let mut observation = observation;
             observation.sessions.extend(reobserved);
             result = reconcile(&result.plan, &observation, LEASE_DURATION);
         }
 
-        resolve_delegate_bases(workspace, &mut result.plan, &mut result.actions);
         let saved = store.save_plan(&result.plan, Some(stamped.revision), now)?;
+        release_reconciled_claims(&store, &stamped.value, &result.plan, &observation, now)?;
         for event_id in &result.acknowledgements {
             if store.acknowledge_event(&result.plan.id, event_id)? {
                 outcome.acknowledgements += 1;
             }
+        }
+        let (actions, busy) =
+            admit_delegate_actions(workspace, &store, &mut result.plan, result.actions, now)?;
+        result.actions = actions;
+        outcome.busy.extend(busy);
+        let resolution_blocked =
+            resolve_delegate_bases(workspace, &mut result.plan, &mut result.actions);
+        for issue in resolution_blocked {
+            release_plan_claim(&store, &result.plan, issue, now)?;
+        }
+        let mut saved_revision = saved.revision;
+        if result.plan != saved.value {
+            saved_revision = store
+                .save_plan(&result.plan, Some(saved_revision), now)?
+                .revision;
         }
         let owner_worktree = owner_worktree(workspace, &result.plan.owner);
         if owner_needs_wakeup(workspace, &result.plan, &result.actions)? {
             queue_owner_prompt(&owner_worktree, &result.plan, &result.actions)?;
             outcome.owner_queued += 1;
         }
-        let (delegated, blocked) =
-            dispatch_actions(workspace, &owner_worktree, &result.plan, result.actions)?;
-        if !blocked.is_empty() {
+        let (delegated, blocked, failed) = dispatch_actions(
+            workspace,
+            &owner_worktree,
+            &result.plan,
+            result.actions,
+            &store,
+            now,
+        )?;
+        if !blocked.is_empty() || !failed.is_empty() {
             for issue in blocked {
                 block_delegation(&mut result.plan, issue);
             }
-            store.save_plan(&result.plan, Some(saved.revision), now)?;
+            for issue in failed {
+                retry_delegation(&mut result.plan, issue, now);
+            }
+            store.save_plan(&result.plan, Some(saved_revision), now)?;
         }
         outcome.delegated += delegated;
         slots_remaining = slots_remaining.saturating_sub(delegated);
@@ -354,7 +382,115 @@ pub fn reconcile_workspace_tick(
     Ok(outcome)
 }
 
-fn resolve_delegate_bases(workspace: &Path, plan: &mut Plan, actions: &mut Vec<Action>) {
+fn release_reconciled_claims(
+    store: &OrchestratorStore,
+    previous: &Plan,
+    next: &Plan,
+    observation: &Observation,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let mut releases = BTreeSet::new();
+    for event in &observation.events {
+        if event.plan == next.id
+            && !matches!(event.kind, EventKind::PrOpened)
+            && previous
+                .nodes
+                .get(&event.issue)
+                .is_some_and(|node| node.generation == event.generation)
+        {
+            releases.insert((event.issue, event.generation));
+        }
+    }
+    for (&issue, node) in &next.nodes {
+        let timed_out = previous
+            .nodes
+            .get(&issue)
+            .is_some_and(|old| old.state.occupies_worker() && node.state == NodeState::RetryWait);
+        if node.state.terminal() || timed_out {
+            releases.insert((issue, node.generation));
+        }
+    }
+    for (issue, generation) in releases {
+        store.release_claim(issue, &next.id, &next.owner, generation, now)?;
+    }
+    Ok(())
+}
+
+fn admit_delegate_actions(
+    workspace: &Path,
+    store: &OrchestratorStore,
+    plan: &mut Plan,
+    actions: Vec<Action>,
+    now: DateTime<Utc>,
+) -> Result<(Vec<Action>, Vec<Claim>)> {
+    let mut admitted = Vec::with_capacity(actions.len());
+    let mut busy = Vec::new();
+    for action in actions {
+        let Action::Delegate {
+            issue, generation, ..
+        } = &action
+        else {
+            admitted.push(action);
+            continue;
+        };
+        let lease = plan.nodes[issue]
+            .lease
+            .clone()
+            .context("delegate action has no lease")?;
+        let claim = Claim {
+            workspace: store.workspace_key().into(),
+            issue: *issue,
+            plan: plan.id.clone(),
+            owner: plan.owner.clone(),
+            generation: *generation,
+            lease,
+        };
+        let current = store.load_claims()?.value.by_issue.get(issue).cloned();
+        let absent = match current.as_ref() {
+            Some(current) if current.lease.expires_at <= now => {
+                claim_owner_absent(workspace, store, current)?.then_some(current)
+            }
+            _ => None,
+        };
+        match store.claim(claim, now, absent)? {
+            ClaimOutcome::Acquired => admitted.push(action),
+            ClaimOutcome::Busy(current) => {
+                let node = plan.nodes.get_mut(issue).unwrap();
+                node.state = NodeState::Runnable;
+                node.lease = None;
+                node.worker = None;
+                busy.push(current);
+            }
+        }
+    }
+    Ok((admitted, busy))
+}
+
+fn claim_owner_absent(workspace: &Path, store: &OrchestratorStore, claim: &Claim) -> Result<bool> {
+    for status in session::statuses(workspace)? {
+        if orchestrator_event::binding(&status.root)?.is_some_and(|binding| {
+            binding.plan == claim.plan
+                && binding.issue == claim.issue
+                && binding.generation == claim.generation
+        }) {
+            return Ok(false);
+        }
+    }
+    let has_pr = store
+        .load_plan(&claim.plan)?
+        .and_then(|stamped| stamped.value.nodes.get(&claim.issue).cloned())
+        .is_some_and(|node| {
+            node.generation == claim.generation && node.pull_request.is_some_and(|pr| !pr.merged)
+        });
+    Ok(!has_pr)
+}
+
+fn resolve_delegate_bases(
+    workspace: &Path,
+    plan: &mut Plan,
+    actions: &mut Vec<Action>,
+) -> Vec<u64> {
+    let mut blocked = Vec::new();
     actions.retain_mut(|action| {
         let Action::Delegate { issue, base, .. } = action else {
             return true;
@@ -371,10 +507,12 @@ fn resolve_delegate_bases(workspace: &Path, plan: &mut Plan, actions: &mut Vec<A
                     plan.id, issue
                 ));
                 block_delegation(plan, *issue);
+                blocked.push(*issue);
                 false
             }
         }
     });
+    blocked
 }
 
 fn resolve_dependency_base(
@@ -428,6 +566,27 @@ fn block_delegation(plan: &mut Plan, issue: u64) {
     }
 }
 
+fn retry_delegation(plan: &mut Plan, issue: u64, now: DateTime<Utc>) {
+    if let Some(node) = plan.nodes.get_mut(&issue) {
+        node.state = NodeState::RetryWait;
+        node.lease = None;
+        node.worker = None;
+        node.next_retry = Some(now + Duration::seconds(30));
+    }
+}
+
+fn release_plan_claim(
+    store: &OrchestratorStore,
+    plan: &Plan,
+    issue: u64,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    if let Some(node) = plan.nodes.get(&issue) {
+        store.release_claim(issue, &plan.id, &plan.owner, node.generation, now)?;
+    }
+    Ok(())
+}
+
 fn observe(workspace: &Path, plan: &Plan, now: DateTime<Utc>) -> Result<Observation> {
     let mut observations = BTreeMap::new();
     for status in session::statuses(workspace)? {
@@ -479,9 +638,12 @@ fn dispatch_actions(
     owner_worktree: &Path,
     plan: &Plan,
     actions: Vec<Action>,
-) -> Result<(usize, Vec<u64>)> {
+    store: &OrchestratorStore,
+    now: DateTime<Utc>,
+) -> Result<(usize, Vec<u64>, Vec<u64>)> {
     let mut delegated = 0;
     let mut blocked = Vec::new();
+    let mut failed = Vec::new();
     for action in actions {
         let Action::Delegate {
             issue,
@@ -497,7 +659,10 @@ fn dispatch_actions(
             Err(error) => {
                 if error.downcast_ref::<DependencyBaseError>().is_some() {
                     blocked.push(issue);
+                } else {
+                    failed.push(issue);
                 }
+                release_plan_claim(store, plan, issue, now)?;
                 error_log::ErrorLog::record(&format!(
                     "orchestrator {} failed to delegate issue #{}: {error:#}",
                     plan.id, issue
@@ -505,7 +670,7 @@ fn dispatch_actions(
             }
         }
     }
-    Ok((delegated, blocked))
+    Ok((delegated, blocked, failed))
 }
 
 fn delegate_worker(
@@ -660,6 +825,7 @@ mod tests {
     use crate::domain::workspace_state::BranchStatus;
     use crate::infrastructure::workspace_store::WorkspaceStore;
     use std::process::Command;
+    use std::time::{Duration as StdDuration, Instant};
 
     fn now() -> DateTime<Utc> {
         "2026-01-01T00:00:00Z".parse().unwrap()
@@ -685,6 +851,17 @@ mod tests {
             owner: "owner".into(),
             max_parallel: 1,
             nodes: [(node.issue, node)].into(),
+        }
+    }
+    fn durable_claim(store: &OrchestratorStore, plan: &Plan, issue: u64) -> Claim {
+        let node = &plan.nodes[&issue];
+        Claim {
+            workspace: store.workspace_key().into(),
+            issue,
+            plan: plan.id.clone(),
+            owner: plan.owner.clone(),
+            generation: node.generation,
+            lease: node.lease.clone().unwrap(),
         }
     }
     fn git(dir: &Path, args: &[&str]) {
@@ -1242,6 +1419,38 @@ mod tests {
     }
 
     #[test]
+    fn workspace_tick_reports_busy_without_dispatch_side_effects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = OrchestratorStore::new(tmp.path());
+        store
+            .save_plan(&plan(node(1, NodeState::Runnable)), None, now())
+            .unwrap();
+        let foreign = Claim {
+            workspace: store.workspace_key().into(),
+            issue: 1,
+            plan: "foreign".into(),
+            owner: "other-owner".into(),
+            generation: 7,
+            lease: Lease {
+                owner: "other-owner".into(),
+                expires_at: now() + LEASE_DURATION,
+            },
+        };
+        store.claim(foreign.clone(), now(), None).unwrap();
+
+        let outcome = reconcile_workspace_tick(tmp.path(), 1, now()).unwrap();
+
+        assert_eq!(outcome.busy, vec![foreign]);
+        assert_eq!(outcome.delegated, 0);
+        assert_eq!(outcome.owner_queued, 0);
+        assert_eq!(
+            store.load_plan("p").unwrap().unwrap().value.nodes[&1].state,
+            NodeState::Runnable
+        );
+        assert!(session::list(tmp.path()).unwrap().is_empty());
+    }
+
+    #[test]
     fn workspace_tick_delegates_worker_directly_under_owner() {
         let _guard = crate::test_support::process_env_guard();
         let data = tempfile::tempdir().unwrap();
@@ -1270,6 +1479,7 @@ mod tests {
         let outcome = reconcile_workspace_tick(tmp.path(), 1, now()).unwrap();
 
         assert_eq!(outcome.delegated, 1);
+        assert!(outcome.busy.is_empty());
         assert_eq!(outcome.owner_queued, 1);
         let sessions = session::list(tmp.path()).unwrap();
         let worker = sessions
@@ -1287,6 +1497,144 @@ mod tests {
         assert_eq!(
             git_output(&worker.root, &["rev-parse", "HEAD"]),
             git_output(tmp.path(), &["rev-parse", "main"])
+        );
+        let claim = store.load_claims().unwrap().value.by_issue[&1].clone();
+        assert_eq!(claim.workspace, store.workspace_key());
+        assert_eq!(claim.owner, "owner");
+        assert_eq!(claim.generation, 1);
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn process_claim_child() {
+        let Ok(workspace) = std::env::var("USAGI_ORCHESTRATOR_CLAIM_TEST_WORKSPACE") else {
+            return;
+        };
+        let owner = std::env::var("USAGI_ORCHESTRATOR_CLAIM_TEST_OWNER").unwrap();
+        let barrier =
+            PathBuf::from(std::env::var("USAGI_ORCHESTRATOR_CLAIM_TEST_BARRIER").unwrap());
+        let workspace = PathBuf::from(workspace);
+        std::fs::write(barrier.join(format!("ready-{owner}")), "").unwrap();
+        let deadline = Instant::now() + StdDuration::from_secs(10);
+        while !barrier.join("go").exists() {
+            assert!(Instant::now() < deadline, "claim test barrier timed out");
+            std::thread::sleep(StdDuration::from_millis(10));
+        }
+        let store = OrchestratorStore::new(&workspace);
+        let commit = git_output(&workspace, &["rev-parse", "HEAD"]);
+        let mut candidate = plan(node(1, NodeState::Delegating));
+        candidate.id = format!("plan-{owner}");
+        candidate.owner.clone_from(&owner);
+        candidate.nodes.get_mut(&1).unwrap().generation = 1;
+        candidate.nodes.get_mut(&1).unwrap().lease = Some(Lease {
+            owner: owner.clone(),
+            expires_at: now() + LEASE_DURATION,
+        });
+        let action = Action::Delegate {
+            id: format!("delegate-{owner}"),
+            issue: 1,
+            generation: 1,
+            base: Base {
+                reference: commit.clone(),
+                commit,
+            },
+        };
+        let (admitted, busy) =
+            admit_delegate_actions(&workspace, &store, &mut candidate, vec![action], now())
+                .unwrap();
+        let result = if admitted.is_empty() {
+            assert_eq!(busy.len(), 1);
+            "busy"
+        } else {
+            delegate_worker(
+                &workspace,
+                &workspace,
+                &candidate,
+                1,
+                1,
+                match &admitted[0] {
+                    Action::Delegate { base, .. } => base,
+                    Action::Reobserve { .. } => unreachable!(),
+                },
+            )
+            .unwrap();
+            "delegated"
+        };
+        std::fs::write(barrier.join(format!("result-{owner}")), result).unwrap();
+    }
+
+    #[test]
+    fn two_process_admission_spawns_one_worker_and_loser_has_no_effect() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        let tmp = tempfile::tempdir().unwrap();
+        let barrier = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        crate::usecase::issue::create(
+            tmp.path(),
+            crate::usecase::issue::NewIssue {
+                title: "Atomic claim".into(),
+                priority: Default::default(),
+                labels: Vec::new(),
+                dependson: Vec::new(),
+                related: Vec::new(),
+                parent: None,
+                milestone: None,
+                body: String::new(),
+            },
+        )
+        .unwrap();
+        let test_binary = std::env::current_exe().unwrap();
+        let mut children = Vec::new();
+        for owner in ["a", "b"] {
+            children.push(
+                Command::new(&test_binary)
+                    .args([
+                        "--exact",
+                        "usecase::orchestrator::tests::process_claim_child",
+                        "--nocapture",
+                    ])
+                    .env(crate::infrastructure::storage::DATA_DIR_ENV, data.path())
+                    .env("USAGI_ORCHESTRATOR_CLAIM_TEST_WORKSPACE", tmp.path())
+                    .env("USAGI_ORCHESTRATOR_CLAIM_TEST_OWNER", owner)
+                    .env("USAGI_ORCHESTRATOR_CLAIM_TEST_BARRIER", barrier.path())
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+        let deadline = Instant::now() + StdDuration::from_secs(10);
+        while ["a", "b"]
+            .iter()
+            .any(|owner| !barrier.path().join(format!("ready-{owner}")).exists())
+        {
+            assert!(Instant::now() < deadline, "child readiness timed out");
+            std::thread::sleep(StdDuration::from_millis(10));
+        }
+        std::fs::write(barrier.path().join("go"), "").unwrap();
+        for mut child in children {
+            assert!(child.wait().unwrap().success());
+        }
+        let results = ["a", "b"].map(|owner| {
+            std::fs::read_to_string(barrier.path().join(format!("result-{owner}"))).unwrap()
+        });
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| *result == "delegated")
+                .count(),
+            1
+        );
+        assert_eq!(results.iter().filter(|result| *result == "busy").count(), 1);
+        assert_eq!(session::list(tmp.path()).unwrap().len(), 1);
+        assert_eq!(
+            OrchestratorStore::new(tmp.path())
+                .load_claims()
+                .unwrap()
+                .value
+                .by_issue
+                .len(),
+            1
         );
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
@@ -1472,7 +1820,20 @@ mod tests {
             merged: false,
         });
         let store = crate::infrastructure::orchestrator_store::OrchestratorStore::new(tmp.path());
-        store.save_plan(&plan(n), None, now()).unwrap();
+        let active_plan = plan(n);
+        store.save_plan(&active_plan, None, now()).unwrap();
+        let claim = Claim {
+            workspace: store.workspace_key().into(),
+            issue: 1,
+            plan: active_plan.id.clone(),
+            owner: active_plan.owner.clone(),
+            generation: 0,
+            lease: Lease {
+                owner: active_plan.owner.clone(),
+                expires_at: now() + LEASE_DURATION,
+            },
+        };
+        store.claim(claim.clone(), now(), None).unwrap();
         orchestrator_event::register(
             &worker.root,
             &WorkerBinding {
@@ -1503,6 +1864,132 @@ mod tests {
         assert_eq!(saved.value.nodes[&1].worker, None);
         assert_eq!(saved.value.nodes[&1].state, NodeState::Merged);
         assert!(saved.value.nodes[&1].pull_request.as_ref().unwrap().merged);
+        assert!(store.load_claims().unwrap().value.by_issue.is_empty());
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn failed_worker_releases_claim_and_retry_claims_a_new_generation() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        crate::usecase::issue::create(
+            tmp.path(),
+            crate::usecase::issue::NewIssue {
+                title: "Retry claim".into(),
+                priority: Default::default(),
+                labels: Vec::new(),
+                dependson: Vec::new(),
+                related: Vec::new(),
+                parent: None,
+                milestone: None,
+                body: String::new(),
+            },
+        )
+        .unwrap();
+        let store = OrchestratorStore::new(tmp.path());
+        store
+            .save_plan(&plan(node(1, NodeState::Runnable)), None, now())
+            .unwrap();
+        assert_eq!(
+            reconcile_workspace_tick(tmp.path(), 1, now())
+                .unwrap()
+                .delegated,
+            1
+        );
+        let first = store.load_claims().unwrap().value.by_issue[&1].clone();
+        let event = Event {
+            id: "p-1-1-failed-0".into(),
+            plan: "p".into(),
+            issue: 1,
+            generation: 1,
+            kind: EventKind::Failed,
+            terminal_revision: 0,
+            observed_at: now(),
+        };
+        store.append_event(&event).unwrap();
+
+        let released = reconcile_workspace_tick(tmp.path(), 1, now()).unwrap();
+
+        assert_eq!(released.delegated, 0);
+        assert!(store.load_claims().unwrap().value.by_issue.is_empty());
+        assert_eq!(
+            store.load_plan("p").unwrap().unwrap().value.nodes[&1].state,
+            NodeState::RetryWait
+        );
+
+        let retried =
+            reconcile_workspace_tick(tmp.path(), 1, now() + Duration::seconds(31)).unwrap();
+
+        assert_eq!(retried.delegated, 1);
+        let second = store.load_claims().unwrap().value.by_issue[&1].clone();
+        assert_eq!(first.generation, 1);
+        assert_eq!(second.generation, 2);
+        assert_eq!(session::list(tmp.path()).unwrap().len(), 1);
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn crashed_owner_is_reclaimed_only_after_stale_lease_and_absence_reobserve() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        crate::usecase::issue::create(
+            tmp.path(),
+            crate::usecase::issue::NewIssue {
+                title: "Crash recovery".into(),
+                priority: Default::default(),
+                labels: Vec::new(),
+                dependson: Vec::new(),
+                related: Vec::new(),
+                parent: None,
+                milestone: None,
+                body: String::new(),
+            },
+        )
+        .unwrap();
+        let mut active = plan(node(1, NodeState::Delegating));
+        active.nodes.get_mut(&1).unwrap().generation = 1;
+        active.nodes.get_mut(&1).unwrap().lease = Some(Lease {
+            owner: "owner".into(),
+            expires_at: now() + LEASE_DURATION,
+        });
+        let store = OrchestratorStore::new(tmp.path());
+        store.save_plan(&active, None, now()).unwrap();
+        store
+            .claim(durable_claim(&store, &active, 1), now(), None)
+            .unwrap();
+
+        let before_expiry =
+            reconcile_workspace_tick(tmp.path(), 1, now() + Duration::minutes(4)).unwrap();
+        assert_eq!(before_expiry.delegated, 0);
+        assert!(session::list(tmp.path()).unwrap().is_empty());
+
+        let reobserved = reconcile_workspace_tick(tmp.path(), 1, now() + LEASE_DURATION).unwrap();
+        assert_eq!(reobserved.delegated, 0);
+        assert_eq!(
+            store.load_plan("p").unwrap().unwrap().value.nodes[&1].state,
+            NodeState::Runnable
+        );
+        assert_eq!(
+            store.load_claims().unwrap().value.by_issue[&1].generation,
+            1
+        );
+
+        let recovered =
+            reconcile_workspace_tick(tmp.path(), 1, now() + LEASE_DURATION + Duration::seconds(1))
+                .unwrap();
+        assert_eq!(recovered.delegated, 1);
+        assert!(recovered.busy.is_empty());
+        assert_eq!(
+            store.load_claims().unwrap().value.by_issue[&1].generation,
+            2
+        );
+        assert_eq!(session::list(tmp.path()).unwrap().len(), 1);
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 
@@ -1738,16 +2225,19 @@ mod tests {
                 commit,
             },
         };
+        let store = OrchestratorStore::new(tmp.path());
 
         let delegated = dispatch_actions(
             tmp.path(),
             tmp.path(),
             &plan(node(1, NodeState::Running)),
             vec![action],
+            &store,
+            now(),
         )
         .unwrap();
 
-        assert_eq!(delegated, (1, Vec::new()));
+        assert_eq!(delegated, (1, Vec::new(), Vec::new()));
         let binding = orchestrator_event::binding(&existing.root)
             .unwrap()
             .unwrap();
@@ -1770,6 +2260,7 @@ mod tests {
                 commit: "abc".into(),
             },
         };
+        let store = OrchestratorStore::new(tmp.path());
 
         let delegated = dispatch_actions(
             tmp.path(),
@@ -1783,10 +2274,12 @@ mod tests {
                 },
                 action,
             ],
+            &store,
+            now(),
         )
         .unwrap();
 
-        assert_eq!(delegated, (0, Vec::new()));
+        assert_eq!(delegated, (0, Vec::new(), vec![1]));
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 

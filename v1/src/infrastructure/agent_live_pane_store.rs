@@ -32,7 +32,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::infrastructure::json_file;
-use crate::infrastructure::worktree_keyed_store::{dir, file_name, key, path_for};
+use crate::infrastructure::worktree_keyed_store::{self, dir, file_name, key, path_for};
 
 /// Subdirectory of the data dir the live-pane markers live under.
 const MARKER_SUBDIR: &str = "agent-live-panes";
@@ -104,9 +104,11 @@ fn read_marker(worktree: &Path) -> Option<(PathBuf, u32)> {
 /// loses the session's agent pane (it closed, the session was removed, or the TUI
 /// is tearing down) so `auto` mode stops resolving to the live channel.
 pub fn clear(worktree: &Path) {
-    if let Ok(path) = path_for(MARKER_SUBDIR, worktree) {
-        let _ = std::fs::remove_file(path);
-    }
+    let _ = try_clear(worktree);
+}
+
+pub fn try_clear(worktree: &Path) -> Result<()> {
+    worktree_keyed_store::try_clear(MARKER_SUBDIR, worktree)
 }
 
 #[cfg(test)]

@@ -1,14 +1,14 @@
 ---
 number: 494
 title: fix(v1/mcp): root session の tracked memory mutation を禁止する
-status: todo
+status: done
 priority: medium
 labels: [review, v1, mcp, memory, security]
 dependson: []
 related: [105, 106, 404]
 parent: 453
 created_at: 2026-07-20T12:07:07.043815+00:00
-updated_at: 2026-07-20T12:07:07.043815+00:00
+updated_at: 2026-07-20T22:33:58.819704+00:00
 ---
 
 ## 問題・影響

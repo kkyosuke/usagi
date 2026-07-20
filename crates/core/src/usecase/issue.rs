@@ -151,8 +151,15 @@ pub fn ensure_write_allowed(repo_root: &Path) -> Result<()> {
 /// Returns an error when the store cannot allocate a number or write the issue.
 #[coverage(off)]
 pub fn create(store: &IssueStore, spec: NewIssue, now: DateTime<Utc>) -> Result<Issue> {
-    let number = store.reserve_next_number()?;
     let lock = store.lock()?;
+    if let Some(existing) = store
+        .scan_lenient()?
+        .into_iter()
+        .find(|issue| matches_new_issue_source(issue, &spec))
+    {
+        return Ok(existing);
+    }
+    let number = store.reserve_next_number()?;
     let issue = Issue {
         number,
         title: spec.title,
@@ -169,6 +176,22 @@ pub fn create(store: &IssueStore, spec: NewIssue, now: DateTime<Utc>) -> Result<
     };
     store.write_locked(&lock, &issue)?;
     Ok(issue)
+}
+
+/// Match the durable identity of an initial create request. Timestamps and the
+/// allocated number are deliberately excluded so retrying after an ambiguous
+/// response finds the source that already committed instead of allocating a
+/// duplicate.
+fn matches_new_issue_source(issue: &Issue, spec: &NewIssue) -> bool {
+    issue.status == IssueStatus::Todo
+        && issue.title == spec.title
+        && issue.priority == spec.priority
+        && issue.labels == spec.labels
+        && issue.dependson == spec.dependson
+        && issue.related == spec.related
+        && issue.parent == spec.parent
+        && issue.milestone == spec.milestone
+        && issue.body == spec.body
 }
 
 /// Fetch one issue by number, or `None` when it does not exist.
@@ -323,7 +346,7 @@ pub fn update(
     now: DateTime<Utc>,
 ) -> Result<Option<Issue>> {
     let lock = store.lock()?;
-    let Some(mut issue) = store.read(number)? else {
+    let Some(mut issue) = store.read_locked(number)? else {
         return Ok(None);
     };
     if let Some(title) = patch.title {
@@ -375,6 +398,7 @@ mod tests {
         to_prompt, update,
     };
     use crate::domain::issue::{IssuePriority, IssueStatus};
+    use crate::infrastructure::persistence::json_file::{AtomicWriteStage, fail_next_atomic_write};
     use crate::infrastructure::store::issue::IssueStore;
     use chrono::{DateTime, TimeZone, Utc};
     use std::fs;
@@ -410,6 +434,28 @@ mod tests {
         assert_eq!(first.status, IssueStatus::Todo);
         assert_eq!(first.priority, IssuePriority::High);
         assert_eq!(first.created_at, ts(20));
+    }
+
+    #[test]
+    fn create_retry_reuses_committed_source_identity_after_derived_failure() {
+        let _guard = crate::test_support::process_env_guard();
+        let logs = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var(crate::infrastructure::paths::DATA_DIR_ENV, logs.path());
+        }
+        let (_tmp, store) = store();
+        fail_next_atomic_write(&store.index_path(), AtomicWriteStage::Rename);
+
+        let first = create(&store, spec("same request"), ts(20)).unwrap();
+        let retry = create(&store, spec("same request"), ts(21)).unwrap();
+
+        assert_eq!(retry.number, first.number);
+        assert_eq!(retry.created_at, first.created_at);
+        assert_eq!(store.scan().unwrap().len(), 1);
+
+        unsafe {
+            std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
+        }
     }
 
     #[test]

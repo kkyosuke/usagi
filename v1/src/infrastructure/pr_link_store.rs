@@ -128,6 +128,10 @@ pub fn clear(worktree: &Path) {
     worktree_keyed_store::clear(PR_SUBDIR, worktree);
 }
 
+pub fn try_clear(worktree: &Path) -> Result<()> {
+    worktree_keyed_store::try_clear(PR_SUBDIR, worktree)
+}
+
 /// Read the PR list from `path`, but only when the file is stamped with `key` (our
 /// worktree). A file stamped with a different worktree (a hash collision, or a
 /// stale file synced from another machine), a missing file, or a corrupt one all

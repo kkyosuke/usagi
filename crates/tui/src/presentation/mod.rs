@@ -333,8 +333,8 @@ fn forward_live_terminal_input(
     };
     // A launch worker temporarily owns the port; surface the dropped
     // keystroke instead of swallowing it silently.
-    if !ui.send_terminal_bytes(&terminal, &bytes) {
-        controls.set_feedback("terminal is busy; keystroke dropped");
+    if let Err(message) = ui.send_terminal_bytes(&terminal, &bytes) {
+        controls.set_feedback(message);
     }
     true
 }
@@ -985,25 +985,26 @@ impl WorkspaceUi {
     }
 
     /// Forward raw passthrough bytes to the live terminal `terminal`. Returns
-    /// `false` when no attached session matches.
+    /// an error when the port is busy or the matching session cannot accept it.
     #[coverage(off)]
-    fn send_terminal_bytes(&mut self, terminal: &TerminalRef, bytes: &[u8]) -> bool {
+    fn send_terminal_bytes(&mut self, terminal: &TerminalRef, bytes: &[u8]) -> Result<(), String> {
         let Some(port) = self
             .agent
             .as_mut()
             .and_then(|agent| agent.port.as_deref_mut())
         else {
-            return false;
+            return Err("terminal is busy; keystroke not delivered".to_owned());
         };
         let Some(session) = self
             .terminals
             .iter_mut()
             .find(|session| session.terminal().fences(terminal))
         else {
-            return false;
+            return Err("terminal session is no longer available".to_owned());
         };
-        session.send_input(&mut AgentStreamPort(port), bytes);
-        true
+        session
+            .send_input(&mut AgentStreamPort(port), bytes)
+            .map_err(|error| error.message().to_owned())
     }
 
     /// Poll every attached terminal once and return the refs of those the daemon
@@ -1072,6 +1073,13 @@ impl WorkspaceUi {
             .iter()
             .find(|session| session.terminal().fences(terminal))
             .map(TerminalSession::cells)
+    }
+
+    fn terminal_error(&self, terminal: &TerminalRef) -> Option<&str> {
+        self.terminals
+            .iter()
+            .find(|session| session.terminal().fences(terminal))
+            .and_then(TerminalSession::error)
     }
 }
 
@@ -1859,7 +1867,11 @@ fn controller_terminal_view(
     controls.sync_focus(terminal.as_ref());
     let terminal = terminal?;
     let rows = ui.terminal_rows(&terminal, controls.selection())?;
-    Some(controls.project(rows, viewport_rows))
+    let mut projection = controls.project(rows, viewport_rows);
+    if let Some(error) = ui.terminal_error(&terminal) {
+        projection.feedback = Some(error.to_owned());
+    }
+    Some(projection)
 }
 
 /// Run the per-frame terminal sweep: poll every terminal, auto-close any that
@@ -2042,11 +2054,15 @@ fn handle_terminal_pointer(
     }
 }
 
-/// Clear a finished terminal selection only when a normal left click lands in
-/// the live terminal's rendered content viewport. Sidebar, chrome, modal, and
-/// empty-selection clicks retain their existing ownership and handling.
+/// Begin a terminal selection when a normal left click lands in the live
+/// terminal's rendered content viewport. This records the press cell as the
+/// drag anchor, before crossterm delivers the first [`PointerKind::Drag`] event.
+/// Sidebar, chrome, modal, and out-of-content clicks retain their existing
+/// ownership and handling.
 #[coverage(off)]
-fn clear_terminal_selection_on_click(
+#[allow(clippy::too_many_arguments)]
+fn begin_terminal_selection_on_click(
+    ui: &WorkspaceUi,
     runtime: &WorkspaceRuntime,
     controls: &mut LiveTerminalControls,
     height: usize,
@@ -2055,13 +2071,20 @@ fn clear_terminal_selection_on_click(
     scroll: usize,
     pointer: (u16, u16),
 ) -> bool {
-    if !runtime.wants_live_input()
-        || !controls.has_selection()
-        || terminal_point_at(height, width, rows_len, scroll, pointer.0, pointer.1).is_none()
-    {
+    if !runtime.wants_live_input() {
         return false;
     }
-    controls.clear_selection();
+    let Some(terminal) = runtime.focused_terminal() else {
+        return false;
+    };
+    let Some(point) = terminal_point_at(height, width, rows_len, scroll, pointer.0, pointer.1)
+    else {
+        return false;
+    };
+    let Some(cells) = ui.terminal_cells(&terminal) else {
+        return false;
+    };
+    controls.begin_selection(TerminalSelection::begin(cells, point));
     true
 }
 
@@ -2096,7 +2119,8 @@ fn intercept_live_terminal_control(
             );
         }
         Key::Click { column, row } => {
-            return clear_terminal_selection_on_click(
+            return begin_terminal_selection_on_click(
+                ui,
                 runtime,
                 controls,
                 height,
@@ -3064,7 +3088,7 @@ mod tests {
         UnavailableDecisionCommandPort, UnavailableEnvironmentStore, UnavailablePrSnapshotPort,
         UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory, WelcomeStep,
         WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
-        app_event_from_key, clear_terminal_selection_on_click, close_exited_panes,
+        app_event_from_key, begin_terminal_selection_on_click, close_exited_panes,
         controller_terminal_view, forward_live_terminal_input, handle_terminal_pointer,
         intercept_live_terminal_control, key_to_terminal_bytes, new_project_notice,
         play_startup_splash, render_controller_frame, render_home_snapshot, restore_open_panes,
@@ -3092,7 +3116,11 @@ mod tests {
     use std::collections::VecDeque;
     use std::io::{self, Write};
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc::Receiver,
+    };
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::agent::AgentProfileId;
     use usagi_core::domain::id::{
@@ -3745,6 +3773,87 @@ mod tests {
 
     #[test]
     #[coverage(off)]
+    fn controller_loop_dispatches_each_ctrl_a_representation_once_to_the_session_port() {
+        struct SignallingSessionPort {
+            calls: Arc<AtomicUsize>,
+            create_call: std::sync::mpsc::Sender<String>,
+        }
+
+        impl SessionCommandPort for SignallingSessionPort {
+            fn execute(
+                &mut self,
+                _: &Workspace,
+                _: Option<&SessionRecord>,
+                command: SessionCommand,
+            ) -> Result<SessionCommandResult, String> {
+                let SessionCommand::Create { name } = command else {
+                    return Err("unexpected session command".to_owned());
+                };
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.create_call
+                    .send(name)
+                    .map_err(|error| error.to_string())?;
+                Ok(SessionCommandResult::message("daemon accepted"))
+            }
+        }
+
+        // The composition adapter normalizes a modified Ctrl+A to LineStart,
+        // preserves a raw control byte as U+0001, and carries Home as Home. All
+        // three must enter the same controller form and lifecycle dispatch path.
+        for create_key in [Key::LineStart, Key::Char('\u{1}'), Key::Home] {
+            let snapshot = WorkspaceSnapshot::new(
+                ws("empty"),
+                WorkspaceState {
+                    sessions: Vec::new(),
+                    root_notes: Scratchpad::default(),
+                    root_environment: std::collections::BTreeMap::new(),
+                    updated_at: now(),
+                },
+            );
+            let terminal = TerminalRef {
+                daemon_generation: DaemonGeneration::new(),
+                terminal_id: TerminalId::new(),
+                workspace_id: snapshot.workspace_id,
+                session_id: None,
+                worktree_id: WorktreeId::new(),
+            };
+            let calls = Arc::new(AtomicUsize::new(0));
+            let (create_call, observed_create) = std::sync::mpsc::channel();
+            let keys = [
+                create_key.clone(),
+                Key::Char('a'),
+                Key::Char('p'),
+                Key::Char('i'),
+                Key::Enter,
+                Key::CtrlQ,
+                Key::Char('y'),
+            ];
+            let mut term = FakeTerminal::with_keys_waiting_for_create(&keys, observed_create);
+
+            let result = run_workspace_controller(
+                &mut term,
+                snapshot,
+                Box::new(SignallingSessionPort {
+                    calls: calls.clone(),
+                    create_call,
+                }),
+                Box::new(SuccessfulAgentPort(terminal)),
+                Box::new(UnavailableDecisionCommandPort),
+                Box::new(UnavailableEnvironmentStore),
+                Box::new(NoDesktopNotifications),
+                Box::new(NoMetrics),
+                Box::new(UnavailablePrSnapshotPort),
+                Box::new(UnavailableBrowserOpener),
+            );
+
+            assert!(matches!(result, Ok(Exit::Quit)), "{create_key:?}");
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "{create_key:?}");
+            assert_eq!(term.observed_creates, ["api"], "{create_key:?}");
+        }
+    }
+
+    #[test]
+    #[coverage(off)]
     fn drain_session_completions_refluxes_create_failure_with_its_token() {
         let snapshot = snapshot("demo");
         let view = WorkspaceView::with_runtime_ids(
@@ -3884,13 +3993,13 @@ mod tests {
     }
 
     /// A streaming agent port whose PTY attaches live from `replay`, then reports
-    /// exit on the next poll when `exit_on_poll` is set. It records each detach so
-    /// the auto-close path can be asserted end to end.
+    /// the configured safe error on poll. It records each detach so the auto-close
+    /// path can be asserted end to end.
     struct ScriptedAgentPort {
         terminal: TerminalRef,
         subscription: u64,
         replay: Vec<u8>,
-        exit_on_poll: bool,
+        poll_error: Option<TerminalError>,
         detaches: Arc<Mutex<Vec<u64>>>,
     }
 
@@ -3922,11 +4031,7 @@ mod tests {
             _terminal: &TerminalRef,
             _after_offset: u64,
         ) -> Result<Vec<TerminalChunk>, TerminalError> {
-            if self.exit_on_poll {
-                Err(TerminalError::Exited)
-            } else {
-                Ok(Vec::new())
-            }
+            self.poll_error.map_or(Ok(Vec::new()), Err)
         }
 
         fn input_terminal(
@@ -3993,7 +4098,7 @@ mod tests {
                 terminal: terminal.clone(),
                 subscription: 5,
                 replay: b"live!".to_vec(),
-                exit_on_poll: true,
+                poll_error: Some(TerminalError::Exited),
                 detaches: Arc::clone(&detaches),
             }),
         );
@@ -4006,6 +4111,41 @@ mod tests {
         assert!(runtime.active_pane().tabs().is_empty());
         assert!(!runtime.state().has_live_pane());
         assert_eq!(*detaches.lock().unwrap(), vec![5]);
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn reconnecting_and_stale_terminal_states_are_projected_into_the_pane_footer() {
+        for (error, expected) in [
+            (
+                TerminalError::Unavailable,
+                "daemon unavailable; reconnecting",
+            ),
+            (TerminalError::Stale, "terminal is no longer available"),
+        ] {
+            let workspace = WorkspaceId::new();
+            let session = SessionId::new();
+            let terminal = live_terminal_ref(workspace, session);
+            let (mut ui, runtime) = focused_live_pane(
+                workspace,
+                session,
+                terminal.clone(),
+                Box::new(ScriptedAgentPort {
+                    terminal,
+                    subscription: 6,
+                    replay: b"retained".to_vec(),
+                    poll_error: Some(error),
+                    detaches: Arc::new(Mutex::new(Vec::new())),
+                }),
+            );
+            let mut controls = LiveTerminalControls::default();
+
+            assert!(ui.poll_all_terminals().is_empty());
+            let view = controller_terminal_view(&ui, &runtime, &mut controls, 10).unwrap();
+
+            assert_eq!(view.feedback.as_deref(), Some(expected));
+            assert_eq!(view.rows[0], "retained");
+        }
     }
 
     #[test]
@@ -4023,7 +4163,7 @@ mod tests {
                 terminal,
                 subscription: 8,
                 replay: Vec::new(),
-                exit_on_poll: false,
+                poll_error: None,
                 detaches: Arc::clone(&detaches),
             }),
         );
@@ -4331,7 +4471,7 @@ mod tests {
                 terminal: terminal.clone(),
                 subscription: 9,
                 replay: b"hello".to_vec(),
-                exit_on_poll: false,
+                poll_error: None,
                 detaches: Arc::new(Mutex::new(Vec::new())),
             }),
         );
@@ -4351,19 +4491,19 @@ mod tests {
             column,
             row: 5,
         };
-        handle_terminal_pointer(
+        assert!(begin_terminal_selection_on_click(
             &ui,
             &runtime,
             &mut controls,
-            &mut term,
-            &mut browser,
             20,
             80,
             rows_len,
             0,
-            drag(37),
-        );
+            (37, 5),
+        ));
         assert!(controls.has_selection());
+        // The next drag report lands at the final "o". The press cell above is
+        // still part of the copied range, so this must yield all of "hello".
         handle_terminal_pointer(
             &ui,
             &runtime,
@@ -4438,7 +4578,7 @@ mod tests {
                 terminal: terminal.clone(),
                 subscription: 11,
                 replay: b"see https://example.com/x now".to_vec(),
-                exit_on_poll: false,
+                poll_error: None,
                 detaches: Arc::new(Mutex::new(Vec::new())),
             }),
         );
@@ -4497,7 +4637,7 @@ mod tests {
 
     #[test]
     #[coverage(off)]
-    fn a_normal_click_in_live_terminal_content_clears_only_the_retained_selection() {
+    fn a_terminal_press_anchors_a_drag_at_its_start_cell() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let terminal = live_terminal_ref(workspace, session);
@@ -4509,7 +4649,7 @@ mod tests {
                 terminal: terminal.clone(),
                 subscription: 9,
                 replay: b"hello".to_vec(),
-                exit_on_poll: false,
+                poll_error: None,
                 detaches: Arc::new(Mutex::new(Vec::new())),
             }),
         );
@@ -4519,15 +4659,11 @@ mod tests {
             .len();
         let mut controls = LiveTerminalControls::default();
         controls.sync_focus(Some(&terminal));
-        controls.begin_selection(TerminalSelection::begin(
-            ui.terminal_cells(&terminal).expect("terminal cells"),
-            TerminalPoint { row: 0, column: 0 },
-        ));
-        controls.extend_selection(TerminalPoint { row: 0, column: 4 });
-        let _ = controls.finish_drag();
-
-        // The right pane starts at column 37 and terminal content at row 5.
-        assert!(clear_terminal_selection_on_click(
+        // The right pane starts at column 37 and terminal content at row 5. The
+        // press anchors the selection at the first "h", before the first drag
+        // report reaches the controller.
+        assert!(begin_terminal_selection_on_click(
+            &ui,
             &runtime,
             &mut controls,
             20,
@@ -4536,11 +4672,16 @@ mod tests {
             0,
             (37, 5),
         ));
-        assert!(!controls.has_selection());
+        assert!(controls.is_dragging());
+        assert_eq!(
+            controls.selection().expect("selection started").anchor(),
+            TerminalPoint { row: 0, column: 0 }
+        );
 
-        // With no selection, a left-sidebar click is still left for sidebar
-        // navigation; the terminal interceptor must not consume it.
-        assert!(!clear_terminal_selection_on_click(
+        // A left-sidebar click remains with sidebar navigation; the terminal
+        // interceptor must not consume it.
+        assert!(!begin_terminal_selection_on_click(
+            &ui,
             &runtime,
             &mut controls,
             20,
@@ -4569,7 +4710,7 @@ mod tests {
                 terminal: terminal.clone(),
                 subscription: 9,
                 replay: b"ab\r\n\r\ncd".to_vec(),
-                exit_on_poll: false,
+                poll_error: None,
                 detaches: Arc::new(Mutex::new(Vec::new())),
             }),
         );
@@ -4610,7 +4751,7 @@ mod tests {
                 terminal: terminal.clone(),
                 subscription: 3,
                 replay,
-                exit_on_poll: false,
+                poll_error: None,
                 detaches: Arc::new(Mutex::new(Vec::new())),
             }),
         );
@@ -4641,6 +4782,8 @@ mod tests {
         frames: Vec<Vec<String>>,
         waits: Vec<std::time::Duration>,
         copied: Vec<String>,
+        create_call: Option<Receiver<String>>,
+        observed_creates: Vec<String>,
         fail_size: bool,
         fail_draw: bool,
     }
@@ -4650,6 +4793,13 @@ mod tests {
             Self {
                 keys: keys.iter().cloned().collect(),
                 ..Self::default()
+            }
+        }
+
+        fn with_keys_waiting_for_create(keys: &[Key], create_call: Receiver<String>) -> Self {
+            Self {
+                create_call: Some(create_call),
+                ..Self::with_keys(keys)
             }
         }
     }
@@ -4676,9 +4826,22 @@ mod tests {
         }
 
         fn read_key(&mut self) -> io::Result<Key> {
-            self.keys
+            let key = self
+                .keys
                 .pop_front()
-                .ok_or_else(|| io::Error::other("no more keys"))
+                .ok_or_else(|| io::Error::other("no more keys"))?;
+            // Create runs on the lifecycle worker. Tests that exercise the whole
+            // terminal adapter wait at the quit boundary, making the dispatch
+            // observation deterministic without changing production scheduling.
+            if matches!(key, Key::CtrlQ)
+                && let Some(create_call) = self.create_call.take()
+            {
+                let name = create_call
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                self.observed_creates.push(name);
+            }
+            Ok(key)
         }
 
         fn copy_text(&mut self, text: &str) -> Result<(), String> {

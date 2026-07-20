@@ -289,6 +289,16 @@ fn codex_mcp_arguments(command: &Path) -> Result<Vec<String>, ()> {
         format!("mcp_servers.usagi.command = {command}"),
         "-c".into(),
         r#"mcp_servers.usagi.args = ["mcp"]"#.into(),
+        // This is deliberately scoped to the daemon-provisioned `usagi` MCP
+        // server. Codex keeps its normal approval policy for shell commands,
+        // file edits, network access, and every other MCP server.
+        // Codex starts stdio MCP servers with an explicit environment allowlist.
+        // Forward the daemon-selected data home and runtime-fenced credential
+        // so the MCP child reaches the owning daemon and proves its owner.
+        "-c".into(),
+        r#"mcp_servers.usagi.env_vars = ["USAGI_HOME", "USAGI_MCP_CALLER_CREDENTIAL"]"#.into(),
+        "-c".into(),
+        r#"mcp_servers.usagi.default_tools_approval_mode = "approve""#.into(),
     ])
 }
 
@@ -3375,6 +3385,10 @@ mod tests {
                 "mcp_servers.usagi.command = \"/opt/usagi/bin/usagi\"",
                 "-c",
                 "mcp_servers.usagi.args = [\"mcp\"]",
+                "-c",
+                "mcp_servers.usagi.env_vars = [\"USAGI_HOME\", \"USAGI_MCP_CALLER_CREDENTIAL\"]",
+                "-c",
+                "mcp_servers.usagi.default_tools_approval_mode = \"approve\"",
             ]
         );
         assert_eq!(
