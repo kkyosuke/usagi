@@ -1,14 +1,14 @@
 ---
 number: 407
 title: usagi mcp: production E2E harness を整備し docs（07-mcp/orchestration guide）を実挙動へ整合する
-status: todo
+status: in-progress
 priority: medium
 labels: [mcp, docs]
 dependson: [401]
 related: []
 parent: 400
 created_at: 2026-07-20T04:55:08.806180+00:00
-updated_at: 2026-07-20T04:55:08.806180+00:00
+updated_at: 2026-07-20T07:08:59.001026+00:00
 ---
 
 親: #400。依存: #401。各系実装が寄りかかる共有の **production E2E harness** を整備し、docs のドリフトを解消する。harness は早期に着手し、各系 issue（#402–#406）はその上に自系の E2E を足す。

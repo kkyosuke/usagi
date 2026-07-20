@@ -115,12 +115,9 @@ mod tests {
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0]["uri"], "usagi://guides/orchestration");
         assert_eq!(contents[0]["mimeType"], "text/markdown");
-        assert!(
-            contents[0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("session_delegate_brief")
-        );
+        let text = contents[0]["text"].as_str().unwrap();
+        assert!(text.contains("session_create"));
+        assert!(!text.contains("session_delegate_brief"));
     }
 
     #[test]
