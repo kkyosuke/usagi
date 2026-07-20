@@ -1,14 +1,14 @@
 ---
 number: 457
 title: fix(daemon): PTY child の継承環境を明示 allowlist に限定する
-status: in-progress
+status: done
 priority: high
 labels: [review, v2, daemon, pty, security]
 dependson: []
 related: [250, 251, 252, 253, 254, 255, 271, 306]
 parent: 453
 created_at: 2026-07-20T12:06:18.627769+00:00
-updated_at: 2026-07-20T13:04:34.402401+00:00
+updated_at: 2026-07-20T13:31:19.041536+00:00
 ---
 
 ## 問題・影響
