@@ -1204,8 +1204,8 @@ const CREATE_SKELETON_ROWS: usize = 2;
 /// current target, so it carries no marker.
 fn create_skeleton_lines(width: usize, name: &str, tick: u64) -> Vec<String> {
     let wave = widgets::Shimmer {
-        style: Role::Feature.style().bold(),
-        base_style: Role::Feature.style().dim(),
+        style: Role::Accent.style().bold(),
+        base_style: Role::Accent.style().dim(),
         speed: 4,
     };
     let frame = usize::try_from(tick).unwrap_or(usize::MAX);
@@ -1747,6 +1747,11 @@ mod tests {
         assert_ne!(first[0], later[0]);
         assert!(strip(&later[0]).contains("atlas"));
         assert_eq!(display_width(&later[0]), 30);
+        assert!(
+            first
+                .iter()
+                .all(|line| line.contains("\u{1b}[2;36m") || line.contains("\u{1b}[1;36m"))
+        );
     }
 
     #[test]

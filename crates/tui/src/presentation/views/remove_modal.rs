@@ -120,18 +120,29 @@ pub fn same_incarnation(left: &SessionRecord, right: &SessionRecord) -> bool {
 fn row(entry: &SessionRecord, cursor: bool, selected: bool, width: usize) -> String {
     let marker = modal::selection_marker(cursor);
     let check = if selected {
-        Role::Success.style().paint("[x]")
+        Role::Danger.style().bold().paint("[x]")
     } else {
         "[ ]".to_owned()
     };
     let label = widgets::clip_to_width(entry.display_label(), width.saturating_sub(8));
+    let label = if selected {
+        Role::Danger.style().paint(&label)
+    } else {
+        label
+    };
     modal::content_line(&format!("{marker} {check} {label}"), width)
 }
 
 fn body(state: &RemoveModal) -> Vec<String> {
     // The removal checklist is the one modal whose help hint leads the body
     // instead of closing it.
-    let mut lines = vec![modal::footer("Space: select   Enter: remove   Esc: cancel")];
+    let footer = format!(
+        "{}{}{}",
+        modal::footer("  Space: select   "),
+        Role::Danger.style().bold().paint("Enter: remove"),
+        modal::footer("   Esc: cancel"),
+    );
+    let mut lines = vec![footer];
     if state.is_empty() {
         lines.push(modal::empty_notice("no sessions to remove"));
     } else {
@@ -239,6 +250,10 @@ mod tests {
         let normal_frame = render_over(12, 60, &vec![String::new(); 12], &normal).join("\n");
         assert!(!normal_frame.contains("force removal enabled"));
         modal.toggle();
+        let selected = render_over(12, 60, &vec![String::new(); 12], &modal).join("\n");
+        assert!(selected.contains("\u{1b}[1;31m[x]\u{1b}[0m"));
+        assert!(selected.contains("\u{1b}[31ma\u{1b}[0m"));
+        assert!(selected.contains("\u{1b}[1;31mEnter: remove\u{1b}[0m"));
         modal.set_feedback("cannot remove");
         let frame = render_over(12, 60, &vec![String::new(); 12], &modal).join("\n");
         assert!(frame.contains("cannot remove"));

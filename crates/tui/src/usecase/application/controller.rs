@@ -3096,6 +3096,10 @@ fn activate_selected(state: &mut AppState) -> Vec<Effect> {
 
 #[coverage(off)]
 fn open_create_session(state: &mut AppState) -> Vec<Effect> {
+    // Ctrl-A opens this persistent sidebar action directly, so keep the visual
+    // cursor and the inline form on the same `+ new session` row. The active
+    // target remains unchanged.
+    state.selected = Selection::NewSession;
     state.create_session = Some(CreateSessionForm::new(state.session_names.clone()));
     state.overlay = Some(Overlay::CreateSession);
     Vec::new()
@@ -4072,6 +4076,7 @@ mod tests {
         let mut state = AppState::home(workspace, Vec::new());
         let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));
         assert_eq!(state.active(), Target::Root(workspace));
+        assert_eq!(state.selected(), Selection::NewSession);
         assert_eq!(state.overlay(), Some(Overlay::CreateSession));
         assert_eq!(state.create_session_form().unwrap().name(), "");
         // Home / Tab while the name-only form owns input must not retrigger create
