@@ -1787,6 +1787,46 @@ impl TerminalPool {
         ExitedPaneRetirement::Retired
     }
 
+    /// Stop and reap the single Agent process for an orchestrator retry. A
+    /// missing or ambiguous process is not confirmation: the durable generation
+    /// remains fenced until a later observation can prove it retired.
+    pub(crate) fn retire_orchestrator_agent(&mut self, dir: &Path, label: &str) -> bool {
+        let Some(session) = self.sessions.get_mut(dir) else {
+            return matches!(
+                agent_state_store::read(dir),
+                Some(crate::domain::agent_phase::AgentPhase::Exited)
+            );
+        };
+        let agent_count = session
+            .panes
+            .iter()
+            .filter(|pane| matches!(pane.kind, PaneKind::Agent))
+            .count();
+        if agent_count != 1
+            || !session
+                .panes
+                .iter_mut()
+                .filter(|pane| matches!(pane.kind, PaneKind::Agent))
+                .all(Pane::kill_backend)
+        {
+            return false;
+        }
+        session
+            .panes
+            .retain(|pane| !matches!(pane.kind, PaneKind::Agent));
+        if session.panes.is_empty() {
+            self.sessions.remove(dir);
+        } else {
+            session.active = session.active.min(session.panes.len().saturating_sub(1));
+            session.rebuild_tab_labels();
+        }
+        let _ = agent_state_store::write(dir, crate::domain::agent_phase::AgentPhase::Exited);
+        agent_live_pane_store::clear(dir);
+        self.preview_cache = None;
+        self.refresh_watched(dir, label);
+        true
+    }
+
     /// Whether an existing agent pane is idle enough for a next-turn launch
     /// prompt. Running/waiting work keeps the durable request queued; ready,
     /// completed-turn, and phase-less CLIs may accept it.
@@ -1909,12 +1949,23 @@ impl TerminalPool {
                 agent_state_store::clear(dir);
             }
         };
+        let mut process_env = launch.env.clone();
+        if fresh_agent {
+            if let Some(credential) = crate::infrastructure::orchestrator_event::binding(dir)?
+                .and_then(|binding| binding.credential)
+            {
+                process_env.insert(
+                    crate::infrastructure::orchestrator_event::CREDENTIAL_ENV.to_string(),
+                    credential,
+                );
+            }
+        }
         let spawned = spawn_backend(
             dir,
             &geo,
             initial,
             self.scrollback_lines,
-            launch.env,
+            &process_env,
             &mut before_spawn,
         );
         let pty = spawned?;
@@ -3184,6 +3235,64 @@ mod tests {
                 pool.sessions[&dir].panes[0].kind,
                 PaneKind::Terminal
             ));
+        });
+    }
+
+    #[test]
+    fn orchestrator_retry_retires_exactly_one_agent_after_kill_ack() {
+        with_data_dir(|| {
+            let dir = path("orchestrator-retry");
+            let terminal_kills = Arc::new(AtomicU64::new(0));
+            let agent_kills = Arc::new(AtomicU64::new(0));
+            let mut pool = TerminalPool::new(false, 0);
+            insert_spy_session(
+                &mut pool,
+                &dir,
+                vec![
+                    spy_pane(Arc::clone(&terminal_kills), true, PaneKind::Terminal),
+                    spy_pane(Arc::clone(&agent_kills), true, PaneKind::Agent),
+                ],
+            );
+            agent_state_store::write(&dir, AgentPhase::Running).unwrap();
+
+            assert!(pool.retire_orchestrator_agent(&dir, "worker"));
+            assert_eq!(agent_kills.load(Ordering::SeqCst), 1);
+            assert_eq!(terminal_kills.load(Ordering::SeqCst), 0);
+            assert_eq!(pool.sessions[&dir].panes.len(), 1);
+            // The surviving terminal makes refresh clear agent-only phase state;
+            // the orchestrator's durable retired state is the restart authority.
+            assert_eq!(agent_state_store::read(&dir), None);
+        });
+    }
+
+    #[test]
+    fn orchestrator_retry_keeps_generation_when_kill_fails_or_is_ambiguous() {
+        with_data_dir(|| {
+            for (name, panes) in [
+                (
+                    "kill-fails",
+                    vec![spy_pane(
+                        Arc::new(AtomicU64::new(0)),
+                        false,
+                        PaneKind::Agent,
+                    )],
+                ),
+                (
+                    "ambiguous",
+                    vec![
+                        spy_pane(Arc::new(AtomicU64::new(0)), true, PaneKind::Agent),
+                        spy_pane(Arc::new(AtomicU64::new(0)), true, PaneKind::Agent),
+                    ],
+                ),
+            ] {
+                let dir = path(name);
+                let mut pool = TerminalPool::new(false, 0);
+                insert_spy_session(&mut pool, &dir, panes);
+                agent_state_store::write(&dir, AgentPhase::Running).unwrap();
+                assert!(!pool.retire_orchestrator_agent(&dir, name));
+                assert_eq!(agent_state_store::read(&dir), Some(AgentPhase::Running));
+                assert!(!pool.sessions[&dir].panes.is_empty());
+            }
         });
     }
 
