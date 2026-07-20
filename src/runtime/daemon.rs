@@ -36,8 +36,8 @@ use usagi_daemon::infrastructure::pty::PtyTerminal;
 use usagi_daemon::infrastructure::unix_transport::{SecureUnixListener, ensure_private_dir};
 use usagi_daemon::presentation::DaemonEnv;
 use usagi_daemon::usecase::agent_ipc::{
-    AgentRuntime, AgentTerminalActor, ResolvedAgentScope, ScopeResolveError, SessionScopeResolver,
-    SharedTerminalOwner, TerminalOutcome,
+    AgentRuntime, AgentTerminalActor, PromptMode, ResolvedAgentScope, ScopeResolveError,
+    SessionScopeResolver, SharedTerminalOwner, TerminalOutcome,
 };
 use usagi_daemon::usecase::claude::{
     ClaudeAdapter, ClaudeProvision, ClaudeProvisionFailure, ClaudeProvisioner,
@@ -1048,7 +1048,7 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         Arc::clone(&supervisor),
     )?;
     let decisions = Arc::new(UserDecisionStore::new(data_dir.join("daemon")));
-    consume_user_decision_events(&decisions)
+    consume_user_decision_events(&decisions, &agent)
         .map_err(|error| std::io::Error::other(error.message))?;
     start_ipc_accept_loop(
         listener,
@@ -2175,7 +2175,7 @@ fn dispatch_user_decision(
         ))
     });
     let response = owner.and_then(|(workspace, owner)| {
-        consume_user_decision_events(store)?;
+        consume_user_decision_events(store, agent)?;
         let now = Utc::now();
         let result = (|| -> Result<serde_json::Value, UserDecisionError> { match action {
             DispatchToolAction::UserDecisionRequest => {
@@ -2227,7 +2227,7 @@ fn dispatch_user_decision(
             ProtocolError::new(code, message)
         })?;
         if action == DispatchToolAction::UserDecisionResolve {
-            consume_user_decision_events(store)?;
+            consume_user_decision_events(store, agent)?;
         }
         Ok(value)
     });
@@ -2244,18 +2244,65 @@ fn dispatch_user_decision(
 
 fn consume_user_decision_events(
     decisions: &UserDecisionStore,
+    agent: &SharedAgentRuntime,
 ) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
+    use usagi_core::domain::agent::RunStatus;
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
-    decisions
-        .consume_events()
+
+    // The decision record is the durable source of truth.  Do not clear an
+    // event until its exact originating run has accepted the continuation
+    // prompt; a restarted daemon can therefore retry pending delivery.
+    for event in decisions
+        .events()
         .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "decision outbox is unavailable"))?
-        .map(|_| ())
-        .map_err(|_| {
-            ProtocolError::new(
+    {
+        let mut runtime = agent.lock().map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+        })?;
+        let dispatch = runtime.dispatch_store();
+        let Some(decision) = decisions.get_for_event(&event).map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "decision outbox is unavailable")
+        })?
+        else {
+            return Err(ProtocolError::new(
                 ErrorCode::Unavailable,
                 "decision delivery record is inconsistent",
-            )
-        })
+            ));
+        };
+        let live_run = dispatch
+            .runs()
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "dispatch provenance is unavailable")
+            })?
+            .into_iter()
+            .any(|run| run.run_id == decision.owner.run_id && run.status == RunStatus::Running);
+        let binding_matches = dispatch
+            .binding(decision.owner.run_id)
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "dispatch provenance is unavailable")
+            })?
+            .is_some_and(|binding| binding.caller == event.recipient);
+        if !live_run || !binding_matches {
+            // A terminal or stale incarnation must never receive a late human
+            // answer.  It is intentionally discarded rather than queued.
+            decisions.ack_event(event.decision_id).map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "decision outbox is unavailable")
+            })?;
+            continue;
+        }
+        let answer = serde_json::to_string(&event.answer).map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "decision answer is unavailable")
+        })?;
+        let prompt = format!(
+            "User decision {} resolved. Continue the current task using this answer: {answer}",
+            event.decision_id
+        );
+        runtime.prompt(decision.owner.session_id, &prompt, PromptMode::Live)?;
+        decisions.ack_event(event.decision_id).map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "decision outbox is unavailable")
+        })?;
+    }
+    Ok(())
 }
 
 fn dispatch_dispatch(
