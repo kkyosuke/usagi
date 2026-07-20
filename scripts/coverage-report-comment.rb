@@ -1,62 +1,102 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# lcov.info を読み、カバレッジ未達 (lines/functions < 閾値) のファイルと
-# 未達関数・未達行を Markdown で出力する。coverage.yml がこの出力を PR コメントと
-# Job Summary (GITHUB_STEP_SUMMARY) の両方へ流す。生成ロジックをここへ抽出する
-# ことで、fixture ベースの test (scripts/tests/coverage-report-comment.sh) で
-# 固定でき、YAML 内の inline スクリプトでは不可能なユニット検証を行える。
+# cargo-llvm-cov の JSON レポート (`cargo llvm-cov report --json`) を読み、カバレッジ
+# 未達 (lines/functions < 閾値) のファイルと未達関数・未達行を Markdown で出力する。
+# coverage.yml がこの出力を PR コメントと Job Summary の両方へ流す。
+#
+# JSON を入力にするのは、gate (`cargo llvm-cov report --fail-under-*`) が使う集計と
+# 完全に一致させるため。lcov 出力の関数レコード (FN/FNDA) は generic の単相化ごとに
+# 1 件並ぶため、そのまま数えると gate と大きく食い違う（例: 実質 100% でも 76% に見える）。
+# JSON の summary は単相化をマージした関数カバレッジで、gate と一致する。
 #
 # 使い方:
-#   ruby scripts/coverage-report-comment.rb [lcov.info]
+#   ruby scripts/coverage-report-comment.rb [coverage.json]
 #
 # 環境変数 (すべて任意):
 #   COVERAGE_MIN         閾値 (%)。既定 100。scripts/coverage.sh が export する。
 #   MAX_FILES            表示する未達ファイルの上限。既定 20。
 #   MAX_FUNCS_PER_FILE   1 ファイルあたり表示する未達関数の上限。既定 10。
 #   MAX_LINE_RANGES      1 ファイルあたり表示する未達行レンジの上限。既定 20。
+#   DEMANGLER            Rust/C++ シンボルの demangler コマンド。既定 c++filt
+#                        （binutils。Rust v0 を demangle する）。空にすると素の
+#                        mangled 名のまま出力する。
 #   GITHUB_WORKSPACE     ファイル path から取り除くリポジトリルート。既定は cwd。
-#
-# cargo-llvm-cov の `--lcov` 出力は既定で関数レコード (FN/FNDA/FNF/FNH) を含み、
-# 関数名は demangle 済み。ここでは lcov のみを入力とし、cargo の再実行はしない。
 
-lcov_path = ARGV[0] || "lcov.info"
+require "json"
+
+json_path = ARGV[0] || "coverage.json"
 threshold = (ENV["COVERAGE_MIN"] || "100").to_f
 max_files = (ENV["MAX_FILES"] || "20").to_i
 max_funcs = (ENV["MAX_FUNCS_PER_FILE"] || "10").to_i
 max_ranges = (ENV["MAX_LINE_RANGES"] || "20").to_i
+demangler = ENV.fetch("DEMANGLER", "c++filt")
 
-abort "coverage-report-comment: #{lcov_path} が見つかりません" unless File.file?(lcov_path)
+abort "coverage-report-comment: #{json_path} が見つかりません" unless File.file?(json_path)
+
+data = JSON.parse(File.read(json_path)).fetch("data").fetch(0)
 
 root = (ENV["GITHUB_WORKSPACE"] || Dir.pwd).sub(%r{/*\z}, "") + "/"
-
-FileCov = Struct.new(:path, :fn_lines, :fn_hits, :uncovered_lines, :lf, :lh,
-                     keyword_init: true)
-
-records = []
-current = nil
-File.foreach(lcov_path) do |raw|
-  line = raw.chomp
-  case line
-  when /\ASF:(.*)/
-    current = FileCov.new(path: Regexp.last_match(1), fn_lines: {}, fn_hits: {},
-                          uncovered_lines: [], lf: 0, lh: 0)
-  when /\AFN:(\d+),(.*)/
-    current.fn_lines[Regexp.last_match(2)] = Regexp.last_match(1).to_i
-  when /\AFNDA:(\d+),(.*)/
-    current.fn_hits[Regexp.last_match(2)] = Regexp.last_match(1).to_i
-  when /\ADA:(\d+),(\d+)/
-    current.lf += 1
-    if Regexp.last_match(2).to_i.zero?
-      current.uncovered_lines << Regexp.last_match(1).to_i
-    else
-      current.lh += 1
-    end
-  when "end_of_record"
-    records << current if current
-    current = nil
-  end
+def rel(path, root)
+  path.start_with?(root) ? path[root.length..] : path
 end
+
+# functions[] を (ファイル, 宣言行) で束ねる。generic の単相化は同じソース宣言行を
+# 共有するため、宣言行で束ねると JSON summary のマージ済み関数数と一致する。
+# ある関数はどれか 1 つの単相化でも実行されていれば covered。
+fn_groups = Hash.new { |h, k| h[k] = [] }
+data.fetch("functions", []).each do |fn|
+  regions = fn["regions"]
+  next if regions.nil? || regions.empty?
+
+  file = fn["filenames"][0]
+  fn_groups[file] << { decl: regions[0][0], count: fn["count"], name: fn["name"] }
+end
+
+def uncovered_fns_for(entries)
+  entries.group_by { |e| e[:decl] }
+         .select { |_, insts| insts.all? { |i| i[:count].zero? } }
+         .map { |decl, insts| { decl: decl, name: insts[0][:name] } }
+         .sort_by { |f| f[:decl] }
+end
+
+# regions[] から未達行を復元する（gap region は除外）。各行に被さる region の最大
+# 実行回数を取り、0 の行が未達。これは lcov の DA:<line>,0 と一致する。
+def uncovered_lines_for(entries_regions)
+  line_max = {}
+  entries_regions.each do |r|
+    l1, _, l2, _, cnt, _, _, kind = r
+    next if kind == 2 # gap region
+
+    (l1..l2).each { |ln| line_max[ln] = [line_max[ln] || 0, cnt].max }
+  end
+  line_max.select { |_, c| c.zero? }.keys.sort
+end
+
+regions_by_file = Hash.new { |h, k| h[k] = [] }
+data.fetch("functions", []).each do |fn|
+  file = fn["filenames"][0]
+  (fn["regions"] || []).each { |r| regions_by_file[file] << r }
+end
+
+Row = Struct.new(:path, :fnf, :fnh, :lf, :lh, :uncovered_fns, :uncovered_lines,
+                 keyword_init: true)
+
+rows = data.fetch("files").map do |f|
+  fs = f["summary"]["functions"]
+  ls = f["summary"]["lines"]
+  file = f["filename"]
+  Row.new(path: rel(file, root),
+          fnf: fs["count"], fnh: fs["covered"], lf: ls["count"], lh: ls["covered"],
+          uncovered_fns: uncovered_fns_for(fn_groups[file]),
+          uncovered_lines: uncovered_lines_for(regions_by_file[file]))
+end
+
+totals = data.fetch("totals")
+tot_lf = totals["lines"]["count"]
+tot_lh = totals["lines"]["covered"]
+tot_fnf = totals["functions"]["count"]
+tot_fnh = totals["functions"]["covered"]
 
 def rate(hit, found)
   return 100.0 if found.zero?
@@ -92,36 +132,39 @@ def compress(nums, limit)
   [labels.first(limit), labels.length - limit]
 end
 
-Row = Struct.new(:path, :fnf, :fnh, :lf, :lh, :uncovered_fns, :fn_lines,
-                 :uncovered_lines, keyword_init: true)
+# 表示する mangled 名をまとめて demangle する（1 プロセスで一括処理）。
+def demangle(names, demangler)
+  return names if names.empty? || demangler.nil? || demangler.empty?
 
-rows = records.map do |r|
-  names = (r.fn_lines.keys | r.fn_hits.keys)
-  fnh = names.count { |n| (r.fn_hits[n] || 0).positive? }
-  uncovered = names.reject { |n| (r.fn_hits[n] || 0).positive? }
-                   .sort_by { |n| [r.fn_lines[n] || 0, n] }
-  Row.new(path: r.path.start_with?(root) ? r.path[root.length..] : r.path,
-          fnf: names.length, fnh: fnh, lf: r.lf, lh: r.lh,
-          uncovered_fns: uncovered, fn_lines: r.fn_lines,
-          uncovered_lines: r.uncovered_lines)
+  begin
+    out = IO.popen([demangler], "r+") do |io|
+      io.write(names.join("\n") + "\n")
+      io.close_write
+      io.read
+    end
+    result = out.split("\n")
+    result.length == names.length ? result : names
+  rescue StandardError
+    names
+  end
 end
 
-tot_lf = rows.sum(&:lf)
-tot_lh = rows.sum(&:lh)
-tot_fnf = rows.sum(&:fnf)
-tot_fnh = rows.sum(&:fnh)
+incomplete = rows.select { |row| row.fnh < row.fnf || row.lh < row.lf }
+                 .sort_by { |row| [rate(row.lh, row.lf), rate(row.fnh, row.fnf), row.path] }
+shown = incomplete.first(max_files)
+
+# 表示するファイルの未達関数名だけ demangle する。
+name_map = {}
+raw_names = shown.flat_map { |row| row.uncovered_fns.first(max_funcs).map { |f| f[:name] } }.uniq
+demangle(raw_names, demangler).each_with_index { |dn, i| name_map[raw_names[i]] = dn }
+
 line_pct = rate(tot_lh, tot_lf)
 fn_pct = rate(tot_fnh, tot_fnf)
-
-incomplete = rows.select do |row|
-  rate(row.lh, row.lf) < threshold || rate(row.fnh, row.fnf) < threshold
-end.sort_by { |row| [rate(row.lh, row.lf), rate(row.fnh, row.fnf), row.path] }
 
 out = []
 out << "## 📊 Test Coverage"
 out << ""
-
-verdict = line_pct >= threshold && fn_pct >= threshold ? "✅ PASS" : "❌ FAIL"
+verdict = tot_lh >= tot_lf && tot_fnh >= tot_fnf ? "✅ PASS" : "❌ FAIL"
 out << format("> 🚀 **いまのカバレッジ — Lines: %.2f%% / Functions: %.2f%%**" \
               "（閾値 %g%%: %s）", line_pct, fn_pct, threshold, verdict)
 out << ""
@@ -134,8 +177,6 @@ else
   out << ""
   out << "| 📄 ファイル | 🔧 Functions | 📈 Lines |"
   out << "| :--- | ---: | ---: |"
-
-  shown = incomplete.first(max_files)
   shown.each do |row|
     fpct = rate(row.fnh, row.fnf)
     lpct = rate(row.lh, row.lf)
@@ -156,10 +197,8 @@ else
     unless row.uncovered_fns.empty?
       out << ""
       out << "- 🔧 未達関数 (#{row.uncovered_fns.length}):"
-      row.uncovered_fns.first(max_funcs).each do |name|
-        line = row.fn_lines[name]
-        loc = line ? " (L#{line})" : ""
-        out << "  - #{code(name)}#{loc}"
+      row.uncovered_fns.first(max_funcs).each do |f|
+        out << "  - #{code(name_map.fetch(f[:name], f[:name]))} (L#{f[:decl]})"
       end
       extra = row.uncovered_fns.length - max_funcs
       out << "  - …ほか #{extra} 関数" if extra.positive?
