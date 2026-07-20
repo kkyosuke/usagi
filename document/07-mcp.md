@@ -54,16 +54,10 @@ tool は系統ごとに分かれ、`tools/list` に載る `name` と `inputSchem
 | `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合して user-decision store を操作する |
 | `session_prompt` | daemon IPC へ到達し、daemon が `invalid_argument` を返す |
 | issue / memory と、上記以外の session tool | JSON-RPC internal error（`tool not yet implemented`）を返す |
-| `session_dispatch` / `session_get` / `agent_*` / `supervisor_*` | daemon の汎用応答を返すが、対応する durable effect を保証しない |
+| `session_dispatch` / `session_get` / `agent_*` / `supervisor_*` | daemon が明示的な JSON-RPC エラーを返し、durable effect は生じない |
 
-agent は durable effect を保証する行だけを実行手順に使う。特に汎用応答を agent dispatch や supervisor
-開始の成功として扱わない。
-
-daemon に durable handler が無い tool action は成功として扱わない。現在、dispatch 系の
-`session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` /
-`agent_inbox` と supervisor 系の `supervisor_start` / `supervisor_get` / `supervisor_list` /
-`supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` は、`tools/call` で
-明示的な JSON-RPC エラーを返す。daemon は入力 payload を成功応答としてエコーせず、副作用も生じない。
+agent は durable effect を保証する行だけを実行手順に使う。daemon は handler の無い action の入力
+payload を成功応答としてエコーしない。
 
 ## resource 面
 

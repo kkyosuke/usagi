@@ -90,4 +90,13 @@ fn production_agent_fixture_is_injected_without_cli_credentials() {
         branch["properties"]["runtime"]["const"] == "claude"
             && branch["properties"]["model"]["enum"] == json!(["fixture-claude"])
     }));
+    let response = mcp.tool("agent_list", &json!({}));
+    assert_eq!(response["error"]["code"], -32603);
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not implemented")
+    );
+    assert!(!mcp.fixture_log().exists());
 }
