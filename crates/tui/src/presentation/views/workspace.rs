@@ -978,14 +978,7 @@ pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -
     } else if let Some(overlay) = &home.preview_overlay {
         render_preview_overlay(height, width, &frame, overlay)
     } else if let Some(overlay) = &home.decision_overlay {
-        decision_modal::render_over(
-            height,
-            width,
-            &frame,
-            overlay,
-            &home.decisions,
-            &home.sessions,
-        )
+        decision_modal::render_over(height, width, &frame, overlay, &home.decisions)
     } else if home.closeup_action_visible {
         // Prefer the runtime's persisted action modal (its caret and selection),
         // titled with the active target. Fall back to a fresh modal only for the
@@ -1099,13 +1092,11 @@ fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
     else {
         return header_spacer(width);
     };
-    let session = home
-        .sessions
-        .iter()
-        .find(|session| session.id == decision.owner.session_id)
-        .map_or_else(|| "session".to_owned(), |session| session.label.clone());
     widgets::clip_to_width(
-        &format!("  🔔 {session}: {}  (click bell to review)", decision.title),
+        &format!(
+            "  🔔 session {}: {}  (click bell to review)",
+            decision.owner.session_id, decision.title
+        ),
         width,
     )
 }

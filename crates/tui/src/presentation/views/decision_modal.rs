@@ -3,7 +3,6 @@
 #![coverage(off)] // ANSI-only composition over the shared modal primitive; state transitions are covered in the controller.
 
 use crate::presentation::theme::{Role, Style};
-use crate::presentation::views::workspace::ProjectedSession;
 use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::controller::DecisionOverlayState;
 
@@ -18,7 +17,6 @@ pub fn render_over(
     base: &[String],
     overlay: &DecisionOverlayState,
     decisions: &[usagi_core::domain::user_decision::UserDecision],
-    sessions: &[ProjectedSession],
 ) -> Vec<String> {
     let (title, body) = if let Some(editor) = overlay.editor() {
         let decision = editor.decision();
@@ -76,14 +74,11 @@ pub fn render_over(
             body.push(modal::empty_notice("(none)"));
         }
         for (index, decision) in decisions.iter().enumerate() {
-            let session = sessions
-                .iter()
-                .find(|session| session.id == decision.owner.session_id)
-                .map_or("session", |session| session.label.as_str());
             body.push(modal::content_line(
                 &format!(
-                    "{} {session}: {}",
+                    "{} session {}: {}",
                     modal::selection_marker(index == overlay.selected()),
+                    decision.owner.session_id,
                     decision.title
                 ),
                 INNER_WIDTH,

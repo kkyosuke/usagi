@@ -2070,7 +2070,6 @@ fn decision_ids(event: &BackendEvent) -> std::collections::BTreeSet<UserDecision
 fn notify_new_decisions(
     event: &BackendEvent,
     notified: &mut std::collections::BTreeSet<UserDecisionId>,
-    ui: &WorkspaceUi,
     notifications: &mut dyn DesktopNotificationPort,
 ) {
     let BackendEvent::Decisions { decisions, .. } = event else {
@@ -2080,16 +2079,9 @@ fn notify_new_decisions(
         if !notified.insert(decision.decision_id) {
             continue;
         }
-        let session = ui
-            .workspace
-            .sessions()
-            .iter()
-            .zip(ui.workspace.session_ids())
-            .find(|(_, id)| **id == decision.owner.session_id)
-            .map_or("session", |(record, _)| record.name.as_str());
         notifications.notify(
             "usagi: decision needed",
-            &format!("{session}: {}", decision.title),
+            &format!("session {}: {}", decision.owner.session_id, decision.title),
         );
     }
 }
@@ -2201,7 +2193,6 @@ fn drive_workspace_controller(
             notify_new_decisions(
                 &event,
                 &mut notified_decisions,
-                &ui,
                 desktop_notifications.as_mut(),
             );
             let _ = runtime.apply_event(AppEvent::Backend(event));
