@@ -64,7 +64,7 @@ fn production_issue_writes_are_refused_at_the_workspace_root() {
 #[test]
 fn production_store_tools_round_trip_through_stdio_and_durable_files() {
     let mut mcp = McpHarness::start_in_session("store-e2e");
-    let created = tool_text(mcp.tool(
+    let created = tool_text(&mcp.tool(
         "issue_create",
         &json!({
             "title":"MCP durable issue",
@@ -73,12 +73,12 @@ fn production_store_tools_round_trip_through_stdio_and_durable_files() {
             "body":"round trip"
         }),
     ));
-    let fetched = tool_text(mcp.tool("issue_get", &json!({"number":1})));
-    let found = tool_text(mcp.tool(
+    let fetched = tool_text(&mcp.tool("issue_get", &json!({"number":1})));
+    let found = tool_text(&mcp.tool(
         "issue_search",
         &json!({"query":"durable","label":"mcp","ready":true}),
     ));
-    let saved = tool_text(mcp.tool(
+    let saved = tool_text(&mcp.tool(
         "memory_save",
         &json!({
             "name":"MCP Fact",
@@ -87,7 +87,7 @@ fn production_store_tools_round_trip_through_stdio_and_durable_files() {
             "body":"remember me"
         }),
     ));
-    let memory = tool_text(mcp.tool("memory_get", &json!({"name":"mcp-fact"})));
+    let memory = tool_text(&mcp.tool("memory_get", &json!({"name":"mcp-fact"})));
 
     assert_eq!(created["number"], 1);
     assert_eq!(fetched["title"], "MCP durable issue");
@@ -102,7 +102,7 @@ fn production_store_tools_round_trip_through_stdio_and_durable_files() {
     assert!(mcp.cwd().join(".usagi/memory/mcp-fact.md").is_file());
 }
 
-fn tool_text(response: serde_json::Value) -> serde_json::Value {
+fn tool_text(response: &serde_json::Value) -> serde_json::Value {
     assert!(response.get("error").is_none(), "{response}");
     serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
 }
