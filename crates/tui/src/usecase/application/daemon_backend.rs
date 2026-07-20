@@ -40,6 +40,15 @@ use crate::usecase::overview;
 pub struct Completions(Sender<AppEvent>);
 
 impl Completions {
+    /// Create a completion sink and its non-blocking receiver. Composition
+    /// adapters normally receive a sink from [`DaemonBackend`]; host-level tests
+    /// use this constructor to exercise asynchronous completion forwarding.
+    #[must_use]
+    pub fn channel() -> (Self, Receiver<AppEvent>) {
+        let (sender, receiver) = mpsc::channel();
+        (Self(sender), receiver)
+    }
+
     /// Return one completion to the reducer.  Delivery order is preserved by the
     /// underlying channel; a closed receiver is ignored.
     pub fn emit(&self, event: AppEvent) {
@@ -174,14 +183,17 @@ pub trait DecisionPort {
 struct NoDecisions;
 #[coverage(off)] // Production composition injects DecisionPort; this safe default preserves legacy embedders.
 impl DecisionPort for NoDecisions {
-    fn refresh(&mut self, _: WorkspaceId, _: Completions) {}
+    fn refresh(&mut self, _: WorkspaceId, completions: Completions) {
+        unavailable(&completions, "user decisions are unavailable");
+    }
     fn resolve(
         &mut self,
         _: WorkspaceId,
         _: UserDecisionId,
         _: UserDecisionAnswer,
-        _: Completions,
+        completions: Completions,
     ) {
+        unavailable(&completions, "user decisions are unavailable");
     }
 }
 
@@ -205,9 +217,22 @@ pub trait OverlayPort {
 struct NoOverlay;
 #[coverage(off)] // Production composition injects OverlayPort; this safe default preserves legacy embedders.
 impl OverlayPort for NoOverlay {
-    fn load_pull_requests(&mut self, _: Target, _: Completions) {}
-    fn load_preview(&mut self, _: Target, _: Completions) {}
-    fn open_pull_request(&mut self, _: String, _: Completions) {}
+    fn load_pull_requests(&mut self, _: Target, completions: Completions) {
+        unavailable(&completions, "Pull Request data is unavailable");
+    }
+    fn load_preview(&mut self, _: Target, completions: Completions) {
+        unavailable(&completions, "preview is unavailable");
+    }
+    fn open_pull_request(&mut self, _: String, completions: Completions) {
+        unavailable(&completions, "browser opening is unavailable");
+    }
+}
+
+fn unavailable(completions: &Completions, message: &str) {
+    use super::controller::{BackendEvent, Notice};
+    completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+        message,
+    ))));
 }
 
 /// Whether the runtime loop should keep running after an effect.
@@ -368,11 +393,14 @@ impl DaemonBackend {
                 self.overlay.open_pull_request(url, self.completions());
             }
             Effect::Detach => return Flow::Exit,
-            // Entry surfaces own these; the Home screen never emits them. They
-            // are accepted here so a future screen-graph route is the only edit.
+            // Entry surfaces are outside Home. If one reaches this backend it is
+            // completed explicitly instead of being mistaken for success.
             Effect::AttachWorkspace { .. }
             | Effect::CloneProject { .. }
-            | Effect::RegisterWorkspace { .. } => {}
+            | Effect::RegisterWorkspace { .. } => unavailable(
+                &self.completions(),
+                "workspace entry effect is unavailable in Home",
+            ),
         }
         Flow::Continue
     }
@@ -761,7 +789,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_effects_are_inert_without_an_overlay_port() {
+    fn overlay_effects_complete_with_explicit_errors_without_an_overlay_port() {
         let mut backend = backend();
         for effect in [
             Effect::LoadPullRequests {
@@ -776,7 +804,7 @@ mod tests {
         ] {
             assert_eq!(backend.dispatch(effect), Flow::Continue);
         }
-        assert!(backend.drain_events().is_empty());
+        assert_eq!(backend.drain_events().len(), 3);
     }
 
     #[test]
@@ -787,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn entry_surface_effects_are_inert_no_ops() {
+    fn entry_surface_effects_complete_with_explicit_home_errors() {
         let mut backend = backend();
         for effect in [
             Effect::AttachWorkspace {
@@ -807,7 +835,7 @@ mod tests {
         ] {
             assert_eq!(backend.dispatch(effect), Flow::Continue);
         }
-        assert!(backend.drain_events().is_empty());
+        assert_eq!(backend.drain_events().len(), 3);
     }
 
     #[test]
