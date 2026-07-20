@@ -222,8 +222,10 @@ reservation は durable state に残っていても選択対象にしない。
 dismissed を新規検出として通知しない。
 
 Enter は選択中の canonical HTTPS PR URL を browser effect に 1 回渡す。合成ルートは macOS では
-`open`、Linux では `xdg-open` を argv として実行する。URL を shell command に補間せず、検証失敗、
-未対応 platform、起動失敗は TUI を終了させず safe feedback にする。
+`open`、Linux では `xdg-open`、Windows では `cmd /C start "" <url>`（空文字は `start` が消費する
+window title 引数）を argv として実行する。URL を shell command に補間せず、検証失敗、
+未対応 platform、起動失敗は TUI を終了させず safe feedback にする。同じ browser effect は
+[live terminal の URL クリック](#live-terminal-の出力表示と入力)でも再利用する。
 Closeup の `close [-f|--force]` は、選択中 session の削除を Overview と同じ daemon session-command port へ
 直接依頼し、`-f` と `--force` は同値である。target、未知 flag、重複 flag は安全に拒否する。
 
@@ -390,6 +392,15 @@ drag を離した後も、選択範囲は右ペインに reverse-video で示し
 clipboard adapter は macOS の `pbcopy`、Windows の `clip.exe`、
 Wayland の `wl-copy`、X11 の `xclip` / `xsel` を現在の環境に応じて使う。利用可能な backend がない場合は copy を成功扱いにせず、
 安全な feedback を表示する。
+
+出力中の `http(s)` URL は左クリックで OS 既定ブラウザに開ける。URL が載るセルは下線で装飾し、クリック可能で
+あることを示す。drag で非空の選択が成立した release は**コピー**、選択が生じない素のクリックだけを**リンクオープン**として扱い、
+両者は排他である（選択中はリンクを開かない）。クリック位置のセルを保持中の行/列へ写し、行末で折り返した URL は 1 本に結合して
+開く。URL 上でないセルのクリックは何も開かない no-op で、選択・scrollback offset を乱さない。検出・検証は純粋コアが担い（`http(s)`
+スキームのみ許可し、制御文字・ESC・空白・非 ASCII を拒否する）、起動直前にも再検証してから argv で spawn するため、ANSI/端末制御
+列がブラウザ引数へ渡らない。起動は [PR modal と browser effect](#pr-modal-と-browser-effect) と同じ browser effect（macOS `open` /
+Linux `xdg-open` / Windows `cmd /C start "" <url>`）を使い、未対応 platform・起動失敗は TUI を乱さず safe feedback にする。
+pointer の release は PTY へ入力として転送しない。
 
 live terminal に focus がある間、leader ではないすべてのキー入力（文字・修飾キー・paste・raw bytes・Enter・Backspace・Tab・矢印など）は management ではなく
 PTY へ送られる。矢印は対応する CSI 列、Enter は `CR` に符号化する。tab 巡回や Closeup/Switch の遷移は

@@ -1608,10 +1608,13 @@ fn pane_launch_operation(launch: &PaneLaunch) -> OperationId {
     }
 }
 
-/// Drive a terminal-output pointer gesture: a drag begins or extends a selection
-/// against the visible cells, and a release copies it to the OS clipboard with
-/// safe feedback. `rows_len` / `scroll` describe the frame's projected viewport so
-/// the pointer maps back to the exact retained cell.
+/// Drive a terminal-output pointer gesture. A drag begins or extends a selection
+/// against the visible cells. A release copies a non-empty selection to the OS
+/// clipboard; a plain click that produced no selection instead opens the
+/// `http(s)` URL under the pointer in the browser (#389) — the two gestures are
+/// mutually exclusive, so a drag-to-copy never also opens a link. `rows_len` /
+/// `scroll` describe the frame's projected viewport so the pointer maps back to
+/// the exact retained cell.
 #[coverage(off)]
 #[allow(clippy::too_many_arguments)]
 fn handle_terminal_pointer(
@@ -1619,6 +1622,7 @@ fn handle_terminal_pointer(
     runtime: &WorkspaceRuntime,
     controls: &mut LiveTerminalControls,
     term: &mut dyn Terminal,
+    browser: &mut dyn BrowserOpener,
     height: usize,
     width: usize,
     rows_len: usize,
@@ -1647,6 +1651,20 @@ fn handle_terminal_pointer(
             if let Some(text) = controls.finish_drag() {
                 let result = term.copy_text(&text);
                 controls.record_copy(&text, result);
+                return;
+            }
+            // No selection was drawn, so this release is a plain click: open the
+            // link under it, if any. A click off any link is a harmless no-op.
+            let Some(terminal) = runtime.focused_terminal() else {
+                return;
+            };
+            let Some(point) =
+                terminal_point_at(height, width, rows_len, scroll, pointer.column, pointer.row)
+            else {
+                return;
+            };
+            if let Some(cells) = ui.terminal_cells(&terminal) {
+                controls.open_link_at(&cells, point, browser);
             }
         }
     }
@@ -1687,6 +1705,7 @@ fn intercept_live_terminal_control(
     runtime: &mut WorkspaceRuntime,
     controls: &mut LiveTerminalControls,
     term: &mut dyn Terminal,
+    browser: &mut dyn BrowserOpener,
     pending_targets: &mut std::collections::HashMap<OperationId, Target>,
     height: usize,
     width: usize,
@@ -1701,7 +1720,7 @@ fn intercept_live_terminal_control(
         }
         Key::Pointer(pointer) => {
             handle_terminal_pointer(
-                ui, runtime, controls, term, height, width, rows_len, scroll, *pointer,
+                ui, runtime, controls, term, browser, height, width, rows_len, scroll, *pointer,
             );
         }
         Key::Click { column, row } => {
@@ -2229,6 +2248,7 @@ fn drive_workspace_controller(
             &mut runtime,
             &mut controls,
             term,
+            browser.as_mut(),
             &mut pending_targets,
             height,
             width,
@@ -2758,8 +2778,8 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 #[coverage(off)] // Test assertion branches are not product coverage targets.
 mod tests {
     use super::{
-        AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Config, ConfigStep,
-        DefaultSettingsPort, Exit, Geometry, MetricsPort, MetricsPortFactory, NewStep,
+        AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, BrowserOpener, Config,
+        ConfigStep, DefaultSettingsPort, Exit, Geometry, MetricsPort, MetricsPortFactory, NewStep,
         NoDesktopNotifications, NoMetrics, NoMetricsFactory, SessionCommandPort,
         SessionCommandPortFactory, SessionCommandResult, Start, TerminalAttach, TerminalChunk,
         TerminalError, UnavailableBrowserOpener, UnavailableDecisionCommandPort,
@@ -3671,6 +3691,7 @@ mod tests {
             .expect("attached live rows")
             .len();
         let mut term = FakeTerminal::default();
+        let mut browser = RecordingBrowser::default();
         let mut controls = LiveTerminalControls::default();
         controls.sync_focus(Some(&terminal));
 
@@ -3686,6 +3707,7 @@ mod tests {
             &runtime,
             &mut controls,
             &mut term,
+            &mut browser,
             20,
             80,
             rows_len,
@@ -3698,6 +3720,7 @@ mod tests {
             &runtime,
             &mut controls,
             &mut term,
+            &mut browser,
             20,
             80,
             rows_len,
@@ -3709,6 +3732,7 @@ mod tests {
             &runtime,
             &mut controls,
             &mut term,
+            &mut browser,
             20,
             80,
             rows_len,
@@ -3732,6 +3756,94 @@ mod tests {
             projected.iter().any(|row| row.contains("\u{1b}[7mhello")),
             "selection highlight lost after release: {projected:?}"
         );
+        // A drag that copied a selection never also opens a link.
+        assert!(browser.opened.is_empty());
+    }
+
+    /// A recording [`BrowserOpener`] fake: it captures opened URLs so a pointer
+    /// test can assert what (if anything) a click launched, and never runs IO.
+    #[derive(Default)]
+    struct RecordingBrowser {
+        opened: Vec<String>,
+    }
+
+    impl BrowserOpener for RecordingBrowser {
+        #[coverage(off)]
+        fn open(&mut self, url: &str) -> Result<(), String> {
+            self.opened.push(url.to_owned());
+            Ok(())
+        }
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn a_plain_click_on_a_terminal_link_opens_it_without_touching_the_pty() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let (ui, runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(ScriptedAgentPort {
+                terminal: terminal.clone(),
+                subscription: 11,
+                replay: b"see https://example.com/x now".to_vec(),
+                exit_on_poll: false,
+                detaches: Arc::new(Mutex::new(Vec::new())),
+            }),
+        );
+        let rows_len = ui
+            .terminal_rows(&terminal, None)
+            .expect("attached live rows")
+            .len();
+        let mut term = FakeTerminal::default();
+        let mut browser = RecordingBrowser::default();
+        let mut controls = LiveTerminalControls::default();
+        controls.sync_focus(Some(&terminal));
+
+        // A press-release with no drag: the URL starts at content column 4, so
+        // frame column 37 + 4 = 41 lands on it. The click opens the whole link.
+        handle_terminal_pointer(
+            &ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            20,
+            80,
+            rows_len,
+            0,
+            PointerEvent {
+                kind: PointerKind::Up,
+                column: 41,
+                row: 5,
+            },
+        );
+        assert_eq!(browser.opened, vec!["https://example.com/x".to_owned()]);
+        // A pointer release is not keyboard input, so nothing was forwarded to the
+        // child PTY, and the clipboard was left alone.
+        assert!(term.copied.is_empty());
+
+        // A click on the leading prose (frame column 37 = content column 0) opens
+        // nothing.
+        handle_terminal_pointer(
+            &ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            20,
+            80,
+            rows_len,
+            0,
+            PointerEvent {
+                kind: PointerKind::Up,
+                column: 37,
+                row: 5,
+            },
+        );
+        assert_eq!(browser.opened.len(), 1);
     }
 
     #[test]
