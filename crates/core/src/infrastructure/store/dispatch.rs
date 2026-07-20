@@ -778,6 +778,20 @@ mod tests {
                 .unwrap(),
             reservation
         );
+        let existing_agent = store.agent(agent_id).unwrap().unwrap();
+        let existing_run = store.run(operation).unwrap().unwrap();
+        assert_eq!(
+            store
+                .reserve_admission(
+                    existing_agent,
+                    existing_run,
+                    binding.clone(),
+                    store.admission(operation).unwrap().unwrap(),
+                )
+                .unwrap()
+                .operation_id,
+            operation
+        );
         assert_eq!(store.admission(operation).unwrap(), Some(reservation));
         assert_eq!(store.binding(operation).unwrap(), Some(binding));
         let serialized = fs::read_to_string(store.registry_path()).unwrap();
@@ -785,6 +799,7 @@ mod tests {
         assert!(!serialized.contains("USAGI_MCP_CALLER_CREDENTIAL"));
 
         assert!(store.commit_admission(operation).unwrap());
+        assert!(!store.commit_admission(operation).unwrap());
         assert_eq!(store.runs().unwrap()[0].status, RunStatus::Running);
         assert_eq!(store.reconcile_incomplete_admissions().unwrap(), 1);
         assert_eq!(store.runs().unwrap()[0].status, RunStatus::Failed);
@@ -792,6 +807,12 @@ mod tests {
             store.agent(agent_id).unwrap().unwrap().status,
             AgentStatus::Failed
         );
+        assert_eq!(store.reconcile_incomplete_admissions().unwrap(), 0);
+        assert!(!store.fail_admission(OperationId::new()).unwrap());
+
+        store
+            .mutate_registry(|registry| registry.runs.clear())
+            .unwrap();
         assert_eq!(store.reconcile_incomplete_admissions().unwrap(), 0);
     }
 

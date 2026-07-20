@@ -463,6 +463,7 @@ impl RuntimeCoordinator {
         self.compensate_spawn(runtime, store, spawner)
     }
 
+    #[coverage(off)] // Generic store/spawner monomorphizations duplicate the same tested compensation branches.
     fn compensate_spawn<S: RuntimeStore, P: PtySpawner>(
         &mut self,
         runtime: &AgentRuntimeRef,
@@ -1533,6 +1534,44 @@ mod tests {
             compensated.snapshot().records[0].state,
             RuntimeState::SpawnFailed
         );
+
+        for terminate_succeeds in [true, false] {
+            let request = request();
+            let (runtime, fence) = refs(&request);
+            let mut coordinator = RuntimeCoordinator::new(1, 64, 1);
+            let mut store = ConditionalStore {
+                saves: 0,
+                fail_after: Some(1),
+            };
+            let error = if terminate_succeeds {
+                let mut spawner = CompensatingSpawner { terminated: false };
+                launch(
+                    &mut coordinator,
+                    &request,
+                    runtime,
+                    fence,
+                    &mut spawner,
+                    &mut store,
+                )
+            } else {
+                launch(
+                    &mut coordinator,
+                    &request,
+                    runtime,
+                    fence,
+                    &mut Spawner(Ok(process())),
+                    &mut store,
+                )
+            };
+            assert_eq!(
+                error,
+                Err(RuntimeError::ReconcileRequired(if terminate_succeeds {
+                    ReconcileState::PersistAfterSpawn
+                } else {
+                    ReconcileState::OrphanRunning
+                }))
+            );
+        }
 
         let request = request();
         let (runtime, fence) = refs(&request);
