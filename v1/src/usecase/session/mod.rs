@@ -3476,6 +3476,10 @@ mod tests {
 
     #[test]
     fn remove_quarantines_other_strays_without_deleting_them() {
+        // `remove` clears per-worktree state below the process-wide data
+        // directory. Other tests temporarily redirect that directory, so hold
+        // the shared environment guard while this cleanup runs.
+        let _guard = crate::test_support::process_env_guard();
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
         let a = create(root.path(), "a").unwrap();
