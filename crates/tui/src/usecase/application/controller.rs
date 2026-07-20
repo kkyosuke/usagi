@@ -2073,6 +2073,11 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             if workspace != state.workspace {
                 return Vec::new();
             }
+            let previously_known = state
+                .decisions
+                .iter()
+                .map(|decision| decision.decision_id)
+                .collect::<std::collections::BTreeSet<_>>();
             state.decisions = decisions
                 .into_iter()
                 .filter(|decision| {
@@ -2081,6 +2086,22 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 })
                 .collect();
             reconcile_decision_overlay(state);
+            // A snapshot is authoritative, but must not repeatedly steal focus
+            // after the user dismissed its already-known rows.  A first snapshot
+            // (including reconnect/resync) and newly arrived rows open the list
+            // only when no other modal/editor owns keyboard input.
+            if state.overlay.is_none()
+                && state
+                    .decisions
+                    .iter()
+                    .any(|decision| !previously_known.contains(&decision.decision_id))
+            {
+                state.overlay = Some(Overlay::Decisions);
+                state.decision_overlay = Some(DecisionOverlayState {
+                    selected: 0,
+                    editor: None,
+                });
+            }
             Vec::new()
         }
         AppEvent::Backend(BackendEvent::DecisionResolved {
@@ -2563,7 +2584,7 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
 #[coverage(off)]
 fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     match key {
-        AppKey::OpenDecisions => {
+        AppKey::OpenDecisions | AppKey::Char('d') => {
             state.overlay = Some(Overlay::Decisions);
             state.decision_overlay = Some(DecisionOverlayState {
                 selected: 0,
@@ -5168,6 +5189,48 @@ mod tests {
                 .map(|error| error.message.as_str()),
             Some("gh unavailable")
         );
+    }
+
+    #[test]
+    fn decision_snapshots_auto_open_only_for_new_pending_rows_without_stealing_an_overlay() {
+        let workspace = WorkspaceId::new();
+        let first = pending_decision(workspace);
+        let second = pending_decision(workspace);
+        let mut state = AppState::home(workspace, Vec::new());
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![first.clone()],
+            }),
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Decisions));
+        assert!(state.decision_overlay().is_some());
+
+        // Dismissal changes only UI state. A duplicate/resync snapshot must not
+        // steal focus again, while a genuinely new pending row may notify.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        assert_eq!(state.overlay(), None);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![first.clone()],
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![first, second],
+            }),
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+        assert_eq!(state.decisions().len(), 2);
     }
 
     #[test]

@@ -15,7 +15,7 @@ use crossterm::terminal::{
 };
 use crossterm::{execute, queue};
 use usagi_core::domain::AppInfo;
-use usagi_core::domain::id::WorkspaceId;
+use usagi_core::domain::id::{UserDecisionId, WorkspaceId};
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session::{SessionOrigin, SessionRecord};
@@ -24,6 +24,7 @@ use usagi_core::domain::settings::Settings;
 use usagi_core::domain::terminal_launch::{
     TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
 };
+use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::git::{clone as git_clone, diff_status};
@@ -31,8 +32,8 @@ use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
     AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonMetrics, DaemonReply,
-    DaemonRequest, IpcClient, MetricsAction, PrAction, PrRequest, SessionAction, TerminalAction,
-    TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
+    DaemonRequest, DispatchToolAction, IpcClient, MetricsAction, PrAction, PrRequest,
+    SessionAction, TerminalAction, TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
 };
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 use usagi_core::usecase::workspace as workspace_usecase;
@@ -43,11 +44,13 @@ use usagi_tui::presentation::views::config::{self, AvailableAgentModels, Config}
 use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::GitDiff;
 use usagi_tui::presentation::{
-    self, AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Exit, MetricsPort,
-    MetricsPortFactory, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, Start,
-    WorkspaceLoader, WorkspaceSnapshot,
+    self, AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, DecisionCommandPort, Exit,
+    MetricsPort, MetricsPortFactory, SessionCommandPort, SessionCommandPortFactory,
+    SessionCommandResult, Start, WorkspaceLoader, WorkspaceSnapshot,
 };
-use usagi_tui::usecase::application::controller::NewRequest;
+use usagi_tui::usecase::application::controller::{
+    BackendEvent, NewRequest, Notice, SafeError, SafeMessage,
+};
 use usagi_tui::usecase::application::pane_runtime::Geometry;
 use usagi_tui::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
 use usagi_tui::usecase::application::terminal_session::{
@@ -66,6 +69,92 @@ use crate::tui_input::{CrosstermSource, EventPump, NoBackend};
 #[derive(Default)]
 struct DaemonSessionCommandPort {
     last_revision: u64,
+}
+
+/// Production bridge for the controller's durable user-decision effects.
+/// The daemon remains the authority; this adapter only converts its safe
+/// snapshots and confirmations back into reducer events.
+struct DaemonDecisionCommandPort;
+
+impl DaemonDecisionCommandPort {
+    #[coverage(off)]
+    fn client() -> Result<impl DaemonClient, String> {
+        crate::runtime::daemon::client(ClientPolicy::tui())
+            .map_err(|error| format!("daemon unavailable: {error}"))
+    }
+
+    #[coverage(off)]
+    fn safe_error(error: impl std::fmt::Display) -> SafeError {
+        SafeError {
+            message: SafeMessage::new(error.to_string()),
+            error_id: "decision-daemon-error".to_owned(),
+        }
+    }
+}
+
+impl DecisionCommandPort for DaemonDecisionCommandPort {
+    #[coverage(off)]
+    fn refresh(&mut self, workspace: WorkspaceId) -> BackendEvent {
+        let result =
+            (|| -> Result<Vec<usagi_core::domain::user_decision::UserDecision>, String> {
+                let mut client = Self::client()?;
+                let reply = client
+                    .request(DaemonRequest::DispatchTool {
+                        action: DispatchToolAction::UserDecisionList,
+                        operation_id: usagi_core::domain::id::OperationId::new().to_string(),
+                        payload: serde_json::json!({}),
+                    })
+                    .map_err(daemon_error_reason)?;
+                let DaemonReply::Ok(value) = reply else {
+                    return Err("daemon did not return a decision snapshot".to_owned());
+                };
+                serde_json::from_value(value.get("decisions").cloned().unwrap_or(value))
+                    .map_err(|_| "daemon returned an invalid decision snapshot".to_owned())
+            })();
+        match result {
+            Ok(decisions) => BackendEvent::Decisions {
+                workspace,
+                decisions,
+            },
+            Err(error) => BackendEvent::Notice(Notice::new(error)),
+        }
+    }
+
+    #[coverage(off)]
+    fn resolve(
+        &mut self,
+        workspace: WorkspaceId,
+        decision_id: UserDecisionId,
+        answer: UserDecisionAnswer,
+    ) -> BackendEvent {
+        let result = (|| -> Result<(), String> {
+            let mut client = Self::client()?;
+            match client
+                .request(DaemonRequest::DispatchTool {
+                    action: DispatchToolAction::UserDecisionResolve,
+                    operation_id: usagi_core::domain::id::OperationId::new().to_string(),
+                    payload: serde_json::json!({"decision_id": decision_id, "answer": answer}),
+                })
+                .map_err(daemon_error_reason)?
+            {
+                DaemonReply::Ok(_) => Ok(()),
+                DaemonReply::Accepted { .. } => {
+                    Err("daemon did not confirm the decision answer".to_owned())
+                }
+            }
+        })();
+        match result {
+            Ok(()) => BackendEvent::DecisionResolved {
+                workspace,
+                decision_id,
+            },
+            Err(error) => BackendEvent::DecisionError {
+                workspace,
+                decision_id,
+                error: Self::safe_error(error),
+            },
+        }
+    }
 }
 
 struct DaemonMetricsPort {
@@ -1318,6 +1407,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
                     snapshot,
                     Box::new(DaemonSessionCommandPort::default()),
                     Box::new(DaemonAgentCommandPort::new()),
+                    Box::new(DaemonDecisionCommandPort),
                     Box::new(DaemonMetricsPort::new()),
                     Box::new(DaemonPrSnapshotPort),
                     Box::new(PlatformBrowserOpener),
