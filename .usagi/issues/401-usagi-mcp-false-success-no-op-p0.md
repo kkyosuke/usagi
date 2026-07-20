@@ -1,14 +1,14 @@
 ---
 number: 401
 title: usagi mcp: false-success no-op を明示エラー化する（安全弁・P0）
-status: todo
+status: in-progress
 priority: high
 labels: [mcp]
 dependson: []
 related: []
 parent: 400
 created_at: 2026-07-20T04:53:15.305558+00:00
-updated_at: 2026-07-20T04:53:15.305558+00:00
+updated_at: 2026-07-20T07:09:00.119250+00:00
 ---
 
 親: #400。**最優先の安全弁**。実 durable 効果が無いのに成功を返す 13 tool を、実装が入るまで**明示エラー**に変える（agent の誤成功を止める）。以後の系別実装 PR は、自系 tool についてこのエラーを実処理へ置換する。
