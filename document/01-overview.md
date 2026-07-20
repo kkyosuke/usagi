@@ -83,7 +83,11 @@ workspace scope を切り替え、`↑↓` で Theme / Modal mode / Agent model 
 Modal mode は Overview / Closeup で action を選択する **Action** と command を入力する **Prompt** を切り替える。
 Agent model はインストール済み CLI に対応する `Claude` / `OpenAI` だけを表示し、新しい Agent pane の既定 profile としてそれぞれ `claude` / `codex` を選ぶ。どちらの CLI もない場合は灰色で無効化する。
 scope ごとに独立した draft と dirty state を持ち、変更があるときだけ Save を有効にする。保存成功時は `saved` を表示して
-Welcome へ戻り、保存失敗時は draft を保って error を表示する。Modal mode と Agent model は global 設定として `settings.json` に保存され、次に開く Workspace の Overview / Closeup と Agent pane に適用される。Esc で Welcome へ戻る（`usagi config` から直接開いた場合も Welcome が home）。合成ルートは対話ループの
+Welcome へ戻り、保存失敗時は draft を保って error を表示する。Global は user data directory の `settings.json`、
+Workspace は対象 repository の `.usagi/settings.json`（debug build は `.usagi/dev/settings.json`）へ保存する。
+Workspace entry は local override を global の上へ重ね、effective な Modal mode を次に開く Overview / Closeup へ
+適用する。scope resolution と entry lifecycle の正本は [TUI の settings scope](03-tui.md#settings-scope-と-workspace-entry)
+である。Esc で Welcome へ戻る（`usagi config` から直接開いた場合も Welcome が home）。合成ルートは対話ループの
 開始画面を Welcome か Config かで選び、どちらも同じループを回す。
 
 Workspace 画面は、`state.json` から読んだ session 一覧と root 行を左ペイン、選択中 session の

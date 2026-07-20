@@ -20,7 +20,7 @@ use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session::{SessionOrigin, SessionRecord};
 use usagi_core::domain::session_lifecycle::ManagedSession;
-use usagi_core::domain::settings::Settings;
+use usagi_core::domain::settings::{LocalSettings, Settings};
 use usagi_core::domain::terminal_launch::{
     TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
 };
@@ -28,6 +28,7 @@ use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::git::{clone as git_clone, diff_status};
+use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
@@ -1385,24 +1386,39 @@ struct CrosstermTerminal {
 
 struct PersistentSettingsPort {
     storage: Storage,
-    workspace: Settings,
+    workspace: Option<WorkspaceSettingsStore>,
 }
 
 impl PersistentSettingsPort {
     fn open() -> std::io::Result<Self> {
         Ok(Self {
             storage: Storage::open_default().map_err(io_error)?,
-            workspace: Settings::default(),
+            workspace: None,
         })
     }
 }
 
 impl SettingsPort for PersistentSettingsPort {
+    fn select_workspace(&mut self, workspace_root: &Path) -> std::io::Result<()> {
+        self.workspace = Some(WorkspaceSettingsStore::new(workspace_root));
+        Ok(())
+    }
+
     #[coverage(off)]
     fn read(&mut self, scope: SettingsScope) -> std::io::Result<Settings> {
         Ok(match scope {
             SettingsScope::Global => self.storage.load_settings().map_err(io_error)?,
-            SettingsScope::Workspace => self.workspace.clone(),
+            SettingsScope::Workspace => {
+                let global = self.storage.load_settings().map_err(io_error)?;
+                let local = self
+                    .workspace
+                    .as_ref()
+                    .map(WorkspaceSettingsStore::load)
+                    .transpose()
+                    .map_err(io_error)?
+                    .unwrap_or_default();
+                global.with_local(&local)
+            }
         })
     }
 
@@ -1413,7 +1429,16 @@ impl SettingsPort for PersistentSettingsPort {
                 let _lock = self.storage.lock().map_err(io_error)?;
                 self.storage.save_settings(settings).map_err(io_error)?;
             }
-            SettingsScope::Workspace => self.workspace = settings.clone(),
+            SettingsScope::Workspace => {
+                let workspace = self
+                    .workspace
+                    .as_ref()
+                    .ok_or_else(|| io_error("workspace settings require an opened workspace"))?;
+                let _lock = workspace.lock().map_err(io_error)?;
+                workspace
+                    .save(&LocalSettings::from(settings))
+                    .map_err(io_error)?;
+            }
         }
         Ok(())
     }
@@ -1994,14 +2019,18 @@ impl BrowserOpener for PlatformBrowserOpener {
 fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
     let mut loader = FsWorkspaceLoader::open_default()?;
     let snapshot = loader.open(path)?;
+    let mut settings = PersistentSettingsPort::open()?;
+    settings.select_workspace(&snapshot.workspace.path)?;
+    let effective_settings = usagi_core::usecase::settings::read_for_workspace_entry(&mut settings);
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         let mut backend_factory = ProductionBackendFactory;
         run_with_metrics_hook(|| {
             run_in_terminal(|terminal| {
-                presentation::run_workspace_controller_with_backend(
+                presentation::run_workspace_controller_with_backend_and_settings(
                     terminal,
                     snapshot,
                     &mut backend_factory,
+                    &effective_settings,
                 )
             })
         })?;
@@ -2050,10 +2079,11 @@ mod tests {
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
     use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycle};
-    use usagi_core::domain::settings::{ModalSelectionMode, Settings};
+    use usagi_core::domain::settings::{LocalSettings, ModalSelectionMode, Settings, Theme};
     use usagi_core::domain::workspace::Workspace;
     use usagi_core::domain::workspace_state::WorkspaceState;
     use usagi_core::infrastructure::paths::project_data_dir;
+    use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
     use usagi_core::infrastructure::store::state::WorkspaceStateStore;
     use usagi_core::infrastructure::store::workspace::Storage;
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
@@ -2504,7 +2534,7 @@ mod tests {
         let storage = Storage::new(temporary.path());
         let mut first = PersistentSettingsPort {
             storage: Storage::new(temporary.path()),
-            workspace: Settings::default(),
+            workspace: None,
         };
         let settings = Settings {
             modal_selection_mode: ModalSelectionMode::Prompt,
@@ -2513,7 +2543,7 @@ mod tests {
         first.save(SettingsScope::Global, &settings).unwrap();
         let mut restarted = PersistentSettingsPort {
             storage,
-            workspace: Settings::default(),
+            workspace: None,
         };
         assert_eq!(
             restarted
@@ -2522,6 +2552,79 @@ mod tests {
                 .modal_selection_mode,
             ModalSelectionMode::Prompt
         );
+    }
+
+    #[test]
+    fn workspace_settings_overlay_is_durable_and_rebound_per_workspace() {
+        let temporary = tempfile::tempdir().unwrap();
+        let global_dir = temporary.path().join("global");
+        let workspace_a = temporary.path().join("a");
+        let workspace_b = temporary.path().join("b");
+        std::fs::create_dir_all(&workspace_a).unwrap();
+        std::fs::create_dir_all(&workspace_b).unwrap();
+        let global = Settings {
+            theme: Theme::Dark,
+            modal_selection_mode: ModalSelectionMode::Action,
+            ..Settings::default()
+        };
+        Storage::new(&global_dir).save_settings(&global).unwrap();
+
+        let mut port = PersistentSettingsPort {
+            storage: Storage::new(&global_dir),
+            workspace: None,
+        };
+        port.select_workspace(&workspace_a).unwrap();
+        assert_eq!(port.read(SettingsScope::Workspace).unwrap(), global);
+        let local_a = Settings {
+            modal_selection_mode: ModalSelectionMode::Prompt,
+            ..global.clone()
+        };
+        port.save(SettingsScope::Workspace, &local_a).unwrap();
+
+        let mut reopened = PersistentSettingsPort {
+            storage: Storage::new(&global_dir),
+            workspace: None,
+        };
+        reopened.select_workspace(&workspace_a).unwrap();
+        assert_eq!(reopened.read(SettingsScope::Workspace).unwrap(), local_a);
+        reopened.select_workspace(&workspace_b).unwrap();
+        assert_eq!(reopened.read(SettingsScope::Workspace).unwrap(), global);
+    }
+
+    #[test]
+    fn workspace_settings_unknown_values_defer_and_corrupt_files_error() {
+        let temporary = tempfile::tempdir().unwrap();
+        let global_dir = temporary.path().join("global");
+        let workspace = temporary.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let global = Settings {
+            theme: Theme::Dark,
+            modal_selection_mode: ModalSelectionMode::Prompt,
+            ..Settings::default()
+        };
+        Storage::new(&global_dir).save_settings(&global).unwrap();
+        let local_store = WorkspaceSettingsStore::new(&workspace);
+        std::fs::create_dir_all(local_store.path().parent().unwrap()).unwrap();
+        std::fs::write(
+            local_store.path(),
+            r#"{"version":1,"theme":"future","modal_selection_mode":"future"}"#,
+        )
+        .unwrap();
+        let mut port = PersistentSettingsPort {
+            storage: Storage::new(&global_dir),
+            workspace: None,
+        };
+        port.select_workspace(&workspace).unwrap();
+        assert_eq!(port.read(SettingsScope::Workspace).unwrap(), global);
+
+        std::fs::write(local_store.path(), "{ broken").unwrap();
+        assert!(port.read(SettingsScope::Workspace).is_err());
+        assert_eq!(
+            usagi_core::usecase::settings::read_for_workspace_entry(&mut port),
+            global
+        );
+        let local = LocalSettings::default();
+        assert_eq!(global.clone().with_local(&local), global);
     }
 
     #[test]

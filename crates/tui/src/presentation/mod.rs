@@ -2428,6 +2428,7 @@ fn drive_workspace_controller(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
     backend_factory: &mut dyn ControllerBackendFactory,
+    modal_selection_mode: usagi_core::domain::settings::ModalSelectionMode,
 ) -> io::Result<WorkspaceStep> {
     let workspace_id = snapshot.workspace_id;
     let session_ids = snapshot.session_ids.clone();
@@ -2444,7 +2445,8 @@ fn drive_workspace_controller(
         session_ids.clone(),
         composition.agent_commands,
     );
-    let mut runtime = WorkspaceRuntime::new(workspace_id, session_ids);
+    let mut runtime =
+        WorkspaceRuntime::with_selection_mode(workspace_id, session_ids, modal_selection_mode);
     let mut metrics_backend = MetricsBackend::new(composition.metrics);
     let mut metrics_projection = MetricsProjection::default();
     let mut pending_targets: std::collections::HashMap<OperationId, Target> =
@@ -2584,7 +2586,35 @@ pub fn run_workspace_controller_with_backend(
     snapshot: WorkspaceSnapshot,
     backend_factory: &mut dyn ControllerBackendFactory,
 ) -> io::Result<Exit> {
-    drive_workspace_controller(term, snapshot, backend_factory).map(|_| Exit::Quit)
+    drive_workspace_controller(
+        term,
+        snapshot,
+        backend_factory,
+        usagi_core::domain::settings::ModalSelectionMode::Action,
+    )
+    .map(|_| Exit::Quit)
+}
+
+/// Run a direct workspace entry with settings already resolved for that
+/// workspace identity.
+///
+/// # Errors
+///
+/// Returns terminal IO failures from the interactive loop.
+#[coverage(off)]
+pub fn run_workspace_controller_with_backend_and_settings(
+    term: &mut dyn Terminal,
+    snapshot: WorkspaceSnapshot,
+    backend_factory: &mut dyn ControllerBackendFactory,
+    settings: &usagi_core::domain::settings::Settings,
+) -> io::Result<Exit> {
+    drive_workspace_controller(
+        term,
+        snapshot,
+        backend_factory,
+        settings.modal_selection_mode,
+    )
+    .map(|_| Exit::Quit)
 }
 
 struct FixedBackendFactory {
@@ -2823,9 +2853,17 @@ pub fn run_with_settings_and_agent_and_metrics_port_factory_and_model_availabili
 fn open_snapshot_via_controller(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
+    settings: &mut dyn SettingsPort,
     backend_factory: &mut dyn ControllerBackendFactory,
 ) -> io::Result<WorkspaceStep> {
-    drive_workspace_controller(term, snapshot, backend_factory)
+    settings.select_workspace(&snapshot.workspace.path)?;
+    let effective = usagi_core::usecase::settings::read_for_workspace_entry(settings);
+    drive_workspace_controller(
+        term,
+        snapshot,
+        backend_factory,
+        effective.modal_selection_mode,
+    )
 }
 
 struct CompatibilityBackendFactory<'a, 'b, 'c> {
@@ -2945,7 +2983,10 @@ pub fn run_screen_graph_with_backend(
                 WelcomeStep::Quit => return Ok(Exit::Quit),
                 WelcomeStep::OpenList => screen = Screen::Open,
                 WelcomeStep::NewForm => screen = Screen::New,
-                WelcomeStep::ConfigScreen => screen = Screen::Config,
+                WelcomeStep::ConfigScreen => {
+                    config_form = Config::load_with_available_models(settings, available_models);
+                    screen = Screen::Config;
+                }
                 WelcomeStep::OpenRecent(index) => {
                     let Some(path) = welcome
                         .recent()
@@ -2959,7 +3000,7 @@ pub fn run_screen_graph_with_backend(
                     welcome.record_opened(&snapshot.workspace);
                     open.record_opened(&snapshot.workspace);
                     let workspace_step =
-                        open_snapshot_via_controller(term, snapshot, backend_factory)?;
+                        open_snapshot_via_controller(term, snapshot, settings, backend_factory)?;
                     if workspace_step == WorkspaceStep::Quit {
                         return Ok(Exit::Quit);
                     }
@@ -2974,8 +3015,12 @@ pub fn run_screen_graph_with_backend(
                         let snapshot = loader.open(&path)?;
                         welcome.record_opened(&snapshot.workspace);
                         open.record_opened(&snapshot.workspace);
-                        let workspace_step =
-                            open_snapshot_via_controller(term, snapshot, backend_factory)?;
+                        let workspace_step = open_snapshot_via_controller(
+                            term,
+                            snapshot,
+                            settings,
+                            backend_factory,
+                        )?;
                         if workspace_step == WorkspaceStep::Quit {
                             return Ok(Exit::Quit);
                         }
@@ -2999,8 +3044,12 @@ pub fn run_screen_graph_with_backend(
                         new_form.set_notice(None);
                         welcome.record_opened(&snapshot.workspace);
                         open.record_opened(&snapshot.workspace);
-                        let workspace_step =
-                            open_snapshot_via_controller(term, snapshot, backend_factory)?;
+                        let workspace_step = open_snapshot_via_controller(
+                            term,
+                            snapshot,
+                            settings,
+                            backend_factory,
+                        )?;
                         if workspace_step == WorkspaceStep::Quit {
                             return Ok(Exit::Quit);
                         }
@@ -5254,6 +5303,90 @@ mod tests {
     struct RecordingSettingsPort {
         saves: usize,
         fail_save: bool,
+    }
+
+    #[derive(Default)]
+    struct WorkspaceBindingSettingsPort {
+        selected: Vec<PathBuf>,
+    }
+
+    impl SettingsPort for WorkspaceBindingSettingsPort {
+        fn select_workspace(&mut self, workspace_root: &Path) -> io::Result<()> {
+            self.selected.push(workspace_root.to_path_buf());
+            Ok(())
+        }
+
+        fn read(
+            &mut self,
+            _scope: usagi_core::usecase::settings::SettingsScope,
+        ) -> io::Result<usagi_core::domain::settings::Settings> {
+            Ok(usagi_core::domain::settings::Settings {
+                modal_selection_mode: usagi_core::domain::settings::ModalSelectionMode::Prompt,
+                ..usagi_core::domain::settings::Settings::default()
+            })
+        }
+
+        fn save(
+            &mut self,
+            _scope: usagi_core::usecase::settings::SettingsScope,
+            _settings: &usagi_core::domain::settings::Settings,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn screen_graph_binds_settings_for_open_recent_and_new_entries() {
+        let cases = [
+            (
+                vec![Key::Char('o'), Key::Enter, Key::CtrlQ, Key::Char('y')],
+                vec![ws("open")],
+                Vec::new(),
+                PathBuf::from("/tmp/open"),
+            ),
+            (
+                vec![Key::Char('1'), Key::CtrlQ, Key::Char('y')],
+                Vec::new(),
+                vec![recent("recent")],
+                PathBuf::from("/tmp/recent"),
+            ),
+            (
+                vec![
+                    Key::Char('e'),
+                    Key::Right,
+                    Key::Down,
+                    Key::Char('x'),
+                    Key::Enter,
+                    Key::CtrlQ,
+                    Key::Char('y'),
+                ],
+                Vec::new(),
+                Vec::new(),
+                PathBuf::from("/tmp/x"),
+            ),
+        ];
+
+        for (keys, workspaces, recent, expected) in cases {
+            let mut term = FakeTerminal::with_keys(&keys);
+            let mut loader = FakeLoader::default();
+            let mut settings = WorkspaceBindingSettingsPort::default();
+            let mut sessions = UnavailableSessionCommandPortFactory;
+            assert_eq!(
+                run_with_settings(
+                    &mut term,
+                    workspaces,
+                    recent,
+                    now(),
+                    Start::Welcome,
+                    &mut loader,
+                    &mut settings,
+                    &mut sessions,
+                )
+                .unwrap(),
+                Exit::Quit
+            );
+            assert_eq!(settings.selected, vec![expected]);
+        }
     }
 
     impl SettingsPort for RecordingSettingsPort {
