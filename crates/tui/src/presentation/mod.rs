@@ -3383,13 +3383,14 @@ mod tests {
                 operation_id: OperationId::new(),
                 arguments: "new".to_owned(),
             },
+            Effect::OpenExternalTerminal { target },
             Effect::SelectTab {
                 direction: TabDirection::Next,
             },
         ] {
             backend.dispatch(effect);
         }
-        assert_eq!(actions.try_iter().count(), 6);
+        assert_eq!(actions.try_iter().count(), 7);
 
         for effect in [
             Effect::LoadNotes { target },
@@ -6021,6 +6022,10 @@ mod tests {
                 "open",
             ),
             Err("terminal launch is unavailable".to_owned())
+        );
+        assert_eq!(
+            port.open_external_terminal(Path::new("/tmp/worktree")),
+            Err("external terminal launch is unavailable".to_owned())
         );
         // The default discovers no runtimes, so an embedder without a daemon
         // simply opens a workspace with no restored panes.
