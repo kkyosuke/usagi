@@ -3092,7 +3092,11 @@ mod tests {
     use std::collections::VecDeque;
     use std::io::{self, Write};
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc::Receiver,
+    };
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::agent::AgentProfileId;
     use usagi_core::domain::id::{
@@ -3741,6 +3745,87 @@ mod tests {
                 .iter()
                 .all(|frame| !frame.join("\n").contains("New session"))
         );
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn controller_loop_dispatches_each_ctrl_a_representation_once_to_the_session_port() {
+        struct SignallingSessionPort {
+            calls: Arc<AtomicUsize>,
+            create_call: std::sync::mpsc::Sender<String>,
+        }
+
+        impl SessionCommandPort for SignallingSessionPort {
+            fn execute(
+                &mut self,
+                _: &Workspace,
+                _: Option<&SessionRecord>,
+                command: SessionCommand,
+            ) -> Result<SessionCommandResult, String> {
+                let SessionCommand::Create { name } = command else {
+                    return Err("unexpected session command".to_owned());
+                };
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.create_call
+                    .send(name)
+                    .map_err(|error| error.to_string())?;
+                Ok(SessionCommandResult::message("daemon accepted"))
+            }
+        }
+
+        // The composition adapter normalizes a modified Ctrl+A to LineStart,
+        // preserves a raw control byte as U+0001, and carries Home as Home. All
+        // three must enter the same controller form and lifecycle dispatch path.
+        for create_key in [Key::LineStart, Key::Char('\u{1}'), Key::Home] {
+            let snapshot = WorkspaceSnapshot::new(
+                ws("empty"),
+                WorkspaceState {
+                    sessions: Vec::new(),
+                    root_notes: Scratchpad::default(),
+                    root_environment: std::collections::BTreeMap::new(),
+                    updated_at: now(),
+                },
+            );
+            let terminal = TerminalRef {
+                daemon_generation: DaemonGeneration::new(),
+                terminal_id: TerminalId::new(),
+                workspace_id: snapshot.workspace_id,
+                session_id: None,
+                worktree_id: WorktreeId::new(),
+            };
+            let calls = Arc::new(AtomicUsize::new(0));
+            let (create_call, observed_create) = std::sync::mpsc::channel();
+            let keys = [
+                create_key.clone(),
+                Key::Char('a'),
+                Key::Char('p'),
+                Key::Char('i'),
+                Key::Enter,
+                Key::CtrlQ,
+                Key::Char('y'),
+            ];
+            let mut term = FakeTerminal::with_keys_waiting_for_create(&keys, observed_create);
+
+            let result = run_workspace_controller(
+                &mut term,
+                snapshot,
+                Box::new(SignallingSessionPort {
+                    calls: calls.clone(),
+                    create_call,
+                }),
+                Box::new(SuccessfulAgentPort(terminal)),
+                Box::new(UnavailableDecisionCommandPort),
+                Box::new(UnavailableEnvironmentStore),
+                Box::new(NoDesktopNotifications),
+                Box::new(NoMetrics),
+                Box::new(UnavailablePrSnapshotPort),
+                Box::new(UnavailableBrowserOpener),
+            );
+
+            assert!(matches!(result, Ok(Exit::Quit)), "{create_key:?}");
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "{create_key:?}");
+            assert_eq!(term.observed_creates, ["api"], "{create_key:?}");
+        }
     }
 
     #[test]
@@ -4641,6 +4726,8 @@ mod tests {
         frames: Vec<Vec<String>>,
         waits: Vec<std::time::Duration>,
         copied: Vec<String>,
+        create_call: Option<Receiver<String>>,
+        observed_creates: Vec<String>,
         fail_size: bool,
         fail_draw: bool,
     }
@@ -4650,6 +4737,13 @@ mod tests {
             Self {
                 keys: keys.iter().cloned().collect(),
                 ..Self::default()
+            }
+        }
+
+        fn with_keys_waiting_for_create(keys: &[Key], create_call: Receiver<String>) -> Self {
+            Self {
+                create_call: Some(create_call),
+                ..Self::with_keys(keys)
             }
         }
     }
@@ -4676,9 +4770,22 @@ mod tests {
         }
 
         fn read_key(&mut self) -> io::Result<Key> {
-            self.keys
+            let key = self
+                .keys
                 .pop_front()
-                .ok_or_else(|| io::Error::other("no more keys"))
+                .ok_or_else(|| io::Error::other("no more keys"))?;
+            // Create runs on the lifecycle worker. Tests that exercise the whole
+            // terminal adapter wait at the quit boundary, making the dispatch
+            // observation deterministic without changing production scheduling.
+            if matches!(key, Key::CtrlQ)
+                && let Some(create_call) = self.create_call.take()
+            {
+                let name = create_call
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                self.observed_creates.push(name);
+            }
+            Ok(key)
         }
 
         fn copy_text(&mut self, text: &str) -> Result<(), String> {
