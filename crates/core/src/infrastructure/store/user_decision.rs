@@ -171,7 +171,7 @@ mod tests {
             decision_id: UserDecisionId::new(),
             owner: UserDecisionOwner {
                 workspace_id: WorkspaceId::new(),
-                session_id: SessionId::new(),
+                session_id: Some(SessionId::new()),
                 caller: CallerRef {
                     session_id: Some(SessionId::new()),
                     agent_id: AgentId::new(),

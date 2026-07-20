@@ -5014,7 +5014,7 @@ mod tests {
             decision_id: UserDecisionId::new(),
             owner: usagi_core::domain::user_decision::UserDecisionOwner {
                 workspace_id: workspace,
-                session_id: SessionId::new(),
+                session_id: Some(SessionId::new()),
                 caller: usagi_core::domain::agent::CallerRef {
                     session_id: Some(SessionId::new()),
                     agent_id: usagi_core::domain::id::AgentId::new(),

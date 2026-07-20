@@ -1242,12 +1242,6 @@ fn dispatch_user_decision(
                     "decision caller provenance is unavailable",
                 )
             })?;
-        let session_id = binding.worker.session_id.ok_or_else(|| {
-            ProtocolError::new(
-                ErrorCode::OwnershipUnknown,
-                "decision worker has no session scope",
-            )
-        })?;
         if binding.worker.agent_id != run.agent_id {
             return Err(ProtocolError::new(
                 ErrorCode::OwnershipUnknown,
@@ -1256,7 +1250,7 @@ fn dispatch_user_decision(
         }
         Ok(UserDecisionOwner {
             workspace_id: workspace,
-            session_id,
+            session_id: binding.worker.session_id,
             caller: binding.caller,
             run_id,
         })
