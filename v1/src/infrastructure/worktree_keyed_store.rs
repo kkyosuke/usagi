@@ -118,8 +118,19 @@ where
 
 /// Clear the file addressed by `worktree` under `subdir` (best-effort).
 pub fn clear(subdir: &str, worktree: &Path) {
-    if let Ok(path) = path_for(subdir, worktree) {
-        let _ = fs::remove_file(path);
+    let _ = try_clear(subdir, worktree);
+}
+
+/// Clear the file addressed by `worktree`, reporting storage failures while
+/// treating an already-absent file as success. Session removal uses this form so
+/// its durable cleanup phase can remain retryable instead of silently committing
+/// a partially cleared context.
+pub fn try_clear(subdir: &str, worktree: &Path) -> Result<()> {
+    let path = path_for(subdir, worktree)?;
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }
 

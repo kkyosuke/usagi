@@ -42,7 +42,7 @@ use crate::infrastructure::agent_prompt_store::{retry_state_after_failure, Retry
 use crate::infrastructure::json_file;
 use crate::infrastructure::store_lock::{self, StoreLock};
 use crate::infrastructure::worktree_keyed_store::{
-    self, dir, file_name, key, path_for, read_ours, WorktreeStamped,
+    dir, file_name, key, path_for, read_ours, WorktreeStamped,
 };
 
 /// Subdirectory of the data dir the live-prompt files live under.
@@ -848,9 +848,16 @@ pub fn requeue_after_spawn_failure(
 /// not inherit prompts sent to the previous session. Called from session removal
 /// (see [`crate::usecase::session::remove`]); a no-op when nothing is queued.
 pub fn clear(worktree: &Path) {
-    worktree_keyed_store::clear(PROMPT_SUBDIR, worktree);
-    if let Ok(path) = path_for(PROMPT_SUBDIR, worktree) {
-        let _ = fs::remove_dir_all(path);
+    let _ = try_clear(worktree);
+}
+
+pub fn try_clear(worktree: &Path) -> Result<()> {
+    let path = path_for(PROMPT_SUBDIR, worktree)?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path).map_err(Into::into),
+        Ok(_) => fs::remove_file(path).map_err(Into::into),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }
 

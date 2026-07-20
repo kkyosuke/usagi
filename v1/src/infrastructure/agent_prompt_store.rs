@@ -482,6 +482,10 @@ pub fn clear(worktree: &Path) {
     worktree_keyed_store::clear(PROMPT_SUBDIR, worktree);
 }
 
+pub fn try_clear(worktree: &Path) -> Result<()> {
+    worktree_keyed_store::try_clear(PROMPT_SUBDIR, worktree)
+}
+
 /// Whether any prompt is currently queued for *some* worktree — a cheap
 /// directory listing, so the home screen's autostart pass can skip the
 /// per-session lookup entirely on the common tick where nothing is queued.

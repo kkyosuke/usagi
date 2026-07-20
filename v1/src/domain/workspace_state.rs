@@ -686,6 +686,52 @@ pub struct SessionRecord {
     pub last_active: Option<DateTime<Utc>>,
 }
 
+/// Durable progress marker for a session removal transaction.
+///
+/// The marker is written before Git teardown starts and is removed only after
+/// the session's recoverability context has been cleared and its session record
+/// has been committed away. Keeping it outside [`SessionRecord`] also lets
+/// reconcile describe an unrecorded on-disk session conservatively without
+/// inventing the missing session metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingSessionRemoval {
+    /// Stable session identity used by retries and status projection.
+    pub name: String,
+    /// Session tree that Git teardown owns.
+    pub root: PathBuf,
+    /// Canonical per-worktree keys captured while the directories still exist.
+    /// Ancillary cleanup must use these after Git has removed the directories.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worktrees: Vec<PathBuf>,
+    /// Last durably committed teardown boundary.
+    pub phase: SessionRemovalPhase,
+}
+
+/// Durable boundaries of the two-stage removal transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRemovalPhase {
+    /// The session identity and recovery context are intact while managed Git
+    /// worktrees and branches are being removed.
+    GitTeardown,
+    /// Every managed Git teardown succeeded; ancillary context cleanup may be
+    /// retried idempotently before the session record is dropped.
+    ContextCleanup,
+    /// Reconcile found an on-disk session without enough recorded ownership to
+    /// delete it safely. It is retained for explicit operator recovery.
+    Orphaned,
+}
+
+impl SessionRemovalPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GitTeardown => "git_teardown",
+            Self::ContextCleanup => "context_cleanup",
+            Self::Orphaned => "orphaned",
+        }
+    }
+}
+
 impl SessionRecord {
     /// The label shown in the sidebar: the custom [`display_name`](Self::display_name)
     /// when set, otherwise the session [`name`](Self::name).
@@ -727,6 +773,10 @@ pub struct WorkspaceState {
     /// workspace tree. Empty (and omitted from older files) when none exist.
     #[serde(default)]
     pub sessions: Vec<SessionRecord>,
+    /// In-flight or conservatively quarantined removals. Empty during normal
+    /// operation and omitted from older-compatible state files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_removals: Vec<PendingSessionRemoval>,
     /// A free-form, multi-line note attached to the workspace **root** (the `⌂
     /// root` row, which belongs to no session) — the same scratch space sessions
     /// carry in [`SessionRecord::note`], but for the workspace itself. Display /
@@ -750,6 +800,7 @@ impl WorkspaceState {
     pub fn new() -> Self {
         Self {
             sessions: Vec::new(),
+            pending_removals: Vec::new(),
             root_note: None,
             root_todos: Vec::new(),
             root_decisions: Vec::new(),

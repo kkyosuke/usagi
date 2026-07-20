@@ -122,6 +122,7 @@
 | フィールド | 型 | 意味 |
 |---|---|---|
 | `sessions` | array | 作成済みセッションの一覧（`.usagi/sessions/` 配下）。**配列順がホーム画面の表示順**で、初期値は作成順、選択（Overview）の `K`/`J` で並び替えると入れ替えた順序がこの配列に永続化される（[design/home/02-layout.md](../design/home/02-layout.md#選択overview既定)）。古いファイルには無く、その場合は空として扱う |
+| `pending_removals` | array | 進行中または隔離中の session removal marker。要素は `{ "name": string, "root": path, "worktrees": path[], "phase": "git_teardown" \| "context_cleanup" \| "orphaned" }`。`worktrees` は teardown 前に正規化した ancillary cleanup key。`git_teardown` は recovery context を保持した Git teardown 中、`context_cleanup` は全 Git teardown 成功後の冪等 cleanup 中、`orphaned` は session record が無く所有権不明のため自動削除しない状態。空なら省略され、古いファイルでは空として扱う |
 | `root_note` | string? | ワークスペース**ルート行（`⌂ root`）**に紐づく自由記述の**複数行メモ**（任意）。セッションが持つ `note` のルート版で、ルートはどのセッションにも属さないためトップレベルに置く。**見た目だけ**の付加情報で、未設定（既定）なら省略される |
 | `root_todos` | array | ルート行の**チェックリスト**（`SessionRecord.todos` のルート版）。要素は下記 `SessionTodo`。空（既定）なら省略される |
 | `root_decisions` | array | ルート行の**意思決定ログ**（`SessionRecord.decisions` のルート版）。要素は下記 `SessionDecision`。空（既定）なら省略される |
