@@ -28,7 +28,8 @@ use usagi_core::{
     domain::{
         agent::{
             AgentCapability, AgentProfileId, AgentStatus, CallerRef, DispatchBinding, DispatchRun,
-            InboxKind, InboxMessage, LaunchMode, LaunchRequest, LaunchScope, RunStatus, WorkerRef,
+            InboxKind, InboxMessage, LaunchMode, LaunchRequest, LaunchScope, ModelSelector,
+            RunStatus, WorkerRef,
         },
         id::{
             AgentRuntimeId, AgentRuntimeRef, ClientId, CompletionFence, ConnectionId,
@@ -550,7 +551,7 @@ impl<
             expected_revision: 0,
         };
         let request = LaunchRequest {
-            profile_id,
+            profile_id: profile_id.clone(),
             mode: LaunchMode::Interactive,
             model: None,
             resume: false,
@@ -567,6 +568,7 @@ impl<
             operation: fence,
             mcp_allowed: true,
         };
+        let credential = OperationId::new().to_string();
         self.orchestrator
             .launch(
                 &mut self.coordinator,
@@ -576,9 +578,48 @@ impl<
                 self.geometry,
                 &mut self.store,
                 &mut self.pty,
-                None,
+                Some(credential.clone()),
             )
             .map_err(map_orchestration_error)?;
+        let worker = self
+            .dispatch
+            .upsert_agent_by_runtime_model(
+                intent.session,
+                profile_id.clone(),
+                ModelSelector::new("default").expect("literal model selector is canonical"),
+            )
+            .map_err(|_| dispatch_storage_error())?;
+        self.dispatch
+            .upsert_run(DispatchRun {
+                run_id: operation,
+                agent_id: worker.agent_id,
+                prompt: String::new(),
+                started_at: Utc::now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .map_err(|_| dispatch_storage_error())?;
+        let caller = CallerRef {
+            session_id: worker.session_id,
+            agent_id: worker.agent_id,
+        };
+        self.dispatch
+            .upsert_binding(DispatchBinding {
+                run_id: operation,
+                caller,
+                worker: WorkerRef {
+                    session_id: worker.session_id,
+                    agent_id: worker.agent_id,
+                },
+            })
+            .map_err(|_| dispatch_storage_error())?;
+        self.mcp_callers.insert(
+            credential,
+            McpCaller {
+                runtime: authorization.runtime,
+                operation,
+            },
+        );
         Ok(AgentAdmission {
             operation_id: operation_id.to_owned(),
             revision: 1,
