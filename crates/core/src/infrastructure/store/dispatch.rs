@@ -365,7 +365,11 @@ impl DispatchStore {
         binding: DispatchBinding,
         admission: AgentAdmissionReservation,
     ) -> Result<AgentAdmissionReservation> {
-        self.mutate_registry(|registry| registry.reserve_admission(agent, run, binding, admission))
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let mut registry = self.load_registry()?;
+        let reservation = registry.reserve_admission(agent, run, binding, admission);
+        json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+        Ok(reservation)
     }
 
     /// Atomically publishes a prepared admission as live only after the PTY
@@ -375,7 +379,11 @@ impl DispatchStore {
     ///
     /// Returns an error when the registry cannot be locked, read, or written.
     pub fn commit_admission(&self, operation_id: OperationId) -> Result<bool> {
-        self.mutate_registry(|registry| registry.commit_admission(operation_id))
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let mut registry = self.load_registry()?;
+        let committed = registry.commit_admission(operation_id);
+        json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+        Ok(committed)
     }
 
     /// Records the safe terminal result of a compensated or interrupted
@@ -386,7 +394,11 @@ impl DispatchStore {
     ///
     /// Returns an error when the registry cannot be locked, read, or written.
     pub fn fail_admission(&self, operation_id: OperationId) -> Result<bool> {
-        self.mutate_registry(|registry| registry.fail_admission(operation_id))
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let mut registry = self.load_registry()?;
+        let failed = registry.fail_admission(operation_id);
+        json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+        Ok(failed)
     }
 
     /// Fails every run which was still non-terminal when the daemon lost its
@@ -397,7 +409,11 @@ impl DispatchStore {
     ///
     /// Returns an error when the registry cannot be locked, read, or written.
     pub fn reconcile_incomplete_admissions(&self) -> Result<usize> {
-        self.mutate_registry(Registry::reconcile_incomplete_admissions)
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let mut registry = self.load_registry()?;
+        let reconciled = registry.reconcile_incomplete_admissions();
+        json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+        Ok(reconciled)
     }
 
     /// Adds or replaces a run by `run_id`.
@@ -543,7 +559,6 @@ impl DispatchStore {
         Ok(changed)
     }
 
-    #[coverage(off)] // Each return type duplicates this tested lock/read/write plumbing as a separate monomorphization.
     fn mutate_registry<T>(&self, mutate: impl FnOnce(&mut Registry) -> T) -> Result<T> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut registry = self.load_registry()?;
