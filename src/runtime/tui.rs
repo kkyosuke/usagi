@@ -1128,14 +1128,30 @@ fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
     if matches!(key.kind, KeyEventKind::Release) {
         return Key::Other;
     }
-    // Ctrl-A is the IME-safe shortcut for the persistent `+ new session`
-    // action. Preserve it as a control byte so typing `c` directly on the
-    // action row can still start a session name with that character.
+    // Ctrl-A / Ctrl-E become semantic caret keys. A focused text field reads
+    // them as emacs line-start / line-end; the reducer's navigation branch maps
+    // `LineStart` back to the reserved `+ new session` action (IME-safe #287),
+    // and `key_to_terminal_bytes` still forwards U+0001 / U+0005 to a focused
+    // shell. `Home` / `End` carry the same split without the control modifier.
     if (key.modifiers.control && key.code == KeyCode::Char('a'))
         || key.code == KeyCode::Char('\u{1}')
-        || key.code == KeyCode::Home
     {
-        return Key::Char('\u{1}');
+        return Key::LineStart;
+    }
+    if (key.modifiers.control && key.code == KeyCode::Char('e'))
+        || key.code == KeyCode::Char('\u{5}')
+    {
+        return Key::LineEnd;
+    }
+    // Shift+motion extends a selection in the focused input; a live shell still
+    // receives movement via `key_to_terminal_bytes`. Handle these before the
+    // generic modified-chord passthrough below swallows the Shift.
+    match key.code {
+        KeyCode::Left if key.modifiers.shift => return Key::SelectLeft,
+        KeyCode::Right if key.modifiers.shift => return Key::SelectRight,
+        KeyCode::Home if key.modifiers.shift => return Key::SelectHome,
+        KeyCode::End if key.modifiers.shift => return Key::SelectEnd,
+        _ => {}
     }
     // The live classifier has already encoded the original terminal input.
     // Keep modified chords opaque so this management-key adapter cannot drop
@@ -1159,6 +1175,9 @@ fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
         KeyCode::Down => Key::Down,
         KeyCode::Left => Key::Left,
         KeyCode::Right => Key::Right,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        KeyCode::Delete => Key::Delete,
         KeyCode::Enter => Key::Enter,
         KeyCode::Tab => Key::Tab,
         KeyCode::Backspace => Key::Backspace,
@@ -1568,6 +1587,19 @@ mod tests {
         KeyCode, KeyEvent, KeyEventKind, LiveInput, Modifiers,
     };
 
+    /// A pressed [`LiveInput::Key`] with the given code and modifiers.
+    fn live_key(code: KeyCode, modifiers: Modifiers) -> LiveInput {
+        LiveInput::Key(KeyEvent::new(code, modifiers, KeyEventKind::Press))
+    }
+
+    /// The Control-only modifier set.
+    fn control() -> Modifiers {
+        Modifiers {
+            control: true,
+            ..Modifiers::default()
+        }
+    }
+
     #[test]
     fn decode_terminal_poll_returns_output_chunks_while_running() {
         let body = json!({
@@ -1685,23 +1717,60 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_a_maps_to_the_new_session_shortcut() {
-        let key = LiveInput::Key(KeyEvent::new(
-            KeyCode::Char('a'),
-            Modifiers {
-                control: true,
-                ..Modifiers::default()
-            },
-            KeyEventKind::Press,
-        ));
-        assert_eq!(passthrough_key(&key, Vec::new()), Key::Char('\u{1}'));
+    fn ctrl_a_and_ctrl_e_map_to_semantic_line_edge_keys() {
+        // Ctrl-A → LineStart (emacs line-start in a text field; `+ new session`
+        // in navigation, resolved downstream). Both the modified `a` and the raw
+        // U+0001 decoding reach the same key.
+        let ctrl_a = live_key(KeyCode::Char('a'), control());
+        assert_eq!(passthrough_key(&ctrl_a, Vec::new()), Key::LineStart);
+        let raw_soh = live_key(KeyCode::Char('\u{1}'), Modifiers::default());
+        assert_eq!(passthrough_key(&raw_soh, Vec::new()), Key::LineStart);
 
-        let home = LiveInput::Key(KeyEvent::new(
-            KeyCode::Home,
-            Modifiers::default(),
-            KeyEventKind::Press,
-        ));
-        assert_eq!(passthrough_key(&home, Vec::new()), Key::Char('\u{1}'));
+        // Ctrl-E → LineEnd, from both the modified `e` and raw U+0005.
+        let ctrl_e = live_key(KeyCode::Char('e'), control());
+        assert_eq!(passthrough_key(&ctrl_e, Vec::new()), Key::LineEnd);
+        let raw_enq = live_key(KeyCode::Char('\u{5}'), Modifiers::default());
+        assert_eq!(passthrough_key(&raw_enq, Vec::new()), Key::LineEnd);
+    }
+
+    #[test]
+    fn plain_home_end_and_delete_reach_the_input_as_caret_keys() {
+        assert_eq!(
+            passthrough_key(&live_key(KeyCode::Home, Modifiers::default()), Vec::new()),
+            Key::Home
+        );
+        assert_eq!(
+            passthrough_key(&live_key(KeyCode::End, Modifiers::default()), Vec::new()),
+            Key::End
+        );
+        assert_eq!(
+            passthrough_key(&live_key(KeyCode::Delete, Modifiers::default()), Vec::new()),
+            Key::Delete
+        );
+    }
+
+    #[test]
+    fn shift_motion_extends_a_selection_without_being_swallowed_as_a_chord() {
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            passthrough_key(&live_key(KeyCode::Left, shift), b"\x1b[1;2D".to_vec()),
+            Key::SelectLeft
+        );
+        assert_eq!(
+            passthrough_key(&live_key(KeyCode::Right, shift), b"\x1b[1;2C".to_vec()),
+            Key::SelectRight
+        );
+        assert_eq!(
+            passthrough_key(&live_key(KeyCode::Home, shift), b"\x1b[1;2H".to_vec()),
+            Key::SelectHome
+        );
+        assert_eq!(
+            passthrough_key(&live_key(KeyCode::End, shift), b"\x1b[1;2F".to_vec()),
+            Key::SelectEnd
+        );
     }
 
     #[test]

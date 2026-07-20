@@ -267,8 +267,14 @@ fn key_to_terminal_bytes(key: Key) -> Option<Vec<u8>> {
         Key::Escape => b"\x1b".to_vec(),
         Key::Up => b"\x1b[A".to_vec(),
         Key::Down => b"\x1b[B".to_vec(),
-        Key::Right => b"\x1b[C".to_vec(),
-        Key::Left => b"\x1b[D".to_vec(),
+        Key::Right | Key::SelectRight => b"\x1b[C".to_vec(),
+        Key::Left | Key::SelectLeft => b"\x1b[D".to_vec(),
+        // The focused shell owns its own line editing: forward Home/Ctrl-A and
+        // End/Ctrl-E as the readline control chords the previous mapping sent, so
+        // caret keys that mean selection to a text field keep moving in the shell.
+        Key::Home | Key::LineStart | Key::SelectHome => vec![1],
+        Key::End | Key::LineEnd | Key::SelectEnd => vec![5],
+        Key::Delete => b"\x1b[3~".to_vec(),
         Key::Quit => vec![3],
         Key::CtrlQ => vec![17],
         Key::CtrlD => vec![4],
@@ -891,6 +897,15 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
             .map_or(WelcomeStep::Stay, welcome_action),
         Key::Left
         | Key::Right
+        | Key::Home
+        | Key::End
+        | Key::Delete
+        | Key::LineStart
+        | Key::LineEnd
+        | Key::SelectLeft
+        | Key::SelectRight
+        | Key::SelectHome
+        | Key::SelectEnd
         | Key::Backspace
         | Key::Tab
         | Key::CtrlD
@@ -925,8 +940,38 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
             step_new_horizontal(form, true);
             NewStep::Stay
         }
+        // Home/End と emacs 行頭/行末（Ctrl-A/Ctrl-E）はフォーカス中フィールドの
+        // キャレット移動。テキスト入力にフォーカスがあるので new-session ではなく caret。
+        Key::Home | Key::LineStart => {
+            form.cursor_home();
+            NewStep::Stay
+        }
+        Key::End | Key::LineEnd => {
+            form.cursor_end();
+            NewStep::Stay
+        }
+        Key::SelectLeft => {
+            form.select_left();
+            NewStep::Stay
+        }
+        Key::SelectRight => {
+            form.select_right();
+            NewStep::Stay
+        }
+        Key::SelectHome => {
+            form.select_home();
+            NewStep::Stay
+        }
+        Key::SelectEnd => {
+            form.select_end();
+            NewStep::Stay
+        }
         Key::Backspace => {
             form.backspace();
+            NewStep::Stay
+        }
+        Key::Delete => {
+            form.delete_forward();
             NewStep::Stay
         }
         Key::Char(ch) => {
@@ -991,7 +1036,7 @@ fn step_new_horizontal(form: &mut New, right: bool) {
 
 /// Open 画面のキー処理。Enter で選択 path を確定し、Esc で welcome へ戻る。
 #[coverage(off)]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 fn step_open(open: &mut Open, key: Key) -> OpenStep {
     if open.unregistering_path().is_some() {
         return match key {
@@ -1040,6 +1085,34 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
         }
         Key::Right => {
             open.filter_right();
+            OpenStep::Stay
+        }
+        Key::Home | Key::LineStart => {
+            open.filter_home();
+            OpenStep::Stay
+        }
+        Key::End | Key::LineEnd => {
+            open.filter_end();
+            OpenStep::Stay
+        }
+        Key::Delete => {
+            open.filter_delete_forward();
+            OpenStep::Stay
+        }
+        Key::SelectLeft => {
+            open.filter_select_left();
+            OpenStep::Stay
+        }
+        Key::SelectRight => {
+            open.filter_select_right();
+            OpenStep::Stay
+        }
+        Key::SelectHome => {
+            open.filter_select_home();
+            OpenStep::Stay
+        }
+        Key::SelectEnd => {
+            open.filter_select_end();
             OpenStep::Stay
         }
         Key::Escape => OpenStep::Back,
@@ -1297,17 +1370,29 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         Key::Backspace => AppKey::Backspace,
         Key::Tab => AppKey::Tab,
         Key::Escape => AppKey::Escape,
-        // Runtime adapters preserve Ctrl-A as U+0001. Reclassify it at the
-        // management boundary; live panes do not reach here unless a Ctrl-O
-        // prefix has resolved an explicit local action.
-        Key::Char('\u{1}') => AppKey::CtrlA,
+        // Runtime adapters preserve Ctrl-A as U+0001. `Ctrl-A` (LineStart) and
+        // `Home` both mean `+ new session` here, where no text field owns focus:
+        // the sidebar-navigation contract from #257/#287 that this issue keeps
+        // intact. A focused palette / create form intercepts these before the
+        // reducer, so caret motion never reaches this navigation branch.
+        Key::LineStart | Key::Home | Key::Char('\u{1}') => AppKey::CtrlA,
         Key::Char(character) => AppKey::Char(character),
         Key::Quit => AppKey::CtrlC,
         Key::CtrlQ => AppKey::CtrlQ,
         // Input the Home reducer never consumes: raw PTY passthrough, terminal
-        // pointer drags (a shell + `TerminalSession` concern), and Ctrl-D (Open
-        // Workspace only).
-        Key::Passthrough(_) | Key::Pointer(_) | Key::CtrlD => {
+        // pointer drags (a shell + `TerminalSession` concern), Ctrl-D (Open
+        // Workspace only), and the caret/selection keys that have meaning only
+        // inside a focused text field (End/Ctrl-E, Delete, Shift+arrows).
+        Key::Passthrough(_)
+        | Key::Pointer(_)
+        | Key::CtrlD
+        | Key::End
+        | Key::LineEnd
+        | Key::Delete
+        | Key::SelectLeft
+        | Key::SelectRight
+        | Key::SelectHome
+        | Key::SelectEnd => {
             return None;
         }
     };

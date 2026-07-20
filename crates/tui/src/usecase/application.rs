@@ -212,6 +212,26 @@ pub enum Key {
     Left,
     /// キャレットやタブを 1 つ右へ／モード選択では次の選択へ（→）。
     Right,
+    /// キャレットを行頭へ（Home）。テキスト入力にフォーカスがある間はキャレット移動、
+    /// navigation 文脈では `+ new session`（`Ctrl-A` と同義。#257）。
+    Home,
+    /// キャレットを行末へ（End）。navigation 文脈では効果を持たない。
+    End,
+    /// キャレット位置の 1 文字を前方削除する（Del）。
+    Delete,
+    /// キャレットを入力の先頭へ（`Ctrl-A`）。テキスト入力にフォーカスがある間だけ
+    /// 行頭キャレットで、navigation 文脈では `+ new session` に予約されたまま（#287）。
+    LineStart,
+    /// キャレットを入力の末尾へ（`Ctrl-E`。`End` と等価）。
+    LineEnd,
+    /// 選択をキャレットから 1 文字左へ広げる（`Shift`+`←`）。
+    SelectLeft,
+    /// 選択をキャレットから 1 文字右へ広げる（`Shift`+`→`）。
+    SelectRight,
+    /// 選択を行頭まで広げる（`Shift`+`Home`）。
+    SelectHome,
+    /// 選択を行末まで広げる（`Shift`+`End`）。
+    SelectEnd,
     /// 選択中の項目を確定する。
     Enter,
     /// キャレット手前の 1 文字を削除する（Backspace）。

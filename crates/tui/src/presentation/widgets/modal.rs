@@ -206,14 +206,15 @@ pub fn scroll_window(rows: &[String], start: usize, end: usize) -> Vec<String> {
 }
 
 /// The **palette** input line: a danger `❯` prompt followed by the block-caret
-/// rendering of `value` with the caret at byte `cursor`.
+/// rendering of `value` with the caret at byte `cursor` and the `selection`
+/// range (if any) reversed.
 ///
 /// Shared by the overview and closeup palettes so every command input draws the
-/// same prompt glyph and accent caret.
+/// same prompt glyph, accent caret, and selection highlight.
 #[must_use]
-pub fn prompt_line(value: &str, cursor: usize) -> String {
+pub fn prompt_line(value: &str, cursor: usize, selection: Option<(usize, usize)>) -> String {
     let prompt = Role::Danger.style().bold().paint("❯");
-    let body = super::block_caret(value, cursor, &Role::Accent.style());
+    let body = super::block_caret_with_selection(value, cursor, selection, &Role::Accent.style());
     format!("{prompt} {body}")
 }
 
@@ -853,11 +854,19 @@ mod tests {
 
     #[test]
     fn prompt_line_draws_a_danger_prompt_and_accent_caret() {
-        let line = prompt_line("cmd", 3);
+        let line = prompt_line("cmd", 3, None);
         assert!(line.starts_with(&Role::Danger.style().bold().paint("❯")));
         assert!(line.contains("cmd"));
         // The caret past the value is the shared block caret's inverse space.
         assert!(line.contains("\u{1b}[7"));
+    }
+
+    #[test]
+    fn prompt_line_reverses_a_selection_range() {
+        // "cm" selected: the shared renderer reverses the whole range in one span.
+        let line = prompt_line("cmd", 2, Some((0, 2)));
+        assert!(line.contains("\u{1b}[7;36mcm\u{1b}[0m"));
+        assert_eq!(display_width(&line), display_width("❯ cmd"));
     }
 
     #[test]

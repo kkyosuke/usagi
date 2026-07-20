@@ -3605,6 +3605,51 @@ mod tests {
         }
     }
 
+    #[test]
+    fn management_classifier_keeps_navigation_ctrl_a_and_ignores_caret_only_keys() {
+        use crate::usecase::terminal_input::Modifiers;
+        let key = |code, modifiers| {
+            LiveInput::Key(crate::usecase::terminal_input::KeyEvent::new(
+                code,
+                modifiers,
+                KeyEventKind::Press,
+            ))
+        };
+        let plain = Modifiers::default;
+        let shift = || Modifiers {
+            shift: true,
+            ..plain()
+        };
+        // Home and Ctrl-A remain the `+ new session` action in navigation; this
+        // reducer has no byte caret, so the caret-only edits (End / Ctrl-E,
+        // Delete, and Shift+motion selection) are inert here and never
+        // mis-route into the string-only create form.
+        assert_eq!(
+            classify_management_input(key(KeyCode::Home, plain())),
+            Some(AppKey::CtrlA)
+        );
+        assert_eq!(classify_management_input(key(KeyCode::End, plain())), None);
+        assert_eq!(
+            classify_management_input(key(
+                KeyCode::Char('e'),
+                Modifiers {
+                    control: true,
+                    ..plain()
+                }
+            )),
+            None
+        );
+        assert_eq!(
+            classify_management_input(key(KeyCode::Delete, plain())),
+            None
+        );
+        assert_eq!(
+            classify_management_input(key(KeyCode::Home, shift())),
+            Some(AppKey::CtrlA),
+            "Shift+Home still resolves to the navigation action, not a selection"
+        );
+    }
+
     fn clone_form() -> NewForm {
         NewForm {
             repository: " https://example.com/acme/app.git ".to_owned(),
