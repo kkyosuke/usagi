@@ -220,6 +220,15 @@ pub struct DaemonMetrics {
     pub resident_memory_bytes: u64,
     pub active_subscribers: u32,
     pub dropped_updates: u64,
+    /// PTY output trimmed from the bounded retention window.
+    #[serde(default)]
+    pub terminal_dropped_bytes: u64,
+    /// PTY output merged before registry admission.
+    #[serde(default)]
+    pub terminal_coalesced_bytes: u64,
+    /// PTY output bytes whose reader had to wait for bounded queue capacity.
+    #[serde(default)]
+    pub terminal_backpressured_bytes: u64,
 }
 
 /// Product-neutral Agent launch intent sent by a TUI client.
@@ -589,12 +598,18 @@ mod metrics_schema_tests {
             "cpu_percent_hundredths": 123,
             "resident_memory_bytes": 456,
             "active_subscribers": 2,
-            "dropped_updates": 3
+            "dropped_updates": 3,
+            "terminal_dropped_bytes": 4,
+            "terminal_coalesced_bytes": 5,
+            "terminal_backpressured_bytes": 6
         }))
         .unwrap();
         assert_eq!(snapshot.schema_version, 1);
         assert_eq!(snapshot.cpu_percent_hundredths, 123);
         assert_eq!(snapshot.resident_memory_bytes, 456);
+        assert_eq!(snapshot.terminal_dropped_bytes, 4);
+        assert_eq!(snapshot.terminal_coalesced_bytes, 5);
+        assert_eq!(snapshot.terminal_backpressured_bytes, 6);
 
         let legacy_snapshot: DaemonMetrics = serde_json::from_value(serde_json::json!({
             "schema_version": 1,
@@ -605,6 +620,9 @@ mod metrics_schema_tests {
         .unwrap();
         assert_eq!(legacy_snapshot.cpu_percent_hundredths, 0);
         assert_eq!(legacy_snapshot.resident_memory_bytes, 0);
+        assert_eq!(legacy_snapshot.terminal_dropped_bytes, 0);
+        assert_eq!(legacy_snapshot.terminal_coalesced_bytes, 0);
+        assert_eq!(legacy_snapshot.terminal_backpressured_bytes, 0);
     }
 }
 

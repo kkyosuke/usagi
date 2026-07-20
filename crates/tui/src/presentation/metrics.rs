@@ -175,6 +175,9 @@ mod tests {
             resident_memory_bytes: 45 * 1024 * 1024,
             active_subscribers: 3,
             dropped_updates: 0,
+            terminal_dropped_bytes: 0,
+            terminal_coalesced_bytes: 0,
+            terminal_backpressured_bytes: 0,
         }
     }
 
