@@ -299,7 +299,8 @@ mod tests {
     #[test]
     fn linux_plan_mounts_the_host_read_only_then_binds_allow_roots() {
         let root = PathBuf::from("/tmp/allowed");
-        let command = platform_command(&[root.clone()], &[OsString::from("true")]).unwrap();
+        let command =
+            platform_command(std::slice::from_ref(&root), &[OsString::from("true")]).unwrap();
         assert_eq!(command.program, Path::new("bwrap"));
         assert!(command.args.windows(3).any(|args| {
             args == [
