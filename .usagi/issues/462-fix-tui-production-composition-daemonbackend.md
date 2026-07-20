@@ -1,14 +1,14 @@
 ---
 number: 462
 title: fix(tui): production composition を DaemonBackend に一本化する
-status: in-progress
+status: done
 priority: high
 labels: [review, v2, tui, daemon, architecture]
 dependson: [406]
 related: [296, 314, 315, 316, 317, 319, 379, 405, 406]
 parent: 453
 created_at: 2026-07-20T12:06:20.366664+00:00
-updated_at: 2026-07-20T20:42:01.314984+00:00
+updated_at: 2026-07-20T21:23:40.069876+00:00
 ---
 
 ## 問題・影響
