@@ -122,7 +122,7 @@ pub struct PromptDelivery {
 /// One durable Agent operation, replayed identically on resend/reconnect.
 #[derive(Debug, Clone)]
 struct AgentOperation {
-    semantic_key: String,
+    semantic_key: Option<String>,
     outcome: Result<AgentAdmission, ProtocolError>,
 }
 
@@ -261,6 +261,55 @@ impl<S, P, J, L> AgentRuntime<S, P, J, L> {
             operations: BTreeMap::new(),
             mcp_callers: BTreeMap::new(),
         }
+    }
+
+    /// Constructs the runtime only after a reconciled durable snapshot has
+    /// been validated and loaded. No admission path is available on failure.
+    pub fn hydrate_with_dispatch_and_locator(
+        generation: DaemonGeneration,
+        registry: AdapterRegistry,
+        store: S,
+        journal: J,
+        pty: P,
+        default_profile: AgentProfileId,
+        geometry: Geometry,
+        dispatch: DispatchStore,
+        locator: L,
+        snapshot: super::runtime::RuntimeStoreSnapshot,
+    ) -> Result<Self, super::runtime::RuntimeSnapshotError> {
+        let coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64)?;
+        let operations = coordinator
+            .snapshot()
+            .records
+            .into_iter()
+            .map(|record| {
+                let operation_id = record.operation.operation_id.to_string();
+                let outcome = durable_operation_outcome(&record);
+                (
+                    operation_id,
+                    AgentOperation {
+                        semantic_key: record.semantic_key,
+                        outcome,
+                    },
+                )
+            })
+            .collect();
+        Ok(Self {
+            generation,
+            coordinator,
+            orchestrator: Orchestrator::new(),
+            registry,
+            store,
+            journal,
+            pty,
+            default_profile,
+            geometry,
+            dispatch,
+            locator,
+            operations,
+            // Credentials intentionally fail closed across daemon restart.
+            mcp_callers: BTreeMap::new(),
+        })
     }
 
     /// Returns the durable outcome of a previously admitted operation, so a
@@ -409,7 +458,11 @@ impl<
     ) -> Result<AgentAdmission, ProtocolError> {
         let semantic_key = semantic_key(intent);
         if let Some(existing) = self.operations.get(operation_id) {
-            if existing.semantic_key != semantic_key {
+            if existing
+                .semantic_key
+                .as_ref()
+                .is_some_and(|key| key != &semantic_key)
+            {
                 return Err(ProtocolError::new(
                     ErrorCode::IdempotencyConflict,
                     "operation id was reused with a different agent launch",
@@ -421,7 +474,7 @@ impl<
         self.operations.insert(
             operation_id.to_owned(),
             AgentOperation {
-                semantic_key,
+                semantic_key: Some(semantic_key),
                 outcome: outcome.clone(),
             },
         );
@@ -470,6 +523,28 @@ impl<
                 "dispatch agent does not belong to session",
             ));
         }
+        let launch = AgentLaunchIntent {
+            workspace: intent.workspace,
+            session: Some(session),
+            profile: Some(worker.runtime.clone()),
+        };
+        let semantic = format!(
+            "dispatch:{}:{}:{}",
+            intent.session_name, worker.agent_id, intent.prompt
+        );
+        if let Some(existing) = self.operations.get(operation_id) {
+            if existing
+                .semantic_key
+                .as_ref()
+                .is_some_and(|key| key != &semantic)
+            {
+                return Err(ProtocolError::new(
+                    ErrorCode::IdempotencyConflict,
+                    "operation id was reused with a different dispatch",
+                ));
+            }
+            return existing.outcome.clone();
+        }
         if matches!(intent.agent, DispatchAgentIntent::New { .. }) {
             let config = WorkspaceAgentConfig::read(
                 &scope
@@ -490,36 +565,19 @@ impl<
                 ));
             }
         }
-        let launch = AgentLaunchIntent {
-            workspace: intent.workspace,
-            session: Some(session),
-            profile: Some(worker.runtime.clone()),
-        };
-        let semantic = format!(
-            "dispatch:{}:{}:{}",
-            intent.session_name, worker.agent_id, intent.prompt
-        );
-        if let Some(existing) = self.operations.get(operation_id) {
-            if existing.semantic_key != semantic {
-                return Err(ProtocolError::new(
-                    ErrorCode::IdempotencyConflict,
-                    "operation id was reused with a different dispatch",
-                ));
-            }
-            return existing.outcome.clone();
-        }
         let outcome = self.admit_dispatch(
             operation,
             &launch,
             &intent.prompt,
             &worker,
             &intent.caller,
+            &semantic,
             scope,
         );
         self.operations.insert(
             operation_id.to_owned(),
             AgentOperation {
-                semantic_key: semantic,
+                semantic_key: Some(semantic),
                 outcome: outcome.clone(),
             },
         );
@@ -533,6 +591,7 @@ impl<
         prompt: &str,
         worker: &usagi_core::domain::agent::Agent,
         caller: &CallerRef,
+        semantic_key: &str,
         scope: &R,
     ) -> Result<AgentAdmission, ProtocolError> {
         let resolved = scope
@@ -578,7 +637,7 @@ impl<
         };
         let credential = OperationId::new().to_string();
         self.orchestrator
-            .launch(
+            .launch_with_semantic(
                 &mut self.coordinator,
                 &mut self.registry,
                 &authorization,
@@ -587,6 +646,7 @@ impl<
                 &mut self.store,
                 &mut self.pty,
                 Some(credential.clone()),
+                semantic_key.to_owned(),
             )
             .map_err(map_orchestration_error)?;
         self.dispatch
@@ -694,7 +754,7 @@ impl<
         };
         let credential = OperationId::new().to_string();
         self.orchestrator
-            .launch(
+            .launch_with_semantic(
                 &mut self.coordinator,
                 &mut self.registry,
                 &authorization,
@@ -703,6 +763,11 @@ impl<
                 &mut self.store,
                 &mut self.pty,
                 Some(credential.clone()),
+                semantic_key(&AgentLaunchIntent {
+                    workspace: intent.workspace,
+                    session: intent.session,
+                    profile: intent.profile.clone(),
+                }),
             )
             .map_err(map_orchestration_error)?;
         if queued.is_some() {
@@ -1186,6 +1251,38 @@ fn semantic_key(intent: &AgentLaunchIntent) -> String {
     )
 }
 
+fn durable_operation_outcome(
+    record: &super::runtime::DurableRuntimeRecord,
+) -> Result<AgentAdmission, ProtocolError> {
+    use super::runtime::DurableOperationOutcome;
+    match record.outcome {
+        DurableOperationOutcome::Accepted => Ok(AgentAdmission {
+            operation_id: record.operation.operation_id.to_string(),
+            revision: 1,
+            terminal: record.runtime.terminal.clone(),
+            completed: false,
+        }),
+        DurableOperationOutcome::Completed => Ok(AgentAdmission {
+            operation_id: record.operation.operation_id.to_string(),
+            revision: 1,
+            terminal: record.runtime.terminal.clone(),
+            completed: true,
+        }),
+        DurableOperationOutcome::SpawnUnavailable => Err(ProtocolError::new(
+            ErrorCode::Unavailable,
+            "agent process could not be started",
+        )),
+        DurableOperationOutcome::ExitUnavailable => Err(ProtocolError::new(
+            ErrorCode::Unavailable,
+            "agent process ended unsuccessfully; inspect the attached terminal output",
+        )),
+        DurableOperationOutcome::OwnershipUnknown => Err(ProtocolError::new(
+            ErrorCode::OwnershipUnknown,
+            "agent process ownership is unknown after daemon restart",
+        )),
+    }
+}
+
 fn terminal_geometry(
     geometry: usagi_core::usecase::client::TerminalGeometry,
 ) -> Result<Geometry, ProtocolError> {
@@ -1283,6 +1380,10 @@ fn map_runtime_error(error: RuntimeError) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    };
 
     use super::*;
     use crate::usecase::{
@@ -1305,6 +1406,15 @@ mod tests {
     struct Store {
         saves: usize,
         fail_after: Option<usize>,
+    }
+
+    #[derive(Clone)]
+    struct FileStore(PathBuf);
+    impl RuntimeStore for FileStore {
+        type Error = std::io::Error;
+        fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), Self::Error> {
+            std::fs::write(&self.0, serde_json::to_vec(&snapshot)?)
+        }
     }
     impl RuntimeStore for Store {
         type Error = ();
@@ -1365,6 +1475,32 @@ mod tests {
         }
         fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
             self.writes.extend_from_slice(bytes);
+            Ok(())
+        }
+    }
+
+    struct CountingPty(Arc<AtomicU32>);
+    impl PtySpawner for CountingPty {
+        fn spawn(
+            &mut self,
+            _: &DurableLaunchSnapshot,
+            _: &SpawnProvision,
+            _: &TerminalRef,
+        ) -> Result<ProcessIdentity, SpawnFailure> {
+            let count = self.0.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(ProcessIdentity {
+                pid: count,
+                start_identity: format!("fake-agent-{count}"),
+                process_group: count,
+            })
+        }
+    }
+    impl PtyWriter for CountingPty {
+        fn select_terminal(&mut self, _: &TerminalRef) {}
+        fn resize(&mut self, _: &TerminalRef, _: Geometry) -> Result<(), PtyWriteError> {
+            Ok(())
+        }
+        fn write_all(&mut self, _: &[u8]) -> Result<(), PtyWriteError> {
             Ok(())
         }
     }
@@ -1510,6 +1646,186 @@ mod tests {
     }
 
     // ---- tests ---------------------------------------------------------------
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One restart scenario keeps the two runtime instances and shared file visibly ordered.
+    fn restart_hydrates_file_snapshot_before_dispatch_admission_and_preserves_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot_path = dir.path().join("agents.json");
+        let dispatch_dir = dir.path().join("dispatch");
+        let executable_dir = tempfile::tempdir().unwrap();
+        std::fs::write(executable_dir.path().join("claude"), "fixture").unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let resolved = configured_scope(worktree.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let caller = CallerRef {
+            session_id: Some(SessionId::new()),
+            agent_id: usagi_core::domain::id::AgentId::new(),
+        };
+        let dispatch_intent = |prompt: &str| DispatchIntent {
+            workspace,
+            session_name: "worker".into(),
+            caller: caller.clone(),
+            agent: DispatchAgentIntent::New {
+                runtime: AgentProfileId::new("claude").unwrap(),
+                model: usagi_core::domain::agent::ModelSelector::new("test").unwrap(),
+            },
+            prompt: prompt.into(),
+        };
+        let spawns = Arc::new(AtomicU32::new(0));
+        let make_fresh = || {
+            AgentRuntime::with_dispatch_and_locator(
+                DaemonGeneration::new(),
+                claude_registry(),
+                FileStore(snapshot_path.clone()),
+                Journal::default(),
+                CountingPty(Arc::clone(&spawns)),
+                AgentProfileId::new("claude").unwrap(),
+                Geometry { cols: 80, rows: 24 },
+                DispatchStore::new(dispatch_dir.clone()),
+                FixtureLocator(executable_dir.path().to_path_buf()),
+            )
+        };
+        let mut first = make_fresh();
+        let successful = OperationId::new().to_string();
+        let success_terminal = first
+            .dispatch(
+                &successful,
+                &dispatch_intent("success"),
+                session,
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap()
+            .terminal;
+        first.exit(&success_terminal, 0).unwrap();
+        let unsuccessful = OperationId::new().to_string();
+        let failed_terminal = first
+            .dispatch(
+                &unsuccessful,
+                &dispatch_intent("failure"),
+                session,
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap()
+            .terminal;
+        first.exit(&failed_terminal, 17).unwrap();
+        let interrupted = OperationId::new().to_string();
+        first
+            .dispatch(
+                &interrupted,
+                &dispatch_intent("pending"),
+                session,
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap();
+        let old_credential = first.mcp_callers.keys().next().unwrap().clone();
+        assert_eq!(spawns.load(Ordering::SeqCst), 3);
+        drop(first);
+
+        let loaded: RuntimeStoreSnapshot =
+            serde_json::from_slice(&std::fs::read(&snapshot_path).unwrap()).unwrap();
+        loaded.validate_schema().unwrap();
+        let (reconciled, count) = loaded.reconcile_after_daemon_restart();
+        assert_eq!(count, 1);
+        FileStore(snapshot_path.clone())
+            .save(reconciled.clone())
+            .unwrap();
+        let mut second = AgentRuntime::hydrate_with_dispatch_and_locator(
+            DaemonGeneration::new(),
+            claude_registry(),
+            FileStore(snapshot_path.clone()),
+            Journal::default(),
+            CountingPty(Arc::clone(&spawns)),
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+            DispatchStore::new(dispatch_dir),
+            FixtureLocator(executable_dir.path().to_path_buf()),
+            reconciled,
+        )
+        .unwrap();
+
+        // Replay is resolved before current admission checks; the executable
+        // disappearing after restart cannot turn a durable final into a new
+        // launch failure (or authorize a replacement spawn).
+        std::fs::remove_file(executable_dir.path().join("claude")).unwrap();
+        let replay = second
+            .dispatch(
+                &successful,
+                &dispatch_intent("success"),
+                session,
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap();
+        assert!(replay.completed);
+        assert_eq!(replay.terminal, success_terminal);
+        assert_eq!(
+            second
+                .dispatch(
+                    &unsuccessful,
+                    &dispatch_intent("failure"),
+                    session,
+                    &FakeScope(Ok(resolved.clone())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::Unavailable
+        );
+        assert_eq!(
+            second
+                .dispatch(
+                    &interrupted,
+                    &dispatch_intent("pending"),
+                    session,
+                    &FakeScope(Ok(resolved.clone())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+        assert_eq!(
+            second
+                .dispatch(
+                    &successful,
+                    &dispatch_intent("different"),
+                    session,
+                    &FakeScope(Ok(resolved.clone())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::IdempotencyConflict
+        );
+        assert_eq!(spawns.load(Ordering::SeqCst), 3);
+        assert!(second.mcp_caller(&old_credential).is_none());
+        let inventory = second.coordinator.inventory(
+            &usagi_core::domain::terminal_launch::TerminalLaunchScope {
+                workspace_id: workspace,
+                session_id: Some(session),
+                worktree_id: resolved.worktree_id,
+            },
+        );
+        assert!(inventory.iter().all(|entry| !entry.live));
+
+        second
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(session),
+                    profile: Some(AgentProfileId::new("claude").unwrap()),
+                },
+                &FakeScope(Ok(resolved)),
+            )
+            .unwrap();
+        assert_eq!(spawns.load(Ordering::SeqCst), 4);
+        let saved: RuntimeStoreSnapshot =
+            serde_json::from_slice(&std::fs::read(snapshot_path).unwrap()).unwrap();
+        assert_eq!(saved.records.len(), 4);
+        assert!(saved.records.iter().any(|record| {
+            record.operation.operation_id.to_string() == successful
+                && record.outcome == super::super::runtime::DurableOperationOutcome::Completed
+        }));
+    }
 
     #[test]
     fn queued_prompt_is_consumed_by_launch_and_auto_then_delivers_live() {

@@ -1,14 +1,14 @@
 ---
 number: 458
 title: fix(daemon): Agent runtime と operation ledger を restart 時に hydrate する
-status: todo
+status: done
 priority: high
 labels: [review, v2, daemon, agent, durability]
 dependson: []
 related: [209, 251, 271, 283, 311, 350, 386, 402, 460]
 parent: 453
 created_at: 2026-07-20T12:06:19.000658+00:00
-updated_at: 2026-07-20T12:35:29.639277+00:00
+updated_at: 2026-07-20T13:26:39.613193+00:00
 ---
 
 ## 問題・影響

@@ -34,11 +34,49 @@ pub struct DurableRuntimeRecord {
     pub launch: DurableLaunchSnapshot,
     pub state: RuntimeState,
     pub process: Option<ProcessIdentity>,
+    /// Canonical caller intent used to reject operation-id reuse after restart.
+    /// Legacy snapshots omit it and are therefore replayed only as a safe,
+    /// non-spawnable failure.
+    #[serde(default)]
+    pub semantic_key: Option<String>,
+    /// Safe public operation result. Private process output and credentials are
+    /// deliberately absent from the durable form.
+    #[serde(default)]
+    pub outcome: DurableOperationOutcome,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DurableOperationOutcome {
+    #[default]
+    Accepted,
+    Completed,
+    SpawnUnavailable,
+    ExitUnavailable,
+    OwnershipUnknown,
+}
+
+const RUNTIME_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeStoreSnapshot {
+    #[serde(default = "legacy_runtime_snapshot_version")]
+    pub schema_version: u32,
     pub records: Vec<DurableRuntimeRecord>,
+}
+
+const fn legacy_runtime_snapshot_version() -> u32 {
+    1
+}
+
+impl Default for RuntimeStoreSnapshot {
+    fn default() -> Self {
+        Self {
+            schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+            records: Vec::new(),
+        }
+    }
 }
 
 impl RuntimeStoreSnapshot {
@@ -59,11 +97,32 @@ impl RuntimeStoreSnapshot {
                 RuntimeState::Reserved | RuntimeState::Running | RuntimeState::ReconcileRequired(_)
             ) {
                 record.state = RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown);
+                record.outcome = DurableOperationOutcome::OwnershipUnknown;
                 interrupted += 1;
             }
+            if self.schema_version == 1 && record.semantic_key.is_none() {
+                record.outcome = DurableOperationOutcome::OwnershipUnknown;
+            }
         }
+        self.schema_version = RUNTIME_SNAPSHOT_SCHEMA_VERSION;
         (self, interrupted)
     }
+
+    pub fn validate_schema(&self) -> Result<(), RuntimeSnapshotError> {
+        if matches!(self.schema_version, 1 | RUNTIME_SNAPSHOT_SCHEMA_VERSION) {
+            Ok(())
+        } else {
+            Err(RuntimeSnapshotError::UnknownSchema(self.schema_version))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeSnapshotError {
+    UnknownSchema(u32),
+    DuplicateRuntime,
+    DuplicateOperation,
+    ScopeMismatch,
 }
 
 pub trait RuntimeStore {
@@ -234,6 +293,20 @@ impl RuntimeCoordinator {
         }
     }
 
+    pub fn hydrate(
+        snapshot: RuntimeStoreSnapshot,
+        limit: usize,
+        journal_limit: usize,
+        input_cache_limit: usize,
+    ) -> Result<Self, RuntimeSnapshotError> {
+        let records = hydrated_records(snapshot)?;
+        Ok(Self {
+            limit,
+            records,
+            terminals: TerminalRegistry::new(journal_limit, input_cache_limit),
+        })
+    }
+
     #[coverage(off)]
     pub fn launch<A: AgentAdapter + ?Sized, S: RuntimeStore, P: PtySpawner>(
         &mut self,
@@ -245,6 +318,34 @@ impl RuntimeCoordinator {
         store: &mut S,
         spawner: &mut P,
         mcp_credential: Option<String>,
+    ) -> Result<(), RuntimeError> {
+        self.launch_with_semantic(
+            request,
+            runtime,
+            operation,
+            geometry,
+            adapter,
+            store,
+            spawner,
+            mcp_credential,
+            "internal-launch".to_owned(),
+        )
+    }
+
+    // LLVM counts this generic orchestration once per downstream adapter/store/spawner
+    // monomorphization. Unit and real-file restart tests cover the shared behavior.
+    #[coverage(off)]
+    pub fn launch_with_semantic<A: AgentAdapter + ?Sized, S: RuntimeStore, P: PtySpawner>(
+        &mut self,
+        request: &LaunchRequest,
+        runtime: AgentRuntimeRef,
+        operation: CompletionFence,
+        geometry: Geometry,
+        adapter: &mut A,
+        store: &mut S,
+        spawner: &mut P,
+        mcp_credential: Option<String>,
+        semantic_key: String,
     ) -> Result<(), RuntimeError> {
         self.validate_scope(&runtime, &operation)?;
         let key = runtime.agent_runtime_id.as_str();
@@ -279,6 +380,8 @@ impl RuntimeCoordinator {
                 launch,
                 state: RuntimeState::Reserved,
                 process: None,
+                semantic_key: Some(semantic_key),
+                outcome: DurableOperationOutcome::Accepted,
             },
         );
         self.persist(store)?; // durable reservation/snapshot precedes every external effect
@@ -306,13 +409,17 @@ impl RuntimeCoordinator {
                 Ok(())
             }
             Err(SpawnFailure::Definite) => {
-                self.records.get_mut(&key).expect("inserted").state = RuntimeState::SpawnFailed;
+                let record = self.records.get_mut(&key).expect("inserted");
+                record.state = RuntimeState::SpawnFailed;
+                record.outcome = DurableOperationOutcome::SpawnUnavailable;
                 self.persist(store)?;
                 Err(RuntimeError::SpawnFailed)
             }
             Err(SpawnFailure::Ambiguous) => {
                 self.records.get_mut(&key).expect("inserted").state =
                     RuntimeState::ReconcileRequired(ReconcileState::SpawnAmbiguous);
+                self.records.get_mut(&key).expect("inserted").outcome =
+                    DurableOperationOutcome::OwnershipUnknown;
                 self.persist(store)?;
                 Err(RuntimeError::ReconcileRequired(
                     ReconcileState::SpawnAmbiguous,
@@ -360,6 +467,11 @@ impl RuntimeCoordinator {
             .exited(&runtime.terminal, status)
             .map_err(RuntimeError::Terminal)?;
         self.record_mut(runtime)?.state = RuntimeState::Exited;
+        self.record_mut(runtime)?.outcome = if status == 0 {
+            DurableOperationOutcome::Completed
+        } else {
+            DurableOperationOutcome::ExitUnavailable
+        };
         if self.persist(store).is_err() {
             self.record_mut(runtime)?.state =
                 RuntimeState::ReconcileRequired(ReconcileState::PersistAfterExit);
@@ -526,6 +638,7 @@ impl RuntimeCoordinator {
     #[coverage(off)]
     pub fn snapshot(&self) -> RuntimeStoreSnapshot {
         RuntimeStoreSnapshot {
+            schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
             records: self.records.values().cloned().collect(),
         }
     }
@@ -588,6 +701,34 @@ impl RuntimeCoordinator {
     }
 }
 
+#[inline(never)]
+fn hydrated_records(
+    snapshot: RuntimeStoreSnapshot,
+) -> Result<BTreeMap<String, DurableRuntimeRecord>, RuntimeSnapshotError> {
+    snapshot.validate_schema()?;
+    let mut records = BTreeMap::new();
+    let mut operations = std::collections::BTreeSet::new();
+    for record in snapshot.records {
+        if record.runtime.terminal.session_id != record.runtime.session_id
+            || record.runtime.session_id != record.operation.session_id
+            || record.runtime.terminal.workspace_id != record.operation.workspace_id
+            || record.runtime.terminal.daemon_generation != record.operation.owner_daemon_generation
+        {
+            return Err(RuntimeSnapshotError::ScopeMismatch);
+        }
+        if !operations.insert(record.operation.operation_id) {
+            return Err(RuntimeSnapshotError::DuplicateOperation);
+        }
+        if records
+            .insert(record.runtime.agent_runtime_id.as_str(), record)
+            .is_some()
+        {
+            return Err(RuntimeSnapshotError::DuplicateRuntime);
+        }
+    }
+    Ok(records)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,6 +747,21 @@ mod tests {
         fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
             self.0.push(snapshot);
             Ok(())
+        }
+    }
+    struct ConditionalStore {
+        saves: usize,
+        fail_after: Option<usize>,
+    }
+    impl RuntimeStore for ConditionalStore {
+        type Error = ();
+        fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
+            self.saves += 1;
+            if self.fail_after.is_some_and(|limit| self.saves > limit) {
+                Err(())
+            } else {
+                Ok(())
+            }
         }
     }
     struct FailingStore(usize);
@@ -712,6 +868,7 @@ mod tests {
         let (runtime, operation) = refs(&request);
         let launch = Resolver { calls: 0 }.resolve(&request).unwrap().snapshot;
         let snapshot = RuntimeStoreSnapshot {
+            schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
             records: vec![
                 DurableRuntimeRecord {
                     runtime: runtime.clone(),
@@ -719,6 +876,8 @@ mod tests {
                     launch: launch.clone(),
                     state: RuntimeState::Running,
                     process: Some(process()),
+                    semantic_key: Some("first".into()),
+                    outcome: DurableOperationOutcome::Accepted,
                 },
                 DurableRuntimeRecord {
                     runtime,
@@ -726,6 +885,8 @@ mod tests {
                     launch,
                     state: RuntimeState::Exited,
                     process: Some(process()),
+                    semantic_key: Some("second".into()),
+                    outcome: DurableOperationOutcome::Completed,
                 },
             ],
         };
@@ -738,6 +899,149 @@ mod tests {
             RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown)
         );
         assert_eq!(reconciled.records[1].state, RuntimeState::Exited);
+    }
+
+    #[test]
+    fn hydrate_validates_schema_identity_and_legacy_outcomes() {
+        assert_eq!(
+            RuntimeStoreSnapshot::default(),
+            RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: Vec::new(),
+            }
+        );
+        assert_eq!(
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: 99,
+                records: Vec::new(),
+            })
+            .unwrap_err(),
+            RuntimeSnapshotError::UnknownSchema(99)
+        );
+
+        let request = request();
+        let (runtime, operation) = refs(&request);
+        let launch = Resolver::default().resolve(&request).unwrap().snapshot;
+        let record = DurableRuntimeRecord {
+            runtime,
+            operation,
+            launch,
+            state: RuntimeState::Exited,
+            process: Some(process()),
+            semantic_key: Some("intent".into()),
+            outcome: DurableOperationOutcome::Completed,
+        };
+        assert_eq!(
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![record.clone()],
+            })
+            .unwrap()
+            .len(),
+            1
+        );
+
+        let mut mismatched = record.clone();
+        mismatched.operation.workspace_id = WorkspaceId::new();
+        assert_eq!(
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![mismatched],
+            })
+            .unwrap_err(),
+            RuntimeSnapshotError::ScopeMismatch
+        );
+
+        let mut same_runtime = record.clone();
+        same_runtime.operation.operation_id = OperationId::new();
+        assert_eq!(
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![record.clone(), same_runtime],
+            })
+            .unwrap_err(),
+            RuntimeSnapshotError::DuplicateRuntime
+        );
+
+        let (other_runtime, mut same_operation) = refs(&request);
+        same_operation.operation_id = record.operation.operation_id;
+        let duplicate_operation = DurableRuntimeRecord {
+            runtime: other_runtime,
+            operation: same_operation,
+            ..record.clone()
+        };
+        assert_eq!(
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![record.clone(), duplicate_operation],
+            })
+            .unwrap_err(),
+            RuntimeSnapshotError::DuplicateOperation
+        );
+
+        let mut legacy = record;
+        legacy.semantic_key = None;
+        legacy.outcome = DurableOperationOutcome::Accepted;
+        let legacy: RuntimeStoreSnapshot = serde_json::from_value(serde_json::json!({
+            "records": [legacy]
+        }))
+        .unwrap();
+        assert_eq!(legacy.schema_version, 1);
+        let (legacy, interrupted) = legacy.reconcile_after_daemon_restart();
+        assert_eq!(interrupted, 0);
+        assert_eq!(legacy.schema_version, RUNTIME_SNAPSHOT_SCHEMA_VERSION);
+        assert_eq!(
+            legacy.records[0].outcome,
+            DurableOperationOutcome::OwnershipUnknown
+        );
+    }
+
+    #[test]
+    fn durable_snapshot_schema_round_trips_every_safe_outcome_and_rejects_unknown_fields() {
+        let request = request();
+        let (runtime, operation) = refs(&request);
+        let launch = Resolver::default().resolve(&request).unwrap().snapshot;
+        for outcome in [
+            DurableOperationOutcome::Accepted,
+            DurableOperationOutcome::Completed,
+            DurableOperationOutcome::SpawnUnavailable,
+            DurableOperationOutcome::ExitUnavailable,
+            DurableOperationOutcome::OwnershipUnknown,
+        ] {
+            let snapshot = RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![DurableRuntimeRecord {
+                    runtime: runtime.clone(),
+                    operation: operation.clone(),
+                    launch: launch.clone(),
+                    state: RuntimeState::Exited,
+                    process: Some(process()),
+                    semantic_key: Some("intent".into()),
+                    outcome,
+                }],
+            };
+            assert_eq!(
+                serde_json::from_str::<RuntimeStoreSnapshot>(
+                    &serde_json::to_string(&snapshot).unwrap()
+                )
+                .unwrap(),
+                snapshot
+            );
+        }
+        assert!(
+            serde_json::from_value::<RuntimeStoreSnapshot>(serde_json::json!({
+                "schema_version": RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                "records": [],
+                "future_field": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<RuntimeStoreSnapshot>(serde_json::json!({
+                "schema_version": RUNTIME_SNAPSHOT_SCHEMA_VERSION
+            }))
+            .is_err()
+        );
     }
     fn launch<S: RuntimeStore>(
         coordinator: &mut RuntimeCoordinator,
@@ -1051,6 +1355,46 @@ mod tests {
             ),
             Err(RuntimeError::SpawnFailed)
         );
+
+        for failure in [SpawnFailure::Definite, SpawnFailure::Ambiguous] {
+            let successful_request = request();
+            let (runtime, fence) = refs(&successful_request);
+            let mut coordinator = RuntimeCoordinator::new(1, 64, 1);
+            let mut successful_store = ConditionalStore {
+                saves: 0,
+                fail_after: None,
+            };
+            assert!(
+                launch(
+                    &mut coordinator,
+                    &successful_request,
+                    runtime,
+                    fence,
+                    &mut Spawner(Err(failure)),
+                    &mut successful_store,
+                )
+                .is_err()
+            );
+
+            let failing_request = request();
+            let (runtime, fence) = refs(&failing_request);
+            let mut coordinator = RuntimeCoordinator::new(1, 64, 1);
+            let mut failing_store = ConditionalStore {
+                saves: 0,
+                fail_after: Some(1),
+            };
+            assert_eq!(
+                launch(
+                    &mut coordinator,
+                    &failing_request,
+                    runtime,
+                    fence,
+                    &mut Spawner(Err(failure)),
+                    &mut failing_store,
+                ),
+                Err(RuntimeError::Store)
+            );
+        }
 
         let persisted_request = request();
         let (runtime, fence) = refs(&persisted_request);
