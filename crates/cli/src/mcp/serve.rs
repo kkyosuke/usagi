@@ -5,6 +5,7 @@
 //! `handle_line`（str → 応答文字列 or なし）に純粋なルーティングを閉じ込め、`serve` は
 //! 実 IO（stdin/stdout）の反復だけを担う。実 IO は合成ルートが注入するため、ルーティングは
 //! ユニットテストできる。`tools/call` は実装済み tool を対応する store / daemon 経路へ送り、
+//! issue / memory は cwd の core store usecase、session 系は daemon client へ接続し、
 //! tool 個別または daemon のエラーを JSON-RPC エラーへ変換する。
 
 use std::io::{self, BufRead, Write};
@@ -301,14 +302,28 @@ fn tools_call(
             Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
         };
     }
+    store_tool_call(id, name, &arguments)
+}
+
+#[coverage(off)]
+fn store_tool_call(id: Value, name: &str, arguments: &Value) -> Value {
     match dispatch(name, &arguments.to_string()) {
+        Ok(result) => protocol::success(
+            id,
+            json!({"content":[{"type":"text","text":result}], "isError": false}),
+        ),
         Err(ToolError::UnknownTool(tool)) => protocol::error(
             id,
             error_code::METHOD_NOT_FOUND,
             &format!("unknown tool: {tool}"),
         ),
-        // 全 tool が未実装スタブ。将来 Ok(result) を返す tool は MCP の content に包む。
-        _ => protocol::error(
+        Err(ToolError::InvalidParams(message)) => {
+            protocol::error(id, error_code::INVALID_PARAMS, &message)
+        }
+        Err(ToolError::Execution(message)) => {
+            protocol::error(id, error_code::INTERNAL_ERROR, &message)
+        }
+        Err(ToolError::Unimplemented(_)) => protocol::error(
             id,
             error_code::INTERNAL_ERROR,
             &format!("tool not yet implemented: {name}"),
@@ -449,14 +464,24 @@ mod tests {
     }
 
     #[test]
-    fn tools_call_known_tool_reports_unimplemented() {
-        let v = call(r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"issue_create","arguments":{"title":"x"}}}"#).unwrap();
-        assert_eq!(v["error"]["code"], -32603);
+    fn tools_call_store_tool_returns_content() {
+        let v = call(r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"issue_get","arguments":{"number":4294967295}}}"#).unwrap();
+        assert_eq!(v["result"]["content"][0]["text"], "null");
+        assert_eq!(v["result"]["isError"], false);
+    }
+
+    #[test]
+    fn tools_call_store_tool_maps_invalid_arguments_and_execution_errors() {
+        let invalid = call(r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"issue_get","arguments":{}}}"#).unwrap();
+        assert_eq!(invalid["error"]["code"], -32602);
+
+        let missing = call(r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"issue_to_prompt","arguments":{"number":4294967295}}}"#).unwrap();
+        assert_eq!(missing["error"]["code"], -32603);
         assert!(
-            v["error"]["message"]
+            missing["error"]["message"]
                 .as_str()
                 .unwrap()
-                .contains("issue_create")
+                .contains("no issue")
         );
     }
 

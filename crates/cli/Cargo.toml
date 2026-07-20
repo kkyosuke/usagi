@@ -18,6 +18,9 @@ clap_complete.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 toml.workspace = true
+# MCP store adapters bind the production clock and translate core usecase errors.
+chrono.workspace = true
+anyhow.workspace = true
 
 [dev-dependencies]
 # update のテストで GitRunner のフェイクを書くため（seam の戻り値が anyhow::Result）。

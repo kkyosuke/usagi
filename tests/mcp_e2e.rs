@@ -46,17 +46,65 @@ fn production_session_create_reaches_daemon_and_durable_lifecycle() {
 }
 
 #[test]
-fn production_store_call_is_an_explicit_error_until_store_wiring_exists() {
+fn production_issue_writes_are_refused_at_the_workspace_root() {
     let mut mcp = McpHarness::start();
-    let response = mcp.tool("issue_get", &json!({"number":1}));
-    assert_eq!(response["error"]["code"], -32603);
+    let read = mcp.tool("issue_get", &json!({"number":1}));
+    assert_eq!(read["result"]["content"][0]["text"], "null");
+    let write = mcp.tool("issue_create", &json!({"title":"refused"}));
+    assert_eq!(write["error"]["code"], -32603);
     assert!(
-        response["error"]["message"]
+        write["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("not yet implemented")
+            .contains("workspace root")
     );
     assert!(!mcp.workspace().join(".usagi/issues").exists());
+}
+
+#[test]
+fn production_store_tools_round_trip_through_stdio_and_durable_files() {
+    let mut mcp = McpHarness::start_in_session("store-e2e");
+    let created = tool_text(&mcp.tool(
+        "issue_create",
+        &json!({
+            "title":"MCP durable issue",
+            "priority":"high",
+            "labels":["mcp"],
+            "body":"round trip"
+        }),
+    ));
+    let fetched = tool_text(&mcp.tool("issue_get", &json!({"number":1})));
+    let found = tool_text(&mcp.tool(
+        "issue_search",
+        &json!({"query":"durable","label":"mcp","ready":true}),
+    ));
+    let saved = tool_text(&mcp.tool(
+        "memory_save",
+        &json!({
+            "name":"MCP Fact",
+            "title":"Durable fact",
+            "type":"project",
+            "body":"remember me"
+        }),
+    ));
+    let memory = tool_text(&mcp.tool("memory_get", &json!({"name":"mcp-fact"})));
+
+    assert_eq!(created["number"], 1);
+    assert_eq!(fetched["title"], "MCP durable issue");
+    assert_eq!(found[0]["ready"], true);
+    assert_eq!(saved["name"], "mcp-fact");
+    assert_eq!(memory["body"], "remember me");
+    assert!(
+        mcp.cwd()
+            .join(".usagi/issues/001-mcp-durable-issue.md")
+            .is_file()
+    );
+    assert!(mcp.cwd().join(".usagi/memory/mcp-fact.md").is_file());
+}
+
+fn tool_text(response: &serde_json::Value) -> serde_json::Value {
+    assert!(response.get("error").is_none(), "{response}");
+    serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
 }
 
 #[test]

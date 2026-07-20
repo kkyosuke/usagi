@@ -6,7 +6,6 @@
 //! session 系は usagi-core の IPC クライアント経由で daemon に委譲し、結果を JSON に
 //! 整形する（独自のビジネスロジックは持たない）。CLI のコマンドハンドラ
 //! （`crate::cli::commands`）は同じ core usecase を呼ぶ兄弟である。
-//! 現状は **tool 面の枠だけ**で、各 tool の `call` は既定のスタブのまま。
 
 pub mod issue;
 pub mod memory;
@@ -31,8 +30,8 @@ mod tests {
     use crate::mcp::tool::ToolError;
 
     /// 全 tool の IF メタデータが健全である（名前一意・説明非空・スキーマが JSON object・
-    /// 既定 `call` は未実装）。各 `Tool` の `name` / `description` / `input_schema` / `call` を
-    /// 一括で被覆する。診断メッセージは付けない（成功時に評価されず未被覆行になるため）。
+    /// session / supervisor の既定 `call` は未実装）。store tool は durable effect を持つため、
+    /// call の被覆は専用テストに委ねる。
     #[test]
     fn every_tool_has_valid_metadata() {
         let reg = registry();
@@ -48,7 +47,9 @@ mod tests {
             assert_eq!(schema["type"], "object");
             assert!(schema.get("properties").is_some());
 
-            assert!(matches!(tool.call("{}"), Err(ToolError::Unimplemented(n)) if n == name));
+            if !name.starts_with("issue_") && !name.starts_with("memory_") {
+                assert!(matches!(tool.call("{}"), Err(ToolError::Unimplemented(n)) if n == name));
+            }
         }
     }
 

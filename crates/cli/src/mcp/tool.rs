@@ -42,6 +42,10 @@ pub enum ToolError {
     UnknownTool(String),
     /// tool の枠だけがあり、中身が未実装。
     Unimplemented(&'static str),
+    /// tool の JSON 引数が wire 契約に合わない。
+    InvalidParams(String),
+    /// tool の usecase または永続化処理が失敗した。
+    Execution(String),
 }
 
 impl fmt::Display for ToolError {
@@ -49,6 +53,9 @@ impl fmt::Display for ToolError {
         match self {
             ToolError::UnknownTool(name) => write!(f, "unknown tool `{name}`"),
             ToolError::Unimplemented(name) => write!(f, "tool `{name}` is not yet implemented"),
+            ToolError::InvalidParams(message) | ToolError::Execution(message) => {
+                f.write_str(message)
+            }
         }
     }
 }
@@ -68,6 +75,14 @@ mod tests {
         assert_eq!(
             ToolError::Unimplemented("issue_create").to_string(),
             "tool `issue_create` is not yet implemented"
+        );
+        assert_eq!(
+            ToolError::InvalidParams("bad arguments".into()).to_string(),
+            "bad arguments"
+        );
+        assert_eq!(
+            ToolError::Execution("store failed".into()).to_string(),
+            "store failed"
         );
     }
 

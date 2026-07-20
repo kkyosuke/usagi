@@ -1,14 +1,14 @@
 ---
 number: 404
 title: usagi mcp: issue/memory の store 系 tool を core usecase に接続する
-status: todo
+status: done
 priority: medium
 labels: [mcp]
 dependson: [401]
 related: []
 parent: 400
 created_at: 2026-07-20T04:54:15.169914+00:00
-updated_at: 2026-07-20T04:54:15.169914+00:00
+updated_at: 2026-07-20T08:17:04.714782+00:00
 ---
 
 親: #400。依存: #401。issue/memory の store 系 tool を、cwd の `.usagi/` を読み書きする core usecase に接続する（CLI コマンドと同じ usecase を呼ぶ兄弟実装）。
