@@ -79,6 +79,18 @@ submit は stable option ID または空でない許可済み freeform を送る
 残り、resolve error・disconnect・resync 後も snapshot で再試行可能な pending state に収束する。modal が開いて
 いる間は Home、Closeup、terminal の背景入力を dispatch しない。
 
+新しい pending decision を resync で観測すると、Home header の右上に `🔔 N notice` を表示し、その直下の
+banner に session identity（root は `workspace root`）と decision の title（summary）を表示する。ベルをクリックすると existing decision modal を
+開き、未読表示を既読にする。modal が前面の場合はベル・banner を含む背景入力を受け取らない。未読は TUI-local の
+stable decision ID 集合であり、同じ snapshot の replay、reconnect、resync は再び未読にしない。decision が
+resolve/cancel/expire で pending snapshot から消えると未読も消える。
+
+TUI は tick の resync で初回 snapshot 後に新規 ID を観測したときだけ desktop notification port を呼ぶ。通知本文は
+session identity と title のみで、prompt・option・freeform answer は OS notification に送らない。port の配信失敗は safe に
+無視し、TUI の banner / modal を継続する。合成ルートは macOS では `osascript`、Linux では `notify-send` を固定の
+実行ファイルと引数ベクトルで spawn する。その他の OS、実行ファイル不在、headless notification service の失敗は
+非対応として no-op である。
+
 Home 背景の dim は各 ANSI span の reset 後にも維持し、行末で必ず reset する。overlay は dim 済みの背景へ
 後から合成するため、modal 自身の style と可読性を優先する。
 

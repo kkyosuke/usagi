@@ -649,6 +649,7 @@ pub struct AppState {
     note_editor: Option<NoteEditor>,
     environment_editor: Option<EnvironmentEditor>,
     decisions: Vec<UserDecision>,
+    unread_decisions: std::collections::BTreeSet<UserDecisionId>,
     decision_overlay: Option<DecisionOverlayState>,
     pr_overlay: Option<PrOverlay>,
     preview_overlay: Option<PreviewOverlay>,
@@ -691,6 +692,7 @@ impl AppState {
             note_editor: None,
             environment_editor: None,
             decisions: Vec::new(),
+            unread_decisions: std::collections::BTreeSet::new(),
             decision_overlay: None,
             pr_overlay: None,
             preview_overlay: None,
@@ -763,6 +765,12 @@ impl AppState {
     #[coverage(off)]
     pub fn decisions(&self) -> &[UserDecision] {
         &self.decisions
+    }
+    /// Pending decisions the user has not opened from the notice centre yet.
+    #[must_use]
+    #[coverage(off)]
+    pub fn unread_decision_ids(&self) -> &std::collections::BTreeSet<UserDecisionId> {
+        &self.unread_decisions
     }
     /// Open decision list/editor state, if its overlay is visible.
     #[must_use]
@@ -2085,6 +2093,19 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                         && decision.status == UserDecisionStatus::Pending
                 })
                 .collect();
+            state.unread_decisions.retain(|id| {
+                state
+                    .decisions
+                    .iter()
+                    .any(|decision| decision.decision_id == *id)
+            });
+            state.unread_decisions.extend(
+                state
+                    .decisions
+                    .iter()
+                    .filter(|decision| !previously_known.contains(&decision.decision_id))
+                    .map(|decision| decision.decision_id),
+            );
             reconcile_decision_overlay(state);
             // A snapshot is authoritative, but must not repeatedly steal focus
             // after the user dismissed its already-known rows.  A first snapshot
@@ -2114,6 +2135,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state
                 .decisions
                 .retain(|decision| decision.decision_id != decision_id);
+            state.unread_decisions.remove(&decision_id);
             reconcile_decision_overlay(state);
             Vec::new()
         }
@@ -2585,6 +2607,7 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
 fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     match key {
         AppKey::OpenDecisions | AppKey::Char('d') => {
+            state.unread_decisions.clear();
             state.overlay = Some(Overlay::Decisions);
             state.decision_overlay = Some(DecisionOverlayState {
                 selected: 0,
@@ -5068,6 +5091,10 @@ mod tests {
                 decisions: vec![decision.clone()],
             }),
         );
+        assert_eq!(state.unread_decision_ids().len(), 1);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDecisions));
+        assert!(state.unread_decision_ids().is_empty());
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         assert_eq!(
             update(&mut state, AppEvent::Key(AppKey::SubmitDecision)),
@@ -5212,6 +5239,7 @@ mod tests {
         );
         assert_eq!(state.overlay(), Some(Overlay::Decisions));
         assert!(state.decision_overlay().is_some());
+        assert_eq!(state.unread_decision_ids().len(), 1);
 
         // Dismissal changes only UI state. A duplicate/resync snapshot must not
         // steal focus again, while a genuinely new pending row may notify.
