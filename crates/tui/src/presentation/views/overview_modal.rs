@@ -77,6 +77,12 @@ impl OverviewModal {
         self.input.cursor()
     }
 
+    /// 入力欄の選択範囲（正規化した `start..end` のバイト範囲）。選択なしは `None`。
+    #[must_use]
+    pub fn selection(&self) -> Option<(usize, usize)> {
+        self.input.selection()
+    }
+
     /// 選択中候補の添字（[`OverviewModal::matches`] 内）。
     #[must_use]
     pub fn selected(&self) -> usize {
@@ -232,14 +238,52 @@ impl OverviewModal {
         self.expanded = false;
     }
 
-    /// キャレットを 1 文字左へ。
+    /// キャレット位置の 1 文字を前方削除し、選択を先頭に戻す（候補集合が変わるため）。
+    pub fn delete_forward(&mut self) {
+        self.input.delete_forward();
+        self.selected = 0;
+        self.history_index = None;
+        self.expanded = false;
+    }
+
+    /// キャレットを 1 文字左へ。選択は解除する。
     pub fn cursor_left(&mut self) {
         self.input.move_left();
     }
 
-    /// キャレットを 1 文字右へ。
+    /// キャレットを 1 文字右へ。選択は解除する。
     pub fn cursor_right(&mut self) {
         self.input.move_right();
+    }
+
+    /// キャレットを行頭へ（Home / Ctrl-A）。選択は解除する。
+    pub fn cursor_home(&mut self) {
+        self.input.move_home();
+    }
+
+    /// キャレットを行末へ（End / Ctrl-E）。選択は解除する。
+    pub fn cursor_end(&mut self) {
+        self.input.move_end();
+    }
+
+    /// 選択をキャレットから 1 文字左へ広げる（`Shift`+`←`）。
+    pub fn select_left(&mut self) {
+        self.input.select_left();
+    }
+
+    /// 選択をキャレットから 1 文字右へ広げる（`Shift`+`→`）。
+    pub fn select_right(&mut self) {
+        self.input.select_right();
+    }
+
+    /// 選択を行頭まで広げる（`Shift`+`Home`）。
+    pub fn select_home(&mut self) {
+        self.input.select_home();
+    }
+
+    /// 選択を行末まで広げる（`Shift`+`End`）。
+    pub fn select_end(&mut self) {
+        self.input.select_end();
     }
 
     /// 選択を次の候補へ（末尾で先頭へ回り込む）。候補が無ければ何もしない。
@@ -302,7 +346,7 @@ fn hint_row(hint: overview::CommandInfo, selected: bool, inner: usize) -> String
 fn body(state: &OverviewModal) -> Vec<String> {
     let matches = state.matches();
     let mut lines = vec![
-        modal::prompt_line(state.input(), state.cursor()),
+        modal::prompt_line(state.input(), state.cursor(), state.selection()),
         String::new(),
     ];
     if matches.is_empty() {
@@ -639,6 +683,34 @@ mod tests {
         assert_eq!(modal.cursor(), 1);
         modal.cursor_right();
         assert_eq!(modal.cursor(), 2);
+    }
+
+    #[test]
+    fn home_end_and_selection_edit_the_palette_input() {
+        let mut modal = OverviewModal::new();
+        type_str(&mut modal, "issue");
+        modal.cursor_home();
+        assert_eq!(modal.cursor(), 0);
+        modal.cursor_end();
+        assert_eq!(modal.cursor(), 5);
+
+        // Shift+Home selects to the start; forward-delete drops the whole range.
+        modal.select_home();
+        assert_eq!(modal.selection(), Some((0, 5)));
+        modal.delete_forward();
+        assert_eq!(modal.input(), "");
+        assert_eq!(modal.selection(), None);
+        assert_eq!(modal.selected(), 0);
+
+        // select_left / select_right / select_end extend from the caret.
+        type_str(&mut modal, "abc");
+        modal.cursor_home();
+        modal.select_right();
+        assert_eq!(modal.selection(), Some((0, 1)));
+        modal.select_end();
+        assert_eq!(modal.selection(), Some((0, 3)));
+        modal.select_left();
+        assert_eq!(modal.selection(), Some((0, 2)));
     }
 
     #[test]

@@ -181,6 +181,49 @@ impl Open {
         self.filter.move_right();
     }
 
+    /// Move the filter caret to the start of the line (Home / Ctrl-A).
+    #[coverage(off)]
+    pub fn filter_home(&mut self) {
+        self.filter.move_home();
+    }
+
+    /// Move the filter caret to the end of the line (End / Ctrl-E).
+    #[coverage(off)]
+    pub fn filter_end(&mut self) {
+        self.filter.move_end();
+    }
+
+    /// Forward-delete at the filter caret (Delete), returning to the first hit.
+    #[coverage(off)]
+    pub fn filter_delete_forward(&mut self) {
+        self.filter.delete_forward();
+        self.selected_index = 0;
+    }
+
+    /// Extend the filter selection one character left (Shift+Left).
+    #[coverage(off)]
+    pub fn filter_select_left(&mut self) {
+        self.filter.select_left();
+    }
+
+    /// Extend the filter selection one character right (Shift+Right).
+    #[coverage(off)]
+    pub fn filter_select_right(&mut self) {
+        self.filter.select_right();
+    }
+
+    /// Extend the filter selection to the start of the line (Shift+Home).
+    #[coverage(off)]
+    pub fn filter_select_home(&mut self) {
+        self.filter.select_home();
+    }
+
+    /// Extend the filter selection to the end of the line (Shift+End).
+    #[coverage(off)]
+    pub fn filter_select_end(&mut self) {
+        self.filter.select_end();
+    }
+
     /// Switch between Single and Unite selection. A new Unite set starts empty.
     #[coverage(off)]
     pub fn toggle_unite(&mut self) {
@@ -371,7 +414,12 @@ fn filter_line(open: &Open) -> String {
     let accent = Role::Accent.style().bold();
     let value = format!(
         "{}{}",
-        widgets::block_caret(input.value(), input.cursor(), &accent),
+        widgets::block_caret_with_selection(
+            input.value(),
+            input.cursor(),
+            input.selection(),
+            &accent
+        ),
         if input.is_empty() {
             Role::Accent.style().dim().paint("type to filter")
         } else {

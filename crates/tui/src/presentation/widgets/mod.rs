@@ -77,6 +77,61 @@ pub fn shimmer_text_with(text: &str, frame: usize, shimmer: Shimmer) -> String {
     out
 }
 
+/// `value` の byte-offset `cursor` に block cursor を、`selection` の範囲があれば
+/// 反転ハイライトで描く。
+///
+/// `selection` は [`TextInput::selection`] が返す正規化済み `start..end`（バイト範囲）。
+/// `None`（選択なし）のときは [`block_caret`] と同一の出力になる。選択があるときは範囲を
+/// base style の reverse-video で反転し、キャレット位置（範囲の左端か右端）へ
+/// [`INPUT_CURSOR_MARKER`] を置く。別に反転セルを重ねないので、表示桁数は素の value と
+/// 一致し、全角（CJK）2 桁計上も崩れない。範囲は char 境界へ飽和して安全に分割する。
+///
+/// [`TextInput::selection`]: super::TextInput::selection
+/// [`INPUT_CURSOR_MARKER`]: crate::presentation::frame::INPUT_CURSOR_MARKER
+#[must_use]
+pub fn block_caret_with_selection(
+    value: &str,
+    cursor: usize,
+    selection: Option<(usize, usize)>,
+    base: &Style,
+) -> String {
+    let Some((start, end)) = selection else {
+        return block_caret(value, cursor, base);
+    };
+    let start = floor_boundary(value, start.min(value.len()));
+    let end = floor_boundary(value, end.min(value.len()));
+    if start >= end {
+        // An empty range carries no highlight; fall back so a stray caller cannot
+        // emit two cursor markers around a zero-width span.
+        return block_caret(value, cursor, base);
+    }
+    let cursor = floor_boundary(value, cursor.min(value.len()));
+    let marker = crate::presentation::frame::INPUT_CURSOR_MARKER;
+    let mut out = String::new();
+    if start > 0 {
+        out.push_str(&base.paint(&value[..start]));
+    }
+    if cursor <= start {
+        out.push(marker);
+    }
+    out.push_str(&base.reverse().paint(&value[start..end]));
+    if cursor >= end {
+        out.push(marker);
+    }
+    if end < value.len() {
+        out.push_str(&base.paint(&value[end..]));
+    }
+    out
+}
+
+/// `offset` を含む char 境界まで前方向へ丸める（境界上ならそのまま）。
+fn floor_boundary(value: &str, mut offset: usize) -> usize {
+    while !value.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
 /// `value` の byte-offset `cursor` に block cursor を描く。
 ///
 /// キャレット直後の Unicode scalar を base style の reverse-video で反転し、文字を
@@ -371,9 +426,9 @@ pub fn relative_session_time(from: DateTime<Utc>, now: DateTime<Utc>) -> String 
 #[cfg(test)]
 mod tests {
     use super::{
-        Shimmer, block_caret, centered_padding, clip_to_width, dim_ansi, display_width,
-        normalize_size, relative_session_time, relative_time, shimmer_text, shimmer_text_with,
-        wrap_to_width,
+        Shimmer, block_caret, block_caret_with_selection, centered_padding, clip_to_width,
+        dim_ansi, display_width, normalize_size, relative_session_time, relative_time,
+        shimmer_text, shimmer_text_with, wrap_to_width,
     };
     use crate::presentation::theme::{Role, Style};
     use chrono::{DateTime, Duration, Utc};
@@ -426,6 +481,60 @@ mod tests {
                 crate::presentation::frame::INPUT_CURSOR_MARKER
             )
         );
+    }
+
+    #[test]
+    fn block_caret_with_selection_matches_block_caret_without_a_range() {
+        let accent = Role::Accent.style().bold();
+        assert_eq!(
+            block_caret_with_selection("abcd", 2, None, &accent),
+            block_caret("abcd", 2, &accent),
+        );
+        // 空範囲は選択なしと同じ（誤ったマーカー二重出力を防ぐ）。
+        assert_eq!(
+            block_caret_with_selection("abcd", 2, Some((2, 2)), &accent),
+            block_caret("abcd", 2, &accent),
+        );
+    }
+
+    #[test]
+    fn block_caret_with_selection_highlights_the_range_and_keeps_the_width() {
+        let accent = Role::Accent.style();
+        // "ab" を選択、キャレットは右端(2)。
+        let ascii = block_caret_with_selection("abcd", 2, Some((0, 2)), &accent);
+        assert_eq!(display_width(&ascii), 4);
+        assert!(ascii.contains("\u{1b}[7;36mab\u{1b}[0m"));
+        // キャレット右端: マーカーは選択範囲の直後。
+        assert!(ascii.contains(&format!(
+            "\u{1b}[7;36mab\u{1b}[0m{}",
+            crate::presentation::frame::INPUT_CURSOR_MARKER
+        )));
+
+        // キャレットが左端(0)のときはマーカーが選択範囲の手前。
+        let left = block_caret_with_selection("abcd", 0, Some((0, 2)), &accent);
+        assert!(left.contains(&format!(
+            "{}\u{1b}[7;36mab",
+            crate::presentation::frame::INPUT_CURSOR_MARKER
+        )));
+
+        // 範囲が行頭より後ろ(start>0)なら、前置きテキストを base で描いてから反転する。
+        let mid = block_caret_with_selection("abcd", 4, Some((2, 4)), &accent);
+        assert_eq!(display_width(&mid), 4);
+        assert!(mid.contains(&accent.paint("ab")));
+        assert!(mid.contains("\u{1b}[7;36mcd\u{1b}[0m"));
+    }
+
+    #[test]
+    fn block_caret_with_selection_keeps_cjk_width_and_boundaries() {
+        let accent = Role::Accent.style();
+        // "あい" のうち "あ"(3 バイト) を選択。表示幅は素の "あいう" と同じ 6。
+        let cjk = block_caret_with_selection("あいう", "あ".len(), Some((0, "あ".len())), &accent);
+        assert_eq!(display_width(&cjk), 6);
+        assert!(cjk.contains("\u{1b}[7;36mあ\u{1b}[0m"));
+
+        // 非境界オフセットを渡しても scalar を割らずに飽和する。
+        let clamped = block_caret_with_selection("あい", 2, Some((1, 4)), &accent);
+        assert_eq!(display_width(&clamped), 4);
     }
 
     #[test]

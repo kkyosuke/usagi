@@ -167,6 +167,36 @@ impl WorkspaceRuntime {
                 modal.cursor_right();
                 Vec::new()
             }
+            // A focused palette input owns Home/End and emacs Ctrl-A/Ctrl-E as
+            // caret motion, so they never reach the reducer's `+ new session`.
+            Key::Home | Key::LineStart => {
+                modal.cursor_home();
+                Vec::new()
+            }
+            Key::End | Key::LineEnd => {
+                modal.cursor_end();
+                Vec::new()
+            }
+            Key::Delete => {
+                modal.delete_forward();
+                Vec::new()
+            }
+            Key::SelectLeft => {
+                modal.select_left();
+                Vec::new()
+            }
+            Key::SelectRight => {
+                modal.select_right();
+                Vec::new()
+            }
+            Key::SelectHome => {
+                modal.select_home();
+                Vec::new()
+            }
+            Key::SelectEnd => {
+                modal.select_end();
+                Vec::new()
+            }
             Key::Backspace => {
                 modal.backspace();
                 Vec::new()
@@ -215,6 +245,37 @@ impl WorkspaceRuntime {
             }
             Key::Right => {
                 modal.expand_selected();
+                Vec::new()
+            }
+            // Left/Right drive the action picker's collapse/expand here, so the
+            // prompt caret uses Home/End and emacs Ctrl-A/Ctrl-E, and selection
+            // extends with Shift+arrow / Shift+Home/End.
+            Key::Home | Key::LineStart => {
+                modal.cursor_home();
+                Vec::new()
+            }
+            Key::End | Key::LineEnd => {
+                modal.cursor_end();
+                Vec::new()
+            }
+            Key::Delete => {
+                modal.delete_forward();
+                Vec::new()
+            }
+            Key::SelectLeft => {
+                modal.select_left();
+                Vec::new()
+            }
+            Key::SelectRight => {
+                modal.select_right();
+                Vec::new()
+            }
+            Key::SelectHome => {
+                modal.select_home();
+                Vec::new()
+            }
+            Key::SelectEnd => {
+                modal.select_end();
                 Vec::new()
             }
             Key::Backspace => {
@@ -690,6 +751,38 @@ mod tests {
     }
 
     #[test]
+    fn overview_palette_selects_and_replaces_with_emacs_and_shift_keys() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = overview_on(workspace);
+        type_str(&mut runtime, "issue");
+        // Ctrl-A/Ctrl-E move the caret to the line edges without opening a session.
+        let _ = runtime.handle_key(Key::LineStart);
+        assert_eq!(runtime.overview_modal().unwrap().cursor(), 0);
+        let _ = runtime.handle_key(Key::LineEnd);
+        assert_eq!(runtime.overview_modal().unwrap().cursor(), 5);
+        // Home/End behave the same inside the focused palette.
+        let _ = runtime.handle_key(Key::Home);
+        assert_eq!(runtime.overview_modal().unwrap().cursor(), 0);
+        let _ = runtime.handle_key(Key::End);
+        // Shift+Home selects the whole line; Delete drops the selection.
+        let _ = runtime.handle_key(Key::SelectHome);
+        assert_eq!(runtime.overview_modal().unwrap().selection(), Some((0, 5)));
+        let _ = runtime.handle_key(Key::Delete);
+        assert_eq!(runtime.overview_modal().unwrap().input(), "");
+        // Shift+arrow / Shift+End extend a fresh selection.
+        type_str(&mut runtime, "abc");
+        let _ = runtime.handle_key(Key::Home);
+        let _ = runtime.handle_key(Key::SelectRight);
+        assert_eq!(runtime.overview_modal().unwrap().selection(), Some((0, 1)));
+        let _ = runtime.handle_key(Key::SelectEnd);
+        assert_eq!(runtime.overview_modal().unwrap().selection(), Some((0, 3)));
+        let _ = runtime.handle_key(Key::SelectLeft);
+        assert_eq!(runtime.overview_modal().unwrap().selection(), Some((0, 2)));
+        // The sidebar never moved while the palette owned every key.
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Overview));
+    }
+
+    #[test]
     fn overview_history_recall_survives_an_invalid_submit() {
         let workspace = WorkspaceId::new();
         let mut runtime = overview_on(workspace);
@@ -796,6 +889,32 @@ mod tests {
         assert!(runtime.closeup_modal().is_some());
         let effects = runtime.handle_key(Key::Escape);
         assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn closeup_prompt_caret_uses_home_end_and_shift_selection() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        // Left/Right drive the action picker here, so caret motion is Home/End
+        // (and emacs Ctrl-A/Ctrl-E); selection extends with Shift+arrow.
+        type_str(&mut runtime, "close");
+        let _ = runtime.handle_key(Key::LineStart);
+        assert_eq!(runtime.closeup_modal().unwrap().selection(), None);
+        let _ = runtime.handle_key(Key::SelectEnd);
+        assert_eq!(runtime.closeup_modal().unwrap().selection(), Some((0, 5)));
+        let _ = runtime.handle_key(Key::Delete);
+        // Home / SelectRight / SelectLeft / LineEnd all reach the prompt input.
+        type_str(&mut runtime, "abc");
+        let _ = runtime.handle_key(Key::Home);
+        let _ = runtime.handle_key(Key::SelectRight);
+        assert_eq!(runtime.closeup_modal().unwrap().selection(), Some((0, 1)));
+        let _ = runtime.handle_key(Key::End);
+        let _ = runtime.handle_key(Key::SelectLeft);
+        assert_eq!(runtime.closeup_modal().unwrap().selection(), Some((2, 3)));
+        let _ = runtime.handle_key(Key::SelectHome);
+        let _ = runtime.handle_key(Key::LineEnd);
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
     }
 
     #[test]

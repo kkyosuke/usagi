@@ -1,13 +1,13 @@
 ---
 number: 396
 title: feat(tui): 入力 widget に範囲選択（Shift+←/→・Shift+Home/End）と emacs 行頭/行末移動（Ctrl+A/Ctrl+E）を追加する
-status: todo
+status: done
 priority: medium
 labels: [tui, input, widget, ux]
 dependson: []
 related: [42, 257, 287]
 created_at: 2026-07-20T04:25:28.639907+00:00
-updated_at: 2026-07-20T04:25:28.639907+00:00
+updated_at: 2026-07-20T06:46:29.158782+00:00
 ---
 
 ## 目的
