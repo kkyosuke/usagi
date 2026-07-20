@@ -57,6 +57,101 @@ pub enum CredentialProvenance {
     DaemonMintedEphemeral,
 }
 
+impl Registry {
+    fn reserve_admission(
+        &mut self,
+        agent: Agent,
+        run: DispatchRun,
+        binding: DispatchBinding,
+        admission: AgentAdmissionReservation,
+    ) -> AgentAdmissionReservation {
+        if let Some(existing) = self
+            .admissions
+            .iter()
+            .find(|item| item.operation_id == admission.operation_id)
+        {
+            return existing.clone();
+        }
+        if let Some(existing) = self
+            .agents
+            .iter_mut()
+            .find(|item| item.agent_id == agent.agent_id)
+        {
+            *existing = agent;
+        } else {
+            self.agents.push(agent);
+        }
+        self.runs.push(run);
+        self.bindings.push(binding);
+        self.admissions.push(admission.clone());
+        admission
+    }
+
+    fn commit_admission(&mut self, operation_id: OperationId) -> bool {
+        let Some(run) = self
+            .runs
+            .iter_mut()
+            .find(|run| run.run_id == operation_id && run.status == RunStatus::Preparing)
+        else {
+            return false;
+        };
+        run.status = RunStatus::Running;
+        if let Some(agent) = self
+            .agents
+            .iter_mut()
+            .find(|agent| agent.agent_id == run.agent_id)
+        {
+            agent.status = AgentStatus::Running;
+        }
+        true
+    }
+
+    fn fail_admission(&mut self, operation_id: OperationId) -> bool {
+        let Some(run) = self.runs.iter_mut().find(|run| run.run_id == operation_id) else {
+            return false;
+        };
+        run.status = RunStatus::Failed;
+        run.ended_at = Some(Utc::now());
+        if let Some(agent) = self
+            .agents
+            .iter_mut()
+            .find(|agent| agent.agent_id == run.agent_id)
+        {
+            agent.status = AgentStatus::Failed;
+            agent.current_run = None;
+        }
+        true
+    }
+
+    fn reconcile_incomplete_admissions(&mut self) -> usize {
+        let mut reconciled = 0;
+        for admission in &self.admissions {
+            let Some(run) = self
+                .runs
+                .iter_mut()
+                .find(|run| run.run_id == admission.operation_id)
+            else {
+                continue;
+            };
+            if !matches!(run.status, RunStatus::Preparing | RunStatus::Running) {
+                continue;
+            }
+            run.status = RunStatus::Failed;
+            run.ended_at = Some(Utc::now());
+            if let Some(agent) = self
+                .agents
+                .iter_mut()
+                .find(|agent| agent.agent_id == run.agent_id)
+            {
+                agent.status = AgentStatus::Failed;
+                agent.current_run = None;
+            }
+            reconciled += 1;
+        }
+        reconciled
+    }
+}
+
 /// One prompt waiting for the next Agent launch in a durable session scope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueuedPrompt {
@@ -270,28 +365,7 @@ impl DispatchStore {
         binding: DispatchBinding,
         admission: AgentAdmissionReservation,
     ) -> Result<AgentAdmissionReservation> {
-        self.mutate_registry(|registry| {
-            if let Some(existing) = registry
-                .admissions
-                .iter()
-                .find(|item| item.operation_id == admission.operation_id)
-            {
-                return existing.clone();
-            }
-            if let Some(existing) = registry
-                .agents
-                .iter_mut()
-                .find(|item| item.agent_id == agent.agent_id)
-            {
-                *existing = agent;
-            } else {
-                registry.agents.push(agent);
-            }
-            registry.runs.push(run);
-            registry.bindings.push(binding);
-            registry.admissions.push(admission.clone());
-            admission
-        })
+        self.mutate_registry(|registry| registry.reserve_admission(agent, run, binding, admission))
     }
 
     /// Atomically publishes a prepared admission as live only after the PTY
@@ -301,24 +375,7 @@ impl DispatchStore {
     ///
     /// Returns an error when the registry cannot be locked, read, or written.
     pub fn commit_admission(&self, operation_id: OperationId) -> Result<bool> {
-        self.mutate_registry(|registry| {
-            let Some(run) = registry
-                .runs
-                .iter_mut()
-                .find(|run| run.run_id == operation_id && run.status == RunStatus::Preparing)
-            else {
-                return false;
-            };
-            run.status = RunStatus::Running;
-            if let Some(agent) = registry
-                .agents
-                .iter_mut()
-                .find(|agent| agent.agent_id == run.agent_id)
-            {
-                agent.status = AgentStatus::Running;
-            }
-            true
-        })
+        self.mutate_registry(|registry| registry.commit_admission(operation_id))
     }
 
     /// Records the safe terminal result of a compensated or interrupted
@@ -329,26 +386,7 @@ impl DispatchStore {
     ///
     /// Returns an error when the registry cannot be locked, read, or written.
     pub fn fail_admission(&self, operation_id: OperationId) -> Result<bool> {
-        self.mutate_registry(|registry| {
-            let Some(run) = registry
-                .runs
-                .iter_mut()
-                .find(|run| run.run_id == operation_id)
-            else {
-                return false;
-            };
-            run.status = RunStatus::Failed;
-            run.ended_at = Some(Utc::now());
-            if let Some(agent) = registry
-                .agents
-                .iter_mut()
-                .find(|agent| agent.agent_id == run.agent_id)
-            {
-                agent.status = AgentStatus::Failed;
-                agent.current_run = None;
-            }
-            true
-        })
+        self.mutate_registry(|registry| registry.fail_admission(operation_id))
     }
 
     /// Fails every run which was still non-terminal when the daemon lost its
@@ -359,33 +397,7 @@ impl DispatchStore {
     ///
     /// Returns an error when the registry cannot be locked, read, or written.
     pub fn reconcile_incomplete_admissions(&self) -> Result<usize> {
-        self.mutate_registry(|registry| {
-            let mut reconciled = 0;
-            for admission in &registry.admissions {
-                let Some(run) = registry
-                    .runs
-                    .iter_mut()
-                    .find(|run| run.run_id == admission.operation_id)
-                else {
-                    continue;
-                };
-                if !matches!(run.status, RunStatus::Preparing | RunStatus::Running) {
-                    continue;
-                }
-                run.status = RunStatus::Failed;
-                run.ended_at = Some(Utc::now());
-                if let Some(agent) = registry
-                    .agents
-                    .iter_mut()
-                    .find(|agent| agent.agent_id == run.agent_id)
-                {
-                    agent.status = AgentStatus::Failed;
-                    agent.current_run = None;
-                }
-                reconciled += 1;
-            }
-            reconciled
-        })
+        self.mutate_registry(Registry::reconcile_incomplete_admissions)
     }
 
     /// Adds or replaces a run by `run_id`.
