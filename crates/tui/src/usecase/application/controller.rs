@@ -2330,6 +2330,13 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                     state.selected = Selection::Target(Target::Session(created));
                     state.active = Target::Session(created);
                     state.route = Route::Home(HomeMode::Closeup);
+                    // Match the ordinary session-activation path: a newly
+                    // created session has no live pane yet, so its Closeup
+                    // action surface must own Ctrl-C. Without it, the bare
+                    // Closeup route treats Ctrl-C as a request to detach the
+                    // whole TUI.
+                    state.closeup_action_forced = false;
+                    state.overlay = (!state.has_live_pane).then_some(Overlay::Closeup);
                 }
             } else if pending.is_some_and(|pending| pending.kind == PendingKind::CreateSession)
                 && state.overlay.is_none()
@@ -4385,6 +4392,13 @@ mod tests {
             state.selected(),
             Selection::Target(Target::Session(created))
         );
+        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+
+        // A just-created session has no live pane. Ctrl-C must leave its action
+        // surface for the switcher, never detach the entire TUI.
+        assert!(update(&mut state, AppEvent::Key(AppKey::CtrlC)).is_empty());
+        assert_eq!(state.route(), Route::Home(HomeMode::Switch));
+        assert_eq!(state.overlay(), None);
 
         let effects = update(
             &mut state,
