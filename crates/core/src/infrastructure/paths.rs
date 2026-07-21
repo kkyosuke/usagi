@@ -57,7 +57,6 @@ pub fn runtime_mode() -> RuntimeMode {
     match std::env::var(RUNTIME_MODE_ENV).as_deref() {
         Ok("production") => RuntimeMode::Production,
         Ok("development") => RuntimeMode::Development,
-        Ok("local") => RuntimeMode::Local,
         _ => RuntimeMode::Local,
     }
 }
