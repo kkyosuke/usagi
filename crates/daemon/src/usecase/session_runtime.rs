@@ -451,6 +451,19 @@ impl<G: GitRunner> SessionRuntime<G> {
         if before.sessions.iter().any(|session| session.name == name) {
             return Err(SessionRuntimeError::SessionWorkspaceExists(name));
         }
+        let path = self
+            .repo_root
+            .join(STATE_DIR)
+            .join(SESSIONS_DIR)
+            .join(&name);
+        // Do not reserve a lifecycle operation or invoke Git when a previous,
+        // untracked session directory still occupies the destination.  The
+        // durable snapshot cannot represent such a stale path, so the client
+        // cannot catch it from its displayed session names alone.  Use
+        // `symlink_metadata` so even a dangling symlink is treated as occupied.
+        if fs::symlink_metadata(&path).is_ok() {
+            return Err(SessionRuntimeError::SessionWorkspaceExists(name));
+        }
         let operation = journal(operation_id, self.generation, semantic_key);
         let reserved = self
             .store
@@ -468,11 +481,6 @@ impl<G: GitRunner> SessionRuntime<G> {
             .last()
             .ok_or(SessionRuntimeError::Rejected)?;
         let fence = fence(&reserved, session, operation_id);
-        let path = self
-            .repo_root
-            .join(STATE_DIR)
-            .join(SESSIONS_DIR)
-            .join(&name);
         match build_session_tree(&self.git, &self.repo_root, &path, &format!("usagi/{name}")) {
             Ok(()) => {
                 let completed = self
@@ -1557,6 +1565,36 @@ mod tests {
                 .summary,
             error.safe_message()
         );
+    }
+
+    #[test]
+    fn rejects_a_stale_workspace_before_reserving_or_invoking_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        let stale = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("test");
+        std::fs::create_dir_all(&stale).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut runtime = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            CountingGit {
+                calls: Arc::clone(&calls),
+            },
+        )
+        .unwrap();
+
+        let error = runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name":"test"}))
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            SessionRuntimeError::SessionWorkspaceExists("test".into())
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(runtime.state().unwrap().sessions.is_empty());
+        assert!(runtime.state().unwrap().operations.is_empty());
     }
 
     #[test]
