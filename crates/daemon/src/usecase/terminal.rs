@@ -227,7 +227,6 @@ pub struct TerminalRegistry {
 
 impl TerminalRegistry {
     #[must_use]
-    #[coverage(off)]
     pub fn new(journal_limit: usize, input_cache_limit: usize) -> Self {
         Self {
             entries: BTreeMap::new(),
@@ -240,7 +239,6 @@ impl TerminalRegistry {
     ///
     /// Returns [`RegistryError::StaleTarget`] when this terminal identity was
     /// already registered.
-    #[coverage(off)]
     pub fn register(
         &mut self,
         reference: TerminalRef,
@@ -272,7 +270,6 @@ impl TerminalRegistry {
     ///
     /// Returns [`RegistryError::StaleTarget`] for a different generation or
     /// ownership scope.
-    #[coverage(off)]
     pub fn attach(
         &mut self,
         reference: &TerminalRef,
@@ -302,7 +299,6 @@ impl TerminalRegistry {
     ///
     /// Returns [`RegistryError::UnknownSubscription`] unless this connection
     /// owns the exact subscription.
-    #[coverage(off)]
     pub fn detach(
         &mut self,
         reference: &TerminalRef,
@@ -321,7 +317,6 @@ impl TerminalRegistry {
 
     /// Releases only this connection's subscriptions.  It intentionally leaves
     /// the PTY, output journal and process ownership alive.
-    #[coverage(off)]
     pub fn disconnect(&mut self, connection: ConnectionId) {
         for entry in self.entries.values_mut() {
             entry.attachments.retain(|_, owner| *owner != connection);
@@ -336,7 +331,6 @@ impl TerminalRegistry {
     /// # Panics
     ///
     /// Panics only if an internal retained-byte accounting invariant is broken.
-    #[coverage(off)]
     pub fn append_output(
         &mut self,
         reference: &TerminalRef,
@@ -405,7 +399,6 @@ impl TerminalRegistry {
     /// Returns [`RegistryError::StaleTarget`] when the reference is stale, or
     /// [`RegistryError::ResyncRequired`] when the cursor has fallen out of the
     /// bounded journal.
-    #[coverage(off)]
     pub fn replay_from(
         &self,
         reference: &TerminalRef,
@@ -442,12 +435,11 @@ impl TerminalRegistry {
     /// # Errors
     ///
     /// Returns [`RegistryError::StaleTarget`] for a non-current terminal.
-    #[coverage(off)]
-    pub fn resize<W: PtyWriter>(
+    pub fn resize(
         &mut self,
         reference: &TerminalRef,
         geometry: Geometry,
-        writer: &mut W,
+        writer: &mut dyn PtyWriter,
     ) -> Result<Snapshot, RegistryError> {
         // Hold the registry's exclusive borrow across preflight, effect, and
         // commit. The terminal actor mutex then keeps exit/replacement from
@@ -469,13 +461,12 @@ impl TerminalRegistry {
     ///
     /// Returns a fencing, attachment, or input-sequencing error without
     /// writing any bytes.
-    #[coverage(off)]
-    pub fn write_input<W: PtyWriter>(
+    pub fn write_input(
         &mut self,
         reference: &TerminalRef,
         input: InputRequest,
         bytes: &[u8],
-        writer: &mut W,
+        writer: &mut dyn PtyWriter,
     ) -> Result<InputAck, RegistryError> {
         let input_cache_limit = self.input_cache_limit;
         let entry = self.entry_mut(reference)?;
@@ -518,7 +509,6 @@ impl TerminalRegistry {
     /// # Errors
     ///
     /// Returns [`RegistryError::StaleTarget`] for a non-current terminal.
-    #[coverage(off)]
     pub fn exited(&mut self, reference: &TerminalRef, status: i32) -> Result<Event, RegistryError> {
         let entry = self.entry_mut(reference)?;
         entry.exited = Some(status);
@@ -534,19 +524,16 @@ impl TerminalRegistry {
     /// # Errors
     ///
     /// Returns [`RegistryError::StaleTarget`] for a non-current terminal.
-    #[coverage(off)]
     pub fn snapshot(&self, reference: &TerminalRef) -> Result<Snapshot, RegistryError> {
         Ok(snapshot(self.entry(reference)?))
     }
 
-    #[coverage(off)]
     fn entry(&self, reference: &TerminalRef) -> Result<&Entry, RegistryError> {
         self.entries
             .get(&key(reference))
             .filter(|entry| entry.reference.fences(reference))
             .ok_or(RegistryError::StaleTarget)
     }
-    #[coverage(off)]
     fn entry_mut(&mut self, reference: &TerminalRef) -> Result<&mut Entry, RegistryError> {
         self.entries
             .get_mut(&key(reference))
@@ -555,11 +542,9 @@ impl TerminalRegistry {
     }
 }
 
-#[coverage(off)]
 fn key(reference: &TerminalRef) -> String {
     reference.terminal_id.as_str()
 }
-#[coverage(off)]
 fn snapshot(entry: &Entry) -> Snapshot {
     let base_offset = entry
         .journal
@@ -912,6 +897,10 @@ mod tests {
                 b"x",
                 &mut Writer::default()
             ),
+            Err(RegistryError::Exited)
+        );
+        assert_eq!(
+            registry.resize(&r, Geometry { cols: 1, rows: 1 }, &mut Writer::default()),
             Err(RegistryError::Exited)
         );
     }

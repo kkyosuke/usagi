@@ -5,8 +5,6 @@
 //! credentials, rendered argv, or phase-hook input.
 
 #![allow(clippy::missing_errors_doc, clippy::too_many_arguments)] // Port methods expose injected runtime dependencies and typed fences.
-#![coverage(off)] // Generic port wiring is monomorphized at callers; the fake runtime/provisioner tests below exercise every safety outcome without double-counting those instantiations.
-
 use std::collections::BTreeMap;
 
 use usagi_core::{
@@ -205,15 +203,15 @@ impl Orchestrator {
     /// Resolves the selected adapter through the common registry and launches
     /// it once. MCP materialization remains adapter-scoped and is requested
     /// only after profile capability and explicit authorization are checked.
-    pub fn launch<S: RuntimeStore, P: PtySpawner>(
+    pub fn launch(
         &mut self,
         runtime: &mut RuntimeCoordinator,
         registry: &mut AdapterRegistry,
         authorization: &RuntimeAuthorization,
         request: &LaunchRequest,
         geometry: Geometry,
-        store: &mut S,
-        spawner: &mut P,
+        store: &mut dyn RuntimeStore,
+        spawner: &mut dyn PtySpawner,
         mcp_credential: Option<String>,
     ) -> Result<(), OrchestrationError> {
         self.launch_with_semantic(
@@ -229,15 +227,15 @@ impl Orchestrator {
         )
     }
 
-    pub fn launch_with_semantic<S: RuntimeStore, P: PtySpawner>(
+    pub fn launch_with_semantic(
         &mut self,
         runtime: &mut RuntimeCoordinator,
         registry: &mut AdapterRegistry,
         authorization: &RuntimeAuthorization,
         request: &LaunchRequest,
         geometry: Geometry,
-        store: &mut S,
-        spawner: &mut P,
+        store: &mut dyn RuntimeStore,
+        spawner: &mut dyn PtySpawner,
         mcp_credential: Option<String>,
         semantic_key: String,
     ) -> Result<(), OrchestrationError> {
@@ -257,15 +255,15 @@ impl Orchestrator {
 
     /// Launches an explicit provider resume and durably supersedes its
     /// interrupted source incarnations in the replacement reservation.
-    pub fn resume_with_semantic<S: RuntimeStore, P: PtySpawner>(
+    pub fn resume_with_semantic(
         &mut self,
         runtime: &mut RuntimeCoordinator,
         registry: &mut AdapterRegistry,
         authorization: &RuntimeAuthorization,
         request: &LaunchRequest,
         geometry: Geometry,
-        store: &mut S,
-        spawner: &mut P,
+        store: &mut dyn RuntimeStore,
+        spawner: &mut dyn PtySpawner,
         mcp_credential: Option<String>,
         semantic_key: String,
         superseded: &[AgentRuntimeRef],
@@ -284,14 +282,14 @@ impl Orchestrator {
         )
     }
 
-    fn launch_with_semantic_superseding<S: RuntimeStore, P: PtySpawner>(
+    fn launch_with_semantic_superseding(
         runtime: &mut RuntimeCoordinator,
         registry: &mut AdapterRegistry,
         authorization: &RuntimeAuthorization,
         request: &LaunchRequest,
         geometry: Geometry,
-        store: &mut S,
-        spawner: &mut P,
+        store: &mut dyn RuntimeStore,
+        spawner: &mut dyn PtySpawner,
         mcp_credential: Option<String>,
         semantic_key: String,
         superseded: &[AgentRuntimeRef],
@@ -439,24 +437,25 @@ impl Orchestrator {
         if !profile.capabilities.contains(&AgentCapability::Resume) {
             return ResumeDecision::ManualActionRequired;
         }
-        matches!(
-            record.state,
-            RuntimeState::Running | RuntimeState::ReconcileRequired(ReconcileState::OrphanRunning)
-        )
-        .then_some(ResumeDecision::Compatible)
-        .unwrap_or(ResumeDecision::ManualActionRequired)
+        match record.state {
+            RuntimeState::Running
+            | RuntimeState::ReconcileRequired(ReconcileState::OrphanRunning) => {
+                ResumeDecision::Compatible
+            }
+            _ => ResumeDecision::ManualActionRequired,
+        }
     }
 
     /// Reclaims only a verified absence or records a verified orphan. Missing
     /// secrets, ambiguous spawn, identity mismatch, and unknown observations
     /// remain manual-action outcomes and cannot cause a replacement spawn.
-    pub fn reclaim<S: RuntimeStore>(
+    pub fn reclaim(
         &mut self,
         runtime: &mut RuntimeCoordinator,
         authorization: &RuntimeAuthorization,
         observation: ProcessObservation,
         secrets: SecretAvailability,
-        store: &mut S,
+        store: &mut dyn RuntimeStore,
     ) -> Result<ReclaimDecision, OrchestrationError> {
         let record = runtime
             .record_for(&authorization.runtime)
@@ -553,7 +552,6 @@ mod tests {
     #[derive(Default)]
     struct Store;
     impl RuntimeStore for Store {
-        type Error = ();
         fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
             Ok(())
         }
@@ -573,6 +571,23 @@ mod tests {
             })
         }
     }
+    struct FailingSpawner;
+    impl PtySpawner for FailingSpawner {
+        fn spawn(
+            &mut self,
+            _: &DurableLaunchSnapshot,
+            _: &SpawnProvision,
+            _: &usagi_core::domain::id::TerminalRef,
+        ) -> Result<super::super::generation::ProcessIdentity, SpawnFailure> {
+            Err(SpawnFailure::Definite)
+        }
+    }
+
+    #[test]
+    fn default_orchestrator_has_no_phase_leases() {
+        assert!(Orchestrator::default().phases.is_empty());
+    }
+
     fn setup() -> (
         RuntimeCoordinator,
         AdapterRegistry,
@@ -735,6 +750,270 @@ mod tests {
                 &mut store
             ),
             Ok(ReclaimDecision::Reclaimed)
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One production-symbol test enumerates every fail-closed orchestration route.
+    fn registry_launch_phase_resume_and_reclaim_error_routes_are_total() {
+        let (mut runtime, mut registry, auth, request) = setup();
+        let profile = registry.profile(&request.profile_id).unwrap();
+        assert_eq!(
+            registry.register(
+                profile.clone(),
+                Box::new(Adapter {
+                    profile: profile.clone()
+                })
+            ),
+            Err(RegistryError::DuplicateProfile)
+        );
+        let mismatched = AgentProfile::new(
+            AgentProfileId::new("mismatch").unwrap(),
+            "mismatch",
+            1,
+            [],
+            [LaunchMode::Interactive],
+        );
+        assert_eq!(
+            registry.register(
+                mismatched,
+                Box::new(Adapter {
+                    profile: profile.clone(),
+                }),
+            ),
+            Err(RegistryError::ProfileMismatch)
+        );
+        assert_eq!(
+            registry.profile(&AgentProfileId::new("unknown").unwrap()),
+            Err(RegistryError::UnknownProfile)
+        );
+
+        let mut orchestration = Orchestrator::new();
+        let mut store = Store;
+        let mut spawner = Spawner;
+        let mut foreign = auth.clone();
+        foreign.operation.owner_daemon_generation = DaemonGeneration::new();
+        assert_eq!(
+            orchestration.launch(
+                &mut runtime,
+                &mut registry,
+                &foreign,
+                &request,
+                Geometry { cols: 80, rows: 24 },
+                &mut store,
+                &mut spawner,
+                None,
+            ),
+            Err(OrchestrationError::Unauthorized)
+        );
+        let mut no_mcp = auth.clone();
+        no_mcp.mcp_allowed = false;
+        assert_eq!(
+            orchestration.launch(
+                &mut runtime,
+                &mut registry,
+                &no_mcp,
+                &request,
+                Geometry { cols: 80, rows: 24 },
+                &mut store,
+                &mut spawner,
+                None,
+            ),
+            Err(OrchestrationError::Unauthorized)
+        );
+        let mut unknown = request.clone();
+        unknown.profile_id = AgentProfileId::new("unknown").unwrap();
+        assert_eq!(
+            orchestration.launch(
+                &mut runtime,
+                &mut registry,
+                &auth,
+                &unknown,
+                Geometry { cols: 80, rows: 24 },
+                &mut store,
+                &mut spawner,
+                None,
+            ),
+            Err(OrchestrationError::UnknownProfile)
+        );
+        assert_eq!(
+            orchestration.enable_phase_reporting(&runtime, &registry, &auth, "token".into()),
+            Err(PhaseRejection::UnknownRuntime)
+        );
+
+        let (mut failed_runtime, mut failed_registry, failed_auth, failed_request) = setup();
+        assert!(matches!(
+            orchestration.launch(
+                &mut failed_runtime,
+                &mut failed_registry,
+                &failed_auth,
+                &failed_request,
+                Geometry { cols: 80, rows: 24 },
+                &mut store,
+                &mut FailingSpawner,
+                None,
+            ),
+            Err(OrchestrationError::Runtime(_))
+        ));
+
+        orchestration
+            .launch(
+                &mut runtime,
+                &mut registry,
+                &auth,
+                &request,
+                Geometry { cols: 80, rows: 24 },
+                &mut store,
+                &mut spawner,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            orchestration.enable_phase_reporting(&runtime, &registry, &foreign, "token".into()),
+            Err(PhaseRejection::Unauthorized)
+        );
+        registry.adapters[0].0.revision += 1;
+        assert_eq!(
+            orchestration.enable_phase_reporting(&runtime, &registry, &auth, "token".into()),
+            Err(PhaseRejection::CapabilityUnavailable)
+        );
+        registry.adapters[0].0 = profile.clone();
+        registry.adapters[0]
+            .0
+            .capabilities
+            .remove(&AgentCapability::PhaseReporting);
+        assert_eq!(
+            orchestration.enable_phase_reporting(&runtime, &registry, &auth, "token".into()),
+            Err(PhaseRejection::CapabilityUnavailable)
+        );
+        registry.adapters[0].0 = profile.clone();
+        assert_eq!(
+            Orchestrator::new().report_phase(&runtime, &auth, "missing", 1, AgentPhase::Running,),
+            Err(PhaseRejection::InvalidToken)
+        );
+        orchestration
+            .enable_phase_reporting(&runtime, &registry, &auth, "token".into())
+            .unwrap();
+        orchestration
+            .phases
+            .get_mut(&auth.runtime.agent_runtime_id.as_str())
+            .unwrap()
+            .operation = foreign.operation.clone();
+        assert_eq!(
+            orchestration.report_phase(&runtime, &auth, "token", 1, AgentPhase::Running),
+            Err(PhaseRejection::InvalidToken)
+        );
+
+        let mut unknown_auth = auth.clone();
+        unknown_auth.runtime.agent_runtime_id = AgentRuntimeId::new();
+        assert_eq!(
+            orchestration.report_phase(&runtime, &unknown_auth, "token", 2, AgentPhase::Running,),
+            Err(PhaseRejection::UnknownRuntime)
+        );
+        assert_eq!(
+            orchestration.resume(&runtime, &registry, &unknown_auth),
+            ResumeDecision::ManualActionRequired
+        );
+        assert_eq!(
+            orchestration.resume(&runtime, &registry, &foreign),
+            ResumeDecision::ManualActionRequired
+        );
+        registry.adapters[0].0.revision += 1;
+        assert_eq!(
+            orchestration.resume(&runtime, &registry, &auth),
+            ResumeDecision::ManualActionRequired
+        );
+        registry.adapters[0].0 = profile.clone();
+        registry.adapters[0]
+            .0
+            .capabilities
+            .remove(&AgentCapability::Resume);
+        assert_eq!(
+            orchestration.resume(&runtime, &registry, &auth),
+            ResumeDecision::ManualActionRequired
+        );
+        registry.adapters[0].0 = profile;
+
+        let (mut no_resume_runtime, mut no_resume_registry, no_resume_auth, mut no_resume_request) =
+            setup();
+        no_resume_request.resume = false;
+        no_resume_registry.adapters[0]
+            .0
+            .capabilities
+            .remove(&AgentCapability::Resume);
+        orchestration
+            .launch(
+                &mut no_resume_runtime,
+                &mut no_resume_registry,
+                &no_resume_auth,
+                &no_resume_request,
+                Geometry { cols: 80, rows: 24 },
+                &mut store,
+                &mut spawner,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            orchestration.resume(&no_resume_runtime, &no_resume_registry, &no_resume_auth),
+            ResumeDecision::ManualActionRequired
+        );
+
+        let (mut orphan_runtime, mut orphan_registry, orphan_auth, orphan_request) = setup();
+        orchestration
+            .launch(
+                &mut orphan_runtime,
+                &mut orphan_registry,
+                &orphan_auth,
+                &orphan_request,
+                Geometry { cols: 80, rows: 24 },
+                &mut store,
+                &mut spawner,
+                None,
+            )
+            .unwrap();
+        let process = orphan_runtime
+            .record_for(&orphan_auth.runtime)
+            .unwrap()
+            .process
+            .clone()
+            .unwrap();
+        assert_eq!(
+            orchestration.reclaim(
+                &mut orphan_runtime,
+                &orphan_auth,
+                ProcessObservation::VerifiedAlive(process),
+                SecretAvailability::Available,
+                &mut store,
+            ),
+            Ok(ReclaimDecision::OrphanNeedsAction)
+        );
+        assert_eq!(
+            orchestration.resume(&orphan_runtime, &orphan_registry, &orphan_auth),
+            ResumeDecision::Compatible
+        );
+
+        runtime.exit(&auth.runtime, 0, &mut store).unwrap();
+        assert_eq!(
+            orchestration.report_phase(&runtime, &auth, "token", 2, AgentPhase::Running),
+            Err(PhaseRejection::Exited)
+        );
+        assert_eq!(
+            orchestration.enable_phase_reporting(&runtime, &registry, &auth, "token".into()),
+            Err(PhaseRejection::Exited)
+        );
+        assert_eq!(
+            orchestration.resume(&runtime, &registry, &auth),
+            ResumeDecision::ManualActionRequired
+        );
+        assert_eq!(
+            orchestration.reclaim(
+                &mut runtime,
+                &unknown_auth,
+                ProcessObservation::Gone,
+                SecretAvailability::Available,
+                &mut store,
+            ),
+            Err(OrchestrationError::UnknownRuntime)
         );
     }
 }

@@ -5,7 +5,7 @@
 //! durably reserves an operation before invoking git, then applies the exact
 //! completion fence captured from the reservation.
 
-#![coverage(off)] // daemon runtime integration boundary; exercised by fake-Git tests.
+#![coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=session_runtime_fake_git_contract
 
 use std::ffi::OsStr;
 use std::fs;
@@ -101,7 +101,6 @@ pub struct SessionScope {
 /// unit tests inject a deterministic runner.
 pub struct SystemGit;
 impl GitRunner for SystemGit {
-    #[coverage(off)]
     fn run(&self, repo: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
         let output = std::process::Command::new("git")
             .arg("-C")
@@ -118,15 +117,15 @@ impl GitRunner for SystemGit {
 
 /// One daemon process's session writer.  Callers serialize it across IPC
 /// connections; the store also locks every reducer mutation for crash safety.
-pub struct SessionRuntime<G> {
+pub struct SessionRuntime {
     repo_root: PathBuf,
     root_worktree_id: WorktreeId,
     generation: DaemonGeneration,
     store: DaemonLifecycleStore,
-    git: G,
+    git: Box<dyn GitRunner + Send>,
 }
 
-impl<G: GitRunner> SessionRuntime<G> {
+impl SessionRuntime {
     /// Returns the repository root durably trusted by this daemon's session store.
     #[must_use]
     pub fn repository_root(&self) -> &Path {
@@ -165,7 +164,7 @@ impl<G: GitRunner> SessionRuntime<G> {
     /// # Errors
     ///
     /// Returns an error when the lifecycle state cannot be loaded or initialized.
-    pub fn open(
+    pub fn open<G: GitRunner + Send + 'static>(
         candidate_repo_root: PathBuf,
         state_dir: &Path,
         generation: DaemonGeneration,
@@ -212,7 +211,7 @@ impl<G: GitRunner> SessionRuntime<G> {
             root_worktree_id,
             generation,
             store,
-            git,
+            git: Box::new(git),
         };
         if is_repo_root(&runtime.repo_root) {
             migrate_usagi_ignore_rules(&runtime.repo_root)
@@ -486,7 +485,12 @@ impl<G: GitRunner> SessionRuntime<G> {
             .last()
             .ok_or(SessionRuntimeError::Rejected)?;
         let fence = fence(&reserved, session, operation_id);
-        match build_session_tree(&self.git, &self.repo_root, &path, &format!("usagi/{name}")) {
+        match build_session_tree(
+            self.git.as_ref(),
+            &self.repo_root,
+            &path,
+            &format!("usagi/{name}"),
+        ) {
             Ok(()) => {
                 let completed = self
                     .store
@@ -591,7 +595,7 @@ impl<G: GitRunner> SessionRuntime<G> {
             .join(STATE_DIR)
             .join(SESSIONS_DIR)
             .join(&name);
-        match remove_session_tree(&self.git, &path, force) {
+        match remove_session_tree(self.git.as_ref(), &path, force) {
             Ok(()) => {
                 let completed = self
                     .store
@@ -672,7 +676,7 @@ impl<G: GitRunner> SessionRuntime<G> {
             None => false,
         };
         let state = self.state()?;
-        let candidates = validated_legacy_sessions(&self.repo_root, &state, &self.git)?;
+        let candidates = validated_legacy_sessions(&self.repo_root, &state, self.git.as_ref())?;
         let names = candidates
             .iter()
             .map(|record| record.name.clone())
@@ -763,9 +767,9 @@ impl<G: GitRunner> SessionRuntime<G> {
 /// state.  We validate the complete legacy set before writing `sessions.json`;
 /// a malformed, duplicate, missing, or differently-bound record leaves no
 /// partial v2 state for a later start to guess from.
-fn adopt_legacy_workspace_sessions<G: GitRunner>(
+fn adopt_legacy_workspace_sessions(
     repository_root: &Path,
-    git: &G,
+    git: &dyn GitRunner,
 ) -> Result<Option<WorkspaceLifecycleState>, SessionRuntimeError> {
     let sessions = validated_legacy_sessions_without_v2(repository_root, git)
         .map_err(|_| SessionRuntimeError::Storage)?;
@@ -787,10 +791,10 @@ fn adopt_legacy_workspace_sessions<G: GitRunner>(
 /// Reads and validates the complete legacy set.  The returned records are
 /// deliberately only used to mint lifecycle identities; UI metadata stays in
 /// `state.json` and is never rewritten by recovery.
-fn validated_legacy_sessions<G: GitRunner>(
+fn validated_legacy_sessions(
     repository_root: &Path,
     v2: &WorkspaceLifecycleState,
-    git: &G,
+    git: &dyn GitRunner,
 ) -> Result<Vec<usagi_core::domain::session::SessionRecord>, SessionRuntimeError> {
     let records = validated_legacy_sessions_without_v2(repository_root, git)?;
     if records.iter().any(|record| {
@@ -803,9 +807,9 @@ fn validated_legacy_sessions<G: GitRunner>(
     Ok(records)
 }
 
-fn validated_legacy_sessions_without_v2<G: GitRunner>(
+fn validated_legacy_sessions_without_v2(
     repository_root: &Path,
-    git: &G,
+    git: &dyn GitRunner,
 ) -> Result<Vec<usagi_core::domain::session::SessionRecord>, SessionRuntimeError> {
     let Some(legacy) = WorkspaceStateStore::new(repository_root)
         .load()
@@ -1190,7 +1194,7 @@ mod tests {
             })
         }
     }
-    fn runtime(git: FakeGit) -> (TempDir, SessionRuntime<FakeGit>) {
+    fn runtime(git: FakeGit) -> (TempDir, SessionRuntime) {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join(".git")).unwrap();
         let runtime = SessionRuntime::open(

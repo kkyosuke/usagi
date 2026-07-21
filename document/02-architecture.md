@@ -396,6 +396,12 @@ final output を drain 済みの verified exit、または identity を伴う re
 
 product 固有 adapter、secret、IPC schema はこの coordinator の境界外である。
 
+daemon の production composition は store、PTY、journal、writer、session scope、record publisher を trait object の
+port として同じ constructor に注入する。テスト専用 constructor や別実装の wiring は持たず、production が使う
+composition を fake port / failpoint で直接通す。store failpoint は reservation 後の partial effect、restart hydrate、
+stale ref、observer exit の ordering を検証し、実 socket accept・OS signal・PTY syscall だけを理由付き
+`coverage(off)` と integration test の対象にする。
+
 daemon は journal に commit 済みの PTY output から HTTP(S) の `github.com/<owner>/<repo>/pull/<number>`
 だけを検出し、suffix・query・fragment を除いた canonical URL を stable `SessionId` ごとの PR inventory
 へ投影する。inventory は daemon data directory の atomically replaced JSON snapshot であり、terminal ID、

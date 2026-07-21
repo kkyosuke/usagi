@@ -1,6 +1,6 @@
 //! daemon 面へ Unix process / socket / signal を接続する composition adapter。
 
-#![coverage(off)] // Unix socket / process / PTY wiring; fake-PTY owner contracts live in usagi-daemon tests.
+#![coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_ipc_fixture_codex_survives_disconnect_and_replays_final
 
 use std::backtrace::Backtrace;
 use std::cell::RefCell;
@@ -99,10 +99,9 @@ fn terminal_environment() -> BTreeMap<String, String> {
 
 struct FileTerminalStore(PathBuf);
 impl TerminalStore for FileTerminalStore {
-    type Error = std::io::Error;
-    fn save(&mut self, snapshot: TerminalStoreSnapshot) -> Result<(), Self::Error> {
-        json_file::write_atomic(snapshot_directory(&self.0)?, &self.0, &snapshot)
-            .map_err(std::io::Error::other)
+    fn save(&mut self, snapshot: TerminalStoreSnapshot) -> Result<(), ()> {
+        let directory = snapshot_directory(&self.0).map_err(|_| ())?;
+        json_file::write_atomic(directory, &self.0, &snapshot).map_err(|_| ())
     }
 }
 
@@ -117,7 +116,8 @@ impl FileTerminalStore {
             .reconcile_after_daemon_restart()
             .map_err(|_| std::io::Error::other("invalid generic terminal snapshot"))?;
         if interrupted != 0 {
-            self.save(snapshot.clone())?;
+            self.save(snapshot.clone())
+                .map_err(|()| std::io::Error::other("could not reconcile terminal snapshot"))?;
         }
         Ok((snapshot, interrupted))
     }
@@ -126,10 +126,9 @@ impl FileTerminalStore {
 /// Persists the durable Agent runtime snapshot next to the terminal store.
 struct FileRuntimeStore(PathBuf);
 impl RuntimeStore for FileRuntimeStore {
-    type Error = std::io::Error;
-    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), Self::Error> {
-        json_file::write_atomic(snapshot_directory(&self.0)?, &self.0, &snapshot)
-            .map_err(std::io::Error::other)
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
+        let directory = snapshot_directory(&self.0).map_err(|_| ())?;
+        json_file::write_atomic(directory, &self.0, &snapshot).map_err(|_| ())
     }
 }
 
@@ -159,7 +158,8 @@ impl FileRuntimeStore {
         let legacy = snapshot.schema_version < 3;
         let (snapshot, interrupted) = snapshot.reconcile_after_daemon_restart();
         if interrupted != 0 || legacy {
-            self.save(snapshot.clone())?;
+            self.save(snapshot.clone())
+                .map_err(|()| std::io::Error::other("could not reconcile runtime snapshot"))?;
         }
         if interrupted != 0 {
             ErrorLog::record(&format!(
@@ -185,8 +185,7 @@ fn snapshot_directory(path: &Path) -> std::io::Result<&Path> {
 /// with daemon-crash PTY FD continuation (out of scope for this issue).
 struct DiscardJournal;
 impl OutputJournal for DiscardJournal {
-    type Error = std::convert::Infallible;
-    fn append(&mut self, _output: &Output) -> Result<(), Self::Error> {
+    fn append(&mut self, _output: &Output) -> Result<(), ()> {
         Ok(())
     }
 }
@@ -489,7 +488,7 @@ fn available_worktree(snapshot: &serde_json::Value, session: SessionId) -> Optio
         .and_then(|candidate| serde_json::from_value(candidate.get("worktree_id")?.clone()).ok())
 }
 
-type RootAgentRuntime = AgentRuntime<FileRuntimeStore, AgentPty, DiscardJournal>;
+type RootAgentRuntime = AgentRuntime;
 type SharedAgentRuntime = Arc<Mutex<RootAgentRuntime>>;
 type SharedSupervisorRuntime = Arc<Mutex<SupervisorRuntime>>;
 
@@ -534,7 +533,6 @@ impl AgentTerminalActor for SharedAgent {
     // verified by `SharedTerminalOwner`'s fake in `usagi_daemon::usecase::agent_ipc`
     // (no test drives the real serve loop, which is where this lock wrapper is
     // reached), so only the lock/poison delegation lives here.
-    #[coverage(off)]
     fn terminal_inventory(
         &self,
         scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
@@ -727,7 +725,6 @@ impl PtyWriter for AgentPty {
     fn select_terminal(&mut self, terminal: &TerminalRef) {
         self.selected = Some(terminal.terminal_id.as_str().clone());
     }
-    #[coverage(off)] // Real PTY ioctl; the agent IPC fake verifies the fenced resize behavior.
     fn resize(&mut self, terminal: &TerminalRef, geometry: Geometry) -> Result<(), PtyWriteError> {
         let Some(entry) = self
             .terminals
@@ -867,7 +864,6 @@ impl PtyWriter for DaemonPty {
     fn select_terminal(&mut self, terminal: &usagi_core::domain::id::TerminalRef) {
         self.selected = Some(terminal.terminal_id.as_str().clone());
     }
-    #[coverage(off)] // Real PTY ioctl; the generic terminal use case covers the request semantics.
     fn resize(
         &mut self,
         terminal: &usagi_core::domain::id::TerminalRef,
@@ -917,7 +913,7 @@ struct SharedTerminal(
         >,
     >,
 );
-type SharedSessionRuntime = Arc<Mutex<SessionRuntime<SystemGit>>>;
+type SharedSessionRuntime = Arc<Mutex<SessionRuntime>>;
 type SharedTerminalRuntime = Arc<
     Mutex<
         GenericTerminalRuntime<
@@ -1066,7 +1062,6 @@ use super::bootstrap;
 use super::launchd;
 
 #[allow(clippy::too_many_lines)] // IPC request routing remains in the composition adapter.
-#[coverage(off)]
 fn spawn_ipc_server(
     data_dir: &Path,
     info: &AppInfo,
@@ -1470,7 +1465,7 @@ fn start_ipc_accept_loop(
                                     &mut writer,
                                     &server,
                                     &mut owner,
-                                    |request_id, body, hello, connection, _client| match body
+                                    &mut |request_id, body, hello, connection, _client| match body
                                         .get("kind")
                                         .and_then(serde_json::Value::as_str)
                                     {
@@ -3302,7 +3297,6 @@ struct FsRecordFile {
 }
 
 impl RecordFile for FsRecordFile {
-    #[coverage(off)]
     fn read(&self) -> std::io::Result<Option<String>> {
         match std::fs::read_to_string(&self.path) {
             Ok(contents) => Ok(Some(contents)),
@@ -3310,14 +3304,12 @@ impl RecordFile for FsRecordFile {
             Err(err) => Err(err),
         }
     }
-    #[coverage(off)]
     fn write(&self, contents: &str) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&self.path, contents)
     }
-    #[coverage(off)]
     fn remove(&self) -> std::io::Result<()> {
         match std::fs::remove_file(&self.path) {
             Ok(()) => Ok(()),
@@ -3330,12 +3322,10 @@ impl RecordFile for FsRecordFile {
 struct KillProbe;
 impl LivenessProbe for KillProbe {
     #[cfg(unix)]
-    #[coverage(off)]
     fn is_alive(&self, pid: u32) -> bool {
         libc::pid_t::try_from(pid).is_ok_and(|pid| unsafe { libc::kill(pid, 0) } == 0)
     }
     #[cfg(not(unix))]
-    #[coverage(off)]
     fn is_alive(&self, _pid: u32) -> bool {
         false
     }
@@ -3344,7 +3334,6 @@ impl LivenessProbe for KillProbe {
 struct SigtermTerminator;
 impl Terminator for SigtermTerminator {
     #[cfg(unix)]
-    #[coverage(off)]
     fn terminate(&self, pid: u32) -> std::io::Result<()> {
         let pid =
             libc::pid_t::try_from(pid).map_err(|_| std::io::Error::other("pid out of range"))?;
@@ -3355,7 +3344,6 @@ impl Terminator for SigtermTerminator {
         }
     }
     #[cfg(not(unix))]
-    #[coverage(off)]
     fn terminate(&self, _pid: u32) -> std::io::Result<()> {
         Err(std::io::Error::other(
             "terminating a daemon is only supported on Unix",
@@ -3373,7 +3361,6 @@ struct IpcReady<'a> {
     published: AtomicBool,
 }
 impl DaemonReady for IpcReady<'_> {
-    #[coverage(off)]
     fn publish(&self) -> std::io::Result<()> {
         if self
             .published
@@ -3392,7 +3379,6 @@ impl DaemonReady for IpcReady<'_> {
 struct SignalShutdown(Arc<AtomicBool>);
 impl ShutdownSignal for SignalShutdown {
     #[cfg(unix)]
-    #[coverage(off)]
     fn wait(&self) -> std::io::Result<()> {
         unsafe {
             let mut set: libc::sigset_t = std::mem::zeroed();
@@ -3411,7 +3397,6 @@ impl ShutdownSignal for SignalShutdown {
         Ok(())
     }
     #[cfg(not(unix))]
-    #[coverage(off)]
     fn wait(&self) -> std::io::Result<()> {
         Err(std::io::Error::other(
             "running the daemon is only supported on Unix",
@@ -3423,7 +3408,6 @@ struct ServeLauncher {
     exe: PathBuf,
 }
 impl DaemonLauncher for ServeLauncher {
-    #[coverage(off)]
     fn launch(&self) -> std::io::Result<()> {
         let mut command = std::process::Command::new(&self.exe);
         command
@@ -3440,7 +3424,6 @@ impl DaemonLauncher for ServeLauncher {
 
 struct RealSleeper;
 impl Sleeper for RealSleeper {
-    #[coverage(off)]
     fn sleep(&self) {
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -3451,7 +3434,6 @@ struct FileInstanceLock {
     held: RefCell<Option<std::fs::File>>,
 }
 impl InstanceLock for FileInstanceLock {
-    #[coverage(off)]
     fn acquire(&self) -> std::io::Result<bool> {
         const TIMEOUT: Duration = Duration::from_secs(2);
         const POLL: Duration = Duration::from_millis(20);
@@ -3479,7 +3461,6 @@ impl InstanceLock for FileInstanceLock {
 }
 
 /// `usagi daemon` の実行時資源を組み立てて daemon presentation へ渡す。
-#[coverage(off)]
 pub(crate) fn run<W: Write>(
     out: &mut W,
     command: Option<&str>,
@@ -3506,7 +3487,6 @@ pub(crate) fn run<W: Write>(
 /// panic in an IPC, PTY, or observer worker. The hook records every thread's
 /// panic before the thread unwinds; [`run`] then catches a main-thread panic at
 /// the outer daemon boundary and terminates the process with an ordinary error.
-#[coverage(off)]
 fn install_panic_logger() {
     let previous = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -3514,8 +3494,6 @@ fn install_panic_logger() {
         previous(info);
     }));
 }
-
-#[coverage(off)]
 fn format_panic(info: &PanicHookInfo<'_>) -> String {
     let payload = if let Some(message) = info.payload().downcast_ref::<&str>() {
         (*message).to_owned()
@@ -3532,8 +3510,6 @@ fn format_panic(info: &PanicHookInfo<'_>) -> String {
         Backtrace::force_capture()
     )
 }
-
-#[coverage(off)]
 fn run_inner<W: Write>(out: &mut W, command: Option<&str>, info: &AppInfo) -> std::io::Result<()> {
     let daemon_dir = paths::data_dir()
         .map_err(|err| std::io::Error::other(format!("{err:#}")))?
@@ -3608,7 +3584,6 @@ fn run_inner<W: Write>(out: &mut W, command: Option<&str>, info: &AppInfo) -> st
 /// binaries restart their development daemon once per bootstrap; release
 /// binaries reuse a matching production daemon and only roll over an older
 /// build.
-#[coverage(off)]
 pub(crate) fn client(
     policy: ClientPolicy,
 ) -> Result<IpcClient<std::os::unix::net::UnixStream>, ClientError> {
@@ -3629,7 +3604,6 @@ pub(crate) fn client(
     .map_err(|error| ClientError::Lifecycle(error.to_string()))
 }
 
-#[coverage(off)]
 fn current_build() -> BuildIdentity {
     BuildIdentity {
         version: env!("CARGO_PKG_VERSION").into(),
@@ -3637,8 +3611,6 @@ fn current_build() -> BuildIdentity {
         target: std::env::consts::ARCH.into(),
     }
 }
-
-#[coverage(off)]
 fn connect_client(
     data_dir: &Path,
     policy: ClientPolicy,
@@ -3652,8 +3624,6 @@ fn connect_client(
     )
     .map_err(std::io::Error::other)
 }
-
-#[coverage(off)]
 fn run_lifecycle(exe: &Path, command: &str) -> std::io::Result<()> {
     let status = std::process::Command::new(exe)
         .args(["daemon", command])
@@ -3666,8 +3636,6 @@ fn run_lifecycle(exe: &Path, command: &str) -> std::io::Result<()> {
         .then_some(())
         .ok_or_else(|| std::io::Error::other(format!("daemon {command} failed")))
 }
-
-#[coverage(off)]
 fn acquire_bootstrap_lock(data_dir: &Path) -> Result<std::fs::File, ClientError> {
     let daemon_dir = data_dir.join("daemon");
     std::fs::create_dir_all(data_dir)
@@ -3697,7 +3665,6 @@ fn acquire_bootstrap_lock(data_dir: &Path) -> Result<std::fs::File, ClientError>
 
 /// Ensures that an active daemon endpoint exists before an interactive TUI is
 /// shown. TUI operations still acquire their own client connection.
-#[coverage(off)]
 pub(crate) fn ensure_ready() -> Result<(), ClientError> {
     client(ClientPolicy::tui()).map(|_| ())
 }
@@ -4029,9 +3996,7 @@ mod tests {
     struct TestTerminalStore;
 
     impl TerminalStore for TestTerminalStore {
-        type Error = std::convert::Infallible;
-
-        fn save(&mut self, _: TerminalStoreSnapshot) -> Result<(), Self::Error> {
+        fn save(&mut self, _: TerminalStoreSnapshot) -> Result<(), ()> {
             Ok(())
         }
     }
@@ -4216,7 +4181,10 @@ mod tests {
                 generic_request,
                 1,
                 "/bin/sh",
-                vec!["-c".to_owned(), "printf generic-final".to_owned()],
+                vec![
+                    "-c".to_owned(),
+                    "printf generic-final; sleep 0.01".to_owned(),
+                ],
                 PathBuf::from("/"),
                 [],
             )
@@ -4261,7 +4229,7 @@ mod tests {
             profile,
             1,
             "/bin/sh",
-            vec!["-c".to_owned(), "printf agent-final".to_owned()],
+            vec!["-c".to_owned(), "printf agent-final; sleep 0.01".to_owned()],
             [],
             PathBuf::from("/"),
         )
@@ -4824,6 +4792,14 @@ mod tests {
                 process: None,
                 state: usagi_daemon::usecase::generation::TerminalState::IdentityUnknown,
             });
+        assert_eq!(
+            usagi_daemon::usecase::generation::GenerationCoordinator::restore(
+                corrupt.generation.clone(),
+                2,
+            )
+            .unwrap_err(),
+            usagi_daemon::usecase::generation::GenerationError::UnknownGeneration
+        );
         std::fs::write(&path, serde_json::to_vec(&corrupt).unwrap()).unwrap();
         let before = std::fs::read(&path).unwrap();
 
@@ -4849,7 +4825,7 @@ mod tests {
         });
     }
 
-    fn assert_failed_snapshot_write_is_consistent(save: impl FnOnce(&Path) -> std::io::Result<()>) {
+    fn assert_failed_snapshot_write_is_consistent(save: impl FnOnce(&Path) -> Result<(), ()>) {
         let dir = tempfile::tempdir().unwrap();
         // An existing non-empty directory cannot be replaced by the final
         // rename. This fails after the durable temp has been written, so it

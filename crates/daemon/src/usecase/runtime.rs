@@ -115,7 +115,6 @@ impl RuntimeStoreSnapshot {
     /// provable live owner explicit instead.  A later, explicit recovery path
     /// may inspect the record, but startup itself never spawns a replacement.
     #[must_use]
-    #[coverage(off)]
     pub fn reconcile_after_daemon_restart(mut self) -> (Self, usize) {
         let mut interrupted = 0;
         for record in &mut self.records {
@@ -205,8 +204,8 @@ pub enum RuntimeSnapshotError {
 }
 
 pub trait RuntimeStore {
-    type Error;
-    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), Self::Error>;
+    #[allow(clippy::result_unit_err)] // Persistence detail is intentionally erased at the usecase port.
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()>;
 }
 /// Called exactly once by [`RuntimeCoordinator::launch`], before PTY spawn.
 /// Ephemeral, adapter-owned spawn inputs. This value is never copied into a
@@ -229,7 +228,6 @@ pub struct ProvisionContext {
 
 impl ProvisionContext {
     #[must_use]
-    #[coverage(off)]
     pub fn from_request(request: &LaunchRequest) -> Self {
         Self {
             scope: request.scope.clone(),
@@ -242,7 +240,6 @@ impl ProvisionContext {
 
 impl SpawnProvision {
     #[must_use]
-    #[coverage(off)]
     pub fn new(
         environment: impl IntoIterator<
             Item = (usagi_core::domain::agent::EnvironmentVariableName, String),
@@ -257,7 +254,6 @@ impl SpawnProvision {
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn environment(
         &self,
     ) -> &BTreeMap<usagi_core::domain::agent::EnvironmentVariableName, String> {
@@ -265,7 +261,6 @@ impl SpawnProvision {
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn arguments(&self) -> &[String] {
         &self.arguments
     }
@@ -274,7 +269,6 @@ impl SpawnProvision {
     /// live sources. Later sources win collisions: public terminal profile,
     /// adapter provision, then daemon-issued ephemeral provision.
     #[must_use]
-    #[coverage(off)]
     pub fn compose_environment(
         &self,
         public_profile: &BTreeMap<String, String>,
@@ -297,7 +291,6 @@ impl SpawnProvision {
     /// provisioning. This is the highest-priority source: it replaces an
     /// adapter value with the same name, while adapter values replace public
     /// profile values when the process environment is composed.
-    #[coverage(off)]
     pub fn insert_daemon_environment(
         &mut self,
         name: usagi_core::domain::agent::EnvironmentVariableName,
@@ -352,8 +345,8 @@ pub trait PtySpawner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminateReapError;
 pub trait OutputJournal {
-    type Error;
-    fn append(&mut self, output: &Output) -> Result<(), Self::Error>;
+    #[allow(clippy::result_unit_err)] // Journal detail is intentionally erased at the usecase port.
+    fn append(&mut self, output: &Output) -> Result<(), ()>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,7 +378,6 @@ pub struct RuntimeCoordinator {
 
 impl RuntimeCoordinator {
     #[must_use]
-    #[coverage(off)]
     pub fn new(limit: usize, journal_limit: usize, input_cache_limit: usize) -> Self {
         Self {
             limit,
@@ -431,16 +423,15 @@ impl RuntimeCoordinator {
         self.generation.current()
     }
 
-    #[coverage(off)]
-    pub fn launch<A: AgentAdapter + ?Sized, S: RuntimeStore, P: PtySpawner>(
+    pub fn launch(
         &mut self,
         request: &LaunchRequest,
         runtime: AgentRuntimeRef,
         operation: CompletionFence,
         geometry: Geometry,
-        adapter: &mut A,
-        store: &mut S,
-        spawner: &mut P,
+        adapter: &mut dyn AgentAdapter,
+        store: &mut dyn RuntimeStore,
+        spawner: &mut dyn PtySpawner,
         mcp_credential: Option<String>,
     ) -> Result<(), RuntimeError> {
         self.launch_with_semantic(
@@ -456,19 +447,15 @@ impl RuntimeCoordinator {
         )
     }
 
-    // LLVM counts this generic orchestration once per downstream adapter/store/spawner
-    // monomorphization. Unit and real-file restart tests cover the shared behavior.
-    #[coverage(off)]
-    #[allow(clippy::too_many_lines)] // Reservation, generation ownership, spawn, and compensation form one transaction.
-    pub fn launch_with_semantic<A: AgentAdapter + ?Sized, S: RuntimeStore, P: PtySpawner>(
+    pub fn launch_with_semantic(
         &mut self,
         request: &LaunchRequest,
         runtime: AgentRuntimeRef,
         operation: CompletionFence,
         geometry: Geometry,
-        adapter: &mut A,
-        store: &mut S,
-        spawner: &mut P,
+        adapter: &mut dyn AgentAdapter,
+        store: &mut dyn RuntimeStore,
+        spawner: &mut dyn PtySpawner,
         mcp_credential: Option<String>,
         semantic_key: String,
     ) -> Result<(), RuntimeError> {
@@ -489,16 +476,15 @@ impl RuntimeCoordinator {
     /// Reserves a replacement runtime while superseding interrupted runtime
     /// incarnations in the same durable snapshot. Exited/reclaimed sources stay
     /// as history; only `identity_unknown` sources release occupied capacity.
-    #[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=restart_resume_supersedes_the_interrupted_runtime_without_leaking_capacity
-    pub fn resume_with_semantic<A: AgentAdapter + ?Sized, S: RuntimeStore, P: PtySpawner>(
+    pub fn resume_with_semantic(
         &mut self,
         request: &LaunchRequest,
         runtime: AgentRuntimeRef,
         operation: CompletionFence,
         geometry: Geometry,
-        adapter: &mut A,
-        store: &mut S,
-        spawner: &mut P,
+        adapter: &mut dyn AgentAdapter,
+        store: &mut dyn RuntimeStore,
+        spawner: &mut dyn PtySpawner,
         mcp_credential: Option<String>,
         semantic_key: String,
         superseded: &[AgentRuntimeRef],
@@ -518,20 +504,15 @@ impl RuntimeCoordinator {
     }
 
     #[allow(clippy::too_many_lines)] // Keep the reservation, source transition, and spawn compensation in one transactional flow.
-    #[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=restart_resume_supersedes_the_interrupted_runtime_without_leaking_capacity
-    fn launch_with_semantic_superseding<
-        A: AgentAdapter + ?Sized,
-        S: RuntimeStore,
-        P: PtySpawner,
-    >(
+    fn launch_with_semantic_superseding(
         &mut self,
         request: &LaunchRequest,
         runtime: AgentRuntimeRef,
         operation: CompletionFence,
         geometry: Geometry,
-        adapter: &mut A,
-        store: &mut S,
-        spawner: &mut P,
+        adapter: &mut dyn AgentAdapter,
+        store: &mut dyn RuntimeStore,
+        spawner: &mut dyn PtySpawner,
         mcp_credential: Option<String>,
         semantic_key: String,
         superseded: &[AgentRuntimeRef],
@@ -632,11 +613,9 @@ impl RuntimeCoordinator {
         );
         self.generation
             .reserve_terminal(runtime.terminal.clone())
-            .map_err(|error| match error {
-                GenerationError::TerminalOwnedElsewhere => {
-                    RuntimeError::Terminal(RegistryError::StaleTarget)
-                }
-                other => RuntimeError::Generation(other),
+            .map_err(|error| {
+                debug_assert_eq!(error, GenerationError::TerminalOwnedElsewhere);
+                RuntimeError::Terminal(RegistryError::StaleTarget)
             })?;
         self.persist(store)?; // durable reservation/snapshot precedes every external effect
         if let Err(error) = self.terminals.register(runtime.terminal.clone(), geometry) {
@@ -687,22 +666,20 @@ impl RuntimeCoordinator {
     /// Compensates a failure after spawn but before the whole admission has
     /// committed. A successful return is intentionally impossible: even when
     /// termination succeeds the original request remains a durable failure.
-    #[coverage(off)]
-    pub fn compensate_after_spawn<S: RuntimeStore, P: PtySpawner>(
+    pub fn compensate_after_spawn(
         &mut self,
         runtime: &AgentRuntimeRef,
-        store: &mut S,
-        spawner: &mut P,
+        store: &mut dyn RuntimeStore,
+        spawner: &mut dyn PtySpawner,
     ) -> RuntimeError {
         self.compensate_spawn(runtime, store, spawner)
     }
 
-    #[coverage(off)] // Generic store/spawner monomorphizations duplicate the same tested compensation branches.
-    fn compensate_spawn<S: RuntimeStore, P: PtySpawner>(
+    fn compensate_spawn(
         &mut self,
         runtime: &AgentRuntimeRef,
-        store: &mut S,
-        spawner: &mut P,
+        store: &mut dyn RuntimeStore,
+        spawner: &mut dyn PtySpawner,
     ) -> RuntimeError {
         let terminated = spawner.terminate_reap(&runtime.terminal).is_ok();
         if terminated {
@@ -738,12 +715,11 @@ impl RuntimeCoordinator {
     }
 
     /// Journal output before it becomes available to terminal replay clients.
-    #[coverage(off)]
-    pub fn append_output<J: OutputJournal>(
+    pub fn append_output(
         &mut self,
         runtime: &AgentRuntimeRef,
         data: Vec<u8>,
-        journal: &mut J,
+        journal: &mut dyn OutputJournal,
     ) -> Result<Output, RuntimeError> {
         self.running(runtime)?;
         let start_offset = self
@@ -757,19 +733,20 @@ impl RuntimeCoordinator {
             end_offset: start_offset + data.len() as u64,
             data,
         };
-        journal.append(&output).map_err(|_| RuntimeError::Journal)?;
+        journal
+            .append(&output)
+            .map_err(|()| RuntimeError::Journal)?;
         self.terminals
             .append_output(&runtime.terminal, output.data.clone())
             .map_err(RuntimeError::Terminal)
     }
 
     /// Caller drains all output before this verified exit is committed.
-    #[coverage(off)]
-    pub fn exit<S: RuntimeStore>(
+    pub fn exit(
         &mut self,
         runtime: &AgentRuntimeRef,
         status: i32,
-        store: &mut S,
+        store: &mut dyn RuntimeStore,
     ) -> Result<(), RuntimeError> {
         self.running(runtime)?;
         self.terminals
@@ -805,12 +782,11 @@ impl RuntimeCoordinator {
 
     /// Reconciliation performs no replacement spawn. A slot is released only
     /// on a verified disappearance (or [`Self::exit`]).
-    #[coverage(off)]
-    pub fn reconcile<S: RuntimeStore>(
+    pub fn reconcile(
         &mut self,
         runtime: &AgentRuntimeRef,
         observation: ProcessObservation,
-        store: &mut S,
+        store: &mut dyn RuntimeStore,
     ) -> Result<(), RuntimeError> {
         let identity_unknown = matches!(observation, ProcessObservation::Unknown);
         let next_state = match &observation {
@@ -832,20 +808,21 @@ impl RuntimeCoordinator {
         let record = self.record_mut(runtime)?;
         record.state = next_state;
         if let Some(provider) = &mut record.provider_resume {
-            provider.last_known_status = match record.state {
-                RuntimeState::Exited | RuntimeState::Reclaimed => ProviderResumeStatus::Exited,
-                _ => ProviderResumeStatus::Interrupted,
+            let exited = matches!(record.state, RuntimeState::Exited | RuntimeState::Reclaimed);
+            provider.last_known_status = if exited {
+                ProviderResumeStatus::Exited
+            } else {
+                ProviderResumeStatus::Interrupted
             };
-            provider.last_known_phase = Some(match provider.last_known_status {
-                ProviderResumeStatus::Active => ProviderResumePhase::Running,
-                ProviderResumeStatus::Interrupted => ProviderResumePhase::Interrupted,
-                ProviderResumeStatus::Exited => ProviderResumePhase::Ended,
+            provider.last_known_phase = Some(if exited {
+                ProviderResumePhase::Ended
+            } else {
+                ProviderResumePhase::Interrupted
             });
         }
         self.persist(store)
     }
 
-    #[coverage(off)]
     pub fn terminal_snapshot(&self, runtime: &AgentRuntimeRef) -> Result<Snapshot, RuntimeError> {
         self.record(runtime)?;
         self.terminals
@@ -855,7 +832,6 @@ impl RuntimeCoordinator {
 
     /// Atomically snapshots the runtime terminal and assigns a connection-owned
     /// subscription.  Only a running, fenced runtime is attachable.
-    #[coverage(off)]
     pub fn attach(
         &mut self,
         runtime: &AgentRuntimeRef,
@@ -869,7 +845,6 @@ impl RuntimeCoordinator {
 
     /// Removes only the named attachment; the daemon-owned Agent process and its
     /// PTY intentionally stay alive.
-    #[coverage(off)]
     pub fn detach(
         &mut self,
         runtime: &AgentRuntimeRef,
@@ -883,12 +858,11 @@ impl RuntimeCoordinator {
     }
 
     /// Updates the fenced runtime terminal geometry.
-    #[coverage(off)]
-    pub fn resize<W: PtyWriter>(
+    pub fn resize(
         &mut self,
         runtime: &AgentRuntimeRef,
         geometry: Geometry,
-        writer: &mut W,
+        writer: &mut dyn PtyWriter,
     ) -> Result<Snapshot, RuntimeError> {
         self.running(runtime)?;
         self.terminals
@@ -897,13 +871,12 @@ impl RuntimeCoordinator {
     }
 
     /// Writes fenced, de-duplicated terminal input to the daemon-owned PTY.
-    #[coverage(off)]
-    pub fn input<W: PtyWriter>(
+    pub fn input(
         &mut self,
         runtime: &AgentRuntimeRef,
         input: InputRequest,
         bytes: &[u8],
-        writer: &mut W,
+        writer: &mut dyn PtyWriter,
     ) -> Result<InputAck, RuntimeError> {
         self.running(runtime)?;
         self.terminals
@@ -912,7 +885,6 @@ impl RuntimeCoordinator {
     }
 
     /// Replays retained output after `offset` for a reconnecting attachment.
-    #[coverage(off)]
     pub fn replay_from(
         &self,
         runtime: &AgentRuntimeRef,
@@ -926,7 +898,6 @@ impl RuntimeCoordinator {
 
     /// Drops only this connection's subscriptions across every runtime terminal.
     /// It never kills an Agent process, its PTY, or the completion worker.
-    #[coverage(off)]
     pub fn disconnect(&mut self, connection: ConnectionId) {
         self.terminals.disconnect(connection);
     }
@@ -935,7 +906,6 @@ impl RuntimeCoordinator {
     /// requests address a terminal only by its `TerminalRef`; this maps that ref
     /// back to the owning runtime without a name or PID fallback.
     #[must_use]
-    #[coverage(off)]
     pub fn runtime_for_terminal(&self, terminal: &TerminalRef) -> Option<AgentRuntimeRef> {
         if !self.generation.owns_terminal(terminal) {
             return None;
@@ -972,7 +942,6 @@ impl RuntimeCoordinator {
     }
     /// Returns the immutable record only when the complete runtime reference
     /// fences it.  This exposes no ephemeral provision or terminal output.
-    #[coverage(off)]
     pub fn record_for(
         &self,
         runtime: &AgentRuntimeRef,
@@ -982,11 +951,11 @@ impl RuntimeCoordinator {
     /// Records an ID obtained from a documented provider-owned structured
     /// channel. The complete runtime and launch scope must still fence the
     /// record; callers cannot repair or infer legacy metadata by name/path.
-    pub fn record_provider_resume<S: RuntimeStore>(
+    pub fn record_provider_resume(
         &mut self,
         runtime: &AgentRuntimeRef,
         provider_resume: ProviderResumeRef,
-        store: &mut S,
+        store: &mut dyn RuntimeStore,
     ) -> Result<(), RuntimeError> {
         let record = self.record_mut(runtime)?;
         if record.state != RuntimeState::Running
@@ -1003,7 +972,6 @@ impl RuntimeCoordinator {
         self.persist(store)
     }
     #[must_use]
-    #[coverage(off)]
     pub fn snapshot(&self) -> RuntimeStoreSnapshot {
         RuntimeStoreSnapshot {
             schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
@@ -1021,7 +989,6 @@ impl RuntimeCoordinator {
             .map_err(RuntimeError::Generation)
     }
     #[must_use]
-    #[coverage(off)]
     pub fn occupied_slots(&self) -> usize {
         self.records
             .values()
@@ -1035,11 +1002,11 @@ impl RuntimeCoordinator {
             })
             .count()
     }
-    #[coverage(off)]
-    fn persist<S: RuntimeStore>(&self, store: &mut S) -> Result<(), RuntimeError> {
-        store.save(self.snapshot()).map_err(|_| RuntimeError::Store)
+    fn persist(&self, store: &mut dyn RuntimeStore) -> Result<(), RuntimeError> {
+        store
+            .save(self.snapshot())
+            .map_err(|()| RuntimeError::Store)
     }
-    #[coverage(off)]
     fn validate_scope(
         &self,
         runtime: &AgentRuntimeRef,
@@ -1052,14 +1019,12 @@ impl RuntimeCoordinator {
             .then_some(())
             .ok_or(RuntimeError::ScopeMismatch)
     }
-    #[coverage(off)]
     fn record(&self, runtime: &AgentRuntimeRef) -> Result<&DurableRuntimeRecord, RuntimeError> {
         self.records
             .get(&runtime.agent_runtime_id.as_str())
             .filter(|record| record.runtime.fences(runtime))
             .ok_or(RuntimeError::UnknownRuntime)
     }
-    #[coverage(off)]
     fn record_mut(
         &mut self,
         runtime: &AgentRuntimeRef,
@@ -1069,7 +1034,6 @@ impl RuntimeCoordinator {
             .filter(|record| record.runtime.fences(runtime))
             .ok_or(RuntimeError::UnknownRuntime)
     }
-    #[coverage(off)]
     fn running(&self, runtime: &AgentRuntimeRef) -> Result<(), RuntimeError> {
         match self.record(runtime)?.state {
             RuntimeState::Running => self
@@ -1137,7 +1101,10 @@ mod tests {
     use super::*;
     use std::{collections::BTreeSet, path::PathBuf};
     use usagi_core::domain::{
-        agent::{AgentProfileId, LaunchMode, LaunchPlan, LaunchScope},
+        agent::{
+            AgentProfileId, LaunchMode, LaunchPlan, LaunchScope, ProviderCaptureProvenance,
+            ProviderKind, ProviderSessionId,
+        },
         id::{
             AgentRuntimeId, ClientId, DaemonGeneration, OperationId, RequestId, SessionId,
             TerminalId, WorkspaceId, WorktreeId,
@@ -1146,7 +1113,6 @@ mod tests {
     #[derive(Default)]
     struct Store(Vec<RuntimeStoreSnapshot>);
     impl RuntimeStore for Store {
-        type Error = ();
         fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
             self.0.push(snapshot);
             Ok(())
@@ -1157,7 +1123,6 @@ mod tests {
         fail_after: Option<usize>,
     }
     impl RuntimeStore for ConditionalStore {
-        type Error = ();
         fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
             self.saves += 1;
             if self.fail_after.is_some_and(|limit| self.saves > limit) {
@@ -1169,7 +1134,6 @@ mod tests {
     }
     struct FailingStore(usize);
     impl RuntimeStore for FailingStore {
-        type Error = ();
         fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
             self.0 += 1;
             if self.0 == 2 { Err(()) } else { Ok(()) }
@@ -1182,9 +1146,12 @@ mod tests {
     impl AgentAdapter for Resolver {
         fn resolve(&mut self, request: &LaunchRequest) -> Result<ResolvedLaunch, AdapterError> {
             self.calls += 1;
+            let provider_resume = request.provider_resume.clone();
+            let mut durable_request = request.clone();
+            durable_request.provider_resume = None;
             Ok(ResolvedLaunch {
                 snapshot: DurableLaunchSnapshot::new(
-                    request.clone(),
+                    durable_request,
                     LaunchPlan::new(
                         request.profile_id.clone(),
                         7,
@@ -1196,7 +1163,7 @@ mod tests {
                     .unwrap(),
                 ),
                 provision: SpawnProvision::new([], Vec::new()),
-                provider_resume: request.provider_resume.clone(),
+                provider_resume,
             })
         }
     }
@@ -1231,7 +1198,6 @@ mod tests {
     #[derive(Default)]
     struct Journal(Vec<Output>);
     impl OutputJournal for Journal {
-        type Error = ();
         fn append(&mut self, output: &Output) -> Result<(), ()> {
             self.0.push(output.clone());
             Ok(())
@@ -1330,6 +1296,98 @@ mod tests {
     }
 
     #[test]
+    fn resume_rejects_a_live_superseded_runtime_before_reserving_a_replacement() {
+        let request = request();
+        let (source, source_fence) = refs(&request);
+        let mut coordinator = RuntimeCoordinator::new(2, 64, 1);
+        let mut store = Store::default();
+        let mut spawner = Spawner(Ok(process()));
+        launch(
+            &mut coordinator,
+            &request,
+            source.clone(),
+            source_fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+        let (replacement, replacement_fence) = refs(&request);
+
+        assert_eq!(
+            coordinator.resume_with_semantic(
+                &request,
+                replacement,
+                replacement_fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver::default(),
+                &mut store,
+                &mut spawner,
+                None,
+                "resume".into(),
+                &[source],
+            ),
+            Err(RuntimeError::ProviderResumeMismatch)
+        );
+        assert_eq!(coordinator.snapshot().records.len(), 1);
+    }
+
+    #[test]
+    fn reconcile_projects_provider_metadata_for_gone_and_interrupted_processes() {
+        for (observation, expected_status, expected_phase) in [
+            (
+                ProcessObservation::Gone,
+                ProviderResumeStatus::Exited,
+                ProviderResumePhase::Ended,
+            ),
+            (
+                ProcessObservation::Unknown,
+                ProviderResumeStatus::Interrupted,
+                ProviderResumePhase::Interrupted,
+            ),
+        ] {
+            let mut request = request();
+            request.resume = true;
+            request
+                .required_capabilities
+                .insert(usagi_core::domain::agent::AgentCapability::Resume);
+            request.provider_resume = Some(ProviderResumeRef {
+                provider: ProviderKind::Claude,
+                native_session_id: ProviderSessionId::new("provider-session").unwrap(),
+                adapter_revision: 7,
+                scope: request.scope.clone(),
+                provenance: ProviderCaptureProvenance::ProviderStructured,
+                last_known_status: ProviderResumeStatus::Active,
+                last_known_phase: Some(ProviderResumePhase::Running),
+            });
+            let (runtime, fence) = refs(&request);
+            let mut coordinator = RuntimeCoordinator::new(1, 64, 1);
+            let mut store = Store::default();
+            launch(
+                &mut coordinator,
+                &request,
+                runtime.clone(),
+                fence,
+                &mut Spawner(Ok(process())),
+                &mut store,
+            )
+            .unwrap();
+
+            coordinator
+                .reconcile(&runtime, observation, &mut store)
+                .unwrap();
+            let provider = coordinator
+                .record_for(&runtime)
+                .unwrap()
+                .provider_resume
+                .as_ref()
+                .unwrap();
+            assert_eq!(provider.last_known_status, expected_status);
+            assert_eq!(provider.last_known_phase, Some(expected_phase));
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One table-style test covers every snapshot validation edge.
     fn hydrate_validates_schema_identity_and_legacy_outcomes() {
         assert_eq!(
             RuntimeStoreSnapshot::default(),
@@ -1348,6 +1406,21 @@ mod tests {
             .unwrap_err(),
             RuntimeSnapshotError::UnknownSchema(99)
         );
+        assert_eq!(
+            RuntimeCoordinator::hydrate(
+                RuntimeStoreSnapshot {
+                    schema_version: 99,
+                    records: Vec::new(),
+                    generation: GenerationSnapshot::default(),
+                },
+                1,
+                64,
+                1,
+            )
+            .unwrap_err(),
+            RuntimeSnapshotError::UnknownSchema(99)
+        );
+        assert!(RuntimeCoordinator::hydrate(RuntimeStoreSnapshot::default(), 1, 64, 1).is_ok());
 
         let request = request();
         let (runtime, operation) = refs(&request);
@@ -1813,6 +1886,36 @@ mod tests {
             c.terminal_snapshot(&stale),
             Err(RuntimeError::UnknownRuntime)
         );
+        assert_eq!(
+            c.reconcile(&stale, ProcessObservation::Gone, &mut store),
+            Err(RuntimeError::Generation(
+                GenerationError::TerminalOwnedElsewhere
+            ))
+        );
+        assert_eq!(
+            c.attach(&stale, ConnectionId::new()),
+            Err(RuntimeError::UnknownRuntime)
+        );
+        assert_eq!(
+            c.detach(&stale, 1, ConnectionId::new()),
+            Err(RuntimeError::UnknownRuntime)
+        );
+        assert_eq!(c.replay_from(&stale, 0), Err(RuntimeError::UnknownRuntime));
+        assert_eq!(
+            c.input(
+                &stale,
+                InputRequest {
+                    subscription: 1,
+                    connection: ConnectionId::new(),
+                    client: ClientId::new(),
+                    request: RequestId::new(),
+                    input_seq: 0,
+                },
+                b"ignored",
+                &mut Writer::default(),
+            ),
+            Err(RuntimeError::UnknownRuntime)
+        );
         c.reconcile(
             &runtime,
             ProcessObservation::VerifiedAlive(process()),
@@ -1993,7 +2096,9 @@ mod tests {
         struct BadResolver;
         impl AgentAdapter for BadResolver {
             fn resolve(&mut self, request: &LaunchRequest) -> Result<ResolvedLaunch, AdapterError> {
-                let mut resolved = Resolver::default().resolve(request)?;
+                let mut resolved = Resolver::default()
+                    .resolve(request)
+                    .expect("test resolver accepts the canonical request");
                 resolved.snapshot.request.resume = true;
                 Ok(resolved)
             }
@@ -2035,6 +2140,28 @@ mod tests {
             launch(&mut c, &request, duplicate, fence, &mut spawner, &mut store),
             Err(RuntimeError::Terminal(RegistryError::StaleTarget))
         );
+
+        let pre_registered_request = request.clone();
+        let (pre_registered_runtime, pre_registered_fence) = refs(&pre_registered_request);
+        let mut pre_registered = RuntimeCoordinator::new(2, 64, 1);
+        pre_registered
+            .terminals
+            .register(
+                pre_registered_runtime.terminal.clone(),
+                Geometry { cols: 80, rows: 24 },
+            )
+            .unwrap();
+        assert_eq!(
+            launch(
+                &mut pre_registered,
+                &pre_registered_request,
+                pre_registered_runtime,
+                pre_registered_fence,
+                &mut spawner,
+                &mut store,
+            ),
+            Err(RuntimeError::Terminal(RegistryError::StaleTarget))
+        );
     }
 
     #[test]
@@ -2049,14 +2176,12 @@ mod tests {
         }
         struct RejectingStore;
         impl RuntimeStore for RejectingStore {
-            type Error = ();
             fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
                 Err(())
             }
         }
         struct RejectingJournal;
         impl OutputJournal for RejectingJournal {
-            type Error = ();
             fn append(&mut self, _: &Output) -> Result<(), ()> {
                 Err(())
             }

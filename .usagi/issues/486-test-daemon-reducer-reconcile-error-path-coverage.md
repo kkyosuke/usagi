@@ -1,14 +1,14 @@
 ---
 number: 486
 title: test(daemon): reducer・reconcile・error path を coverage 対象へ戻す
-status: todo
+status: done
 priority: medium
 labels: [review, v2, daemon, coverage]
 dependson: [484]
 related: [356, 360, 380]
 parent: 453
 created_at: 2026-07-20T12:06:49.822445+00:00
-updated_at: 2026-07-20T12:07:41.850643+00:00
+updated_at: 2026-07-21T13:06:59.998378+00:00
 ---
 
 ## 問題・影響

@@ -36,7 +36,6 @@ use usagi_core::infrastructure::daemon::{
 ///
 /// Never in practice: the `Alive` arm unwraps the record, and `classify` reports
 /// `Alive` only when a record is present.
-#[coverage(off)]
 pub fn stop<F: RecordFile, P: LivenessProbe, T: Terminator>(
     store: &DaemonRecordStore<F>,
     probe: &P,

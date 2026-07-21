@@ -24,8 +24,8 @@ use usagi_core::domain::agent::{
     LaunchPlan,
 };
 use usagi_core::domain::id::{
-    ClientId, ConnectionId, DaemonGeneration, OperationId, RequestId, SessionId, TerminalRef,
-    WorkspaceId,
+    ClientId, ConnectionId, DaemonGeneration, OperationId, RequestId, SessionId, TerminalId,
+    TerminalRef, WorkspaceId, WorktreeId,
 };
 use usagi_core::infrastructure::ipc::ErrorCode;
 use usagi_core::infrastructure::store::dispatch::DispatchStore;
@@ -39,7 +39,9 @@ use usagi_daemon::usecase::agent_ipc::{
 use usagi_daemon::usecase::claude::{
     ClaudeAdapter, ClaudeProvision, ClaudeProvisionFailure, ClaudeProvisioner,
 };
-use usagi_daemon::usecase::generation::ProcessIdentity;
+use usagi_daemon::usecase::generation::{
+    GenerationCoordinator, GenerationError, ProcessIdentity, TerminalOwnership, TerminalState,
+};
 use usagi_daemon::usecase::orchestration::AdapterRegistry;
 use usagi_daemon::usecase::runtime::{
     AdapterError, AgentAdapter, OutputJournal, ProvisionContext, PtySpawner, ResolvedLaunch,
@@ -52,7 +54,6 @@ use usagi_daemon::usecase::terminal::{Geometry, Output, PtyWriteError, PtyWriter
 #[derive(Default)]
 struct MemoryStore(Vec<RuntimeStoreSnapshot>);
 impl RuntimeStore for MemoryStore {
-    type Error = ();
     fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
         self.0.push(snapshot);
         Ok(())
@@ -66,13 +67,11 @@ struct FailSecondSaveStore {
 }
 struct FailFirstSaveStore;
 impl RuntimeStore for FailFirstSaveStore {
-    type Error = ();
     fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
         Err(())
     }
 }
 impl RuntimeStore for FailSecondSaveStore {
-    type Error = ();
     fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
         self.saves += 1;
         if self.saves == 2 {
@@ -86,7 +85,6 @@ impl RuntimeStore for FailSecondSaveStore {
 #[derive(Default)]
 struct MemoryJournal(Vec<Output>);
 impl OutputJournal for MemoryJournal {
-    type Error = ();
     fn append(&mut self, output: &Output) -> Result<(), ()> {
         self.0.push(output.clone());
         Ok(())
@@ -710,4 +708,25 @@ fn real_pty_claude_launch_fails_closed_when_the_binary_is_unavailable() {
         ),
         TerminalOutcome::NotOwned
     ));
+}
+
+#[test]
+fn production_runtime_rejects_terminal_ownership_without_its_generation() {
+    let mut snapshot = RuntimeStoreSnapshot::default();
+    snapshot.generation.terminals.push(TerminalOwnership {
+        terminal: TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+        },
+        process: None,
+        state: TerminalState::IdentityUnknown,
+    });
+
+    assert_eq!(
+        GenerationCoordinator::restore(snapshot.generation, 1).unwrap_err(),
+        GenerationError::UnknownGeneration
+    );
 }

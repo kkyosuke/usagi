@@ -112,7 +112,6 @@ pub struct GenerationCoordinator {
 
 impl GenerationCoordinator {
     #[must_use]
-    #[coverage(off)]
     pub fn new(limit: usize) -> Self {
         Self {
             limit,
@@ -124,7 +123,6 @@ impl GenerationCoordinator {
 
     /// Restores only a self-consistent snapshot. Corruption fails closed rather
     /// than forgetting terminal ownership.
-    #[coverage(off)]
     pub fn restore(snapshot: GenerationSnapshot, limit: usize) -> Result<Self, GenerationError> {
         let mut coordinator = Self::new(limit);
         for record in snapshot.records {
@@ -176,7 +174,6 @@ impl GenerationCoordinator {
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn snapshot(&self) -> GenerationSnapshot {
         GenerationSnapshot {
             current: self.current,
@@ -209,7 +206,6 @@ impl GenerationCoordinator {
 
     /// Adds a listener that is ready to take part in a handoff but cannot yet
     /// mutate session/control state.
-    #[coverage(off)]
     pub fn register_standby(
         &mut self,
         generation: DaemonGeneration,
@@ -222,7 +218,6 @@ impl GenerationCoordinator {
         })
     }
 
-    #[coverage(off)]
     fn register_record(&mut self, record: GenerationRecord) -> Result<(), GenerationError> {
         if self.records.contains_key(&record.generation.as_str()) {
             return Err(GenerationError::DuplicateGeneration);
@@ -235,7 +230,6 @@ impl GenerationCoordinator {
     }
 
     /// Makes the first registered daemon active.
-    #[coverage(off)]
     pub fn activate_initial(
         &mut self,
         generation: DaemonGeneration,
@@ -251,7 +245,11 @@ impl GenerationCoordinator {
     /// Atomically performs the control handoff after `next` has become ready.
     /// A running non-terminal external effect makes rollover unsafe; queued
     /// work can be re-owned only after its old worker has stopped.
-    #[coverage(off)]
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the records checked immediately before the handoff mutate
+    /// without going through this exclusive coordinator reference.
     pub fn rollover(
         &mut self,
         active: DaemonGeneration,
@@ -265,15 +263,16 @@ impl GenerationCoordinator {
         if self.role(next) != Some(GenerationRole::Standby) {
             return Err(GenerationError::NotStandby);
         }
-        self.set_role(active, GenerationRole::Active, GenerationRole::Draining)?;
-        self.set_role(next, GenerationRole::Standby, GenerationRole::Active)?;
+        self.set_role(active, GenerationRole::Active, GenerationRole::Draining)
+            .expect("active generation was checked before rollover");
+        self.set_role(next, GenerationRole::Standby, GenerationRole::Active)
+            .expect("standby generation was checked before rollover");
         self.current = Some(next);
         Ok(())
     }
 
     /// Rechecks control authority immediately before an effect and again before
     /// its state commit. Callers use this on both sides of external IO.
-    #[coverage(off)]
     pub fn require_active(&self, generation: DaemonGeneration) -> Result<(), GenerationError> {
         (self.current == Some(generation) && self.role(generation) == Some(GenerationRole::Active))
             .then_some(())
@@ -282,7 +281,6 @@ impl GenerationCoordinator {
 
     /// Resolves a terminal only through its owner generation's trusted record.
     /// Draining generations intentionally remain routable for terminal IO.
-    #[coverage(off)]
     pub fn terminal_endpoint(&self, terminal: &TerminalRef) -> Result<&str, GenerationError> {
         let ownership = self
             .terminals
@@ -295,10 +293,7 @@ impl GenerationCoordinator {
         self.records
             .get(&terminal.daemon_generation.as_str())
             .filter(|record| {
-                matches!(
-                    record.role,
-                    GenerationRole::Active | GenerationRole::Draining
-                )
+                record.role == GenerationRole::Active || record.role == GenerationRole::Draining
             })
             .map(|record| record.endpoint.as_str())
             .ok_or(GenerationError::UnknownGeneration)
@@ -306,7 +301,6 @@ impl GenerationCoordinator {
 
     /// Stores terminal ownership before spawn. A missing identity after crash is
     /// deliberately `identity_unknown`, never evidence that no child exists.
-    #[coverage(off)]
     pub fn reserve_terminal(&mut self, terminal: TerminalRef) -> Result<(), GenerationError> {
         self.require_active(terminal.daemon_generation)?;
         let key = terminal_key(&terminal);
@@ -324,7 +318,6 @@ impl GenerationCoordinator {
         Ok(())
     }
 
-    #[coverage(off)]
     pub fn record_spawn(
         &mut self,
         terminal: &TerminalRef,
@@ -339,17 +332,17 @@ impl GenerationCoordinator {
     /// Marks every terminal of a crashed generation as non-attachable. Exact
     /// identity evidence produces `orphan_running`; all other evidence is
     /// `identity_unknown` and must never be signalled.
-    #[coverage(off)]
-    pub fn crash_generation<F>(&mut self, generation: DaemonGeneration, mut observe: F)
-    where
-        F: FnMut(&ProcessIdentity) -> ProcessObservation,
-    {
+    pub fn crash_generation(
+        &mut self,
+        generation: DaemonGeneration,
+        observe: &mut dyn FnMut(&ProcessIdentity) -> ProcessObservation,
+    ) {
         for ownership in self
             .terminals
             .values_mut()
             .filter(|entry| entry.terminal.daemon_generation == generation)
         {
-            ownership.state = match ownership.process.as_ref().map(&mut observe) {
+            ownership.state = match ownership.process.as_ref().map(&mut *observe) {
                 Some(ProcessObservation::VerifiedAlive(actual))
                     if ownership.process.as_ref() == Some(&actual) =>
                 {
@@ -370,7 +363,6 @@ impl GenerationCoordinator {
     /// Replacement Agent spawn is blocked while an orphan from the same session
     /// and worktree remains unresolved.
     #[must_use]
-    #[coverage(off)]
     pub fn replacement_allowed(&self, session: SessionId, worktree: WorktreeId) -> bool {
         !self.terminals.values().any(|ownership| {
             ownership.terminal.session_id == Some(session)
@@ -384,7 +376,6 @@ impl GenerationCoordinator {
 
     /// Reconcile a terminal only after verified process disappearance, a
     /// completed terminate ACK, or an explicit human acknowledgement.
-    #[coverage(off)]
     pub fn resolve_orphan(
         &mut self,
         terminal: &TerminalRef,
@@ -415,14 +406,15 @@ impl GenerationCoordinator {
     }
 
     /// Retires a draining daemon only after every owned terminal is resolved.
-    #[coverage(off)]
+    ///
     pub fn collect_draining(
         &mut self,
         generation: DaemonGeneration,
     ) -> Result<bool, GenerationError> {
-        if self.role(generation) != Some(GenerationRole::Draining) {
-            return Err(GenerationError::NotActive);
-        }
+        let record = match self.records.get_mut(&generation.as_str()) {
+            Some(record) if record.role == GenerationRole::Draining => record,
+            _ => return Err(GenerationError::NotActive),
+        };
         let live = self.terminals.values().any(|terminal| {
             terminal.terminal.daemon_generation == generation
                 && matches!(
@@ -435,15 +427,10 @@ impl GenerationCoordinator {
         if live {
             return Ok(false);
         }
-        let record = self
-            .records
-            .get_mut(&generation.as_str())
-            .ok_or(GenerationError::UnknownGeneration)?;
         record.role = GenerationRole::Retired;
         Ok(true)
     }
 
-    #[coverage(off)]
     fn ownership_mut(
         &mut self,
         terminal: &TerminalRef,
@@ -453,20 +440,17 @@ impl GenerationCoordinator {
             .filter(|known| known.terminal.fences(terminal))
             .ok_or(GenerationError::TerminalOwnedElsewhere)
     }
-    #[coverage(off)]
     fn role(&self, generation: DaemonGeneration) -> Option<GenerationRole> {
         self.records
             .get(&generation.as_str())
             .map(|record| record.role)
     }
-    #[coverage(off)]
     fn retained_generations(&self) -> usize {
         self.records
             .values()
             .filter(|record| record.role != GenerationRole::Retired)
             .count()
     }
-    #[coverage(off)]
     fn set_role(
         &mut self,
         generation: DaemonGeneration,
@@ -485,7 +469,6 @@ impl GenerationCoordinator {
     }
 }
 
-#[coverage(off)]
 fn terminal_key(terminal: &TerminalRef) -> String {
     terminal.terminal_id.as_str()
 }
@@ -569,7 +552,7 @@ mod tests {
         let worktree = pane.worktree_id;
         registry.reserve_terminal(pane.clone()).unwrap();
         registry.record_spawn(&pane, identity()).unwrap();
-        registry.crash_generation(owner, |_| {
+        registry.crash_generation(owner, &mut |_| {
             ProcessObservation::VerifiedAlive(ProcessIdentity {
                 pid: 7,
                 start_identity: "reused".into(),
@@ -593,7 +576,7 @@ mod tests {
         registry.reserve_terminal(pane.clone()).unwrap();
         let process = identity();
         registry.record_spawn(&pane, process.clone()).unwrap();
-        registry.crash_generation(owner, |_| {
+        registry.crash_generation(owner, &mut |_| {
             ProcessObservation::VerifiedAlive(process.clone())
         });
         assert_eq!(
@@ -615,11 +598,202 @@ mod tests {
         let session = pane.session_id.unwrap();
         let worktree = pane.worktree_id;
         registry.reserve_terminal(pane.clone()).unwrap();
-        registry.crash_generation(owner, |_| ProcessObservation::Gone);
+        registry.crash_generation(owner, &mut |_| ProcessObservation::Gone);
         assert_eq!(
             registry.snapshot().terminals[0].state,
             TerminalState::IdentityUnknown
         );
         assert!(!registry.replacement_allowed(session, worktree));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One lifecycle fixture covers the coupled restore/reconcile edges.
+    fn restore_reconcile_and_error_edges_fail_closed() {
+        assert_eq!(
+            GenerationCoordinator::new(2).activate_initial(generation()),
+            Err(GenerationError::UnknownGeneration)
+        );
+        let standby = generation();
+        let mut wrong_role = GenerationCoordinator::new(2);
+        wrong_role
+            .register_standby(standby, "standby.sock".into())
+            .unwrap();
+        wrong_role.records.get_mut(&standby.as_str()).unwrap().role = GenerationRole::Retired;
+        assert_eq!(
+            wrong_role.activate_initial(standby),
+            Err(GenerationError::NotActive)
+        );
+        let (mut registry, active) = coordinator();
+        let pane = terminal(active);
+        registry.reserve_terminal(pane.clone()).unwrap();
+        registry.record_spawn(&pane, identity()).unwrap();
+        let snapshot = registry.snapshot();
+        let restored = GenerationCoordinator::restore(snapshot.clone(), 2).unwrap();
+        assert_eq!(restored.snapshot(), snapshot);
+        let foreign_terminal = terminal(generation());
+        assert_eq!(
+            registry.terminal_endpoint(&foreign_terminal),
+            Err(GenerationError::TerminalOwnedElsewhere)
+        );
+        assert_eq!(
+            registry.reserve_terminal(foreign_terminal.clone()),
+            Err(GenerationError::NotActive)
+        );
+        assert_eq!(
+            registry.record_spawn(&foreign_terminal, identity()),
+            Err(GenerationError::TerminalOwnedElsewhere)
+        );
+        assert_eq!(
+            GenerationCoordinator::restore(
+                GenerationSnapshot {
+                    current: None,
+                    records: Vec::new(),
+                    terminals: vec![TerminalOwnership {
+                        terminal: foreign_terminal,
+                        process: None,
+                        state: TerminalState::IdentityUnknown,
+                    }],
+                },
+                2,
+            )
+            .unwrap_err(),
+            GenerationError::UnknownGeneration
+        );
+
+        let mut duplicate_record = snapshot.clone();
+        duplicate_record
+            .records
+            .push(duplicate_record.records[0].clone());
+        assert_eq!(
+            GenerationCoordinator::restore(duplicate_record, 2).unwrap_err(),
+            GenerationError::DuplicateGeneration
+        );
+        let mut bad_current = snapshot.clone();
+        bad_current.current = Some(generation());
+        assert_eq!(
+            GenerationCoordinator::restore(bad_current, 2).unwrap_err(),
+            GenerationError::NotActive
+        );
+        let mut missing_current = snapshot.clone();
+        missing_current.current = None;
+        assert_eq!(
+            GenerationCoordinator::restore(missing_current, 2).unwrap_err(),
+            GenerationError::NotActive
+        );
+        let mut unavailable_owner = snapshot.clone();
+        unavailable_owner.current = None;
+        unavailable_owner.records[0].role = GenerationRole::Retired;
+        assert_eq!(
+            GenerationCoordinator::restore(unavailable_owner, 2).unwrap_err(),
+            GenerationError::TerminalUnavailable
+        );
+        let mut missing_process = snapshot.clone();
+        missing_process.terminals[0].process = None;
+        assert_eq!(
+            GenerationCoordinator::restore(missing_process, 2).unwrap_err(),
+            GenerationError::TerminalUnavailable
+        );
+        let mut orphan_without_process = snapshot.clone();
+        orphan_without_process.terminals[0].process = None;
+        orphan_without_process.terminals[0].state = TerminalState::OrphanRunning;
+        assert_eq!(
+            GenerationCoordinator::restore(orphan_without_process, 2).unwrap_err(),
+            GenerationError::TerminalUnavailable
+        );
+        let mut lost_without_process = snapshot.clone();
+        lost_without_process.terminals[0].process = None;
+        lost_without_process.terminals[0].state = TerminalState::Lost;
+        assert!(GenerationCoordinator::restore(lost_without_process, 2).is_ok());
+        let mut duplicate_terminal = snapshot.clone();
+        duplicate_terminal
+            .terminals
+            .push(duplicate_terminal.terminals[0].clone());
+        assert_eq!(
+            GenerationCoordinator::restore(duplicate_terminal, 2).unwrap_err(),
+            GenerationError::DuplicateGeneration
+        );
+
+        assert_eq!(
+            registry.register_standby(active, "duplicate.sock".into()),
+            Err(GenerationError::DuplicateGeneration)
+        );
+        assert_eq!(
+            registry.activate_initial(active),
+            Err(GenerationError::NotActive)
+        );
+        assert_eq!(
+            registry.rollover(active, generation(), false),
+            Err(GenerationError::NotStandby)
+        );
+        assert_eq!(
+            registry.rollover(generation(), generation(), false),
+            Err(GenerationError::NotActive)
+        );
+        assert_eq!(
+            registry.reserve_terminal(pane.clone()),
+            Err(GenerationError::TerminalOwnedElsewhere)
+        );
+
+        let next = generation();
+        registry.register_standby(next, "next.sock".into()).unwrap();
+        registry.rollover(active, next, false).unwrap();
+        assert!(!registry.collect_draining(active).unwrap());
+        assert_eq!(
+            registry.collect_draining(next),
+            Err(GenerationError::NotActive)
+        );
+        registry
+            .resolve_orphan(&pane, ProcessObservation::Gone, false)
+            .unwrap();
+        assert!(registry.collect_draining(active).unwrap());
+        assert!(registry.replacement_allowed(SessionId::new(), WorktreeId::new()));
+
+        let (mut crashed, owner) = coordinator();
+        let crashed_terminal = terminal(owner);
+        crashed.reserve_terminal(crashed_terminal.clone()).unwrap();
+        crashed.record_spawn(&crashed_terminal, identity()).unwrap();
+        crashed.crash_generation(owner, &mut |_| ProcessObservation::Gone);
+        assert_eq!(crashed.snapshot().terminals[0].state, TerminalState::Lost);
+        assert!(crashed.replacement_allowed(
+            crashed_terminal.session_id.unwrap(),
+            crashed_terminal.worktree_id
+        ));
+        crashed
+            .resolve_orphan(&crashed_terminal, ProcessObservation::Unknown, true)
+            .unwrap();
+        let mut mismatched_identity = identity();
+        mismatched_identity.pid += 1;
+        assert_eq!(
+            registry.resolve_orphan(
+                &pane,
+                ProcessObservation::VerifiedAlive(mismatched_identity),
+                false
+            ),
+            Err(GenerationError::TerminalUnavailable)
+        );
+        registry.crash_generation(generation(), &mut |_| ProcessObservation::Gone);
+
+        let (mut orphaned, unknown_owner) = coordinator();
+        let unknown_terminal = terminal(unknown_owner);
+        orphaned.reserve_terminal(unknown_terminal.clone()).unwrap();
+        orphaned
+            .record_spawn(&unknown_terminal, identity())
+            .unwrap();
+        // Exercise the defensive route independently from restore(), which now
+        // rejects this corrupted relationship before constructing a coordinator.
+        orphaned.records.clear();
+        assert_eq!(
+            orphaned.terminal_endpoint(&unknown_terminal),
+            Err(GenerationError::UnknownGeneration)
+        );
+
+        let (mut wrong_role, active) = coordinator();
+        // restore() rejects this inconsistency; keep the defensive transition
+        // covered by constructing it inside the module boundary.
+        wrong_role.current = None;
+        assert_eq!(
+            wrong_role.activate_initial(active),
+            Err(GenerationError::NotActive)
+        );
     }
 }

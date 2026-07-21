@@ -17,7 +17,6 @@
     clippy::needless_pass_by_value,
     clippy::too_many_arguments
 )] // Injected runtime ports make these boundary signatures part of the contract.
-#![coverage(off)] // Generic injected ports (scope resolver, store, journal, PTY) are monomorphized at the composition root; the fake-based tests below exercise every safety outcome without double-counting those instantiations.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -170,29 +169,63 @@ pub trait AgentTerminalActor {
 /// The daemon's single Agent owner.  It holds the durable runtime coordinator,
 /// orchestrator, adapter registry, runtime store, output journal, and PTY
 /// spawner/writer, plus the producer-issued operation ledger for idempotency.
-pub struct AgentRuntime<S, P, J, L = PathExecutableLocator> {
+trait RuntimeStorePort: super::runtime::RuntimeStore + Send {
+    #[cfg(test)]
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+}
+
+impl<T: super::runtime::RuntimeStore + Send + 'static> RuntimeStorePort for T {
+    #[cfg(test)]
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+trait OutputJournalPort: OutputJournal + Send {}
+impl<T: OutputJournal + Send> OutputJournalPort for T {}
+
+trait AgentPtyPort: PtySpawner + PtyWriter + Send {
+    #[cfg(test)]
+    fn as_any(&self) -> &dyn std::any::Any;
+    #[cfg(test)]
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+}
+
+impl<T: PtySpawner + PtyWriter + Send + 'static> AgentPtyPort for T {
+    #[cfg(test)]
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    #[cfg(test)]
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+pub struct AgentRuntime {
     coordinator: RuntimeCoordinator,
     orchestrator: Orchestrator,
     registry: AdapterRegistry,
-    store: S,
-    journal: J,
-    pty: P,
+    store: Box<dyn RuntimeStorePort>,
+    journal: Box<dyn OutputJournalPort>,
+    pty: Box<dyn AgentPtyPort>,
     default_profile: AgentProfileId,
     geometry: Geometry,
     dispatch: DispatchStore,
-    locator: L,
+    locator: Box<dyn ExecutableLocator>,
     operations: BTreeMap<String, AgentOperation>,
     mcp_callers: BTreeMap<String, McpCaller>,
 }
 
-impl<S, P, J> AgentRuntime<S, P, J, PathExecutableLocator> {
+impl AgentRuntime {
     #[must_use]
     pub fn new(
         generation: DaemonGeneration,
         registry: AdapterRegistry,
-        store: S,
-        journal: J,
-        pty: P,
+        store: impl super::runtime::RuntimeStore + Send + 'static,
+        journal: impl OutputJournal + Send + 'static,
+        pty: impl PtySpawner + PtyWriter + Send + 'static,
         default_profile: AgentProfileId,
         geometry: Geometry,
     ) -> Self {
@@ -214,9 +247,9 @@ impl<S, P, J> AgentRuntime<S, P, J, PathExecutableLocator> {
     pub fn with_dispatch(
         generation: DaemonGeneration,
         registry: AdapterRegistry,
-        store: S,
-        journal: J,
-        pty: P,
+        store: impl super::runtime::RuntimeStore + Send + 'static,
+        journal: impl OutputJournal + Send + 'static,
+        pty: impl PtySpawner + PtyWriter + Send + 'static,
         default_profile: AgentProfileId,
         geometry: Geometry,
         dispatch: DispatchStore,
@@ -235,7 +268,7 @@ impl<S, P, J> AgentRuntime<S, P, J, PathExecutableLocator> {
     }
 }
 
-impl<S, P, J, L> AgentRuntime<S, P, J, L> {
+impl AgentRuntime {
     /// Constructs an Agent runtime with an injected current executable locator.
     ///
     /// # Panics
@@ -246,13 +279,13 @@ impl<S, P, J, L> AgentRuntime<S, P, J, L> {
     pub fn with_dispatch_and_locator(
         generation: DaemonGeneration,
         registry: AdapterRegistry,
-        store: S,
-        journal: J,
-        pty: P,
+        store: impl super::runtime::RuntimeStore + Send + 'static,
+        journal: impl OutputJournal + Send + 'static,
+        pty: impl PtySpawner + PtyWriter + Send + 'static,
         default_profile: AgentProfileId,
         geometry: Geometry,
         dispatch: DispatchStore,
-        locator: L,
+        locator: impl ExecutableLocator + 'static,
     ) -> Self {
         let mut coordinator = RuntimeCoordinator::new(16, 64 * 1024, 64);
         coordinator
@@ -262,13 +295,13 @@ impl<S, P, J, L> AgentRuntime<S, P, J, L> {
             coordinator,
             orchestrator: Orchestrator::new(),
             registry,
-            store,
-            journal,
-            pty,
+            store: Box::new(store),
+            journal: Box::new(journal),
+            pty: Box::new(pty),
             default_profile,
             geometry,
             dispatch,
-            locator,
+            locator: Box::new(locator),
             operations: BTreeMap::new(),
             mcp_callers: BTreeMap::new(),
         }
@@ -279,23 +312,20 @@ impl<S, P, J, L> AgentRuntime<S, P, J, L> {
     pub fn hydrate_with_dispatch_and_locator(
         generation: DaemonGeneration,
         registry: AdapterRegistry,
-        mut store: S,
-        journal: J,
-        pty: P,
+        mut store: impl super::runtime::RuntimeStore + Send + 'static,
+        journal: impl OutputJournal + Send + 'static,
+        pty: impl PtySpawner + PtyWriter + Send + 'static,
         default_profile: AgentProfileId,
         geometry: Geometry,
         dispatch: DispatchStore,
-        locator: L,
+        locator: impl ExecutableLocator + 'static,
         snapshot: super::runtime::RuntimeStoreSnapshot,
-    ) -> Result<Self, super::runtime::RuntimeSnapshotError>
-    where
-        S: super::runtime::RuntimeStore,
-    {
+    ) -> Result<Self, super::runtime::RuntimeSnapshotError> {
         let mut coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64)?;
         coordinator.activate_generation(generation)?;
         store
             .save(coordinator.snapshot())
-            .map_err(|_| super::runtime::RuntimeSnapshotError::OwnershipPersist)?;
+            .map_err(|()| super::runtime::RuntimeSnapshotError::OwnershipPersist)?;
         dispatch
             .reconcile_incomplete_admissions()
             .map_err(|_| super::runtime::RuntimeSnapshotError::DispatchReconcile)?;
@@ -319,13 +349,13 @@ impl<S, P, J, L> AgentRuntime<S, P, J, L> {
             coordinator,
             orchestrator: Orchestrator::new(),
             registry,
-            store,
-            journal,
-            pty,
+            store: Box::new(store),
+            journal: Box::new(journal),
+            pty: Box::new(pty),
             default_profile,
             geometry,
             dispatch,
-            locator,
+            locator: Box::new(locator),
             operations,
             // Credentials intentionally fail closed across daemon restart.
             mcp_callers: BTreeMap::new(),
@@ -372,6 +402,7 @@ impl<S, P, J, L> AgentRuntime<S, P, J, L> {
     /// Resolves the durable dispatch identity authenticated by an MCP child.
     /// The credential is daemon-minted process provision; no client supplied
     /// agent or session name participates in this lookup.
+    #[must_use]
     pub fn mcp_dispatch_caller(&self, credential: &str) -> Option<CallerRef> {
         let run_id = self.mcp_caller(credential)?;
         let binding = self.dispatch.binding(run_id).ok()??;
@@ -382,13 +413,7 @@ impl<S, P, J, L> AgentRuntime<S, P, J, L> {
     }
 }
 
-impl<
-    S: super::runtime::RuntimeStore,
-    P: PtySpawner + PtyWriter,
-    J: OutputJournal,
-    L: ExecutableLocator,
-> AgentRuntime<S, P, J, L>
-{
+impl AgentRuntime {
     /// Resolves an authenticated MCP child to its owning managed session.
     #[must_use]
     pub fn caller_session(&self, credential: &str) -> Option<SessionId> {
@@ -403,21 +428,12 @@ impl<
     /// Returns the durable runtime phase projected for one session.
     #[must_use]
     pub fn session_phase(&self, session: SessionId) -> &'static str {
-        use super::runtime::RuntimeState;
         self.coordinator
             .snapshot()
             .records
             .into_iter()
             .filter(|record| record.runtime.session_id == Some(session))
-            .map(|record| match record.state {
-                RuntimeState::Running => (4, "running"),
-                RuntimeState::Reserved => (3, "ready"),
-                RuntimeState::ReconcileRequired(
-                    super::runtime::ReconcileState::IdentityUnknown,
-                ) => (3, "interrupted"),
-                RuntimeState::SpawnFailed | RuntimeState::ReconcileRequired(_) => (2, "exited"),
-                RuntimeState::Exited | RuntimeState::Reclaimed => (1, "ended"),
-            })
+            .map(|record| runtime_phase(record.state))
             .max_by_key(|(priority, _)| *priority)
             .map_or("none", |(_, phase)| phase)
     }
@@ -472,7 +488,7 @@ impl<
         }
         self.dispatch
             .queue_prompt(session, prompt.to_owned(), Utc::now())
-            .map_err(|_| dispatch_storage_error())?;
+            .map_err(map_dispatch_storage_error)?;
         Ok(PromptDelivery {
             delivered_to: "queue",
             queued: true,
@@ -520,11 +536,11 @@ impl<
     /// Admits one Agent launch.  The same producer `operation_id` with the same
     /// intent returns the same admission (no second spawn); the same id with a
     /// different intent is a typed idempotency conflict.
-    pub fn launch<R: SessionScopeResolver>(
+    pub fn launch(
         &mut self,
         operation_id: &str,
         intent: &AgentLaunchIntent,
-        scope: &R,
+        scope: &dyn SessionScopeResolver,
     ) -> Result<AgentAdmission, ProtocolError> {
         let semantic_key = semantic_key(intent);
         if let Some(existing) = self.operations.get(operation_id) {
@@ -554,12 +570,12 @@ impl<
     /// Starts a new daemon-owned runtime for the provider conversation retained
     /// by an interrupted/exited runtime. This never reattaches the old PTY and
     /// never falls back to provider-global "last" semantics.
-    pub fn resume<R: SessionScopeResolver>(
+    pub fn resume(
         &mut self,
         operation_id: &str,
         workspace: WorkspaceId,
         session: SessionId,
-        scope: &R,
+        scope: &dyn SessionScopeResolver,
     ) -> Result<AgentAdmission, ProtocolError> {
         let semantic_key = format!("resume:{workspace}:{session}");
         if let Some(existing) = self.operations.get(operation_id) {
@@ -615,13 +631,14 @@ impl<
             last_known_phase: Some(ProviderResumePhase::Running),
         };
         self.coordinator
-            .record_provider_resume(runtime, reference, &mut self.store)
+            .record_provider_resume(runtime, reference, &mut *self.store)
             .map_err(map_runtime_error)
     }
 
     /// Safe interrupted/resume projection for a managed session. Provider IDs
     /// are never returned; only availability and a stable reason cross IPC.
     #[must_use]
+    #[allow(clippy::missing_panics_doc)] // The preceding identity iterator proves the resumable record invariant.
     pub fn session_resume_status(&self, session: SessionId) -> (bool, ProviderResumeReason) {
         let records = self.coordinator.snapshot().records;
         if records.iter().any(|record| {
@@ -653,12 +670,13 @@ impl<
         if !identities.all(|candidate| candidate == first) {
             return (false, ProviderResumeReason::AmbiguousProviderMetadata);
         }
-        let Some(source) = resumable.first() else {
-            return (false, ProviderResumeReason::ProviderMetadataUnavailable);
-        };
-        let Some(reference) = source.provider_resume.as_ref() else {
-            return (false, ProviderResumeReason::ProviderMetadataUnavailable);
-        };
+        let source = resumable
+            .first()
+            .expect("identity came from a resumable record");
+        let reference = source
+            .provider_resume
+            .as_ref()
+            .expect("resumable records retain provider metadata");
         let profile_id = &source.launch.plan.profile_id;
         let internally_compatible = resumable.iter().all(|record| {
             record.launch.plan.profile_id == *profile_id
@@ -684,12 +702,12 @@ impl<
     /// runtime used by ordinary Agent launch, then records its durable run and
     /// caller binding.  The caller is captured now and never accepted from a
     /// later completion request.
-    pub fn dispatch<R: SessionScopeResolver>(
+    pub fn dispatch(
         &mut self,
         operation_id: &str,
         intent: &DispatchIntent,
         session: SessionId,
-        scope: &R,
+        scope: &dyn SessionScopeResolver,
     ) -> Result<AgentAdmission, ProtocolError> {
         let operation = OperationId::parse(operation_id).map_err(|_| {
             ProtocolError::new(
@@ -707,14 +725,12 @@ impl<
             DispatchAgentIntent::Existing { agent_id } => self
                 .dispatch
                 .agent(*agent_id)
-                .map_err(|_| dispatch_storage_error())?
-                .ok_or_else(|| {
-                    ProtocolError::new(ErrorCode::InvalidArgument, "dispatch agent was not found")
-                })?,
+                .map_err(map_dispatch_storage_error)?
+                .ok_or_else(dispatch_agent_not_found)?,
             DispatchAgentIntent::New { runtime, model } => self
                 .dispatch
                 .upsert_agent_by_runtime_model(Some(session), runtime.clone(), model.clone())
-                .map_err(|_| dispatch_storage_error())?,
+                .map_err(map_dispatch_storage_error)?,
         };
         if worker.session_id != Some(session) {
             return Err(ProtocolError::new(
@@ -784,7 +800,7 @@ impl<
     }
 
     #[allow(clippy::too_many_lines)] // Admission keeps its durable prepare/spawn/commit order visible.
-    fn admit_dispatch<R: SessionScopeResolver>(
+    fn admit_dispatch(
         &mut self,
         operation: OperationId,
         launch: &AgentLaunchIntent,
@@ -792,12 +808,12 @@ impl<
         worker: &usagi_core::domain::agent::Agent,
         caller: &CallerRef,
         semantic_key: &str,
-        scope: &R,
+        scope: &dyn SessionScopeResolver,
     ) -> Result<AgentAdmission, ProtocolError> {
         if let Some(existing) = self
             .dispatch
             .admission(operation)
-            .map_err(|_| dispatch_storage_error())?
+            .map_err(map_dispatch_storage_error)?
         {
             return Err(if existing.semantic_key == semantic_key {
                 ProtocolError::new(
@@ -814,7 +830,7 @@ impl<
         if self
             .dispatch
             .run(operation)
-            .map_err(|_| dispatch_storage_error())?
+            .map_err(map_dispatch_storage_error)?
             .is_some()
         {
             return Err(ProtocolError::new(
@@ -833,9 +849,7 @@ impl<
             worktree_id: resolved.worktree_id,
         };
         let runtime = AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), launch.session)
-            .map_err(|_| {
-                ProtocolError::new(ErrorCode::Internal, "agent runtime scope is inconsistent")
-            })?;
+            .expect("terminal and runtime session are constructed from the same launch");
         let fence = CompletionFence {
             workspace_id: launch.workspace,
             session_id: launch.session,
@@ -893,7 +907,7 @@ impl<
                     credential_provenance: DispatchCredentialProvenance::DaemonMintedEphemeral,
                 },
             )
-            .map_err(|_| dispatch_storage_error())?;
+            .map_err(map_dispatch_storage_error)?;
         self.mcp_callers.insert(
             credential.clone(),
             McpCaller {
@@ -907,8 +921,8 @@ impl<
             &authorization,
             &request,
             self.geometry,
-            &mut self.store,
-            &mut self.pty,
+            &mut *self.store,
+            &mut *self.pty,
             Some(credential.clone()),
             semantic_key.to_owned(),
         ) {
@@ -926,13 +940,13 @@ impl<
     }
 
     #[allow(clippy::too_many_lines)] // Admission atomically fences launch, caller registration, and replay state.
-    fn admit_resume<R: SessionScopeResolver>(
+    fn admit_resume(
         &mut self,
         operation_id: &str,
         workspace: WorkspaceId,
         session: SessionId,
         semantic_key: &str,
-        scope: &R,
+        scope: &dyn SessionScopeResolver,
     ) -> Result<AgentAdmission, ProtocolError> {
         let operation = OperationId::parse(operation_id).map_err(|_| {
             ProtocolError::new(
@@ -943,12 +957,12 @@ impl<
         if self
             .dispatch
             .admission(operation)
-            .map_err(|_| dispatch_storage_error())?
+            .map_err(map_dispatch_storage_error)?
             .is_some()
             || self
                 .dispatch
                 .run(operation)
-                .map_err(|_| dispatch_storage_error())?
+                .map_err(map_dispatch_storage_error)?
                 .is_some()
         {
             return Err(ProtocolError::new(
@@ -1030,9 +1044,7 @@ impl<
             worktree_id: resolved.worktree_id,
         };
         let runtime = AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), Some(session))
-            .map_err(|_| {
-                ProtocolError::new(ErrorCode::Internal, "agent runtime scope is inconsistent")
-            })?;
+            .expect("terminal and runtime session are constructed from the same resume");
         let fence = CompletionFence {
             workspace_id: workspace,
             session_id: Some(session),
@@ -1075,7 +1087,7 @@ impl<
                     ModelSelector::new("default").expect("literal model selector is canonical")
                 }),
             )
-            .map_err(|_| dispatch_storage_error())?;
+            .map_err(map_dispatch_storage_error)?;
         worker.status = AgentStatus::Starting;
         worker.current_run = Some(operation);
         let caller = CallerRef {
@@ -1107,7 +1119,7 @@ impl<
                     credential_provenance: DispatchCredentialProvenance::DaemonMintedEphemeral,
                 },
             )
-            .map_err(|_| dispatch_storage_error())?;
+            .map_err(map_dispatch_storage_error)?;
         self.mcp_callers.insert(
             credential.clone(),
             McpCaller {
@@ -1121,8 +1133,8 @@ impl<
             &authorization,
             &request,
             self.geometry,
-            &mut self.store,
-            &mut self.pty,
+            &mut *self.store,
+            &mut *self.pty,
             Some(credential.clone()),
             semantic_key.to_owned(),
             &superseded,
@@ -1141,11 +1153,11 @@ impl<
     }
 
     #[allow(clippy::too_many_lines)] // Admission atomically fences launch, caller registration, and replay state.
-    fn admit<R: SessionScopeResolver>(
+    fn admit(
         &mut self,
         operation_id: &str,
         intent: &AgentLaunchIntent,
-        scope: &R,
+        scope: &dyn SessionScopeResolver,
     ) -> Result<AgentAdmission, ProtocolError> {
         let profile_id = intent
             .profile
@@ -1164,7 +1176,7 @@ impl<
         if let Some(existing) = self
             .dispatch
             .admission(operation)
-            .map_err(|_| dispatch_storage_error())?
+            .map_err(map_dispatch_storage_error)?
         {
             return Err(if existing.semantic_key == launch_semantic {
                 ProtocolError::new(
@@ -1181,7 +1193,7 @@ impl<
         if self
             .dispatch
             .run(operation)
-            .map_err(|_| dispatch_storage_error())?
+            .map_err(map_dispatch_storage_error)?
             .is_some()
         {
             return Err(ProtocolError::new(
@@ -1200,9 +1212,7 @@ impl<
             worktree_id: resolved.worktree_id,
         };
         let runtime = AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), intent.session)
-            .map_err(|_| {
-                ProtocolError::new(ErrorCode::Internal, "agent runtime scope is inconsistent")
-            })?;
+            .expect("terminal and runtime session are constructed from the same intent");
         let fence = CompletionFence {
             workspace_id: intent.workspace,
             session_id: intent.session,
@@ -1215,7 +1225,7 @@ impl<
         let queued = self
             .dispatch
             .queued_prompt(intent.session)
-            .map_err(|_| dispatch_storage_error())?;
+            .map_err(map_dispatch_storage_error)?;
         let request = LaunchRequest {
             profile_id: profile_id.clone(),
             mode: LaunchMode::Interactive,
@@ -1243,7 +1253,7 @@ impl<
                 profile_id.clone(),
                 ModelSelector::new("default").expect("literal model selector is canonical"),
             )
-            .map_err(|_| dispatch_storage_error())?;
+            .map_err(map_dispatch_storage_error)?;
         worker.status = AgentStatus::Starting;
         worker.current_run = Some(operation);
         let caller = CallerRef {
@@ -1275,11 +1285,11 @@ impl<
                     credential_provenance: DispatchCredentialProvenance::DaemonMintedEphemeral,
                 },
             )
-            .map_err(|_| dispatch_storage_error())?;
+            .map_err(map_dispatch_storage_error)?;
         if queued.is_some() {
             self.dispatch
                 .consume_prompt(intent.session)
-                .map_err(|_| dispatch_storage_error())?;
+                .map_err(map_dispatch_storage_error)?;
         }
         self.mcp_callers.insert(
             credential.clone(),
@@ -1294,8 +1304,8 @@ impl<
             &authorization,
             &request,
             self.geometry,
-            &mut self.store,
-            &mut self.pty,
+            &mut *self.store,
+            &mut *self.pty,
             Some(credential.clone()),
             launch_semantic,
         ) {
@@ -1318,12 +1328,23 @@ impl<
         credential: &str,
         runtime: &AgentRuntimeRef,
     ) -> Result<(), ProtocolError> {
-        if matches!(self.dispatch.commit_admission(operation), Ok(true)) {
+        let committed = matches!(self.dispatch.commit_admission(operation), Ok(true));
+        self.finish_admission_commit(operation, credential, runtime, committed)
+    }
+
+    fn finish_admission_commit(
+        &mut self,
+        operation: OperationId,
+        credential: &str,
+        runtime: &AgentRuntimeRef,
+        committed: bool,
+    ) -> Result<(), ProtocolError> {
+        if committed {
             return Ok(());
         }
         let compensation =
             self.coordinator
-                .compensate_after_spawn(runtime, &mut self.store, &mut self.pty);
+                .compensate_after_spawn(runtime, &mut *self.store, &mut *self.pty);
         self.mcp_callers.remove(credential);
         let _ = self.dispatch.fail_admission(operation);
         Err(map_runtime_error(compensation))
@@ -1337,18 +1358,23 @@ impl<
             .runtime_for_terminal(terminal)
             .ok_or_else(stale_terminal)?;
         self.coordinator
-            .append_output(&runtime, bytes, &mut self.journal)
+            .append_output(&runtime, bytes, &mut *self.journal)
             .map(|_| ())
             .map_err(map_runtime_error)
     }
 
     /// Commits a verified Agent exit after the caller has drained output.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal admission ledger invariant is broken: every
+    /// launched runtime must retain its operation record until exit.
     pub fn exit(&mut self, terminal: &TerminalRef, status: i32) -> Result<(), ProtocolError> {
         let runtime = self
             .coordinator
             .runtime_for_terminal(terminal)
             .ok_or_else(stale_terminal)?;
-        let result = self.coordinator.exit(&runtime, status, &mut self.store);
+        let result = self.coordinator.exit(&runtime, status, &mut *self.store);
         if matches!(
             result,
             Ok(())
@@ -1373,20 +1399,22 @@ impl<
             .operation_id
             .as_str()
             .clone();
-        if let Some(record) = self.operations.get_mut(&operation) {
-            record.outcome = match &record.outcome {
-                Ok(admission) if status == 0 => {
-                    let mut final_admission = admission.clone();
-                    final_admission.completed = true;
-                    Ok(final_admission)
-                }
-                Ok(_) => Err(ProtocolError::new(
-                    ErrorCode::Unavailable,
-                    "agent process ended unsuccessfully; inspect the attached terminal output",
-                )),
-                Err(error) => Err(error.clone()),
-            };
-        }
+        let record = self
+            .operations
+            .get_mut(&operation)
+            .expect("runtime exits retain their admitted operation ledger");
+        record.outcome = match &record.outcome {
+            Ok(admission) if status == 0 => {
+                let mut final_admission = admission.clone();
+                final_admission.completed = true;
+                Ok(final_admission)
+            }
+            Ok(_) => Err(ProtocolError::new(
+                ErrorCode::Unavailable,
+                "agent process ended unsuccessfully; inspect the attached terminal output",
+            )),
+            Err(error) => Err(error.clone()),
+        };
         self.synthesize_no_report(&runtime)?;
         Ok(())
     }
@@ -1402,7 +1430,7 @@ impl<
         let Some(binding) = self
             .dispatch
             .binding(run_id)
-            .map_err(|_| dispatch_storage_error())?
+            .map_err(map_dispatch_storage_error)?
         else {
             return Ok(());
         };
@@ -1411,15 +1439,11 @@ impl<
         let inbox = self
             .dispatch
             .inbox(&binding.caller)
-            .map_err(|_| dispatch_storage_error())?;
-        if inbox.iter().any(|message| {
-            message.run_id == run_id
-                && matches!(
-                    message.kind,
-                    InboxKind::Completed | InboxKind::Failed | InboxKind::NoReport
-                )
-        }) {
-            return Ok(());
+            .map_err(map_dispatch_storage_error)?;
+        for message in &inbox {
+            if message.run_id == run_id {
+                return Ok(());
+            }
         }
         self.dispatch
             .append_inbox(
@@ -1434,13 +1458,13 @@ impl<
                     read: false,
                 },
             )
-            .map_err(|_| dispatch_storage_error())?;
+            .map_err(map_dispatch_storage_error)?;
         self.dispatch
             .transition_run(run_id, RunStatus::NoReport, Some(Utc::now()))
-            .map_err(|_| dispatch_storage_error())?;
+            .map_err(map_dispatch_storage_error)?;
         self.dispatch
             .transition_agent(binding.worker.agent_id, AgentStatus::Exited, None)
-            .map_err(|_| dispatch_storage_error())?;
+            .map_err(map_dispatch_storage_error)?;
         Ok(())
     }
 
@@ -1470,21 +1494,18 @@ impl<
         let Some(binding) = self
             .dispatch
             .binding(candidate.operation_id)
-            .map_err(|_| dispatch_storage_error())?
+            .map_err(map_dispatch_storage_error)?
         else {
             return Ok(());
         };
         let inbox = self
             .dispatch
             .inbox(&binding.caller)
-            .map_err(|_| dispatch_storage_error())?;
-        if inbox.iter().any(|message| {
-            message.run_id == candidate.operation_id
-                && matches!(
-                    message.kind,
-                    InboxKind::Completed | InboxKind::Failed | InboxKind::NoReport
-                )
-        }) {
+            .map_err(map_dispatch_storage_error)?;
+        if inbox
+            .iter()
+            .any(|message| message.run_id == candidate.operation_id)
+        {
             return Ok(());
         }
         self.dispatch
@@ -1500,7 +1521,7 @@ impl<
                     read: false,
                 },
             )
-            .map_err(|_| dispatch_storage_error())?;
+            .map_err(map_dispatch_storage_error)?;
         let status = if kind == InboxKind::Completed {
             RunStatus::Completed
         } else {
@@ -1508,7 +1529,7 @@ impl<
         };
         self.dispatch
             .transition_run(candidate.operation_id, status, Some(Utc::now()))
-            .map_err(|_| dispatch_storage_error())?;
+            .map_err(map_dispatch_storage_error)?;
         let agent_status = if kind == InboxKind::Completed {
             AgentStatus::Idle
         } else {
@@ -1516,7 +1537,7 @@ impl<
         };
         self.dispatch
             .transition_agent(binding.worker.agent_id, agent_status, None)
-            .map_err(|_| dispatch_storage_error())?;
+            .map_err(map_dispatch_storage_error)?;
         Ok(())
     }
 
@@ -1531,12 +1552,11 @@ impl<
         summary: String,
         result: Option<usagi_core::domain::agent::StructuredResult>,
     ) -> Result<CallerRef, ProtocolError> {
-        let caller = self.mcp_callers.get(credential).cloned().ok_or_else(|| {
-            ProtocolError::new(
-                ErrorCode::OwnershipUnknown,
-                "agent caller provenance is unknown",
-            )
-        })?;
+        let caller = self
+            .mcp_callers
+            .get(credential)
+            .cloned()
+            .ok_or_else(unknown_caller_provenance)?;
         if requested_run.is_some_and(|run_id| run_id != caller.operation) {
             return Err(ProtocolError::new(
                 ErrorCode::OwnershipUnknown,
@@ -1552,13 +1572,8 @@ impl<
         let binding = self
             .dispatch
             .binding(caller.operation)
-            .map_err(|_| dispatch_storage_error())?
-            .ok_or_else(|| {
-                ProtocolError::new(
-                    ErrorCode::OwnershipUnknown,
-                    "dispatch binding is unavailable",
-                )
-            })?;
+            .map_err(map_dispatch_storage_error)?
+            .ok_or_else(dispatch_binding_unavailable)?;
         let delivered_to = binding.caller.clone();
         self.report(&caller.runtime, &fence, kind, summary, result)?;
         Ok(delivered_to)
@@ -1604,7 +1619,7 @@ impl<
             (TerminalAction::Resize, TerminalRequest::Resize { geometry, .. }) => {
                 let geometry = terminal_geometry(geometry)?;
                 self.coordinator
-                    .resize(runtime, geometry, &mut self.pty)
+                    .resize(runtime, geometry, &mut *self.pty)
                     .map(|snapshot| json!(snapshot))
                     .map_err(map_runtime_error)
             }
@@ -1634,7 +1649,7 @@ impl<
                             input_seq,
                         },
                         &bytes,
-                        &mut self.pty,
+                        &mut *self.pty,
                     )
                     .map(|ack| json!({ "ack": ack }))
                     .map_err(map_runtime_error)
@@ -1647,9 +1662,7 @@ impl<
     }
 }
 
-impl<S: super::runtime::RuntimeStore, P: PtySpawner + PtyWriter, J: OutputJournal>
-    AgentTerminalActor for AgentRuntime<S, P, J>
-{
+impl AgentTerminalActor for AgentRuntime {
     fn handle_terminal(
         &mut self,
         connection: ConnectionId,
@@ -1855,11 +1868,42 @@ fn stale_terminal() -> ProtocolError {
     ProtocolError::new(ErrorCode::StaleTarget, "agent terminal reference is stale")
 }
 
-fn dispatch_storage_error() -> ProtocolError {
+fn map_dispatch_storage_error(_: anyhow::Error) -> ProtocolError {
     ProtocolError::new(
         ErrorCode::Unavailable,
         "daemon could not persist dispatch state",
     )
+}
+
+fn dispatch_agent_not_found() -> ProtocolError {
+    ProtocolError::new(ErrorCode::InvalidArgument, "dispatch agent was not found")
+}
+
+fn unknown_caller_provenance() -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::OwnershipUnknown,
+        "agent caller provenance is unknown",
+    )
+}
+
+fn dispatch_binding_unavailable() -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::OwnershipUnknown,
+        "dispatch binding is unavailable",
+    )
+}
+
+const fn runtime_phase(state: super::runtime::RuntimeState) -> (u8, &'static str) {
+    use super::runtime::RuntimeState;
+    match state {
+        RuntimeState::Running => (4, "running"),
+        RuntimeState::Reserved => (3, "ready"),
+        RuntimeState::ReconcileRequired(super::runtime::ReconcileState::IdentityUnknown) => {
+            (3, "interrupted")
+        }
+        RuntimeState::SpawnFailed | RuntimeState::ReconcileRequired(_) => (2, "exited"),
+        RuntimeState::Exited | RuntimeState::Reclaimed => (1, "ended"),
+    }
 }
 
 fn map_scope_error(error: ScopeResolveError) -> ProtocolError {
@@ -1967,31 +2011,25 @@ mod tests {
     struct Store {
         saves: usize,
         fail_after: Option<usize>,
-    }
-
-    #[derive(Clone)]
-    struct FileStore(PathBuf);
-    impl RuntimeStore for FileStore {
-        type Error = std::io::Error;
-        fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), Self::Error> {
-            std::fs::write(&self.0, serde_json::to_vec(&snapshot)?)
-        }
+        snapshot_path: Option<PathBuf>,
     }
     impl RuntimeStore for Store {
-        type Error = ();
-        fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
+        fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
             self.saves += 1;
-            match self.fail_after {
-                Some(limit) if self.saves > limit => Err(()),
-                _ => Ok(()),
+            if self.fail_after.is_some_and(|limit| self.saves > limit) {
+                return Err(());
             }
+            if let Some(path) = &self.snapshot_path {
+                let bytes = serde_json::to_vec(&snapshot).map_err(|_| ())?;
+                std::fs::write(path, bytes).map_err(|_| ())?;
+            }
+            Ok(())
         }
     }
 
     #[derive(Default)]
     struct Journal(Vec<Output>);
     impl OutputJournal for Journal {
-        type Error = ();
         fn append(&mut self, output: &Output) -> Result<(), ()> {
             self.0.push(output.clone());
             Ok(())
@@ -2006,6 +2044,9 @@ mod tests {
         resized: Vec<(TerminalRef, Geometry)>,
         released: Vec<TerminalRef>,
         resize_failure: bool,
+        write_failure: bool,
+        terminate_success: bool,
+        spawn_counter: Option<Arc<AtomicU32>>,
     }
     impl PtySpawner for Pty {
         fn spawn(
@@ -2014,6 +2055,14 @@ mod tests {
             _: &SpawnProvision,
             _: &TerminalRef,
         ) -> Result<ProcessIdentity, SpawnFailure> {
+            if let Some(counter) = &self.spawn_counter {
+                let count = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                return Ok(ProcessIdentity {
+                    pid: count,
+                    start_identity: format!("fake-agent-{count}"),
+                    process_group: count,
+                });
+            }
             match self.spawn {
                 Some(failure) => Err(failure),
                 None => Ok(ProcessIdentity {
@@ -2022,6 +2071,15 @@ mod tests {
                     process_group: 4321,
                 }),
             }
+        }
+
+        fn terminate_reap(
+            &mut self,
+            _: &TerminalRef,
+        ) -> Result<(), super::super::runtime::TerminateReapError> {
+            self.terminate_success
+                .then_some(())
+                .ok_or(super::super::runtime::TerminateReapError)
         }
     }
     impl PtyWriter for Pty {
@@ -2041,38 +2099,15 @@ mod tests {
             }
         }
         fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
+            if self.write_failure {
+                return Err(PtyWriteError { applied_prefix: 0 });
+            }
             self.writes.extend_from_slice(bytes);
             Ok(())
         }
         fn release(&mut self, terminal: &TerminalRef) -> bool {
             self.released.push(terminal.clone());
             true
-        }
-    }
-
-    struct CountingPty(Arc<AtomicU32>);
-    impl PtySpawner for CountingPty {
-        fn spawn(
-            &mut self,
-            _: &DurableLaunchSnapshot,
-            _: &SpawnProvision,
-            _: &TerminalRef,
-        ) -> Result<ProcessIdentity, SpawnFailure> {
-            let count = self.0.fetch_add(1, Ordering::SeqCst) + 1;
-            Ok(ProcessIdentity {
-                pid: count,
-                start_identity: format!("fake-agent-{count}"),
-                process_group: count,
-            })
-        }
-    }
-    impl PtyWriter for CountingPty {
-        fn select_terminal(&mut self, _: &TerminalRef) {}
-        fn resize(&mut self, _: &TerminalRef, _: Geometry) -> Result<(), PtyWriteError> {
-            Ok(())
-        }
-        fn write_all(&mut self, _: &[u8]) -> Result<(), PtyWriteError> {
-            Ok(())
         }
     }
 
@@ -2105,10 +2140,20 @@ mod tests {
         }
     }
 
-    struct AlwaysExecutable;
-    impl ExecutableLocator for AlwaysExecutable {
-        fn is_available(&self, _: &str) -> bool {
-            true
+    struct ProfileOverrideAdapter {
+        profile: AgentProfile,
+        inner: CodexAdapter<FakeCodexProvisioner>,
+    }
+
+    impl usagi_core::usecase::agent::AgentProfileCatalog for ProfileOverrideAdapter {
+        fn find(&self, profile_id: &AgentProfileId) -> Option<AgentProfile> {
+            (self.profile.id == *profile_id).then(|| self.profile.clone())
+        }
+    }
+
+    impl AgentAdapter for ProfileOverrideAdapter {
+        fn resolve(&mut self, request: &LaunchRequest) -> Result<ResolvedLaunch, AdapterError> {
+            self.inner.resolve(request)
         }
     }
 
@@ -2180,7 +2225,7 @@ mod tests {
         registry
     }
 
-    fn runtime() -> AgentRuntime<Store, Pty, Journal> {
+    fn runtime() -> AgentRuntime {
         AgentRuntime::new(
             DaemonGeneration::new(),
             claude_registry(),
@@ -2192,9 +2237,7 @@ mod tests {
         )
     }
 
-    fn runtime_with_fixture(
-        locator: FixtureLocator,
-    ) -> AgentRuntime<Store, Pty, Journal, FixtureLocator> {
+    fn runtime_with_fixture(locator: FixtureLocator) -> AgentRuntime {
         AgentRuntime::with_dispatch_and_locator(
             DaemonGeneration::new(),
             claude_registry(),
@@ -2208,7 +2251,7 @@ mod tests {
         )
     }
 
-    fn codex_runtime() -> AgentRuntime<Store, Pty, Journal, AlwaysExecutable> {
+    fn codex_runtime() -> AgentRuntime {
         let mut registry = AdapterRegistry::new();
         let adapter = CodexAdapter::new(FakeCodexProvisioner);
         registry
@@ -2223,8 +2266,20 @@ mod tests {
             AgentProfileId::new("codex").unwrap(),
             Geometry { cols: 80, rows: 24 },
             DispatchStore::new(tempfile::tempdir().unwrap().keep()),
-            AlwaysExecutable,
+            PathExecutableLocator,
         )
+    }
+
+    fn store_mut(runtime: &mut AgentRuntime) -> &mut Store {
+        runtime.store.as_any_mut().downcast_mut::<Store>().unwrap()
+    }
+
+    fn pty(runtime: &AgentRuntime) -> &Pty {
+        runtime.pty.as_any().downcast_ref::<Pty>().unwrap()
+    }
+
+    fn pty_mut(runtime: &mut AgentRuntime) -> &mut Pty {
+        runtime.pty.as_any_mut().downcast_mut::<Pty>().unwrap()
     }
 
     fn configured_scope(workspace: &std::path::Path) -> ResolvedAgentScope {
@@ -2244,7 +2299,7 @@ mod tests {
         AgentLaunchIntent {
             workspace: WorkspaceId::new(),
             session: Some(SessionId::new()),
-            profile: profile.map(|name| AgentProfileId::new(name).unwrap()),
+            profile: optional_profile(profile),
         }
     }
 
@@ -2252,8 +2307,12 @@ mod tests {
         AgentLaunchIntent {
             workspace: WorkspaceId::new(),
             session: None,
-            profile: profile.map(|name| AgentProfileId::new(name).unwrap()),
+            profile: optional_profile(profile),
         }
+    }
+
+    fn optional_profile(profile: Option<&str>) -> Option<AgentProfileId> {
+        profile.map(|name| AgentProfileId::new(name).unwrap())
     }
 
     // ---- tests ---------------------------------------------------------------
@@ -2270,9 +2329,10 @@ mod tests {
             session: Some(session),
             profile: Some(AgentProfileId::new("codex").unwrap()),
         };
+        let initial_operation = OperationId::new();
         let first = runtime
             .launch(
-                &OperationId::new().to_string(),
+                &initial_operation.to_string(),
                 &launch_intent,
                 &FakeScope(Ok(resolved.clone())),
             )
@@ -2332,9 +2392,119 @@ mod tests {
 
         runtime.exit(&first.terminal, 0).unwrap();
         assert_eq!(
+            runtime
+                .admit_resume(
+                    &initial_operation.to_string(),
+                    workspace,
+                    session,
+                    &format!("resume:{workspace}:{session}"),
+                    &FakeScope(Ok(resolved.clone())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+        assert_eq!(
             runtime.session_resume_status(session),
             (true, ProviderResumeReason::ExplicitResumeAvailable)
         );
+        let mut ambiguous_snapshot = runtime.coordinator.snapshot();
+        let mut ambiguous_record = ambiguous_snapshot.records[0].clone();
+        let mut ambiguous_ownership = ambiguous_snapshot
+            .generation
+            .terminals
+            .iter()
+            .find(|ownership| {
+                ownership
+                    .terminal
+                    .fences(&ambiguous_record.runtime.terminal)
+            })
+            .unwrap()
+            .clone();
+        ambiguous_record.runtime.agent_runtime_id = AgentRuntimeId::new();
+        let ambiguous_terminal_id = TerminalId::new();
+        ambiguous_record.runtime.terminal.terminal_id = ambiguous_terminal_id;
+        ambiguous_ownership.terminal.terminal_id = ambiguous_terminal_id;
+        ambiguous_record.operation.operation_id = OperationId::new();
+        ambiguous_record.semantic_key = Some("ambiguous-resume-source".into());
+        ambiguous_record
+            .provider_resume
+            .as_mut()
+            .unwrap()
+            .native_session_id = ProviderSessionId::new("other-codex-session").unwrap();
+        ambiguous_snapshot.records.push(ambiguous_record);
+        ambiguous_snapshot
+            .generation
+            .terminals
+            .push(ambiguous_ownership);
+        let original_coordinator = std::mem::replace(
+            &mut runtime.coordinator,
+            RuntimeCoordinator::hydrate(ambiguous_snapshot, 16, 64 * 1024, 64).unwrap(),
+        );
+        assert_eq!(
+            runtime.session_resume_status(session),
+            (false, ProviderResumeReason::AmbiguousProviderMetadata)
+        );
+        runtime.coordinator = original_coordinator;
+
+        let original_registry = std::mem::replace(&mut runtime.registry, AdapterRegistry::new());
+        assert_eq!(
+            runtime.session_resume_status(session),
+            (false, ProviderResumeReason::IncompatibleProviderMetadata)
+        );
+        assert_eq!(
+            runtime
+                .resume(
+                    &OperationId::new().to_string(),
+                    workspace,
+                    session,
+                    &FakeScope(Ok(resolved.clone())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::Unavailable
+        );
+        runtime.registry = original_registry;
+
+        let inner = CodexAdapter::new(FakeCodexProvisioner);
+        let mut profile = inner.profile().clone();
+        profile.capabilities.remove(&AgentCapability::Resume);
+        let mut incompatible_registry = AdapterRegistry::new();
+        incompatible_registry
+            .register(
+                profile.clone(),
+                Box::new(ProfileOverrideAdapter { profile, inner }),
+            )
+            .unwrap();
+        let original_registry = std::mem::replace(&mut runtime.registry, incompatible_registry);
+        assert_eq!(
+            runtime
+                .resume(
+                    &OperationId::new().to_string(),
+                    workspace,
+                    session,
+                    &FakeScope(Ok(resolved.clone())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::Unavailable
+        );
+        runtime.registry = original_registry;
+
+        pty_mut(&mut runtime).spawn = Some(SpawnFailure::Definite);
+        assert_eq!(
+            runtime
+                .resume(
+                    &OperationId::new().to_string(),
+                    workspace,
+                    session,
+                    &FakeScope(Ok(resolved.clone())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::Unavailable
+        );
+        pty_mut(&mut runtime).spawn = None;
         assert_eq!(
             runtime
                 .resume(
@@ -2384,6 +2554,18 @@ mod tests {
         assert_eq!(
             runtime
                 .resume(
+                    &operation,
+                    WorkspaceId::new(),
+                    session,
+                    &FakeScope(Ok(resolved.clone())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::IdempotencyConflict
+        );
+        assert_eq!(
+            runtime
+                .resume(
                     &OperationId::new().to_string(),
                     workspace,
                     session,
@@ -2393,7 +2575,7 @@ mod tests {
                 .code,
             ErrorCode::InvalidArgument
         );
-        assert_eq!(runtime.coordinator.snapshot().records.len(), 2);
+        assert_eq!(runtime.coordinator.snapshot().records.len(), 3);
     }
 
     #[test]
@@ -2447,7 +2629,7 @@ mod tests {
                 AgentProfileId::new("claude").unwrap(),
                 Geometry { cols: 80, rows: 24 },
                 DispatchStore::new(tempfile::tempdir().unwrap().keep()),
-                AlwaysExecutable,
+                PathExecutableLocator,
             )
         };
         let mut first = make_runtime();
@@ -2481,7 +2663,7 @@ mod tests {
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
             DispatchStore::new(tempfile::tempdir().unwrap().keep()),
-            AlwaysExecutable,
+            PathExecutableLocator,
             reconciled,
         )
         .unwrap();
@@ -2548,9 +2730,15 @@ mod tests {
             AgentRuntime::with_dispatch_and_locator(
                 DaemonGeneration::new(),
                 claude_registry(),
-                FileStore(snapshot_path.clone()),
+                Store {
+                    snapshot_path: Some(snapshot_path.clone()),
+                    ..Store::default()
+                },
                 Journal::default(),
-                CountingPty(Arc::clone(&spawns)),
+                Pty {
+                    spawn_counter: Some(Arc::clone(&spawns)),
+                    ..Pty::default()
+                },
                 AgentProfileId::new("claude").unwrap(),
                 Geometry { cols: 80, rows: 24 },
                 DispatchStore::new(dispatch_dir.clone()),
@@ -2634,15 +2822,24 @@ mod tests {
                 .iter()
                 .all(|record| { record.role == super::super::generation::GenerationRole::Retired })
         );
-        FileStore(snapshot_path.clone())
-            .save(reconciled.clone())
-            .unwrap();
+        Store {
+            snapshot_path: Some(snapshot_path.clone()),
+            ..Store::default()
+        }
+        .save(reconciled.clone())
+        .unwrap();
         let mut second = AgentRuntime::hydrate_with_dispatch_and_locator(
             DaemonGeneration::new(),
             claude_registry(),
-            FileStore(snapshot_path.clone()),
+            Store {
+                snapshot_path: Some(snapshot_path.clone()),
+                ..Store::default()
+            },
             Journal::default(),
-            CountingPty(Arc::clone(&spawns)),
+            Pty {
+                spawn_counter: Some(Arc::clone(&spawns)),
+                ..Pty::default()
+            },
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
             DispatchStore::new(dispatch_dir),
@@ -2781,7 +2978,10 @@ mod tests {
             claude_registry(),
             Store::default(),
             Journal::default(),
-            CountingPty(Arc::clone(&spawns)),
+            Pty {
+                spawn_counter: Some(Arc::clone(&spawns)),
+                ..Pty::default()
+            },
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
             DispatchStore::new(tempfile::tempdir().unwrap().keep()),
@@ -2842,9 +3042,13 @@ mod tests {
             Store {
                 saves: 0,
                 fail_after: Some(0),
+                ..Store::default()
             },
             Journal::default(),
-            CountingPty(Arc::clone(&spawns)),
+            Pty {
+                spawn_counter: Some(Arc::clone(&spawns)),
+                ..Pty::default()
+            },
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
             DispatchStore::new(&dispatch_dir),
@@ -2864,7 +3068,10 @@ mod tests {
             claude_registry(),
             Store::default(),
             Journal::default(),
-            CountingPty(Arc::clone(&spawns)),
+            Pty {
+                spawn_counter: Some(Arc::clone(&spawns)),
+                ..Pty::default()
+            },
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
             DispatchStore::new(&dispatch_dir),
@@ -2880,9 +3087,19 @@ mod tests {
             ErrorCode::OwnershipUnknown
         );
         let mut conflict = launch_intent;
-        conflict.profile = Some(AgentProfileId::new("other").unwrap());
+        conflict.workspace = WorkspaceId::new();
+        let mut third = AgentRuntime::with_dispatch(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty::default(),
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+            DispatchStore::new(&dispatch_dir),
+        );
         assert_eq!(
-            second
+            third
                 .launch(&operation, &conflict, &FakeScope(Ok(scope())))
                 .unwrap_err()
                 .code,
@@ -2906,6 +3123,20 @@ mod tests {
         let launch_intent = intent(None);
         let session = launch_intent.session.unwrap();
         assert_eq!(runtime.session_phase(session), "none");
+        assert_eq!(
+            runtime
+                .prompt(Some(session), "  ", PromptMode::Auto)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            runtime
+                .prompt(Some(session), "now", PromptMode::Live)
+                .unwrap_err()
+                .code,
+            ErrorCode::Unavailable
+        );
         let queued = runtime
             .prompt(Some(session), "queued work", PromptMode::Auto)
             .unwrap();
@@ -2941,15 +3172,34 @@ mod tests {
             .prompt(Some(session), "follow up", PromptMode::Auto)
             .unwrap();
         assert_eq!(live.delivered_to, "live");
-        assert_eq!(runtime.pty.writes, b"follow up\n");
+        assert_eq!(pty(&runtime).writes, b"follow up\n");
         let fenced = runtime.prompt_run(operation, "decision answer").unwrap();
         assert_eq!(fenced.delivered_to, "live");
-        assert_eq!(runtime.pty.writes, b"follow up\ndecision answer\n");
+        assert_eq!(pty(&runtime).writes, b"follow up\ndecision answer\n");
         assert!(runtime.prompt_run(OperationId::new(), "late").is_err());
+        assert_eq!(
+            runtime.prompt_run(operation, "  ").unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
         assert!(
             runtime
                 .prompt(Some(session), "later", PromptMode::Queue)
                 .is_err()
+        );
+        pty_mut(&mut runtime).write_failure = true;
+        assert_eq!(
+            runtime
+                .prompt_run(operation, "failed decision")
+                .unwrap_err()
+                .code,
+            ErrorCode::Unavailable
+        );
+        assert_eq!(
+            runtime
+                .prompt(Some(session), "fails", PromptMode::Live)
+                .unwrap_err()
+                .code,
+            ErrorCode::Unavailable
         );
         assert!(runtime.prompt(None, "now", PromptMode::Live).is_err());
         assert!(runtime.prompt(None, "  ", PromptMode::Auto).is_err());
@@ -2997,7 +3247,7 @@ mod tests {
             },
         ));
         assert_eq!(
-            runtime.pty.resized,
+            pty(&runtime).resized,
             vec![(terminal.clone(), Geometry { cols: 43, rows: 17 })]
         );
 
@@ -3055,8 +3305,8 @@ mod tests {
             },
         ));
         assert_eq!(resync["exited"], 0);
-        assert_eq!(runtime.pty.selected.as_ref(), Some(&terminal));
-        assert_eq!(runtime.pty.writes, b"go\n");
+        assert_eq!(pty(&runtime).selected.as_ref(), Some(&terminal));
+        assert_eq!(pty(&runtime).writes, b"go\n");
     }
 
     #[test]
@@ -3092,7 +3342,7 @@ mod tests {
         runtime.exit(&terminal, 0).unwrap();
         assert!(runtime.exit(&terminal, 0).is_err());
         assert_eq!(
-            runtime.pty.released.as_slice(),
+            pty(&runtime).released.as_slice(),
             std::slice::from_ref(&terminal)
         );
         let late_resize = runtime.handle_terminal(
@@ -3136,11 +3386,12 @@ mod tests {
             )
             .unwrap()
             .terminal;
-        runtime.store.fail_after = Some(runtime.store.saves);
+        let saves = store_mut(&mut runtime).saves;
+        store_mut(&mut runtime).fail_after = Some(saves);
 
         let error = runtime.exit(&terminal, 0).unwrap_err();
         assert_eq!(error.code, ErrorCode::OwnershipUnknown);
-        assert_eq!(runtime.pty.released, [terminal]);
+        assert_eq!(pty(&runtime).released, [terminal]);
     }
 
     #[test]
@@ -3182,6 +3433,22 @@ mod tests {
             .launch(&operation, &launch_intent, &fake_scope)
             .unwrap()
             .terminal;
+        let runtime_ref = runtime.coordinator.runtime_for_terminal(&terminal).unwrap();
+        let fence = runtime
+            .coordinator
+            .record_for(&runtime_ref)
+            .unwrap()
+            .operation
+            .clone();
+        runtime
+            .report(
+                &runtime_ref,
+                &fence,
+                InboxKind::Completed,
+                "no dispatch binding".into(),
+                None,
+            )
+            .unwrap();
 
         runtime.exit(&terminal, 23).unwrap();
         let failure = runtime
@@ -3197,6 +3464,70 @@ mod tests {
                 .launch(&operation, &launch_intent, &fake_scope)
                 .is_err()
         );
+
+        let operation = OperationId::new().to_string();
+        let terminal = runtime
+            .launch(&operation, &launch_intent, &fake_scope)
+            .unwrap()
+            .terminal;
+        runtime.operations.get_mut(&operation).unwrap().outcome = Err(stale_terminal());
+        runtime.exit(&terminal, 0).unwrap();
+        assert_eq!(
+            runtime
+                .launch(&operation, &launch_intent, &fake_scope)
+                .unwrap_err()
+                .code,
+            ErrorCode::StaleTarget
+        );
+    }
+
+    #[test]
+    fn missing_dispatch_binding_is_a_safe_noop_for_report_and_observer_exit() {
+        let mut runtime = runtime();
+        let operation = OperationId::new().to_string();
+        let launch_intent = intent(None);
+        let terminal = runtime
+            .launch(&operation, &launch_intent, &FakeScope(Ok(scope())))
+            .unwrap()
+            .terminal;
+        let runtime_ref = runtime.coordinator.runtime_for_terminal(&terminal).unwrap();
+        let fence = runtime
+            .coordinator
+            .record_for(&runtime_ref)
+            .unwrap()
+            .operation
+            .clone();
+        runtime.dispatch = DispatchStore::new(tempfile::tempdir().unwrap().keep());
+        runtime.mcp_callers.insert(
+            "missing-binding".into(),
+            McpCaller {
+                runtime: runtime_ref.clone(),
+                operation: fence.operation_id,
+            },
+        );
+        assert_eq!(
+            runtime
+                .report_from_mcp(
+                    "missing-binding",
+                    None,
+                    InboxKind::Completed,
+                    "missing binding".into(),
+                    None,
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+        runtime
+            .report(
+                &runtime_ref,
+                &fence,
+                InboxKind::Completed,
+                "missing binding".into(),
+                None,
+            )
+            .unwrap();
+        runtime.exit(&terminal, 0).unwrap();
     }
 
     #[test]
@@ -3382,6 +3713,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Related fence and completion branches share one admitted fixture.
     fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
         let fixture = tempfile::tempdir().unwrap();
         std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
@@ -3413,6 +3745,13 @@ mod tests {
             )
             .unwrap();
         let credential = runtime.mcp_callers.keys().next().cloned().unwrap();
+        assert_eq!(
+            runtime
+                .report_from_mcp("forged", None, InboxKind::Completed, "ignored".into(), None)
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
         assert_eq!(
             runtime.mcp_dispatch_caller(&credential).unwrap().session_id,
             Some(session)
@@ -3483,6 +3822,55 @@ mod tests {
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].kind, InboxKind::Completed);
         assert_eq!(inbox[0].result, Some(result));
+
+        let failed_operation = OperationId::new();
+        let failed = runtime
+            .dispatch(
+                &failed_operation.to_string(),
+                &dispatch,
+                session,
+                &FakeScope(Ok(configured_scope(worktree.path()))),
+            )
+            .unwrap();
+        let failed_credential = runtime
+            .mcp_callers
+            .iter()
+            .find(|(_, provenance)| provenance.operation == failed_operation)
+            .map(|(credential, _)| credential.clone())
+            .unwrap();
+        runtime
+            .report_from_mcp(
+                &failed_credential,
+                None,
+                InboxKind::Failed,
+                "failed".into(),
+                None,
+            )
+            .unwrap();
+        let binding = runtime
+            .dispatch_store()
+            .binding(failed_operation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            runtime
+                .dispatch_store()
+                .run(failed_operation)
+                .unwrap()
+                .unwrap()
+                .status,
+            RunStatus::Failed
+        );
+        assert_eq!(
+            runtime
+                .dispatch_store()
+                .agent(binding.worker.agent_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            AgentStatus::Failed
+        );
+        runtime.exit(&failed.terminal, 1).unwrap();
     }
 
     #[test]
@@ -3673,7 +4061,7 @@ mod tests {
                 TerminalOutcome::NotOwned
             ));
         }
-        assert!(runtime.pty.resized.is_empty());
+        assert!(pty(&runtime).resized.is_empty());
     }
 
     #[test]
@@ -3687,7 +4075,7 @@ mod tests {
             )
             .unwrap()
             .terminal;
-        runtime.pty.resize_failure = true;
+        pty_mut(&mut runtime).resize_failure = true;
 
         let outcome = runtime.handle_terminal(
             ConnectionId::new(),
@@ -3702,9 +4090,7 @@ mod tests {
                 },
             },
         );
-        let TerminalOutcome::Handled(Err(error)) = outcome else {
-            panic!("agent resize failure must be handled")
-        };
+        let error = handled_result(outcome).unwrap_err();
         assert_eq!(error.code, ErrorCode::Unavailable);
 
         let snapshot = handled(runtime.handle_terminal(
@@ -3712,10 +4098,26 @@ mod tests {
             ClientId::new(),
             RequestId::new(),
             TerminalAction::Resync,
-            TerminalRequest::Resync { terminal },
+            TerminalRequest::Resync {
+                terminal: terminal.clone(),
+            },
         ));
         assert_eq!(snapshot["geometry"], json!({"cols":80,"rows":24}));
-        assert_eq!(runtime.pty.resized.len(), 1);
+        assert_eq!(
+            handled_result(runtime.handle_terminal(
+                ConnectionId::new(),
+                ClientId::new(),
+                RequestId::new(),
+                TerminalAction::Attach,
+                TerminalRequest::Resync {
+                    terminal: terminal.clone(),
+                },
+            ))
+            .unwrap_err()
+            .code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(pty(&runtime).resized.len(), 1);
     }
 
     #[test]
@@ -3894,6 +4296,22 @@ mod tests {
         };
         let resolved: ResolvedLaunch = adapter.resolve(&request).unwrap();
         assert_eq!(resolved.snapshot.plan.program, "claude");
+        let inner = CodexAdapter::new(FakeCodexProvisioner);
+        let profile = inner.profile().clone();
+        let mut override_adapter = ProfileOverrideAdapter { profile, inner };
+        let codex_request = LaunchRequest {
+            profile_id: AgentProfileId::new("codex").unwrap(),
+            ..request
+        };
+        assert_eq!(
+            override_adapter
+                .resolve(&codex_request)
+                .unwrap()
+                .snapshot
+                .plan
+                .program,
+            "codex"
+        );
         let _ = (
             AdapterError::ProvisionFailed,
             AgentCapability::Resume,
@@ -3914,6 +4332,18 @@ mod tests {
             )
             .unwrap(),
         );
+
+        let mut runtime = runtime();
+        let (restart_snapshot, _) = runtime
+            .coordinator
+            .snapshot()
+            .reconcile_after_daemon_restart();
+        runtime.coordinator = RuntimeCoordinator::hydrate(restart_snapshot, 16, 64 * 1024, 64)
+            .expect("a reconciled empty snapshot is valid");
+        assert_eq!(
+            runtime.active_generation().unwrap_err().code,
+            ErrorCode::OwnershipUnknown
+        );
     }
 
     #[test]
@@ -3923,10 +4353,471 @@ mod tests {
         assert_eq!(error.code, ErrorCode::ResyncRequired);
     }
 
+    #[test]
+    #[allow(clippy::too_many_lines)] // Table-style coverage of all helper error and replay outcomes.
+    fn helper_error_routes_and_durable_replay_outcomes_are_total() {
+        use super::super::runtime::{DurableOperationOutcome, ReconcileState};
+
+        for (state, expected) in [
+            (super::super::runtime::RuntimeState::Running, "running"),
+            (super::super::runtime::RuntimeState::Reserved, "ready"),
+            (super::super::runtime::RuntimeState::SpawnFailed, "exited"),
+            (
+                super::super::runtime::RuntimeState::ReconcileRequired(
+                    ReconcileState::IdentityUnknown,
+                ),
+                "interrupted",
+            ),
+            (
+                super::super::runtime::RuntimeState::ReconcileRequired(
+                    ReconcileState::OrphanRunning,
+                ),
+                "exited",
+            ),
+            (super::super::runtime::RuntimeState::Exited, "ended"),
+            (super::super::runtime::RuntimeState::Reclaimed, "ended"),
+        ] {
+            assert_eq!(runtime_phase(state).1, expected);
+        }
+        assert!(is_resume_source_state(
+            super::super::runtime::RuntimeState::Exited
+        ));
+        assert!(is_resume_source_state(
+            super::super::runtime::RuntimeState::Reclaimed
+        ));
+        assert!(is_resume_source_state(
+            super::super::runtime::RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown)
+        ));
+        assert!(!is_resume_source_state(
+            super::super::runtime::RuntimeState::Running
+        ));
+        let run_id = OperationId::new();
+        for kind in [InboxKind::Completed, InboxKind::Failed, InboxKind::NoReport] {
+            let message = InboxMessage {
+                run_id,
+                from: WorkerRef {
+                    session_id: None,
+                    agent_id: usagi_core::domain::id::AgentId::new(),
+                },
+                kind,
+                summary: String::new(),
+                result: None,
+                created_at: Utc::now(),
+                read: false,
+            };
+            assert_eq!(message.run_id, run_id);
+            assert_ne!(message.run_id, OperationId::new());
+        }
+
+        let mut orphan_runtime = runtime();
+        let admission = orphan_runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &intent(None),
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let mut record = orphan_runtime.coordinator.snapshot().records.remove(0);
+        for (outcome, expected_code, completed) in [
+            (DurableOperationOutcome::Accepted, None, false),
+            (DurableOperationOutcome::Completed, None, true),
+            (
+                DurableOperationOutcome::SpawnUnavailable,
+                Some(ErrorCode::Unavailable),
+                false,
+            ),
+            (
+                DurableOperationOutcome::ExitUnavailable,
+                Some(ErrorCode::Unavailable),
+                false,
+            ),
+            (
+                DurableOperationOutcome::OwnershipUnknown,
+                Some(ErrorCode::OwnershipUnknown),
+                false,
+            ),
+        ] {
+            record.outcome = outcome;
+            let projection = durable_operation_outcome(&record);
+            if let Some(code) = expected_code {
+                assert_eq!(projection.unwrap_err().code, code);
+            } else {
+                assert_eq!(projection.unwrap().completed, completed);
+            }
+        }
+        assert_eq!(record.runtime.terminal, admission.terminal);
+        assert_eq!(
+            handled_result(TerminalOutcome::NotOwned).unwrap_err().code,
+            ErrorCode::StaleTarget
+        );
+
+        assert_eq!(
+            terminal_geometry(TerminalGeometry { cols: 0, rows: 1 })
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            map_scope_error(ScopeResolveError::Unavailable).code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            map_scope_error(ScopeResolveError::Storage).code,
+            ErrorCode::Unavailable
+        );
+        for (error, code) in [
+            (OrchestrationError::Unauthorized, ErrorCode::InvalidArgument),
+            (
+                OrchestrationError::UnknownProfile,
+                ErrorCode::InvalidArgument,
+            ),
+            (OrchestrationError::UnknownRuntime, ErrorCode::StaleTarget),
+        ] {
+            assert_eq!(map_orchestration_error(error).code, code);
+        }
+        for (error, code) in [
+            (
+                RuntimeError::Adapter(AdapterError::ExecutableUnavailable),
+                ErrorCode::Unavailable,
+            ),
+            (
+                RuntimeError::Adapter(AdapterError::ProvisionFailed),
+                ErrorCode::Unavailable,
+            ),
+            (
+                RuntimeError::RuntimeAlreadyExists,
+                ErrorCode::RevisionConflict,
+            ),
+            (RuntimeError::ScopeMismatch, ErrorCode::InvalidArgument),
+            (
+                RuntimeError::ConcurrencyExhausted,
+                ErrorCode::ResourceExhausted,
+            ),
+            (
+                RuntimeError::Terminal(RegistryError::PtyResizeFailed),
+                ErrorCode::Unavailable,
+            ),
+            (
+                RuntimeError::Terminal(RegistryError::StaleTarget),
+                ErrorCode::StaleTarget,
+            ),
+            (RuntimeError::UnknownRuntime, ErrorCode::StaleTarget),
+            (
+                RuntimeError::TerminalGenerationMismatch,
+                ErrorCode::StaleTarget,
+            ),
+            (RuntimeError::Store, ErrorCode::OwnershipUnknown),
+            (RuntimeError::Journal, ErrorCode::OwnershipUnknown),
+            (
+                RuntimeError::ReconcileRequired(ReconcileState::IdentityUnknown),
+                ErrorCode::OwnershipUnknown,
+            ),
+            (RuntimeError::SpawnFailed, ErrorCode::Unavailable),
+        ] {
+            assert_eq!(map_runtime_error(error).code, code);
+        }
+
+        let root = AgentLaunchIntent {
+            workspace: WorkspaceId::new(),
+            session: None,
+            profile: None,
+        };
+        assert!(semantic_key(&root).contains("workspace-root:<default>"));
+        let counter = Arc::new(AtomicU32::new(0));
+        let mut pty = Pty {
+            spawn_counter: Some(counter),
+            ..Pty::default()
+        };
+        pty.select_terminal(&admission.terminal);
+        pty.resize(&admission.terminal, Geometry { cols: 1, rows: 1 })
+            .unwrap();
+        pty.write_all(b"x").unwrap();
+        assert_eq!(
+            map_dispatch_storage_error(anyhow::anyhow!("store failpoint")).code,
+            ErrorCode::Unavailable
+        );
+    }
+
+    #[test]
+    fn dispatch_rejects_invalid_unknown_and_foreign_requests_before_spawn() {
+        let mut runtime = runtime();
+        let session = SessionId::new();
+        let caller = CallerRef {
+            session_id: Some(SessionId::new()),
+            agent_id: usagi_core::domain::id::AgentId::new(),
+        };
+        let unknown = DispatchIntent {
+            workspace: WorkspaceId::new(),
+            session_name: "worker".into(),
+            caller: caller.clone(),
+            agent: DispatchAgentIntent::Existing {
+                agent_id: usagi_core::domain::id::AgentId::new(),
+            },
+            prompt: "work".into(),
+        };
+        assert_eq!(
+            runtime
+                .dispatch("invalid", &unknown, session, &FakeScope(Ok(scope())))
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        let mut empty = unknown.clone();
+        empty.prompt.clear();
+        assert_eq!(
+            runtime
+                .dispatch(
+                    &OperationId::new().to_string(),
+                    &empty,
+                    session,
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            runtime
+                .dispatch(
+                    &OperationId::new().to_string(),
+                    &unknown,
+                    session,
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+
+        let foreign_session = SessionId::new();
+        let foreign = runtime
+            .dispatch
+            .upsert_agent_by_runtime_model(
+                Some(foreign_session),
+                AgentProfileId::new("claude").unwrap(),
+                ModelSelector::new("test").unwrap(),
+            )
+            .unwrap();
+        let foreign_intent = DispatchIntent {
+            agent: DispatchAgentIntent::Existing {
+                agent_id: foreign.agent_id,
+            },
+            ..unknown
+        };
+        assert_eq!(
+            runtime
+                .dispatch(
+                    &OperationId::new().to_string(),
+                    &foreign_intent,
+                    session,
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        assert!(runtime.coordinator.snapshot().records.is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // The durable admission states intentionally share one replay setup.
+    fn dispatch_replays_prepared_conflicting_and_legacy_admissions_without_respawn() {
+        let temp = tempfile::tempdir().unwrap();
+        let dispatch_dir = temp.path().join("dispatch");
+        let session = SessionId::new();
+        let durable = DispatchStore::new(&dispatch_dir);
+        let worker = durable
+            .upsert_agent_by_runtime_model(
+                Some(session),
+                AgentProfileId::new("claude").unwrap(),
+                ModelSelector::new("test").unwrap(),
+            )
+            .unwrap();
+        let intent = DispatchIntent {
+            workspace: WorkspaceId::new(),
+            session_name: "worker".into(),
+            caller: CallerRef {
+                session_id: Some(SessionId::new()),
+                agent_id: usagi_core::domain::id::AgentId::new(),
+            },
+            agent: DispatchAgentIntent::Existing {
+                agent_id: worker.agent_id,
+            },
+            prompt: "work".into(),
+        };
+        let operation = OperationId::new();
+        let make_runtime = |store| {
+            AgentRuntime::with_dispatch(
+                DaemonGeneration::new(),
+                claude_registry(),
+                store,
+                Journal::default(),
+                Pty::default(),
+                AgentProfileId::new("claude").unwrap(),
+                Geometry { cols: 80, rows: 24 },
+                DispatchStore::new(&dispatch_dir),
+            )
+        };
+        let mut first = make_runtime(Store {
+            saves: 0,
+            fail_after: Some(0),
+            ..Store::default()
+        });
+        assert_eq!(
+            first
+                .dispatch(
+                    &operation.to_string(),
+                    &intent,
+                    session,
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+        for (candidate, code) in [
+            (intent.clone(), ErrorCode::OwnershipUnknown),
+            (
+                DispatchIntent {
+                    prompt: "different".into(),
+                    ..intent.clone()
+                },
+                ErrorCode::IdempotencyConflict,
+            ),
+        ] {
+            assert_eq!(
+                make_runtime(Store::default())
+                    .dispatch(
+                        &operation.to_string(),
+                        &candidate,
+                        session,
+                        &FakeScope(Ok(scope())),
+                    )
+                    .unwrap_err()
+                    .code,
+                code
+            );
+        }
+
+        let legacy_dir = temp.path().join("legacy");
+        let legacy = DispatchStore::new(&legacy_dir);
+        let worker = legacy
+            .upsert_agent_by_runtime_model(
+                Some(session),
+                AgentProfileId::new("claude").unwrap(),
+                ModelSelector::new("test").unwrap(),
+            )
+            .unwrap();
+        let legacy_operation = OperationId::new();
+        legacy
+            .upsert_run(DispatchRun {
+                run_id: legacy_operation,
+                agent_id: worker.agent_id,
+                prompt: "legacy".into(),
+                started_at: Utc::now(),
+                ended_at: None,
+                status: RunStatus::Preparing,
+            })
+            .unwrap();
+        let mut runtime = AgentRuntime::with_dispatch(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty::default(),
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+            legacy,
+        );
+        assert_eq!(
+            runtime
+                .dispatch(
+                    &legacy_operation.to_string(),
+                    &DispatchIntent {
+                        agent: DispatchAgentIntent::Existing {
+                            agent_id: worker.agent_id,
+                        },
+                        ..intent
+                    },
+                    session,
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+    }
+
+    #[test]
+    fn admission_commit_failpoint_compensates_partial_effects() {
+        let operation = OperationId::new();
+        let mut orphan_runtime = runtime();
+        let admission = orphan_runtime
+            .launch(
+                &operation.to_string(),
+                &intent(None),
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let runtime_ref = orphan_runtime
+            .coordinator
+            .runtime_for_terminal(&admission.terminal)
+            .unwrap();
+        assert_eq!(
+            orphan_runtime
+                .finish_admission_commit(operation, "missing", &runtime_ref, false)
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+        assert!(matches!(
+            orphan_runtime
+                .coordinator
+                .record_for(&runtime_ref)
+                .unwrap()
+                .state,
+            super::super::runtime::RuntimeState::ReconcileRequired(
+                super::super::runtime::ReconcileState::OrphanRunning
+            )
+        ));
+
+        let operation = OperationId::new();
+        let mut runtime = runtime();
+        let admission = runtime
+            .launch(
+                &operation.to_string(),
+                &intent(None),
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let runtime_ref = runtime
+            .coordinator
+            .runtime_for_terminal(&admission.terminal)
+            .unwrap();
+        pty_mut(&mut runtime).terminate_success = true;
+        let saves = store_mut(&mut runtime).saves;
+        store_mut(&mut runtime).fail_after = Some(saves);
+        assert_eq!(
+            runtime
+                .finish_admission_commit(operation, "missing", &runtime_ref, false)
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+        assert!(matches!(
+            runtime.coordinator.record_for(&runtime_ref).unwrap().state,
+            super::super::runtime::RuntimeState::SpawnFailed
+        ));
+    }
+
     fn handled(outcome: TerminalOutcome) -> Value {
+        handled_result(outcome).unwrap()
+    }
+
+    fn handled_result(outcome: TerminalOutcome) -> Result<Value, ProtocolError> {
         match outcome {
-            TerminalOutcome::Handled(result) => result.unwrap(),
-            TerminalOutcome::NotOwned => panic!("expected the agent owner to handle the terminal"),
+            TerminalOutcome::Handled(result) => result,
+            TerminalOutcome::NotOwned => Err(stale_terminal()),
         }
     }
 }
