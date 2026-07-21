@@ -265,10 +265,10 @@ pub fn handle_connection_with_terminal_and<R: Read, W: Write, T: TerminalOwner, 
     writer: &mut W,
     server: &ServerProtocol,
     terminal: &mut T,
-    dispatch_request: D,
+    mut dispatch_request: D,
 ) -> io::Result<()>
 where
-    D: Fn(
+    D: FnMut(
         usagi_core::infrastructure::ipc::RequestId,
         serde_json::Value,
         &ServerHello,

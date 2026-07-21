@@ -49,6 +49,7 @@ use usagi_daemon::usecase::generation::ProcessIdentity;
 use usagi_daemon::usecase::generic_terminal::{
     GenericPtySpawner, TerminalProfileResolver, TerminalStore, TerminalStoreSnapshot,
 };
+use usagi_daemon::usecase::metrics::{MetricsBroker, MetricsObserver, MetricsSample};
 use usagi_daemon::usecase::orchestration::AdapterRegistry;
 use usagi_daemon::usecase::pr_inventory::OutputPrProjector;
 use usagi_daemon::usecase::runtime::{
@@ -901,13 +902,12 @@ type SharedTerminalRuntime = Arc<
 >;
 type SharedPrInventory = Arc<Mutex<OutputPrProjector<PrInventoryStore>>>;
 
-/// Samples daemon-owned process resources between metrics requests.
-struct ProcessMetrics {
+/// Supplies raw process-resource observations to the metrics authority.
+struct ProcessResourceSampler {
     previous: Option<(Instant, u64)>,
-    terminal: Arc<TerminalPipelineMetrics>,
 }
 
-impl ProcessMetrics {
+impl ProcessResourceSampler {
     fn snapshot(&mut self) -> (u32, u64) {
         let now = Instant::now();
         let Some((cpu_micros, resident_memory_bytes)) = process_resource_usage() else {
@@ -950,7 +950,8 @@ fn process_resource_usage() -> Option<(u64, u64)> {
     Some((cpu_micros, resident_memory_bytes))
 }
 
-type SharedProcessMetrics = Arc<Mutex<ProcessMetrics>>;
+type SharedMetricsBroker = Arc<Mutex<MetricsBroker>>;
+type SharedProcessResourceSampler = Arc<Mutex<ProcessResourceSampler>>;
 impl usagi_daemon::presentation::ipc::TerminalOwner for SharedTerminal {
     fn request(
         &mut self,
@@ -1058,10 +1059,9 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         agent,
         pr_inventory,
         decisions,
-        Arc::new(Mutex::new(ProcessMetrics {
-            previous: None,
-            terminal: pipeline_metrics,
-        })),
+        Arc::new(Mutex::new(MetricsBroker::default())),
+        Arc::new(Mutex::new(ProcessResourceSampler { previous: None })),
+        pipeline_metrics,
         supervisor,
     )
 }
@@ -1256,7 +1256,9 @@ fn start_ipc_accept_loop(
     agent: SharedAgentRuntime,
     pr_inventory: SharedPrInventory,
     decisions: Arc<UserDecisionStore>,
-    metrics: SharedProcessMetrics,
+    metrics: SharedMetricsBroker,
+    process_metrics: SharedProcessResourceSampler,
+    pipeline_metrics: Arc<TerminalPipelineMetrics>,
     supervisor: SharedSupervisorRuntime,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
@@ -1274,6 +1276,8 @@ fn start_ipc_accept_loop(
                         let pr_inventory = Arc::clone(&pr_inventory);
                         let decisions = Arc::clone(&decisions);
                         let metrics = Arc::clone(&metrics);
+                        let process_metrics = Arc::clone(&process_metrics);
+                        let pipeline_metrics = Arc::clone(&pipeline_metrics);
                         let supervisor = Arc::clone(&supervisor);
                         let _ = std::thread::Builder::new()
                             .name("usagi-ipc-client".to_string())
@@ -1287,7 +1291,8 @@ fn start_ipc_accept_loop(
                                     SharedAgent(agent_owner),
                                     SharedTerminal(terminal),
                                 );
-                                let _ = usagi_daemon::presentation::ipc::handle_connection_with_terminal_and(
+                                let mut metrics_observer = None;
+                                let result = usagi_daemon::presentation::ipc::handle_connection_with_terminal_and(
                                     &mut reader,
                                     &mut writer,
                                     &server,
@@ -1299,7 +1304,7 @@ fn start_ipc_accept_loop(
                                         Some("session") => dispatch_session(&session, &agent_launch, &pr_inventory, request_id, &body, hello),
                                         Some("agent") => dispatch_agent(&agent_launch, &scope_sessions, request_id, &body, hello),
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &scope_sessions, request_id, &body, hello),
-                                        Some("metrics") => dispatch_metrics(&metrics, request_id, &body, hello),
+                                        Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
                                         Some("pr") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
                                         Some("dispatch_tool") => dispatch_dispatch_tool(&agent_launch, &scope_sessions, &decisions, request_id, &body, hello),
                                         Some("supervisor_tool") => dispatch_supervisor_tool(&supervisor, connection, request_id, &body, hello),
@@ -1307,6 +1312,12 @@ fn start_ipc_accept_loop(
                                         _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
                                     },
                                 );
+                                if let Some(observer) = metrics_observer
+                                    && let Ok(mut broker) = metrics.lock()
+                                {
+                                    broker.unsubscribe(observer.subscription());
+                                }
+                                let _ = result;
                             });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -2393,44 +2404,86 @@ fn session_id_by_name(snapshot: &serde_json::Value, name: &str) -> Option<Sessio
 }
 
 fn dispatch_metrics(
-    metrics: &SharedProcessMetrics,
+    metrics: &SharedMetricsBroker,
+    process_metrics: &SharedProcessResourceSampler,
+    pipeline_metrics: &TerminalPipelineMetrics,
+    observer: &mut Option<MetricsObserver>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    _body: &serde_json::Value,
+    body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
-    let (cpu_percent_hundredths, resident_memory_bytes, dropped, coalesced, backpressured) =
-        metrics.lock().map_or((0, 0, 0, 0, 0), |mut metrics| {
-            let (cpu, memory) = metrics.snapshot();
-            let retention = output_pipeline_counters();
-            (
-                cpu,
-                memory,
-                retention.dropped_bytes,
-                retention.coalesced_bytes,
-                metrics.terminal.backpressured_bytes.load(Ordering::Relaxed),
-            )
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
+    use usagi_core::usecase::client::{DaemonRequest, MetricsAction};
+
+    let action = serde_json::from_value::<DaemonRequest>(body.clone())
+        .ok()
+        .and_then(|request| match request {
+            DaemonRequest::Metrics { action } => Some(action),
+            _ => None,
         });
-    let sampled_at_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| {
-            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-        });
-    envelope(
-        hello,
-        request_id,
-        usagi_core::infrastructure::ipc::ResponseOutcome::Ok,
-        serde_json::json!({
-            "schema_version": 2,
-            "sampled_at_ms": sampled_at_ms,
-            "cpu_percent_hundredths": cpu_percent_hundredths,
-            "resident_memory_bytes": resident_memory_bytes,
-            "active_subscribers": 0,
-            "dropped_updates": 0,
-            "terminal_dropped_bytes": dropped,
-            "terminal_coalesced_bytes": coalesced,
-            "terminal_backpressured_bytes": backpressured,
-        }),
-    )
+    let Some(action) = action else {
+        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+    };
+    let snapshot = (|| {
+        let mut broker = metrics
+            .lock()
+            .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "metrics are unavailable"))?;
+        match action {
+            MetricsAction::Subscribe => {
+                if observer.is_none() {
+                    *observer = Some(broker.subscribe());
+                }
+                Ok(broker.snapshot())
+            }
+            MetricsAction::Unsubscribe => {
+                if let Some(current) = observer.take() {
+                    broker.unsubscribe(current.subscription());
+                }
+                Ok(broker.snapshot())
+            }
+            MetricsAction::Snapshot => {
+                let (cpu_percent_hundredths, resident_memory_bytes) = process_metrics
+                    .lock()
+                    .map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::Unavailable,
+                            "process metrics are unavailable",
+                        )
+                    })?
+                    .snapshot();
+                let retention = output_pipeline_counters();
+                let sampled_at_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |duration| {
+                        u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+                    });
+                Ok(broker.publish(MetricsSample {
+                    sampled_at_ms,
+                    cpu_percent_hundredths,
+                    resident_memory_bytes,
+                    terminal_dropped_bytes: retention.dropped_bytes,
+                    terminal_coalesced_bytes: retention.coalesced_bytes,
+                    terminal_backpressured_bytes: pipeline_metrics
+                        .backpressured_bytes
+                        .load(Ordering::Relaxed),
+                }))
+            }
+        }
+    })();
+    match snapshot {
+        Ok(snapshot) => envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Ok,
+            serde_json::json!(snapshot),
+        ),
+        Err(error) => envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Error(error),
+            serde_json::Value::Null,
+        ),
+    }
 }
 
 fn dispatch_session(
@@ -3391,6 +3444,115 @@ mod tests {
             },
             limits: ProtocolLimits::default(),
         }
+    }
+
+    fn metrics_response(
+        broker: &SharedMetricsBroker,
+        sampler: &SharedProcessResourceSampler,
+        pipeline: &TerminalPipelineMetrics,
+        observer: &mut Option<MetricsObserver>,
+        action: usagi_core::usecase::client::MetricsAction,
+    ) -> usagi_core::usecase::client::DaemonMetrics {
+        use usagi_core::infrastructure::ipc::{EnvelopeKind, ResponseOutcome};
+        use usagi_core::usecase::client::DaemonRequest;
+
+        let response = dispatch_metrics(
+            broker,
+            sampler,
+            pipeline,
+            observer,
+            usagi_core::infrastructure::ipc::RequestId("metrics".into()),
+            &serde_json::to_value(DaemonRequest::Metrics { action }).unwrap(),
+            &session_test_hello(),
+        );
+        let EnvelopeKind::Response { outcome, body, .. } = response.kind else {
+            panic!("metrics dispatch must produce a response")
+        };
+        assert_eq!(outcome, ResponseOutcome::Ok);
+        serde_json::from_value(body).unwrap()
+    }
+
+    #[test]
+    fn production_metrics_composition_shares_broker_lifecycle_and_resets_on_restart() {
+        use usagi_core::usecase::client::MetricsAction;
+
+        let broker = Arc::new(Mutex::new(MetricsBroker::default()));
+        let sampler = Arc::new(Mutex::new(ProcessResourceSampler { previous: None }));
+        let pipeline = TerminalPipelineMetrics::default();
+        let mut slow = None;
+        let mut fast = None;
+        assert_eq!(
+            metrics_response(
+                &broker,
+                &sampler,
+                &pipeline,
+                &mut slow,
+                MetricsAction::Subscribe,
+            )
+            .active_subscribers,
+            1
+        );
+        assert_eq!(
+            metrics_response(
+                &broker,
+                &sampler,
+                &pipeline,
+                &mut fast,
+                MetricsAction::Subscribe,
+            )
+            .active_subscribers,
+            2
+        );
+
+        let mut snapshot_client = None;
+        metrics_response(
+            &broker,
+            &sampler,
+            &pipeline,
+            &mut snapshot_client,
+            MetricsAction::Snapshot,
+        );
+        assert!(fast.as_ref().unwrap().try_recv().is_ok());
+        let snapshot = metrics_response(
+            &broker,
+            &sampler,
+            &pipeline,
+            &mut snapshot_client,
+            MetricsAction::Snapshot,
+        );
+        assert_eq!(snapshot.active_subscribers, 2);
+        assert_eq!(snapshot.dropped_updates, 1);
+        assert!(fast.as_ref().unwrap().try_recv().is_ok());
+
+        assert_eq!(
+            metrics_response(
+                &broker,
+                &sampler,
+                &pipeline,
+                &mut fast,
+                MetricsAction::Unsubscribe,
+            )
+            .active_subscribers,
+            1
+        );
+        let disconnected = slow.take().unwrap();
+        broker
+            .lock()
+            .unwrap()
+            .unsubscribe(disconnected.subscription());
+        assert_eq!(broker.lock().unwrap().snapshot().active_subscribers, 0);
+
+        let restarted = Arc::new(Mutex::new(MetricsBroker::default()));
+        let restarted_sampler = Arc::new(Mutex::new(ProcessResourceSampler { previous: None }));
+        let restarted_snapshot = metrics_response(
+            &restarted,
+            &restarted_sampler,
+            &pipeline,
+            &mut snapshot_client,
+            MetricsAction::Snapshot,
+        );
+        assert_eq!(restarted_snapshot.active_subscribers, 0);
+        assert_eq!(restarted_snapshot.dropped_updates, 0);
     }
 
     #[test]

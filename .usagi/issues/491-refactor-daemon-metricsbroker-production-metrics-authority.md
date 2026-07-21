@@ -1,14 +1,14 @@
 ---
 number: 491
 title: refactor(daemon): MetricsBroker を production metrics の唯一の authority にする
-status: todo
+status: in-progress
 priority: medium
 labels: [review, v2, daemon, metrics]
 dependson: []
 related: [297, 319]
 parent: 453
 created_at: 2026-07-20T12:06:51.474490+00:00
-updated_at: 2026-07-20T12:06:51.474490+00:00
+updated_at: 2026-07-20T23:57:32.509245+00:00
 ---
 
 ## 問題・影響

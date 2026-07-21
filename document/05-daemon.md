@@ -393,6 +393,11 @@ non-blocking に fan-out する。observer が遅い場合は中間 snapshot を
 Agent runtime の進行を block しない。登録、解除、再接続時の protocol は
 [4. daemon IPC](04-ipc.md#daemon-metrics-subscription) を正本とする。
 
+daemon process は composition 時に metrics broker を一つだけ生成する。subscriber の登録・解除、
+bounded queue への publish、drop 集計、wire snapshot はこの broker が一元管理し、IPC connection close
+でも同じ登録を回収する。daemon restart は新しい process-local broker incarnation を生成するため、
+subscriber と drop count は 0 から始まり、client は再接続後に新しく subscribe する。
+
 同じ snapshot は terminal retention で trim / coalesce した byte 数と、PTY observation queue で
 backpressure した byte 数も process-local counter として返す。counter と log は byte 数だけを扱い、
 terminal output、argv、environment、secret を含めない。
