@@ -280,6 +280,8 @@ pub struct EnvironmentEditor {
 pub struct DecisionEditor {
     decision: UserDecision,
     selected_option: usize,
+    /// Explicit text viewport offset. `None` follows the selected option.
+    scroll_offset: Option<usize>,
     freeform: String,
     error: Option<SafeError>,
 }
@@ -289,6 +291,7 @@ impl DecisionEditor {
         Self {
             decision,
             selected_option: 0,
+            scroll_offset: None,
             freeform: String::new(),
             error: None,
         }
@@ -302,6 +305,11 @@ impl DecisionEditor {
     #[coverage(off)]
     pub const fn selected_option(&self) -> usize {
         self.selected_option
+    }
+    #[must_use]
+    #[coverage(off)]
+    pub const fn scroll_offset(&self) -> Option<usize> {
+        self.scroll_offset
     }
     #[must_use]
     #[coverage(off)]
@@ -1177,6 +1185,10 @@ pub enum AppKey {
     DecisionPrevious,
     /// Move within the pending list or current decision options.
     DecisionNext,
+    /// Scroll a long decision's text towards its beginning without changing its answer.
+    DecisionPagePrevious,
+    /// Scroll a long decision's text towards its end without changing its answer.
+    DecisionPageNext,
     /// Replace the permitted freeform answer draft.
     SetDecisionFreeform(String),
     /// Submit the selected stable option or nonempty permitted freeform text.
@@ -1252,6 +1264,8 @@ pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
         KeyCode::Tab => Some(AppKey::Tab),
         KeyCode::Backspace => Some(AppKey::Backspace),
         KeyCode::Escape => Some(AppKey::Escape),
+        KeyCode::PageUp => Some(AppKey::DecisionPagePrevious),
+        KeyCode::PageDown => Some(AppKey::DecisionPageNext),
         KeyCode::Up => Some(AppKey::Up),
         KeyCode::Down => Some(AppKey::Down),
         KeyCode::Left => Some(AppKey::Left),
@@ -2594,10 +2608,20 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
             }
             AppKey::DecisionPrevious | AppKey::Up => {
                 editor.selected_option = editor.selected_option.saturating_sub(1);
+                editor.scroll_offset = None;
             }
             AppKey::DecisionNext | AppKey::Down => {
                 editor.selected_option = (editor.selected_option + 1)
                     .min(editor.decision.options.len().saturating_sub(1));
+                editor.scroll_offset = None;
+            }
+            AppKey::DecisionPagePrevious => {
+                editor.scroll_offset =
+                    Some(editor.scroll_offset.unwrap_or_default().saturating_sub(8));
+            }
+            AppKey::DecisionPageNext => {
+                editor.scroll_offset =
+                    Some(editor.scroll_offset.unwrap_or_default().saturating_add(8));
             }
             AppKey::SetDecisionFreeform(text) => {
                 if editor.decision.allow_freeform {
@@ -2771,6 +2795,8 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         | AppKey::SaveEnvironment
         | AppKey::DecisionPrevious
         | AppKey::DecisionNext
+        | AppKey::DecisionPagePrevious
+        | AppKey::DecisionPageNext
         | AppKey::SetDecisionFreeform(_)
         | AppKey::SubmitDecision => Vec::new(),
     }
