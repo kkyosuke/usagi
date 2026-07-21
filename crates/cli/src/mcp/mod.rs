@@ -54,4 +54,12 @@ mod tests {
             Err(ToolError::UnknownTool(name)) if name == "does_not_exist"
         ));
     }
+
+    #[test]
+    fn dispatch_rejects_malformed_json_before_the_adapter() {
+        assert!(matches!(
+            dispatch("session_create", "{"),
+            Err(ToolError::InvalidParams(_))
+        ));
+    }
 }

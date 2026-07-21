@@ -341,7 +341,8 @@ impl std::error::Error for ToolError {}
 
 #[cfg(test)]
 mod tests {
-    use super::ToolError;
+    use super::{ToolError, validate_schema, validate_schema_definition};
+    use serde_json::json;
 
     #[test]
     fn display_covers_both_variants() {
@@ -370,5 +371,64 @@ mod tests {
         assert!(format!("{err:?}").contains("Unimplemented"));
         let as_error: &dyn std::error::Error = &err;
         assert!(as_error.to_string().contains("not yet implemented"));
+    }
+
+    #[test]
+    fn runtime_schema_validator_covers_constraints_and_nested_values() {
+        for (value, schema) in [
+            (json!("x"), json!({"const":"y"})),
+            (json!(null), json!({"type":"unsupported"})),
+            (json!(-1), json!({"type":"integer","minimum":0})),
+            (json!(2), json!({"type":"integer","maximum":1})),
+            (
+                json!({"extra":true}),
+                json!({"type":"object","additionalProperties":false}),
+            ),
+            (
+                json!([false]),
+                json!({"type":"array","items":{"type":"string"}}),
+            ),
+        ] {
+            assert!(validate_schema(&value, &schema, "$").is_err());
+        }
+        assert!(validate_schema(&json!(0), &json!({"type":["integer","null"]}), "$").is_ok());
+        assert!(validate_schema(&json!({}), &json!({"type":"object"}), "$").is_ok());
+        assert!(
+            validate_schema(
+                &json!({}),
+                &json!({"type":"object","properties":{"optional":{"type":"string"}}}),
+                "$"
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_schema(
+                &json!(["ok"]),
+                &json!({"type":"array","items":{"type":"string"}}),
+                "$"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn schema_definition_rejects_every_malformed_keyword_shape() {
+        let malformed = [
+            json!([]),
+            json!({"type":[]}),
+            json!({"type":["unknown"]}),
+            json!({"properties":[]}),
+            json!({"required":[1]}),
+            json!({"additionalProperties":{}}),
+            json!({"enum":{}}),
+            json!({"oneOf":[]}),
+            json!({"items":[]}),
+            json!({"minimum":"zero"}),
+            json!({"maximum":"one"}),
+            json!({"deprecated":"yes"}),
+        ];
+        for schema in malformed {
+            assert!(validate_schema_definition(&schema).is_err());
+        }
     }
 }

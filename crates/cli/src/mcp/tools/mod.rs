@@ -179,7 +179,7 @@ pub fn validate_registry(descriptors: &[ToolDescriptor]) -> Result<(), RegistryE
 
 #[cfg(test)]
 mod tests {
-    use super::{registry, validate_registry};
+    use super::{descriptor, registry, validate_registry};
     use crate::mcp::tool::{CallerPolicy, Tool, ToolDescriptor, ToolError, ToolRoute};
     use usagi_core::usecase::client::SessionAction;
 
@@ -206,6 +206,19 @@ mod tests {
         }
         fn input_schema(&self) -> &'static str {
             r#"{"type":"object","properties":{"name":{"type":"string","pattern":"x"}}}"#
+        }
+    }
+
+    struct SchemaFixture(&'static str, &'static str);
+    impl Tool for SchemaFixture {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn description(&self) -> &'static str {
+            "fixture"
+        }
+        fn input_schema(&self) -> &'static str {
+            self.1
         }
     }
 
@@ -298,32 +311,36 @@ mod tests {
             let schema: serde_json::Value =
                 serde_json::from_str(descriptor.input_schema()).unwrap();
             let valid = valid_value(&schema);
-            descriptor
-                .validate(&valid, &schema)
-                .unwrap_or_else(|error| panic!("{} valid fixture: {error}", descriptor.name()));
+            descriptor.validate(&valid, &schema).unwrap();
             assert!(
-                matches!(
-                    descriptor.validate(&serde_json::json!([]), &schema),
-                    Err(ToolError::InvalidParams(_))
-                ),
-                "{} invalid fixture",
-                descriptor.name()
+                descriptor
+                    .validate(&serde_json::json!([]), &schema)
+                    .is_err()
             );
-            match (descriptor.route(), descriptor.caller_policy()) {
-                (ToolRoute::Store | ToolRoute::Session(_), CallerPolicy::Public)
-                | (ToolRoute::Session(_), CallerPolicy::SessionCredential)
-                | (ToolRoute::Dispatch(_), CallerPolicy::AgentCredential)
-                | (ToolRoute::Supervisor(_), CallerPolicy::DaemonProvenance) => {}
-                pair => panic!(
-                    "{} has mismatched route/policy: {pair:?}",
-                    descriptor.name()
-                ),
-            }
+            assert!(matches!(
+                (descriptor.route(), descriptor.caller_policy()),
+                (
+                    ToolRoute::Store | ToolRoute::Session(_),
+                    CallerPolicy::Public
+                ) | (ToolRoute::Session(_), CallerPolicy::SessionCredential)
+                    | (ToolRoute::Dispatch(_), CallerPolicy::AgentCredential)
+                    | (ToolRoute::Supervisor(_), CallerPolicy::DaemonProvenance)
+            ));
         }
+        assert_eq!(valid_value(&serde_json::json!({"type":"number"})), 0);
+        assert_eq!(valid_value(&serde_json::json!({"type":"boolean"})), false);
+        assert_eq!(valid_value(&serde_json::json!({})), serde_json::Value::Null);
     }
 
     #[test]
     fn registry_rejects_duplicate_name_duplicate_route_and_unadvertised_route() {
+        assert_eq!(FixtureTool("description").description(), "fixture");
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                descriptor(Box::new(FixtureTool("unknown")));
+            }))
+            .is_err()
+        );
         let duplicate_name = [
             ToolDescriptor::new(
                 Box::new(FixtureTool("same")),
@@ -386,7 +403,12 @@ mod tests {
                 .to_string()
                 .contains("unavailable")
         );
+    }
 
+    #[test]
+    fn registry_rejects_schema_and_policy_drift() {
+        assert_eq!(UnsupportedSchema.description(), "fixture");
+        assert_eq!(SchemaFixture("fixture", "{}").description(), "fixture");
         let unsupported_schema = [ToolDescriptor::new(
             Box::new(UnsupportedSchema),
             ToolRoute::Store,
@@ -398,5 +420,37 @@ mod tests {
                 .to_string()
                 .contains("unsupported keyword")
         );
+
+        let mismatch = [ToolDescriptor::new(
+            Box::new(FixtureTool("mismatch")),
+            ToolRoute::Store,
+            CallerPolicy::AgentCredential,
+        )];
+        assert!(
+            validate_registry(&mismatch)
+                .unwrap_err()
+                .to_string()
+                .contains("policy mismatch")
+        );
+
+        for fixture in [
+            SchemaFixture("invalid_json", "{"),
+            SchemaFixture("not_object", r#"{"type":"array","properties":{}}"#),
+            SchemaFixture("no_properties", r#"{"type":"object"}"#),
+        ] {
+            assert!(
+                validate_registry(&[ToolDescriptor::new(
+                    Box::new(fixture),
+                    ToolRoute::Store,
+                    CallerPolicy::Public,
+                )])
+                .is_err()
+            );
+        }
+
+        assert!(matches!(
+            super::memory::MemoryGet.call("{}"),
+            Err(ToolError::InvalidParams(_))
+        ));
     }
 }

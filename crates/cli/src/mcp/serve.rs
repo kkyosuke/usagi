@@ -572,6 +572,12 @@ mod tests {
             }
         }
 
+        // Exercise the generic fixture builder's branches even when no current
+        // required field uses these schema types.
+        assert_eq!(value(&serde_json::json!({"type":"number"})), 0);
+        assert_eq!(value(&serde_json::json!({"type":"boolean"})), false);
+        assert_eq!(value(&serde_json::json!({})), Value::Null);
+
         let registry = crate::mcp::tools::registry();
         let descriptor = registry
             .iter()
