@@ -1,14 +1,14 @@
 ---
 number: 490
 title: fix(tui): Ctrl-O leader と global control chord の優先順を統一する
-status: in-progress
+status: done
 priority: medium
 labels: [review, v2, tui, input]
 dependson: []
 related: [224, 303, 305, 408]
 parent: 453
 created_at: 2026-07-20T12:06:51.145630+00:00
-updated_at: 2026-07-21T12:28:12.684404+00:00
+updated_at: 2026-07-21T12:49:20.260560+00:00
 ---
 
 ## 問題・影響
