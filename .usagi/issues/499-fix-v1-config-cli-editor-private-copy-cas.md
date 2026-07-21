@@ -1,14 +1,14 @@
 ---
 number: 499
 title: fix(v1/config): CLI editor を private copy と CAS で保存する
-status: todo
+status: in-progress
 priority: medium
 labels: [review, v1, cli, config, concurrency]
 dependson: []
 related: [15, 22, 29, 153]
 parent: 453
 created_at: 2026-07-20T12:07:08.687712+00:00
-updated_at: 2026-07-20T12:07:08.687712+00:00
+updated_at: 2026-07-21T13:40:55.592543+00:00
 ---
 
 ## 問題・影響
