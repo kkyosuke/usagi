@@ -68,6 +68,10 @@ local mode は別の endpoint を使うが、どちらの mode でも同 build d
 場合は replacement を起動せず、安全な typed lifecycle error を表示する。client が daemon-owned terminal や
 managed session をローカルに代替実行することはない。
 
+daemon verb を含む process argv は、合成ルートが side effect より前に完全に解析する。本節の表は
+解析成功後の lifecycle effect を定義し、文法・usage error・終了 status は
+[2. アーキテクチャの process argv contract](02-architecture.md#process-argv-contract) を正本とする。
+
 | コマンド | 動作 |
 |---|---|
 | `usagi daemon start` | detached `serve` を起動し、`daemon.json` に稼働中の pid が登録されるまで待つ。すでに稼働中なら新しい process を起動しない |

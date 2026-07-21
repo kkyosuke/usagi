@@ -16,6 +16,24 @@ use crate::usecase;
 
 pub mod ipc;
 
+/// 合成ルートで検証済みの daemon 制御要求。
+///
+/// argv の文字列解釈と usage error の整形は合成ルートが担い、この層には実行可能な
+/// verb だけを閉じた型として渡す。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DaemonCommand {
+    /// 前景で daemon を常駐させる。
+    Serve,
+    /// daemon を背景起動する。
+    Start,
+    /// daemon の稼働状態を表示する。
+    Status,
+    /// 稼働中の daemon を停止する。
+    Stop,
+    /// daemon を停止してから背景起動する。
+    Restart,
+}
+
 /// daemon 面が実 IO を行うために注入される依存一式。合成ルートが本物（ファイル・
 /// signal 0・SIGTERM・signal 待受・detached spawn・sleep・単一インスタンスロック・
 /// 自プロセス pid）を束ねて構築し、テストは fake を差し込む。[`run`] にまとめて渡すことで、
@@ -41,22 +59,20 @@ pub struct DaemonEnv<'a, F, P, T, R, S, L, K, M> {
     pub pid: u32,
 }
 
-/// daemon 面の entry point。合成ルートが `usagi daemon` で dispatch する interface で、
-/// `usagi daemon` に続くサブコマンド（無しは `None`）を解決し、結果を注入された `out` へ
-/// 書き出す。この層は解決と書き出しの配線に徹し、独自のビジネスロジックは持たない。
+/// daemon 面の entry point。合成ルートが `usagi daemon` の argv を検証して構築した
+/// [`DaemonCommand`] を受け取り、結果を注入された `out` へ書き出す。この層は振り分けと
+/// 書き出しの配線に徹し、独自のビジネスロジックは持たない。
 ///
 /// 実 IO を伴う verb は、注入された [`DaemonEnv`] を使う usecase へ振り分ける:
-/// 無指定と `serve` は前景の常駐 [`usecase::serve::serve`]、`start` は背景起動の
+/// `serve` は前景の常駐 [`usecase::serve::serve`]、`start` は背景起動の
 /// [`usecase::start::start`]、`status` は [`usecase::status::report`]、`stop` は
-/// [`usecase::stop::stop`]、`restart` は [`usecase::restart::restart`]。認識できない
-/// サブコマンドは [`usecase::unknown_subcommand`] の案内を書き出す。
+/// [`usecase::stop::stop`]、`restart` は [`usecase::restart::restart`]。
 ///
 /// # Errors
 ///
 /// 振り分け先 usecase のレコード読取・signal・待受・spawn・掃除に失敗した場合、または `out`
 /// への書き込みに失敗した場合、そのエラーを返す。
 pub fn run<
-    W: Write,
     F: RecordFile,
     P: LivenessProbe,
     T: Terminator,
@@ -66,13 +82,13 @@ pub fn run<
     K: Sleeper,
     M: InstanceLock,
 >(
-    out: &mut W,
-    subcommand: Option<&str>,
+    out: &mut dyn Write,
+    command: DaemonCommand,
     info: &AppInfo,
     env: &DaemonEnv<F, P, T, R, S, L, K, M>,
 ) -> std::io::Result<()> {
-    match subcommand {
-        None | Some("serve") => usecase::serve::serve(
+    match command {
+        DaemonCommand::Serve => usecase::serve::serve(
             out,
             env.store,
             env.ready,
@@ -81,20 +97,20 @@ pub fn run<
             env.pid,
             info,
         ),
-        Some("start") => {
+        DaemonCommand::Start => {
             let line =
                 usecase::start::start(env.store, env.probe, env.launcher, env.sleeper, info)?;
             writeln!(out, "{line}")
         }
-        Some("status") => {
+        DaemonCommand::Status => {
             let line = usecase::status::report(env.store, env.probe, info)?;
             writeln!(out, "{line}")
         }
-        Some("stop") => {
+        DaemonCommand::Stop => {
             let line = usecase::stop::stop(env.store, env.probe, env.terminator, info)?;
             writeln!(out, "{line}")
         }
-        Some("restart") => {
+        DaemonCommand::Restart => {
             let line = usecase::restart::restart(
                 env.store,
                 env.probe,
@@ -105,13 +121,12 @@ pub fn run<
             )?;
             writeln!(out, "{line}")
         }
-        Some(other) => writeln!(out, "{}", usecase::unknown_subcommand(info, other)),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DaemonEnv, run};
+    use super::{DaemonCommand, DaemonEnv, run};
     use crate::test_support::{
         FakeLock, FixedProbe, ImmediateShutdown, InMemoryRecordFile, NoopReady, NoopSleeper,
         RecordingTerminator, TestLauncher,
@@ -127,9 +142,9 @@ mod tests {
         }
     }
 
-    /// Run `subcommand` against a live-probe env (idle launcher — `start` not
+    /// Run `command` against a live-probe env (idle launcher — `start` not
     /// exercised here) and return what was written.
-    fn run_line(subcommand: Option<&str>, store: &DaemonRecordStore<InMemoryRecordFile>) -> String {
+    fn run_line(command: DaemonCommand, store: &DaemonRecordStore<InMemoryRecordFile>) -> String {
         let (probe, terminator, shutdown, sleeper) = (
             FixedProbe(true),
             RecordingTerminator::default(),
@@ -150,38 +165,33 @@ mod tests {
             pid: 4321,
         };
         let mut buf = Vec::new();
-        run(&mut buf, subcommand, &info(), &env).unwrap();
+        run(&mut buf, command, &info(), &env).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
     #[test]
-    fn run_serves_on_none_and_serve() {
+    fn run_routes_serve_to_the_foreground_server() {
         // With no record and an immediate shutdown, serve registers, then clears.
-        for subcommand in [None, Some("serve")] {
-            let store = DaemonRecordStore::new(InMemoryRecordFile::default());
-            assert_eq!(
-                run_line(subcommand, &store),
-                "usagi v0.1.0: daemon serving (pid 4321)\nusagi v0.1.0: daemon stopped (pid 4321)\n"
-            );
-            assert_eq!(store.load().unwrap(), None);
-        }
-    }
-
-    #[test]
-    fn run_reports_unknown_subcommand() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         assert_eq!(
-            run_line(Some("bogus"), &store),
-            "usagi v0.1.0: unknown daemon subcommand `bogus`\n"
+            run_line(DaemonCommand::Serve, &store),
+            "usagi v0.1.0: daemon serving (pid 4321)\nusagi v0.1.0: daemon stopped (pid 4321)\n"
         );
+        assert_eq!(store.load().unwrap(), None);
     }
 
     #[test]
     fn run_routes_start_and_restart_to_the_launcher() {
         // Both start and restart launch a daemon; the launcher registers pid 5555.
-        for (subcommand, expected) in [
-            ("start", "usagi v0.1.0: daemon started (pid 5555)\n"),
-            ("restart", "usagi v0.1.0: daemon restarted (pid 5555)\n"),
+        for (command, expected) in [
+            (
+                DaemonCommand::Start,
+                "usagi v0.1.0: daemon started (pid 5555)\n",
+            ),
+            (
+                DaemonCommand::Restart,
+                "usagi v0.1.0: daemon restarted (pid 5555)\n",
+            ),
         ] {
             let store = DaemonRecordStore::new(InMemoryRecordFile::default());
             let (probe, terminator, shutdown, sleeper) = (
@@ -204,7 +214,7 @@ mod tests {
                 pid: 4321,
             };
             let mut buf = Vec::new();
-            run(&mut buf, Some(subcommand), &info(), &env).unwrap();
+            run(&mut buf, command, &info(), &env).unwrap();
             assert_eq!(String::from_utf8(buf).unwrap(), expected);
         }
     }
@@ -214,13 +224,13 @@ mod tests {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         // No record yet: stop reports there is nothing to stop.
         assert_eq!(
-            run_line(Some("stop"), &store),
+            run_line(DaemonCommand::Stop, &store),
             "usagi v0.1.0: daemon not running\n"
         );
         // With a live record, stop terminates it and clears the record.
         store.save(&DaemonRecord::new(4321)).unwrap();
         assert_eq!(
-            run_line(Some("stop"), &store),
+            run_line(DaemonCommand::Stop, &store),
             "usagi v0.1.0: daemon stopped (pid 4321)\n"
         );
         assert_eq!(store.load().unwrap(), None);
@@ -231,13 +241,13 @@ mod tests {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         // No record yet: status reports the daemon is not running.
         assert_eq!(
-            run_line(Some("status"), &store),
+            run_line(DaemonCommand::Status, &store),
             "usagi v0.1.0: daemon not running\n"
         );
         // With a live record, status reports it running with its pid.
         store.save(&DaemonRecord::new(4321)).unwrap();
         assert_eq!(
-            run_line(Some("status"), &store),
+            run_line(DaemonCommand::Status, &store),
             "usagi v0.1.0: daemon running (pid 4321)\n"
         );
     }
@@ -253,7 +263,12 @@ mod tests {
         // `serve` on the acquired path writes without reading, so a malformed
         // record does not surface there; its error paths are covered in its own
         // tests. The record-reading verbs must propagate the load error.
-        for subcommand in [Some("status"), Some("stop"), Some("start"), Some("restart")] {
+        for command in [
+            DaemonCommand::Status,
+            DaemonCommand::Stop,
+            DaemonCommand::Start,
+            DaemonCommand::Restart,
+        ] {
             let store = DaemonRecordStore::new(InMemoryRecordFile::with("not json"));
             let launcher = TestLauncher::idle(&store);
             let ready = NoopReady;
@@ -269,7 +284,7 @@ mod tests {
                 pid: 4321,
             };
             let mut buf = Vec::new();
-            assert!(run(&mut buf, subcommand, &info(), &env).is_err());
+            assert!(run(&mut buf, command, &info(), &env).is_err());
         }
     }
 }

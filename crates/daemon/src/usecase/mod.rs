@@ -6,10 +6,9 @@
 //!
 //! 制御プレーンの verb はすべて実 IO（store 読取・生存判定・signal・常駐待受・プロセス
 //! 起動）を要するため、各 usecase モジュール（[`serve`] / [`start`] / [`status`] / [`stop`] /
-//! [`restart`]）が担い、[`crate::presentation::run`] が振り分ける。認識できない
-//! サブコマンドだけは実 IO を伴わないので [`unknown_subcommand`] が案内 1 行を組み立てる。
-
-use usagi_core::domain::AppInfo;
+//! [`restart`]）が担い、[`crate::presentation::run`] が検証済みの
+//! [`crate::presentation::DaemonCommand`] を振り分ける。argv の解釈と不正な command の
+//! 拒否は合成ルートが担う。
 
 pub mod agent_ipc;
 pub mod claude;
@@ -31,37 +30,3 @@ pub mod supervisor_runtime;
 pub mod terminal;
 pub mod terminal_ipc;
 pub mod terminal_profile;
-
-/// 認識できない `usagi daemon <subcommand>` に対する案内 1 行を返す。
-///
-/// 実 IO を要する制御プレーン verb（`serve`（無指定含む）/ `start` / `status` / `stop` /
-/// `restart`）は [`crate::presentation::run`] が各 usecase へ先に振り分けるため、ここには
-/// 認識できないサブコマンドだけが渡る。
-#[must_use]
-pub fn unknown_subcommand(info: &AppInfo, subcommand: &str) -> String {
-    format!(
-        "{}: unknown daemon subcommand `{subcommand}`",
-        info.describe()
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::unknown_subcommand;
-    use usagi_core::domain::AppInfo;
-
-    fn info() -> AppInfo {
-        AppInfo {
-            name: "usagi",
-            version: "0.1.0",
-        }
-    }
-
-    #[test]
-    fn unknown_subcommand_builds_a_guidance_line() {
-        assert_eq!(
-            unknown_subcommand(&info(), "bogus"),
-            "usagi v0.1.0: unknown daemon subcommand `bogus`"
-        );
-    }
-}

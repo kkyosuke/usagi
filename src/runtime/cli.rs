@@ -1,4 +1,5 @@
-//! CLI 面の outcome を TUI / daemon adapter へ接続する composition adapter。
+//! 完全な process argv を CLI parser に渡し、typed outcome を TUI / daemon / MCP
+//! adapter へ接続する composition adapter。
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -31,6 +32,22 @@ pub(crate) fn dispatch(
                 TuiRequest::Doctor => EntryScreen::Doctor,
             };
             tui::launch(out, info, &entry).map(|()| ExitCode::SUCCESS)
+        }
+        RunOutcome::LaunchDaemon(command) => {
+            daemon::run(out, command, info).map(|()| ExitCode::SUCCESS)
+        }
+        RunOutcome::LaunchMcp => {
+            let stdin = std::io::stdin();
+            match daemon::client(ClientPolicy::mcp()) {
+                Ok(mut client) => {
+                    usagi_cli::mcp::serve_with_client(stdin.lock(), out, info.version, &mut client)
+                        .map(|()| ExitCode::SUCCESS)
+                }
+                Err(error) => {
+                    writeln!(err, "daemon unavailable: {error}")?;
+                    Ok(ExitCode::FAILURE)
+                }
+            }
         }
         RunOutcome::DaemonRequest(request) => match daemon::client(ClientPolicy::cli()) {
             Ok(mut client) => write_daemon_outcome(client.request(request), out, err),
