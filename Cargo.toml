@@ -72,13 +72,15 @@ serde = { version = "1.0", features = ["derive"] }
 uuid = { version = "1.20", features = ["v4", "v7"] }
 # infrastructure（永続化）で使う。serde_json は index.json / workspaces.json の
 # (de)serialize、anyhow はストアのエラー伝播、fs2 はストアの cross-process ロック、
-# dirs は既定データディレクトリ（~/.usagi）の解決、rayon は markdown の並列スキャン。
+# dirs は既定データディレクトリ（~/.usagi）の解決、rayon は markdown の並列スキャン、
+# sha2 は markdown source identity の決定的 fingerprint。
 serde_json = "1.0"
 toml = "0.8"
 anyhow = "1.0"
 fs2 = "0.4"
 dirs = "6.0"
 rayon = "1.12.0"
+sha2 = "0.10"
 # テスト専用（一時ディレクトリ）。
 tempfile = "3"
 

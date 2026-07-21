@@ -12,7 +12,7 @@ license.workspace = true
 publish = false
 
 # domain の Workspace / Issue / Memory は時刻に chrono、JSON 表現の (de)serialize に
-# serde を使う。infrastructure（永続化）は serde_json / anyhow / fs2 / dirs / rayon を
+# serde を使う。infrastructure（永続化）は serde_json / anyhow / fs2 / dirs / rayon / sha2 を
 # 使う。version はルート Cargo.toml で一元管理する。
 [dependencies]
 chrono.workspace = true
@@ -23,6 +23,7 @@ anyhow.workspace = true
 fs2.workspace = true
 dirs.workspace = true
 rayon.workspace = true
+sha2.workspace = true
 toml.workspace = true
 
 # tempfile はストアのユニットテストで一時ディレクトリを作るためだけに使う。

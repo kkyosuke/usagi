@@ -1,14 +1,14 @@
 ---
 number: 478
 title: fix(core): v2 Markdown index freshness を content identity で判定する
-status: todo
+status: done
 priority: medium
 labels: [review, v2, core, persistence]
 dependson: []
 related: [113, 211]
 parent: 453
 created_at: 2026-07-20T12:06:47.205151+00:00
-updated_at: 2026-07-20T12:06:47.205151+00:00
+updated_at: 2026-07-21T12:49:02.588360+00:00
 ---
 
 ## 問題・影響

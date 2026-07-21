@@ -45,6 +45,7 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 | `serde` | エンティティ・インデックスの JSON (de)serialize derive | 本依存 |
 | `uuid` | v2 resource incarnation の typed ID（UUIDv4）と durable operation ID（UUIDv7） | 本依存 |
 | `serde_json` | `index.json` / `workspaces.json` / `daemon.json` の (de)serialize、`usagi-cli` の MCP サーバの stdio JSON-RPC、`usagi-daemon` の IPC メッセージの wire JSON | 本依存 |
+| `sha2` | issue / memory Markdown source set の deterministic fingerprint | 本依存 |
 | `anyhow` | infrastructure（永続化ストア）と MCP store adapter のエラー伝播 | 本依存 |
 | `fs2` | ストアの cross-process ロック、および合成ルートでの daemon 単一インスタンスロック（`flock` 相当） | 本依存 |
 | `dirs` | 既定データディレクトリ（`~/.usagi`）の解決 | 本依存 |
