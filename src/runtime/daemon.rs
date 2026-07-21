@@ -2815,6 +2815,96 @@ fn dispatch_session_action(
                     ),
                 )
             };
+            if action == SessionAction::DelegateBrief {
+                use usagi_core::domain::agent::{AgentProfileId, ModelSelector};
+                use usagi_core::usecase::client::{DispatchAgentIntent, DispatchIntent};
+
+                let selector = payload
+                    .get("agent")
+                    .and_then(serde_json::Value::as_object)
+                    .ok_or(SessionRuntimeError::InvalidRequest)?;
+                let selected = if let Some(id) = selector.get("id") {
+                    if selector.len() != 1 {
+                        return Err(SessionRuntimeError::InvalidRequest);
+                    }
+                    DispatchAgentIntent::Existing {
+                        agent_id: serde_json::from_value(id.clone())
+                            .map_err(|_| SessionRuntimeError::InvalidRequest)?,
+                    }
+                } else {
+                    if selector.len() != 2 {
+                        return Err(SessionRuntimeError::InvalidRequest);
+                    }
+                    let runtime = selector
+                        .get("runtime")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value::<AgentProfileId>(value).ok())
+                        .ok_or(SessionRuntimeError::InvalidRequest)?;
+                    let model = selector
+                        .get("model")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value::<ModelSelector>(value).ok())
+                        .ok_or(SessionRuntimeError::InvalidRequest)?;
+                    DispatchAgentIntent::New { runtime, model }
+                };
+                let credential = string("_caller_credential")?;
+                let (workspace, caller) = {
+                    let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
+                    let caller = runtime
+                        .mcp_dispatch_caller(credential)
+                        .ok_or(SessionRuntimeError::ScopeUnavailable)?;
+                    let workspace = sessions
+                        .lock()
+                        .map_err(|_| SessionRuntimeError::Storage)?
+                        .snapshot()
+                        .map_err(|_| SessionRuntimeError::Storage)?
+                        .get("workspace_id")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok())
+                        .ok_or(SessionRuntimeError::Storage)?;
+                    (workspace, caller)
+                };
+                // Reject an invalid selector or an unauthenticated caller
+                // before creating the isolated worktree. This composite
+                // operation must not leave an orphan session on rejection.
+                let created = sessions
+                    .lock()
+                    .map_err(|_| SessionRuntimeError::Storage)?
+                    .handle(
+                        SessionAction::Create,
+                        operation_id,
+                        &serde_json::json!({"name": name}),
+                    )?;
+                let id = sessions
+                    .lock()
+                    .map_err(|_| SessionRuntimeError::Storage)?
+                    .session_id(&name)?;
+                let scope = SharedScopeResolver(Arc::clone(sessions));
+                let admission = agent
+                    .lock()
+                    .map_err(|_| SessionRuntimeError::Storage)?
+                    .dispatch(
+                        operation_id,
+                        &DispatchIntent {
+                            workspace,
+                            session_name: name.clone(),
+                            caller,
+                            agent: selected,
+                            prompt: prompt.clone(),
+                        },
+                        id,
+                        &scope,
+                    )
+                    .map_err(|error| SessionRuntimeError::Delivery(error.message))?;
+                return reply(serde_json::json!({
+                    "name": name,
+                    "session_id": id,
+                    "created": created.body,
+                    "run_id": admission.operation_id,
+                    "terminal": admission.terminal,
+                    "completed": admission.completed,
+                }));
+            }
             let created = sessions
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?

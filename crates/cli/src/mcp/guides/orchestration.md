@@ -19,7 +19,8 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 | session 作成 | `session_create` | daemon が session を lifecycle store に記録し、git worktree を作る |
 | 一覧・進捗観測 | `session_list` / `session_status` | lifecycle snapshot と agent phase・worktree の dirty/merged を返す |
 | 追加指示 | `session_prompt` | live Agent PTY または durable next-launch queue へ prompt を配送する |
-| 委譲 | `session_delegate_issue` / `session_delegate_brief` | session 作成と prompt queue 投入を不可分に行う |
+| issue 委譲 | `session_delegate_issue` | session 作成と prompt queue 投入を不可分に行う |
+| ブリーフ委譲 | `session_delegate_brief` | session 作成と authenticated worker の即時 dispatch を不可分に行う |
 | PR 観測 | `session_pr` | daemon-owned PR inventory と merged 集約を返す |
 | 完了報告 | `session_complete` | 呼び出し元 session を credential から復元し root coordinator へ報告する |
 | scratchpad | `session_note_*` / `session_todo_*` / `session_decision_*` | 呼び出し元 session worktree の machine-local store を操作する |
@@ -47,12 +48,16 @@ coordinator は session の生存を `session_status`、成果の統合を `sess
 ## delegate
 
 committed issue は `session_delegate_issue`、事前 issue の無い依頼は `session_delegate_brief` を使う。
-どちらも daemon が worktree を作成した後、同じ session identity の queue へ初回 prompt を保存してから
-成功を返す。途中で session 作成が失敗した場合は queue 投入を行わない。
+`session_delegate_issue` は daemon が worktree を作成した後、同じ session identity の queue へ初回 prompt を
+保存する。`session_delegate_brief` は caller credential を検証してから worktree を作成し、worker を直ちに
+dispatch する。brief の `agent` は
+`{"id":"<agent_id>"}` または allowlist にある `{"runtime":"codex","model":"gpt-5"}` のどちらか一方だけを
+指定する。credential・selector・session 作成のいずれかが失敗した場合は queue へフォールバックしない。
 
 ```json
 {"jsonrpc":"2.0","id":4,"method":"tools/call",
- "params":{"name":"session_delegate_brief","arguments":{"name":"triage-cache","brief":"cache invalidation を調査する"}}}
+ "params":{"name":"session_delegate_brief","arguments":{"name":"triage-cache","brief":"cache invalidation を調査する",
+ "agent":{"runtime":"codex","model":"gpt-5"}}}}
 ```
 
 dispatch/agent tool は daemon が Agent 起動時に注入した private caller credential を必要とする。手動で

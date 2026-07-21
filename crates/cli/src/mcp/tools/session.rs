@@ -464,9 +464,9 @@ impl Tool for SessionDelegateBrief {
         "session_delegate_brief"
     }
     fn description(&self) -> &'static str {
-        "事前 issue の無い作業を始めるときに使う。ブリーフ（自由記述の指示）からトリアージ/設計セッションを作成し起動時キューに投入する。brief 必須。委譲先が worktree 内で issue 化する。"
+        "事前 issue の無い作業を始めるときに使う。ブリーフからトリアージ/設計セッションを作成し、選択した agent へ直ちに実行を dispatch する。brief と agent 必須。委譲先が worktree 内で issue 化する。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"brief":{"type":"string"},"name":{"type":"string"},"runtime":{"type":"string","enum":["claude","codex"]},"agent_cli":{"type":"string","deprecated":true},"model":{"type":"string"}},"required":["brief"]}"#
+        r#"{"type":"object","properties":{"brief":{"type":"string"},"name":{"type":"string"},"agent":{"oneOf":[{"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false},{"type":"object","properties":{"runtime":{"type":"string"},"model":{"type":"string"}},"required":["runtime","model"],"additionalProperties":false}]}},"required":["brief","agent"],"additionalProperties":false}"#
     }
 }

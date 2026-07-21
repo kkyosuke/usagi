@@ -559,9 +559,11 @@ allowlist と PATH 上の `claude` / `codex` の存在を snapshot し、非空 
 server lifetime 中は変わらないため、設定、PATH、CLI install/uninstall の変更を反映するには MCP server の
 再起動または client 再接続が必要である。allowlist の正本や schema を CLI/provider の model list で拡張・保存しない。
 
-既存の `session_create`、`session_delegate_issue`、`session_delegate_brief` は移行期間の
-`agent_cli` alias を受ける。parser はこれを `runtime` に正規化するが、`runtime` または `agent.id` と
-混在した alias は migration error として拒否する。
+既存の `session_create` と `session_delegate_issue` は移行期間の `agent_cli` alias を受ける。parser は
+これを `runtime` に正規化するが、`runtime` または `agent.id` と混在した alias は migration error として
+拒否する。`session_delegate_brief` は `session_dispatch` と同じ必須 `agent` selector を使い、
+`agent.id` と `runtime`/`model` の混在を拒否する。認証済み caller の provenance を dispatch binding に
+保存し、隔離 worktree 内の worker を直ちに起動する。
 
 既存の `session_delegate_brief`、`session_delegate_issue`、`issue_to_prompt`、`session_prompt`、
 `session_complete` は引き続き利用できる。
