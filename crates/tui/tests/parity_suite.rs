@@ -88,6 +88,7 @@ fn session_projection(id: SessionId, label: &str) -> ProjectedSession {
         has_notes: false,
         pr_summary: None,
         removing: false,
+        agent_resume: None,
     }
 }
 

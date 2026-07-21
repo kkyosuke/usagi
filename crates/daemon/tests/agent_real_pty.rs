@@ -273,6 +273,7 @@ impl AgentAdapter for ShellAdapter {
                 ],
                 Vec::new(),
             ),
+            provider_resume: request.provider_resume.clone(),
         })
     }
 }

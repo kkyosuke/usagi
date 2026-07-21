@@ -272,6 +272,9 @@ pub struct DispatchIntent {
 pub enum SessionAction {
     Create,
     Remove,
+    /// Explicitly starts a new Agent runtime for retained provider-native
+    /// conversation metadata. Startup/reconnect paths never issue this action.
+    ResumeAgent,
     /// Explicitly validate and adopt legacy `state.json` sessions. This action
     /// is never part of daemon startup or a normal session refresh.
     RecoverLegacy,

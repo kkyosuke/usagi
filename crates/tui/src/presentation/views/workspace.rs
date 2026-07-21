@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
 use usagi_core::domain::pullrequest::PrLink;
 use usagi_core::domain::session::SessionRecord;
 use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
@@ -87,6 +88,9 @@ pub struct ProjectedSession {
     pub pr_summary: Option<String>,
     /// True while daemon-owned removal is pending.
     pub removing: bool,
+    /// Safe interrupted/resume projection; provider-native IDs never enter the
+    /// presentation model.
+    pub agent_resume: Option<ProviderResumeProjection>,
 }
 
 /// Read-only Git facts supplied asynchronously by the composition layer.
@@ -116,6 +120,7 @@ impl ProjectedSession {
             has_notes: !record.notes.is_empty(),
             pr_summary: pr_summary(&record.prs),
             removing: false,
+            agent_resume: None,
         }
     }
 }
@@ -1399,19 +1404,18 @@ fn home_row_lines_at(
     };
     if let Some(session) = session {
         let modified = widgets::relative_session_time(session.last_modified, now);
-        let metadata = session.pr_summary.as_deref().map_or_else(
-            || {
-                format!(
-                    "{} {modified}",
-                    home_session_continuation_marker(selected, current)
-                )
-            },
-            |pr| {
-                format!(
-                    "{} {modified} · {pr}",
-                    home_session_continuation_marker(selected, current)
-                )
-            },
+        let mut facts = Vec::new();
+        if let Some(resume) = session.agent_resume.and_then(resume_label) {
+            facts.push(resume.to_owned());
+        }
+        facts.push(modified);
+        if let Some(pr) = &session.pr_summary {
+            facts.push(pr.clone());
+        }
+        let metadata = format!(
+            "{} {}",
+            home_session_continuation_marker(selected, current),
+            facts.join(" · ")
         );
         // Draw the same Git summary columns as the legacy sidebar. A non-cursor
         // Switch row is inactive even when its current-target marker or Git
@@ -1435,6 +1439,29 @@ fn home_row_lines_at(
     } else {
         vec![first]
     }
+}
+
+fn resume_label(projection: ProviderResumeProjection) -> Option<&'static str> {
+    if !projection.interrupted {
+        return None;
+    }
+    Some(if projection.resumable {
+        "interrupted · resume available"
+    } else {
+        match projection.reason {
+            ProviderResumeReason::ProviderMetadataUnavailable
+            | ProviderResumeReason::ExplicitResumeAvailable => "interrupted · resume unavailable",
+            ProviderResumeReason::AmbiguousProviderMetadata => {
+                "interrupted · resume metadata ambiguous"
+            }
+            ProviderResumeReason::IncompatibleProviderMetadata => {
+                "interrupted · resume metadata incompatible"
+            }
+            ProviderResumeReason::LiveOrOwnershipUnknown => {
+                "interrupted · resume ownership unknown"
+            }
+        }
+    })
 }
 
 /// Build the inline `+ new session` sidebar lines: the caret row, then any
@@ -1664,7 +1691,7 @@ mod tests {
         CHROME_ROWS, CREATE_SKELETON_ROWS, CreateDraft, GIBIBYTE, GitDiff, HomeProjection,
         LEFT_WIDTH, MEBIBYTE, ProjectedSession, TerminalViewProjection, Workspace,
         abnormal_daemon_speech, create_skeleton_lines, format_memory, load_style,
-        new_session_input_lines, render_home, terminal_point_at, with_footer_gap,
+        new_session_input_lines, render_home, resume_label, terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Style};
     use crate::presentation::widgets::mascot::MascotSpeech;
@@ -1681,6 +1708,7 @@ mod tests {
     use chrono::{DateTime, Utc};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+    use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
     use usagi_core::domain::id::{
         DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
     };
@@ -1795,6 +1823,7 @@ mod tests {
             has_notes: false,
             pr_summary: None,
             removing: false,
+            agent_resume: None,
         }
     }
 
@@ -1868,6 +1897,69 @@ mod tests {
         .join("\n");
         assert!(!quiet.contains("atlas"));
         assert!(!quiet.contains("creating"));
+    }
+
+    #[test]
+    fn interrupted_provider_resume_status_is_visible_without_exposing_an_id() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let state = AppState::home(workspace, vec![session]);
+        let mut projected = projected_session(session, "agent-work", "/work/agent");
+        projected.agent_resume = Some(ProviderResumeProjection {
+            interrupted: true,
+            resumable: true,
+            reason: ProviderResumeReason::ExplicitResumeAvailable,
+        });
+        let home = HomeProjection::from_state(&state, "work", "/work", &[projected]);
+
+        let frame = joined_home(&home);
+        assert!(frame.contains("interrupted · resume available"));
+        assert!(!frame.contains("provider-session-id"));
+    }
+
+    #[test]
+    fn provider_resume_labels_cover_each_safe_projection_state() {
+        let projection = |interrupted, resumable, reason| ProviderResumeProjection {
+            interrupted,
+            resumable,
+            reason,
+        };
+        assert_eq!(
+            resume_label(projection(
+                false,
+                true,
+                ProviderResumeReason::ExplicitResumeAvailable,
+            )),
+            None
+        );
+        let unavailable = [
+            (
+                ProviderResumeReason::ProviderMetadataUnavailable,
+                "interrupted · resume unavailable",
+            ),
+            (
+                ProviderResumeReason::AmbiguousProviderMetadata,
+                "interrupted · resume metadata ambiguous",
+            ),
+            (
+                ProviderResumeReason::IncompatibleProviderMetadata,
+                "interrupted · resume metadata incompatible",
+            ),
+            (
+                ProviderResumeReason::LiveOrOwnershipUnknown,
+                "interrupted · resume ownership unknown",
+            ),
+            (
+                ProviderResumeReason::ExplicitResumeAvailable,
+                "interrupted · resume unavailable",
+            ),
+        ];
+        for (reason, expected) in unavailable {
+            assert_eq!(
+                resume_label(projection(true, false, reason)),
+                Some(expected)
+            );
+        }
     }
 
     #[test]

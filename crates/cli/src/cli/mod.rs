@@ -146,6 +146,11 @@ pub enum SessionCommand {
     Remove {
         name: String,
     },
+    /// Explicitly resume the retained provider conversation in a new daemon
+    /// Agent runtime. This command is never issued during startup/reconnect.
+    Resume {
+        name: String,
+    },
     /// Validate legacy sessions without changing state unless `--apply` is set.
     RecoverLegacy {
         /// Persist the fully validated adoption plan.
@@ -203,6 +208,10 @@ impl Run for Session {
             SessionCommand::Remove { name } => {
                 (SessionAction::Remove, serde_json::json!({"name": name}))
             }
+            SessionCommand::Resume { name } => (
+                SessionAction::ResumeAgent,
+                serde_json::json!({"name": name}),
+            ),
             SessionCommand::RecoverLegacy { apply } => (
                 SessionAction::RecoverLegacy,
                 serde_json::json!({"apply": apply}),
@@ -379,6 +388,10 @@ mod tests {
             (
                 ["usagi", "session", "remove", "a"].as_slice(),
                 usagi_core::usecase::client::SessionAction::Remove,
+            ),
+            (
+                ["usagi", "session", "resume", "a"].as_slice(),
+                usagi_core::usecase::client::SessionAction::ResumeAgent,
             ),
             (
                 ["usagi", "session", "recover-legacy", "--apply"].as_slice(),

@@ -29,7 +29,8 @@ use usagi_core::{
         agent::{
             AgentCapability, AgentProfileId, AgentStatus, CallerRef, DispatchBinding, DispatchRun,
             InboxKind, InboxMessage, LaunchMode, LaunchRequest, LaunchScope, ModelSelector,
-            RunStatus, WorkerRef,
+            ProviderCaptureProvenance, ProviderKind, ProviderResumePhase, ProviderResumeReason,
+            ProviderResumeRef, ProviderResumeStatus, ProviderSessionId, RunStatus, WorkerRef,
         },
         id::{
             AgentRuntimeId, AgentRuntimeRef, ClientId, CompletionFence, ConnectionId,
@@ -389,6 +390,9 @@ impl<
             .map(|record| match record.state {
                 RuntimeState::Running => (4, "running"),
                 RuntimeState::Reserved => (3, "ready"),
+                RuntimeState::ReconcileRequired(
+                    super::runtime::ReconcileState::IdentityUnknown,
+                ) => (3, "interrupted"),
                 RuntimeState::SpawnFailed | RuntimeState::ReconcileRequired(_) => (2, "exited"),
                 RuntimeState::Exited | RuntimeState::Reclaimed => (1, "ended"),
             })
@@ -523,6 +527,135 @@ impl<
             },
         );
         outcome
+    }
+
+    /// Starts a new daemon-owned runtime for the provider conversation retained
+    /// by an interrupted/exited runtime. This never reattaches the old PTY and
+    /// never falls back to provider-global "last" semantics.
+    pub fn resume<R: SessionScopeResolver>(
+        &mut self,
+        operation_id: &str,
+        workspace: WorkspaceId,
+        session: SessionId,
+        scope: &R,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let semantic_key = format!("resume:{workspace}:{session}");
+        if let Some(existing) = self.operations.get(operation_id) {
+            if existing
+                .semantic_key
+                .as_ref()
+                .is_some_and(|key| key != &semantic_key)
+            {
+                return Err(ProtocolError::new(
+                    ErrorCode::IdempotencyConflict,
+                    "operation id was reused with a different agent resume",
+                ));
+            }
+            return existing.outcome.clone();
+        }
+        let outcome = self.admit_resume(operation_id, workspace, session, &semantic_key, scope);
+        self.operations.insert(
+            operation_id.to_owned(),
+            AgentOperation {
+                semantic_key: Some(semantic_key),
+                outcome: outcome.clone(),
+            },
+        );
+        outcome
+    }
+
+    /// Accepts only a provider session ID delivered by a documented structured
+    /// adapter channel. No filesystem or transcript discovery exists at this
+    /// boundary; absence of such a call leaves Codex resume unavailable.
+    pub fn capture_structured_provider_session(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        provider: ProviderKind,
+        native_session_id: ProviderSessionId,
+    ) -> Result<(), ProtocolError> {
+        let record = self
+            .coordinator
+            .record_for(runtime)
+            .map_err(map_runtime_error)?;
+        if !provider_matches_profile(provider, &record.launch.plan.profile_id) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "provider session metadata does not match the runtime profile",
+            ));
+        }
+        let reference = ProviderResumeRef {
+            provider,
+            native_session_id,
+            adapter_revision: record.launch.plan.profile_revision,
+            scope: record.launch.request.scope.clone(),
+            provenance: ProviderCaptureProvenance::ProviderStructured,
+            last_known_status: ProviderResumeStatus::Active,
+            last_known_phase: Some(ProviderResumePhase::Running),
+        };
+        self.coordinator
+            .record_provider_resume(runtime, reference, &mut self.store)
+            .map_err(map_runtime_error)
+    }
+
+    /// Safe interrupted/resume projection for a managed session. Provider IDs
+    /// are never returned; only availability and a stable reason cross IPC.
+    #[must_use]
+    pub fn session_resume_status(&self, session: SessionId) -> (bool, ProviderResumeReason) {
+        let records = self.coordinator.snapshot().records;
+        if records.iter().any(|record| {
+            record.runtime.session_id == Some(session) && holds_live_or_unknown_agent(record.state)
+        }) {
+            return (false, ProviderResumeReason::LiveOrOwnershipUnknown);
+        }
+        let resumable = records
+            .iter()
+            .filter(|record| {
+                record.runtime.session_id == Some(session)
+                    && record.provider_resume.is_some()
+                    && is_resume_source_state(record.state)
+            })
+            .collect::<Vec<_>>();
+        let mut identities = resumable.iter().filter_map(|record| {
+            record.provider_resume.as_ref().map(|reference| {
+                (
+                    reference.provider,
+                    reference.native_session_id.clone(),
+                    reference.adapter_revision,
+                    reference.scope.clone(),
+                )
+            })
+        });
+        let Some(first) = identities.next() else {
+            return (false, ProviderResumeReason::ProviderMetadataUnavailable);
+        };
+        if !identities.all(|candidate| candidate == first) {
+            return (false, ProviderResumeReason::AmbiguousProviderMetadata);
+        }
+        let Some(source) = resumable.first() else {
+            return (false, ProviderResumeReason::ProviderMetadataUnavailable);
+        };
+        let Some(reference) = source.provider_resume.as_ref() else {
+            return (false, ProviderResumeReason::ProviderMetadataUnavailable);
+        };
+        let profile_id = &source.launch.plan.profile_id;
+        let internally_compatible = resumable.iter().all(|record| {
+            record.launch.plan.profile_id == *profile_id
+                && record.launch.plan.profile_revision == reference.adapter_revision
+                && record.launch.request.scope == reference.scope
+                && record.runtime.terminal.workspace_id == reference.scope.workspace_id
+                && record.runtime.terminal.session_id == reference.scope.session_id
+                && record.runtime.terminal.worktree_id == reference.scope.worktree_id
+        });
+        let adapter_compatible = self.registry.profile(profile_id).is_ok_and(|profile| {
+            profile.revision == reference.adapter_revision
+                && profile.capabilities.contains(&AgentCapability::Resume)
+                && provider_matches_profile(reference.provider, profile_id)
+        });
+        if internally_compatible && adapter_compatible {
+            (true, ProviderResumeReason::ExplicitResumeAvailable)
+        } else {
+            (false, ProviderResumeReason::IncompatibleProviderMetadata)
+        }
     }
 
     /// Launches a dispatch-selected worker through the same fenced Agent
@@ -695,6 +828,7 @@ impl<
             mode: LaunchMode::Interactive,
             model: Some(worker.model.clone()),
             resume: false,
+            provider_resume: None,
             initial_prompt: Some(prompt.to_owned()),
             scope: LaunchScope {
                 workspace_id: launch.workspace,
@@ -763,6 +897,221 @@ impl<
         self.commit_admission(operation, &credential, &authorization.runtime)?;
         Ok(AgentAdmission {
             operation_id: operation.to_string(),
+            revision: 1,
+            terminal,
+            completed: false,
+        })
+    }
+
+    #[allow(clippy::too_many_lines)] // Admission atomically fences launch, caller registration, and replay state.
+    fn admit_resume<R: SessionScopeResolver>(
+        &mut self,
+        operation_id: &str,
+        workspace: WorkspaceId,
+        session: SessionId,
+        semantic_key: &str,
+        scope: &R,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let operation = OperationId::parse(operation_id).map_err(|_| {
+            ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "agent resume operation id must be canonical",
+            )
+        })?;
+        if self
+            .dispatch
+            .admission(operation)
+            .map_err(|_| dispatch_storage_error())?
+            .is_some()
+            || self
+                .dispatch
+                .run(operation)
+                .map_err(|_| dispatch_storage_error())?
+                .is_some()
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "agent resume admission is incomplete and cannot be spawned again",
+            ));
+        }
+        let resolved = scope
+            .resolve_available_scope(workspace, Some(session))
+            .map_err(map_scope_error)?;
+        let records = self.coordinator.snapshot().records;
+        if records.iter().any(|record| {
+            record.runtime.session_id == Some(session) && holds_live_or_unknown_agent(record.state)
+        }) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "target session already has a live or ownership-unknown agent",
+            ));
+        }
+        let candidates = records
+            .iter()
+            .filter(|record| {
+                record.runtime.session_id == Some(session)
+                    && record.runtime.terminal.workspace_id == workspace
+                    && record.provider_resume.is_some()
+                    && is_resume_source_state(record.state)
+            })
+            .collect::<Vec<_>>();
+        let source = candidates.first().ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::Unavailable,
+                "provider resume metadata is unavailable for this session",
+            )
+        })?;
+        let reference = source
+            .provider_resume
+            .as_ref()
+            .expect("filtered provider resume metadata")
+            .clone();
+        let profile_id = source.launch.plan.profile_id.clone();
+        let same_identity = candidates.iter().all(|candidate| {
+            candidate.launch.plan.profile_id == profile_id
+                && candidate.launch.plan.profile_revision == reference.adapter_revision
+                && candidate.provider_resume.as_ref().is_some_and(|other| {
+                    other.provider == reference.provider
+                        && other.native_session_id == reference.native_session_id
+                        && other.adapter_revision == reference.adapter_revision
+                        && other.scope == reference.scope
+                })
+        });
+        if !same_identity
+            || !provider_matches_profile(reference.provider, &profile_id)
+            || reference.adapter_revision != source.launch.plan.profile_revision
+            || reference.scope.workspace_id != workspace
+            || reference.scope.session_id != Some(session)
+            || reference.scope.worktree_id != resolved.worktree_id
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "provider resume metadata is ambiguous or stale",
+            ));
+        }
+        let profile = self.registry.profile(&profile_id).map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "agent adapter is unavailable")
+        })?;
+        if profile.revision != reference.adapter_revision
+            || !profile.capabilities.contains(&AgentCapability::Resume)
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::Unavailable,
+                "provider resume metadata is incompatible with the current adapter",
+            ));
+        }
+        let terminal = TerminalRef {
+            daemon_generation: self.generation,
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: Some(session),
+            worktree_id: resolved.worktree_id,
+        };
+        let runtime = AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), Some(session))
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Internal, "agent runtime scope is inconsistent")
+            })?;
+        let fence = CompletionFence {
+            workspace_id: workspace,
+            session_id: Some(session),
+            operation_id: operation,
+            owner_daemon_generation: self.generation,
+            execution_attempt: 1,
+            lifecycle_attempt: 1,
+            expected_revision: 0,
+        };
+        let request = LaunchRequest {
+            profile_id: profile_id.clone(),
+            mode: LaunchMode::Interactive,
+            model: source.launch.request.model.clone(),
+            resume: true,
+            provider_resume: Some(reference),
+            initial_prompt: None,
+            scope: LaunchScope {
+                workspace_id: workspace,
+                session_id: Some(session),
+                worktree_id: resolved.worktree_id,
+            },
+            required_capabilities: [AgentCapability::McpWiring].into_iter().collect(),
+        };
+        let superseded = candidates
+            .iter()
+            .map(|candidate| candidate.runtime.clone())
+            .collect::<Vec<_>>();
+        let authorization = RuntimeAuthorization {
+            runtime,
+            operation: fence,
+            mcp_allowed: true,
+        };
+        let credential = OperationId::new().to_string();
+        let mut worker = self
+            .dispatch
+            .upsert_agent_by_runtime_model(
+                Some(session),
+                profile_id,
+                source.launch.request.model.clone().unwrap_or_else(|| {
+                    ModelSelector::new("default").expect("literal model selector is canonical")
+                }),
+            )
+            .map_err(|_| dispatch_storage_error())?;
+        worker.status = AgentStatus::Starting;
+        worker.current_run = Some(operation);
+        let caller = CallerRef {
+            session_id: worker.session_id,
+            agent_id: worker.agent_id,
+        };
+        self.dispatch
+            .reserve_admission(
+                worker.clone(),
+                DispatchRun {
+                    run_id: operation,
+                    agent_id: worker.agent_id,
+                    prompt: String::new(),
+                    started_at: Utc::now(),
+                    ended_at: None,
+                    status: RunStatus::Preparing,
+                },
+                DispatchBinding {
+                    run_id: operation,
+                    caller,
+                    worker: WorkerRef {
+                        session_id: worker.session_id,
+                        agent_id: worker.agent_id,
+                    },
+                },
+                AgentAdmissionReservation {
+                    operation_id: operation,
+                    semantic_key: semantic_key.to_owned(),
+                    credential_provenance: DispatchCredentialProvenance::DaemonMintedEphemeral,
+                },
+            )
+            .map_err(|_| dispatch_storage_error())?;
+        self.mcp_callers.insert(
+            credential.clone(),
+            McpCaller {
+                runtime: authorization.runtime.clone(),
+                operation,
+            },
+        );
+        if let Err(error) = self.orchestrator.resume_with_semantic(
+            &mut self.coordinator,
+            &mut self.registry,
+            &authorization,
+            &request,
+            self.geometry,
+            &mut self.store,
+            &mut self.pty,
+            Some(credential.clone()),
+            semantic_key.to_owned(),
+            &superseded,
+        ) {
+            self.mcp_callers.remove(&credential);
+            let _ = self.dispatch.fail_admission(operation);
+            return Err(map_orchestration_error(error));
+        }
+        self.commit_admission(operation, &credential, &authorization.runtime)?;
+        Ok(AgentAdmission {
+            operation_id: operation_id.to_owned(),
             revision: 1,
             terminal,
             completed: false,
@@ -850,6 +1199,7 @@ impl<
             mode: LaunchMode::Interactive,
             model: None,
             resume: false,
+            provider_resume: None,
             initial_prompt: queued.as_ref().map(|item| item.prompt.clone()),
             scope: LaunchScope {
                 workspace_id: intent.workspace,
@@ -1391,6 +1741,43 @@ fn semantic_key(intent: &AgentLaunchIntent) -> String {
     )
 }
 
+fn provider_matches_profile(provider: ProviderKind, profile: &AgentProfileId) -> bool {
+    matches!(
+        (provider, profile.as_str()),
+        (ProviderKind::Claude, "claude") | (ProviderKind::Codex, "codex")
+    )
+}
+
+/// Runtime states that still hold the session's Agent slot: a live process or
+/// an incarnation whose ownership is not proven safe to replace. The resume
+/// projection and the resume admission share this fence so the UI never
+/// advertises a resume the daemon would reject.
+fn holds_live_or_unknown_agent(state: super::runtime::RuntimeState) -> bool {
+    matches!(
+        state,
+        super::runtime::RuntimeState::Reserved
+            | super::runtime::RuntimeState::Running
+            | super::runtime::RuntimeState::ReconcileRequired(
+                super::runtime::ReconcileState::OrphanRunning
+                    | super::runtime::ReconcileState::SpawnAmbiguous
+                    | super::runtime::ReconcileState::PersistAfterExit
+            )
+    )
+}
+
+/// Terminal states whose retained provider metadata may seed an explicit
+/// resume. Shared by the resume projection and the admission candidate filter.
+fn is_resume_source_state(state: super::runtime::RuntimeState) -> bool {
+    matches!(
+        state,
+        super::runtime::RuntimeState::Exited
+            | super::runtime::RuntimeState::Reclaimed
+            | super::runtime::RuntimeState::ReconcileRequired(
+                super::runtime::ReconcileState::IdentityUnknown
+            )
+    )
+}
+
 fn durable_operation_outcome(
     record: &super::runtime::DurableRuntimeRecord,
 ) -> Result<AgentAdmission, ProtocolError> {
@@ -1495,6 +1882,10 @@ fn map_runtime_error(error: RuntimeError) -> ProtocolError {
             ErrorCode::InvalidArgument,
             "agent launch scope did not fence",
         ),
+        RuntimeError::ProviderResumeMismatch => (
+            ErrorCode::OwnershipUnknown,
+            "provider resume metadata did not fence",
+        ),
         RuntimeError::ConcurrencyExhausted => (
             ErrorCode::ResourceExhausted,
             "daemon agent runtime capacity is exhausted",
@@ -1531,6 +1922,7 @@ mod tests {
     use super::*;
     use crate::usecase::{
         claude::{ClaudeAdapter, ClaudeProvision, ClaudeProvisionFailure, ClaudeProvisioner},
+        codex::{CodexAdapter, CodexProvision, CodexProvisionFailure, CodexProvisioner},
         generation::ProcessIdentity,
         runtime::{
             AdapterError, AgentAdapter, ProvisionContext, ResolvedLaunch, RuntimeStore,
@@ -1673,6 +2065,27 @@ mod tests {
         }
     }
 
+    struct FakeCodexProvisioner;
+    impl CodexProvisioner for FakeCodexProvisioner {
+        fn provision(
+            &mut self,
+            _context: &ProvisionContext,
+        ) -> Result<CodexProvision, CodexProvisionFailure> {
+            Ok(CodexProvision {
+                working_directory: PathBuf::from("/worktree"),
+                environment_allowlist: BTreeSet::new(),
+                spawn: SpawnProvision::new([], Vec::new()),
+            })
+        }
+    }
+
+    struct AlwaysExecutable;
+    impl ExecutableLocator for AlwaysExecutable {
+        fn is_available(&self, _: &str) -> bool {
+            true
+        }
+    }
+
     struct FakeScope(Result<ResolvedAgentScope, ScopeResolveError>);
     impl SessionScopeResolver for FakeScope {
         fn resolve_available_scope(
@@ -1769,6 +2182,25 @@ mod tests {
         )
     }
 
+    fn codex_runtime() -> AgentRuntime<Store, Pty, Journal, AlwaysExecutable> {
+        let mut registry = AdapterRegistry::new();
+        let adapter = CodexAdapter::new(FakeCodexProvisioner);
+        registry
+            .register(adapter.profile().clone(), Box::new(adapter))
+            .unwrap();
+        AgentRuntime::with_dispatch_and_locator(
+            DaemonGeneration::new(),
+            registry,
+            Store::default(),
+            Journal::default(),
+            Pty::default(),
+            AgentProfileId::new("codex").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+            AlwaysExecutable,
+        )
+    }
+
     fn configured_scope(workspace: &std::path::Path) -> ResolvedAgentScope {
         std::fs::create_dir_all(workspace.join(".usagi")).unwrap();
         std::fs::write(
@@ -1799,6 +2231,265 @@ mod tests {
     }
 
     // ---- tests ---------------------------------------------------------------
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One end-to-end test keeps capture, exit, resume, replay, and live rejection visibly ordered.
+    fn structured_codex_identity_enables_one_explicit_new_runtime_resume() {
+        let mut runtime = codex_runtime();
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let resolved = scope();
+        let launch_intent = AgentLaunchIntent {
+            workspace,
+            session: Some(session),
+            profile: Some(AgentProfileId::new("codex").unwrap()),
+        };
+        let first = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &launch_intent,
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.session_resume_status(session),
+            (false, ProviderResumeReason::LiveOrOwnershipUnknown)
+        );
+        let first_runtime = runtime
+            .coordinator
+            .runtime_for_terminal(&first.terminal)
+            .unwrap();
+        let native_id = ProviderSessionId::new("structured-codex-session").unwrap();
+        assert_eq!(
+            runtime
+                .capture_structured_provider_session(
+                    &first_runtime,
+                    ProviderKind::Claude,
+                    native_id.clone(),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        runtime
+            .capture_structured_provider_session(
+                &first_runtime,
+                ProviderKind::Codex,
+                native_id.clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .capture_structured_provider_session(
+                    &first_runtime,
+                    ProviderKind::Codex,
+                    ProviderSessionId::new("different-session").unwrap(),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+        let captured = runtime.coordinator.snapshot();
+        assert_eq!(
+            captured.records[0]
+                .provider_resume
+                .as_ref()
+                .unwrap()
+                .provenance,
+            ProviderCaptureProvenance::ProviderStructured
+        );
+        assert!(
+            !serde_json::to_string(&captured.records[0].launch)
+                .unwrap()
+                .contains(native_id.expose_sensitive())
+        );
+
+        runtime.exit(&first.terminal, 0).unwrap();
+        assert_eq!(
+            runtime.session_resume_status(session),
+            (true, ProviderResumeReason::ExplicitResumeAvailable)
+        );
+        assert_eq!(
+            runtime
+                .resume(
+                    "not-an-operation-id",
+                    workspace,
+                    session,
+                    &FakeScope(Ok(resolved.clone()))
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            runtime
+                .resume(
+                    &OperationId::new().to_string(),
+                    workspace,
+                    session,
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+        let operation = OperationId::new().to_string();
+        let resumed = runtime
+            .resume(
+                &operation,
+                workspace,
+                session,
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap();
+        assert_ne!(resumed.terminal, first.terminal);
+        assert_eq!(
+            runtime
+                .resume(
+                    &operation,
+                    workspace,
+                    session,
+                    &FakeScope(Ok(resolved.clone())),
+                )
+                .unwrap()
+                .terminal,
+            resumed.terminal
+        );
+        assert_eq!(
+            runtime
+                .resume(
+                    &OperationId::new().to_string(),
+                    workspace,
+                    session,
+                    &FakeScope(Ok(resolved)),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(runtime.coordinator.snapshot().records.len(), 2);
+    }
+
+    #[test]
+    fn codex_without_structured_identity_fails_closed_for_resume() {
+        let mut runtime = codex_runtime();
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let resolved = scope();
+        let first = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(session),
+                    profile: Some(AgentProfileId::new("codex").unwrap()),
+                },
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap();
+        runtime.exit(&first.terminal, 0).unwrap();
+        assert_eq!(
+            runtime.session_resume_status(session),
+            (false, ProviderResumeReason::ProviderMetadataUnavailable)
+        );
+        assert_eq!(
+            runtime
+                .resume(
+                    &OperationId::new().to_string(),
+                    workspace,
+                    session,
+                    &FakeScope(Ok(resolved)),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::Unavailable
+        );
+    }
+
+    #[test]
+    fn restart_resume_supersedes_the_interrupted_runtime_without_leaking_capacity() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let resolved = scope();
+        let make_runtime = || {
+            AgentRuntime::with_dispatch_and_locator(
+                DaemonGeneration::new(),
+                claude_registry(),
+                Store::default(),
+                Journal::default(),
+                Pty::default(),
+                AgentProfileId::new("claude").unwrap(),
+                Geometry { cols: 80, rows: 24 },
+                DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+                AlwaysExecutable,
+            )
+        };
+        let mut first = make_runtime();
+        let initial = first
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(session),
+                    profile: Some(AgentProfileId::new("claude").unwrap()),
+                },
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap();
+        let initial_runtime = first
+            .coordinator
+            .runtime_for_terminal(&initial.terminal)
+            .unwrap();
+        let (reconciled, interrupted) = first
+            .coordinator
+            .snapshot()
+            .reconcile_after_daemon_restart();
+        assert_eq!(interrupted, 1);
+
+        let mut second = AgentRuntime::hydrate_with_dispatch_and_locator(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty::default(),
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+            AlwaysExecutable,
+            reconciled,
+        )
+        .unwrap();
+        assert_eq!(second.session_phase(session), "interrupted");
+        assert_eq!(second.coordinator.occupied_slots(), 1);
+
+        let resumed = second
+            .resume(
+                &OperationId::new().to_string(),
+                workspace,
+                session,
+                &FakeScope(Ok(resolved)),
+            )
+            .unwrap();
+        assert_ne!(resumed.terminal, initial.terminal);
+        assert_eq!(second.coordinator.occupied_slots(), 1);
+        let superseded = second.coordinator.record_for(&initial_runtime).unwrap();
+        assert_eq!(
+            superseded.state,
+            super::super::runtime::RuntimeState::Reclaimed
+        );
+        assert_eq!(
+            superseded
+                .provider_resume
+                .as_ref()
+                .unwrap()
+                .last_known_status,
+            ProviderResumeStatus::Exited
+        );
+
+        second.exit(&resumed.terminal, 0).unwrap();
+        assert_eq!(second.coordinator.occupied_slots(), 0);
+        assert_eq!(second.session_phase(session), "ended");
+    }
 
     #[test]
     #[allow(clippy::too_many_lines)] // One restart scenario keeps the two runtime instances and shared file visibly ordered.
@@ -1881,6 +2572,27 @@ mod tests {
         loaded.validate_schema().unwrap();
         let (reconciled, count) = loaded.reconcile_after_daemon_restart();
         assert_eq!(count, 1);
+        let interrupted_record = reconciled
+            .records
+            .iter()
+            .find(|record| record.operation.operation_id.to_string() == interrupted)
+            .unwrap();
+        assert_eq!(
+            interrupted_record
+                .provider_resume
+                .as_ref()
+                .unwrap()
+                .last_known_status,
+            ProviderResumeStatus::Interrupted
+        );
+        assert_eq!(
+            interrupted_record
+                .provider_resume
+                .as_ref()
+                .unwrap()
+                .last_known_phase,
+            Some(ProviderResumePhase::Interrupted)
+        );
         FileStore(snapshot_path.clone())
             .save(reconciled.clone())
             .unwrap();
@@ -3034,6 +3746,7 @@ mod tests {
             mode: LaunchMode::Interactive,
             model: None,
             resume: false,
+            provider_resume: None,
             initial_prompt: None,
             scope: LaunchScope {
                 workspace_id: WorkspaceId::new(),

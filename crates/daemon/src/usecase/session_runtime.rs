@@ -23,6 +23,7 @@ use usagi_core::domain::session_lifecycle::{
 use usagi_core::infrastructure::git::list_worktrees;
 use usagi_core::infrastructure::git::{GitOutput, GitRunner, add_worktree, remove_worktree};
 use usagi_core::infrastructure::gitignore::migrate_usagi_ignore_rules;
+use usagi_core::infrastructure::ipc::ErrorCode;
 use usagi_core::infrastructure::paths::{SESSIONS_DIR, STATE_DIR, project_data_dir};
 use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore;
@@ -48,6 +49,7 @@ pub enum SessionRuntimeError {
     DurableFailure(String),
     UnknownSession,
     ScopeUnavailable,
+    AgentFailure { code: ErrorCode, message: String },
     Delivery(String),
     Rejected,
     Storage,
@@ -72,7 +74,9 @@ impl SessionRuntimeError {
             Self::SessionWorkspaceCreationFailed { name, detail } => {
                 format!("cannot create session \"{name}\": {detail}")
             }
-            Self::DurableFailure(message) | Self::Delivery(message) => message.clone(),
+            Self::DurableFailure(message)
+            | Self::AgentFailure { message, .. }
+            | Self::Delivery(message) => message.clone(),
             Self::UnknownSession => "session was not found".into(),
             Self::ScopeUnavailable => "session scope is not available".into(),
             Self::Rejected => {
@@ -242,6 +246,7 @@ impl<G: GitRunner> SessionRuntime<G> {
             }
             SessionAction::Status => self.status(operation_id),
             SessionAction::Setup
+            | SessionAction::ResumeAgent
             | SessionAction::Prompt
             | SessionAction::Complete
             | SessionAction::Pr

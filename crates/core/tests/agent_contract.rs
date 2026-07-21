@@ -47,6 +47,7 @@ fn request(profile_id: AgentProfileId) -> LaunchRequest {
         mode: LaunchMode::Headless,
         model: None,
         resume: true,
+        provider_resume: None,
         initial_prompt: Some("continue safely".into()),
         scope: LaunchScope {
             workspace_id: WorkspaceId::new(),

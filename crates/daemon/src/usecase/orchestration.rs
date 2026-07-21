@@ -241,6 +241,61 @@ impl Orchestrator {
         mcp_credential: Option<String>,
         semantic_key: String,
     ) -> Result<(), OrchestrationError> {
+        Self::launch_with_semantic_superseding(
+            runtime,
+            registry,
+            authorization,
+            request,
+            geometry,
+            store,
+            spawner,
+            mcp_credential,
+            semantic_key,
+            &[],
+        )
+    }
+
+    /// Launches an explicit provider resume and durably supersedes its
+    /// interrupted source incarnations in the replacement reservation.
+    pub fn resume_with_semantic<S: RuntimeStore, P: PtySpawner>(
+        &mut self,
+        runtime: &mut RuntimeCoordinator,
+        registry: &mut AdapterRegistry,
+        authorization: &RuntimeAuthorization,
+        request: &LaunchRequest,
+        geometry: Geometry,
+        store: &mut S,
+        spawner: &mut P,
+        mcp_credential: Option<String>,
+        semantic_key: String,
+        superseded: &[AgentRuntimeRef],
+    ) -> Result<(), OrchestrationError> {
+        Self::launch_with_semantic_superseding(
+            runtime,
+            registry,
+            authorization,
+            request,
+            geometry,
+            store,
+            spawner,
+            mcp_credential,
+            semantic_key,
+            superseded,
+        )
+    }
+
+    fn launch_with_semantic_superseding<S: RuntimeStore, P: PtySpawner>(
+        runtime: &mut RuntimeCoordinator,
+        registry: &mut AdapterRegistry,
+        authorization: &RuntimeAuthorization,
+        request: &LaunchRequest,
+        geometry: Geometry,
+        store: &mut S,
+        spawner: &mut P,
+        mcp_credential: Option<String>,
+        semantic_key: String,
+        superseded: &[AgentRuntimeRef],
+    ) -> Result<(), OrchestrationError> {
         if !authorization.fences(&authorization.runtime, &authorization.operation)
             || request.scope.session_id != authorization.runtime.session_id
             || request.scope.workspace_id != authorization.runtime.terminal.workspace_id
@@ -257,8 +312,8 @@ impl Orchestrator {
         let adapter = registry
             .adapter_mut(&request.profile_id)
             .map_err(|_| OrchestrationError::UnknownProfile)?;
-        runtime
-            .launch_with_semantic(
+        if superseded.is_empty() {
+            runtime.launch_with_semantic(
                 request,
                 authorization.runtime.clone(),
                 authorization.operation.clone(),
@@ -269,7 +324,21 @@ impl Orchestrator {
                 mcp_credential,
                 semantic_key,
             )
-            .map_err(OrchestrationError::Runtime)
+        } else {
+            runtime.resume_with_semantic(
+                request,
+                authorization.runtime.clone(),
+                authorization.operation.clone(),
+                geometry,
+                adapter,
+                store,
+                spawner,
+                mcp_credential,
+                semantic_key,
+                superseded,
+            )
+        }
+        .map_err(OrchestrationError::Runtime)
     }
 
     /// Adds an ephemeral token lease for one successfully spawned runtime.
@@ -477,6 +546,7 @@ mod tests {
                     .unwrap(),
                 ),
                 provision: SpawnProvision::new([], vec![]),
+                provider_resume: request.provider_resume.clone(),
             })
         }
     }
@@ -545,6 +615,7 @@ mod tests {
             mode: LaunchMode::Interactive,
             model: None,
             resume: true,
+            provider_resume: None,
             initial_prompt: None,
             scope,
             required_capabilities: [AgentCapability::McpWiring]
