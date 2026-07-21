@@ -285,8 +285,9 @@ fn mcp_environment(
                     )
                     .expect("literal environment variable name is valid"),
                     match paths::runtime_mode() {
+                        paths::RuntimeMode::Production => "production",
                         paths::RuntimeMode::Development => "development",
-                        paths::RuntimeMode::Device => "device",
+                        paths::RuntimeMode::Local => "local",
                     }
                     .to_owned(),
                 ),
@@ -1114,7 +1115,7 @@ fn open_agent_runtime(
     let mut registry = AdapterRegistry::new();
     let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness);
     // Agent MCP children receive the mode-neutral base. They apply the same
-    // selected runtime mode themselves, so both `dev/` and `device/` reach the
+    // selected runtime mode themselves, so both `dev/` and `local/` reach the
     // daemon's already-selected directory without adding that child twice.
     let data_home = data_dir.parent().unwrap_or(data_dir).to_path_buf();
     // Duplicate registration cannot happen for the two literal profiles; a
