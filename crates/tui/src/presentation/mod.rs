@@ -1890,16 +1890,43 @@ fn sync_runtime_sessions(runtime: &mut WorkspaceRuntime, ui: &WorkspaceUi) {
         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Sessions(ids)));
     }
     // Keep the reducer's advisory name copy in step so the create form can reject
-    // a duplicate name locally before it ever reaches the daemon.
-    let names: Vec<String> = ui
+    // a known worktree collision locally before it ever reaches the daemon. The
+    // lifecycle snapshot supplies managed sessions; the directory scan also
+    // catches a stale `.usagi/sessions/<name>` that has no lifecycle record.
+    let mut names: std::collections::BTreeSet<String> = ui
         .workspace
         .sessions()
         .iter()
         .map(|record| record.name.clone())
         .collect();
+    names.extend(session_worktree_names(ui.workspace.path()));
+    let names: Vec<String> = names.into_iter().collect();
     if runtime.state().session_names() != names.as_slice() {
         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionNames(names)));
     }
+}
+
+/// Names of worktree directories which would collide with a new session.
+///
+/// This is a read-only, best-effort preflight fact for the inline form. The
+/// daemon remains the sole authority that creates or removes worktrees; an
+/// unreadable directory simply contributes no local hint and is checked again
+/// by the daemon when the user submits the request.
+fn session_worktree_names(workspace: &Path) -> Vec<String> {
+    let sessions = workspace.join(".usagi").join("sessions");
+    std::fs::read_dir(sessions)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            entry
+                .file_type()
+                .ok()
+                .filter(std::fs::FileType::is_dir)
+                .map(|_| entry)
+        })
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect()
 }
 
 /// Project the focused live terminal's already-polled rows for
@@ -2104,6 +2131,22 @@ fn handle_terminal_pointer(
     }
 }
 
+/// Copy the retained terminal selection, if any, and leave its highlight in
+/// place so the same output can be copied repeatedly.
+fn copy_terminal_selection(controls: &mut LiveTerminalControls, term: &mut dyn Terminal) {
+    let Some(selection) = controls.selection() else {
+        controls.set_feedback("no terminal text is selected");
+        return;
+    };
+    let text = selection.text();
+    if text.is_empty() {
+        controls.set_feedback("no terminal text is selected");
+        return;
+    }
+    let result = term.copy_text(&text);
+    controls.record_copy(&text, result);
+}
+
 /// Begin a terminal selection when a normal left click lands in the live
 /// terminal's rendered content viewport. This records the press cell as the
 /// drag anchor, before crossterm delivers the first [`PointerKind::Drag`] event.
@@ -2139,7 +2182,7 @@ fn begin_terminal_selection_on_click(
 }
 
 /// Intercept the live-terminal view controls the Home reducer does not own —
-/// scroll, tab close, and pointer drag / copy — returning `true` when the key was
+/// copy, scroll, tab close, and pointer drag — returning `true` when the key was
 /// consumed here so the shell loop skips reducer dispatch. `rows_len` / `scroll`
 /// describe the frame's projected viewport for pointer mapping.
 #[coverage(off)]
@@ -2158,6 +2201,9 @@ fn intercept_live_terminal_control(
     scroll: usize,
 ) -> bool {
     match key {
+        Key::Live(LiveTerminalAction::CopyTerminalSelection) => {
+            copy_terminal_selection(controls, term);
+        }
         Key::Live(LiveTerminalAction::ScrollUp) => controls.scroll_up(),
         Key::Live(LiveTerminalAction::ScrollDown) => controls.scroll_down(),
         Key::Live(LiveTerminalAction::CloseTab) => {
@@ -3224,14 +3270,14 @@ mod tests {
         UnavailableSessionCommandPortFactory, WelcomeStep, WorkspaceLoader, WorkspaceRuntime,
         WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
         begin_terminal_selection_on_click, close_exited_panes, controller_terminal_view,
-        drain_controller_host_actions, forward_live_terminal_input, handle_terminal_pointer,
-        intercept_live_terminal_control, key_to_terminal_bytes, new_project_notice,
-        play_startup_splash, render_controller_frame, render_home_snapshot, restore_open_panes,
-        run as run_from_start, run_with_settings,
+        copy_terminal_selection, drain_controller_host_actions, forward_live_terminal_input,
+        handle_terminal_pointer, intercept_live_terminal_control, key_to_terminal_bytes,
+        new_project_notice, play_startup_splash, render_controller_frame, render_home_snapshot,
+        restore_open_panes, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_controller, run_workspace_controller_with_backend_and_settings,
-        safe_session_error, sidebar_pointer_event, step_config, step_new, terminal_geometry,
-        tick_session_refresh, welcome_action, write_banner,
+        safe_session_error, session_worktree_names, sidebar_pointer_event, step_config, step_new,
+        terminal_geometry, tick_session_refresh, welcome_action, write_banner,
     };
     use crate::presentation::live_terminal::LiveTerminalControls;
     use crate::presentation::views::config::AvailableAgentModels;
@@ -3271,6 +3317,7 @@ mod tests {
     use usagi_core::domain::recent::{Recent, UniteOverview};
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
 
+    use tempfile::tempdir;
     use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
     use usagi_core::domain::workspace_state::WorkspaceState;
     use usagi_core::usecase::client::DaemonMetrics;
@@ -3437,6 +3484,16 @@ mod tests {
 
     fn snapshot(name: &str) -> WorkspaceSnapshot {
         WorkspaceSnapshot::new(ws(name), state(name))
+    }
+
+    #[test]
+    fn session_worktree_names_include_stale_directories_only() {
+        let temp = tempdir().unwrap();
+        let sessions = temp.path().join(".usagi/sessions");
+        std::fs::create_dir_all(sessions.join("stale-session")).unwrap();
+        std::fs::write(sessions.join("not-a-worktree"), "marker").unwrap();
+
+        assert_eq!(session_worktree_names(temp.path()), vec!["stale-session"]);
     }
 
     #[test]
@@ -4683,7 +4740,7 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let terminal = live_terminal_ref(workspace, session);
-        let (ui, runtime) = focused_live_pane(
+        let (mut ui, mut runtime) = focused_live_pane(
             workspace,
             session,
             terminal.clone(),
@@ -4754,6 +4811,22 @@ mod tests {
         );
 
         assert_eq!(term.copied, vec!["hello".to_owned()]);
+        // The completed selection is retained, so Ctrl-O c copies it again
+        // without needing another mouse release.
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::CopyTerminalSelection),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut std::collections::HashMap::new(),
+            20,
+            80,
+            rows_len,
+            0,
+        ));
+        assert_eq!(term.copied, vec!["hello".to_owned(), "hello".to_owned()]);
         // Releasing the mouse keeps the range highlighted instead of clearing it,
         // and the projected rows still carry the reverse-video selection.
         assert!(controls.has_selection());
@@ -4767,6 +4840,30 @@ mod tests {
         );
         // A drag that copied a selection never also opens a link.
         assert!(browser.opened.is_empty());
+    }
+
+    #[test]
+    fn retained_terminal_selection_copy_reports_missing_or_empty_selection() {
+        let mut term = FakeTerminal::default();
+        let mut controls = LiveTerminalControls::default();
+
+        copy_terminal_selection(&mut controls, &mut term);
+        assert_eq!(term.copied, Vec::<String>::new());
+        assert_eq!(
+            controls.project(Vec::new(), 1).feedback.as_deref(),
+            Some("no terminal text is selected")
+        );
+
+        controls.begin_selection(TerminalSelection::begin(
+            vec!["text".to_owned()],
+            TerminalPoint { row: 0, column: 4 },
+        ));
+        copy_terminal_selection(&mut controls, &mut term);
+        assert_eq!(term.copied, Vec::<String>::new());
+        assert_eq!(
+            controls.project(Vec::new(), 1).feedback.as_deref(),
+            Some("no terminal text is selected")
+        );
     }
 
     /// A recording [`BrowserOpener`] fake: it captures opened URLs so a pointer
