@@ -1140,10 +1140,13 @@ fn home_left_pane(
         .as_ref()
         .map(|metrics| mascot_metrics(Some(metrics), 0))
         .unwrap_or_default();
+    // 明示された mascot speech を優先し、無ければ正常系以外の daemon 状態を吹き出しへ落とす。
+    let daemon_speech = abnormal_daemon_speech(home.feedback.as_ref());
+    let speech = home.mascot_speech.as_ref().or(daemon_speech.as_ref());
     let mascot = widgets::mascot::sidebar_block_with_sidecar(
         width,
         home.mascot_tick,
-        home.mascot_speech.as_ref(),
+        speech,
         &metric_labels,
     );
     let show_mascot = mascot
@@ -1606,6 +1609,30 @@ fn phase_label(phase: TargetPhase) -> &'static str {
     }
 }
 
+/// 正常系以外の daemon 状態を、左 sidebar のうさぎ吹き出しに出す message へ写す。
+///
+/// 健全に接続され待機・進行しているだけの状態（`None` / `Progress` / `Reconnected`）は
+/// 正常系として `None` を返し、うさぎを無言に保つ。切断・再同期要求・操作/端末エラーだけを
+/// 注意色（bubble の黄色太字）付きの短い 2 行 message にする。footer の詳細 feedback とは別に、
+/// bottom-left のうさぎで一目で異常に気づけるようにするための投影である。
+fn abnormal_daemon_speech(feedback: Option<&Feedback>) -> Option<widgets::mascot::MascotSpeech> {
+    let lines = match feedback? {
+        Feedback::Disconnected => vec!["⚠ daemon 切断".to_owned(), "再接続を待機中".to_owned()],
+        Feedback::ResyncRequired => {
+            vec!["⚠ 再同期が必要".to_owned(), "状態を同期中".to_owned()]
+        }
+        Feedback::OperationError(error) => {
+            vec!["⚠ 操作エラー".to_owned(), error.message.as_str().to_owned()]
+        }
+        Feedback::TerminalError(error) => {
+            vec!["⚠ 端末エラー".to_owned(), error.message.as_str().to_owned()]
+        }
+        // 正常系: 待機・進行中・再接続完了はうさぎを無言に保つ。
+        Feedback::Progress(_) | Feedback::Reconnected => return None,
+    };
+    widgets::mascot::MascotSpeech::new(lines)
+}
+
 #[coverage(off)]
 fn feedback_label(feedback: Option<&Feedback>) -> String {
     match feedback {
@@ -1636,8 +1663,8 @@ mod tests {
     use super::{
         CHROME_ROWS, CREATE_SKELETON_ROWS, CreateDraft, GIBIBYTE, GitDiff, HomeProjection,
         LEFT_WIDTH, MEBIBYTE, ProjectedSession, TerminalViewProjection, Workspace,
-        create_skeleton_lines, format_memory, load_style, new_session_input_lines, render_home,
-        terminal_point_at, with_footer_gap,
+        abnormal_daemon_speech, create_skeleton_lines, format_memory, load_style,
+        new_session_input_lines, render_home, terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Style};
     use crate::presentation::widgets::mascot::MascotSpeech;
@@ -2614,6 +2641,97 @@ mod tests {
         let text = joined_home(&home);
         assert!(text.contains("No tabs stirring yet. Enter starts one."));
         assert!(text.contains("feedback: disconnected; reconnect to continue"));
+    }
+
+    #[test]
+    fn abnormal_daemon_speech_projects_only_non_healthy_states() {
+        // MascotSpeech は内容を公開しないため、bubble を描画して stripped text を検査する。
+        let bubble = |feedback: &Feedback| {
+            let speech = abnormal_daemon_speech(Some(feedback)).expect("abnormal state speaks");
+            strip(
+                &crate::presentation::widgets::mascot::sidebar_block_with_sidecar(
+                    40,
+                    0,
+                    Some(&speech),
+                    &[],
+                )
+                .expect("mascot fits")
+                .rows()
+                .join("\n"),
+            )
+        };
+
+        // 正常系（無 feedback・進行中・再接続完了）はうさぎを無言に保つ。
+        assert!(abnormal_daemon_speech(None).is_none());
+        assert!(
+            abnormal_daemon_speech(Some(&Feedback::Progress(SafeMessage::new("creating"))))
+                .is_none()
+        );
+        assert!(abnormal_daemon_speech(Some(&Feedback::Reconnected)).is_none());
+
+        // 切断・再同期は接続状態の異常として吹き出しに出す。
+        assert!(bubble(&Feedback::Disconnected).contains("daemon 切断"));
+        assert!(bubble(&Feedback::ResyncRequired).contains("再同期が必要"));
+
+        // 操作/端末エラーは安全な message を 2 行目に載せ、error ID は載せない。
+        let op = bubble(&Feedback::OperationError(SafeError {
+            message: SafeMessage::new("Session creation failed"),
+            error_id: "err-safe-7".to_owned(),
+        }));
+        assert!(op.contains("操作エラー"));
+        assert!(op.contains("Session creation failed"));
+        assert!(!op.contains("err-safe-7"));
+
+        let term = bubble(&Feedback::TerminalError(SafeError {
+            message: SafeMessage::new("Could not attach terminal"),
+            error_id: "err-safe-9".to_owned(),
+        }));
+        assert!(term.contains("端末エラー"));
+        assert!(term.contains("Could not attach terminal"));
+    }
+
+    #[test]
+    fn home_bubble_surfaces_a_disconnected_daemon_and_stays_silent_when_healthy() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Feedback(Feedback::Disconnected)),
+        );
+        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let text = strip(&render_home(30, 80, &home).join("\n"));
+        // 切断はうさぎの上に tail 付きの吹き出しとして現れる。
+        assert!(text.contains("╰──┬"), "abnormal state opens a bubble");
+        assert!(text.contains("daemon 切断"));
+
+        // 進行中は正常系なので吹き出しを出さず、無言のうさぎだけが残る。
+        let mut healthy = AppState::home(workspace, Vec::new());
+        let _ = update(
+            &mut healthy,
+            AppEvent::Backend(BackendEvent::Feedback(Feedback::Progress(
+                SafeMessage::new("creating"),
+            ))),
+        );
+        let home = HomeProjection::from_state(&healthy, "work", "/work", &[]);
+        let text = strip(&render_home(30, 80, &home).join("\n"));
+        assert!(!text.contains("╰──┬"), "healthy state stays silent");
+        assert!(text.contains("(o.o)?"));
+    }
+
+    #[test]
+    fn explicit_mascot_speech_wins_over_the_daemon_state_bubble() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Feedback(Feedback::Disconnected)),
+        );
+        let speech = MascotSpeech::new(["同期済み".to_owned()]).expect("speech");
+        let home = HomeProjection::from_state(&state, "work", "/work", &[])
+            .with_mascot_speech(Some(speech));
+        let text = strip(&render_home(30, 80, &home).join("\n"));
+        assert!(text.contains("同期済み"));
+        assert!(!text.contains("daemon 切断"));
     }
 
     #[test]
