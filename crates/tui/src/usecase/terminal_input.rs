@@ -883,6 +883,23 @@ mod tests {
     }
 
     #[test]
+    fn pointer_inputs_without_a_leader_are_left_for_the_terminal_adapter() {
+        for input in [
+            LiveInput::Mouse { column: 4, row: 9 },
+            LiveInput::Pointer(PointerEvent {
+                kind: PointerKind::Drag,
+                column: 4,
+                row: 9,
+            }),
+        ] {
+            assert_eq!(
+                LiveInputClassifier::default().classify(T0, input),
+                LiveInputOutput::Passthrough(Vec::new())
+            );
+        }
+    }
+
+    #[test]
     fn encoder_covers_remaining_portable_key_variants() {
         let cases = [
             (KeyCode::Backspace, vec![0x7f]),

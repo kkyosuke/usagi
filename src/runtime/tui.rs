@@ -2193,7 +2193,7 @@ mod tests {
         BackendEvent, Effect, EnvironmentEntry, Target,
     };
     use usagi_tui::usecase::terminal_input::{
-        KeyCode, KeyEvent, KeyEventKind, LiveInput, Modifiers,
+        KeyCode, KeyEvent, KeyEventKind, LiveInput, Modifiers, PointerEvent, PointerKind,
     };
 
     /// A pressed [`LiveInput::Key`] with the given code and modifiers.
@@ -2509,6 +2509,42 @@ mod tests {
                     &live_key(KeyCode::Char('z'), Modifiers::default()),
                 ),
                 Some(Key::Char('z'))
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_adapter_projects_resolved_live_and_pointer_inputs() {
+        let cases = [
+            (
+                LiveInput::WheelUp,
+                Key::Live(usagi_tui::usecase::terminal_input::LiveTerminalAction::ScrollUp),
+            ),
+            (
+                LiveInput::Pointer(PointerEvent {
+                    kind: PointerKind::Drag,
+                    column: 7,
+                    row: 11,
+                }),
+                Key::Pointer(PointerEvent {
+                    kind: PointerKind::Drag,
+                    column: 7,
+                    row: 11,
+                }),
+            ),
+            (
+                LiveInput::Mouse { column: 5, row: 9 },
+                Key::Click { column: 5, row: 9 },
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                classify_terminal_input(
+                    &mut usagi_tui::usecase::terminal_input::LiveInputClassifier::default(),
+                    Duration::ZERO,
+                    &input,
+                ),
+                Some(expected)
             );
         }
     }
