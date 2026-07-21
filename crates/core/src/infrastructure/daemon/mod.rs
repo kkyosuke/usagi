@@ -150,7 +150,6 @@ pub struct DaemonRecordStore<F> {
 
 impl<F: RecordFile> DaemonRecordStore<F> {
     /// Build a store over the given file seam.
-    #[coverage(off)]
     pub fn new(file: F) -> Self {
         Self { file }
     }
@@ -161,7 +160,6 @@ impl<F: RecordFile> DaemonRecordStore<F> {
     /// Returns the [`RecordFile`] read error, or [`io::ErrorKind::InvalidData`]
     /// when the stored bytes are not a valid `DaemonRecord`, so callers handle
     /// malformed data uniformly with read failures.
-    #[coverage(off)]
     pub fn load(&self) -> io::Result<Option<DaemonRecord>> {
         match self.file.read()? {
             None => Ok(None),
@@ -179,7 +177,6 @@ impl<F: RecordFile> DaemonRecordStore<F> {
     /// # Panics
     /// Panics only if serializing a `DaemonRecord` to JSON fails, which cannot
     /// happen for its fields (a `u32` and a timestamp).
-    #[coverage(off)]
     pub fn save(&self, record: &DaemonRecord) -> io::Result<()> {
         // Serializing a DaemonRecord (a u32 and a timestamp) cannot fail.
         let json = serde_json::to_string(record).expect("DaemonRecord serializes to JSON");
@@ -190,7 +187,6 @@ impl<F: RecordFile> DaemonRecordStore<F> {
     ///
     /// # Errors
     /// Returns the [`RecordFile`] remove error.
-    #[coverage(off)]
     pub fn clear(&self) -> io::Result<()> {
         self.file.remove()
     }

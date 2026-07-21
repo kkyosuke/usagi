@@ -41,14 +41,14 @@ pub enum BuildChannel {
 
 /// Returns the compile-time channel for this binary. `cargo run --release`
 /// selects production because debug assertions are disabled in that profile.
+#[cfg(debug_assertions)]
+const BUILD_CHANNEL: BuildChannel = BuildChannel::Development;
+#[cfg(not(debug_assertions))]
+const BUILD_CHANNEL: BuildChannel = BuildChannel::Production;
+
 #[must_use]
-#[coverage(off)] // The production variant is only compiled by a release build.
 pub const fn build_channel() -> BuildChannel {
-    if cfg!(debug_assertions) {
-        BuildChannel::Development
-    } else {
-        BuildChannel::Production
-    }
+    BUILD_CHANNEL
 }
 
 /// Resolve the directory where usagi stores its per-user data.
@@ -61,7 +61,6 @@ pub const fn build_channel() -> BuildChannel {
 ///
 /// Returns an error when `$USAGI_HOME` is unset and the home directory cannot be
 /// determined.
-#[coverage(off)] // The production base branch is only reachable in a release build.
 pub fn data_dir() -> Result<PathBuf> {
     let base = if let Some(dir) = std::env::var_os(DATA_DIR_ENV).filter(|v| !v.is_empty()) {
         PathBuf::from(dir)
@@ -100,7 +99,6 @@ pub fn project_data_dir(project_root: impl AsRef<Path>) -> PathBuf {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
     use super::*;
 
@@ -110,10 +108,7 @@ mod tests {
         let _guard = crate::test_support::process_env_guard();
         let home = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var(DATA_DIR_ENV, home.path()) };
-        let expected = match build_channel() {
-            BuildChannel::Production => home.path().to_path_buf(),
-            BuildChannel::Development => home.path().join(DEV_DIR),
-        };
+        let expected = channel_data_dir(home.path());
         assert_eq!(data_dir().unwrap(), expected);
 
         // An empty override is ignored in favour of the home-directory default.
@@ -130,10 +125,7 @@ mod tests {
 
     #[test]
     fn project_data_dir_uses_the_same_dev_directory_definition() {
-        let expected = match build_channel() {
-            BuildChannel::Production => PathBuf::from("/project/.usagi"),
-            BuildChannel::Development => PathBuf::from("/project/.usagi/dev"),
-        };
+        let expected = channel_data_dir("/project/.usagi");
         assert_eq!(project_data_dir("/project"), expected);
     }
 
@@ -152,6 +144,7 @@ mod tests {
 
     #[test]
     fn build_channel_variants_are_distinct() {
+        assert_eq!(build_channel(), BUILD_CHANNEL);
         assert_ne!(BuildChannel::Production, BuildChannel::Development);
         assert_eq!(BuildChannel::Production.clone(), BuildChannel::Production);
         assert_eq!(format!("{:?}", BuildChannel::Production), "Production");

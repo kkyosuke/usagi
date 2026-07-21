@@ -1,14 +1,14 @@
 ---
 number: 485
 title: test(core): business reducer と persistence error path を coverage 対象へ戻す
-status: todo
+status: done
 priority: medium
 labels: [review, v2, core, coverage]
 dependson: [484]
 related: [356, 360, 380]
 parent: 453
 created_at: 2026-07-20T12:06:49.488265+00:00
-updated_at: 2026-07-20T12:07:41.545230+00:00
+updated_at: 2026-07-21T00:24:44.315651+00:00
 ---
 
 ## 問題・影響

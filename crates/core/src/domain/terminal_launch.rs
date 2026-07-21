@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Safe, terminal-only launch vocabulary.
 //!
 //! This intentionally has no agent profile, command string, secret value, or
@@ -299,6 +297,7 @@ mod tests {
     #[test]
     fn typed_errors_are_displayable() {
         let profile = TerminalProfileId::new("login-shell").unwrap();
+        assert_eq!(profile.as_str(), "login-shell");
         let errors = [
             TerminalLaunchValidationError::InvalidProfileId,
             TerminalLaunchValidationError::InvalidProfileRevision,

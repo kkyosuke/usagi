@@ -4,8 +4,6 @@
 //! particular, a connection failure is not permission to mutate local session
 //! state or to allocate a local managed PTY.
 
-#![coverage(off)] // Transport boundary behavior is exercised through injected stream tests.
-
 use std::fmt;
 use std::io::{Read, Write};
 
@@ -395,7 +393,6 @@ pub enum ClientError {
 
 impl ClientError {
     #[must_use]
-    #[coverage(off)]
     pub fn retry_mode(&self) -> RetryMode {
         match self {
             Self::Protocol(error) => error.retry_mode,
@@ -404,7 +401,6 @@ impl ClientError {
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn side_effect(&self) -> SideEffect {
         match self {
             Self::Protocol(error) => error.side_effect,
@@ -413,7 +409,6 @@ impl ClientError {
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::Protocol(error) => error.code,
@@ -423,7 +418,6 @@ impl ClientError {
 }
 
 impl fmt::Display for ClientError {
-    #[coverage(off)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Protocol(error) => write!(f, "{:?}: {}", error.code, error.message),
@@ -465,7 +459,6 @@ impl<S: Read + Write> IpcClient<S> {
     ///
     /// Returns a typed protocol error from the peer, or an unavailable error
     /// when the byte stream cannot complete the handshake.
-    #[coverage(off)]
     pub fn connect(
         mut stream: S,
         client_id: String,
@@ -514,14 +507,12 @@ impl<S: Read + Write> IpcClient<S> {
     /// running binary must replace an older daemon; it is not protocol
     /// compatibility negotiation.
     #[must_use]
-    #[coverage(off)]
     pub fn server_build(&self) -> &BuildIdentity {
         &self.server_build
     }
 }
 
 impl<S: Read + Write> DaemonClient for IpcClient<S> {
-    #[coverage(off)]
     fn request(&mut self, request: DaemonRequest) -> Result<DaemonReply, ClientError> {
         self.next_request += 1;
         // Terminal owners use this correlation ID as part of their input
@@ -636,7 +627,6 @@ pub struct ClientPolicy {
 
 impl ClientPolicy {
     #[must_use]
-    #[coverage(off)]
     pub const fn tui() -> Self {
         Self {
             timeout_ms: 2_000,
@@ -644,7 +634,6 @@ impl ClientPolicy {
         }
     }
     #[must_use]
-    #[coverage(off)]
     pub const fn cli() -> Self {
         Self {
             timeout_ms: 10_000,
@@ -652,7 +641,6 @@ impl ClientPolicy {
         }
     }
     #[must_use]
-    #[coverage(off)]
     pub const fn mcp() -> Self {
         Self {
             timeout_ms: 30_000,
@@ -687,7 +675,6 @@ mod tests {
 
     struct Broken;
     impl Read for Broken {
-        #[coverage(off)]
         fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
             Err(io::Error::other("read failed"))
         }
@@ -706,7 +693,6 @@ mod tests {
             self.output.extend_from_slice(buf);
             Ok(buf.len())
         }
-        #[coverage(off)]
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
@@ -715,7 +701,6 @@ mod tests {
         fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
             Err(io::Error::other("write failed"))
         }
-        #[coverage(off)]
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
@@ -789,6 +774,7 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::Unavailable);
         assert_eq!(error.retry_mode(), RetryMode::Reconnect);
         assert_eq!(error.side_effect(), SideEffect::PartialOrUnknown);
+        assert_eq!(error.to_string(), "Unavailable: daemon is absent");
     }
 
     #[test]
@@ -800,6 +786,14 @@ mod tests {
     #[test]
     fn pr_snapshot_decoder_accepts_only_complete_source_of_truth_payloads() {
         let session = SessionId::new();
+        let identity =
+            crate::domain::pr_inventory::canonicalize("https://github.com/o/r/pull/1").unwrap();
+        let mut inventory = PrInventory::default();
+        inventory.discover([identity]);
+        let projected = PrSnapshot::from((session, inventory));
+        assert_eq!(projected.session_id, session);
+        assert_eq!(projected.revision, 1);
+        assert_eq!(projected.entries.len(), 1);
         let snapshot = PrSnapshot {
             session_id: session,
             revision: 4,
@@ -827,6 +821,7 @@ mod tests {
         let mut client =
             IpcClient::connect(stream, "client".into(), "nonce".into(), ClientPolicy::cli())
                 .unwrap();
+        assert_eq!(client.server_build().version, "test");
         assert_eq!(
             client
                 .request(DaemonRequest::Session {
@@ -853,14 +848,20 @@ mod tests {
         assert_eq!(error.retry_mode(), RetryMode::Manual);
         assert_eq!(error.side_effect(), SideEffect::Applied);
         assert!(error.to_string().contains("owner vanished"));
+        assert_eq!(
+            ClientError::Lifecycle("state changed".into()).to_string(),
+            "Lifecycle: state changed"
+        );
     }
 
     #[test]
-    #[coverage(off)]
     fn client_returns_ok_and_protocol_error_replies() {
-        for reply in [
-            ResponseOutcome::Ok,
-            ResponseOutcome::Error(ProtocolError::new(ErrorCode::Busy, "busy")),
+        for (reply, expect_error) in [
+            (ResponseOutcome::Ok, false),
+            (
+                ResponseOutcome::Error(ProtocolError::new(ErrorCode::Busy, "busy")),
+                true,
+            ),
         ] {
             let stream = scripted(reply, "00000000-0000-4000-8000-000000000001");
             let mut client =
@@ -870,10 +871,16 @@ mod tests {
                 action: TerminalAction::Resync,
                 payload: serde_json::json!({}),
             });
-            match result {
-                Ok(DaemonReply::Ok(value)) => assert_eq!(value["ok"], true),
-                Err(ClientError::Protocol(error)) => assert_eq!(error.code, ErrorCode::Busy),
-                other => panic!("unexpected response: {other:?}"),
+            if expect_error {
+                assert!(matches!(
+                    result,
+                    Err(ClientError::Protocol(error)) if error.code == ErrorCode::Busy
+                ));
+            } else {
+                assert!(matches!(
+                    result,
+                    Ok(DaemonReply::Ok(value)) if value["ok"] == true
+                ));
             }
         }
     }
@@ -987,5 +994,10 @@ mod tests {
             .flush()
             .is_ok()
         );
+        let mut broken = Broken;
+        assert!(broken.read(&mut []).is_err());
+        assert!(broken.flush().is_ok());
+        let mut read_fails = ReadFails { output: vec![] };
+        assert!(read_fails.flush().is_ok());
     }
 }

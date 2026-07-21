@@ -54,7 +54,6 @@ pub struct MemoryFilter {
 /// # Errors
 ///
 /// Returns an error when the store cannot be read or written.
-#[coverage(off)]
 pub fn save(store: &MemoryStore, spec: NewMemory, now: DateTime<Utc>) -> Result<Memory> {
     let name = slugify(&spec.name);
     let lock = store.lock()?;
@@ -80,7 +79,6 @@ pub fn save(store: &MemoryStore, spec: NewMemory, now: DateTime<Utc>) -> Result<
 ///
 /// Returns an error when the name is unsafe or the backing file cannot be read
 /// or parsed.
-#[coverage(off)]
 pub fn get(store: &MemoryStore, name: &str) -> Result<Option<Memory>> {
     store.read(name)
 }
@@ -91,7 +89,6 @@ pub fn get(store: &MemoryStore, name: &str) -> Result<Option<Memory>> {
 ///
 /// Returns an error when the index cannot be read and the markdown source cannot
 /// be rescanned.
-#[coverage(off)]
 pub fn list(store: &MemoryStore) -> Result<Vec<MemorySummary>> {
     store.summaries()
 }
@@ -179,7 +176,6 @@ pub fn search(
 ///
 /// Returns an error when the name is unsafe, the lock cannot be taken, or the
 /// file cannot be removed.
-#[coverage(off)]
 pub fn delete(store: &MemoryStore, name: &str) -> Result<bool> {
     store.remove(name)
 }

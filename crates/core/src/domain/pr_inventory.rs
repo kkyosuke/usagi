@@ -18,7 +18,6 @@ impl PrIdentity {
 
 /// Parses one complete HTTP(S) URL into a GitHub PR identity.
 #[must_use]
-#[coverage(off)] // Defensive URL syntax rejection is exhaustively unit-tested; LLVM region accounting for chained short-circuits is not useful coverage signal.
 pub fn canonicalize(candidate: &str) -> Option<PrIdentity> {
     if candidate.bytes().any(|byte| byte.is_ascii_control()) || !valid_percent_encoding(candidate) {
         return None;
@@ -58,7 +57,6 @@ pub fn canonicalize(candidate: &str) -> Option<PrIdentity> {
 
 /// Extracts canonical PRs from one complete byte sequence.
 #[must_use]
-#[coverage(off)] // Scanner mechanics are covered through the canonicalizer contract above.
 pub fn extract(bytes: &[u8]) -> Vec<PrIdentity> {
     let mut identities = Vec::new();
     let mut start = 0;
@@ -101,7 +99,6 @@ pub fn extract(bytes: &[u8]) -> Vec<PrIdentity> {
     identities
 }
 
-#[coverage(off)] // Called only by the excluded defensive parser.
 fn valid_percent_encoding(value: &str) -> bool {
     let bytes = value.as_bytes();
     let mut index = 0;
@@ -121,7 +118,6 @@ fn valid_percent_encoding(value: &str) -> bool {
     true
 }
 
-#[coverage(off)] // Called only by the excluded defensive parser.
 fn valid_path_part(value: &str) -> bool {
     !value.is_empty()
         && value
@@ -271,6 +267,7 @@ mod tests {
             "https://github.com/o/r/pull/0",
             "https://github.com/o/r/pull/999999999999999999999999",
             "https://github.com/o%zz/r/pull/1",
+            "https://github.com/o/r/issues/1",
         ] {
             assert!(canonicalize(value).is_none(), "{value}");
         }

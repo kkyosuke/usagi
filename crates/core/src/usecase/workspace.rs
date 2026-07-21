@@ -49,7 +49,6 @@ use crate::infrastructure::store::workspace::Storage;
 ///
 /// Returns an error when the registry lock cannot be acquired or the registry
 /// cannot be read or written.
-#[coverage(off)]
 pub fn open(storage: &Storage, path: &Path, now: DateTime<Utc>) -> Result<Workspace> {
     register_resolved(storage, path, None, now)
 }
@@ -71,7 +70,6 @@ pub fn open(storage: &Storage, path: &Path, now: DateTime<Utc>) -> Result<Worksp
 ///
 /// Returns an error when the registry lock cannot be acquired or the registry
 /// cannot be read or written.
-#[coverage(off)]
 pub fn register(
     storage: &Storage,
     path: &Path,
@@ -83,7 +81,6 @@ pub fn register(
     register_resolved(storage, path, name, now)
 }
 
-#[coverage(off)]
 fn register_resolved(
     storage: &Storage,
     path: &Path,
@@ -110,7 +107,6 @@ fn register_resolved(
 ///
 /// Returns an error when the registry lock cannot be acquired or the registry
 /// cannot be read or written.
-#[coverage(off)]
 pub fn remove(storage: &Storage, paths: &[std::path::PathBuf]) -> Result<Vec<Workspace>> {
     if paths.is_empty() {
         return Ok(Vec::new());
@@ -143,7 +139,6 @@ pub fn remove(storage: &Storage, paths: &[std::path::PathBuf]) -> Result<Vec<Wor
 ///
 /// Returns an error when the global workspace registry cannot be read. Errors
 /// confined to an individual registered workspace are degraded to zero counts.
-#[coverage(off)]
 pub fn recent(storage: &Storage) -> Result<Vec<Recent>> {
     let mut workspaces = storage.load_workspaces()?;
     workspaces.sort_by_key(|workspace| std::cmp::Reverse(workspace.updated_at));
@@ -254,7 +249,6 @@ pub fn preflight_new_workspace(
     }
 }
 
-#[coverage(off)]
 fn resolve_or_register(
     workspaces: &mut Vec<Workspace>,
     path: &Path,
@@ -292,7 +286,6 @@ fn resolve_or_register(
     (workspace, persist)
 }
 
-#[coverage(off)]
 fn available_name(workspaces: &[Workspace], base: &str) -> String {
     let is_taken = |candidate: &str| {
         workspaces
@@ -313,7 +306,6 @@ fn available_name(workspaces: &[Workspace], base: &str) -> String {
     }
 }
 
-#[coverage(off)]
 fn overview_for(workspace: Workspace) -> WorkspaceOverview {
     let state = WorkspaceStateStore::new(&workspace.path)
         .load()
@@ -780,5 +772,12 @@ mod tests {
             assert!(!message.is_empty());
             assert!(!message.contains('\n'));
         }
+    }
+
+    #[test]
+    fn remove_with_no_paths_is_a_storage_free_noop() {
+        let (_tmp, storage) = storage();
+        assert!(remove(&storage, &[]).unwrap().is_empty());
+        assert!(!storage.dir().exists());
     }
 }

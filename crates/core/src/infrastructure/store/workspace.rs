@@ -48,20 +48,17 @@ impl Storage {
     ///
     /// Returns an error when the data directory cannot be determined
     /// (see [`data_dir`]).
-    #[coverage(off)]
     pub fn open_default() -> Result<Self> {
         Ok(Self::new(data_dir()?))
     }
 
     /// Open storage rooted at an explicit directory (mainly for tests).
     #[must_use]
-    #[coverage(off)]
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -80,7 +77,6 @@ impl Storage {
     ///
     /// Returns an error when the lock cannot be acquired (see
     /// [`StoreLock::acquire`]).
-    #[coverage(off)]
     pub fn lock(&self) -> Result<StoreLock> {
         StoreLock::acquire(&self.dir)
     }
@@ -90,7 +86,6 @@ impl Storage {
     /// # Errors
     ///
     /// Returns an error when `workspaces.json` exists but cannot be read or parsed.
-    #[coverage(off)]
     pub fn load_workspaces(&self) -> Result<Vec<Workspace>> {
         let file: Option<WorkspacesOwned> =
             json_file::read_versioned(&self.dir.join(WORKSPACES_FILE))?;
@@ -103,7 +98,6 @@ impl Storage {
     ///
     /// Returns an error when the data directory cannot be created or the file
     /// cannot be written.
-    #[coverage(off)]
     pub fn save_workspaces(&self, workspaces: &[Workspace]) -> Result<()> {
         json_file::write_versioned(
             &self.dir,
@@ -140,7 +134,6 @@ impl Storage {
     /// # Errors
     ///
     /// Returns an error when the registry cannot be read or written.
-    #[coverage(off)]
     pub fn touch_workspace(
         &self,
         name: &str,

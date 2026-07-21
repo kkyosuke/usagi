@@ -38,19 +38,16 @@ pub struct SupervisorStore {
 }
 impl SupervisorStore {
     #[must_use]
-    #[coverage(off)]
     pub fn new(daemon_state_dir: &Path) -> Self {
         Self {
             dir: daemon_state_dir.join("supervisor-runs"),
         }
     }
     #[must_use]
-    #[coverage(off)]
     pub fn snapshot_path(&self, id: SupervisorRunId) -> PathBuf {
         self.dir.join(format!("{id}{SNAPSHOT_SUFFIX}"))
     }
     #[must_use]
-    #[coverage(off)]
     pub fn journal_path(&self, id: SupervisorRunId) -> PathBuf {
         self.dir.join(format!("{id}{JOURNAL_SUFFIX}"))
     }
@@ -59,7 +56,6 @@ impl SupervisorStore {
     /// # Errors
     ///
     /// Returns an error when the state directory or snapshot cannot be written.
-    #[coverage(off)]
     pub fn initialize(&self, run: &SupervisorRun) -> Result<()> {
         json_file::write_atomic(&self.dir, &self.snapshot_path(run.supervisor_run_id), run)
     }
@@ -69,7 +65,6 @@ impl SupervisorStore {
     /// # Errors
     ///
     /// Returns an error when a snapshot or a non-final journal record is corrupt.
-    #[coverage(off)]
     pub fn load(&self, id: SupervisorRunId) -> Result<Option<SupervisorRun>> {
         let Some(mut run) = json_file::read(&self.snapshot_path(id))? else {
             return Ok(None);
@@ -86,7 +81,6 @@ impl SupervisorStore {
     ///
     /// Returns an error for a stale revision, reducer rejection, or durable IO
     /// failure. The snapshot is unchanged when the event cannot be accepted.
-    #[coverage(off)]
     pub fn apply(
         &self,
         id: SupervisorRunId,
@@ -116,7 +110,6 @@ impl SupervisorStore {
     /// # Errors
     ///
     /// Returns an error when the durable state cannot be read or replayed.
-    #[coverage(off)]
     pub fn query(&self, id: SupervisorRunId) -> Result<Option<SupervisorRunQuery>> {
         Ok(self.load(id)?.map(|run| run.query()))
     }
@@ -126,7 +119,6 @@ impl SupervisorStore {
     /// # Errors
     ///
     /// Returns an error when the state directory or an aggregate is corrupt.
-    #[coverage(off)]
     pub fn runs(&self) -> Result<Vec<SupervisorRun>> {
         let entries = match fs::read_dir(&self.dir) {
             Ok(entries) => entries,
@@ -158,7 +150,6 @@ impl SupervisorStore {
     /// # Errors
     ///
     /// Returns an error when the event journal cannot be read.
-    #[coverage(off)]
     pub fn events(
         &self,
         id: SupervisorRunId,
@@ -182,7 +173,6 @@ impl SupervisorStore {
             .map_or(cursor.next_sequence, |event| event.sequence + 1);
         Ok((selected, EventCursor { next_sequence }))
     }
-    #[coverage(off)]
     fn append(&self, id: SupervisorRunId, event: &SupervisorEvent) -> Result<()> {
         fs::create_dir_all(&self.dir).context("failed to create supervisor state directory")?;
         let mut bytes = serde_json::to_vec(event)?;
@@ -195,7 +185,6 @@ impl SupervisorStore {
         file.sync_all()?;
         Ok(())
     }
-    #[coverage(off)]
     fn read_journal(&self, id: SupervisorRunId) -> Result<Vec<SupervisorEvent>> {
         let path = self.journal_path(id);
         let file = match fs::File::open(&path) {
@@ -277,6 +266,111 @@ mod tests {
         assert_eq!(
             store.load(id).unwrap().unwrap().query().state,
             SupervisorRunState::Running
+        );
+    }
+
+    #[test]
+    fn query_runs_and_corrupt_journal_paths_are_observable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        let missing = SupervisorRunId::new();
+        assert!(store.query(missing).unwrap().is_none());
+        assert!(store.runs().unwrap().is_empty());
+        assert!(
+            store
+                .apply(missing, 0, &event(1))
+                .unwrap_err()
+                .to_string()
+                .contains("does not exist")
+        );
+
+        let run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let id = run.supervisor_run_id;
+        store.initialize(&run).unwrap();
+        let another = SupervisorRun::new(
+            "caller".into(),
+            "another".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        store.initialize(&another).unwrap();
+        assert_eq!(store.query(id).unwrap().unwrap().supervisor_run_id, id);
+        fs::write(store.dir.join("ignored.txt"), "ignored").unwrap();
+        assert_eq!(store.runs().unwrap().len(), 2);
+
+        fs::write(store.journal_path(id), "{broken\n{also-broken\n").unwrap();
+        assert!(
+            store
+                .load(id)
+                .unwrap_err()
+                .to_string()
+                .contains("corrupt supervisor event journal")
+        );
+        fs::write(store.journal_path(id), "{final-torn\n").unwrap();
+        assert_eq!(store.load(id).unwrap().unwrap().state_revision, 0);
+
+        fs::remove_file(store.journal_path(id)).unwrap();
+        fs::create_dir(store.journal_path(id)).unwrap();
+        assert!(store.load(id).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            fs::remove_dir(store.journal_path(id)).unwrap();
+            symlink(store.journal_path(id), store.journal_path(id)).unwrap();
+            assert!(
+                store
+                    .load(id)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("failed to open supervisor event journal")
+            );
+        }
+    }
+
+    #[test]
+    fn store_io_failures_do_not_masquerade_as_applied_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        let run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let id = run.supervisor_run_id;
+        store.initialize(&run).unwrap();
+        fs::create_dir(store.journal_path(id)).unwrap();
+        assert!(store.apply(id, 0, &event(1)).is_err());
+        assert!(store.load(id).is_err());
+
+        let blocked = tempfile::tempdir().unwrap();
+        fs::write(blocked.path().join("supervisor-runs"), "not a directory").unwrap();
+        assert!(SupervisorStore::new(blocked.path()).runs().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disappearing_snapshot_is_reported_deterministically() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        fs::create_dir_all(&store.dir).unwrap();
+        let name = format!("{}{}", SupervisorRunId::new(), SNAPSHOT_SUFFIX);
+        symlink(store.dir.join("missing-target"), store.dir.join(name)).unwrap();
+        assert!(
+            store
+                .runs()
+                .unwrap_err()
+                .to_string()
+                .contains("snapshot disappeared")
         );
     }
 }

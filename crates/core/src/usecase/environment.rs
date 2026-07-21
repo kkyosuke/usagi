@@ -21,7 +21,6 @@ use crate::usecase::note::Target;
 
 /// The environment map for `target` within `state`, or `None` when a named
 /// session does not exist. The root always resolves.
-#[coverage(off)]
 fn environment_of<'a>(
     state: &'a WorkspaceState,
     target: Target<'_>,
@@ -37,7 +36,6 @@ fn environment_of<'a>(
 }
 
 /// Mutable counterpart of [`environment_of`].
-#[coverage(off)]
 fn environment_of_mut<'a>(
     state: &'a mut WorkspaceState,
     target: Target<'_>,
@@ -58,7 +56,6 @@ fn environment_of_mut<'a>(
 /// # Errors
 ///
 /// Returns an error when `state.json` cannot be read or parsed.
-#[coverage(off)]
 pub fn environment(
     store: &WorkspaceStateStore,
     target: Target<'_>,
@@ -80,7 +77,6 @@ pub fn environment(
 /// # Errors
 ///
 /// Returns an error when the store cannot be locked, read, or written.
-#[coverage(off)]
 pub fn set_environment(
     store: &WorkspaceStateStore,
     target: Target<'_>,

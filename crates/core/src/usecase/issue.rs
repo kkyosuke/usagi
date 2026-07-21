@@ -149,7 +149,6 @@ pub fn ensure_write_allowed(repo_root: &Path) -> Result<()> {
 /// # Errors
 ///
 /// Returns an error when the store cannot allocate a number or write the issue.
-#[coverage(off)]
 pub fn create(store: &IssueStore, spec: NewIssue, now: DateTime<Utc>) -> Result<Issue> {
     let lock = store.lock()?;
     if let Some(existing) = store
@@ -199,7 +198,6 @@ fn matches_new_issue_source(issue: &Issue, spec: &NewIssue) -> bool {
 /// # Errors
 ///
 /// Returns an error when the backing file cannot be read or parsed.
-#[coverage(off)]
 pub fn get(store: &IssueStore, number: u32) -> Result<Option<Issue>> {
     store.read(number)
 }
@@ -210,7 +208,6 @@ pub fn get(store: &IssueStore, number: u32) -> Result<Option<Issue>> {
 ///
 /// Returns an error when the index cannot be read and the markdown source cannot
 /// be rescanned.
-#[coverage(off)]
 pub fn list(store: &IssueStore) -> Result<Vec<IssueSummary>> {
     store.summaries()
 }
@@ -338,7 +335,6 @@ pub fn to_prompt(issue: &Issue) -> String {
 /// # Errors
 ///
 /// Returns an error when the issue cannot be read or the write fails.
-#[coverage(off)]
 pub fn update(
     store: &IssueStore,
     number: u32,
@@ -386,7 +382,6 @@ pub fn update(
 /// # Errors
 ///
 /// Returns an error when the lock cannot be taken or a file cannot be removed.
-#[coverage(off)]
 pub fn delete(store: &IssueStore, number: u32) -> Result<bool> {
     store.remove(number)
 }
