@@ -130,21 +130,24 @@ worktree を走査し、番号を予約するため、別 process・別 worktree
 
 ## `index.json`（派生キャッシュ）
 
-一覧・検索を速くするための、各 issue のメタデータ（本文を除く）のキャッシュです。`version` を持ち、markdown ファイルが常に **正**。書き込み・削除では該当 issue のエントリだけを差し替える**増分更新**で、markdown 全件の読み直しは行いません（ロック保持時間を issue 件数に比例させないため）。`index.json` が無い／壊れている場合のみ markdown 群から自動再構築されるため、欠落しても整合性は損なわれません（だから git 管理外でよい）。再生成可能なキャッシュなので、書き込みはアトミック（一時ファイル + `rename`）だが fsync は行いません。
+一覧・検索を速くするための、各 issue のメタデータ（本文を除く）のキャッシュです。markdown ファイルが常に
+**正**であり、書き込み・削除では該当 issue のエントリだけを差し替えます。再生成可能なキャッシュなので、
+`index.json` の書き込みはアトミック（一時ファイル + `rename`）だが fsync は行いません。
 
-`index.json` は usagi 自身の書き込み・削除でしか更新されないため、**git pull・ブランチ選択・セッションブランチのマージ・手編集**で markdown が変わると取り残されます。そこで一覧（`summaries`）はキャッシュを信頼する前に **鮮度を安価に検証**します。markdown ファイルを 1 つも読まず、`index.json` の更新時刻（mtime）と issue ファイル群の `stat` だけで判定します。
+`source_fingerprint` は、辞書順に並べた全 source Markdown の相対ファイル名と全 bytes を長さ付きで入力した SHA-256
+です。したがって、件数が同じ rename・置換、mtime を保存した編集、粗い時刻粒度で同時刻になった編集も stale として
+検知します。一覧（`summaries`）は store の `.lock` を取得してから現在の fingerprint と cache を比較し、相違時は同じ
+lock 区間で source scan → `index.json` publish まで完了します。並行 writer は rebuild 後に実行され、その mutation を
+反映した derived state を publish するため、古い snapshot が新しい source の cache を上書きしません。
 
-| 判定 | 意味 | 挙動 |
-|---|---|---|
-| ファイル数 ≠ キャッシュのエントリ数 | 外部でファイルが追加／削除された | 再構築 |
-| いずれかの issue ファイルが `index.json` より新しい | 外部で編集された | 再構築 |
-| 上記どちらも該当しない | キャッシュは最新 | そのまま信頼（stat のみの fast path） |
-
-usagi 自身の書き込みは markdown → `index.json` の順で行うため、通常運用では `index.json` が常に issue ファイル以上に新しく、fast path に乗ります（余計な再構築を誘発しません）。mtime が同一刻みに収まる同時編集だけは検知できませんが、それは usagi 自身の一連の書き込み（同時にキャッシュも更新する）でしか起きず、この検証が守る外部変更には該当しません。採番の `max_number` も同じ理由でキャッシュを信頼せずファイル名から導出しています。
+`source_fingerprint` または対応する `version` がない legacy cache、未知の version、JSON として壊れた cache は stale と
+して lock 下で再生成します。この移行で source Markdown は変更しません。採番の `max_number` も cache を信頼せず
+ファイル名から導出します。
 
 ```jsonc
 {
   "version": 1,
+  "source_fingerprint": "sha256:0123456789abcdef...",
   "issues": [
     {
       "number": 1,
