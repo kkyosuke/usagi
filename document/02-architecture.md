@@ -202,6 +202,20 @@ issue / memory store の永続化契約は本節を正本とする。source of t
 `MEMORY.md` は source から破棄・再生成できる derived file である。derived file のための
 durable source migration は行わない。
 
+`index.json` の schema version は `2` で、sorted source file name（key identity）と source
+Markdown の全 byte を長さ区切りで SHA-256 に入力した `source_fingerprint` を保持する。list / search
+は current source set を同じ方法で fingerprint し、一致した index だけを採用する。このため rename、
+同数の delete+add、mtime を保存した変更、粗い timestamp、same-size edit でも stale cache を返さない。
+version が旧版・未知版、fingerprint が欠落・形式不正・未知 algorithm、または内容が不一致なら source
+を走査して index を一度 rebuild する。rebuild は source Markdown を変更しない。
+
+freshness check の cost は source file 数を `N`、総 byte 数を `B` とすると、directory scan と filename
+sort が `O(N log N)`、read/hash が `O(B)`、作業 memory が 16 KiB buffer と path list の `O(N)` である。
+fast path は全 source byte を各 1 回読む一方、frontmatter の parse と summary 再構築、derived file write
+を省略する。この read/hash が cache hit の契約であり、mtime や file size だけを freshness identity として
+利用しない。source mutation 後は一部 summary の patch ではなく全 source を走査して fingerprint と summary
+を再生成し、外部編集された sibling の stale summary に新しい fingerprint を付けない。
+
 mutation は store lock 下で次の順序に分ける。
 
 ```text

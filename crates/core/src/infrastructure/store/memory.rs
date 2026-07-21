@@ -30,12 +30,15 @@ const TOC_FILE: &str = "MEMORY.md";
 
 #[derive(Debug, Deserialize)]
 struct IndexFile {
+    version: u32,
+    source_fingerprint: String,
     memories: Vec<MemorySummary>,
 }
 
 #[derive(Serialize)]
 struct IndexFileRef<'a> {
     version: u32,
+    source_fingerprint: &'a str,
     memories: &'a [MemorySummary],
 }
 
@@ -66,14 +69,6 @@ impl MarkdownEntry for MemoryEntry {
         memory_file_name(&entry.name)
     }
 
-    fn key(entry: &Memory) -> String {
-        entry.name.clone()
-    }
-
-    fn key_from_summary(summary: &MemorySummary) -> String {
-        summary.name.clone()
-    }
-
     fn key_from_path(path: &Path) -> Option<String> {
         path.file_stem()
             .and_then(|stem| stem.to_str())
@@ -88,13 +83,17 @@ impl MarkdownEntry for MemoryEntry {
         entries.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
-    fn summaries_from_index(index: IndexFile) -> Vec<MemorySummary> {
-        index.memories
+    fn index_parts(index: IndexFile) -> (u32, String, Vec<MemorySummary>) {
+        (index.version, index.source_fingerprint, index.memories)
     }
 
-    fn index_file_ref(summaries: &[MemorySummary]) -> IndexFileRef<'_> {
+    fn index_file_ref<'a>(
+        summaries: &'a [MemorySummary],
+        source_fingerprint: &'a str,
+    ) -> IndexFileRef<'a> {
         IndexFileRef {
-            version: crate::infrastructure::persistence::json_file::FILE_FORMAT_VERSION,
+            version: crate::infrastructure::persistence::markdown_store::INDEX_FORMAT_VERSION,
+            source_fingerprint,
             memories: summaries,
         }
     }
@@ -445,7 +444,8 @@ mod tests {
         store.write(&memory("a-fact", "A fact")).unwrap();
 
         let index = fs::read_to_string(store.index_path()).unwrap();
-        assert!(index.contains("\"version\": 1"));
+        assert!(index.contains("\"version\": 2"));
+        assert!(index.contains("\"source_fingerprint\": \"sha256:"));
         assert!(index.contains("\"name\": \"a-fact\""));
 
         let toc = fs::read_to_string(store.toc_path()).unwrap();
@@ -567,7 +567,7 @@ mod tests {
         let summaries = store.summaries().unwrap();
         assert_eq!(summaries.len(), 1);
         let text = fs::read_to_string(store.index_path()).unwrap();
-        assert!(text.contains("\"version\": 1"));
+        assert!(text.contains("\"version\": 2"));
 
         let entry = fs::read_dir(
             crate::infrastructure::paths::data_dir()
@@ -786,6 +786,102 @@ mod tests {
         set_mtime(&path, 2_000);
 
         assert_eq!(store.summaries().unwrap()[0].title, "Updated title");
+    }
+
+    #[test]
+    fn summaries_trust_a_fresh_memory_index_without_parsing_markdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(tmp.path());
+        store.write(&memory("one", "One")).unwrap();
+        let mut cached = memory("one", "One").summary();
+        cached.title = "Cached title".to_string();
+        store.inner.write_index(&[cached]).unwrap();
+
+        assert_eq!(store.summaries().unwrap()[0].title, "Cached title");
+    }
+
+    #[test]
+    fn summaries_rebuild_after_same_count_memory_rename() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(tmp.path());
+        store.write(&memory("one", "One")).unwrap();
+        let mut cached = memory("one", "One").summary();
+        cached.title = "Stale cache".to_string();
+        store.inner.write_index(&[cached]).unwrap();
+        fs::rename(store.dir().join("one.md"), store.dir().join("renamed.md")).unwrap();
+
+        let summary = &store.summaries().unwrap()[0];
+        assert_eq!(summary.name, "one");
+        assert_eq!(summary.title, "One");
+    }
+
+    #[test]
+    fn summaries_rebuild_after_same_count_memory_delete_and_add() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(tmp.path());
+        store.write(&memory("one", "One")).unwrap();
+        fs::remove_file(store.dir().join("one.md")).unwrap();
+        fs::write(
+            store.dir().join("two.md"),
+            memory("two", "Two").to_markdown(),
+        )
+        .unwrap();
+
+        assert_eq!(store.summaries().unwrap()[0].name, "two");
+    }
+
+    #[test]
+    fn summaries_rebuild_after_same_size_memory_edit_with_coarse_mtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(tmp.path());
+        store.write(&memory("one", "One")).unwrap();
+        let path = store.dir().join("one.md");
+        set_mtime(&path, 1_000);
+        let original_len = fs::metadata(&path).unwrap().len();
+
+        fs::write(&path, memory("one", "Two").to_markdown()).unwrap();
+        set_mtime(&path, 1_000);
+        set_mtime(&store.index_path(), 1_000);
+
+        assert_eq!(fs::metadata(&path).unwrap().len(), original_len);
+        assert_eq!(store.summaries().unwrap()[0].title, "Two");
+    }
+
+    #[test]
+    fn summaries_rebuild_after_memory_edit_with_preserved_older_mtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(tmp.path());
+        store.write(&memory("one", "One")).unwrap();
+        let path = store.dir().join("one.md");
+
+        fs::write(&path, memory("one", "Updated title").to_markdown()).unwrap();
+        set_mtime(&path, 1_000);
+        set_mtime(&store.index_path(), 2_000);
+
+        assert_eq!(store.summaries().unwrap()[0].title, "Updated title");
+    }
+
+    #[test]
+    fn summaries_rebuild_legacy_and_unknown_memory_fingerprint_metadata() {
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var(crate::infrastructure::paths::DATA_DIR_ENV, home.path());
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(tmp.path());
+        store.write(&memory("one", "One")).unwrap();
+
+        for metadata in [
+            r#"{"version":1,"memories":[]}"#,
+            r#"{"version":2,"source_fingerprint":"md5:unknown","memories":[]}"#,
+        ] {
+            fs::write(store.index_path(), metadata).unwrap();
+            assert_eq!(store.summaries().unwrap()[0].title, "One");
+        }
+        unsafe {
+            std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
+        }
     }
 
     #[test]

@@ -7,11 +7,13 @@
 //! derived artifact such as memory's `MEMORY.md` table of contents.
 
 use std::fs;
+use std::io::Read;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Serialize, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
 
 use super::json_file;
 use crate::infrastructure::error_log::ErrorLog;
@@ -21,6 +23,8 @@ use crate::infrastructure::store::{DerivedState, MutationOutcome};
 /// Kept out of git by usagi's ignore rules.
 pub(crate) const INDEX_FILE: &str = "index.json";
 const DIRTY_FILE: &str = ".derived-dirty";
+pub(crate) const INDEX_FORMAT_VERSION: u32 = 2;
+const FINGERPRINT_ALGORITHM: &str = "sha256";
 
 /// Store-specific behavior for one kind of markdown entry.
 pub(crate) trait MarkdownEntry: Sync {
@@ -39,13 +43,14 @@ pub(crate) trait MarkdownEntry: Sync {
     fn parse_markdown(text: &str) -> Result<Self::Entry>;
     fn to_markdown(entry: &Self::Entry) -> String;
     fn file_name(entry: &Self::Entry) -> Result<String>;
-    fn key(entry: &Self::Entry) -> Self::Key;
-    fn key_from_summary(summary: &Self::Summary) -> Self::Key;
     fn key_from_path(path: &Path) -> Option<Self::Key>;
     fn summary(entry: &Self::Entry) -> Self::Summary;
     fn sort_entries(entries: &mut Vec<Self::Entry>);
-    fn summaries_from_index(index: Self::IndexFile) -> Vec<Self::Summary>;
-    fn index_file_ref(summaries: &[Self::Summary]) -> Self::IndexFileRef<'_>;
+    fn index_parts(index: Self::IndexFile) -> (u32, String, Vec<Self::Summary>);
+    fn index_file_ref<'a>(
+        summaries: &'a [Self::Summary],
+        source_fingerprint: &'a str,
+    ) -> Self::IndexFileRef<'a>;
 
     /// Write extra derived files after `index.json`. Stores without such files
     /// keep only the cache.
@@ -55,6 +60,8 @@ pub(crate) trait MarkdownEntry: Sync {
 }
 
 struct MarkdownIndex<E: MarkdownEntry> {
+    version: u32,
+    source_fingerprint: String,
     summaries: Vec<E::Summary>,
 }
 
@@ -147,6 +154,45 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
         Ok(files)
     }
 
+    /// Compute a deterministic identity for the complete source set.
+    ///
+    /// Each entry contributes its UTF-8 file name and exact bytes, both framed
+    /// with fixed-width lengths. Sorting names makes the result independent of
+    /// directory iteration order. Reading bytes (rather than metadata) catches
+    /// preserved/coarse mtimes and same-size edits.
+    fn source_fingerprint(mut files: Vec<PathBuf>) -> Result<String> {
+        files.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+        let mut hasher = Sha256::new();
+        for path in files {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .with_context(|| format!("source filename is not UTF-8: {}", path.display()))?;
+            let name = name.as_bytes();
+            hasher.update((name.len() as u64).to_be_bytes());
+            hasher.update(name);
+
+            let mut file = fs::File::open(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?;
+            let length = file
+                .metadata()
+                .with_context(|| format!("failed to inspect {}", path.display()))?
+                .len();
+            hasher.update(length.to_be_bytes());
+            let mut buffer = [0_u8; 16 * 1024];
+            loop {
+                let read = file
+                    .read(&mut buffer)
+                    .with_context(|| format!("failed to read {}", path.display()))?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+        }
+        Ok(format!("{FINGERPRINT_ALGORITHM}:{:x}", hasher.finalize()))
+    }
+
     pub(crate) fn files_for_key(&self, key: &E::Key) -> Result<Vec<PathBuf>> {
         Ok(self
             .entry_files()?
@@ -222,32 +268,16 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
         }
     }
 
-    /// Patch the derived cache/extra files after `entry` was written. Falls back
-    /// to a full rebuild when the cache is missing or unreadable.
-    pub(crate) fn reindex_after_write(&self, entry: &E::Entry) -> Result<()> {
-        let Some(mut summaries) = self.load_index()?.map(|index| index.summaries) else {
-            return self.rebuild_derived().map(|_| ());
-        };
-        let key = E::key(entry);
-        let summary = E::summary(entry);
-        match summaries.binary_search_by(|s| E::key_from_summary(s).cmp(&key)) {
-            Ok(pos) => summaries[pos] = summary,
-            Err(pos) => summaries.insert(pos, summary),
-        }
-        self.write_derived(&summaries)
+    /// Refresh derived files after a source write. Re-scan all sources so an
+    /// unrelated manual edit cannot be hidden behind a newly stamped identity.
+    pub(crate) fn reindex_after_write(&self, _entry: &E::Entry) -> Result<()> {
+        self.rebuild_derived().map(|_| ())
     }
 
-    /// Patch the derived cache/extra files after `key` was removed. Falls back to
-    /// a full rebuild when the cache is missing or unreadable.
-    pub(crate) fn reindex_after_remove(&self, key: &E::Key) -> Result<()> {
-        let Some(mut summaries) = self.load_index()?.map(|index| index.summaries) else {
-            return self.rebuild_derived().map(|_| ());
-        };
-        if let Ok(pos) = summaries.binary_search_by(|s| E::key_from_summary(s).cmp(key)) {
-            summaries.remove(pos);
-            self.write_derived(&summaries)?;
-        }
-        Ok(())
+    /// Refresh derived files after a source removal under the same contract as
+    /// [`reindex_after_write`](Self::reindex_after_write).
+    pub(crate) fn reindex_after_remove(&self, _key: &E::Key) -> Result<()> {
+        self.rebuild_derived().map(|_| ())
     }
 
     /// Metadata summaries for every entry. The index is used only when it is
@@ -274,7 +304,8 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     pub(crate) fn write_index(&self, summaries: &[E::Summary]) -> Result<()> {
         fs::create_dir_all(&self.dir)
             .context(format!("failed to create {}", self.dir.display()))?;
-        let index = E::index_file_ref(summaries);
+        let fingerprint = Self::source_fingerprint(self.entry_files()?)?;
+        let index = E::index_file_ref(summaries, &fingerprint);
         json_file::write_atomic_cache(&self.dir, &self.index_path(), &index)
     }
 
@@ -289,26 +320,18 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     }
 
     /// Load `index.json` only when it is fresh relative to the markdown files.
-    /// A missing, unreadable, corrupt, count-mismatched, or older cache returns
-    /// `None` so callers rebuild from the markdown source of truth.
+    /// A missing, unreadable, corrupt, legacy, unknown-version, or identity-
+    /// mismatched cache returns `None` so callers rebuild from markdown.
     fn load_fresh_index(&self) -> Result<Option<MarkdownIndex<E>>> {
-        let Ok(index_mtime) = fs::metadata(self.index_path()).and_then(|m| m.modified()) else {
-            return Ok(None);
-        };
         let Some(index) = self.load_index()? else {
             return Ok(None);
         };
         let files = self.entry_files()?;
-        if files.len() != index.summaries.len() {
+        if index.version != INDEX_FORMAT_VERSION
+            || !valid_fingerprint(&index.source_fingerprint)
+            || Self::source_fingerprint(files)? != index.source_fingerprint
+        {
             return Ok(None);
-        }
-        for path in &files {
-            let fresh = fs::metadata(path)
-                .and_then(|m| m.modified())
-                .is_ok_and(|mtime| mtime <= index_mtime);
-            if !fresh {
-                return Ok(None);
-            }
         }
         Ok(Some(index))
     }
@@ -324,9 +347,14 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
             }
         };
         match serde_json::from_str::<E::IndexFile>(&text) {
-            Ok(index) => Ok(Some(MarkdownIndex {
-                summaries: E::summaries_from_index(index),
-            })),
+            Ok(index) => {
+                let (version, source_fingerprint, summaries) = E::index_parts(index);
+                Ok(Some(MarkdownIndex {
+                    version,
+                    source_fingerprint,
+                    summaries,
+                }))
+            }
             Err(e) => {
                 ErrorLog::record(&format!(
                     "{} index {} is corrupt; rebuilding from markdown: {e}",
@@ -337,4 +365,10 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
             }
         }
     }
+}
+
+fn valid_fingerprint(fingerprint: &str) -> bool {
+    fingerprint.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
 }
