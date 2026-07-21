@@ -36,7 +36,7 @@ pub struct GenerationRecord {
 /// The current locator and all retained generation records.  Persist this as
 /// one compare-and-swap value; publishing the locator separately would allow
 /// two active control writers after a crash.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct GenerationSnapshot {
     pub current: Option<DaemonGeneration>,
     pub records: Vec<GenerationRecord>,
@@ -136,7 +136,37 @@ impl GenerationCoordinator {
         {
             return Err(GenerationError::NotActive);
         }
+        let active_records = coordinator
+            .records
+            .values()
+            .filter(|record| record.role == GenerationRole::Active)
+            .count();
+        if active_records != usize::from(coordinator.current.is_some()) {
+            return Err(GenerationError::NotActive);
+        }
         for terminal in snapshot.terminals {
+            let Some(owner) = coordinator
+                .records
+                .get(&terminal.terminal.daemon_generation.as_str())
+            else {
+                return Err(GenerationError::UnknownGeneration);
+            };
+            if terminal.state == TerminalState::Available
+                && !matches!(
+                    owner.role,
+                    GenerationRole::Active | GenerationRole::Draining
+                )
+            {
+                return Err(GenerationError::TerminalUnavailable);
+            }
+            if terminal.process.is_none()
+                && matches!(
+                    terminal.state,
+                    TerminalState::Available | TerminalState::OrphanRunning
+                )
+            {
+                return Err(GenerationError::TerminalUnavailable);
+            }
             let key = terminal_key(&terminal.terminal);
             if coordinator.terminals.insert(key, terminal).is_some() {
                 return Err(GenerationError::DuplicateGeneration);
@@ -153,6 +183,28 @@ impl GenerationCoordinator {
             records: self.records.values().cloned().collect(),
             terminals: self.terminals.values().cloned().collect(),
         }
+    }
+
+    /// Returns the only generation allowed to admit control work.
+    #[must_use]
+    pub fn current(&self) -> Option<DaemonGeneration> {
+        self.current
+    }
+
+    /// Verifies exact terminal ownership without exposing or guessing an
+    /// endpoint. Agent runtimes use this before every local PTY effect.
+    pub fn require_terminal(&self, terminal: &TerminalRef) -> Result<(), GenerationError> {
+        self.terminal_endpoint(terminal).map(|_| ())
+    }
+
+    /// Returns whether the exact terminal identity belongs to this authority,
+    /// including retained exited/lost records. Routing uses this to return a
+    /// fenced stale result instead of falling through to another owner.
+    #[must_use]
+    pub fn owns_terminal(&self, terminal: &TerminalRef) -> bool {
+        self.terminals
+            .get(&terminal_key(terminal))
+            .is_some_and(|known| known.terminal.fences(terminal))
     }
 
     /// Adds a listener that is ready to take part in a handoff but cannot yet
@@ -342,6 +394,15 @@ impl GenerationCoordinator {
         let ownership = self.ownership_mut(terminal)?;
         match observation {
             ProcessObservation::Gone => ownership.state = TerminalState::Lost,
+            ProcessObservation::Unknown if !acknowledged => {
+                ownership.state = TerminalState::IdentityUnknown;
+                return Err(GenerationError::TerminalUnavailable);
+            }
+            ProcessObservation::VerifiedAlive(actual)
+                if ownership.process.as_ref() == Some(&actual) && !acknowledged =>
+            {
+                ownership.state = TerminalState::OrphanRunning;
+            }
             ProcessObservation::VerifiedAlive(actual)
                 if ownership.process.as_ref() == Some(&actual) && acknowledged =>
             {

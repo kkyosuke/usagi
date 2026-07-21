@@ -150,7 +150,13 @@ impl FileRuntimeStore {
                 format!("invalid agent runtime snapshot schema: {error:?}"),
             )
         })?;
-        let legacy = snapshot.schema_version == 1;
+        snapshot.validate_ownership().map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid agent generation ownership: {error:?}"),
+            )
+        })?;
+        let legacy = snapshot.schema_version < 3;
         let (snapshot, interrupted) = snapshot.reconcile_after_daemon_restart();
         if interrupted != 0 || legacy {
             self.save(snapshot.clone())?;
@@ -4799,6 +4805,34 @@ mod tests {
             );
             assert_eq!(std::fs::read(path).unwrap(), before);
         }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agents.json");
+        let generation = DaemonGeneration::new();
+        let mut corrupt = RuntimeStoreSnapshot::default();
+        corrupt
+            .generation
+            .terminals
+            .push(usagi_daemon::usecase::generation::TerminalOwnership {
+                terminal: TerminalRef {
+                    daemon_generation: generation,
+                    terminal_id: TerminalId::new(),
+                    workspace_id: WorkspaceId::new(),
+                    session_id: Some(SessionId::new()),
+                    worktree_id: WorktreeId::new(),
+                },
+                process: None,
+                state: usagi_daemon::usecase::generation::TerminalState::IdentityUnknown,
+            });
+        std::fs::write(&path, serde_json::to_vec(&corrupt).unwrap()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        assert!(
+            FileRuntimeStore(path.clone())
+                .reconcile_after_restart()
+                .is_err()
+        );
+        assert_eq!(std::fs::read(path).unwrap(), before);
     }
 
     #[test]
