@@ -156,7 +156,7 @@
     },
     {
       "path": "crates/cli/src/mcp/serve.rs",
-      "symbol": "fn:attach_session_caller",
+      "symbol": "fn:apply_caller_policy",
       "occurrence": 1,
       "reason": "migration_debt",
       "owner": "root-cli",
@@ -174,7 +174,7 @@
     },
     {
       "path": "crates/cli/src/mcp/serve.rs",
-      "symbol": "fn:session_action",
+      "symbol": "fn:execute_tool",
       "occurrence": 1,
       "reason": "migration_debt",
       "owner": "root-cli",

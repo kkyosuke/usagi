@@ -29,7 +29,9 @@ pub fn dispatch(name: &str, params: &str) -> Result<String, ToolError> {
         .iter()
         .find(|tool| tool.name() == name)
         .ok_or_else(|| ToolError::UnknownTool(name.to_owned()))?;
-    tool.call(params)
+    let arguments = serde_json::from_str(params)
+        .map_err(|error| ToolError::InvalidParams(error.to_string()))?;
+    tool.call_store(&arguments)
 }
 
 #[cfg(test)]
@@ -50,6 +52,14 @@ mod tests {
         assert!(matches!(
             dispatch("does_not_exist", "{}"),
             Err(ToolError::UnknownTool(name)) if name == "does_not_exist"
+        ));
+    }
+
+    #[test]
+    fn dispatch_rejects_malformed_json_before_the_adapter() {
+        assert!(matches!(
+            dispatch("session_create", "{"),
+            Err(ToolError::InvalidParams(_))
         ));
     }
 }
