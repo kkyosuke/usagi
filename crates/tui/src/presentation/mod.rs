@@ -107,17 +107,6 @@ pub trait AgentCommandPort: Send {
         Err("terminal launch is unavailable".to_owned())
     }
 
-    /// Open a native terminal application rooted at `directory`. This is kept
-    /// on the composition adapter so presentation code never spawns processes.
-    ///
-    /// # Errors
-    ///
-    /// Returns a presentation-safe error when the platform terminal cannot be
-    /// opened.
-    fn open_external_terminal(&mut self, _directory: &Path) -> Result<(), String> {
-        Err("external terminal launch is unavailable".to_owned())
-    }
-
     /// Resize a daemon-owned terminal to the visible pane viewport.
     ///
     /// # Errors
@@ -193,6 +182,20 @@ pub trait AgentCommandPort: Send {
     fn list_terminals(&mut self) -> Result<Vec<TerminalInventoryEntry>, TerminalError> {
         Ok(Vec::new())
     }
+}
+
+/// Platform-native terminal launch boundary.
+///
+/// This is deliberately independent from [`AgentCommandPort`]: daemon terminal
+/// streaming temporarily moves that port into a pane-launch worker, while
+/// `terminal new` must remain available just as it is in v1.
+pub trait ExternalTerminalPort: Send {
+    /// Open a native terminal rooted at `directory`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a presentation-safe platform launch failure.
+    fn open(&mut self, directory: &Path) -> Result<(), String>;
 }
 
 /// Daemon-authoritative durable decision boundary for the workspace runtime.
@@ -456,6 +459,7 @@ pub struct ControllerBackendComposition {
     pub backend: DaemonBackend,
     pub session_commands: Box<dyn SessionCommandPort>,
     pub agent_commands: Box<dyn AgentCommandPort>,
+    pub external_terminal: Box<dyn ExternalTerminalPort>,
     pub metrics: Box<dyn MetricsPort>,
     pub browser: Box<dyn BrowserOpener>,
 }
@@ -470,6 +474,14 @@ pub trait ControllerBackendFactory {
 }
 
 struct UnavailableBackendPort;
+
+struct UnavailableExternalTerminalPort;
+
+impl ExternalTerminalPort for UnavailableExternalTerminalPort {
+    fn open(&mut self, _: &Path) -> Result<(), String> {
+        Err("external terminal launch is unavailable".to_owned())
+    }
+}
 
 fn unavailable_completion(completions: &Completions, message: &str) {
     completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
@@ -838,6 +850,7 @@ struct WorkspaceUi {
     /// owns the port, so the skeleton clears the frame the daemon row lands.
     creating_session: Option<PendingCreate>,
     agent: Option<AgentContext>,
+    external_terminal: Box<dyn ExternalTerminalPort>,
     pane_launches: Vec<PaneLaunch>,
     pane_completions: Receiver<PaneLaunchCompletion>,
     pane_completion_sender: Sender<PaneLaunchCompletion>,
@@ -929,6 +942,7 @@ impl WorkspaceUi {
             removing_session: None,
             creating_session: None,
             agent: None,
+            external_terminal: Box::new(UnavailableExternalTerminalPort),
             pane_launches: Vec::new(),
             pane_completions,
             pane_completion_sender,
@@ -952,6 +966,11 @@ impl WorkspaceUi {
             sessions,
             port: Some(port),
         });
+        self
+    }
+
+    fn with_external_terminal(mut self, port: Box<dyn ExternalTerminalPort>) -> Self {
+        self.external_terminal = port;
         self
     }
 
@@ -2382,27 +2401,17 @@ fn drain_controller_host_actions(
                         .find(|(_, id)| **id == session)
                         .map(|(record, _)| record.root.clone()),
                 };
-                match (
-                    path,
-                    ui.agent
-                        .as_mut()
-                        .and_then(|agent| agent.port.as_deref_mut()),
-                ) {
-                    (Some(path), Some(port)) => {
-                        if let Err(error) = port.open_external_terminal(&path) {
+                match path {
+                    Some(path) => {
+                        if let Err(error) = ui.external_terminal.open(&path) {
                             let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
                                 Notice::new(error),
                             )));
                         }
                     }
-                    (None, _) => {
+                    None => {
                         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
                             Notice::new("selected session is no longer available"),
-                        )));
-                    }
-                    (_, None) => {
-                        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
-                            Notice::new("external terminal launch is unavailable"),
                         )));
                     }
                 }
@@ -2486,11 +2495,13 @@ fn drive_workspace_controller(
     let mut browser = composition.browser;
     let workspace =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, session_ids.clone());
-    let mut ui = WorkspaceUi::new(workspace, composition.session_commands).with_agent_context(
-        workspace_id,
-        session_ids.clone(),
-        composition.agent_commands,
-    );
+    let mut ui = WorkspaceUi::new(workspace, composition.session_commands)
+        .with_agent_context(
+            workspace_id,
+            session_ids.clone(),
+            composition.agent_commands,
+        )
+        .with_external_terminal(composition.external_terminal);
     let mut runtime =
         WorkspaceRuntime::with_selection_mode(workspace_id, session_ids, modal_selection_mode);
     let mut metrics_backend = MetricsBackend::new(composition.metrics);
@@ -2689,6 +2700,7 @@ impl ControllerBackendFactory for FixedBackendFactory {
                 .take()
                 .expect("fixed session port is created once"),
             agent_commands: self.agent.take().expect("fixed agent port is created once"),
+            external_terminal: Box::new(UnavailableExternalTerminalPort),
             metrics: self
                 .metrics
                 .take()
@@ -2943,6 +2955,7 @@ impl ControllerBackendFactory for CompatibilityBackendFactory<'_, '_, '_> {
             backend,
             session_commands: self.sessions.create(),
             agent_commands,
+            external_terminal: Box::new(UnavailableExternalTerminalPort),
             metrics,
             browser: Box::new(UnavailableBrowserOpener),
         }
@@ -3247,19 +3260,20 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 mod tests {
     use super::{
         AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, BrowserOpener, Config,
-        ConfigStep, ControllerHost, DefaultSettingsPort, Exit, FixedBackendFactory, Geometry,
-        MetricsPort, MetricsPortFactory, NewStep, NoDesktopNotifications, NoMetrics,
-        NoMetricsFactory, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult,
-        Start, TerminalAttach, TerminalChunk, TerminalError, UnavailableAgentCommandPort,
-        UnavailableBackendPort, UnavailableBrowserOpener, UnavailableDecisionCommandPort,
-        UnavailableEnvironmentStore, UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
+        ConfigStep, ControllerHost, ControllerHostAction, DefaultSettingsPort, Exit,
+        ExternalTerminalPort, FixedBackendFactory, Geometry, MetricsPort, MetricsPortFactory,
+        NewStep, NoDesktopNotifications, NoMetrics, NoMetricsFactory, SessionCommandPort,
+        SessionCommandPortFactory, SessionCommandResult, Start, TerminalAttach, TerminalChunk,
+        TerminalError, UnavailableAgentCommandPort, UnavailableBackendPort,
+        UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
+        UnavailableExternalTerminalPort, UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
         UnavailableSessionCommandPortFactory, WelcomeStep, WorkspaceLoader, WorkspaceRuntime,
         WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
         begin_terminal_selection_on_click, close_exited_panes, controller_terminal_view,
-        copy_terminal_selection, forward_live_terminal_input, handle_terminal_pointer,
-        intercept_live_terminal_control, key_to_terminal_bytes, new_project_notice,
-        play_startup_splash, render_controller_frame, render_home_snapshot, restore_open_panes,
-        run as run_from_start, run_with_settings,
+        copy_terminal_selection, drain_controller_host_actions, forward_live_terminal_input,
+        handle_terminal_pointer, intercept_live_terminal_control, key_to_terminal_bytes,
+        new_project_notice, play_startup_splash, render_controller_frame, render_home_snapshot,
+        restore_open_panes, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_controller, run_workspace_controller_with_backend_and_settings,
         safe_session_error, session_worktree_names, sidebar_pointer_event, step_config, step_new,
@@ -3574,6 +3588,49 @@ mod tests {
     }
 
     type SessionCommandCall = (String, Option<String>, SessionCommand);
+
+    struct RecordingExternalTerminalPort(Arc<Mutex<Vec<PathBuf>>>);
+
+    impl ExternalTerminalPort for RecordingExternalTerminalPort {
+        fn open(&mut self, directory: &Path) -> Result<(), String> {
+            self.0.lock().unwrap().push(directory.to_path_buf());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn unavailable_external_terminal_port_returns_a_safe_error() {
+        assert_eq!(
+            UnavailableExternalTerminalPort.open(Path::new("/tmp/worktree")),
+            Err("external terminal launch is unavailable".to_owned())
+        );
+    }
+
+    #[test]
+    fn external_terminal_launch_does_not_require_agent_port() {
+        let workspace = WorkspaceId::new();
+        let view =
+            WorkspaceView::with_runtime_ids(ws("demo"), WorkspaceState::default(), Vec::new());
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_external_terminal(Box::new(RecordingExternalTerminalPort(opened.clone())));
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender
+            .send(ControllerHostAction::OpenExternalTerminal(Target::Root(
+                workspace,
+            )))
+            .unwrap();
+
+        drain_controller_host_actions(
+            &receiver,
+            &mut ui,
+            &mut runtime,
+            &mut std::collections::HashMap::new(),
+        );
+
+        assert_eq!(*opened.lock().unwrap(), vec![PathBuf::from("/tmp/demo")]);
+    }
 
     struct SuccessfulAgentPort(TerminalRef);
 
@@ -6324,10 +6381,6 @@ mod tests {
                 "open",
             ),
             Err("terminal launch is unavailable".to_owned())
-        );
-        assert_eq!(
-            port.open_external_terminal(Path::new("/tmp/worktree")),
-            Err("external terminal launch is unavailable".to_owned())
         );
         // The default discovers no runtimes, so an embedder without a daemon
         // simply opens a workspace with no restored panes.

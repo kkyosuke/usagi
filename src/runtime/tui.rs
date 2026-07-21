@@ -50,8 +50,8 @@ use usagi_tui::presentation::views::workspace::GitDiff;
 use usagi_tui::presentation::{
     self, AgentCommandPort, BannerScreenRunner, ControllerBackendComposition,
     ControllerBackendFactory, ControllerHost, DecisionCommandPort, DesktopNotificationPort,
-    EnvironmentStorePort, Exit, MetricsPort, SessionCommandPort, SessionCommandResult, Start,
-    WorkspaceLoader, WorkspaceSnapshot,
+    EnvironmentStorePort, Exit, ExternalTerminalPort, MetricsPort, SessionCommandPort,
+    SessionCommandResult, Start, WorkspaceLoader, WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::controller::{
     BackendEvent, EnvironmentEntry, NewRequest, Notice, SafeError, SafeMessage, Target,
@@ -593,6 +593,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             backend,
             session_commands: Box::new(DaemonSessionCommandPort::default()),
             agent_commands: Box::new(DaemonAgentCommandPort::new()),
+            external_terminal: Box::new(PlatformExternalTerminalPort),
             metrics: Box::new(DaemonMetricsPort::new()),
             browser: Box::new(PlatformBrowserOpener),
         }
@@ -710,6 +711,41 @@ impl MetricsPort for DaemonMetricsPort {
 /// Terminal streaming keeps one persistent daemon connection for its lifetime:
 /// the daemon fences a terminal subscription (and therefore input/detach) to the
 /// connection that attached it, so attach, poll and input must share it.
+/// Native-terminal launcher kept independent from daemon terminal streaming.
+///
+/// This mirrors v1's detached platform launcher: `terminal new` must still
+/// work while an embedded terminal's daemon port is owned by a launch worker.
+struct PlatformExternalTerminalPort;
+
+impl ExternalTerminalPort for PlatformExternalTerminalPort {
+    #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=presentation::tests::external_terminal_launch_does_not_require_agent_port
+    fn open(&mut self, directory: &Path) -> Result<(), String> {
+        let directory = directory.to_string_lossy().into_owned();
+        let argv = if cfg!(target_os = "macos") {
+            vec!["open", "-a", "Terminal", &directory]
+        } else if cfg!(target_os = "windows") {
+            vec!["wt", "-d", &directory]
+        } else if cfg!(unix) {
+            vec!["x-terminal-emulator", "--working-directory", &directory]
+        } else {
+            return Err(
+                "opening an external terminal is not supported on this platform".to_owned(),
+            );
+        };
+        let (command, arguments) = argv
+            .split_first()
+            .expect("external terminal command is never empty");
+        Command::new(command)
+            .args(arguments)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("failed to open external terminal: {error}"))
+    }
+}
+
 #[derive(Default)]
 struct DaemonAgentCommandPort {
     terminal: Option<IpcClient<std::os::unix::net::UnixStream>>,
@@ -894,33 +930,6 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                         .map_err(|_| "terminal launch returned an invalid terminal".to_owned())
                 }),
         }
-    }
-
-    #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=crates/tui/src/presentation/mod.rs::agent_command_port_terminal_methods_are_safe_by_default
-    fn open_external_terminal(&mut self, directory: &Path) -> Result<(), String> {
-        let directory = directory.to_string_lossy().into_owned();
-        let argv = if cfg!(target_os = "macos") {
-            vec!["open", "-a", "Terminal", &directory]
-        } else if cfg!(target_os = "windows") {
-            vec!["wt", "-d", &directory]
-        } else if cfg!(unix) {
-            vec!["x-terminal-emulator", "--working-directory", &directory]
-        } else {
-            return Err(
-                "opening an external terminal is not supported on this platform".to_owned(),
-            );
-        };
-        let (command, arguments) = argv
-            .split_first()
-            .expect("external terminal command is never empty");
-        Command::new(command)
-            .args(arguments)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map(|_| ())
-            .map_err(|error| format!("failed to open external terminal: {error}"))
     }
 
     #[coverage(off)]

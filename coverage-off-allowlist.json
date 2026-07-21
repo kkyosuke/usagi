@@ -7879,7 +7879,7 @@
     {
       "path": "src/runtime/tui.rs",
       "symbol": "fn:open",
-      "occurrence": 1,
+      "occurrence": 2,
       "reason": "migration_debt",
       "owner": "tui",
       "expires": "2027-01-31",
@@ -7978,7 +7978,7 @@
     {
       "path": "src/runtime/tui.rs",
       "symbol": "fn:open",
-      "occurrence": 2,
+      "occurrence": 3,
       "reason": "migration_debt",
       "owner": "tui",
       "expires": "2027-01-31",
