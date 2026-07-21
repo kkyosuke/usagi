@@ -4502,6 +4502,7 @@ mod tests {
             message: "created".to_owned(),
             sessions: Some(records),
             session_ids: Some(vec![existing, created]),
+            agent_resumes: None,
             revision: None,
         });
         let completion = super::SessionBackendCompletion::Create {
@@ -4597,6 +4598,7 @@ mod tests {
                 message: "completed".to_owned(),
                 sessions: None,
                 session_ids: Some(session_ids),
+                agent_resumes: None,
                 revision: None,
             })
         }
@@ -4760,6 +4762,7 @@ mod tests {
                 message: "recovered".to_owned(),
                 sessions: None,
                 session_ids: Some(vec![self.existing, self.created]),
+                agent_resumes: None,
                 revision: None,
             })
         }
@@ -4997,6 +5000,7 @@ mod tests {
             message: "same snapshot".to_owned(),
             sessions: Some(records),
             session_ids: Some(vec![session]),
+            agent_resumes: None,
             revision: None,
         });
         let completion = super::SessionBackendCompletion::Refresh {
