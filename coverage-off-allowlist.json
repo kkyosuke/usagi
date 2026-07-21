@@ -5808,15 +5808,6 @@
     },
     {
       "path": "src/runtime/tui.rs",
-      "symbol": "fn:control_key",
-      "occurrence": 1,
-      "reason": "migration_debt",
-      "owner": "tui",
-      "expires": "2027-01-31",
-      "tracking": "#487"
-    },
-    {
-      "path": "src/runtime/tui.rs",
       "symbol": "fn:passthrough_key",
       "occurrence": 1,
       "reason": "migration_debt",
