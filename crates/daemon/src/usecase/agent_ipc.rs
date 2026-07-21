@@ -171,7 +171,6 @@ pub trait AgentTerminalActor {
 /// orchestrator, adapter registry, runtime store, output journal, and PTY
 /// spawner/writer, plus the producer-issued operation ledger for idempotency.
 pub struct AgentRuntime<S, P, J, L = PathExecutableLocator> {
-    generation: DaemonGeneration,
     coordinator: RuntimeCoordinator,
     orchestrator: Orchestrator,
     registry: AdapterRegistry,
@@ -238,6 +237,11 @@ impl<S, P, J> AgentRuntime<S, P, J, PathExecutableLocator> {
 
 impl<S, P, J, L> AgentRuntime<S, P, J, L> {
     /// Constructs an Agent runtime with an injected current executable locator.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a newly allocated generation coordinator rejects its
+    /// first production generation, which indicates an internal invariant bug.
     #[must_use]
     pub fn with_dispatch_and_locator(
         generation: DaemonGeneration,
@@ -250,9 +254,12 @@ impl<S, P, J, L> AgentRuntime<S, P, J, L> {
         dispatch: DispatchStore,
         locator: L,
     ) -> Self {
+        let mut coordinator = RuntimeCoordinator::new(16, 64 * 1024, 64);
+        coordinator
+            .activate_generation(generation)
+            .expect("a fresh Agent coordinator accepts its production generation");
         Self {
-            generation,
-            coordinator: RuntimeCoordinator::new(16, 64 * 1024, 64),
+            coordinator,
             orchestrator: Orchestrator::new(),
             registry,
             store,
@@ -272,7 +279,7 @@ impl<S, P, J, L> AgentRuntime<S, P, J, L> {
     pub fn hydrate_with_dispatch_and_locator(
         generation: DaemonGeneration,
         registry: AdapterRegistry,
-        store: S,
+        mut store: S,
         journal: J,
         pty: P,
         default_profile: AgentProfileId,
@@ -280,8 +287,15 @@ impl<S, P, J, L> AgentRuntime<S, P, J, L> {
         dispatch: DispatchStore,
         locator: L,
         snapshot: super::runtime::RuntimeStoreSnapshot,
-    ) -> Result<Self, super::runtime::RuntimeSnapshotError> {
-        let coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64)?;
+    ) -> Result<Self, super::runtime::RuntimeSnapshotError>
+    where
+        S: super::runtime::RuntimeStore,
+    {
+        let mut coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64)?;
+        coordinator.activate_generation(generation)?;
+        store
+            .save(coordinator.snapshot())
+            .map_err(|_| super::runtime::RuntimeSnapshotError::OwnershipPersist)?;
         dispatch
             .reconcile_incomplete_admissions()
             .map_err(|_| super::runtime::RuntimeSnapshotError::DispatchReconcile)?;
@@ -302,7 +316,6 @@ impl<S, P, J, L> AgentRuntime<S, P, J, L> {
             })
             .collect();
         Ok(Self {
-            generation,
             coordinator,
             orchestrator: Orchestrator::new(),
             registry,
@@ -334,6 +347,15 @@ impl<S, P, J, L> AgentRuntime<S, P, J, L> {
     #[must_use]
     pub fn dispatch_store(&self) -> &DispatchStore {
         &self.dispatch
+    }
+
+    fn active_generation(&self) -> Result<DaemonGeneration, ProtocolError> {
+        self.coordinator.active_generation().ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "agent generation ownership is unavailable",
+            )
+        })
     }
 
     /// Resolves an opaque MCP credential only while its exact runtime is live.
@@ -804,7 +826,7 @@ impl<
             .resolve_available_scope(launch.workspace, launch.session)
             .map_err(map_scope_error)?;
         let terminal = TerminalRef {
-            daemon_generation: self.generation,
+            daemon_generation: self.active_generation()?,
             terminal_id: TerminalId::new(),
             workspace_id: launch.workspace,
             session_id: launch.session,
@@ -818,7 +840,7 @@ impl<
             workspace_id: launch.workspace,
             session_id: launch.session,
             operation_id: operation,
-            owner_daemon_generation: self.generation,
+            owner_daemon_generation: self.active_generation()?,
             execution_attempt: 1,
             lifecycle_attempt: 1,
             expected_revision: 0,
@@ -1001,7 +1023,7 @@ impl<
             ));
         }
         let terminal = TerminalRef {
-            daemon_generation: self.generation,
+            daemon_generation: self.active_generation()?,
             terminal_id: TerminalId::new(),
             workspace_id: workspace,
             session_id: Some(session),
@@ -1015,7 +1037,7 @@ impl<
             workspace_id: workspace,
             session_id: Some(session),
             operation_id: operation,
-            owner_daemon_generation: self.generation,
+            owner_daemon_generation: self.active_generation()?,
             execution_attempt: 1,
             lifecycle_attempt: 1,
             expected_revision: 0,
@@ -1171,7 +1193,7 @@ impl<
             .resolve_available_scope(intent.workspace, intent.session)
             .map_err(map_scope_error)?;
         let terminal = TerminalRef {
-            daemon_generation: self.generation,
+            daemon_generation: self.active_generation()?,
             terminal_id: TerminalId::new(),
             workspace_id: intent.workspace,
             session_id: intent.session,
@@ -1185,7 +1207,7 @@ impl<
             workspace_id: intent.workspace,
             session_id: intent.session,
             operation_id: operation,
-            owner_daemon_generation: self.generation,
+            owner_daemon_generation: self.active_generation()?,
             execution_attempt: 1,
             lifecycle_attempt: 1,
             expected_revision: 0,
@@ -1433,6 +1455,9 @@ impl<
         summary: String,
         result: Option<usagi_core::domain::agent::StructuredResult>,
     ) -> Result<(), ProtocolError> {
+        if self.coordinator.require_outcome_owner(runtime).is_err() {
+            return Ok(());
+        }
         let record = self
             .coordinator
             .record_for(runtime)
@@ -1899,7 +1924,8 @@ fn map_runtime_error(error: RuntimeError) -> ProtocolError {
         }
         RuntimeError::Terminal(_)
         | RuntimeError::UnknownRuntime
-        | RuntimeError::TerminalGenerationMismatch => {
+        | RuntimeError::TerminalGenerationMismatch
+        | RuntimeError::Generation(_) => {
             (ErrorCode::StaleTarget, "agent terminal reference is stale")
         }
         RuntimeError::Store | RuntimeError::Journal | RuntimeError::ReconcileRequired(_) => (
@@ -2570,15 +2596,22 @@ mod tests {
         let loaded: RuntimeStoreSnapshot =
             serde_json::from_slice(&std::fs::read(&snapshot_path).unwrap()).unwrap();
         loaded.validate_schema().unwrap();
+        loaded.validate_ownership().unwrap();
+        let interrupted_record = loaded
+            .records
+            .iter()
+            .find(|record| record.operation.operation_id.to_string() == interrupted)
+            .unwrap()
+            .clone();
         let (reconciled, count) = loaded.reconcile_after_daemon_restart();
         assert_eq!(count, 1);
-        let interrupted_record = reconciled
+        let reconciled_interrupted = reconciled
             .records
             .iter()
             .find(|record| record.operation.operation_id.to_string() == interrupted)
             .unwrap();
         assert_eq!(
-            interrupted_record
+            reconciled_interrupted
                 .provider_resume
                 .as_ref()
                 .unwrap()
@@ -2586,12 +2619,20 @@ mod tests {
             ProviderResumeStatus::Interrupted
         );
         assert_eq!(
-            interrupted_record
+            reconciled_interrupted
                 .provider_resume
                 .as_ref()
                 .unwrap()
                 .last_known_phase,
             Some(ProviderResumePhase::Interrupted)
+        );
+        assert!(reconciled.generation.current.is_none());
+        assert!(
+            reconciled
+                .generation
+                .records
+                .iter()
+                .all(|record| { record.role == super::super::generation::GenerationRole::Retired })
         );
         FileStore(snapshot_path.clone())
             .save(reconciled.clone())
@@ -2662,6 +2703,31 @@ mod tests {
         );
         assert_eq!(spawns.load(Ordering::SeqCst), 3);
         assert!(second.mcp_caller(&old_credential).is_none());
+        assert_eq!(
+            second
+                .output(&interrupted_record.runtime.terminal, b"late".to_vec())
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+        assert_eq!(
+            second
+                .exit(&interrupted_record.runtime.terminal, 0)
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+        let inbox_before = second.dispatch.inbox(&caller).unwrap();
+        second
+            .report(
+                &interrupted_record.runtime,
+                &interrupted_record.operation,
+                InboxKind::Completed,
+                "late completion".into(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(second.dispatch.inbox(&caller).unwrap(), inbox_before);
         let inventory = second.coordinator.inventory(
             &usagi_core::domain::terminal_launch::TerminalLaunchScope {
                 workspace_id: workspace,
@@ -2685,11 +2751,82 @@ mod tests {
         assert_eq!(spawns.load(Ordering::SeqCst), 4);
         let saved: RuntimeStoreSnapshot =
             serde_json::from_slice(&std::fs::read(snapshot_path).unwrap()).unwrap();
+        saved.validate_ownership().unwrap();
         assert_eq!(saved.records.len(), 4);
+        assert!(saved.generation.current.is_some());
+        assert_eq!(
+            saved
+                .generation
+                .records
+                .iter()
+                .filter(|record| {
+                    record.role == super::super::generation::GenerationRole::Active
+                })
+                .count(),
+            1
+        );
         assert!(saved.records.iter().any(|record| {
             record.operation.operation_id.to_string() == successful
                 && record.outcome == super::super::runtime::DurableOperationOutcome::Completed
         }));
+    }
+
+    #[test]
+    fn concurrent_production_admission_uses_one_generation_transition_and_spawn() {
+        use std::sync::{Barrier, Mutex};
+
+        let spawns = Arc::new(AtomicU32::new(0));
+        let runtime = Arc::new(Mutex::new(AgentRuntime::with_dispatch(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            CountingPty(Arc::clone(&spawns)),
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+        )));
+        let operation = OperationId::new().to_string();
+        let launch = intent(None);
+        let resolved = scope();
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let runtime = Arc::clone(&runtime);
+                let operation = operation.clone();
+                let launch = launch.clone();
+                let resolved = resolved.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    runtime
+                        .lock()
+                        .unwrap()
+                        .launch(&operation, &launch, &FakeScope(Ok(resolved)))
+                        .unwrap()
+                })
+            })
+            .collect();
+        let admissions: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        assert!(admissions[0].terminal.fences(&admissions[1].terminal));
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        let snapshot = runtime.lock().unwrap().coordinator.snapshot();
+        assert_eq!(snapshot.generation.terminals.len(), 1);
+        assert_eq!(
+            snapshot
+                .generation
+                .records
+                .iter()
+                .filter(|record| {
+                    record.role == super::super::generation::GenerationRole::Active
+                })
+                .count(),
+            1
+        );
     }
 
     #[test]
