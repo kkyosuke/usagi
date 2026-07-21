@@ -1,13 +1,13 @@
 ---
 number: 453
 title: 全コードレビュー修正 backlog（origin/main bfd59ec6）
-status: in-progress
+status: done
 priority: high
 labels: [review, epic]
 dependson: []
 related: [400]
 created_at: 2026-07-20T12:05:18.222534+00:00
-updated_at: 2026-07-21T14:30:43.014926+00:00
+updated_at: 2026-07-21T14:39:27.215826+00:00
 ---
 
 ## 問題・影響
