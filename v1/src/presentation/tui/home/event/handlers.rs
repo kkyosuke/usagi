@@ -768,14 +768,16 @@ pub(super) fn env_editor_key(state: &mut HomeState, key: Key) {
             // this resolves to the same workspace the editor was seeded from
             // (統合/unite mode: the cursor group's workspace, not just the primary).
             let root = state.selected_workspace_root();
-            let env = state
-                .confirm_env_editor()
-                .expect("env editor open while editing");
-            // Read-modify-write so the workspace's other local overrides survive.
-            let mut settings = crate::usecase::settings::load_local(&root).unwrap_or_default();
-            settings.env = env;
-            match crate::usecase::settings::save_local(&root, &settings) {
-                Ok(()) => state.log_output("Saved workspace env 󰤇".to_string()),
+            let editor = state.env_editor().expect("env editor open while editing");
+            let baseline = editor.baseline().clone();
+            let env = editor.bindings();
+            match crate::usecase::settings::save_local_env_revisioned(&root, &baseline, &env) {
+                Ok(_) => {
+                    // Close only after persistence succeeds. Conflict and IO
+                    // errors leave the draft and caret intact for retry.
+                    state.confirm_env_editor();
+                    state.log_output("Saved workspace env 󰤇".to_string());
+                }
                 Err(e) => state.log_error(format!("Failed to save env: {e}")),
             }
         }

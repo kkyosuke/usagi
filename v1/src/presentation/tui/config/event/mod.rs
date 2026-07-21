@@ -18,12 +18,19 @@ pub enum Outcome {
     Quit,
 }
 
-/// Persists the edited settings: the global [`Settings`] plus, when the screen
-/// has a project context, that project's [`LocalSettings`] overrides.
+/// Settings returned by a revision-aware save after concurrent disjoint fields
+/// have been merged from the latest file.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SavedSettings {
+    Global(Settings),
+    Local(LocalSettings),
+}
+
+/// Persists the editor state, including its baseline content identity.
 ///
 /// Taking this as a parameter lets the event loop be tested without touching
 /// disk: production wires it to the settings use case, tests pass a stub.
-pub type Save<'a> = dyn FnMut(&Settings, Option<&LocalSettings>) -> Result<()> + 'a;
+pub type Save<'a> = dyn FnMut(&Settings, Option<&LocalSettings>) -> Result<SavedSettings> + 'a;
 
 /// Starts provisioning the `ollama` runtime in the background, taking the sudo
 /// password entered in the install modal so the install can elevate
@@ -376,8 +383,12 @@ fn save_changes(config: &mut Config, save: &mut Save) -> Option<String> {
         return Some("No changes to save 󰤇".to_string());
     }
     Some(match save(config.settings(), config.local()) {
-        Ok(()) => {
-            config.mark_saved();
+        Ok(SavedSettings::Global(saved)) => {
+            config.adopt_saved_global(saved);
+            "Saved 󰤇".to_string()
+        }
+        Ok(SavedSettings::Local(saved)) => {
+            config.adopt_saved_local(saved);
             "Saved 󰤇".to_string()
         }
         Err(e) => format!("Failed to save: {e}"),
