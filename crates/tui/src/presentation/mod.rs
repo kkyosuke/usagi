@@ -4207,7 +4207,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn session_commands_start_independently_without_rejecting_the_second_request() {
         let snapshot = snapshot("demo");
         let view = WorkspaceView::with_runtime_ids(
@@ -4238,7 +4237,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn stale_session_completion_does_not_replace_a_newer_snapshot() {
         let snapshot = snapshot("demo");
         let original = snapshot.session_ids[0];
