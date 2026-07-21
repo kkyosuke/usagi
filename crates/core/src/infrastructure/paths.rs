@@ -55,8 +55,16 @@ pub fn runtime_mode() -> RuntimeMode {
     match std::env::var(RUNTIME_MODE_ENV).as_deref() {
         Ok("development") => RuntimeMode::Development,
         Ok("device") => RuntimeMode::Device,
-        _ if cfg!(debug_assertions) => RuntimeMode::Development,
-        _ => RuntimeMode::Device,
+        _ => {
+            #[cfg(debug_assertions)]
+            {
+                RuntimeMode::Development
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                RuntimeMode::Device
+            }
+        }
     }
 }
 
@@ -166,6 +174,16 @@ mod tests {
 
         unsafe { std::env::set_var(RUNTIME_MODE_ENV, "development") };
         assert_eq!(runtime_mode(), RuntimeMode::Development);
+
+        unsafe { std::env::set_var(RUNTIME_MODE_ENV, "invalid") };
+        assert_eq!(
+            runtime_mode(),
+            if cfg!(debug_assertions) {
+                RuntimeMode::Development
+            } else {
+                RuntimeMode::Device
+            }
+        );
 
         if let Some(value) = previous {
             unsafe { std::env::set_var(RUNTIME_MODE_ENV, value) };
