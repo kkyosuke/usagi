@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Daemon-owned, terminal-only launch orchestration.
 //!
 //! The IPC-facing request selects only a trusted profile. This coordinator
@@ -70,12 +68,10 @@ impl TerminalStoreSnapshot {
         self.validate()?;
         let mut interrupted = 0;
         for record in &mut self.records {
-            if matches!(
-                record.state,
-                TerminalRuntimeState::Reserved
-                    | TerminalRuntimeState::Running
-                    | TerminalRuntimeState::ReconcileRequired(_)
-            ) {
+            if record.state == TerminalRuntimeState::Reserved
+                || record.state == TerminalRuntimeState::Running
+                || matches!(record.state, TerminalRuntimeState::ReconcileRequired(_))
+            {
                 record.state = TerminalRuntimeState::ReconcileRequired(
                     TerminalReconcileState::IdentityUnknown,
                 );
@@ -109,8 +105,8 @@ impl TerminalStoreSnapshot {
     }
 }
 pub trait TerminalStore {
-    type Error;
-    fn save(&mut self, snapshot: TerminalStoreSnapshot) -> Result<(), Self::Error>;
+    #[allow(clippy::result_unit_err)] // Persistence detail is intentionally erased at the usecase port.
+    fn save(&mut self, snapshot: TerminalStoreSnapshot) -> Result<(), ()>;
 }
 /// Resolves a code-defined profile or trusted local settings once, before spawn.
 pub trait TerminalProfileResolver {
@@ -189,15 +185,15 @@ impl GenericTerminalCoordinator {
             terminals: TerminalRegistry::new(journal_limit, input_cache_limit),
         })
     }
-    pub fn launch<R: TerminalProfileResolver, S: TerminalStore, P: GenericPtySpawner>(
+    pub fn launch(
         &mut self,
         request: &TerminalLaunchRequest,
         terminal: TerminalRef,
         operation: CompletionFence,
         geometry: Geometry,
-        resolver: &mut R,
-        store: &mut S,
-        spawner: &mut P,
+        resolver: &mut dyn TerminalProfileResolver,
+        store: &mut dyn TerminalStore,
+        spawner: &mut dyn GenericPtySpawner,
     ) -> Result<(), GenericTerminalError> {
         self.validate_scope(request, &terminal, &operation)?;
         let key = terminal.terminal_id.as_str();
@@ -226,9 +222,9 @@ impl GenericTerminalCoordinator {
             },
         );
         self.persist(store)?;
-        if let Err(error) = self.terminals.register(terminal.clone(), geometry) {
-            return Err(GenericTerminalError::Terminal(error));
-        }
+        self.terminals
+            .register(terminal.clone(), geometry)
+            .expect("a newly reserved terminal cannot already be registered");
         match spawner.spawn(&resolved, &terminal, geometry) {
             Ok(process) => {
                 let record = self.records.get_mut(&key).expect("reserved record");
@@ -308,11 +304,11 @@ impl GenericTerminalCoordinator {
             .append_output(terminal, bytes)
             .map_err(GenericTerminalError::Terminal)
     }
-    pub fn resize<W: PtyWriter>(
+    pub fn resize(
         &mut self,
         terminal: &TerminalRef,
         geometry: Geometry,
-        writer: &mut W,
+        writer: &mut dyn PtyWriter,
     ) -> Result<Snapshot, GenericTerminalError> {
         self.running(terminal)?;
         self.terminals
@@ -323,12 +319,12 @@ impl GenericTerminalCoordinator {
     pub fn ensure_running(&self, terminal: &TerminalRef) -> Result<(), GenericTerminalError> {
         self.running(terminal)
     }
-    pub fn input<W: PtyWriter>(
+    pub fn input(
         &mut self,
         terminal: &TerminalRef,
         input: InputRequest,
         bytes: &[u8],
-        writer: &mut W,
+        writer: &mut dyn PtyWriter,
     ) -> Result<InputAck, GenericTerminalError> {
         self.running(terminal)?;
         self.terminals
@@ -345,25 +341,32 @@ impl GenericTerminalCoordinator {
             .replay_from(terminal, offset)
             .map_err(GenericTerminalError::Terminal)
     }
-    pub fn exit<S: TerminalStore>(
+    pub fn exit(
         &mut self,
         terminal: &TerminalRef,
         status: i32,
-        store: &mut S,
+        store: &mut dyn TerminalStore,
     ) -> Result<(), GenericTerminalError> {
         self.running(terminal)?;
         self.terminals
             .exited(terminal, status)
             .map_err(GenericTerminalError::Terminal)?;
         self.record_mut(terminal)?.state = TerminalRuntimeState::Exited;
-        self.persist(store)
+        if self.persist(store).is_err() {
+            self.record_mut(terminal)?.state =
+                TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::PersistAfterExit);
+            return Err(GenericTerminalError::ReconcileRequired(
+                TerminalReconcileState::PersistAfterExit,
+            ));
+        }
+        Ok(())
     }
     /// Never starts a replacement after an ambiguous outcome.
-    pub fn reconcile<S: TerminalStore>(
+    pub fn reconcile(
         &mut self,
         terminal: &TerminalRef,
         observation: ProcessObservation,
-        store: &mut S,
+        store: &mut dyn TerminalStore,
     ) -> Result<(), GenericTerminalError> {
         let record = self.record_mut(terminal)?;
         record.state = match observation {
@@ -422,10 +425,10 @@ impl GenericTerminalCoordinator {
             })
             .count()
     }
-    fn persist<S: TerminalStore>(&self, store: &mut S) -> Result<(), GenericTerminalError> {
+    fn persist(&self, store: &mut dyn TerminalStore) -> Result<(), GenericTerminalError> {
         store
             .save(self.snapshot())
-            .map_err(|_| GenericTerminalError::Store)
+            .map_err(|()| GenericTerminalError::Store)
     }
     fn validate_scope(
         &self,
@@ -474,7 +477,6 @@ impl GenericTerminalCoordinator {
 
     /// Retained output remains readable after a terminal exits. Only launches,
     /// input, output, and resize require a running PTY.
-    #[coverage(off)] // Narrow state predicate exercised by the exited-output contract test.
     fn replayable(&self, terminal: &TerminalRef) -> Result<(), GenericTerminalError> {
         matches!(
             self.record(terminal)?.state,
@@ -499,7 +501,6 @@ mod tests {
     #[derive(Default)]
     struct Store(Vec<TerminalStoreSnapshot>);
     impl TerminalStore for Store {
-        type Error = ();
         fn save(&mut self, snapshot: TerminalStoreSnapshot) -> Result<(), ()> {
             self.0.push(snapshot);
             Ok(())
@@ -507,14 +508,12 @@ mod tests {
     }
     struct FailingStore;
     impl TerminalStore for FailingStore {
-        type Error = ();
         fn save(&mut self, _: TerminalStoreSnapshot) -> Result<(), ()> {
             Err(())
         }
     }
     struct FailAfter(usize);
     impl TerminalStore for FailAfter {
-        type Error = ();
         fn save(&mut self, _: TerminalStoreSnapshot) -> Result<(), ()> {
             self.0 = self.0.saturating_sub(1);
             (self.0 != 0).then_some(()).ok_or(())
@@ -526,7 +525,7 @@ mod tests {
             &mut self,
             request: &TerminalLaunchRequest,
         ) -> Result<ResolvedTerminalLaunch, TerminalLaunchValidationError> {
-            ResolvedTerminalLaunch::new(
+            Ok(ResolvedTerminalLaunch::new(
                 DurableTerminalLaunchSnapshot::new(
                     request.clone(),
                     1,
@@ -534,12 +533,14 @@ mod tests {
                     vec![],
                     PathBuf::from("."),
                     [EnvironmentVariableName::new("TERM").unwrap()],
-                )?,
+                )
+                .expect("the trusted test profile is valid"),
                 BTreeMap::from([(
                     EnvironmentVariableName::new("TERM").unwrap(),
                     "xterm-256color".into(),
                 )]),
             )
+            .expect("the trusted test environment matches its allowlist"))
         }
     }
     struct Spawner(Result<ProcessIdentity, SpawnFailure>);
@@ -620,6 +621,80 @@ mod tests {
         assert_eq!(
             unknown.reconcile_after_daemon_restart(),
             Err(GenericTerminalError::InvalidSnapshot)
+        );
+    }
+
+    #[test]
+    fn snapshot_restore_and_capacity_edges_are_total() {
+        let legacy: TerminalStoreSnapshot =
+            serde_json::from_value(serde_json::json!({"records": []})).unwrap();
+        assert_eq!(legacy, TerminalStoreSnapshot::default());
+
+        let request = request();
+        let (terminal, fence) = refs(&request);
+        let mut coordinator = GenericTerminalCoordinator::new(1, 64, 1);
+        let mut store = Store::default();
+        coordinator
+            .launch(
+                &request,
+                terminal.clone(),
+                fence.clone(),
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver,
+                &mut store,
+                &mut Spawner(Ok(process())),
+            )
+            .unwrap();
+        assert_eq!(
+            coordinator.launch(
+                &request,
+                terminal.clone(),
+                fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver,
+                &mut store,
+                &mut Spawner(Ok(process())),
+            ),
+            Err(GenericTerminalError::TerminalAlreadyExists)
+        );
+        let (other, other_fence) = refs(&request);
+        assert_eq!(
+            coordinator.launch(
+                &request,
+                other,
+                other_fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver,
+                &mut store,
+                &mut Spawner(Ok(process())),
+            ),
+            Err(GenericTerminalError::ConcurrencyExhausted)
+        );
+
+        let running = coordinator.snapshot();
+        let (reconciled, count) = running.clone().reconcile_after_daemon_restart().unwrap();
+        assert_eq!(count, 1);
+        let (already_reconciling, count) =
+            reconciled.clone().reconcile_after_daemon_restart().unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(already_reconciling, reconciled);
+        assert!(GenericTerminalCoordinator::from_snapshot(1, 64, 1, running).is_err());
+        assert!(GenericTerminalCoordinator::from_snapshot(1, 64, 1, reconciled.clone()).is_ok());
+        let mut wrong_reconcile = reconciled;
+        wrong_reconcile.records[0].state =
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::SpawnAmbiguous);
+        assert!(GenericTerminalCoordinator::from_snapshot(1, 64, 1, wrong_reconcile).is_err());
+
+        coordinator
+            .records
+            .get_mut(&terminal.terminal_id.as_str())
+            .unwrap()
+            .state = TerminalRuntimeState::Reclaimed;
+        assert_eq!(
+            coordinator.replay_from(&terminal, 0),
+            Err(GenericTerminalError::ReconcileRequired(
+                TerminalReconcileState::IdentityUnknown
+            ))
         );
     }
     #[test]

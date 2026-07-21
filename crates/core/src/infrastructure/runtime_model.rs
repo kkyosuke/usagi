@@ -13,7 +13,7 @@ use serde::Deserialize;
 const CONFIG_PATH: &str = ".usagi/config.toml";
 
 /// PATH lookup boundary. Tests inject this port instead of depending on PATH.
-pub trait ExecutableLocator {
+pub trait ExecutableLocator: Send {
     /// Whether `executable` can be run from the current PATH.
     fn is_available(&self, executable: &str) -> bool;
 }

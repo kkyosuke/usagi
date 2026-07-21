@@ -89,7 +89,6 @@ impl SecureUnixListener {
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn locator(&self) -> &EndpointLocator {
         &self.locator
     }
@@ -174,7 +173,6 @@ fn write_locator(daemon: &Path, locator: &EndpointLocator) -> io::Result<()> {
     fs::rename(temporary, daemon.join("current.json"))
 }
 
-#[coverage(off)]
 fn checked_endpoint(daemon: &Path, locator: &EndpointLocator) -> io::Result<PathBuf> {
     let endpoint = daemon.join(&locator.endpoint);
     let expected = daemon
@@ -191,7 +189,6 @@ fn checked_endpoint(daemon: &Path, locator: &EndpointLocator) -> io::Result<Path
     Ok(endpoint)
 }
 
-#[coverage(off)]
 fn relative_endpoint(daemon: &Path, endpoint: &Path) -> io::Result<String> {
     endpoint
         .strip_prefix(daemon)
@@ -211,7 +208,6 @@ fn relative_endpoint(daemon: &Path, endpoint: &Path) -> io::Result<String> {
 ///
 /// Returns an error when `path` cannot be created or is not a private
 /// directory owned by the current user.
-#[coverage(off)]
 pub fn ensure_private_dir(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(_) => verify_private(path, DIR_MODE, true),
@@ -224,7 +220,6 @@ pub fn ensure_private_dir(path: &Path) -> io::Result<()> {
     }
 }
 
-#[coverage(off)]
 fn verify_private(path: &Path, mode: u32, directory: bool) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink()
@@ -302,6 +297,7 @@ fn effective_uid() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::ffi::OsStringExt;
     use tempfile::TempDir;
 
     fn generation() -> DaemonGeneration {
@@ -321,6 +317,7 @@ mod tests {
         assert_eq!(fs::metadata(&daemon).unwrap().mode() & 0o777, DIR_MODE);
         let locator = read_locator(&daemon).unwrap();
         assert_eq!(locator.generation, generation);
+        assert_eq!(listener.locator(), &locator);
         assert_eq!(
             fs::metadata(checked_endpoint(&daemon, &locator).unwrap())
                 .unwrap()
@@ -347,5 +344,37 @@ mod tests {
         fs::set_permissions(&locator_path, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(connect_current(clean.path()).is_err());
         drop(listener);
+
+        let outside = clean.path().join("outside.sock");
+        assert_eq!(
+            relative_endpoint(&clean.path().join("daemon"), &outside)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        let unsafe_locator = EndpointLocator {
+            generation: generation(),
+            endpoint: "outside.sock".into(),
+            state: EndpointState::Active,
+        };
+        assert_eq!(
+            checked_endpoint(&clean.path().join("daemon"), &unsafe_locator)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        let file = clean.path().join("not-a-directory");
+        fs::write(&file, []).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(DIR_MODE)).unwrap();
+        assert_eq!(
+            ensure_private_dir(&file).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let invalid = PathBuf::from(std::ffi::OsString::from_vec(b"bad\0path".to_vec()));
+        assert_eq!(
+            ensure_private_dir(&invalid).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
     }
 }

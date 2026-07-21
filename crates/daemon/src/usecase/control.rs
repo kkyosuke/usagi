@@ -84,7 +84,6 @@ pub struct Prompt {
 }
 
 /// Apply a phase report only for the exact capability and a newer source sequence.
-#[coverage(off)]
 pub fn report_phase(
     runtime: &mut RuntimeSnapshot,
     token: &str,
@@ -103,7 +102,6 @@ pub fn report_phase(
     Ok(true)
 }
 /// Resolve an omitted prompt target only where one eligible agent pane exists.
-#[coverage(off)]
 pub fn resolve_target(
     session: &SessionSnapshot,
     target: Option<AgentRuntimeId>,
@@ -124,7 +122,6 @@ pub fn resolve_target(
     }
 }
 /// Advance the durable input transaction. ACK loss is intentionally ambiguous.
-#[coverage(off)]
 pub fn advance_prompt(prompt: &mut Prompt, next: PromptState) -> Result<(), ControlError> {
     if prompt.state == PromptState::InputAcknowledged && next == PromptState::RetryWait {
         prompt.state = PromptState::Ambiguous;
@@ -146,7 +143,6 @@ pub fn advance_prompt(prompt: &mut Prompt, next: PromptState) -> Result<(), Cont
     Err(ControlError::InvalidTransition)
 }
 /// Begin removal by fencing all ordinary prompt/spawn delivery.
-#[coverage(off)]
 pub fn begin_remove(
     session: &mut SessionSnapshot,
     expected_revision: u64,

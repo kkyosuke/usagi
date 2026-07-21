@@ -1,6 +1,5 @@
 //! Handshake-gated server adapter for the transport-independent IPC protocol.
 
-#![coverage(off)] // Framing and owner ports are integration boundaries with injected IO.
 #![allow(clippy::missing_errors_doc)] // Errors are directly forwarded transport/protocol failures.
 
 use std::io::{self, Read, Write};
@@ -39,10 +38,9 @@ pub trait TerminalOwner {
 }
 
 /// Complete a bootstrap handshake. No ordinary envelope is accepted before this succeeds.
-#[coverage(off)]
-pub fn handshake<R: Read, W: Write>(
-    reader: &mut R,
-    writer: &mut W,
+pub fn handshake(
+    reader: &mut dyn Read,
+    writer: &mut dyn Write,
     server: &ServerProtocol,
 ) -> io::Result<Option<ServerHello>> {
     let Some(first) = read_json_frame::<Bootstrap>(reader, server.limits.max_frame_bytes as usize)?
@@ -80,7 +78,6 @@ pub fn handshake<R: Read, W: Write>(
 /// producer-supplied operation id; terminal requests retain their typed body
 /// for the terminal owner to process.
 #[must_use]
-#[coverage(off)]
 pub fn dispatch(
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: serde_json::Value,
@@ -121,28 +118,28 @@ pub fn dispatch(
 
 /// Serve one client. A target generation mismatch and pre-handshake normal
 /// request are rejected before request dispatch.
-#[coverage(off)]
-pub fn handle_connection<R: Read, W: Write>(
-    reader: &mut R,
-    writer: &mut W,
+pub fn handle_connection(
+    reader: &mut dyn Read,
+    writer: &mut dyn Write,
     server: &ServerProtocol,
 ) -> io::Result<()> {
-    handle_connection_with(reader, writer, server, dispatch)
+    let mut dispatch_request = dispatch;
+    handle_connection_with(reader, writer, server, &mut dispatch_request)
 }
 
 /// As [`handle_connection`], but routes accepted requests to the daemon-owned
 /// runtime supplied by the composition root.  Keeping the runtime outside the
 /// connection makes durable state shared by every client connection.
-#[coverage(off)]
-pub fn handle_connection_with<R: Read, W: Write, D>(
-    reader: &mut R,
-    writer: &mut W,
+pub fn handle_connection_with(
+    reader: &mut dyn Read,
+    writer: &mut dyn Write,
     server: &ServerProtocol,
-    dispatch_request: D,
-) -> io::Result<()>
-where
-    D: Fn(usagi_core::infrastructure::ipc::RequestId, serde_json::Value, &ServerHello) -> Envelope,
-{
+    dispatch_request: &mut dyn FnMut(
+        usagi_core::infrastructure::ipc::RequestId,
+        serde_json::Value,
+        &ServerHello,
+    ) -> Envelope,
+) -> io::Result<()> {
     let Some(hello) = handshake(reader, writer, server)? else {
         return Ok(());
     };
@@ -183,15 +180,21 @@ where
     Ok(())
 }
 
-/// Serve one client through the daemon's sole terminal owner.  Connection
-/// teardown is deliberately reported to the owner even after a framing error:
-/// that drops subscriptions only and leaves the PTY/process alive.
-#[coverage(off)]
-pub fn handle_connection_with_terminal<R: Read, W: Write, T: TerminalOwner>(
-    reader: &mut R,
-    writer: &mut W,
+/// Serve one client with a shared terminal owner while preserving the caller's
+/// non-terminal dispatch.  The composition root uses this to keep session
+/// lifecycle routing independent from daemon-owned PTY ownership.
+pub fn handle_connection_with_terminal_and(
+    reader: &mut dyn Read,
+    writer: &mut dyn Write,
     server: &ServerProtocol,
-    terminal: &mut T,
+    terminal: &mut dyn TerminalOwner,
+    dispatch_request: &mut dyn FnMut(
+        usagi_core::infrastructure::ipc::RequestId,
+        serde_json::Value,
+        &ServerHello,
+        usagi_core::domain::id::ConnectionId,
+        usagi_core::domain::id::ClientId,
+    ) -> Envelope,
 ) -> io::Result<()> {
     let Some(hello) = handshake(reader, writer, server)? else {
         return Ok(());
@@ -226,90 +229,7 @@ pub fn handle_connection_with_terminal<R: Read, W: Write, T: TerminalOwner>(
                 match usagi_core::domain::id::RequestId::parse(&request_id.0) {
                     Ok(owner_request_id) => terminal
                         .request(connection, client, owner_request_id, action, payload)
-                        .map(|body| (ResponseOutcome::Ok, body)),
-                    Err(_) => Err(ProtocolError::new(
-                        ErrorCode::InvalidArgument,
-                        "terminal request_id must be a canonical resource ID",
-                    )),
-                }
-            } else {
-                Ok(dispatch(request_id.clone(), body, &hello).kind_response())
-            };
-            let (outcome, body) = match outcome_body {
-                Ok((outcome, body)) => (outcome, body),
-                Err(error) => (ResponseOutcome::Error(error), json!(null)),
-            };
-            let reply = Envelope {
-                protocol: hello.protocol,
-                daemon_generation: hello.daemon_generation.clone(),
-                kind: EnvelopeKind::Response {
-                    request_id,
-                    outcome,
-                    body,
-                },
-            };
-            write_json_frame(writer, &reply, hello.limits.max_frame_bytes as usize)?;
-        }
-        Ok(())
-    })();
-    terminal.disconnect(connection);
-    result
-}
-
-/// Serve one client with a shared terminal owner while preserving the caller's
-/// non-terminal dispatch.  The composition root uses this to keep session
-/// lifecycle routing independent from daemon-owned PTY ownership.
-#[coverage(off)]
-pub fn handle_connection_with_terminal_and<R: Read, W: Write, T: TerminalOwner, D>(
-    reader: &mut R,
-    writer: &mut W,
-    server: &ServerProtocol,
-    terminal: &mut T,
-    mut dispatch_request: D,
-) -> io::Result<()>
-where
-    D: FnMut(
-        usagi_core::infrastructure::ipc::RequestId,
-        serde_json::Value,
-        &ServerHello,
-        usagi_core::domain::id::ConnectionId,
-        usagi_core::domain::id::ClientId,
-    ) -> Envelope,
-{
-    let Some(hello) = handshake(reader, writer, server)? else {
-        return Ok(());
-    };
-    let connection = usagi_core::domain::id::ConnectionId::new();
-    let client = usagi_core::domain::id::ClientId::new();
-    let result = (|| {
-        while let Some(envelope) =
-            read_json_frame::<Envelope>(reader, hello.limits.max_frame_bytes as usize)?
-        {
-            let EnvelopeKind::Request {
-                request_id, body, ..
-            } = envelope.kind
-            else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "client may only send request envelopes",
-                ));
-            };
-            let outcome_body = if envelope.protocol != hello.protocol
-                || envelope.daemon_generation != hello.daemon_generation
-            {
-                Err(ProtocolError::new(
-                    ErrorCode::GenerationMismatch,
-                    "request targets a different daemon generation",
-                ))
-            } else if let Ok(usagi_core::usecase::client::DaemonRequest::Terminal {
-                action,
-                payload,
-            }) = serde_json::from_value(body.clone())
-            {
-                match usagi_core::domain::id::RequestId::parse(&request_id.0) {
-                    Ok(owner_request_id) => terminal
-                        .request(connection, client, owner_request_id, action, payload)
-                        .map(|body| (ResponseOutcome::Ok, body)),
+                        .map(ok_response),
                     Err(_) => Err(ProtocolError::new(
                         ErrorCode::InvalidArgument,
                         "terminal request_id must be a canonical resource ID",
@@ -344,6 +264,10 @@ where
     result
 }
 
+fn ok_response(body: serde_json::Value) -> (ResponseOutcome, serde_json::Value) {
+    (ResponseOutcome::Ok, body)
+}
+
 trait ResponseOutcomeBody {
     fn kind_response(self) -> (ResponseOutcome, serde_json::Value);
 }
@@ -358,7 +282,6 @@ impl ResponseOutcomeBody for Envelope {
 
 /// Build a server protocol policy from daemon-owned identity/configuration.
 #[must_use]
-#[coverage(off)]
 pub fn server_protocol(
     daemon_generation: DaemonGeneration,
     connection_id: String,
@@ -402,8 +325,13 @@ mod tests {
         }
     }
 
-    struct NoopTerminal;
-    impl TerminalOwner for NoopTerminal {
+    #[derive(Default)]
+    struct RecordingTerminal {
+        fail: bool,
+        requests: usize,
+        disconnects: usize,
+    }
+    impl TerminalOwner for RecordingTerminal {
         fn request(
             &mut self,
             _: usagi_core::domain::id::ConnectionId,
@@ -412,10 +340,20 @@ mod tests {
             _: usagi_core::usecase::client::TerminalAction,
             _: serde_json::Value,
         ) -> Result<serde_json::Value, ProtocolError> {
-            unreachable!("non-terminal request must not reach terminal owner")
+            self.requests += 1;
+            if self.fail {
+                Err(ProtocolError::new(
+                    ErrorCode::Unavailable,
+                    "terminal failed",
+                ))
+            } else {
+                Ok(json!({"terminal": "handled"}))
+            }
         }
 
-        fn disconnect(&mut self, _: usagi_core::domain::id::ConnectionId) {}
+        fn disconnect(&mut self, _: usagi_core::domain::id::ConnectionId) {
+            self.disconnects += 1;
+        }
     }
 
     fn server() -> ServerProtocol {
@@ -462,6 +400,33 @@ mod tests {
             },
         }
     }
+    fn terminal_request(request_id: String) -> Envelope {
+        Envelope {
+            protocol: ProtocolVersion {
+                generation: 1,
+                revision: 1,
+            },
+            daemon_generation: DaemonGeneration("current".into()),
+            kind: EnvelopeKind::Request {
+                request_id: usagi_core::infrastructure::ipc::RequestId(request_id),
+                timeout_ms: None,
+                body: serde_json::to_value(usagi_core::usecase::client::DaemonRequest::Terminal {
+                    action: usagi_core::usecase::client::TerminalAction::Inventory,
+                    payload: json!({}),
+                })
+                .unwrap(),
+            },
+        }
+    }
+    fn test_dispatch(
+        request_id: usagi_core::infrastructure::ipc::RequestId,
+        body: serde_json::Value,
+        hello: &ServerHello,
+        _: usagi_core::domain::id::ConnectionId,
+        _: usagi_core::domain::id::ClientId,
+    ) -> Envelope {
+        dispatch(request_id, body, hello)
+    }
     #[test]
     fn handshake_returns_hello_and_preserves_build_as_diagnostic() {
         let mut input = Vec::new();
@@ -501,8 +466,8 @@ mod tests {
             &mut Cursor::new(input),
             &mut output,
             &server(),
-            &mut NoopTerminal,
-            |request_id, _, hello, _, _| Envelope {
+            &mut RecordingTerminal::default(),
+            &mut |request_id, _, hello, _, _| Envelope {
                 protocol: hello.protocol,
                 daemon_generation: hello.daemon_generation.clone(),
                 kind: EnvelopeKind::Response {
@@ -529,6 +494,135 @@ mod tests {
                 ..
             } if body.is_null()
         ));
+    }
+
+    #[test]
+    fn terminal_server_routes_success_errors_and_fences_before_effects() {
+        let valid_id = usagi_core::domain::id::RequestId::new().to_string();
+        let mut stale = terminal_request(usagi_core::domain::id::RequestId::new().to_string());
+        stale.daemon_generation = DaemonGeneration("stale".into());
+        let requests = [
+            terminal_request(valid_id),
+            terminal_request("not-a-resource-id".into()),
+            stale,
+        ];
+        let mut input = Vec::new();
+        write_json_frame(&mut input, &hello(), 1024).unwrap();
+        for request in requests {
+            write_json_frame(&mut input, &request, 1024).unwrap();
+        }
+        let mut terminal = RecordingTerminal::default();
+        let mut output = Vec::new();
+        handle_connection_with_terminal_and(
+            &mut Cursor::new(input),
+            &mut output,
+            &server(),
+            &mut terminal,
+            &mut test_dispatch,
+        )
+        .unwrap();
+        assert_eq!(terminal.requests, 1);
+        assert_eq!(terminal.disconnects, 1);
+
+        let mut output = Cursor::new(output);
+        let _ = read_json_frame::<Bootstrap>(&mut output, 1024).unwrap();
+        let replies = (0..3)
+            .map(|_| {
+                read_json_frame::<Envelope>(&mut output, 1024)
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            replies[0].kind,
+            EnvelopeKind::Response {
+                outcome: ResponseOutcome::Ok,
+                ref body,
+                ..
+            } if body == &json!({"terminal": "handled"})
+        ));
+        assert!(replies[1..].iter().all(|reply| matches!(
+            reply.kind,
+            EnvelopeKind::Response {
+                outcome: ResponseOutcome::Error(_),
+                ..
+            }
+        )));
+
+        let mut input = Vec::new();
+        write_json_frame(&mut input, &hello(), 1024).unwrap();
+        write_json_frame(
+            &mut input,
+            &terminal_request(usagi_core::domain::id::RequestId::new().to_string()),
+            1024,
+        )
+        .unwrap();
+        let mut terminal = RecordingTerminal {
+            fail: true,
+            ..RecordingTerminal::default()
+        };
+        let mut output = Vec::new();
+        handle_connection_with_terminal_and(
+            &mut Cursor::new(input),
+            &mut output,
+            &server(),
+            &mut terminal,
+            &mut test_dispatch,
+        )
+        .unwrap();
+        let mut output = Cursor::new(output);
+        let _ = read_json_frame::<Bootstrap>(&mut output, 1024).unwrap();
+        let reply = read_json_frame::<Envelope>(&mut output, 1024)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            reply.kind,
+            EnvelopeKind::Response {
+                outcome: ResponseOutcome::Error(_),
+                body,
+                ..
+            } if body.is_null()
+        ));
+    }
+
+    #[test]
+    fn terminal_server_disconnects_on_close_and_invalid_envelope() {
+        let mut terminal = RecordingTerminal::default();
+        handle_connection_with_terminal_and(
+            &mut Cursor::new(Vec::<u8>::new()),
+            &mut Vec::new(),
+            &server(),
+            &mut terminal,
+            &mut test_dispatch,
+        )
+        .unwrap();
+        assert_eq!(terminal.disconnects, 0);
+
+        let mut input = Vec::new();
+        write_json_frame(&mut input, &hello(), 1024).unwrap();
+        let mut event = request();
+        event.kind = EnvelopeKind::Event {
+            subscription_id: usagi_core::infrastructure::ipc::SubscriptionId("s".into()),
+            stream_ref: usagi_core::infrastructure::ipc::StreamRef {
+                stream_id: usagi_core::infrastructure::ipc::StreamId("x".into()),
+                epoch: "e".into(),
+            },
+            stream_sequence: 1,
+            body: json!({}),
+        };
+        write_json_frame(&mut input, &event, 1024).unwrap();
+        let error = handle_connection_with_terminal_and(
+            &mut Cursor::new(input),
+            &mut Vec::new(),
+            &server(),
+            &mut terminal,
+            &mut test_dispatch,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(terminal.disconnects, 1);
+
+        assert_eq!(event.kind_response(), (ResponseOutcome::Ok, json!(null)));
     }
     #[test]
     fn connection_rejects_normal_message_before_handshake() {
@@ -675,6 +769,13 @@ mod tests {
             usagi_core::infrastructure::ipc::RequestId("r".into()),
             json!({"x": 1}),
             &hello,
+        );
+        let _ = test_dispatch(
+            usagi_core::infrastructure::ipc::RequestId("r2".into()),
+            json!({"x": 2}),
+            &hello,
+            usagi_core::domain::id::ConnectionId::new(),
+            usagi_core::domain::id::ClientId::new(),
         );
         assert!(matches!(
             reply.kind,

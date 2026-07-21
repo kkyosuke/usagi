@@ -31,6 +31,43 @@ use usagi_core::infrastructure::daemon::{
     DaemonReady, DaemonRecordStore, InstanceLock, RecordFile, ShutdownSignal,
 };
 
+/// Type-erased durable record port used by the production composition and
+/// failpoint tests, so both exercise the same serve state machine symbol.
+pub trait DaemonRecordPort {
+    /// Loads the current record, or reports a durable store failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying durable store error.
+    fn load(&self) -> io::Result<Option<DaemonRecord>>;
+    /// Saves the active daemon record.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying durable store error.
+    fn save(&self, record: &DaemonRecord) -> io::Result<()>;
+    /// Clears the active daemon record.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying durable store error.
+    fn clear(&self) -> io::Result<()>;
+}
+
+impl<F: RecordFile> DaemonRecordPort for DaemonRecordStore<F> {
+    fn load(&self) -> io::Result<Option<DaemonRecord>> {
+        DaemonRecordStore::load(self)
+    }
+
+    fn save(&self, record: &DaemonRecord) -> io::Result<()> {
+        DaemonRecordStore::save(self, record)
+    }
+
+    fn clear(&self) -> io::Result<()> {
+        DaemonRecordStore::clear(self)
+    }
+}
+
 /// Run the daemon in the foreground under process id `pid`, writing progress
 /// lines to `out`.
 ///
@@ -38,13 +75,12 @@ use usagi_core::infrastructure::daemon::{
 ///
 /// Returns the lock's acquire error, the store's load / save / clear error, the
 /// ready publication / shutdown signal error, or an `out` write error.
-#[coverage(off)]
-pub fn serve<W: Write, F: RecordFile, R: DaemonReady, S: ShutdownSignal, M: InstanceLock>(
-    out: &mut W,
-    store: &DaemonRecordStore<F>,
-    ready: &R,
-    shutdown: &S,
-    lock: &M,
+pub fn serve(
+    out: &mut dyn Write,
+    store: &dyn DaemonRecordPort,
+    ready: &dyn DaemonReady,
+    shutdown: &dyn ShutdownSignal,
+    lock: &dyn InstanceLock,
     pid: u32,
     info: &AppInfo,
 ) -> io::Result<()> {
@@ -88,6 +124,40 @@ mod tests {
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::daemon::DaemonRecord;
     use usagi_core::infrastructure::daemon::{DaemonReady, DaemonRecordStore};
+
+    struct FailingRecordFile {
+        write: bool,
+        remove: bool,
+    }
+    impl usagi_core::infrastructure::daemon::RecordFile for FailingRecordFile {
+        fn read(&self) -> io::Result<Option<String>> {
+            Ok(None)
+        }
+        fn write(&self, _: &str) -> io::Result<()> {
+            if self.write {
+                Err(io::Error::other("write"))
+            } else {
+                Ok(())
+            }
+        }
+        fn remove(&self) -> io::Result<()> {
+            if self.remove {
+                Err(io::Error::other("remove"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct BrokenWriter;
+    impl io::Write for BrokenWriter {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("output"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn info() -> AppInfo {
         AppInfo {
@@ -307,6 +377,63 @@ mod tests {
                 &FakeLock::Held,
                 2222,
                 &info()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn propagates_registration_output_and_final_clear_failures() {
+        let healthy = FailingRecordFile {
+            write: false,
+            remove: false,
+        };
+        assert!(
+            usagi_core::infrastructure::daemon::RecordFile::read(&healthy)
+                .unwrap()
+                .is_none()
+        );
+        usagi_core::infrastructure::daemon::RecordFile::write(&healthy, "record").unwrap();
+        usagi_core::infrastructure::daemon::RecordFile::remove(&healthy).unwrap();
+        io::Write::flush(&mut BrokenWriter).unwrap();
+        for (file, mut output) in [
+            (
+                FailingRecordFile {
+                    write: true,
+                    remove: false,
+                },
+                Box::new(Vec::new()) as Box<dyn io::Write>,
+            ),
+            (
+                FailingRecordFile {
+                    write: false,
+                    remove: true,
+                },
+                Box::new(Vec::new()) as Box<dyn io::Write>,
+            ),
+        ] {
+            assert!(
+                serve(
+                    &mut output,
+                    &DaemonRecordStore::new(file),
+                    &NoopReady,
+                    &ImmediateShutdown,
+                    &FakeLock::Acquired,
+                    2222,
+                    &info(),
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            serve(
+                &mut BrokenWriter,
+                &DaemonRecordStore::new(InMemoryRecordFile::default()),
+                &NoopReady,
+                &ImmediateShutdown,
+                &FakeLock::Acquired,
+                2222,
+                &info(),
             )
             .is_err()
         );

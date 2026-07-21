@@ -6,6 +6,7 @@
 //! wake reservations, then performs the finite set of reserved wake effects.
 
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
@@ -88,8 +89,15 @@ pub struct InitialTask {
     pub required_artifact_contract: String,
 }
 
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=start_rejects_an_unresolvable_initial_dag
 fn default_artifact_contract() -> String {
     "none".into()
+}
+
+fn push_semantic_component(key: &mut String, value: &str) {
+    key.push_str(&value.len().to_string());
+    key.push(':');
+    key.push_str(value);
 }
 
 /// The single daemon-owned scheduler runtime. It is intentionally independent
@@ -98,6 +106,8 @@ pub struct SupervisorRuntime {
     supervisor: SupervisorStore,
     dispatch: DispatchStore,
     state_path: PathBuf,
+    apply_fail_at: Cell<Option<usize>>,
+    apply_calls: Cell<usize>,
 }
 
 impl SupervisorRuntime {
@@ -107,7 +117,14 @@ impl SupervisorRuntime {
             supervisor: SupervisorStore::new(state_dir),
             dispatch: DispatchStore::new(state_dir),
             state_path: state_dir.join("supervisor-scheduler.json"),
+            apply_fail_at: Cell::new(None),
+            apply_calls: Cell::new(0),
         }
+    }
+
+    #[cfg(test)]
+    fn fail_apply_at(&self, call: usize) {
+        self.apply_fail_at.set(Some(call));
     }
 
     /// Starts one durable run. The operation key is reserved before aggregate
@@ -115,7 +132,7 @@ impl SupervisorRuntime {
     ///
     /// # Errors
     /// Returns an error for conflicting idempotency, invalid DAGs, or durable IO failure.
-    #[coverage(off)] // Also linked into the root production binary; LLVM attributes its nested reducer calls to duplicate crate instances. Unit and production E2E tests cover the behavior.
+    ///
     pub fn start(
         &self,
         caller: &str,
@@ -125,12 +142,23 @@ impl SupervisorRuntime {
         policy_selector: Option<String>,
         now: DateTime<Utc>,
     ) -> Result<SupervisorRunQuery> {
-        let semantic_key = serde_json::to_string(&(
-            caller,
-            &root_task,
-            &initial_tasks,
+        let mut semantic_key = String::new();
+        push_semantic_component(&mut semantic_key, caller);
+        push_semantic_component(&mut semantic_key, &root_task);
+        push_semantic_component(&mut semantic_key, &initial_tasks.len().to_string());
+        for task in &initial_tasks {
+            push_semantic_component(&mut semantic_key, &task.task_id);
+            push_semantic_component(&mut semantic_key, &task.dependencies.len().to_string());
+            for dependency in &task.dependencies {
+                push_semantic_component(&mut semantic_key, dependency);
+            }
+            push_semantic_component(&mut semantic_key, &task.instruction);
+            push_semantic_component(&mut semantic_key, &task.required_artifact_contract);
+        }
+        push_semantic_component(
+            &mut semantic_key,
             policy_selector.as_deref().unwrap_or("default"),
-        ))?;
+        );
         let mut state = self.load_state()?;
         let reservation = match state.starts.get(operation_id) {
             Some(existing) if existing.semantic_key == semantic_key => existing.clone(),
@@ -221,7 +249,10 @@ impl SupervisorRuntime {
     /// # Errors
     /// Returns an error when durable state cannot be read.
     pub fn get(&self, caller: &str, id: SupervisorRunId) -> Result<Option<SupervisorRunQuery>> {
-        Ok(self.owned_run(caller, id)?.map(|run| run.query()))
+        match self.owned_run(caller, id)? {
+            Some(run) => Ok(Some(run.query())),
+            None => Ok(None),
+        }
     }
 
     /// Lists caller-owned durable runs.
@@ -323,7 +354,7 @@ impl SupervisorRuntime {
     ///
     /// # Errors
     /// Returns the first durable reconciliation or wake delivery failure.
-    pub fn tick_all<W: DecisionWaker>(&self, now: DateTime<Utc>, waker: &mut W) -> Result<()> {
+    pub fn tick_all(&self, now: DateTime<Utc>, waker: &mut dyn DecisionWaker) -> Result<()> {
         for run in self.supervisor.runs()? {
             self.tick(run.supervisor_run_id, now, waker)?;
         }
@@ -350,12 +381,11 @@ impl SupervisorRuntime {
     ///
     /// Panics only if an already-corrupt supervisor snapshot contains
     /// provenance for a missing task or parent.
-    #[coverage(off)] // Reconciliation is exercised through injected durable-store fixtures; LLVM cannot attribute its nested reducer calls consistently.
-    pub fn tick<W: DecisionWaker>(
+    pub fn tick(
         &self,
         id: SupervisorRunId,
         now: DateTime<Utc>,
-        waker: &mut W,
+        waker: &mut dyn DecisionWaker,
     ) -> Result<()> {
         let Some(mut run) = self.supervisor.load(id)? else {
             return Ok(());
@@ -363,14 +393,14 @@ impl SupervisorRuntime {
         // Retry eligibility is a persisted deadline, not an in-memory timer.
         // Reconciliation therefore cannot dispatch a retry before its deadline
         // and can resume one after a daemon restart without polling.
-        let due_retries: Vec<_> = run
-            .tasks
-            .iter()
-            .filter(|(_, task)| {
-                task.state == TaskState::Retrying && task.retry_at.is_some_and(|at| at <= now)
-            })
-            .map(|(id, task)| (id.clone(), task.generation))
-            .collect();
+        let mut due_retries = Vec::new();
+        for (id, task) in &run.tasks {
+            if task.state == TaskState::Retrying
+                && matches!(task.retry_at, Some(retry_at) if retry_at <= now)
+            {
+                due_retries.push((id.clone(), task.generation));
+            }
+        }
         for (task_id, generation) in due_retries {
             run = self.apply(
                 &run,
@@ -402,16 +432,15 @@ impl SupervisorRuntime {
                 run = self.apply(&run, now, SupervisorEventSource::DispatchCompletion, event)?;
             }
             let current = run.tasks.get(&task_id).expect("task retained");
-            if !matches!(current.state, TaskState::Dispatched | TaskState::Running) {
-                continue;
-            }
-            if !current.state.terminal() {
+            if matches!(current.state, TaskState::Dispatched | TaskState::Running) {
                 let event = SupervisorEventKind::SetTaskState {
                     task_id: task_id.clone(),
                     generation: current.generation,
                     state: terminal,
                 };
                 run = self.apply(&run, now, source(kind), event)?;
+            } else if !current.state.terminal() {
+                continue;
             }
             if let Some(parent_id) = task.parent_task_id {
                 let child_run = provenance.dispatch_run_id;
@@ -438,6 +467,11 @@ impl SupervisorRuntime {
         source: SupervisorEventSource,
         kind: SupervisorEventKind,
     ) -> Result<usagi_core::domain::supervisor::SupervisorRun> {
+        let call = self.apply_calls.get();
+        self.apply_calls.set(call + 1);
+        if self.apply_fail_at.get() == Some(call) {
+            anyhow::bail!("injected supervisor apply failure");
+        }
         let event = SupervisorEvent {
             sequence: run.state_revision + 1,
             event_id: OperationId::new(),
@@ -451,7 +485,6 @@ impl SupervisorRuntime {
         self.supervisor
             .apply(run.supervisor_run_id, run.state_revision, &event)
     }
-    #[coverage(off)] // Called only by the coverage-excluded reconciliation loop above.
     fn reserve_parent_wake(
         &self,
         run: &mut usagi_core::domain::supervisor::SupervisorRun,
@@ -516,7 +549,7 @@ impl SupervisorRuntime {
             },
         ))
     }
-    fn deliver_reserved<W: DecisionWaker>(&self, waker: &mut W) -> Result<()> {
+    fn deliver_reserved(&self, waker: &mut dyn DecisionWaker) -> Result<()> {
         let mut state = self.load_state()?;
         let mut changed = false;
         for reservation in state.wakes.values_mut().filter(|item| !item.delivered) {
@@ -698,6 +731,75 @@ mod tests {
     }
 
     #[test]
+    fn tick_reconciles_only_retries_whose_durable_deadline_is_due() {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let store = SupervisorStore::new(temp.path());
+        let mut run = SupervisorRun::new(
+            "caller".into(),
+            "root".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let due_id = TaskId::new("due").unwrap();
+        let future_id = TaskId::new("future").unwrap();
+        let mut due = task(run.supervisor_run_id, "due", None);
+        due.state = TaskState::Retrying;
+        due.retry_at = Some(now());
+        let mut future = task(run.supervisor_run_id, "future", None);
+        future.state = TaskState::Retrying;
+        future.retry_at = Some(now() + chrono::Duration::seconds(1));
+        run.tasks = BTreeMap::from([(due_id.clone(), due), (future_id.clone(), future)]);
+        store.initialize(&run).unwrap();
+
+        scheduler.fail_apply_at(0);
+        assert!(
+            scheduler
+                .tick(run.supervisor_run_id, now(), &mut Waker::default())
+                .unwrap_err()
+                .to_string()
+                .contains("injected")
+        );
+        let scheduler = SupervisorRuntime::new(temp.path());
+        scheduler
+            .tick(run.supervisor_run_id, now(), &mut Waker::default())
+            .unwrap();
+
+        let saved = store.load(run.supervisor_run_id).unwrap().unwrap();
+        assert_eq!(saved.tasks[&due_id].state, TaskState::Ready);
+        assert_eq!(saved.tasks[&future_id].state, TaskState::Retrying);
+    }
+
+    #[test]
+    fn start_propagates_each_injected_partial_apply_failure() {
+        for fail_at in 0..=2 {
+            let temp = tempfile::tempdir().unwrap();
+            let scheduler = SupervisorRuntime::new(temp.path());
+            scheduler.fail_apply_at(fail_at);
+            assert!(
+                scheduler
+                    .start(
+                        "caller",
+                        &format!("operation-{fail_at}"),
+                        "root".into(),
+                        vec![InitialTask {
+                            task_id: "child".into(),
+                            dependencies: vec!["root".into()],
+                            instruction: "child".into(),
+                            required_artifact_contract: "none".into(),
+                        }],
+                        None,
+                        now(),
+                    )
+                    .unwrap_err()
+                    .to_string()
+                    .contains("injected")
+            );
+        }
+    }
+
+    #[test]
     fn structured_inbox_report_is_used_for_the_wake_outcome() {
         let temp = tempfile::tempdir().unwrap();
         let scheduler = SupervisorRuntime::new(temp.path());
@@ -793,6 +895,162 @@ mod tests {
             TaskState::Failed
         );
         assert!(waker.wakes.is_empty());
+    }
+
+    #[test]
+    fn tick_retries_a_partial_parent_wake_and_ignores_nonterminal_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let store = SupervisorStore::new(temp.path());
+        let dispatch = DispatchStore::new(temp.path());
+        let mut run = SupervisorRun::new(
+            "caller".into(),
+            "root".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let parent = TaskId::new("parent").unwrap();
+        let waiting = TaskId::new("waiting").unwrap();
+        let child = TaskId::new("child").unwrap();
+        let waiting_run = OperationId::new();
+        let child_run = OperationId::new();
+        let mut parent_task = task(run.supervisor_run_id, "parent", None);
+        parent_task.state = TaskState::Running;
+        let mut waiting_task = task(run.supervisor_run_id, "waiting", None);
+        waiting_task.state = TaskState::Dispatched;
+        let mut child_task = task(run.supervisor_run_id, "child", Some("parent"));
+        child_task.state = TaskState::Dispatched;
+        run.tasks = BTreeMap::from([
+            (parent.clone(), parent_task),
+            (waiting.clone(), waiting_task),
+            (child.clone(), child_task),
+        ]);
+        run.provenance.insert(
+            waiting.clone(),
+            provenance(run.supervisor_run_id, &waiting, None, waiting_run),
+        );
+        run.provenance.insert(
+            child.clone(),
+            provenance(
+                run.supervisor_run_id,
+                &child,
+                Some((&parent, OperationId::new())),
+                child_run,
+            ),
+        );
+        store.initialize(&run).unwrap();
+        for (run_id, status) in [
+            (waiting_run, RunStatus::Running),
+            (child_run, RunStatus::Completed),
+        ] {
+            dispatch
+                .upsert_run(DispatchRun {
+                    run_id,
+                    agent_id: AgentId::new(),
+                    prompt: "child".into(),
+                    started_at: now(),
+                    ended_at: None,
+                    status,
+                })
+                .unwrap();
+        }
+
+        scheduler.fail_apply_at(1);
+        assert!(
+            scheduler
+                .tick(run.supervisor_run_id, now(), &mut Waker::default())
+                .unwrap_err()
+                .to_string()
+                .contains("injected")
+        );
+        let scheduler = SupervisorRuntime::new(temp.path());
+        scheduler.fail_apply_at(1);
+        assert!(
+            scheduler
+                .tick(run.supervisor_run_id, now(), &mut Waker::default())
+                .unwrap_err()
+                .to_string()
+                .contains("injected")
+        );
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let mut waker = Waker::default();
+        scheduler
+            .tick(run.supervisor_run_id, now(), &mut waker)
+            .unwrap();
+        let saved = store.load(run.supervisor_run_id).unwrap().unwrap();
+        assert_eq!(saved.tasks[&waiting].state, TaskState::Dispatched);
+        assert_eq!(saved.tasks[&child].state, TaskState::Succeeded);
+        assert_eq!(saved.tasks[&parent].state, TaskState::AwaitingDecision);
+        assert!(waker.wakes.is_empty());
+    }
+
+    #[test]
+    fn tick_skips_blocked_provenance_and_accepts_terminal_work_without_a_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let store = SupervisorStore::new(temp.path());
+        let dispatch = DispatchStore::new(temp.path());
+        let mut run = SupervisorRun::new(
+            "caller".into(),
+            "root".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let blocked = TaskId::new("blocked").unwrap();
+        let standalone = TaskId::new("standalone").unwrap();
+        let terminal_parent = TaskId::new("terminal-parent").unwrap();
+        let blocked_run = OperationId::new();
+        let standalone_run = OperationId::new();
+        let mut blocked_task = task(run.supervisor_run_id, "blocked", None);
+        blocked_task.state = TaskState::AwaitingDecision;
+        let mut standalone_task = task(run.supervisor_run_id, "standalone", None);
+        standalone_task.state = TaskState::Dispatched;
+        let mut terminal_parent_task = task(run.supervisor_run_id, "terminal-parent", None);
+        terminal_parent_task.state = TaskState::Succeeded;
+        run.tasks = BTreeMap::from([
+            (blocked.clone(), blocked_task),
+            (standalone.clone(), standalone_task),
+            (terminal_parent.clone(), terminal_parent_task),
+        ]);
+        run.provenance.insert(
+            blocked.clone(),
+            provenance(run.supervisor_run_id, &blocked, None, blocked_run),
+        );
+        run.provenance.insert(
+            standalone.clone(),
+            provenance(run.supervisor_run_id, &standalone, None, standalone_run),
+        );
+        scheduler
+            .reserve_parent_wake(
+                &mut run,
+                &terminal_parent,
+                OperationId::new(),
+                InboxKind::Completed,
+                now(),
+            )
+            .unwrap();
+        store.initialize(&run).unwrap();
+        for run_id in [blocked_run, standalone_run] {
+            dispatch
+                .upsert_run(DispatchRun {
+                    run_id,
+                    agent_id: AgentId::new(),
+                    prompt: "work".into(),
+                    started_at: now(),
+                    ended_at: Some(now()),
+                    status: RunStatus::Completed,
+                })
+                .unwrap();
+        }
+
+        scheduler
+            .tick(run.supervisor_run_id, now(), &mut Waker::default())
+            .unwrap();
+        let saved = store.load(run.supervisor_run_id).unwrap().unwrap();
+        assert_eq!(saved.tasks[&blocked].state, TaskState::AwaitingDecision);
+        assert_eq!(saved.tasks[&standalone].state, TaskState::Succeeded);
     }
 
     #[test]
@@ -965,6 +1223,13 @@ mod tests {
                 .get("caller-b", started.supervisor_run_id)
                 .unwrap()
                 .is_none()
+        );
+        assert_eq!(
+            runtime
+                .get("caller-a", started.supervisor_run_id)
+                .unwrap()
+                .unwrap(),
+            started
         );
         assert_eq!(
             runtime

@@ -38,7 +38,6 @@ pub(crate) const MAX_POLLS: usize = 40;
 ///
 /// Never in practice: the guard unwraps the record only after `classify`
 /// reports `Alive`, which happens only when a record is present.
-#[coverage(off)]
 pub fn start<F: RecordFile, P: LivenessProbe, L: DaemonLauncher, K: Sleeper>(
     store: &DaemonRecordStore<F>,
     probe: &P,
@@ -74,7 +73,6 @@ pub fn start<F: RecordFile, P: LivenessProbe, L: DaemonLauncher, K: Sleeper>(
 ///
 /// Returns the launcher's spawn error, the store's load error, or a timeout
 /// error when the launched daemon does not register within [`MAX_POLLS`] polls.
-#[coverage(off)]
 pub(crate) fn launch_and_confirm<F: RecordFile, P: LivenessProbe, L: DaemonLauncher, K: Sleeper>(
     store: &DaemonRecordStore<F>,
     probe: &P,

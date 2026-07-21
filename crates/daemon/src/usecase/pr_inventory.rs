@@ -47,7 +47,6 @@ pub struct GhPrView {
 
 /// Parses exactly the two fields the daemon is allowed to persist or publish.
 #[must_use]
-#[coverage(off)] // The parser is exercised through the refresh fake; LLVM counts serde's short-circuit paths as separate regions.
 pub fn parse_gh_pr_view(output: &str) -> Option<GhPrView> {
     let value: serde_json::Value = serde_json::from_str(output).ok()?;
     let title = value.get("title")?.as_str()?.to_owned();
@@ -65,7 +64,6 @@ pub fn parse_gh_pr_view(output: &str) -> Option<GhPrView> {
 
 /// Fixed argv for one canonical URL. It intentionally has no shell syntax.
 #[must_use]
-#[coverage(off)] // Pure process-boundary argument assembly is asserted by the fake runner contract.
 pub fn gh_pr_view_argv(identity: &PrIdentity) -> Vec<String> {
     vec![
         "pr".into(),
@@ -92,7 +90,6 @@ impl Default for RefreshScheduler {
 }
 impl RefreshScheduler {
     #[must_use]
-    #[coverage(off)] // Scheduler timing is exercised with a deterministic fake clock; LLVM regions are implementation-detail branches.
     pub fn new(cap: usize) -> Self {
         Self {
             attempts: BTreeMap::new(),
@@ -101,14 +98,12 @@ impl RefreshScheduler {
             cap: cap.max(1),
         }
     }
-    #[coverage(off)] // See `new`: fake-clock tests cover scheduling semantics.
     pub fn schedule(&mut self, identity: PrIdentity, now_ms: u64, jitter_ms: u64) {
         self.due_at_ms
             .entry(identity)
             .or_insert(now_ms.saturating_add(jitter_ms));
     }
     #[must_use]
-    #[coverage(off)] // See `new`: fake-clock tests cover scheduling semantics.
     pub fn due(&self, now_ms: u64) -> Vec<PrIdentity> {
         let available = self.cap.saturating_sub(self.in_flight.len());
         self.due_at_ms
@@ -126,7 +121,6 @@ impl RefreshScheduler {
         self.in_flight.extend(due.iter().cloned());
         due
     }
-    #[coverage(off)] // See `new`: fake-clock tests cover scheduling semantics.
     pub fn succeeded(&mut self, identity: &PrIdentity, now_ms: u64, freshness_ms: u64) {
         self.due_at_ms
             .insert(identity.clone(), now_ms.saturating_add(freshness_ms));
@@ -135,7 +129,6 @@ impl RefreshScheduler {
     }
     /// Returns a capped exponential backoff. Jitter is supplied by the caller
     /// so tests can use a fake clock/random source.
-    #[coverage(off)] // See `new`: fake-clock tests cover retry semantics.
     pub fn failed(&mut self, identity: &PrIdentity, now_ms: u64, jitter_ms: u64) -> u64 {
         let attempt = self.attempts.entry(identity.clone()).or_default();
         *attempt = attempt.saturating_add(1);
@@ -356,7 +349,6 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
     /// # Errors
     ///
     /// Returns the durable inventory port's read error.
-    #[coverage(off)] // Persistence boundary is covered via the injected store tests.
     pub fn snapshot(
         &self,
         session: SessionId,

@@ -317,9 +317,7 @@ fn provisioned_environment_is_an_allowlist_not_an_environment_value_map() {
 struct Store(Vec<RuntimeStoreSnapshot>);
 
 impl RuntimeStore for Store {
-    type Error = ();
-
-    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), Self::Error> {
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
         self.0.push(snapshot);
         Ok(())
     }

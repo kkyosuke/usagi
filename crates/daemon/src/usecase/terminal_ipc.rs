@@ -6,7 +6,6 @@
     clippy::needless_pass_by_value,
     clippy::too_many_lines
 )] // IPC actor signatures deliberately carry the complete fencing vocabulary.
-#![coverage(off)] // This injected composition boundary is covered by the fake-PTY contract test.
 
 use std::path::PathBuf;
 
@@ -185,12 +184,7 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
                 let resolved_scope = self
                     .scope
                     .resolve_available_scope(&intent.request.scope)
-                    .map_err(|_| {
-                        ProtocolError::new(
-                            ErrorCode::InvalidArgument,
-                            "requested terminal scope is not an available managed scope",
-                        )
-                    })?;
+                    .map_err(map_scope_failure)?;
                 if resolved_scope.scope != intent.request.scope {
                     return Err(ProtocolError::new(
                         ErrorCode::InvalidArgument,
@@ -356,6 +350,12 @@ fn geometry(value: TerminalGeometry) -> Result<Geometry, ProtocolError> {
             )
         })
 }
+fn map_scope_failure(_: TerminalScopeResolveError) -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::InvalidArgument,
+        "requested terminal scope is not an available managed scope",
+    )
+}
 fn map_error(error: GenericTerminalError) -> ProtocolError {
     let code = match error {
         GenericTerminalError::Terminal(RegistryError::ResyncRequired) => ErrorCode::ResyncRequired,
@@ -384,7 +384,7 @@ mod tests {
     use super::*;
     use crate::usecase::{
         generation::ProcessIdentity,
-        terminal::{PtyWriteError, SpawnFailure},
+        terminal::{PtyWriteError, SpawnFailure, TerminalReconcileState},
     };
     use std::{collections::BTreeMap, path::PathBuf};
     use usagi_core::domain::{
@@ -393,14 +393,15 @@ mod tests {
     };
 
     #[derive(Default)]
-    struct Store;
+    struct Store {
+        fail: bool,
+    }
     impl TerminalStore for Store {
-        type Error = ();
         fn save(
             &mut self,
             _: super::super::generic_terminal::TerminalStoreSnapshot,
         ) -> Result<(), ()> {
-            Ok(())
+            if self.fail { Err(()) } else { Ok(()) }
         }
     }
     struct Resolver;
@@ -420,7 +421,8 @@ mod tests {
                     vec![],
                     PathBuf::from("/"),
                     [],
-                )?,
+                )
+                .expect("test launch snapshot uses canonical literals"),
                 BTreeMap::new(),
             )
         }
@@ -526,7 +528,7 @@ mod tests {
         let mut runtime = GenericTerminalRuntime::new(
             DaemonGeneration::new(),
             Resolver,
-            Store,
+            Store::default(),
             Pty::default(),
             Scope {
                 scope: scope.clone(),
@@ -697,7 +699,7 @@ mod tests {
         let mut runtime = GenericTerminalRuntime::new(
             DaemonGeneration::new(),
             Resolver,
-            Store,
+            Store::default(),
             Pty::default(),
             Scope {
                 scope: TerminalLaunchScope {
@@ -866,7 +868,7 @@ mod tests {
         let mut runtime = GenericTerminalRuntime::new(
             DaemonGeneration::new(),
             Resolver,
-            Store,
+            Store::default(),
             Pty::default(),
             Scope {
                 scope: TerminalLaunchScope {
@@ -901,6 +903,44 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidArgument);
         assert!(runtime.pty.spawned_directories.is_empty());
+
+        let invalid_scope = TerminalLaunchScope {
+            workspace_id: workspace,
+            session_id: Some(session),
+            worktree_id: available_worktree,
+        };
+        let mut invalid_directory = GenericTerminalRuntime::new(
+            DaemonGeneration::new(),
+            Resolver,
+            Store::default(),
+            Pty::default(),
+            Scope {
+                scope: invalid_scope.clone(),
+                working_directory: PathBuf::new(),
+            },
+        );
+        assert_eq!(
+            invalid_directory
+                .request(
+                    ConnectionId::new(),
+                    ClientId::new(),
+                    RequestId::new(),
+                    TerminalAction::Launch,
+                    serde_json::to_value(TerminalRequest::Launch {
+                        intent: usagi_core::usecase::client::TerminalLaunchIntent {
+                            request: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
+                                profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                                scope: invalid_scope,
+                            },
+                            geometry: TerminalGeometry { cols: 80, rows: 24 },
+                        },
+                    })
+                    .unwrap(),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
     }
 
     #[test]
@@ -910,6 +950,119 @@ mod tests {
         ));
 
         assert_eq!(error.code, ErrorCode::ResyncRequired);
+    }
+
+    #[test]
+    fn malformed_requests_geometry_and_every_error_family_are_typed() {
+        let (mut runtime, terminal) = launched_runtime();
+        runtime.disconnect(ConnectionId::new());
+        let (mut failing_exit, failing_terminal) = launched_runtime();
+        failing_exit.store.fail = true;
+        assert_eq!(
+            failing_exit.exit(&failing_terminal, 0).unwrap_err().code,
+            ErrorCode::OwnershipUnknown
+        );
+        assert_eq!(failing_exit.pty.released, vec![failing_terminal]);
+        assert_eq!(
+            map_scope_failure(TerminalScopeResolveError::Unavailable).code,
+            ErrorCode::InvalidArgument
+        );
+        let restored = GenericTerminalRuntime::from_snapshot(
+            DaemonGeneration::new(),
+            Resolver,
+            Store::default(),
+            Pty::default(),
+            Scope {
+                scope: TerminalLaunchScope {
+                    workspace_id: WorkspaceId::new(),
+                    session_id: None,
+                    worktree_id: WorktreeId::new(),
+                },
+                working_directory: PathBuf::from("/"),
+            },
+            super::super::generic_terminal::TerminalStoreSnapshot::default(),
+        );
+        assert!(restored.is_ok());
+        let invalid = super::super::generic_terminal::TerminalStoreSnapshot {
+            schema_version: 0,
+            ..Default::default()
+        };
+        assert!(
+            GenericTerminalRuntime::from_snapshot(
+                DaemonGeneration::new(),
+                Resolver,
+                Store::default(),
+                Pty::default(),
+                Scope {
+                    scope: TerminalLaunchScope {
+                        workspace_id: WorkspaceId::new(),
+                        session_id: None,
+                        worktree_id: WorktreeId::new(),
+                    },
+                    working_directory: PathBuf::from("/"),
+                },
+                invalid,
+            )
+            .is_err()
+        );
+        let malformed = runtime
+            .request(
+                ConnectionId::new(),
+                ClientId::new(),
+                RequestId::new(),
+                TerminalAction::Attach,
+                json!({"unknown": true}),
+            )
+            .unwrap_err();
+        assert_eq!(malformed.code, ErrorCode::InvalidArgument);
+        let mismatch = runtime
+            .request(
+                ConnectionId::new(),
+                ClientId::new(),
+                RequestId::new(),
+                TerminalAction::Launch,
+                serde_json::to_value(TerminalRequest::Attach { terminal }).unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(mismatch.code, ErrorCode::InvalidArgument);
+        assert_eq!(
+            geometry(TerminalGeometry { cols: 1, rows: 0 })
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+
+        let errors = [
+            GenericTerminalError::Terminal(RegistryError::PtyResizeFailed),
+            GenericTerminalError::SpawnFailed,
+            GenericTerminalError::UnknownTerminal,
+            GenericTerminalError::TerminalGenerationMismatch,
+            GenericTerminalError::Terminal(RegistryError::Exited),
+            GenericTerminalError::ConcurrencyExhausted,
+            GenericTerminalError::ReconcileRequired(TerminalReconcileState::IdentityUnknown),
+            GenericTerminalError::Store,
+            GenericTerminalError::InvalidSnapshot,
+            GenericTerminalError::Launch(TerminalLaunchValidationError::InvalidProgram),
+            GenericTerminalError::ScopeMismatch,
+            GenericTerminalError::TerminalAlreadyExists,
+        ];
+        let expected = [
+            ErrorCode::Unavailable,
+            ErrorCode::Unavailable,
+            ErrorCode::StaleTarget,
+            ErrorCode::StaleTarget,
+            ErrorCode::StaleTarget,
+            ErrorCode::ResourceExhausted,
+            ErrorCode::OwnershipUnknown,
+            ErrorCode::OwnershipUnknown,
+            ErrorCode::OwnershipUnknown,
+            ErrorCode::InvalidArgument,
+            ErrorCode::InvalidArgument,
+            ErrorCode::RevisionConflict,
+        ];
+        for (error, code) in errors.into_iter().zip(expected) {
+            assert_eq!(map_error(error).code, code);
+        }
     }
 
     #[test]
@@ -927,7 +1080,7 @@ mod tests {
         let mut runtime = GenericTerminalRuntime::new(
             DaemonGeneration::new(),
             Resolver,
-            Store,
+            Store::default(),
             Pty::default(),
             Scope {
                 scope: scope.clone(),
@@ -956,6 +1109,21 @@ mod tests {
 
         let live = TerminalOwner::inventory(&runtime, &scope);
         assert_eq!(live.len(), 1);
+        assert_eq!(
+            call(
+                &mut runtime,
+                ConnectionId::new(),
+                ClientId::new(),
+                TerminalAction::Inventory,
+                TerminalRequest::Inventory {
+                    scope: scope.clone(),
+                },
+            )["terminals"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(live[0].terminal.fences(&terminal));
         assert_eq!(live[0].kind, TerminalKind::Terminal);
         assert!(live[0].live);

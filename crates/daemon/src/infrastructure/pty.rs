@@ -4,8 +4,6 @@
 //! is the sole place that uses `portable-pty`; callers get readers, writers,
 //! resizing and child waiting without exposing a local terminal to clients.
 
-#![coverage(off)]
-
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Mutex;
@@ -145,6 +143,7 @@ impl PtyTerminal {
     ///
     /// Returns an error if the process cannot be waited for or reports an exit
     /// code outside the supported range.
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agent_real_pty
     pub fn wait(&self) -> std::io::Result<i32> {
         self.child
             .lock()
@@ -160,6 +159,7 @@ impl PtyTerminal {
     /// # Errors
     ///
     /// Returns an error when the child lock, termination, or wait fails.
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agent_real_pty
     pub fn terminate_reap(&self) -> std::io::Result<()> {
         let mut child = self
             .child
@@ -172,6 +172,7 @@ impl PtyTerminal {
 }
 
 impl PtyWriter for PtyTerminal {
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agent_real_pty
     fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
         self.writer
             .lock()
@@ -293,6 +294,17 @@ mod tests {
             "/bin/sh",
             &["-c".to_owned(), "exit 0".to_owned()],
             &[],
+            std::path::Path::new("/"),
+            Geometry { cols: 80, rows: 24 },
+        )
+        .unwrap();
+        assert_eq!(terminal.wait().unwrap(), 0);
+    }
+
+    #[test]
+    fn spawn_convenience_uses_the_real_pty_boundary() {
+        let terminal = PtyTerminal::spawn(
+            "/usr/bin/true",
             std::path::Path::new("/"),
             Geometry { cols: 80, rows: 24 },
         )
@@ -443,6 +455,7 @@ mod tests {
 
         assert_eq!(writer.write_all(b"hello"), Ok(()));
         assert_eq!(writer.inner.written, b"hello");
+        assert!(writer.inner.flush().is_ok());
     }
 
     #[test]
