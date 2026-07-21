@@ -5,10 +5,10 @@
 //! - **Per-repository metadata** at `<repo>/.usagi` ([`STATE_DIR`]): the issue /
 //!   memory stores and the `.gitignore` writer join it. Lives next to the code
 //!   it describes and is committed with it.
-//! - **The global per-user data directory** ([`data_dir`]): the device-mode
-//!   `$USAGI_HOME` / `~/.usagi`, or its `dev/` child in development mode.
-//!   The mode split prevents local development from touching a daemon or state
-//!   used for device validation.
+//! - **The global per-user data directory** ([`data_dir`]): the selected
+//!   `dev/` or `device/` child of `$USAGI_HOME` / `~/.usagi`. The mode split
+//!   prevents local development and device validation from touching each other
+//!   or an existing usagi installation.
 //!
 //! The two share the `.usagi` basename by convention but are independent
 //! directories with different contents and lifetimes.
@@ -20,8 +20,10 @@ use anyhow::{Context, Result};
 /// The repository-relative directory holding usagi's per-project metadata.
 pub const STATE_DIR: &str = ".usagi";
 
-/// The single directory name used for debug runtime state.
+/// The directory name used by development runtime state.
 pub const DEV_DIR: &str = "dev";
+/// The directory name used by device-validation runtime state.
+pub const DEVICE_DIR: &str = "device";
 
 /// The directory under [`STATE_DIR`] that holds session worktrees, one per
 /// session: `<repo>/.usagi/sessions/<name>`.
@@ -61,8 +63,7 @@ pub fn runtime_mode() -> RuntimeMode {
 /// Resolve the directory where usagi stores its per-user data.
 ///
 /// `$USAGI_HOME` takes precedence; otherwise `~/.usagi` is used as the base.
-/// Development mode appends [`DEV_DIR`] to that base while device mode retains
-/// the base itself.
+/// Both runtime modes append their own child directory to that base.
 ///
 /// # Errors
 ///
@@ -81,9 +82,8 @@ pub fn data_dir() -> Result<PathBuf> {
 
 /// Resolve the selected-mode directory rooted at `base`.
 ///
-/// Development mode uses `base/dev`; device mode uses `base` unchanged. This
-/// is shared by global and project-local runtime state so their split cannot
-/// drift.
+/// Development mode uses `base/dev`; device mode uses `base/device`. This is
+/// shared by global and project-local runtime state so their split cannot drift.
 #[must_use]
 pub fn channel_data_dir(base: impl AsRef<Path>) -> PathBuf {
     mode_data_dir(base.as_ref(), runtime_mode())
@@ -91,7 +91,7 @@ pub fn channel_data_dir(base: impl AsRef<Path>) -> PathBuf {
 
 fn mode_data_dir(base: &Path, mode: RuntimeMode) -> PathBuf {
     match mode {
-        RuntimeMode::Device => base.to_path_buf(),
+        RuntimeMode::Device => base.join(DEVICE_DIR),
         RuntimeMode::Development => base.join(DEV_DIR),
     }
 }
@@ -99,7 +99,7 @@ fn mode_data_dir(base: &Path, mode: RuntimeMode) -> PathBuf {
 /// Resolve the selected-mode runtime-state directory for a project.
 ///
 /// Development mode uses `<project_root>/.usagi/dev`; device mode uses
-/// `<project_root>/.usagi`.
+/// `<project_root>/.usagi/device`.
 #[must_use]
 pub fn project_data_dir(project_root: impl AsRef<Path>) -> PathBuf {
     channel_data_dir(project_root.as_ref().join(STATE_DIR))
@@ -141,7 +141,7 @@ mod tests {
         let base = Path::new("/data");
         assert_eq!(
             mode_data_dir(base, RuntimeMode::Device),
-            PathBuf::from("/data")
+            PathBuf::from("/data/device")
         );
         assert_eq!(
             mode_data_dir(base, RuntimeMode::Development),

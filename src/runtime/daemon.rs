@@ -1113,11 +1113,10 @@ fn open_agent_runtime(
     let snapshot = store.reconcile_after_restart()?;
     let mut registry = AdapterRegistry::new();
     let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness);
-    let data_home = if matches!(paths::runtime_mode(), paths::RuntimeMode::Development) {
-        data_dir.parent().unwrap_or(data_dir).to_path_buf()
-    } else {
-        data_dir.to_path_buf()
-    };
+    // Agent MCP children receive the mode-neutral base. They apply the same
+    // selected runtime mode themselves, so both `dev/` and `device/` reach the
+    // daemon's already-selected directory without adding that child twice.
+    let data_home = data_dir.parent().unwrap_or(data_dir).to_path_buf();
     // Duplicate registration cannot happen for the two literal profiles; a
     // failure here would only drop an adapter, so the launch would surface a
     // safe unknown-profile error rather than crash the daemon.
