@@ -202,8 +202,10 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
   （[ルートでの書き込みガードレール](#ルートでの書き込みガードレール)）ため、作業はこの起源 session が worktree 内で
   `issue_create` して PR することで生まれます。
 - `session_create` は `name` をセッション名として `<root>/.usagi/sessions/<name>/` に worktree を生成します
-  （各リポジトリで切るブランチは `usagi/<name>`）。空・パス区切り文字を含む名前は拒否し、
-  既存のセッション名は重複エラーになります（CLI と同じ検証）。`session_list` は `state.json` を読むだけの
+  （各リポジトリで切るブランチは `usagi/<name>`）。新規名は filesystem・Git・setup effect より前に検証され、
+  `usagi/<name>` が Git ref として有効で、UTF-8 で 250 byte 以下である必要があります。命名規則の正本は
+  [オーケストレーションのセッション構築](../04-orchestration.md#セッションの構築再帰走査と複数リポジトリ対応)です。既存のセッション名は
+  重複エラーになります（CLI と同じ検証）。`session_list` は `state.json` を読むだけの
   軽量クエリで、on-disk の reconcile は行いません。
 - `session_create` は worktree を生成するだけで、動作中の TUI の[集中](../design/home/02-layout.md#集中closeup)には
   入りません（`usagi mcp` は TUI を操作できない別プロセスのため）。TUI から作成したときは作成完了後にその

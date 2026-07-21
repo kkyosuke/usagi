@@ -59,6 +59,15 @@ use crate::usecase::workspace_state;
 /// record, the sidebar label) stays unprefixed.
 pub const BRANCH_PREFIX: &str = "usagi/";
 
+/// Maximum UTF-8 byte length of a session name.
+///
+/// Git does not impose a fixed ref-name length, but the session name is also a
+/// single filesystem component and Git appends `.lock` while creating a loose
+/// ref. Reserving those five bytes within the widely supported 255-byte
+/// `NAME_MAX` boundary makes an accepted name portable across the filesystems
+/// usagi supports.
+pub const MAX_SESSION_NAME_BYTES: usize = 250;
+
 /// The git branch a session named `name` checks out: `name` under the
 /// [`BRANCH_PREFIX`] namespace. This is the single source of truth mapping a
 /// session name to its branch, shared by [`create`] (cutting the branch),
@@ -91,9 +100,10 @@ pub trait SetupCommandRunner {
 /// Create session `name` under `workspace_root`, following the workspace's
 /// effective agent settings for its launches.
 ///
-/// Fails if the name is empty or contains path separators, or if the session
-/// already exists. Any git error (e.g. the branch already exists in a repo) is
-/// surfaced. To pin a specific agent CLI / model on the session, use
+/// Fails if the name is empty, cannot form a valid `usagi/<name>` Git branch,
+/// exceeds the portable filesystem-component boundary, or if the session
+/// already exists. Any later git error (e.g. the branch already exists in a
+/// repo) is surfaced. To pin a specific agent CLI / model on the session, use
 /// [`create_with_agent`].
 ///
 /// The session is recorded with [`SessionOrigin::Human`]: this is the
@@ -464,11 +474,14 @@ fn run_setup_commands(
 /// existing sessions / branch clashes that need disk and git access) and the
 /// TUI's live inline-create validation, so the two never drift.
 ///
-/// A session name becomes a git branch name and a directory under
-/// `.usagi/sessions/`, so it must not contain a path separator (`/`, `\`, `.`,
-/// `..`) and must not start with `-` — a leading `-` would be parsed by git as an
-/// option (e.g. `-D`) where the name is interpolated into `git branch -D <name>`
-/// / `git worktree add -b <name>`.
+/// A session name becomes both the final Git branch `usagi/<name>` and one
+/// directory component under `.usagi/sessions/`. In addition to the path-safe
+/// no-separator and no-leading-`-` policy, the final branch must satisfy Git's
+/// `check-ref-format` rules: among other constraints it may not contain `..`,
+/// `@{`, ASCII controls/space, `~^:?*[`, or `\`; start with `.`, end in `.lock`,
+/// or end with `.`. Unicode is otherwise accepted. Git itself has no fixed ref
+/// length limit, so usagi separately caps a name at [`MAX_SESSION_NAME_BYTES`]
+/// UTF-8 bytes for portable filesystem and loose-ref components.
 ///
 /// An empty name has no bad characters and so passes here; callers decide whether
 /// emptiness itself is an error ([`create`] rejects it; the TUI stays quiet while
@@ -481,7 +494,45 @@ pub fn name_format_error(name: &str) -> Option<String> {
     if name.starts_with('-') {
         return Some("session name must not start with \"-\"".to_string());
     }
+    if name.len() > MAX_SESSION_NAME_BYTES {
+        return Some(format!(
+            "session name must be at most {MAX_SESSION_NAME_BYTES} UTF-8 bytes"
+        ));
+    }
+    if !name.is_empty() && !is_valid_git_ref(&branch_name(name)) {
+        return Some(
+            "session name must form a valid Git branch under the \"usagi/\" namespace".to_string(),
+        );
+    }
     None
+}
+
+/// Pure `git check-ref-format` equivalent for the ordinary full ref form used
+/// by session branches. Keeping this local avoids spawning Git during input
+/// validation and guarantees rejection before any filesystem/setup effect.
+fn is_valid_git_ref(reference: &str) -> bool {
+    if reference == "@"
+        || !reference.contains('/')
+        || reference.starts_with('/')
+        || reference.ends_with('/')
+        || reference.ends_with('.')
+        || reference.contains("//")
+        || reference.contains("..")
+        || reference.contains("@{")
+        || reference.contains('\\')
+    {
+        return false;
+    }
+
+    if reference.chars().any(|ch| {
+        ch.is_ascii_control() || ch == ' ' || matches!(ch, '~' | '^' | ':' | '?' | '*' | '[')
+    }) {
+        return false;
+    }
+
+    reference
+        .split('/')
+        .all(|component| !component.starts_with('.') && !component.ends_with(".lock"))
 }
 
 /// The local branch names that already exist across every source repository a
@@ -1689,6 +1740,155 @@ mod tests {
                 "{bad}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn session_name_git_ref_rules_match_git_check_ref_format() {
+        let max_length = "a".repeat(MAX_SESSION_NAME_BYTES);
+        let invalid = [
+            "a..b",
+            "a@{b",
+            ".hidden",
+            "topic.lock",
+            "trailing.",
+            "has space",
+            "control\u{001f}",
+            "tilde~",
+            "caret^",
+            "colon:",
+            "question?",
+            "star*",
+            "bracket[",
+        ];
+        let valid = [
+            "a",
+            "feature-x",
+            "release.1",
+            "locksmith",
+            "日本語-🐇",
+            max_length.as_str(),
+        ];
+
+        for name in invalid.into_iter().chain(valid) {
+            let reference = branch_name(name);
+            let git_accepts = git_cmd(Path::new("."))
+                .args(["check-ref-format", &reference])
+                .status()
+                .unwrap()
+                .success();
+            assert_eq!(
+                name_format_error(name).is_none(),
+                git_accepts,
+                "validator parity for {name:?} ({reference:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_git_ref_names_are_rejected_before_every_creation_effect() {
+        let invalid = [
+            "a..b",
+            "a@{b",
+            ".hidden",
+            "topic.lock",
+            "trailing.",
+            "has space",
+            "bad~",
+            "bad^",
+            "bad:",
+            "bad?",
+            "bad*",
+            "bad[",
+            "bad\u{007f}",
+        ];
+
+        for name in invalid {
+            let root = tempfile::tempdir().unwrap();
+            init_repo(root.path());
+            let branches_before = git::local_branches(root.path());
+            let runner = RecordingSetupRunner::default();
+
+            let error = create_with_setup_runner(
+                root.path(),
+                name,
+                SessionAgent::default(),
+                SessionOrigin::Human,
+                None,
+                &runner,
+                None,
+            )
+            .unwrap_err();
+
+            assert!(
+                error.to_string().contains("valid Git branch"),
+                "{name:?}: {error}"
+            );
+            assert_eq!(
+                git::local_branches(root.path()),
+                branches_before,
+                "{name:?}"
+            );
+            assert!(!root.path().join(STATE_DIR).exists(), "{name:?}");
+            assert!(runner.calls.borrow().is_empty(), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn session_name_length_and_unicode_boundaries_are_explicit() {
+        assert_eq!(name_format_error("日本語-🐇"), None);
+        assert_eq!(name_format_error(&"a".repeat(MAX_SESSION_NAME_BYTES)), None);
+        assert!(name_format_error(&"a".repeat(MAX_SESSION_NAME_BYTES + 1))
+            .unwrap()
+            .contains("250 UTF-8 bytes"));
+        assert_eq!(name_format_error(&"界".repeat(83)), None);
+        assert!(name_format_error(&"界".repeat(84)).is_some());
+
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let boundary = "a".repeat(MAX_SESSION_NAME_BYTES);
+        let created = create(root.path(), &boundary).unwrap();
+        assert_eq!(created.name, boundary);
+        let unicode = create(root.path(), "日本語-🐇").unwrap();
+        assert_eq!(unicode.name, "日本語-🐇");
+    }
+
+    #[test]
+    fn interactive_mcp_and_orchestrator_creation_entrypoints_share_validation() {
+        let assert_rejected_without_effect = |create: &dyn Fn(&Path) -> Result<CreatedSession>| {
+            let root = tempfile::tempdir().unwrap();
+            init_repo(root.path());
+            let branches_before = git::local_branches(root.path());
+
+            let error = create(root.path()).unwrap_err();
+
+            assert!(error.to_string().contains("valid Git branch"));
+            assert_eq!(git::local_branches(root.path()), branches_before);
+            assert!(!root.path().join(STATE_DIR).exists());
+        };
+
+        // Interactive CLI/TUI creation.
+        assert_rejected_without_effect(&|root| create(root, "bad..name"));
+        // MCP creation, including the delegate composites that call this API.
+        assert_rejected_without_effect(&|root| {
+            create_with_agent(
+                root,
+                "bad..name",
+                SessionAgent::default(),
+                SessionOrigin::Mcp,
+                None,
+            )
+        });
+        // Orchestrator stacked-worker creation.
+        assert_rejected_without_effect(&|root| {
+            create_with_agent_at_base(
+                root,
+                "bad..name",
+                SessionAgent::default(),
+                SessionOrigin::Mcp,
+                None,
+                "HEAD",
+            )
+        });
     }
 
     #[test]

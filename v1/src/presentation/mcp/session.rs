@@ -1128,7 +1128,7 @@ fn session_tool_schemas() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "Target session name" }
+                    "name": { "type": "string", "description": "Target session name; must form a valid Git branch as usagi/<name> and be at most 250 UTF-8 bytes" }
                 },
                 "required": ["name"]
             }
@@ -1260,6 +1260,7 @@ fn session_tool_schemas() -> Value {
 mod tests {
     use super::*;
     use crate::domain::workspace_state::PrLink;
+    use crate::infrastructure::git;
     use crate::infrastructure::git::test_command as git_cmd;
     use crate::infrastructure::pr_link_store;
     use crate::presentation::mcp::PROTOCOL_VERSION;
@@ -1939,6 +1940,28 @@ mod tests {
         let contents = fs::read_to_string(entry.path()).unwrap();
         assert!(contents.contains("mcp session_create \"dup\" failed:"));
 
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn create_rejects_git_ref_invalid_names_without_workspace_effects() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let branches_before = git::local_branches(root.path());
+        let server = server_at(root.path(), FakeBackend::ok("x"));
+
+        let result = call(&server, "session_create", json!({"name":"bad@{name"}));
+
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("valid Git branch"));
+        assert_eq!(git::local_branches(root.path()), branches_before);
+        assert!(!root.path().join(".usagi").exists());
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 
