@@ -2,16 +2,17 @@
 //!
 //! usagi's configuration file is the global `settings.json` (see
 //! [`crate::infrastructure::storage`]). `usagi config` prints the current
-//! settings; `usagi config --edit` opens the file in `$EDITOR`, then validates
-//! the result on save, reverting to the previous version if the edit produced
-//! invalid configuration.
+//! settings; `usagi config --edit` opens a private copy in `$EDITOR`, validates
+//! the result, then commits it only if the shared file has not changed.
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
 use crate::domain::settings::{AgentCli, Settings, SkillFeature, Theme};
+use crate::infrastructure::json_file;
 use crate::infrastructure::storage::Storage;
 
 /// Entry point for `usagi config`.
@@ -90,39 +91,61 @@ fn default_editor(os: &str) -> &'static str {
 
 /// Open the settings file in `editor`, then validate the result.
 ///
-/// The current settings are materialized first so the editor opens populated,
-/// normalized content. If the edited file no longer parses into valid
-/// [`Settings`] (bad JSON, missing required fields, or a wrong type), the
-/// previous file is restored and the parse error is surfaced.
+/// The editor receives a mode-0600 private copy containing normalized settings;
+/// the shared file is never used as editor scratch space. After the editor exits,
+/// the complete candidate is parsed before the store lock is acquired. The
+/// candidate is atomically saved only when the shared file's byte revision still
+/// matches the revision captured before editing.
 fn edit_config(storage: &Storage, editor: &dyn Editor) -> Result<Settings> {
-    // Materialize the current settings so the file exists and is normalized.
-    let current = storage.load_settings()?;
-    storage.save_settings(&current)?;
+    let (base_revision, current) = {
+        let _lock = storage.lock()?;
+        (
+            read_revision(&storage.settings_path())?,
+            storage.load_settings()?,
+        )
+    };
 
-    let path = storage.settings_path();
-    let backup = fs::read_to_string(&path)?;
+    let mut candidate_file = tempfile::Builder::new()
+        .prefix("usagi-settings-")
+        .suffix(".json")
+        .tempfile()
+        .context("failed to create a private configuration copy")?;
+    candidate_file
+        .write_all(json_file::serialize_versioned(&current)?.as_bytes())
+        .context("failed to populate the private configuration copy")?;
+    candidate_file
+        .as_file_mut()
+        .flush()
+        .context("failed to flush the private configuration copy")?;
+    let candidate_path = candidate_file.path().to_path_buf();
 
-    editor.edit(&path)?;
-
-    // An editor that *removed* the file (deleted it, or saved by renaming a temp
-    // away and leaving nothing) is a special case the parse-revert below misses:
-    // `load_settings` maps a missing file to `Ok(defaults)`, not `Err`, so the
-    // revert arm would not fire and the previous configuration would be silently
-    // lost (and defaults reported as if saved). Detect the missing file
-    // explicitly and restore the backup to disk.
-    if !path.exists() {
-        fs::write(&path, &backup)?;
-        bail!("the edited configuration file was removed; reverted to the previous version");
+    editor.edit(&candidate_path)?;
+    if !candidate_path.exists() {
+        bail!("the editor removed the private configuration copy; live settings were not changed");
     }
 
-    match storage.load_settings() {
-        Ok(settings) => Ok(settings),
-        Err(error) => {
-            // Roll back to the last valid configuration so usagi stays usable.
-            fs::write(&path, &backup)?;
-            Err(error)
-                .context("the edited configuration was invalid; reverted to the previous version")
-        }
+    let candidate = json_file::read_versioned::<Settings>(&candidate_path)
+        .context("the edited configuration was invalid; live settings were not changed")?
+        .context("the edited configuration was missing; live settings were not changed")?
+        .sanitized();
+
+    let _lock = storage.lock()?;
+    if read_revision(&storage.settings_path())? != base_revision {
+        bail!(
+            "configuration conflict: settings changed while the editor was open; live settings were not changed"
+        );
+    }
+    storage.save_settings(&candidate)?;
+    Ok(candidate)
+}
+
+/// The exact content identity used as the editor transaction's base revision.
+/// Missing is distinct from an empty file so first-write races also conflict.
+fn read_revision(path: &Path) -> Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).context(format!("failed to read {}", path.display())),
     }
 }
 
@@ -237,6 +260,8 @@ fn key_scheme_label(scheme: crate::domain::settings::KeyScheme) -> &'static str 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     /// An [`Editor`] that overwrites the file with fixed `content` (simulating
     /// the user editing and saving), or leaves it untouched when `None`.
@@ -249,6 +274,21 @@ mod tests {
             if let Some(content) = self.content {
                 fs::write(path, content)?;
             }
+            Ok(())
+        }
+    }
+
+    struct BarrierEditor {
+        content: &'static str,
+        opened: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    }
+
+    impl Editor for BarrierEditor {
+        fn edit(&self, path: &Path) -> Result<()> {
+            fs::write(path, self.content)?;
+            self.opened.wait();
+            self.resume.wait();
             Ok(())
         }
     }
@@ -367,6 +407,41 @@ mod tests {
     }
 
     #[test]
+    fn edit_config_uses_a_private_mode_0600_copy_without_materializing_live_settings() {
+        let (_dir, storage) = temp_storage();
+        let live_path = storage.settings_path();
+
+        struct InspectingEditor {
+            live_path: std::path::PathBuf,
+        }
+        impl Editor for InspectingEditor {
+            fn edit(&self, path: &Path) -> Result<()> {
+                assert_ne!(path, self.live_path);
+                assert!(!self.live_path.exists());
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    assert_eq!(fs::metadata(path)?.permissions().mode() & 0o777, 0o600);
+                }
+                fs::write(path, "{\"version\":1,\"theme\":\"dark\"}")?;
+                assert!(!self.live_path.exists());
+                Ok(())
+            }
+        }
+
+        let settings = edit_config(
+            &storage,
+            &InspectingEditor {
+                live_path: live_path.clone(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(settings.theme, Theme::Dark);
+        assert!(live_path.exists());
+    }
+
+    #[test]
     fn edit_config_keeps_current_settings_when_unchanged() {
         let (_dir, storage) = temp_storage();
         storage
@@ -381,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_config_reverts_invalid_edits() {
+    fn invalid_candidate_preserves_a_concurrent_valid_update() {
         let (_dir, storage) = temp_storage();
         storage
             .save_settings(&Settings {
@@ -389,18 +464,36 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        // The editor saves malformed JSON.
-        let editor = FakeEditor {
-            content: Some("{ not valid json"),
-        };
-        let error = edit_config(&storage, &editor).unwrap_err();
+
+        struct InvalidEditor {
+            storage_dir: std::path::PathBuf,
+        }
+        impl Editor for InvalidEditor {
+            fn edit(&self, path: &Path) -> Result<()> {
+                crate::usecase::settings::set_agent_cli(
+                    &Storage::new(&self.storage_dir),
+                    AgentCli::Gemini,
+                )?;
+                fs::write(path, "{ not valid json")?;
+                Ok(())
+            }
+        }
+
+        let error = edit_config(
+            &storage,
+            &InvalidEditor {
+                storage_dir: storage.dir().to_path_buf(),
+            },
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("invalid"));
-        // The previous valid configuration was restored.
-        assert_eq!(storage.load_settings().unwrap().theme, Theme::Dark);
+        let live = storage.load_settings().unwrap();
+        assert_eq!(live.theme, Theme::Dark);
+        assert_eq!(live.agent_cli, AgentCli::Gemini);
     }
 
     #[test]
-    fn edit_config_restores_backup_when_the_editor_removes_the_file() {
+    fn removed_private_copy_preserves_a_concurrent_valid_update() {
         let (_dir, storage) = temp_storage();
         storage
             .save_settings(&Settings {
@@ -409,21 +502,131 @@ mod tests {
             })
             .unwrap();
 
-        // An editor that deletes the settings file rather than saving it. Without
-        // the missing-file guard, load_settings would return Ok(defaults) and the
-        // previous configuration would be lost; the guard must restore the backup.
-        struct DeletingEditor;
+        struct DeletingEditor {
+            storage_dir: std::path::PathBuf,
+        }
         impl Editor for DeletingEditor {
             fn edit(&self, path: &Path) -> Result<()> {
+                crate::usecase::settings::set_agent_cli(
+                    &Storage::new(&self.storage_dir),
+                    AgentCli::Gemini,
+                )?;
                 fs::remove_file(path)?;
                 Ok(())
             }
         }
 
-        let error = edit_config(&storage, &DeletingEditor).unwrap_err();
+        let error = edit_config(
+            &storage,
+            &DeletingEditor {
+                storage_dir: storage.dir().to_path_buf(),
+            },
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("removed"));
-        // The previous valid configuration is restored on disk, not lost.
         assert!(storage.settings_path().exists());
+        let live = storage.load_settings().unwrap();
+        assert_eq!(live.theme, Theme::Dark);
+        assert_eq!(live.agent_cli, AgentCli::Gemini);
+    }
+
+    #[test]
+    fn same_field_concurrent_update_is_a_conflict() {
+        let (_dir, storage) = temp_storage();
+        storage.save_settings(&Settings::default()).unwrap();
+        let opened = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let storage_dir = storage.dir().to_path_buf();
+        let edit_thread = {
+            let opened = Arc::clone(&opened);
+            let resume = Arc::clone(&resume);
+            thread::spawn(move || {
+                edit_config(
+                    &Storage::new(storage_dir),
+                    &BarrierEditor {
+                        content: "{\"version\":1,\"theme\":\"dark\"}",
+                        opened,
+                        resume,
+                    },
+                )
+            })
+        };
+
+        opened.wait();
+        crate::usecase::settings::set_theme(&storage, Theme::Light).unwrap();
+        resume.wait();
+
+        let error = edit_thread.join().unwrap().unwrap_err();
+        assert!(error.to_string().contains("conflict"));
+        assert_eq!(storage.load_settings().unwrap().theme, Theme::Light);
+    }
+
+    #[test]
+    fn disjoint_field_concurrent_update_conflicts_and_retry_uses_the_latest_base() {
+        let (_dir, storage) = temp_storage();
+        storage.save_settings(&Settings::default()).unwrap();
+        let opened = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let storage_dir = storage.dir().to_path_buf();
+        let edit_thread = {
+            let opened = Arc::clone(&opened);
+            let resume = Arc::clone(&resume);
+            thread::spawn(move || {
+                edit_config(
+                    &Storage::new(storage_dir),
+                    &BarrierEditor {
+                        content: "{\"version\":1,\"theme\":\"dark\"}",
+                        opened,
+                        resume,
+                    },
+                )
+            })
+        };
+
+        opened.wait();
+        crate::usecase::settings::set_notifications_enabled(&storage, false).unwrap();
+        resume.wait();
+
+        let error = edit_thread.join().unwrap().unwrap_err();
+        assert!(error.to_string().contains("conflict"));
+        let live = storage.load_settings().unwrap();
+        assert_eq!(live.theme, Theme::System);
+        assert!(!live.notifications_enabled);
+
+        let retried = edit_config(
+            &storage,
+            &FakeEditor {
+                content: Some("{\"version\":1,\"theme\":\"dark\",\"notifications_enabled\":false}"),
+            },
+        )
+        .unwrap();
+        assert_eq!(retried.theme, Theme::Dark);
+        assert!(!retried.notifications_enabled);
+    }
+
+    #[test]
+    fn editor_failure_preserves_the_latest_valid_state() {
+        let (_dir, storage) = temp_storage();
+        storage.save_settings(&Settings::default()).unwrap();
+
+        struct FailingEditor {
+            storage_dir: std::path::PathBuf,
+        }
+        impl Editor for FailingEditor {
+            fn edit(&self, _path: &Path) -> Result<()> {
+                crate::usecase::settings::set_theme(&Storage::new(&self.storage_dir), Theme::Dark)?;
+                bail!("fake editor failed")
+            }
+        }
+
+        let error = edit_config(
+            &storage,
+            &FailingEditor {
+                storage_dir: storage.dir().to_path_buf(),
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("fake editor failed"));
         assert_eq!(storage.load_settings().unwrap().theme, Theme::Dark);
     }
 

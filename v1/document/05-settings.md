@@ -214,9 +214,10 @@
 CLI からも設定を確認・編集できます（[3. コマンドリファレンス](03-commands/README.md)）。ただし `config` は通常の導線ではなく、起動画面の Config に揃えるため `usagi --help` には表示しない上級者向けコマンドです。
 
 - `usagi config` — 現在のグローバル設定を `key  value` 形式で一覧表示（同梱スキル機能は `skill:<機能 ID>  true/false` の行で表示）。
-- `usagi config --edit` — 設定ファイルを `$EDITOR`（→ `$VISUAL` → OS 既定）で開いて編集。保存後に
-  再パースで形式（JSON 構文・必須 `version`・各フィールドの型）を検証し、不正なら編集前の内容へ
-  巻き戻します。
+- `usagi config --edit` — mode 0600 相当の private copy を `$EDITOR`（→ `$VISUAL` → OS 既定）で編集。
+  保存後に全体を検証し、編集中に shared `settings.json` が変わっていない場合だけ atomic に反映します。
+  concurrent update、invalid candidate、copy の削除、editor failure では shared file を変更しません。詳細は
+  [3. コマンドリファレンス](03-commands/01-cli.md#usagi-config)を参照してください。
 
 ## 環境変数
 

@@ -246,14 +246,20 @@ pub fn read_versioned<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
 /// file, stamping the current [`FILE_FORMAT_VERSION`]. The payload is serialized
 /// by reference, so the caller never clones it into an owned envelope struct.
 pub fn write_versioned<T: Serialize + ?Sized>(dir: &Path, path: &Path, payload: &T) -> Result<()> {
-    write_atomic(
-        dir,
-        path,
-        &VersionedRef {
-            version: FILE_FORMAT_VERSION,
-            inner: payload,
-        },
-    )
+    fs::create_dir_all(dir).context(format!("failed to create {}", dir.display()))?;
+    write_atomically(path, serialize_versioned(payload)?.as_bytes(), true)
+}
+
+/// Serialize a versioned payload exactly as a store write would, without
+/// choosing a destination. Used for private editor candidates that must not
+/// materialize or modify the shared store before validation and CAS commit.
+pub fn serialize_versioned<T: Serialize + ?Sized>(payload: &T) -> Result<String> {
+    let mut text = serde_json::to_string_pretty(&VersionedRef {
+        version: FILE_FORMAT_VERSION,
+        inner: payload,
+    })?;
+    text.push('\n');
+    Ok(text)
 }
 
 #[cfg(test)]
@@ -302,6 +308,19 @@ mod tests {
             .filter(|name| name.to_string_lossy().contains(".tmp."))
             .collect();
         assert!(leftover.is_empty(), "temp files left behind: {leftover:?}");
+    }
+
+    #[test]
+    fn serialize_versioned_matches_the_persisted_envelope() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let value = std::collections::BTreeMap::from([("theme", "dark")]);
+
+        let serialized = serialize_versioned(&value).unwrap();
+        write_versioned(dir.path(), &path, &value).unwrap();
+
+        assert_eq!(serialized, fs::read_to_string(path).unwrap());
+        assert!(serialized.contains("\"version\": 1"));
     }
 
     #[test]
