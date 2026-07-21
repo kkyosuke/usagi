@@ -1,14 +1,14 @@
 ---
 number: 495
 title: refactor(v1): subprocess primitive と env resolution の逆依存を解消する
-status: todo
+status: in-progress
 priority: medium
 labels: [review, v1, architecture, process]
 dependson: [500]
 related: [59, 113, 171, 189]
 parent: 453
 created_at: 2026-07-20T12:07:07.377791+00:00
-updated_at: 2026-07-20T12:07:43.112630+00:00
+updated_at: 2026-07-20T23:55:35.567169+00:00
 ---
 
 ## 問題・影響

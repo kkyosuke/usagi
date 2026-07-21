@@ -25,6 +25,21 @@ presentation ──> usecase ──> domain
       └──────────────┴──> infrastructure
 ```
 
+設定を伴う外部プロセスの合成では、入口側が `usecase/settings` で global と
+workspace-local の設定を解決し、immutable な `Settings` snapshot を
+`infrastructure/env_resolver` へ渡します。env adapter は global settings API を
+呼び返しません。短命 subprocess の spawn・有界 wait・pipe read は
+`infrastructure/process` が一元化し、env resolver・release fetch・MCP/LLM などの
+各 adapter/entrypoint が共有します。
+
+```text
+presentation ──> usecase/settings ──> Settings snapshot
+      │                                  │
+      └──────────────────────────────────┼──> infrastructure/env_resolver
+                                         │              │
+                                         └──────────────┴──> infrastructure/process
+```
+
 ## 各層の責務
 
 各層の代表的な型・モジュールは下の[モジュール構成](#モジュール構成src)を参照してください。
@@ -100,6 +115,8 @@ src/
 │   ├── pty.rs                  # 疑似ターミナルセッション（portable-pty + vt100、ベル回数の計測・異常終了のログ記録）
 │   ├── pty_exit.rs             # シェル/エージェントの終了ステータスをエラーログ文へ変換する純粋ロジック（pty.rs のテスト可能な相棒）
 │   ├── release.rs              # git ls-remote --tags でリリースタグを取得（薄い IO ラッパ）
+│   ├── process.rs              # 短命 subprocess の spawn・有界 wait・process-group terminate/reap・上限付き stdout/stderr read を共有する下位 primitive
+│   ├── env_resolver/           # 注入された実効 Settings snapshot の op:// binding を process primitive で解決（global usecase には依存しない）
 │   ├── resource.rs             # sysinfo による実プロセスの CPU/メモリ計測（ResourceSampler トレイト + SysinfoSampler。集計は domain/resource）
 │   ├── session_monitor.rs      # 入力待ち判定の純粋ロジック（phase 優先・ベル基準値・待ち集合・アタッチ）
 │   ├── skills.rs               # バイナリ同梱スキル（assets/skills/）を ~/.usagi/skills/ へ展開（materialize）し worktree の .claude/skills/<name> をスキルごとに symlink（link、プロジェクト独自スキルと共存）。配布の仕組みは 04-orchestration が正本
@@ -152,6 +169,8 @@ src/
 - `domain/` は**他層に依存しない**（`usecase` / `infrastructure` / `presentation` を参照しない）。外部クレートは、永続化フォーマットのための `serde`（`Serialize` / `Deserialize` 派生）と時刻表現の `chrono` に限って許容する。UI フレームワーク（`crossterm` / `console`）やプロセス起動・git・ファイル I/O などの副作用は持ち込まない。
 - 依存方向を逆流させない（例: `domain` から `infrastructure` を参照しない、`infrastructure` から `usecase` を参照しない）。
 - `presentation/` と `usecase/` は `infrastructure/` を利用してよいが、`infrastructure/` は上位層を知らない。
+  `tests/architecture_dependencies.rs` が実コードの `crate::presentation` / `crate::usecase` 参照を拒否する。
+  #496 が扱う session inventory/setup の既存 2 ファイルだけを固定 exception とし、新しい exception は許可しない。
 - 各 TUI 画面は `state.rs`（状態）・`ui.rs`（描画）・`event.rs`（イベントループ）に分離し、
   ホーム画面はさらにコマンド解析/補完を `command/` に分離する。
 

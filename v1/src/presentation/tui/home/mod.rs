@@ -178,7 +178,7 @@ fn resolve_pane_env(
     let ws_root = crate::usecase::session::workspace_root(dir);
     crate::presentation::tui::io::loading::run_with_loading_frames(
         term,
-        move || crate::infrastructure::env_resolver::resolve_workspace_env(&ws_root),
+        move || resolve_workspace_env(&ws_root),
         |hop, _face, height, width| {
             ui::env_resolve_loading_frame(height, width, home, hop, "環境変数を解決中…")
         },
@@ -422,7 +422,7 @@ impl LaunchJobManager {
         let worker_env = Arc::clone(&env);
         let root = ws_root.to_path_buf();
         std::thread::spawn(move || {
-            let resolved = crate::infrastructure::env_resolver::resolve_workspace_env(&root);
+            let resolved = resolve_workspace_env(&root);
             let (lock, cvar) = &*worker_env;
             if let Ok(mut slot) = lock.lock() {
                 *slot = Some(resolved);
@@ -2044,7 +2044,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         let worker_slot = env.clone();
         let worker = std::thread::spawn(move || {
             let resolved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                crate::infrastructure::env_resolver::resolve_workspace_env(&ws_root)
+                resolve_workspace_env(&ws_root)
             }))
             .map_err(|payload| {
                 if let Some(s) = payload.downcast_ref::<&str>() {
@@ -3108,6 +3108,16 @@ fn effective_settings(root: &Path) -> crate::domain::settings::Settings {
     crate::infrastructure::storage::Storage::open_default()
         .and_then(|storage| crate::usecase::settings::effective(&storage, root))
         .unwrap_or_default()
+}
+
+/// Compose settings persistence with the lower-level environment adapter.
+///
+/// Keeping this wiring in presentation means the infrastructure resolver only
+/// sees an immutable settings snapshot and can be reused by another entrypoint
+/// without reaching back into the global settings usecase.
+fn resolve_workspace_env(root: &Path) -> std::collections::BTreeMap<String, String> {
+    let settings = effective_settings(root);
+    crate::infrastructure::env_resolver::resolve_workspace_env(&settings)
 }
 
 /// Whether the local LLM is usable right now: enabled in settings and its model
