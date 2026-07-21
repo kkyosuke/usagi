@@ -603,17 +603,7 @@ impl<
     pub fn session_resume_status(&self, session: SessionId) -> (bool, ProviderResumeReason) {
         let records = self.coordinator.snapshot().records;
         if records.iter().any(|record| {
-            record.runtime.session_id == Some(session)
-                && matches!(
-                    record.state,
-                    super::runtime::RuntimeState::Reserved
-                        | super::runtime::RuntimeState::Running
-                        | super::runtime::RuntimeState::ReconcileRequired(
-                            super::runtime::ReconcileState::OrphanRunning
-                                | super::runtime::ReconcileState::SpawnAmbiguous
-                                | super::runtime::ReconcileState::PersistAfterExit
-                        )
-                )
+            record.runtime.session_id == Some(session) && holds_live_or_unknown_agent(record.state)
         }) {
             return (false, ProviderResumeReason::LiveOrOwnershipUnknown);
         }
@@ -622,14 +612,7 @@ impl<
             .filter(|record| {
                 record.runtime.session_id == Some(session)
                     && record.provider_resume.is_some()
-                    && matches!(
-                        record.state,
-                        super::runtime::RuntimeState::Exited
-                            | super::runtime::RuntimeState::Reclaimed
-                            | super::runtime::RuntimeState::ReconcileRequired(
-                                super::runtime::ReconcileState::IdentityUnknown
-                            )
-                    )
+                    && is_resume_source_state(record.state)
             })
             .collect::<Vec<_>>();
         let mut identities = resumable.iter().filter_map(|record| {
@@ -956,17 +939,7 @@ impl<
             .map_err(map_scope_error)?;
         let records = self.coordinator.snapshot().records;
         if records.iter().any(|record| {
-            record.runtime.session_id == Some(session)
-                && matches!(
-                    record.state,
-                    super::runtime::RuntimeState::Reserved
-                        | super::runtime::RuntimeState::Running
-                        | super::runtime::RuntimeState::ReconcileRequired(
-                            super::runtime::ReconcileState::OrphanRunning
-                                | super::runtime::ReconcileState::SpawnAmbiguous
-                                | super::runtime::ReconcileState::PersistAfterExit
-                        )
-                )
+            record.runtime.session_id == Some(session) && holds_live_or_unknown_agent(record.state)
         }) {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidArgument,
@@ -979,14 +952,7 @@ impl<
                 record.runtime.session_id == Some(session)
                     && record.runtime.terminal.workspace_id == workspace
                     && record.provider_resume.is_some()
-                    && matches!(
-                        record.state,
-                        super::runtime::RuntimeState::Exited
-                            | super::runtime::RuntimeState::Reclaimed
-                            | super::runtime::RuntimeState::ReconcileRequired(
-                                super::runtime::ReconcileState::IdentityUnknown
-                            )
-                    )
+                    && is_resume_source_state(record.state)
             })
             .collect::<Vec<_>>();
         let source = candidates.first().ok_or_else(|| {
@@ -1003,6 +969,7 @@ impl<
         let profile_id = source.launch.plan.profile_id.clone();
         let same_identity = candidates.iter().all(|candidate| {
             candidate.launch.plan.profile_id == profile_id
+                && candidate.launch.plan.profile_revision == reference.adapter_revision
                 && candidate.provider_resume.as_ref().is_some_and(|other| {
                     other.provider == reference.provider
                         && other.native_session_id == reference.native_session_id
@@ -1778,6 +1745,36 @@ fn provider_matches_profile(provider: ProviderKind, profile: &AgentProfileId) ->
     matches!(
         (provider, profile.as_str()),
         (ProviderKind::Claude, "claude") | (ProviderKind::Codex, "codex")
+    )
+}
+
+/// Runtime states that still hold the session's Agent slot: a live process or
+/// an incarnation whose ownership is not proven safe to replace. The resume
+/// projection and the resume admission share this fence so the UI never
+/// advertises a resume the daemon would reject.
+fn holds_live_or_unknown_agent(state: super::runtime::RuntimeState) -> bool {
+    matches!(
+        state,
+        super::runtime::RuntimeState::Reserved
+            | super::runtime::RuntimeState::Running
+            | super::runtime::RuntimeState::ReconcileRequired(
+                super::runtime::ReconcileState::OrphanRunning
+                    | super::runtime::ReconcileState::SpawnAmbiguous
+                    | super::runtime::ReconcileState::PersistAfterExit
+            )
+    )
+}
+
+/// Terminal states whose retained provider metadata may seed an explicit
+/// resume. Shared by the resume projection and the admission candidate filter.
+fn is_resume_source_state(state: super::runtime::RuntimeState) -> bool {
+    matches!(
+        state,
+        super::runtime::RuntimeState::Exited
+            | super::runtime::RuntimeState::Reclaimed
+            | super::runtime::RuntimeState::ReconcileRequired(
+                super::runtime::ReconcileState::IdentityUnknown
+            )
     )
 }
 

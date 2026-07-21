@@ -141,9 +141,9 @@ Agent の pending pane は、同じ `OperationId` の成功 final が返した `
 
 `SessionAction::ResumeAgent` は利用者が明示的に開始する provider conversation の再開である。payload は canonical `operation_id`、`workspace_id` と、stable `session_id` または session name を持つ。provider-native ID、profile argv、environment、transcript、旧 `TerminalRef` は wire field に含めない。成功時は daemon が新しく所有する `AgentRuntimeRef` / PTY incarnation の完全な `TerminalRef` を返す。これは旧 PTY の stream `resume` や再 attach ではない。
 
-同じ operation と同じ intent の再送は同じ admission を replay し、別 intent は `idempotency_conflict` になる。失敗はsafe `invalid_argument` / `unavailable` / `ownership_unknown`となる。list / status / overview の projection は `agent_phase: interrupted`、`agent_resumable` とclosed enumの非機密な `agent_resume_reason` だけを返し、native ID はIPC・hook・errorへ出さない。provider capture、scope / revision / live fence、redaction、new PTY spawnの正本は[Provider-native conversation resume](05-daemon.md#provider-native-conversation-resume)とする。
+同じ operation と同じ intent の再送は同じ admission を replay し、別 intent は `idempotency_conflict` になる。失敗は safe な `invalid_argument` / `unavailable` / `ownership_unknown` となる。list / status / overview の projection は `agent_phase: interrupted`、`agent_resumable` と closed enum の非機密な `agent_resume_reason` だけを返し、native ID は IPC・hook・error へ出さない。provider capture、scope / revision / live fence、redaction、new PTY spawn の正本は [Provider-native conversation resume](05-daemon.md#provider-native-conversation-resume) とする。
 
-daemon restart、TUI起動、workspace open時のpane復元は `ResumeAgent` を送らない。CLI `usagi session resume <name>`、TUI `session resume <name>`、MCP `session_resume` の明示操作だけがこの request を作る。
+daemon restart、TUI 起動、workspace open 時の pane 復元は `ResumeAgent` を送らない。CLI `usagi session resume <name>`、TUI `session resume <name>`、MCP `session_resume` の明示操作だけがこの request を作る。
 
 ## dispatch request
 

@@ -1318,10 +1318,12 @@ impl SessionCommandPort for DaemonSessionCommandPort {
             }
             SessionCommand::List => (SessionAction::List, serde_json::json!({})),
             SessionCommand::Overview => (SessionAction::Overview, serde_json::json!({})),
-            SessionCommand::Resume { name } => (
-                SessionAction::ResumeAgent,
-                serde_json::json!({"name": name}),
-            ),
+            SessionCommand::Resume { .. } => {
+                // Resume spawns a runtime the caller must attach to. Only the
+                // controller's `ResumeAgent` effect owns that pending pane, so
+                // this attach-less port refuses instead of spawning blindly.
+                return Err("session resume must be handled by the TUI".to_owned());
+            }
             SessionCommand::SelectRemove { .. } => {
                 return Err("session selection must be handled by the TUI".to_owned());
             }
@@ -1347,11 +1349,6 @@ impl SessionCommandPort for DaemonSessionCommandPort {
                 revision,
                 body,
             } => {
-                if action == SessionAction::ResumeAgent {
-                    return Ok(SessionCommandResult::message(format!(
-                        "provider resume accepted ({operation_id})"
-                    )));
-                }
                 let snapshot = lifecycle_snapshot(&body)?;
                 if action == SessionAction::Create {
                     created_session_hook(&body, &operation_id, revision)?;
@@ -1363,9 +1360,6 @@ impl SessionCommandPort for DaemonSessionCommandPort {
                 )
             }
             DaemonReply::Ok(value) => {
-                if action == SessionAction::ResumeAgent {
-                    return Ok(SessionCommandResult::message("provider resume completed"));
-                }
                 let snapshot = lifecycle_snapshot(&value)?;
                 session_snapshot_result("daemon snapshot refreshed", &snapshot, workspace)
             }

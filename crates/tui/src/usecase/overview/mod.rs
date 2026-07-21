@@ -214,6 +214,7 @@ pub fn parse_session(arguments: &str) -> Result<SessionCommand, &'static str> {
                 name: rest.to_owned(),
             })
         }
+        "resume" if !rest.is_empty() => Err("session name must not contain whitespace"),
         "create" | "resume" => Err("session name is required"),
         "remove" => parse_remove(rest),
         _ => Err("unknown session command"),
@@ -459,6 +460,10 @@ mod tests {
         assert_eq!(parse_session("create"), Err("session name is required"));
         assert_eq!(parse_session("list extra"), Err("unknown session command"));
         assert_eq!(parse_session("resume"), Err("session name is required"));
+        assert_eq!(
+            parse_session("resume feature x"),
+            Err("session name must not contain whitespace")
+        );
         assert_eq!(
             parse_session("overview extra"),
             Err("unknown session command")
