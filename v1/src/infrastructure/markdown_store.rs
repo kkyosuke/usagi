@@ -12,9 +12,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::infrastructure::error_log::ErrorLog;
 use crate::infrastructure::json_file;
+use crate::infrastructure::store_lock::StoreLock;
 
 /// Filename of the derived metadata cache shared by markdown-backed stores.
 /// Kept out of git by the rules in [`crate::infrastructure::gitignore`].
@@ -63,8 +65,11 @@ pub(crate) trait MarkdownEntry: Sync {
     fn key_from_path(path: &Path) -> Option<Self::Key>;
     fn summary(entry: &Self::Entry) -> Self::Summary;
     fn sort_entries(entries: &mut Vec<Self::Entry>);
-    fn summaries_from_index(index: Self::IndexFile) -> Vec<Self::Summary>;
-    fn index_file_ref(summaries: &[Self::Summary]) -> Self::IndexFileRef<'_>;
+    fn index_parts(index: Self::IndexFile) -> (Option<u32>, Option<String>, Vec<Self::Summary>);
+    fn index_file_ref<'a>(
+        summaries: &'a [Self::Summary],
+        source_fingerprint: &'a str,
+    ) -> Self::IndexFileRef<'a>;
 
     /// Write extra derived files after `index.json`. Stores without such files
     /// keep only the cache.
@@ -75,6 +80,7 @@ pub(crate) trait MarkdownEntry: Sync {
 
 struct MarkdownIndex<E: MarkdownEntry> {
     summaries: Vec<E::Summary>,
+    source_fingerprint: String,
 }
 
 /// Common markdown + derived-index persistence rooted at one store directory.
@@ -214,12 +220,19 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
         if !self.derived_is_dirty() {
             return Ok(());
         }
-        self.rebuild_derived()?;
+        self.rebuild_derived_locked()?;
         self.clear_derived_dirty()
     }
 
     pub(crate) fn derived_is_dirty(&self) -> bool {
         self.dirty_path().exists()
+    }
+
+    /// Whether the current cache belongs to the current source revision. The
+    /// caller holds the store lock so a following mutation can safely choose an
+    /// incremental update only from this exact base.
+    pub(crate) fn derived_is_fresh_locked(&self) -> Result<bool> {
+        Ok(self.load_fresh_index()?.is_some())
     }
 
     fn clear_derived_dirty(&self) -> Result<()> {
@@ -237,7 +250,7 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     /// to a full rebuild when the cache is missing or unreadable.
     pub(crate) fn reindex_after_write(&self, entry: &E::Entry) -> Result<()> {
         let Some(mut summaries) = self.load_index()?.map(|index| index.summaries) else {
-            return self.rebuild_derived().map(|_| ());
+            return self.rebuild_derived_locked().map(|_| ());
         };
         let key = E::key(entry);
         let summary = E::summary(entry);
@@ -245,18 +258,18 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
             Ok(pos) => summaries[pos] = summary,
             Err(pos) => summaries.insert(pos, summary),
         }
-        self.write_derived(&summaries)
+        self.write_derived_locked(&summaries)
     }
 
     /// Patch the derived cache/extra files after `key` was removed. Falls back to
     /// a full rebuild when the cache is missing or unreadable.
     pub(crate) fn reindex_after_remove(&self, key: &E::Key) -> Result<()> {
         let Some(mut summaries) = self.load_index()?.map(|index| index.summaries) else {
-            return self.rebuild_derived().map(|_| ());
+            return self.rebuild_derived_locked().map(|_| ());
         };
         if let Ok(pos) = summaries.binary_search_by(|s| E::key_from_summary(s).cmp(key)) {
             summaries.remove(pos);
-            self.write_derived(&summaries)?;
+            self.write_derived_locked(&summaries)?;
         }
         Ok(())
     }
@@ -264,33 +277,69 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     /// Metadata summaries for every entry. The index is used only when it is
     /// parseable and fresh relative to the markdown files.
     pub(crate) fn summaries(&self) -> Result<Vec<E::Summary>> {
+        if self.directory_is_missing()? {
+            return Ok(Vec::new());
+        }
+        let _lock = StoreLock::acquire(&self.dir)?;
         match self.load_fresh_index()? {
             Some(index) => Ok(index.summaries),
-            None => self.rebuild_derived(),
+            None => self.rebuild_derived_locked(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn summaries_with_rebuild_hook(
+        &self,
+        after_scan: impl FnOnce(),
+    ) -> Result<Vec<E::Summary>> {
+        let _lock = StoreLock::acquire(&self.dir)?;
+        self.rebuild_derived_locked_with_hook(after_scan)
+    }
+
+    fn directory_is_missing(&self) -> Result<bool> {
+        match fs::metadata(&self.dir) {
+            Ok(_) => Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(error) => Err(error).context(format!("failed to inspect {}", self.dir.display())),
         }
     }
 
     /// Write `index.json` and any store-specific derived artifact.
-    pub(crate) fn write_derived(&self, summaries: &[E::Summary]) -> Result<()> {
-        self.write_index(summaries)?;
+    fn write_derived_locked(&self, summaries: &[E::Summary]) -> Result<()> {
+        self.write_index_locked(summaries)?;
         E::write_extra_derived(&self.dir, summaries)
     }
 
     /// Write the sorted summaries to `index.json` as a rebuildable cache.
+    #[cfg(test)]
     pub(crate) fn write_index(&self, summaries: &[E::Summary]) -> Result<()> {
+        let _lock = StoreLock::acquire(&self.dir)?;
+        self.write_index_locked(summaries)
+    }
+
+    fn write_index_locked(&self, summaries: &[E::Summary]) -> Result<()> {
         fs::create_dir_all(&self.dir)
             .context(format!("failed to create {}", self.dir.display()))?;
-        let index = E::index_file_ref(summaries);
+        let source_fingerprint = self.source_fingerprint()?;
+        let index = E::index_file_ref(summaries, &source_fingerprint);
         json_file::write_atomic_cache(&self.dir, &self.index_path(), &index)
     }
 
     /// Rebuild all derived files from the markdown source of truth.
-    pub(crate) fn rebuild_derived(&self) -> Result<Vec<E::Summary>> {
+    pub(crate) fn rebuild_derived_locked(&self) -> Result<Vec<E::Summary>> {
+        self.rebuild_derived_locked_with_hook(|| {})
+    }
+
+    fn rebuild_derived_locked_with_hook(
+        &self,
+        after_scan: impl FnOnce(),
+    ) -> Result<Vec<E::Summary>> {
         let summaries: Vec<E::Summary> = self.scan_lenient()?.iter().map(E::summary).collect();
+        after_scan();
         if summaries.is_empty() && !self.dir.exists() {
             return Ok(summaries);
         }
-        self.write_derived(&summaries)?;
+        self.write_derived_locked(&summaries)?;
         Ok(summaries)
     }
 
@@ -300,28 +349,36 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     }
 
     /// Load `index.json` only when it is fresh relative to the markdown files.
-    /// A missing, unreadable, corrupt, count-mismatched, or older cache returns
+    /// A missing, unreadable, corrupt, legacy, or source-mismatched cache returns
     /// `None` so callers rebuild from the markdown source of truth.
     fn load_fresh_index(&self) -> Result<Option<MarkdownIndex<E>>> {
-        let Ok(index_mtime) = fs::metadata(self.index_path()).and_then(|m| m.modified()) else {
-            return Ok(None);
-        };
         let Some(index) = self.load_index()? else {
             return Ok(None);
         };
-        let files = self.entry_files()?;
-        if files.len() != index.summaries.len() {
+        if self.source_fingerprint()? != index.source_fingerprint {
             return Ok(None);
         }
-        for path in &files {
-            let fresh = fs::metadata(path)
-                .and_then(|m| m.modified())
-                .is_ok_and(|mtime| mtime <= index_mtime);
-            if !fresh {
-                return Ok(None);
-            }
-        }
         Ok(Some(index))
+    }
+
+    /// Stable identity of the complete source set. Paths are framed before file
+    /// bytes so renames and same-size replacements cannot alias each other.
+    fn source_fingerprint(&self) -> Result<String> {
+        let mut files = self.entry_files()?;
+        files.sort();
+        let mut hasher = Sha256::new();
+        for path in files {
+            let name = path
+                .file_name()
+                .expect("directory entries always have a filename")
+                .as_encoded_bytes();
+            let bytes = fs::read(&path).context(format!("failed to read {}", path.display()))?;
+            hasher.update((name.len() as u64).to_le_bytes());
+            hasher.update(name);
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
+        }
+        Ok(format!("sha256:{:x}", hasher.finalize()))
     }
 
     /// Load `index.json`, returning `None` when it is missing or corrupt. A
@@ -335,9 +392,19 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
             }
         };
         match serde_json::from_str::<E::IndexFile>(&text) {
-            Ok(index) => Ok(Some(MarkdownIndex {
-                summaries: E::summaries_from_index(index),
-            })),
+            Ok(index) => {
+                let (version, source_fingerprint, summaries) = E::index_parts(index);
+                if version != Some(json_file::FILE_FORMAT_VERSION) {
+                    return Ok(None);
+                }
+                let Some(source_fingerprint) = source_fingerprint else {
+                    return Ok(None);
+                };
+                Ok(Some(MarkdownIndex {
+                    summaries,
+                    source_fingerprint,
+                }))
+            }
             Err(e) => {
                 ErrorLog::record(&format!(
                     "{} index {} is corrupt; rebuilding from markdown: {e}",

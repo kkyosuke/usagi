@@ -95,15 +95,21 @@ updated_at: 2026-06-17T00:00:00+00:00
 
 ## `index.json`（派生キャッシュ）
 
-一覧・検索を速くするための、各メモリのメタデータ（本文を除く）のキャッシュです。`version` を持ち、markdown
-ファイルが常に **正**。保存・削除では該当メモリのエントリだけを差し替える**増分更新**で（`MEMORY.md` はその
-結果から再描画）、markdown 全件の読み直しは行いません。`index.json` が無い／壊れている場合のみ markdown 群から
-自動再構築されるため、欠落しても整合性は損なわれません（だから git 管理外でよい）。再生成可能なキャッシュなので、
-書き込みはアトミック（一時ファイル + `rename`）だが fsync は行いません（`MEMORY.md` は commit 対象のため durable に保存）。
+一覧・検索を速くするための、各メモリのメタデータ（本文を除く）のキャッシュです。markdown ファイルが常に
+**正**です。保存・削除では該当メモリのエントリだけを差し替え、`MEMORY.md` はその結果から再描画します。
+`source_fingerprint` は、辞書順に並べた全 source Markdown の相対ファイル名と全 bytes を長さ付きで入力した SHA-256
+です。件数が同じ rename・置換や mtime を保存した編集も検知します。
+
+freshness 判定と、stale 時の source scan → `index.json` / `MEMORY.md` publish は store の `.lock` を保持した同じ区間で
+行います。並行 writer は rebuild の前後に直列化され、最終 derived state は最新 source へ収束します。
+`source_fingerprint` または対応する `version` がない legacy cache、未知の version、壊れた cache は stale として lock 下で
+再生成し、source Markdown は変更しません。再生成可能な `index.json` はアトミック（一時ファイル + `rename`）だが fsync
+は行いません（`MEMORY.md` は commit 対象のため durable に保存）。
 
 ```jsonc
 {
   "version": 1,
+  "source_fingerprint": "sha256:0123456789abcdef...",
   "memories": [
     {
       "name": "user-prefers-tabs",

@@ -4,7 +4,8 @@
 //! frontmatter markdown document (see [`crate::domain::issue`]). The markdown
 //! files are the source of truth; `index.json` alongside them is a derived
 //! cache of the metadata that speeds up listings and is rebuilt from the files
-//! whenever it is missing, unreadable, or stale relative to the markdown files.
+//! whenever it is missing, unreadable, or its source fingerprint differs from
+//! the markdown files.
 //! Markdown files are meant to be committed and shared; `index.json` is a local
 //! rebuildable cache, so it is never relied upon for correctness — only speed.
 
@@ -51,12 +52,15 @@ impl std::error::Error for AmbiguousIssueNumber {}
 
 #[derive(Debug, Deserialize)]
 struct IndexFile {
+    version: Option<u32>,
+    source_fingerprint: Option<String>,
     issues: Vec<IssueSummary>,
 }
 
 #[derive(Serialize)]
 struct IndexFileRef<'a> {
     version: u32,
+    source_fingerprint: &'a str,
     issues: &'a [IssueSummary],
 }
 
@@ -107,13 +111,17 @@ impl MarkdownEntry for IssueEntry {
         entries.sort_by_key(|i| i.number);
     }
 
-    fn summaries_from_index(index: IndexFile) -> Vec<IssueSummary> {
-        index.issues
+    fn index_parts(index: IndexFile) -> (Option<u32>, Option<String>, Vec<IssueSummary>) {
+        (index.version, index.source_fingerprint, index.issues)
     }
 
-    fn index_file_ref(summaries: &[IssueSummary]) -> IndexFileRef<'_> {
+    fn index_file_ref<'a>(
+        summaries: &'a [IssueSummary],
+        source_fingerprint: &'a str,
+    ) -> IndexFileRef<'a> {
         IndexFileRef {
             version: crate::infrastructure::json_file::FILE_FORMAT_VERSION,
+            source_fingerprint,
             issues: summaries,
         }
     }
@@ -199,7 +207,8 @@ impl IssueStore {
     /// store's [`lock`](Self::lock). If the title changes, the new file is written
     /// before stale-named siblings for the same number are removed.
     pub fn write_locked(&self, _lock: &StoreLock, issue: &Issue) -> Result<MutationOutcome<()>> {
-        let rebuild_required = self.inner.derived_is_dirty();
+        let rebuild_required =
+            self.inner.derived_is_dirty() || !self.inner.derived_is_fresh_locked()?;
         self.inner.mark_derived_dirty()?;
         let existing = self.unique_files_for(issue.number)?;
         let target = self.inner.write_markdown(issue)?;
@@ -209,7 +218,7 @@ impl IssueStore {
             }
         }
         let refresh = if rebuild_required {
-            self.inner.rebuild_derived().map(|_| ())
+            self.inner.rebuild_derived_locked().map(|_| ())
         } else {
             self.inner.reindex_after_write(issue)
         };
@@ -230,13 +239,14 @@ impl IssueStore {
             let repair = self.inner.repair_derived_locked();
             return Ok(self.inner.finish_committed(false, repair));
         }
-        let rebuild_required = self.inner.derived_is_dirty();
+        let rebuild_required =
+            self.inner.derived_is_dirty() || !self.inner.derived_is_fresh_locked()?;
         self.inner.mark_derived_dirty()?;
         for file in files {
             fs::remove_file(&file).context(format!("failed to remove {}", file.display()))?;
         }
         let refresh = if rebuild_required {
-            self.inner.rebuild_derived().map(|_| ())
+            self.inner.rebuild_derived_locked().map(|_| ())
         } else {
             self.inner.reindex_after_remove(&number)
         };
@@ -250,6 +260,11 @@ impl IssueStore {
             return self.inner.source_summaries();
         }
         self.inner.summaries()
+    }
+
+    #[cfg(test)]
+    fn summaries_with_rebuild_hook(&self, after_scan: impl FnOnce()) -> Result<Vec<IssueSummary>> {
+        self.inner.summaries_with_rebuild_hook(after_scan)
     }
 
     fn repair_derived_best_effort(&self) {
@@ -308,6 +323,9 @@ mod tests {
     use crate::infrastructure::json_file::{fail_next_atomic_write, AtomicWriteStage};
     use crate::infrastructure::markdown_store::DerivedState;
     use chrono::{TimeZone, Utc};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     fn issue(number: u32, title: &str) -> Issue {
         let ts = Utc.with_ymd_and_hms(2026, 6, 14, 0, 0, 0).unwrap();
@@ -692,6 +710,7 @@ mod tests {
         assert_eq!(next, 3);
         assert!(store.dir().join("002-two.md").exists());
         assert_eq!(store.scan().unwrap().len(), 3);
+        assert_eq!(store.summaries().unwrap().len(), 3);
     }
 
     #[test]
@@ -738,6 +757,135 @@ mod tests {
         set_mtime(&path, 2_000);
 
         assert_eq!(store.summaries().unwrap()[0].status, IssueStatus::Done);
+    }
+
+    #[test]
+    fn summaries_rebuild_when_content_changes_with_a_preserved_mtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(1, "One")).unwrap();
+
+        let path = store.dir().join("001-one.md");
+        set_mtime(&path, 1_000);
+        set_mtime(&store.index_path(), 1_000);
+        let mut edited = issue(1, "One");
+        edited.status = IssueStatus::Done;
+        fs::write(&path, edited.to_markdown()).unwrap();
+        set_mtime(&path, 1_000);
+
+        assert_eq!(store.summaries().unwrap()[0].status, IssueStatus::Done);
+    }
+
+    #[test]
+    fn summaries_rebuild_after_same_count_rename_at_the_same_mtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(1, "Old")).unwrap();
+
+        fs::remove_file(store.dir().join("001-old.md")).unwrap();
+        let replacement = store.dir().join("002-new.md");
+        fs::write(&replacement, issue(2, "New").to_markdown()).unwrap();
+        set_mtime(&replacement, 1_000);
+        set_mtime(&store.index_path(), 1_000);
+
+        let summaries = store.summaries().unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].number, 2);
+        assert_eq!(summaries[0].title, "New");
+    }
+
+    #[test]
+    fn legacy_or_unknown_version_index_is_rebuilt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(1, "One")).unwrap();
+        for stale in [
+            r#"{"version":1,"issues":[]}"#,
+            r#"{"version":2,"source_fingerprint":"sha256:old","issues":[]}"#,
+        ] {
+            fs::write(store.index_path(), stale).unwrap();
+
+            assert_eq!(store.summaries().unwrap()[0].title, "One");
+            assert!(fs::read_to_string(store.index_path())
+                .unwrap()
+                .contains("\"source_fingerprint\": \"sha256:"));
+        }
+    }
+
+    #[test]
+    fn concurrent_create_update_remove_wait_for_rebuild_and_converge_after_reopen() {
+        for mutation in ["create", "update", "remove"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().to_path_buf();
+            let store = IssueStore::new(&root);
+            store.write(&issue(1, "One")).unwrap();
+            if mutation == "remove" {
+                store.write(&issue(2, "Two")).unwrap();
+            }
+            fs::remove_file(store.index_path()).unwrap();
+
+            let (scanned_tx, scanned_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let rebuild_root = root.clone();
+            let rebuild = thread::spawn(move || {
+                IssueStore::new(rebuild_root)
+                    .summaries_with_rebuild_hook(|| {
+                        scanned_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                    })
+                    .unwrap()
+            });
+            scanned_rx.recv().unwrap();
+
+            let (started_tx, started_rx) = mpsc::channel();
+            let (finished_tx, finished_rx) = mpsc::channel();
+            let writer_root = root.clone();
+            let writer = thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                let writer_store = IssueStore::new(writer_root);
+                match mutation {
+                    "create" => {
+                        writer_store.write(&issue(2, "Two")).unwrap();
+                    }
+                    "update" => {
+                        writer_store.write(&issue(1, "Updated")).unwrap();
+                    }
+                    "remove" => {
+                        writer_store.remove(2).unwrap();
+                    }
+                    _ => unreachable!(),
+                };
+                finished_tx.send(()).unwrap();
+            });
+            started_rx.recv().unwrap();
+            assert!(finished_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err());
+            release_tx.send(()).unwrap();
+            rebuild.join().unwrap();
+            writer.join().unwrap();
+
+            let reopened = IssueStore::new(&root);
+            let summaries = reopened.summaries().unwrap();
+            match mutation {
+                "create" => assert_eq!(
+                    summaries
+                        .iter()
+                        .map(|summary| summary.number)
+                        .collect::<Vec<_>>(),
+                    vec![1, 2]
+                ),
+                "update" => assert_eq!(summaries[0].title, "Updated"),
+                "remove" => assert_eq!(
+                    summaries
+                        .iter()
+                        .map(|summary| summary.number)
+                        .collect::<Vec<_>>(),
+                    vec![1]
+                ),
+                _ => unreachable!(),
+            }
+        }
     }
 
     #[test]

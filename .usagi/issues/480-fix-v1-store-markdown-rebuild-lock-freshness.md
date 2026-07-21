@@ -1,14 +1,14 @@
 ---
 number: 480
 title: fix(v1/store): Markdown rebuild を lock し freshness を堅牢化する
-status: todo
+status: done
 priority: medium
 labels: [review, v1, persistence, concurrency]
 dependson: []
 related: [113, 117]
 parent: 453
 created_at: 2026-07-20T12:06:47.860251+00:00
-updated_at: 2026-07-20T12:06:47.860251+00:00
+updated_at: 2026-07-21T02:10:29.877091+00:00
 ---
 
 ## 問題・影響

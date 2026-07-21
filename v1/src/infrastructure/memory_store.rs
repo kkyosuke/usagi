@@ -9,7 +9,7 @@
 //! - `index.json` — a local rebuildable metadata cache used only for speed.
 //!
 //! The derived files are rebuilt whenever the cache is missing, unreadable, or
-//! stale relative to the markdown source files.
+//! stale relative to the markdown source fingerprint.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -27,12 +27,15 @@ const TOC_FILE: &str = "MEMORY.md";
 
 #[derive(Debug, Deserialize)]
 struct IndexFile {
+    version: Option<u32>,
+    source_fingerprint: Option<String>,
     memories: Vec<MemorySummary>,
 }
 
 #[derive(Serialize)]
 struct IndexFileRef<'a> {
     version: u32,
+    source_fingerprint: &'a str,
     memories: &'a [MemorySummary],
 }
 
@@ -85,13 +88,17 @@ impl MarkdownEntry for MemoryEntry {
         entries.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
-    fn summaries_from_index(index: IndexFile) -> Vec<MemorySummary> {
-        index.memories
+    fn index_parts(index: IndexFile) -> (Option<u32>, Option<String>, Vec<MemorySummary>) {
+        (index.version, index.source_fingerprint, index.memories)
     }
 
-    fn index_file_ref(summaries: &[MemorySummary]) -> IndexFileRef<'_> {
+    fn index_file_ref<'a>(
+        summaries: &'a [MemorySummary],
+        source_fingerprint: &'a str,
+    ) -> IndexFileRef<'a> {
         IndexFileRef {
             version: crate::infrastructure::json_file::FILE_FORMAT_VERSION,
+            source_fingerprint,
             memories: summaries,
         }
     }
@@ -187,11 +194,12 @@ impl MemoryStore {
     /// Like [`write`](Self::write) but assumes the caller already holds this
     /// store's [`lock`](Self::lock).
     pub fn write_locked(&self, _lock: &StoreLock, memory: &Memory) -> Result<MutationOutcome<()>> {
-        let rebuild_required = self.inner.derived_is_dirty();
+        let rebuild_required =
+            self.inner.derived_is_dirty() || !self.inner.derived_is_fresh_locked()?;
         self.inner.mark_derived_dirty()?;
         self.inner.write_markdown(memory)?;
         let refresh = if rebuild_required {
-            self.inner.rebuild_derived().map(|_| ())
+            self.inner.rebuild_derived_locked().map(|_| ())
         } else {
             self.inner.reindex_after_write(memory)
         };
@@ -216,11 +224,12 @@ impl MemoryStore {
             }
             Err(e) => return Err(e).context(format!("failed to inspect {}", path.display())),
         }
-        let rebuild_required = self.inner.derived_is_dirty();
+        let rebuild_required =
+            self.inner.derived_is_dirty() || !self.inner.derived_is_fresh_locked()?;
         self.inner.mark_derived_dirty()?;
         fs::remove_file(&path).context(format!("failed to remove {}", path.display()))?;
         let refresh = if rebuild_required {
-            self.inner.rebuild_derived().map(|_| ())
+            self.inner.rebuild_derived_locked().map(|_| ())
         } else {
             self.inner.reindex_after_remove(&name.to_string())
         };
@@ -234,6 +243,11 @@ impl MemoryStore {
             return self.inner.source_summaries();
         }
         self.inner.summaries()
+    }
+
+    #[cfg(test)]
+    fn summaries_with_rebuild_hook(&self, after_scan: impl FnOnce()) -> Result<Vec<MemorySummary>> {
+        self.inner.summaries_with_rebuild_hook(after_scan)
     }
 
     fn repair_derived_best_effort(&self) {
@@ -294,6 +308,8 @@ mod tests {
     use crate::infrastructure::json_file::{fail_next_atomic_write, AtomicWriteStage};
     use crate::infrastructure::markdown_store::DerivedState;
     use chrono::{TimeZone, Utc};
+    use std::sync::mpsc;
+    use std::thread;
 
     fn memory(name: &str, title: &str) -> Memory {
         let ts = Utc.with_ymd_and_hms(2026, 6, 17, 0, 0, 0).unwrap();
@@ -396,6 +412,44 @@ mod tests {
         let toc = fs::read_to_string(store.toc_path()).unwrap();
         assert!(toc.starts_with("# Memory\n"));
         assert!(toc.contains("- [A fact](a-fact.md) — project\n"));
+    }
+
+    #[test]
+    fn concurrent_writer_after_rebuild_scan_wins_in_index_and_toc() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let store = MemoryStore::new(&root);
+        store.write(&memory("fact", "Old")).unwrap();
+        fs::remove_file(store.index_path()).unwrap();
+
+        let (scanned_tx, scanned_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let rebuild_root = root.clone();
+        let rebuild = thread::spawn(move || {
+            MemoryStore::new(rebuild_root)
+                .summaries_with_rebuild_hook(|| {
+                    scanned_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                })
+                .unwrap();
+        });
+        scanned_rx.recv().unwrap();
+
+        let writer_root = root.clone();
+        let writer = thread::spawn(move || {
+            MemoryStore::new(writer_root)
+                .write(&memory("fact", "New"))
+                .unwrap();
+        });
+        release_tx.send(()).unwrap();
+        rebuild.join().unwrap();
+        writer.join().unwrap();
+
+        let reopened = MemoryStore::new(&root);
+        assert_eq!(reopened.summaries().unwrap()[0].title, "New");
+        let toc = fs::read_to_string(reopened.toc_path()).unwrap();
+        assert!(toc.contains("[New](fact.md)"));
+        assert!(!toc.contains("[Old](fact.md)"));
     }
 
     #[test]
