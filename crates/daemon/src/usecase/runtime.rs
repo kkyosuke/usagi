@@ -1716,7 +1716,7 @@ mod tests {
         assert_eq!(
             hydrated_records(RuntimeStoreSnapshot {
                 schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
-                records: vec![lineage_source, broken_relation],
+                records: vec![broken_relation],
                 generation: GenerationSnapshot::default(),
             })
             .unwrap_err(),
