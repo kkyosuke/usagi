@@ -218,6 +218,7 @@ identity は保持しない。
 | `Ctrl-O` `Ctrl-A` | OpenCloseupModal | Switch では選択 target の Closeup action を開く。Closeup では tab があっても action modal を前面に出す |
 | `Ctrl-O` `Ctrl-N` | NextTab | 次の tab を選ぶ |
 | `Ctrl-O` `Ctrl-P` | PreviousTab | 前の tab を選ぶ |
+| `Ctrl-O` `c` | CopyTerminalSelection | 保持中の terminal 出力選択を OS clipboard へ再コピーする |
 | `Ctrl-O` `x` / `Ctrl-O` `Ctrl-X` | CloseTab | 選択中の tab を閉じる（live なら subscription を detach、pending なら起動待ちを取消） |
 | `Ctrl-O` `u` / `↑` | ScrollUp | 右ペインの scrollback を 1 行古い方向へ |
 | `Ctrl-O` `d` / `↓` | ScrollDown | 右ペインの scrollback を 1 行 live bottom 方向へ |
@@ -483,9 +484,9 @@ history navigation へそのまま送る。right pane の footer の直前には
 
 出力は mouse drag により選択でき、drag 開始時の press cell から終点までを含めて、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。drag 中も
 drag を離した後も、選択範囲は右ペインに reverse-video で示し続ける。選択は右ペイン content 内の通常左クリック、次の drag が
-新しい選択を始めるか、focus が別の terminal へ移るまで表示され続ける（release で即座に消えない）。この click は text selection
+新しい選択を始めるか、focus が別の terminal へ移るまで表示され続ける（release で即座に消えない）。保持中の選択は `Ctrl-O c` で再コピーできる。この click は text selection
 だけを解除し、sidebar の navigation / activation、modal の入力所有、PTY への入力を変えない。選択の可視化は選択した桁全体に及び、行末の空白 padding や
-選択範囲に含まれる空行も反転する（agent が描く空白 padding 中心の画面でも選択が消えない）。キー入力は
+選択範囲に含まれる空行も反転する（agent が描く空白 padding 中心の画面でも選択が消えない）。`Ctrl-O c` 以外のキー入力は
 コピーに使わず、`Ctrl-C` を含めて live terminal へそのまま送る。
 clipboard adapter は macOS の `pbcopy`、Windows の `clip.exe`、
 Wayland の `wl-copy`、X11 の `xclip` / `xsel` を現在の環境に応じて使う。利用可能な backend がない場合は copy を成功扱いにせず、

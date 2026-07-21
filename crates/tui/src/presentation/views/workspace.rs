@@ -1199,7 +1199,7 @@ fn home_left_pane(
     let footer = match home.mode {
         HomeMode::Switch => "[switch] ↑↓ select / Enter closeup",
         HomeMode::Closeup => {
-            "[closeup] Ctrl-O: x/Ctrl-X close / o switch / a/Ctrl-A actions / n/p tabs"
+            "[closeup] Ctrl-O: x/Ctrl-X close / c copy / o switch / a/Ctrl-A actions / n/p tabs"
         }
     };
     lines.push(
