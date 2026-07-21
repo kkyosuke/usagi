@@ -1423,6 +1423,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(legacy.schema_version, 1);
+        legacy.validate_ownership().unwrap();
         let (legacy, interrupted) = legacy.reconcile_after_daemon_restart();
         assert_eq!(interrupted, 0);
         assert_eq!(legacy.schema_version, RUNTIME_SNAPSHOT_SCHEMA_VERSION);
@@ -1457,6 +1458,24 @@ mod tests {
         assert_eq!(
             RuntimeCoordinator::hydrate(corrupt, 1, 64, 1).unwrap_err(),
             RuntimeSnapshotError::Generation
+        );
+    }
+
+    #[test]
+    fn terminal_ownership_projection_covers_orphan_and_lost_states() {
+        assert_eq!(
+            terminal_ownership_state(RuntimeState::ReconcileRequired(
+                ReconcileState::OrphanRunning
+            )),
+            TerminalState::OrphanRunning
+        );
+        assert_eq!(
+            terminal_ownership_state(RuntimeState::SpawnFailed),
+            TerminalState::Lost
+        );
+        assert_eq!(
+            terminal_ownership_state(RuntimeState::Reclaimed),
+            TerminalState::Lost
         );
     }
 
