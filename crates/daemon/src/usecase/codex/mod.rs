@@ -11,6 +11,7 @@ use usagi_core::{
     domain::agent::{
         AgentCapability, AgentProfile, AgentProfileId, DurableLaunchSnapshot,
         EnvironmentVariableName, LaunchMode, LaunchPlan, LaunchRequest, LaunchValidationError,
+        ProviderKind, ProviderResumePhase, ProviderResumeRef, ProviderResumeStatus,
     },
     usecase::agent::{AgentProfileCatalog, validate_request, validate_snapshot},
 };
@@ -136,17 +137,28 @@ impl<P: CodexProvisioner> AgentAdapter for CodexAdapter<P> {
                 },
             ));
         }
-        let provision = self
+        let mut provision = self
             .provisioner
             .provision(&ProvisionContext::from_request(request))
             .map_err(|failure| match failure {
                 CodexProvisionFailure::ExecutableUnavailable => AdapterError::ExecutableUnavailable,
                 CodexProvisionFailure::MaterializationFailed => AdapterError::ProvisionFailed,
             })?;
+        let provider_resume =
+            validate_provider_resume(request, &profile).map_err(AdapterError::Validation)?;
+        if let Some(reference) = &provider_resume {
+            provision.spawn.append_sensitive_arguments([
+                "resume".to_owned(),
+                reference.native_session_id.expose_sensitive().to_owned(),
+            ]);
+        }
         let plan = render_plan(request, &profile, &provision).map_err(AdapterError::Validation)?;
+        let mut durable_request = request.clone();
+        durable_request.provider_resume = None;
         Ok(ResolvedLaunch {
-            snapshot: DurableLaunchSnapshot::new(request.clone(), plan),
+            snapshot: DurableLaunchSnapshot::new(durable_request, plan),
             provision: provision.spawn,
+            provider_resume,
         })
     }
 }
@@ -157,15 +169,6 @@ fn render_plan(
     provision: &CodexProvision,
 ) -> Result<LaunchPlan, LaunchValidationError> {
     let mut argv = match request.mode {
-        LaunchMode::Interactive if request.resume && request.initial_prompt.is_none() => vec![
-            "resume".into(),
-            "--last".into(),
-            "--dangerously-bypass-hook-trust".into(),
-            "--sandbox".into(),
-            "workspace-write".into(),
-            "--ask-for-approval".into(),
-            "never".into(),
-        ],
         LaunchMode::Interactive => vec![
             "--dangerously-bypass-hook-trust".into(),
             "--sandbox".into(),
@@ -192,4 +195,30 @@ fn render_plan(
         provision.environment_allowlist.clone(),
         provision.working_directory.clone(),
     )
+}
+
+fn validate_provider_resume(
+    request: &LaunchRequest,
+    profile: &AgentProfile,
+) -> Result<Option<ProviderResumeRef>, LaunchValidationError> {
+    if !request.resume {
+        return request
+            .provider_resume
+            .is_none()
+            .then_some(None)
+            .ok_or(LaunchValidationError::ProviderResumeMismatch);
+    }
+    let reference = request
+        .provider_resume
+        .as_ref()
+        .filter(|reference| {
+            reference.provider == ProviderKind::Codex
+                && reference.adapter_revision == profile.revision
+                && reference.scope == request.scope
+        })
+        .ok_or(LaunchValidationError::ProviderResumeMismatch)?;
+    let mut reference = reference.clone();
+    reference.last_known_status = ProviderResumeStatus::Active;
+    reference.last_known_phase = Some(ProviderResumePhase::Starting);
+    Ok(Some(reference))
 }

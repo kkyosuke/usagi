@@ -7,7 +7,7 @@ labels: [daemon, tui, cli, mcp, agent, recovery, design]
 dependson: []
 related: [350, 388, 390]
 created_at: 2026-07-21T10:34:02.909659+00:00
-updated_at: 2026-07-21T10:35:30.817523+00:00
+updated_at: 2026-07-21T11:23:56.950206+00:00
 ---
 
 ## 背景・調査結果

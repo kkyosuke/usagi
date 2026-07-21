@@ -1464,6 +1464,13 @@ pub enum Effect {
         operation_id: OperationId,
         profile: Option<AgentProfileId>,
     },
+    /// Explicit provider-native resume for an interrupted session. The daemon
+    /// validates retained metadata and creates a new PTY/runtime.
+    ResumeAgent {
+        workspace: WorkspaceId,
+        session: SessionId,
+        operation_id: OperationId,
+    },
     /// selected session を削除する。root はこの effect に変換しない。
     RemoveSession {
         workspace: WorkspaceId,
@@ -3089,6 +3096,24 @@ fn submit_overview_session(state: &mut AppState, arguments: &str) -> Vec<Effect>
             state.notice = Some(Notice::new("Refreshing sessions"));
             vec![Effect::RefreshSessions {
                 workspace: state.workspace,
+            }]
+        }
+        overview::SessionCommand::Resume { name } => {
+            state.overlay = None;
+            let Some(index) = state
+                .session_names
+                .iter()
+                .position(|candidate| candidate == &name)
+            else {
+                state.notice = Some(Notice::new("session was not found"));
+                return Vec::new();
+            };
+            let session = state.sessions[index];
+            state.notice = Some(Notice::new("Resuming provider conversation"));
+            vec![Effect::ResumeAgent {
+                workspace: state.workspace,
+                session,
+                operation_id: OperationId::new(),
             }]
         }
         overview::SessionCommand::SelectRemove { .. } => {
@@ -4991,6 +5016,24 @@ mod tests {
             ),
             vec![Effect::RefreshSessions { workspace }]
         );
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionNames(vec!["feature-x".into()])),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let resume = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("session resume feature-x".into())),
+        );
+        assert!(matches!(
+            resume.as_slice(),
+            [Effect::ResumeAgent {
+                workspace: actual_workspace,
+                session: actual_session,
+                ..
+            }] if *actual_workspace == workspace && *actual_session == session
+        ));
 
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));

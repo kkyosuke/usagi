@@ -477,6 +477,7 @@ mod tests {
                     .unwrap(),
                 ),
                 provision: SpawnProvision::new([], vec![]),
+                provider_resume: request.provider_resume.clone(),
             })
         }
     }
@@ -545,6 +546,7 @@ mod tests {
             mode: LaunchMode::Interactive,
             model: None,
             resume: true,
+            provider_resume: None,
             initial_prompt: None,
             scope,
             required_capabilities: [AgentCapability::McpWiring]

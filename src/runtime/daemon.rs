@@ -2719,8 +2719,10 @@ fn session_response_envelope(
         Ok(reply) => {
             let recovery_apply =
                 payload.get("apply").and_then(serde_json::Value::as_bool) == Some(true);
-            let outcome = if matches!(action, SessionAction::Create | SessionAction::Remove)
-                || (action == SessionAction::RecoverLegacy && recovery_apply)
+            let outcome = if matches!(
+                action,
+                SessionAction::Create | SessionAction::Remove | SessionAction::ResumeAgent
+            ) || (action == SessionAction::RecoverLegacy && recovery_apply)
             {
                 ResponseOutcome::Accepted {
                     operation_id: usagi_core::infrastructure::ipc::OperationId(
@@ -2740,6 +2742,7 @@ fn session_response_envelope(
             if let Some(kind) = match action {
                 SessionAction::Create => Some("session.created"),
                 SessionAction::Remove => Some("session.removed"),
+                SessionAction::ResumeAgent => Some("agent.resumed"),
                 SessionAction::RecoverLegacy if recovery_apply => Some("session.legacy_recovered"),
                 SessionAction::RecoverLegacy
                 | SessionAction::List
@@ -2773,10 +2776,15 @@ fn session_response_envelope(
             envelope(hello, request_id, outcome, body)
         }
         Err(error) => {
-            let code = if error == SessionRuntimeError::IdempotencyConflict {
-                usagi_core::infrastructure::ipc::ErrorCode::IdempotencyConflict
-            } else {
-                usagi_core::infrastructure::ipc::ErrorCode::InvalidArgument
+            let code = match &error {
+                SessionRuntimeError::IdempotencyConflict => {
+                    usagi_core::infrastructure::ipc::ErrorCode::IdempotencyConflict
+                }
+                SessionRuntimeError::AgentFailure { code, .. } => *code,
+                SessionRuntimeError::Delivery(_) => {
+                    usagi_core::infrastructure::ipc::ErrorCode::Unavailable
+                }
+                _ => usagi_core::infrastructure::ipc::ErrorCode::InvalidArgument,
             };
             envelope(
                 hello,
@@ -2846,6 +2854,39 @@ fn dispatch_session_action(
     };
 
     match action {
+        SessionAction::ResumeAgent => {
+            let supplied_id = payload
+                .get("session_id")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|_| SessionRuntimeError::InvalidRequest)?;
+            let (name, id) = if let Some(id) = supplied_id {
+                (None, id)
+            } else {
+                let name = string("name")?;
+                (Some(name), named_session(name)?)
+            };
+            let target = sessions
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .session_scope_by_id(id)?;
+            let resolver = SharedScopeResolver(Arc::clone(sessions));
+            let admission = agent
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .resume(operation_id, target.workspace_id, id, &resolver)
+                .map_err(|error| SessionRuntimeError::AgentFailure {
+                    code: error.code,
+                    message: error.message,
+                })?;
+            reply(serde_json::json!({
+                "name": name,
+                "session_id": id,
+                "terminal": admission.terminal,
+                "completed": admission.completed,
+            }))
+        }
         SessionAction::Status => {
             let mut status = sessions
                 .lock()
@@ -2864,6 +2905,9 @@ fn dispatch_session_action(
                         .and_then(|value| serde_json::from_value(value).ok())
                     {
                         item["agent_phase"] = serde_json::json!(runtime.session_phase(id));
+                        let (resumable, reason) = runtime.session_resume_status(id);
+                        item["agent_resumable"] = serde_json::json!(resumable);
+                        item["agent_resume_reason"] = serde_json::json!(reason);
                     }
                 }
             }
@@ -4202,6 +4246,7 @@ mod tests {
             mode: usagi_core::domain::agent::LaunchMode::Interactive,
             model: None,
             resume: false,
+            provider_resume: None,
             initial_prompt: None,
             scope: agent_scope.clone(),
             required_capabilities: BTreeSet::new(),

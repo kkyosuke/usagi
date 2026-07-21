@@ -16,6 +16,7 @@ pub fn tools() -> Vec<Box<dyn Tool>> {
         Box::new(SessionComplete),
         Box::new(SessionPr),
         Box::new(SessionRemove),
+        Box::new(SessionResume),
         Box::new(SessionRecoverLegacy),
         Box::new(SessionNoteGet),
         Box::new(SessionNoteUpdate),
@@ -228,6 +229,21 @@ impl Tool for SessionRecoverLegacy {
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"apply":{"type":"boolean","default":false}},"additionalProperties":false}"#
+    }
+}
+
+/// `session_resume` — explicitly starts a new daemon-owned Agent runtime for
+/// retained provider-native conversation metadata.
+pub struct SessionResume;
+impl Tool for SessionResume {
+    fn name(&self) -> &'static str {
+        "session_resume"
+    }
+    fn description(&self) -> &'static str {
+        "中断したセッションを provider-native ID で明示再開する。daemon が scope・adapter revision・live Agent・operation fence を検証し、旧 PTY へは再接続しない。"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}"#
     }
 }
 

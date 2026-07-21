@@ -3,7 +3,8 @@ use std::{collections::BTreeSet, path::PathBuf};
 use usagi_core::domain::{
     agent::{
         AgentCapability, AgentProfileId, EnvironmentVariableName, LaunchMode, LaunchRequest,
-        LaunchScope, LaunchValidationError, ModelSelector,
+        LaunchScope, LaunchValidationError, ModelSelector, ProviderCaptureProvenance, ProviderKind,
+        ProviderResumePhase, ProviderResumeRef, ProviderResumeStatus, ProviderSessionId,
     },
     id::{
         AgentRuntimeId, AgentRuntimeRef, CompletionFence, DaemonGeneration, OperationId, SessionId,
@@ -63,6 +64,7 @@ fn request(mode: LaunchMode) -> LaunchRequest {
         mode,
         model: Some(ModelSelector::new("gpt-5-codex").unwrap()),
         resume: false,
+        provider_resume: None,
         initial_prompt: Some("fix the test".into()),
         scope: LaunchScope {
             workspace_id: WorkspaceId::new(),
@@ -120,15 +122,22 @@ fn renders_resume_only_without_an_initial_prompt() {
     let mut request = request(LaunchMode::Interactive);
     request.resume = true;
     request.initial_prompt = None;
+    request.provider_resume = Some(ProviderResumeRef {
+        provider: ProviderKind::Codex,
+        native_session_id: ProviderSessionId::new("structured-codex-session").unwrap(),
+        adapter_revision: 1,
+        scope: request.scope.clone(),
+        provenance: ProviderCaptureProvenance::ProviderStructured,
+        last_known_status: ProviderResumeStatus::Interrupted,
+        last_known_phase: Some(ProviderResumePhase::Interrupted),
+    });
     let mut adapter = CodexAdapter::new(FakeProvisioner::ready());
 
-    let snapshot = adapter.resolve(&request).unwrap().snapshot;
+    let resolved = adapter.resolve(&request).unwrap();
 
     assert_eq!(
-        snapshot.plan.argv,
+        resolved.snapshot.plan.argv,
         [
-            "resume",
-            "--last",
             "--dangerously-bypass-hook-trust",
             "--sandbox",
             "workspace-write",
@@ -138,6 +147,60 @@ fn renders_resume_only_without_an_initial_prompt() {
             "gpt-5-codex",
         ]
     );
+    assert_eq!(
+        resolved.provision.arguments(),
+        [
+            "--config",
+            "/scoped/codex.toml",
+            "resume",
+            "structured-codex-session"
+        ]
+    );
+    assert!(
+        !resolved
+            .snapshot
+            .plan
+            .argv
+            .iter()
+            .any(|argument| argument == "structured-codex-session")
+    );
+    assert!(
+        !serde_json::to_string(&resolved.snapshot)
+            .unwrap()
+            .contains("structured-codex-session")
+    );
+}
+
+#[test]
+fn rejects_resume_without_exact_structured_metadata() {
+    let mut resume = request(LaunchMode::Interactive);
+    resume.resume = true;
+    resume.initial_prompt = None;
+    let mut adapter = CodexAdapter::new(FakeProvisioner::ready());
+    assert!(matches!(
+        adapter.resolve(&resume),
+        Err(AdapterError::Validation(
+            LaunchValidationError::ProviderResumeMismatch
+        ))
+    ));
+
+    let mut not_resume = request(LaunchMode::Interactive);
+    not_resume.provider_resume = Some(ProviderResumeRef {
+        provider: ProviderKind::Codex,
+        native_session_id: ProviderSessionId::new("unexpected").unwrap(),
+        adapter_revision: 1,
+        scope: not_resume.scope.clone(),
+        provenance: ProviderCaptureProvenance::ProviderStructured,
+        last_known_status: ProviderResumeStatus::Exited,
+        last_known_phase: None,
+    });
+    let mut adapter = CodexAdapter::new(FakeProvisioner::ready());
+    assert!(matches!(
+        adapter.resolve(&not_resume),
+        Err(AdapterError::Validation(
+            LaunchValidationError::ProviderResumeMismatch
+        ))
+    ));
 }
 
 #[test]

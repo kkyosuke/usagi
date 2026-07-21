@@ -94,6 +94,15 @@ pub struct LaunchAgentRequest {
     pub profile: Option<AgentProfileId>,
 }
 
+/// Explicit provider-native resume request derived from
+/// [`Effect::ResumeAgent`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeAgentRequest {
+    pub workspace: WorkspaceId,
+    pub session: SessionId,
+    pub operation_id: OperationId,
+}
+
 /// A generic-terminal request derived from [`Effect::OpenTerminal`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenTerminalRequest {
@@ -130,6 +139,8 @@ pub trait SessionCommandPort {
 pub trait AgentPort {
     /// Start an Agent through the daemon for an existing session.
     fn launch_agent(&mut self, request: LaunchAgentRequest);
+    /// Resume one interrupted provider conversation in a new daemon runtime.
+    fn resume_agent(&mut self, _request: ResumeAgentRequest) {}
     /// Open or reuse a generic terminal for a stable target.
     fn open_terminal(&mut self, request: OpenTerminalRequest);
     /// Open the target's worktree in the platform terminal without creating a
@@ -308,6 +319,7 @@ impl DaemonBackend {
     /// (`AttachWorkspace` / `CloneProject` / `RegisterWorkspace`) are not used
     /// by the Home screen and are accepted as no-ops until the screen graph
     /// routes them.
+    #[allow(clippy::too_many_lines)] // This exhaustive adapter keeps every controller effect visibly mapped to exactly one port.
     pub fn dispatch(&mut self, effect: Effect) -> Flow {
         match effect {
             Effect::CreateSession {
@@ -349,6 +361,15 @@ impl DaemonBackend {
                 session,
                 operation_id,
                 profile,
+            }),
+            Effect::ResumeAgent {
+                workspace,
+                session,
+                operation_id,
+            } => self.agent.resume_agent(ResumeAgentRequest {
+                workspace,
+                session,
+                operation_id,
             }),
             Effect::OpenTerminal {
                 target,
@@ -463,6 +484,7 @@ mod tests {
     #[derive(Default)]
     struct FakeAgent {
         launched: Vec<LaunchAgentRequest>,
+        resumed: Vec<ResumeAgentRequest>,
         opened: Vec<OpenTerminalRequest>,
         external: Vec<Target>,
         tabs: Vec<TabDirection>,
@@ -471,6 +493,10 @@ mod tests {
     impl AgentPort for FakeAgent {
         fn launch_agent(&mut self, request: LaunchAgentRequest) {
             self.launched.push(request);
+        }
+
+        fn resume_agent(&mut self, request: ResumeAgentRequest) {
+            self.resumed.push(request);
         }
 
         fn open_terminal(&mut self, request: OpenTerminalRequest) {
@@ -678,6 +704,14 @@ mod tests {
                 session: Some(SessionId::new()),
                 operation_id: OperationId::new(),
                 profile: None,
+            }),
+            Flow::Continue
+        );
+        assert_eq!(
+            backend.dispatch(Effect::ResumeAgent {
+                workspace: WorkspaceId::new(),
+                session: SessionId::new(),
+                operation_id: OperationId::new(),
             }),
             Flow::Continue
         );

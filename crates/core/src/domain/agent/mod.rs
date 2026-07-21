@@ -239,6 +239,109 @@ pub struct LaunchScope {
     pub worktree_id: WorktreeId,
 }
 
+/// Provider-owned conversation identity. This is deliberately distinct from
+/// usagi's [`SessionId`] and from the PTY identity carried by `TerminalRef`.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct ProviderSessionId(String);
+
+impl fmt::Debug for ProviderSessionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ProviderSessionId([REDACTED])")
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderSessionId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl ProviderSessionId {
+    /// Accepts one opaque provider identifier without interpreting its format.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LaunchValidationError::InvalidProviderSessionId`] for empty,
+    /// excessively large, or control-character-containing values.
+    pub fn new(value: impl Into<String>) -> Result<Self, LaunchValidationError> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > 512
+            || value.chars().any(char::is_control)
+            || value.trim() != value
+        {
+            Err(LaunchValidationError::InvalidProviderSessionId)
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    /// Returns the opaque provider value. Callers must treat it as sensitive
+    /// metadata and avoid logs or user-facing diagnostics.
+    #[must_use]
+    pub fn expose_sensitive(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Code-defined provider owning a resumable conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    Claude,
+    Codex,
+}
+
+/// Evidence by which a provider-native identity entered durable state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCaptureProvenance {
+    /// The daemon issued the ID before a Claude process was spawned.
+    DaemonIssued,
+    /// A provider-owned, documented structured channel reported the ID.
+    ProviderStructured,
+}
+
+/// Safe durable liveness projection for provider-native resume metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderResumeStatus {
+    Active,
+    Interrupted,
+    Exited,
+}
+
+/// Closed, non-sensitive phase vocabulary retained with provider metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderResumePhase {
+    Starting,
+    Running,
+    Interrupted,
+    Ended,
+}
+
+/// Minimum durable metadata needed to start a new provider process which
+/// resumes the same conversation. It never authorizes attachment to an old
+/// PTY; the containing runtime record supplies that separate incarnation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderResumeRef {
+    pub provider: ProviderKind,
+    pub native_session_id: ProviderSessionId,
+    pub adapter_revision: u32,
+    pub scope: LaunchScope,
+    pub provenance: ProviderCaptureProvenance,
+    pub last_known_status: ProviderResumeStatus,
+    /// Product-neutral, non-sensitive phase vocabulary only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_known_phase: Option<ProviderResumePhase>,
+}
+
 /// Immutable, pre-resolution launch intent. It contains no rendered command,
 /// adapter-private configuration, or secret material.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,6 +350,10 @@ pub struct LaunchRequest {
     pub mode: LaunchMode,
     pub model: Option<ModelSelector>,
     pub resume: bool,
+    /// Present only when this process has a validated provider-native identity.
+    /// Old snapshots omit it and therefore fail closed for explicit resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_resume: Option<ProviderResumeRef>,
     pub initial_prompt: Option<String>,
     pub scope: LaunchScope,
     pub required_capabilities: BTreeSet<AgentCapability>,
@@ -395,6 +502,8 @@ pub enum LaunchValidationError {
     InvalidProgram,
     InvalidArgumentVector,
     InvalidWorkingDirectory,
+    InvalidProviderSessionId,
+    ProviderResumeMismatch,
     EmptyPrompt,
     UnknownProfile { profile_id: AgentProfileId },
     UnsupportedMode { mode: LaunchMode },
@@ -415,6 +524,10 @@ impl fmt::Display for LaunchValidationError {
             Self::InvalidProgram => f.write_str("invalid launch program"),
             Self::InvalidArgumentVector => f.write_str("invalid or secret launch argument"),
             Self::InvalidWorkingDirectory => f.write_str("invalid launch working directory"),
+            Self::InvalidProviderSessionId => f.write_str("invalid provider session ID"),
+            Self::ProviderResumeMismatch => {
+                f.write_str("provider resume metadata does not match the launch")
+            }
             Self::EmptyPrompt => f.write_str("initial prompt must not be empty"),
             Self::UnknownProfile { profile_id } => write!(f, "unknown agent profile: {profile_id}"),
             Self::UnsupportedMode { mode } => write!(f, "unsupported launch mode: {mode:?}"),
@@ -485,6 +598,14 @@ mod tests {
             "TERM"
         );
         assert_eq!(
+            ProviderSessionId::new(" provider-id"),
+            Err(LaunchValidationError::InvalidProviderSessionId)
+        );
+        let provider_id = ProviderSessionId::new("provider-id").unwrap();
+        assert_eq!(provider_id.expose_sensitive(), "provider-id");
+        assert_eq!(format!("{provider_id:?}"), "ProviderSessionId([REDACTED])");
+        assert!(serde_json::from_str::<ProviderSessionId>("\"bad\\nvalue\"").is_err());
+        assert_eq!(
             LaunchPlan::new(
                 AgentProfileId::new("test").unwrap(),
                 1,
@@ -515,6 +636,7 @@ mod tests {
             mode: LaunchMode::Headless,
             model: None,
             resume: true,
+            provider_resume: None,
             initial_prompt: Some("continue".into()),
             scope: LaunchScope {
                 workspace_id: WorkspaceId::new(),
@@ -567,6 +689,8 @@ mod tests {
             LaunchValidationError::InvalidProgram,
             LaunchValidationError::InvalidArgumentVector,
             LaunchValidationError::InvalidWorkingDirectory,
+            LaunchValidationError::InvalidProviderSessionId,
+            LaunchValidationError::ProviderResumeMismatch,
             LaunchValidationError::EmptyPrompt,
             LaunchValidationError::UnknownProfile { profile_id },
             LaunchValidationError::UnsupportedMode {

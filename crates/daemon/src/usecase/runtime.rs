@@ -11,7 +11,10 @@
 use std::collections::BTreeMap;
 
 use usagi_core::domain::{
-    agent::{DurableLaunchSnapshot, LaunchRequest, LaunchValidationError},
+    agent::{
+        DurableLaunchSnapshot, LaunchRequest, LaunchValidationError, ProviderResumePhase,
+        ProviderResumeRef, ProviderResumeStatus,
+    },
     id::{AgentRuntimeRef, CompletionFence, ConnectionId, TerminalRef},
 };
 
@@ -34,6 +37,11 @@ pub struct DurableRuntimeRecord {
     pub launch: DurableLaunchSnapshot,
     pub state: RuntimeState,
     pub process: Option<ProcessIdentity>,
+    /// Provider-owned conversation identity. It is sensitive metadata, never a
+    /// usagi session or terminal identity, and is absent on legacy/Codex runs
+    /// for which no documented structured capture channel was available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_resume: Option<ProviderResumeRef>,
     /// Canonical caller intent used to reject operation-id reuse after restart.
     /// Legacy snapshots omit it and are therefore replayed only as a safe,
     /// non-spawnable failure.
@@ -66,7 +74,7 @@ pub enum DurableOperationOutcome {
     OwnershipUnknown,
 }
 
-const RUNTIME_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+const RUNTIME_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -108,6 +116,10 @@ impl RuntimeStoreSnapshot {
             ) {
                 record.state = RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown);
                 record.outcome = DurableOperationOutcome::OwnershipUnknown;
+                if let Some(provider) = &mut record.provider_resume {
+                    provider.last_known_status = ProviderResumeStatus::Interrupted;
+                    provider.last_known_phase = Some(ProviderResumePhase::Interrupted);
+                }
                 interrupted += 1;
             }
             if self.schema_version == 1 && record.semantic_key.is_none() {
@@ -119,7 +131,7 @@ impl RuntimeStoreSnapshot {
     }
 
     pub fn validate_schema(&self) -> Result<(), RuntimeSnapshotError> {
-        if matches!(self.schema_version, 1 | RUNTIME_SNAPSHOT_SCHEMA_VERSION) {
+        if matches!(self.schema_version, 1 | 2 | RUNTIME_SNAPSHOT_SCHEMA_VERSION) {
             Ok(())
         } else {
             Err(RuntimeSnapshotError::UnknownSchema(self.schema_version))
@@ -237,6 +249,13 @@ impl SpawnProvision {
     ) {
         self.daemon_environment.insert(name, value);
     }
+
+    /// Appends adapter-private invocation arguments before the public durable
+    /// plan. Provider-native IDs use this path so they never appear in the
+    /// durable argv snapshot or diagnostics derived from it.
+    pub fn append_sensitive_arguments(&mut self, arguments: impl IntoIterator<Item = String>) {
+        self.arguments.extend(arguments);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,6 +274,7 @@ pub trait AgentAdapter {
 pub struct ResolvedLaunch {
     pub snapshot: DurableLaunchSnapshot,
     pub provision: SpawnProvision,
+    pub provider_resume: Option<ProviderResumeRef>,
 }
 pub trait PtySpawner {
     fn spawn(
@@ -285,6 +305,7 @@ pub enum RuntimeError {
     Adapter(AdapterError),
     RuntimeAlreadyExists,
     ScopeMismatch,
+    ProviderResumeMismatch,
     ConcurrencyExhausted,
     Terminal(RegistryError),
     Store,
@@ -391,7 +412,10 @@ impl RuntimeCoordinator {
                 .insert_daemon_environment(name, credential);
         }
         let launch = resolved.snapshot;
-        if launch.request != *request
+        let provider_resume = resolved.provider_resume;
+        let mut durable_request = request.clone();
+        durable_request.provider_resume = None;
+        if launch.request != durable_request
             || launch.plan.profile_id != request.profile_id
             || launch.plan.profile_revision == 0
         {
@@ -405,6 +429,7 @@ impl RuntimeCoordinator {
                 launch,
                 state: RuntimeState::Reserved,
                 process: None,
+                provider_resume,
                 semantic_key: Some(semantic_key),
                 outcome: DurableOperationOutcome::Accepted,
                 credential_provenance,
@@ -540,6 +565,10 @@ impl RuntimeCoordinator {
         } else {
             DurableOperationOutcome::ExitUnavailable
         };
+        if let Some(provider) = &mut self.record_mut(runtime)?.provider_resume {
+            provider.last_known_status = ProviderResumeStatus::Exited;
+            provider.last_known_phase = Some(ProviderResumePhase::Ended);
+        }
         if self.persist(store).is_err() {
             self.record_mut(runtime)?.state =
                 RuntimeState::ReconcileRequired(ReconcileState::PersistAfterExit);
@@ -569,6 +598,17 @@ impl RuntimeCoordinator {
             }
             _ => RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown),
         };
+        if let Some(provider) = &mut record.provider_resume {
+            provider.last_known_status = match record.state {
+                RuntimeState::Exited | RuntimeState::Reclaimed => ProviderResumeStatus::Exited,
+                _ => ProviderResumeStatus::Interrupted,
+            };
+            provider.last_known_phase = Some(match provider.last_known_status {
+                ProviderResumeStatus::Active => ProviderResumePhase::Running,
+                ProviderResumeStatus::Interrupted => ProviderResumePhase::Interrupted,
+                ProviderResumeStatus::Exited => ProviderResumePhase::Ended,
+            });
+        }
         self.persist(store)
     }
 
@@ -702,6 +742,29 @@ impl RuntimeCoordinator {
         runtime: &AgentRuntimeRef,
     ) -> Result<&DurableRuntimeRecord, RuntimeError> {
         self.record(runtime)
+    }
+    /// Records an ID obtained from a documented provider-owned structured
+    /// channel. The complete runtime and launch scope must still fence the
+    /// record; callers cannot repair or infer legacy metadata by name/path.
+    pub fn record_provider_resume<S: RuntimeStore>(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        provider_resume: ProviderResumeRef,
+        store: &mut S,
+    ) -> Result<(), RuntimeError> {
+        let record = self.record_mut(runtime)?;
+        if record.state != RuntimeState::Running
+            || record.launch.request.scope != provider_resume.scope
+            || record.launch.plan.profile_revision != provider_resume.adapter_revision
+            || record
+                .provider_resume
+                .as_ref()
+                .is_some_and(|existing| existing != &provider_resume)
+        {
+            return Err(RuntimeError::ProviderResumeMismatch);
+        }
+        record.provider_resume = Some(provider_resume);
+        self.persist(store)
     }
     #[must_use]
     #[coverage(off)]
@@ -866,6 +929,7 @@ mod tests {
                     .unwrap(),
                 ),
                 provision: SpawnProvision::new([], Vec::new()),
+                provider_resume: request.provider_resume.clone(),
             })
         }
     }
@@ -912,6 +976,7 @@ mod tests {
             mode: LaunchMode::Interactive,
             model: None,
             resume: false,
+            provider_resume: None,
             initial_prompt: None,
             scope: LaunchScope {
                 workspace_id: WorkspaceId::new(),
@@ -966,6 +1031,7 @@ mod tests {
                     launch: launch.clone(),
                     state: RuntimeState::Running,
                     process: Some(process()),
+                    provider_resume: None,
                     semantic_key: Some("first".into()),
                     outcome: DurableOperationOutcome::Accepted,
                     credential_provenance: Some(CredentialProvenance::DaemonMintedEphemeral),
@@ -976,6 +1042,7 @@ mod tests {
                     launch,
                     state: RuntimeState::Exited,
                     process: Some(process()),
+                    provider_resume: None,
                     semantic_key: Some("second".into()),
                     outcome: DurableOperationOutcome::Completed,
                     credential_provenance: Some(CredentialProvenance::DaemonMintedEphemeral),
@@ -1020,6 +1087,7 @@ mod tests {
             launch,
             state: RuntimeState::Exited,
             process: Some(process()),
+            provider_resume: None,
             semantic_key: Some("intent".into()),
             outcome: DurableOperationOutcome::Completed,
             credential_provenance: Some(CredentialProvenance::DaemonMintedEphemeral),
@@ -1109,6 +1177,7 @@ mod tests {
                     launch: launch.clone(),
                     state: RuntimeState::Exited,
                     process: Some(process()),
+                    provider_resume: None,
                     semantic_key: Some("intent".into()),
                     outcome,
                     credential_provenance: Some(CredentialProvenance::DaemonMintedEphemeral),

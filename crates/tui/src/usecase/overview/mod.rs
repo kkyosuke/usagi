@@ -52,6 +52,9 @@ pub enum SessionCommand {
     },
     List,
     Overview,
+    Resume {
+        name: String,
+    },
     /// Open the session checklist instead of removing the currently selected row.
     SelectRemove {
         force: bool,
@@ -103,8 +106,8 @@ const DEFINITIONS: &[CommandDefinition] = &[
     CommandDefinition {
         info: CommandInfo {
             name: "session",
-            description: "Create, list, select, or remove sessions",
-            usage: "session [create|list|overview|remove] <name>",
+            description: "Create, list, resume, select, or remove sessions",
+            usage: "session [create|list|overview|resume|remove] <name>",
             long_description: "Manage the sessions that belong to this workspace.",
         },
         factory: |arguments| Command::Session { arguments },
@@ -113,7 +116,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
 
 /// `session` が受け付ける workspace-level subcommand。実行の解釈は session
 /// handler が所有し、ここは palette の補完候補だけを一元化する。
-const SESSION_SUBCOMMANDS: &[&str] = &["create", "list", "overview", "remove"];
+const SESSION_SUBCOMMANDS: &[&str] = &["create", "list", "overview", "remove", "resume"];
 
 /// Overview 固有コマンドの metadata を名前順に返す。
 #[must_use]
@@ -204,9 +207,14 @@ pub fn parse_session(arguments: &str) -> Result<SessionCommand, &'static str> {
         "create" if !rest.is_empty() => Ok(SessionCommand::Create {
             name: rest.to_owned(),
         }),
-        "create" => Err("session name is required"),
         "list" if rest.is_empty() => Ok(SessionCommand::List),
         "overview" if rest.is_empty() => Ok(SessionCommand::Overview),
+        "resume" if !rest.is_empty() && !rest.contains(char::is_whitespace) => {
+            Ok(SessionCommand::Resume {
+                name: rest.to_owned(),
+            })
+        }
+        "create" | "resume" => Err("session name is required"),
         "remove" => parse_remove(rest),
         _ => Err("unknown session command"),
     }
@@ -421,6 +429,12 @@ mod tests {
         assert_eq!(parse_session("list"), Ok(SessionCommand::List));
         assert_eq!(parse_session("overview"), Ok(SessionCommand::Overview));
         assert_eq!(
+            parse_session("resume feature-x"),
+            Ok(SessionCommand::Resume {
+                name: "feature-x".to_owned()
+            })
+        );
+        assert_eq!(
             parse_session("remove feature-x --force"),
             Ok(SessionCommand::Remove {
                 name: "feature-x".into(),
@@ -444,6 +458,7 @@ mod tests {
         );
         assert_eq!(parse_session("create"), Err("session name is required"));
         assert_eq!(parse_session("list extra"), Err("unknown session command"));
+        assert_eq!(parse_session("resume"), Err("session name is required"));
         assert_eq!(
             parse_session("overview extra"),
             Err("unknown session command")

@@ -57,8 +57,8 @@ use crate::usecase::application::daemon_backend::{
     AgentPort as BackendAgentPort, Completions, CreateSessionRequest, DaemonBackend,
     DecisionPort as BackendDecisionPort, Flow as BackendFlow, LaunchAgentRequest,
     OpenTerminalRequest, OverlayPort as BackendOverlayPort, RemoveSessionRequest,
-    SessionCommandPort as BackendSessionCommandPort, TargetStorePort as BackendTargetStorePort,
-    WorkspaceCommandPort as BackendWorkspaceCommandPort,
+    ResumeAgentRequest, SessionCommandPort as BackendSessionCommandPort,
+    TargetStorePort as BackendTargetStorePort, WorkspaceCommandPort as BackendWorkspaceCommandPort,
 };
 use crate::usecase::application::pane::PaneKind;
 use crate::usecase::application::pane_runtime::Geometry;
@@ -85,6 +85,22 @@ pub trait AgentCommandPort: Send {
         session: Option<SessionId>,
         profile: Option<AgentProfileId>,
     ) -> Result<TerminalRef, String>;
+
+    /// Explicitly resumes retained provider-native metadata in a new daemon
+    /// runtime. Implementations must not attach to the old PTY.
+    ///
+    /// # Errors
+    ///
+    /// Returns safe feedback when the daemon rejects the resume or does not
+    /// return a fully fenced terminal reference.
+    fn resume(
+        &mut self,
+        _workspace: WorkspaceId,
+        _session: SessionId,
+        _operation_id: OperationId,
+    ) -> Result<TerminalRef, String> {
+        Err("Agent resume is unavailable.".to_owned())
+    }
 
     /// Open a daemon-owned login shell for a scope. `session` is absent for the
     /// workspace root, whose checkout the daemon resolves to the trusted
@@ -417,6 +433,7 @@ pub enum ControllerHostAction {
     Refresh(WorkspaceId, Completions),
     Remove(RemoveSessionRequest, Completions),
     LaunchAgent(LaunchAgentRequest),
+    ResumeAgent(ResumeAgentRequest),
     OpenTerminal(OpenTerminalRequest),
     OpenExternalTerminal(Target),
     SelectTab(crate::usecase::application::controller::TabDirection),
@@ -459,6 +476,10 @@ impl BackendSessionCommandPort for ControllerHost {
 impl BackendAgentPort for ControllerHost {
     fn launch_agent(&mut self, request: LaunchAgentRequest) {
         let _ = self.0.send(ControllerHostAction::LaunchAgent(request));
+    }
+
+    fn resume_agent(&mut self, request: ResumeAgentRequest) {
+        let _ = self.0.send(ControllerHostAction::ResumeAgent(request));
     }
 
     fn open_terminal(&mut self, request: OpenTerminalRequest) {
@@ -949,6 +970,7 @@ enum PaneLaunch {
         /// Absent for a workspace-root Agent.
         session: Option<SessionId>,
         profile: Option<AgentProfileId>,
+        resume: bool,
     },
     Terminal {
         operation: OperationId,
@@ -1663,6 +1685,7 @@ fn drain_pane_launches(ui: &mut WorkspaceUi, geometry: Geometry) {
                 workspace,
                 session,
                 profile,
+                resume,
             } => {
                 let Some(mut port) = ui.agent.as_mut().and_then(|agent| agent.port.take()) else {
                     ui.pane_launches.push(PaneLaunch::Agent {
@@ -1670,12 +1693,20 @@ fn drain_pane_launches(ui: &mut WorkspaceUi, geometry: Geometry) {
                         workspace,
                         session,
                         profile,
+                        resume,
                     });
                     continue;
                 };
                 let sender = ui.pane_completion_sender.clone();
                 std::thread::spawn(move || {
-                    let result = port.launch(workspace, session, profile);
+                    let result = if resume {
+                        session.map_or_else(
+                            || Err("workspace-root Agent resume is unavailable".to_owned()),
+                            |session| port.resume(workspace, session, operation),
+                        )
+                    } else {
+                        port.launch(workspace, session, profile)
+                    };
                     let _ = sender.send(PaneLaunchCompletion {
                         port,
                         outcome: PaneLaunchOutcome::Agent { operation, result },
@@ -2397,6 +2428,24 @@ fn drain_controller_host_actions(
                     workspace: request.workspace,
                     session: request.session,
                     profile: request.profile,
+                    resume: false,
+                });
+            }
+            ControllerHostAction::ResumeAgent(request) => {
+                let target = Target::Session(request.session);
+                pending_targets.insert(request.operation_id, target);
+                runtime.on_effect(&Effect::LaunchAgent {
+                    workspace: request.workspace,
+                    session: Some(request.session),
+                    operation_id: request.operation_id,
+                    profile: None,
+                });
+                ui.pane_launches.push(PaneLaunch::Agent {
+                    operation: request.operation_id,
+                    workspace: request.workspace,
+                    session: Some(request.session),
+                    profile: None,
+                    resume: true,
                 });
             }
             ControllerHostAction::OpenTerminal(request) => {
@@ -3563,6 +3612,11 @@ mod tests {
                 operation_id: OperationId::new(),
                 profile: None,
             },
+            Effect::ResumeAgent {
+                workspace,
+                session,
+                operation_id: OperationId::new(),
+            },
             Effect::OpenTerminal {
                 target,
                 operation_id: OperationId::new(),
@@ -3575,7 +3629,15 @@ mod tests {
         ] {
             backend.dispatch(effect);
         }
-        assert_eq!(actions.try_iter().count(), 7);
+        assert_eq!(actions.try_iter().count(), 8);
+
+        let mut default_resume = SuccessfulAgentPort(live_terminal_ref(workspace, session));
+        assert_eq!(
+            default_resume
+                .resume(workspace, session, OperationId::new())
+                .unwrap_err(),
+            "Agent resume is unavailable."
+        );
 
         for effect in [
             Effect::LoadNotes { target },

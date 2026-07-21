@@ -22,10 +22,10 @@ use usagi_core::usecase::client::{
 };
 
 #[test]
-fn production_tools_list_fixes_the_47_tool_schema_contract() {
+fn production_tools_list_fixes_the_48_tool_schema_contract() {
     let mut mcp = McpHarness::start();
     let tools = mcp.tools();
-    assert_eq!(tools.len(), 47);
+    assert_eq!(tools.len(), 48);
     let mut names = std::collections::HashSet::new();
     for tool in &tools {
         assert!(names.insert(tool["name"].as_str().unwrap()));

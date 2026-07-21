@@ -843,6 +843,35 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         }
     }
 
+    #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=structured_codex_identity_enables_one_explicit_new_runtime_resume
+    fn resume(
+        &mut self,
+        _workspace: WorkspaceId,
+        session: usagi_core::domain::id::SessionId,
+        operation_id: usagi_core::domain::id::OperationId,
+    ) -> Result<usagi_core::domain::id::TerminalRef, String> {
+        let mut client =
+            crate::runtime::daemon::client(usagi_core::usecase::client::ClientPolicy::tui())
+                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        match client
+            .request(DaemonRequest::Session {
+                action: SessionAction::ResumeAgent,
+                operation_id: operation_id.to_string(),
+                payload: serde_json::json!({"session_id": session}),
+            })
+            .map_err(|_| "provider resume failed; inspect session status".to_owned())?
+        {
+            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => body
+                .get("terminal")
+                .cloned()
+                .ok_or_else(|| "provider resume returned no terminal".to_owned())
+                .and_then(|terminal| {
+                    serde_json::from_value(terminal)
+                        .map_err(|_| "provider resume returned an invalid terminal".to_owned())
+                }),
+        }
+    }
+
     #[coverage(off)]
     fn launch_terminal(
         &mut self,
@@ -1242,6 +1271,10 @@ impl SessionCommandPort for DaemonSessionCommandPort {
             }
             SessionCommand::List => (SessionAction::List, serde_json::json!({})),
             SessionCommand::Overview => (SessionAction::Overview, serde_json::json!({})),
+            SessionCommand::Resume { name } => (
+                SessionAction::ResumeAgent,
+                serde_json::json!({"name": name}),
+            ),
             SessionCommand::SelectRemove { .. } => {
                 return Err("session selection must be handled by the TUI".to_owned());
             }
@@ -1267,6 +1300,11 @@ impl SessionCommandPort for DaemonSessionCommandPort {
                 revision,
                 body,
             } => {
+                if action == SessionAction::ResumeAgent {
+                    return Ok(SessionCommandResult::message(format!(
+                        "provider resume accepted ({operation_id})"
+                    )));
+                }
                 let snapshot = lifecycle_snapshot(&body)?;
                 if action == SessionAction::Create {
                     created_session_hook(&body, &operation_id, revision)?;
@@ -1278,6 +1316,9 @@ impl SessionCommandPort for DaemonSessionCommandPort {
                 )
             }
             DaemonReply::Ok(value) => {
+                if action == SessionAction::ResumeAgent {
+                    return Ok(SessionCommandResult::message("provider resume completed"));
+                }
                 let snapshot = lifecycle_snapshot(&value)?;
                 session_snapshot_result("daemon snapshot refreshed", &snapshot, workspace)
             }
