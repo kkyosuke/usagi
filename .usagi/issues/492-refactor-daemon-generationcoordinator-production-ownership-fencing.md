@@ -1,14 +1,14 @@
 ---
 number: 492
 title: refactor(daemon): GenerationCoordinator を production ownership fencing に統合する
-status: in-progress
+status: done
 priority: medium
 labels: [review, v2, daemon, generation]
 dependson: [458]
 related: [209, 365]
 parent: 453
 created_at: 2026-07-20T12:06:51.807676+00:00
-updated_at: 2026-07-21T12:27:55.061773+00:00
+updated_at: 2026-07-21T12:59:03.837838+00:00
 ---
 
 ## 問題・影響
