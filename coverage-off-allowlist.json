@@ -3171,6 +3171,15 @@
     },
     {
       "path": "crates/tui/src/usecase/application/controller.rs",
+      "symbol": "fn:scroll_offset",
+      "occurrence": 1,
+      "reason": "migration_debt",
+      "owner": "tui",
+      "expires": "2027-01-31",
+      "tracking": "#487"
+    },
+    {
+      "path": "crates/tui/src/usecase/application/controller.rs",
       "symbol": "fn:freeform",
       "occurrence": 1,
       "reason": "migration_debt",

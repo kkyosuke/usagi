@@ -149,6 +149,9 @@ submit は stable option ID または空でない許可済み freeform を送る
 残り、resolve error・disconnect・resync 後も snapshot で再試行可能な pending state に収束する。modal が開いて
 いる間は Home、Closeup、terminal の背景入力を dispatch しない。
 
+decision の title、prompt、option label/description、freeform は modal 幅で折り返す。表示域を超える editor の
+内容は `PageUp` / `PageDown` で読み進め、`↑` / `↓` による option 選択へ戻ると選択中の行へ表示を戻す。
+
 新しい pending decision を resync で観測すると、Home header の右上に `🔔 N notice` を表示し、その直下の
 banner に session identity（root は `workspace root`）と decision の title（summary）を表示する。ベルをクリックすると existing decision modal を
 開き、未読表示を既読にする。modal が前面の場合はベル・banner を含む背景入力を受け取らない。未読は TUI-local の
