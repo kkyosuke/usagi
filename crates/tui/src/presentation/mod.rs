@@ -664,7 +664,7 @@ enum WorkspaceStep {
 /// TUI は session store や git worktree を直接操作しない。実行時の合成ルートが
 /// daemon IPC client をこの port として注入し、テストは fake port で command と
 /// target の対応だけを検証する。
-pub trait SessionCommandPort: Send {
+pub trait SessionCommandPort: Send + Sync {
     /// Execute one parsed Overview session command for this workspace and its
     /// currently selected session, when the command requires one.
     ///
@@ -673,7 +673,7 @@ pub trait SessionCommandPort: Send {
     /// Returns a safe message when the daemon cannot accept the request.
     #[coverage(off)]
     fn execute(
-        &mut self,
+        &self,
         _workspace: &usagi_core::domain::workspace::Workspace,
         _selected: Option<&usagi_core::domain::session::SessionRecord>,
         _command: SessionCommand,
@@ -697,6 +697,9 @@ pub struct SessionCommandResult {
     /// refresh must carry these together so a session created during this TUI
     /// run can subsequently launch an Agent without falling back to a name.
     pub session_ids: Option<Vec<SessionId>>,
+    /// Monotonically increasing daemon lifecycle revision for this snapshot.
+    /// The UI uses it to ignore a response that arrives after a newer command.
+    pub revision: Option<u64>,
 }
 
 impl SessionCommandResult {
@@ -706,6 +709,7 @@ impl SessionCommandResult {
             message: message.into(),
             sessions: None,
             session_ids: None,
+            revision: None,
         }
     }
 }
@@ -715,7 +719,7 @@ struct UnavailableSessionCommandPort;
 impl SessionCommandPort for UnavailableSessionCommandPort {
     #[coverage(off)]
     fn execute(
-        &mut self,
+        &self,
         _workspace: &usagi_core::domain::workspace::Workspace,
         _selected: Option<&usagi_core::domain::session::SessionRecord>,
         _command: SessionCommand,
@@ -859,9 +863,10 @@ impl SessionCommandPortFactory for UnavailableSessionCommandPortFactory {
 /// the controller (`AppState`/`render_home`), not here.
 struct WorkspaceUi {
     workspace: WorkspaceView,
-    /// A create owns the port in its worker until completion, preventing a
-    /// second lifecycle request while its sidebar skeleton is visible.
-    session_commands: Option<Box<dyn SessionCommandPort>>,
+    /// Each lifecycle operation gets its own worker and daemon connection.
+    /// Snapshot revisions, rather than port ownership, order their results.
+    session_commands: std::sync::Arc<dyn SessionCommandPort>,
+    last_session_revision: u64,
     session_completions: Receiver<SessionCommandCompletion>,
     session_completion_sender: Sender<SessionCommandCompletion>,
     /// Session displayed as a removal skeleton until its daemon command returns.
@@ -898,7 +903,6 @@ struct AgentContext {
 }
 
 struct SessionCommandCompletion {
-    port: Box<dyn SessionCommandPort>,
     result: Result<SessionCommandResult, String>,
     completion: SessionBackendCompletion,
 }
@@ -909,7 +913,11 @@ enum SessionBackendCompletion {
         before: Vec<SessionId>,
         completions: Completions,
     },
-    Snapshot {
+    Refresh {
+        completions: Completions,
+    },
+    Remove {
+        session: SessionId,
         completions: Completions,
     },
 }
@@ -958,7 +966,8 @@ impl WorkspaceUi {
         let (pane_completion_sender, pane_completions) = mpsc::channel();
         Self {
             workspace,
-            session_commands: Some(session_commands),
+            session_commands: std::sync::Arc::from(session_commands),
+            last_session_revision: 0,
             session_completions,
             session_completion_sender,
             removing_session: None,
@@ -1476,45 +1485,30 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
 }
 
 /// Run one daemon-owned session command without blocking the terminal event
-/// loop. A create gains a v1-style skeleton immediately; the worker returns the
-/// port with its result so later commands still share the same daemon client
-/// state, and its authoritative snapshot reconciles the sidebar.
+/// loop. Every request has an independent daemon connection; lifecycle
+/// revisions reconcile responses that complete out of order.
 #[coverage(off)]
 fn begin_session_command(
     ui: &mut WorkspaceUi,
     command: SessionCommand,
     completion: SessionBackendCompletion,
 ) -> bool {
-    // A command owns the port until its worker returns it; a second request
-    // while one is in flight is a no-op here (the controller overlay owns the
-    // user-facing "already running" feedback).
-    let Some(mut port) = ui.session_commands.take() else {
-        return false;
-    };
+    let port = std::sync::Arc::clone(&ui.session_commands);
     let workspace = ui.workspace.record().clone();
     let sender = ui.session_completion_sender.clone();
     std::thread::spawn(move || {
         let result = port.execute(&workspace, None, command);
-        let _ = sender.send(SessionCommandCompletion {
-            port,
-            result,
-            completion,
-        });
+        let _ = sender.send(SessionCommandCompletion { result, completion });
     });
     true
 }
 
 /// A terminal wake-up is a bounded opportunity to adopt lifecycle changes made
 /// by another client, such as an MCP server. Never enqueue a refresh while the
-/// single session command port is owned by a worker: its completion already
-/// carries an authoritative snapshot.
-fn tick_session_refresh(
-    key: &Key,
-    session_commands_available: bool,
-    workspace: WorkspaceId,
-) -> Option<Effect> {
-    (matches!(key, Key::Other) && session_commands_available)
-        .then_some(Effect::RefreshSessions { workspace })
+/// a lifecycle command is already in flight: its revision-based completion
+/// reconciliation handles the newer observation safely.
+fn tick_session_refresh(key: &Key, workspace: WorkspaceId) -> Option<Effect> {
+    matches!(key, Key::Other).then_some(Effect::RefreshSessions { workspace })
 }
 
 /// The daemon-owned name for the session identified by `session`, if the current
@@ -1565,12 +1559,26 @@ fn apply_session_projection(
 #[coverage(off)]
 fn drain_session_completions(ui: &mut WorkspaceUi) {
     while let Ok(completion) = ui.session_completions.try_recv() {
-        ui.session_commands = Some(completion.port);
-        ui.removing_session = None;
-        ui.creating_session = None;
+        match &completion.completion {
+            SessionBackendCompletion::Create { .. } => ui.creating_session = None,
+            SessionBackendCompletion::Remove { session, .. }
+                if ui.removing_session == Some(*session) =>
+            {
+                ui.removing_session = None;
+            }
+            SessionBackendCompletion::Refresh { .. } | SessionBackendCompletion::Remove { .. } => {}
+        }
         match completion.result {
             Ok(result) => {
-                apply_session_projection(ui, result.sessions, result.session_ids);
+                let is_current = result
+                    .revision
+                    .is_none_or(|revision| revision >= ui.last_session_revision);
+                if let Some(revision) = result.revision.filter(|_| is_current) {
+                    ui.last_session_revision = revision;
+                }
+                if is_current {
+                    apply_session_projection(ui, result.sessions, result.session_ids);
+                }
                 match completion.completion {
                     SessionBackendCompletion::Create {
                         token,
@@ -1594,7 +1602,8 @@ fn drain_session_completions(ui: &mut WorkspaceUi) {
                             })),
                         }));
                     }
-                    SessionBackendCompletion::Snapshot { completions } => {
+                    SessionBackendCompletion::Refresh { completions }
+                    | SessionBackendCompletion::Remove { completions, .. } => {
                         completions.emit(AppEvent::Backend(BackendEvent::Sessions(
                             ui.workspace.session_ids().to_vec(),
                         )));
@@ -1612,7 +1621,8 @@ fn drain_session_completions(ui: &mut WorkspaceUi) {
                         created: None,
                         notice: Some(Notice::new(safe)),
                     })),
-                    SessionBackendCompletion::Snapshot { completions } => {
+                    SessionBackendCompletion::Refresh { completions }
+                    | SessionBackendCompletion::Remove { completions, .. } => {
                         completions
                             .emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(safe))));
                     }
@@ -2328,15 +2338,6 @@ fn drain_controller_host_actions(
     while let Ok(action) = actions.try_recv() {
         match action {
             ControllerHostAction::Create(request, completions) => {
-                if ui.session_commands.is_none() {
-                    completions.emit(AppEvent::OperationResult(OperationResult {
-                        token: request.token,
-                        succeeded: false,
-                        created: None,
-                        notice: Some(Notice::new("session command is already running")),
-                    }));
-                    continue;
-                }
                 ui.creating_session = Some(PendingCreate {
                     name: request.intent.name.clone(),
                 });
@@ -2354,27 +2355,14 @@ fn drain_controller_host_actions(
                 );
             }
             ControllerHostAction::Refresh(_, completions) => {
-                let fallback = completions;
-                // A busy host cannot take another command; return an explicit result.
-                // The sink is moved into the worker only when the command starts.
-                if ui.session_commands.is_none() {
-                    fallback.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
-                        "session command is already running",
-                    ))));
-                } else {
-                    let _ = begin_session_command(
-                        ui,
-                        SessionCommand::List,
-                        SessionBackendCompletion::Snapshot {
-                            completions: fallback,
-                        },
-                    );
-                }
+                let _ = begin_session_command(
+                    ui,
+                    SessionCommand::List,
+                    SessionBackendCompletion::Refresh { completions },
+                );
             }
             ControllerHostAction::Remove(request, completions) => {
-                if let Some(name) = session_name_for(ui, request.session)
-                    && ui.session_commands.is_some()
-                {
+                if let Some(name) = session_name_for(ui, request.session) {
                     ui.removing_session = Some(request.session);
                     let _ = begin_session_command(
                         ui,
@@ -2382,7 +2370,10 @@ fn drain_controller_host_actions(
                             name,
                             force: request.force,
                         },
-                        SessionBackendCompletion::Snapshot { completions },
+                        SessionBackendCompletion::Remove {
+                            session: request.session,
+                            completions,
+                        },
                     );
                 } else {
                     completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
@@ -2619,9 +2610,7 @@ fn drive_workspace_controller(
                 workspace: workspace_id,
             });
         }
-        if let Some(effect) =
-            tick_session_refresh(&key, ui.session_commands.is_some(), workspace_id)
-        {
+        if let Some(effect) = tick_session_refresh(&key, workspace_id) {
             let _ = backend.dispatch(effect);
         }
         if forward_live_terminal_input(&mut ui, &runtime, &mut controls, term, &key) {
@@ -3469,15 +3458,14 @@ mod tests {
     }
 
     #[test]
-    fn terminal_wakeup_refreshes_sessions_only_when_the_port_is_available() {
+    fn terminal_wakeup_refreshes_sessions_while_other_commands_are_running() {
         let workspace = WorkspaceId::new();
 
         assert_eq!(
-            tick_session_refresh(&Key::Other, true, workspace),
+            tick_session_refresh(&Key::Other, workspace),
             Some(Effect::RefreshSessions { workspace })
         );
-        assert_eq!(tick_session_refresh(&Key::Other, false, workspace), None);
-        assert_eq!(tick_session_refresh(&Key::Enter, true, workspace), None);
+        assert_eq!(tick_session_refresh(&Key::Enter, workspace), None);
     }
 
     #[test]
@@ -3695,7 +3683,7 @@ mod tests {
     impl SessionCommandPort for SnapshotSessionPort {
         #[coverage(off)]
         fn execute(
-            &mut self,
+            &self,
             workspace: &Workspace,
             selected: Option<&SessionRecord>,
             command: SessionCommand,
@@ -3725,6 +3713,7 @@ mod tests {
                 message: "daemon accepted".to_owned(),
                 sessions,
                 session_ids: None,
+                revision: None,
             })
         }
     }
@@ -4107,7 +4096,7 @@ mod tests {
 
         impl SessionCommandPort for SignallingSessionPort {
             fn execute(
-                &mut self,
+                &self,
                 _: &Workspace,
                 _: Option<&SessionRecord>,
                 command: SessionCommand,
@@ -4197,7 +4186,6 @@ mod tests {
             crate::usecase::application::daemon_backend::Completions::channel();
         ui.session_completion_sender
             .send(super::SessionCommandCompletion {
-                port: Box::new(UnavailableSessionCommandPort),
                 result: Err("daemon refused the session".to_owned()),
                 completion: super::SessionBackendCompletion::Create {
                     token,
@@ -4216,6 +4204,86 @@ mod tests {
                     && result.created.is_none()
                     && result.notice.as_ref().is_some_and(|notice| notice.message == "daemon refused the session")
         ));
+    }
+
+    #[test]
+    fn session_commands_start_independently_without_rejecting_the_second_request() {
+        let snapshot = snapshot("demo");
+        let view = WorkspaceView::with_runtime_ids(
+            snapshot.workspace,
+            snapshot.state,
+            snapshot.session_ids,
+        );
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let (first_completions, _) =
+            crate::usecase::application::daemon_backend::Completions::channel();
+        let (second_completions, _) =
+            crate::usecase::application::daemon_backend::Completions::channel();
+
+        assert!(super::begin_session_command(
+            &mut ui,
+            SessionCommand::List,
+            super::SessionBackendCompletion::Refresh {
+                completions: first_completions,
+            },
+        ));
+        assert!(super::begin_session_command(
+            &mut ui,
+            SessionCommand::List,
+            super::SessionBackendCompletion::Refresh {
+                completions: second_completions,
+            },
+        ));
+    }
+
+    #[test]
+    fn stale_session_completion_does_not_replace_a_newer_snapshot() {
+        let snapshot = snapshot("demo");
+        let original = snapshot.session_ids[0];
+        let view = WorkspaceView::with_runtime_ids(
+            snapshot.workspace,
+            snapshot.state,
+            snapshot.session_ids,
+        );
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let (newer_completions, _) =
+            crate::usecase::application::daemon_backend::Completions::channel();
+        let (older_completions, _) =
+            crate::usecase::application::daemon_backend::Completions::channel();
+        let newer = SessionId::new();
+        let mut newer_record = ui.workspace.sessions()[0].clone();
+        newer_record.name = "newer".to_owned();
+
+        ui.session_completion_sender
+            .send(super::SessionCommandCompletion {
+                result: Ok(SessionCommandResult {
+                    message: "newer".to_owned(),
+                    sessions: Some(vec![newer_record]),
+                    session_ids: Some(vec![newer]),
+                    revision: Some(2),
+                }),
+                completion: super::SessionBackendCompletion::Refresh {
+                    completions: newer_completions,
+                },
+            })
+            .unwrap();
+        ui.session_completion_sender
+            .send(super::SessionCommandCompletion {
+                result: Ok(SessionCommandResult {
+                    message: "older".to_owned(),
+                    sessions: Some(ui.workspace.sessions().to_vec()),
+                    session_ids: Some(vec![original]),
+                    revision: Some(1),
+                }),
+                completion: super::SessionBackendCompletion::Refresh {
+                    completions: older_completions,
+                },
+            })
+            .unwrap();
+
+        super::drain_session_completions(&mut ui);
+        assert_eq!(ui.workspace.session_ids(), &[newer]);
+        assert_eq!(ui.workspace.sessions()[0].name, "newer");
     }
 
     #[test]
@@ -4240,11 +4308,11 @@ mod tests {
 
         ui.session_completion_sender
             .send(super::SessionCommandCompletion {
-                port: Box::new(UnavailableSessionCommandPort),
                 result: Ok(SessionCommandResult {
                     message: "created".to_owned(),
                     sessions: Some(records),
                     session_ids: Some(vec![existing, created]),
+                    revision: None,
                 }),
                 completion: super::SessionBackendCompletion::Create {
                     token,
@@ -4293,13 +4361,13 @@ mod tests {
             crate::usecase::application::daemon_backend::Completions::channel();
         ui.session_completion_sender
             .send(super::SessionCommandCompletion {
-                port: Box::new(UnavailableSessionCommandPort),
                 result: Ok(SessionCommandResult {
                     message: "same snapshot".to_owned(),
                     sessions: Some(records),
                     session_ids: Some(vec![session]),
+                    revision: None,
                 }),
-                completion: super::SessionBackendCompletion::Snapshot { completions },
+                completion: super::SessionBackendCompletion::Refresh { completions },
             })
             .unwrap();
         super::drain_session_completions(&mut ui);

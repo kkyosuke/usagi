@@ -78,9 +78,7 @@ use crate::tui_input::{CrosstermSource, EventPump, NoBackend};
 
 /// Composition adapter for Overview's daemon-owned session lifecycle commands.
 #[derive(Default)]
-struct DaemonSessionCommandPort {
-    last_revision: u64,
-}
+struct DaemonSessionCommandPort;
 
 /// Production bridge for the controller's durable user-decision effects.
 /// The daemon remains the authority; this adapter only converts its safe
@@ -591,7 +589,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         }));
         ControllerBackendComposition {
             backend,
-            session_commands: Box::new(DaemonSessionCommandPort::default()),
+            session_commands: Box::new(DaemonSessionCommandPort),
             agent_commands: Box::new(DaemonAgentCommandPort::new()),
             external_terminal: Box::new(PlatformExternalTerminalPort),
             metrics: Box::new(DaemonMetricsPort::new()),
@@ -1233,7 +1231,7 @@ fn lifecycle_snapshot(value: &serde_json::Value) -> Result<LifecycleSnapshot, St
 impl SessionCommandPort for DaemonSessionCommandPort {
     #[coverage(off)]
     fn execute(
-        &mut self,
+        &self,
         workspace: &Workspace,
         _selected: Option<&usagi_core::domain::session::SessionRecord>,
         command: SessionCommand,
@@ -1270,15 +1268,9 @@ impl SessionCommandPort for DaemonSessionCommandPort {
                 body,
             } => {
                 let snapshot = lifecycle_snapshot(&body)?;
-                if snapshot.revision < self.last_revision {
-                    return Ok(SessionCommandResult::message(
-                        "ignored stale daemon snapshot",
-                    ));
-                }
                 if action == SessionAction::Create {
                     created_session_hook(&body, &operation_id, revision)?;
                 }
-                self.last_revision = snapshot.revision;
                 session_snapshot_result(
                     format!("completed operation {operation_id} (revision {revision})"),
                     &snapshot,
@@ -1287,12 +1279,6 @@ impl SessionCommandPort for DaemonSessionCommandPort {
             }
             DaemonReply::Ok(value) => {
                 let snapshot = lifecycle_snapshot(&value)?;
-                if snapshot.revision < self.last_revision {
-                    return Ok(SessionCommandResult::message(
-                        "ignored stale daemon snapshot",
-                    ));
-                }
-                self.last_revision = snapshot.revision;
                 session_snapshot_result("daemon snapshot refreshed", &snapshot, workspace)
             }
         }
@@ -1340,6 +1326,7 @@ fn session_snapshot_result(
         message: message.into(),
         sessions: Some(snapshot.project(workspace, &legacy.sessions)),
         session_ids: Some(session_ids),
+        revision: Some(snapshot.revision),
     })
 }
 
