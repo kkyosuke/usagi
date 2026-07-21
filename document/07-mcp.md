@@ -102,7 +102,7 @@ tool は系統ごとに分かれ、`tools/list` に載る `name` と `inputSchem
 | `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す |
 | `session_complete` | 認証済み session Agent の完了メッセージを workspace root coordinator へ `auto` 配送する |
 | `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child の session worktree にある machine-local scratchpad を core usecase 経由で読み書きする |
-| `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合して user-decision store を操作する。解決後の caller は同じ credential 経路の `user_decision_get` で回答を取得する |
+| `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合して user-decision store を操作する。request は durable な待機 ID を即時に返し、解決回答は同じ run へ continuation prompt として自動配送する。agent 経路は作成した owner/run の decision だけを操作できる |
 | `issue_*` / `memory_*` | cwd の Markdown store を core usecase 経由で操作する |
 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` | caller credential を live Agent runtime と照合し、daemon-owned worker PTY と dispatch store/inbox を操作する |
 | `supervisor_start` / `supervisor_get` / `supervisor_list` / `supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` | IPC connection から daemon が導出した caller provenance の範囲で、durable supervisor aggregate を作成・観測・制御する |
@@ -137,9 +137,12 @@ issue store は git 追跡対象なので、`issue_create` / `issue_update` / `i
 
 TUI の人間回答面は MCP caller credential を持たない。daemon は agent 用 `DispatchTool` と別の型付き IPC
 request として workspace-scoped な `get` / `list` / `resolve` / `cancel` だけを受け付け、`request` と
-`expire` は credential 付き agent 面に限定する。`resolve` は回答と delivery outbox を atomic に保存した後、
-consumer が outbox と durable decision の owner・回答を照合して配送済みにする。したがって outbox は未読のまま
-滞留せず、元 caller は decision ID を使った `user_decision_get` の再試行で解決回答へ収束する。
+`expire` は credential 付き agent 面に限定する。`resolve` は回答と delivery outbox を atomic に保存してから
+`tools/call` の成功応答を返す。consumer は outbox、durable decision の owner・回答、live runtime の operation
+fence、dispatch binding を照合し、すべて一致するときだけ同じ run の PTY へ continuation prompt を送って event を
+ack する。PTY delivery failure や MCP client disconnect では event を残して再試行し、daemon restart で runtime
+identity を復元できない場合は fail-closed で配送しない。期限切れ、cancel、expire は terminal record のみを残し、
+回答 notification を作らない。deadline maintenance は接続や次の MCP call を待たずに期限を terminal 化する。
 
 ## resource 面
 

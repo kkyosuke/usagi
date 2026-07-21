@@ -453,6 +453,44 @@ impl<
         })
     }
 
+    /// Delivers a continuation only to the exact live operation that created
+    /// it.  Session scope alone is insufficient here: a replacement agent in
+    /// the same session must never receive a late decision answer.
+    pub fn prompt_run(
+        &mut self,
+        operation: OperationId,
+        prompt: &str,
+    ) -> Result<PromptDelivery, ProtocolError> {
+        if prompt.trim().is_empty() {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "prompt must not be empty",
+            ));
+        }
+        let live = self
+            .coordinator
+            .snapshot()
+            .records
+            .into_iter()
+            .find(|record| {
+                record.operation.operation_id == operation
+                    && record.state == super::runtime::RuntimeState::Running
+            })
+            .ok_or_else(|| {
+                ProtocolError::new(ErrorCode::Unavailable, "target agent run is no longer live")
+            })?;
+        let mut bytes = prompt.as_bytes().to_vec();
+        bytes.push(b'\n');
+        self.pty.select_terminal(&live.runtime.terminal);
+        self.pty.write_all(&bytes).map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "live prompt delivery failed")
+        })?;
+        Ok(PromptDelivery {
+            delivered_to: "live",
+            queued: false,
+        })
+    }
+
     /// Admits one Agent launch.  The same producer `operation_id` with the same
     /// intent returns the same admission (no second spawn); the same id with a
     /// different intent is a typed idempotency conflict.
@@ -2031,9 +2069,10 @@ mod tests {
                 .is_some()
         );
 
+        let operation = OperationId::new();
         runtime
             .launch(
-                &OperationId::new().to_string(),
+                &operation.to_string(),
                 &launch_intent,
                 &FakeScope(Ok(scope())),
             )
@@ -2054,6 +2093,10 @@ mod tests {
             .unwrap();
         assert_eq!(live.delivered_to, "live");
         assert_eq!(runtime.pty.writes, b"follow up\n");
+        let fenced = runtime.prompt_run(operation, "decision answer").unwrap();
+        assert_eq!(fenced.delivered_to, "live");
+        assert_eq!(runtime.pty.writes, b"follow up\ndecision answer\n");
+        assert!(runtime.prompt_run(OperationId::new(), "late").is_err());
         assert!(
             runtime
                 .prompt(Some(session), "later", PromptMode::Queue)

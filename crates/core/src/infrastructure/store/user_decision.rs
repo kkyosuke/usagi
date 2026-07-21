@@ -70,6 +70,24 @@ impl UserDecisionStore {
             })
             .collect())
     }
+    /// Marks every due pending decision terminal. Expiry deliberately produces
+    /// no delivery event: an answer must never be invented for a timed-out
+    /// caller.
+    pub fn expire_due(&self, now: DateTime<Utc>) -> Result<Vec<UserDecisionId>> {
+        self.mutate(|state| {
+            let mut expired = Vec::new();
+            for decision in &mut state.decisions {
+                if decision.status == UserDecisionStatus::Pending
+                    && decision.expires_at.is_some_and(|deadline| deadline <= now)
+                {
+                    decision.status = UserDecisionStatus::Expired;
+                    decision.resolved_at = Some(now);
+                    expired.push(decision.decision_id);
+                }
+            }
+            expired
+        })
+    }
     pub fn events(&self) -> Result<Vec<UserDecisionResolvedEvent>> {
         Ok(self.load()?.events)
     }
@@ -318,6 +336,28 @@ mod tests {
 
         assert_eq!(store.consume_events().unwrap(), Ok(1));
         assert_eq!(store.consume_events().unwrap(), Ok(0));
+    }
+
+    #[test]
+    fn due_pending_decisions_expire_without_creating_a_delivery() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let mut decision = item();
+        let now = Utc::now();
+        decision.expires_at = Some(now);
+        store.create(decision.clone()).unwrap().unwrap();
+
+        assert_eq!(store.expire_due(now).unwrap(), vec![decision.decision_id]);
+        assert!(store.expire_due(now).unwrap().is_empty());
+        assert_eq!(
+            store
+                .get(decision.owner.workspace_id, decision.decision_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            UserDecisionStatus::Expired
+        );
+        assert!(store.events().unwrap().is_empty());
     }
 
     #[test]

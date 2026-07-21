@@ -72,7 +72,7 @@ impl Tool for UserDecisionList {
         "user_decision_list"
     }
     fn description(&self) -> &'static str {
-        "現在の workspace の pending decision を返す"
+        "現在の agent run が所有する pending decision を返す。TUI は workspace の pending decision を表示する"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{},"additionalProperties":false}"#
