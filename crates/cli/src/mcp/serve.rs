@@ -12,14 +12,13 @@ use std::io::{self, BufRead, Write};
 
 use serde_json::{Value, json};
 use usagi_core::usecase::client::{
-    ClientError, DaemonClient, DaemonReply, DaemonRequest, DispatchToolAction, McpCallerContext,
-    SessionAction, SupervisorToolAction,
+    ClientError, DaemonClient, DaemonReply, DaemonRequest, McpCallerContext,
 };
 
 use super::protocol::{self, error_code};
 use super::runtime_model::{PathExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig};
-use super::tool::ToolError;
-use super::{dispatch, resources, tools};
+use super::tool::{CallerPolicy, ToolDescriptor, ToolError, ToolRoute};
+use super::{resources, tools};
 
 /// サーバが対応する MCP プロトコルバージョン。
 const SUPPORTED_PROTOCOL_VERSION: &str = "2025-06-18";
@@ -87,6 +86,8 @@ pub fn serve_with_client_and_snapshot(
     client: &mut dyn DaemonClient,
     snapshot: &RuntimeModelSnapshot,
 ) -> io::Result<()> {
+    // Fail before accepting input if metadata, route, schema, or capability drifted.
+    drop(tools::registry());
     let mut buf = Vec::new();
     let mut state = ServerState::AwaitingInitialize;
     loop {
@@ -326,86 +327,119 @@ fn tools_call(
         .and_then(|p| p.get("arguments"))
         .cloned()
         .unwrap_or_else(|| json!({}));
-    attach_session_caller(name, &mut arguments);
+    let registry = tools::registry();
+    let Some(descriptor) = registry.iter().find(|descriptor| descriptor.name() == name) else {
+        return protocol::error(
+            id,
+            error_code::METHOD_NOT_FOUND,
+            &format!("unknown tool: {name}"),
+        );
+    };
+    let mut schema: Value = serde_json::from_str(descriptor.input_schema()).unwrap();
     if matches!(name, "session_dispatch" | "session_delegate_brief") {
-        let Some(agent) = arguments.get("agent") else {
-            return protocol::error(id, error_code::INVALID_PARAMS, "missing agent");
-        };
-        if let Err(message) = snapshot.validate_agent(agent) {
+        schema["properties"]["agent"] = snapshot.agent_schema();
+        if let Some(agent) = arguments.get("agent")
+            && let Err(message) = snapshot.validate_agent(agent)
+        {
             return protocol::error(id, error_code::INVALID_PARAMS, &message);
         }
     }
+    if let Err(ToolError::InvalidParams(message)) = descriptor.validate(&arguments, &schema) {
+        return protocol::error(id, error_code::INVALID_PARAMS, &message);
+    }
+    apply_caller_policy(descriptor.caller_policy(), &mut arguments);
     if matches!(name, "session_create" | "session_delegate_issue")
         && let Err(message) = snapshot.normalize_legacy_agent(&mut arguments)
     {
         return protocol::error(id, error_code::INVALID_PARAMS, &message);
     }
-    if let Some(action) = session_action(name) {
-        let operation_id = usagi_core::domain::id::OperationId::new().as_str();
-        return match client.request(DaemonRequest::Session {
-            action,
-            operation_id,
-            payload: arguments,
-        }) {
-            Ok(DaemonReply::Accepted {
-                operation_id,
-                revision,
-                ..
-            }) => protocol::success(
-                id,
-                json!({"content":[{"type":"text","text":format!("accepted operation {operation_id} (revision {revision})")}]}),
-            ),
-            Ok(DaemonReply::Ok(value)) => protocol::success(
-                id,
-                json!({"content":[{"type":"text","text":value.to_string()}]}),
-            ),
-            Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
-        };
-    }
-    if let Some(action) = dispatch_tool_action(name) {
-        let operation_id = usagi_core::domain::id::OperationId::new().as_str();
-        return match client.request(DaemonRequest::DispatchTool {
-            action,
-            operation_id,
-            payload: arguments,
-            caller_context: std::env::var("USAGI_MCP_CALLER_CREDENTIAL")
-                .ok()
-                .filter(|credential| !credential.is_empty())
-                .map(|credential| McpCallerContext { credential }),
-        }) {
-            Ok(DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body)) => protocol::success(
-                id,
-                json!({"content":[{"type":"text","text":body.to_string()}]}),
-            ),
-            Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
-        };
-    }
-    if let Some(action) = supervisor_tool_action(name) {
-        let operation_id = arguments
-            .get("idempotency_key")
-            .and_then(Value::as_str)
-            .map_or_else(
-                || usagi_core::domain::id::OperationId::new().as_str(),
-                ToOwned::to_owned,
-            );
-        return match client.request(DaemonRequest::SupervisorTool {
-            action,
-            operation_id,
-            payload: arguments,
-        }) {
-            Ok(DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body)) => protocol::success(
-                id,
-                json!({"content":[{"type":"text","text":body.to_string()}]}),
-            ),
-            Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
-        };
-    }
-    store_tool_call(id, name, &arguments)
+    execute_tool(id, descriptor, arguments, client)
 }
 
 #[coverage(off)]
-fn store_tool_call(id: Value, name: &str, arguments: &Value) -> Value {
-    match dispatch(name, &arguments.to_string()) {
+fn execute_tool(
+    id: Value,
+    descriptor: &ToolDescriptor,
+    arguments: Value,
+    client: &mut dyn DaemonClient,
+) -> Value {
+    match descriptor.route() {
+        ToolRoute::Session(action) => {
+            let operation_id = usagi_core::domain::id::OperationId::new().as_str();
+            match client.request(DaemonRequest::Session {
+                action,
+                operation_id,
+                payload: arguments,
+            }) {
+                Ok(DaemonReply::Accepted {
+                    operation_id,
+                    revision,
+                    ..
+                }) => protocol::success(
+                    id,
+                    json!({"content":[{"type":"text","text":format!("accepted operation {operation_id} (revision {revision})")}]}),
+                ),
+                Ok(DaemonReply::Ok(value)) => protocol::success(
+                    id,
+                    json!({"content":[{"type":"text","text":value.to_string()}]}),
+                ),
+                Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
+            }
+        }
+        ToolRoute::Dispatch(action) => {
+            let operation_id = usagi_core::domain::id::OperationId::new().as_str();
+            match client.request(DaemonRequest::DispatchTool {
+                action,
+                operation_id,
+                payload: arguments,
+                caller_context: std::env::var("USAGI_MCP_CALLER_CREDENTIAL")
+                    .ok()
+                    .filter(|credential| !credential.is_empty())
+                    .map(|credential| McpCallerContext { credential }),
+            }) {
+                Ok(DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body)) => {
+                    protocol::success(
+                        id,
+                        json!({"content":[{"type":"text","text":body.to_string()}]}),
+                    )
+                }
+                Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
+            }
+        }
+        ToolRoute::Supervisor(action) => {
+            let operation_id = arguments
+                .get("idempotency_key")
+                .and_then(Value::as_str)
+                .map_or_else(
+                    || usagi_core::domain::id::OperationId::new().as_str(),
+                    ToOwned::to_owned,
+                );
+            match client.request(DaemonRequest::SupervisorTool {
+                action,
+                operation_id,
+                payload: arguments,
+            }) {
+                Ok(DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body)) => {
+                    protocol::success(
+                        id,
+                        json!({"content":[{"type":"text","text":body.to_string()}]}),
+                    )
+                }
+                Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
+            }
+        }
+        ToolRoute::Store => store_tool_call(id, descriptor, &arguments),
+        ToolRoute::Unavailable(reason) => protocol::error(
+            id,
+            error_code::INTERNAL_ERROR,
+            &format!("tool unavailable: {reason}"),
+        ),
+    }
+}
+
+#[coverage(off)]
+fn store_tool_call(id: Value, descriptor: &ToolDescriptor, arguments: &Value) -> Value {
+    match descriptor.call_store(arguments) {
         Ok(result) => protocol::success(
             id,
             json!({"content":[{"type":"text","text":result}], "isError": false}),
@@ -421,7 +455,7 @@ fn store_tool_call(id: Value, name: &str, arguments: &Value) -> Value {
         Err(ToolError::Execution(message)) => {
             protocol::error(id, error_code::INTERNAL_ERROR, &message)
         }
-        Err(ToolError::Unimplemented(_)) => protocol::error(
+        Err(ToolError::Unimplemented(name)) => protocol::error(
             id,
             error_code::INTERNAL_ERROR,
             &format!("tool not yet implemented: {name}"),
@@ -430,20 +464,9 @@ fn store_tool_call(id: Value, name: &str, arguments: &Value) -> Value {
 }
 
 #[coverage(off)]
-fn attach_session_caller(name: &str, arguments: &mut Value) {
-    if matches!(
-        name,
-        "session_complete"
-            | "session_note_get"
-            | "session_note_update"
-            | "session_todo_list"
-            | "session_todo_add"
-            | "session_todo_update"
-            | "session_todo_remove"
-            | "session_decision_list"
-            | "session_decision_log"
-            | "session_delegate_brief"
-    ) && let Ok(credential) = std::env::var("USAGI_MCP_CALLER_CREDENTIAL")
+fn apply_caller_policy(policy: CallerPolicy, arguments: &mut Value) {
+    if policy == CallerPolicy::SessionCredential
+        && let Ok(credential) = std::env::var("USAGI_MCP_CALLER_CREDENTIAL")
         && !credential.is_empty()
     {
         arguments["_caller_credential"] = Value::String(credential);
@@ -465,64 +488,6 @@ fn resources_read(id: Value, params: Option<&Value>) -> Value {
             error_code::INVALID_PARAMS,
             &format!("unknown resource: {uri}"),
         ),
-    }
-}
-
-#[coverage(off)]
-fn session_action(name: &str) -> Option<SessionAction> {
-    match name {
-        "session_create" => Some(SessionAction::Create),
-        "session_list" => Some(SessionAction::List),
-        "session_status" => Some(SessionAction::Status),
-        "session_complete" => Some(SessionAction::Complete),
-        "session_pr" => Some(SessionAction::Pr),
-        "session_remove" => Some(SessionAction::Remove),
-        "session_resume" => Some(SessionAction::ResumeAgent),
-        "session_recover_legacy" => Some(SessionAction::RecoverLegacy),
-        "session_setup" => Some(SessionAction::Setup),
-        "session_prompt" => Some(SessionAction::Prompt),
-        "session_note_get" => Some(SessionAction::NoteGet),
-        "session_note_update" => Some(SessionAction::NoteUpdate),
-        "session_todo_list" => Some(SessionAction::TodoList),
-        "session_todo_add" => Some(SessionAction::TodoAdd),
-        "session_todo_update" => Some(SessionAction::TodoUpdate),
-        "session_todo_remove" => Some(SessionAction::TodoRemove),
-        "session_decision_list" => Some(SessionAction::DecisionList),
-        "session_decision_log" => Some(SessionAction::DecisionLog),
-        "session_delegate_issue" => Some(SessionAction::DelegateIssue),
-        "session_delegate_brief" => Some(SessionAction::DelegateBrief),
-        _ => None,
-    }
-}
-
-fn dispatch_tool_action(name: &str) -> Option<DispatchToolAction> {
-    match name {
-        "session_dispatch" => Some(DispatchToolAction::Dispatch),
-        "session_get" => Some(DispatchToolAction::SessionGet),
-        "agent_list" => Some(DispatchToolAction::AgentList),
-        "agent_get" => Some(DispatchToolAction::AgentGet),
-        "agent_complete" => Some(DispatchToolAction::AgentComplete),
-        "agent_fail" => Some(DispatchToolAction::AgentFail),
-        "agent_inbox" => Some(DispatchToolAction::AgentInbox),
-        "user_decision_request" => Some(DispatchToolAction::UserDecisionRequest),
-        "user_decision_get" => Some(DispatchToolAction::UserDecisionGet),
-        "user_decision_list" => Some(DispatchToolAction::UserDecisionList),
-        "user_decision_resolve" => Some(DispatchToolAction::UserDecisionResolve),
-        "user_decision_cancel" => Some(DispatchToolAction::UserDecisionCancel),
-        "user_decision_expire" => Some(DispatchToolAction::UserDecisionExpire),
-        _ => None,
-    }
-}
-
-fn supervisor_tool_action(name: &str) -> Option<SupervisorToolAction> {
-    match name {
-        "supervisor_start" => Some(SupervisorToolAction::Start),
-        "supervisor_get" => Some(SupervisorToolAction::Get),
-        "supervisor_list" => Some(SupervisorToolAction::List),
-        "supervisor_cancel" => Some(SupervisorToolAction::Cancel),
-        "supervisor_resolve_escalation" => Some(SupervisorToolAction::ResolveEscalation),
-        "supervisor_events" => Some(SupervisorToolAction::Events),
-        _ => None,
     }
 }
 
@@ -559,6 +524,64 @@ mod tests {
     /// 1 行を処理して応答 `Value` を得る（通知は `None`）。
     fn call(line: &str) -> Option<Value> {
         handle_line(line, "9.9.9").map(|s| serde_json::from_str(&s).unwrap())
+    }
+
+    fn valid_arguments(name: &str, snapshot: &RuntimeModelSnapshot) -> Value {
+        fn value(schema: &Value) -> Value {
+            if let Some(value) = schema.get("const") {
+                return value.clone();
+            }
+            if let Some(value) = schema
+                .get("enum")
+                .and_then(Value::as_array)
+                .and_then(|values| values.first())
+            {
+                return value.clone();
+            }
+            if let Some(schema) = schema
+                .get("oneOf")
+                .and_then(Value::as_array)
+                .and_then(|schemas| schemas.first())
+            {
+                return value(schema);
+            }
+            match schema.get("type").and_then(Value::as_str) {
+                Some("object") => {
+                    let mut result = serde_json::Map::new();
+                    let properties = schema["properties"].as_object().unwrap();
+                    for key in schema
+                        .get("required")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                    {
+                        result.insert(key.to_owned(), value(&properties[key]));
+                    }
+                    Value::Object(result)
+                }
+                Some("array") => serde_json::json!([]),
+                Some("string") => serde_json::json!("value"),
+                Some("integer") => schema
+                    .get("minimum")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!(0)),
+                Some("number") => serde_json::json!(0),
+                Some("boolean") => serde_json::json!(false),
+                _ => Value::Null,
+            }
+        }
+
+        let registry = crate::mcp::tools::registry();
+        let descriptor = registry
+            .iter()
+            .find(|descriptor| descriptor.name() == name)
+            .unwrap();
+        let mut schema: Value = serde_json::from_str(descriptor.input_schema()).unwrap();
+        if matches!(name, "session_dispatch" | "session_delegate_brief") {
+            schema["properties"]["agent"] = snapshot.agent_schema();
+        }
+        value(&schema)
     }
 
     fn initialize(line: &str) -> Value {
@@ -879,10 +902,6 @@ mod tests {
                 Ok(DaemonReply::Ok(serde_json::json!({"removed":true}))),
             ),
             (
-                "session_setup",
-                Err(ClientError::Unavailable("offline".into())),
-            ),
-            (
                 "session_prompt",
                 Ok(DaemonReply::Accepted {
                     operation_id: "op".into(),
@@ -891,8 +910,10 @@ mod tests {
                 }),
             ),
         ] {
+            let snapshot = RuntimeModelSnapshot::default();
+            let arguments = valid_arguments(name, &snapshot);
             let request = format!(
-                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{{"name":"a"}}}}}}"#
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#
             ) + "\n";
             let input = initialized_input(&request);
             let mut out = Vec::new();
@@ -902,15 +923,7 @@ mod tests {
             };
             serve_with_client(input.as_bytes(), &mut out, "9.9.9", &mut client).unwrap();
             assert_eq!(client.requests.len(), 1);
-            assert!(
-                String::from_utf8(out)
-                    .unwrap()
-                    .contains(if name == "session_setup" {
-                        "Unavailable"
-                    } else {
-                        "content"
-                    })
-            );
+            assert!(String::from_utf8(out).unwrap().contains("content"));
         }
     }
 
@@ -932,11 +945,8 @@ mod tests {
             "session_delegate_issue",
             "session_delegate_brief",
         ] {
-            let arguments = if name == "session_delegate_brief" {
-                r#"{"brief":"triage this","agent":{"id":"00000000-0000-4000-8000-000000000000"}}"#
-            } else {
-                "{}"
-            };
+            let snapshot = RuntimeModelSnapshot::default();
+            let arguments = valid_arguments(name, &snapshot);
             let request = format!(
                 r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#
             ) + "\n";
@@ -1041,20 +1051,11 @@ mod tests {
                 usagi_core::usecase::client::DispatchToolAction::UserDecisionExpire,
             ),
         ] {
-            let arguments = if name == "session_dispatch" {
-                r#"{"session":{"name":"a"},"agent":{"runtime":"claude","model":"sonnet"},"prompt":"ok"}"#
-            } else if name == "user_decision_request" {
-                r#"{"title":"t","prompt":"p","options":[]}"#
-            } else if name == "user_decision_get"
-                || name == "user_decision_cancel"
-                || name == "user_decision_expire"
-            {
-                r#"{"decision_id":"00000000-0000-4000-8000-000000000000"}"#
-            } else if name == "user_decision_resolve" {
-                r#"{"decision_id":"00000000-0000-4000-8000-000000000000","answer":{"kind":"option","option_id":"a"}}"#
-            } else {
-                r#"{"summary":"ok"}"#
-            };
+            let snapshot = RuntimeModelSnapshot::capture(
+                &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
+                &FakeLocator(&["claude"]),
+            );
+            let arguments = valid_arguments(name, &snapshot);
             let request = format!(
                 r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#
             ) + "\n";
@@ -1064,10 +1065,6 @@ mod tests {
                 reply: Ok(DaemonReply::Ok(serde_json::json!({"ok":true}))),
                 requests: vec![],
             };
-            let snapshot = RuntimeModelSnapshot::capture(
-                &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
-                &FakeLocator(&["claude"]),
-            );
             serve_with_client_and_snapshot(
                 input.as_bytes(),
                 &mut out,
@@ -1100,11 +1097,11 @@ mod tests {
             "supervisor_resolve_escalation",
             "supervisor_events",
         ] {
-            let arguments = if name == "session_dispatch" {
-                r#"{"agent":{"runtime":"claude","model":"sonnet"}}"#
-            } else {
-                "{}"
-            };
+            let snapshot = RuntimeModelSnapshot::capture(
+                &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
+                &FakeLocator(&["claude"]),
+            );
+            let arguments = valid_arguments(name, &snapshot);
             let request = format!(
                 r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#
             ) + "\n";
@@ -1119,10 +1116,6 @@ mod tests {
                 )),
                 requests: vec![],
             };
-            let snapshot = RuntimeModelSnapshot::capture(
-                &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
-                &FakeLocator(&["claude"]),
-            );
             serve_with_client_and_snapshot(
                 input.as_bytes(),
                 &mut out,
@@ -1178,7 +1171,7 @@ mod tests {
             &FakeLocator(&["claude"]),
         );
         let input = initialized_input(
-            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"session_dispatch\",\"arguments\":{\"agent\":{\"runtime\":\"claude\",\"model\":\"opus\"}}}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"session_dispatch\",\"arguments\":{\"session\":{\"name\":\"a\"},\"agent\":{\"runtime\":\"claude\",\"model\":\"opus\"},\"prompt\":\"p\"}}}\n",
         );
         let mut out = Vec::new();
         serve_with_client_and_snapshot(input.as_bytes(), &mut out, "9.9.9", &mut client, &snapshot)
@@ -1189,7 +1182,7 @@ mod tests {
     #[test]
     fn default_serve_returns_a_structured_unavailable_error_for_session_tools() {
         let input = initialized_input(
-            "\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"session_create\"}}\n",
+            "\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"session_create\",\"arguments\":{\"name\":\"a\"}}}\n",
         );
         let mut out = Vec::new();
         serve(input.as_bytes(), &mut out, "9.9.9").unwrap();

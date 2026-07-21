@@ -2,6 +2,283 @@
 
 use std::fmt;
 
+use serde_json::Value;
+use usagi_core::usecase::client::{DispatchToolAction, SessionAction, SupervisorToolAction};
+
+/// Descriptor-owned execution destination. A route cannot be advertised without
+/// being attached to the same descriptor as its metadata and policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolRoute {
+    Store,
+    Session(SessionAction),
+    Dispatch(DispatchToolAction),
+    Supervisor(SupervisorToolAction),
+    Unavailable(&'static str),
+}
+
+/// Caller provenance required by a tool route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CallerPolicy {
+    Public,
+    SessionCredential,
+    AgentCredential,
+    DaemonProvenance,
+}
+
+/// The single source of truth consumed by both `tools/list` and `tools/call`.
+pub struct ToolDescriptor {
+    tool: Box<dyn Tool>,
+    route: ToolRoute,
+    caller_policy: CallerPolicy,
+    advertised: bool,
+}
+
+impl ToolDescriptor {
+    #[must_use]
+    pub fn new(tool: Box<dyn Tool>, route: ToolRoute, caller_policy: CallerPolicy) -> Self {
+        Self {
+            tool,
+            route,
+            caller_policy,
+            advertised: true,
+        }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn fixture(
+        tool: Box<dyn Tool>,
+        route: ToolRoute,
+        caller_policy: CallerPolicy,
+        advertised: bool,
+    ) -> Self {
+        Self {
+            tool,
+            route,
+            caller_policy,
+            advertised,
+        }
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        self.tool.name()
+    }
+
+    #[must_use]
+    pub fn description(&self) -> &'static str {
+        self.tool.description()
+    }
+
+    #[must_use]
+    pub fn input_schema(&self) -> &'static str {
+        self.tool.input_schema()
+    }
+
+    #[must_use]
+    pub const fn route(&self) -> ToolRoute {
+        self.route
+    }
+
+    #[must_use]
+    pub const fn caller_policy(&self) -> CallerPolicy {
+        self.caller_policy
+    }
+
+    #[must_use]
+    pub const fn is_advertised(&self) -> bool {
+        self.advertised
+    }
+
+    /// Executes the descriptor's store adapter.
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter's validation, execution, or capability error.
+    pub fn call_store(&self, arguments: &Value) -> Result<String, ToolError> {
+        self.tool.call(&arguments.to_string())
+    }
+
+    /// Validates runtime arguments with the exact schema advertised for this call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError::InvalidParams`] when arguments do not match the schema.
+    pub fn validate(&self, arguments: &Value, schema: &Value) -> Result<(), ToolError> {
+        validate_schema(arguments, schema, "$").map_err(ToolError::InvalidParams)
+    }
+}
+
+fn validate_schema(value: &Value, schema: &Value, path: &str) -> Result<(), String> {
+    if let Some(options) = schema.get("oneOf").and_then(Value::as_array) {
+        let matches = options
+            .iter()
+            .filter(|candidate| validate_schema(value, candidate, path).is_ok())
+            .count();
+        return (matches == 1)
+            .then_some(())
+            .ok_or_else(|| format!("{path} must match exactly one schema"));
+    }
+    if let Some(expected) = schema.get("const")
+        && value != expected
+    {
+        return Err(format!("{path} must equal {expected}"));
+    }
+    if let Some(values) = schema.get("enum").and_then(Value::as_array)
+        && !values.contains(value)
+    {
+        return Err(format!("{path} is not an allowed value"));
+    }
+    if let Some(types) = schema.get("type") {
+        let matches_type = |kind: &str| match kind {
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "string" => value.is_string(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "number" => value.is_number(),
+            "boolean" => value.is_boolean(),
+            "null" => value.is_null(),
+            _ => false,
+        };
+        let valid = types.as_str().is_some_and(matches_type)
+            || types
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().filter_map(Value::as_str).any(matches_type));
+        if !valid {
+            return Err(format!("{path} has the wrong type"));
+        }
+    }
+    if let Some(minimum) = schema.get("minimum").and_then(Value::as_f64)
+        && value.as_f64().is_some_and(|number| number < minimum)
+    {
+        return Err(format!("{path} must be at least {minimum}"));
+    }
+    if let Some(maximum) = schema.get("maximum").and_then(Value::as_f64)
+        && value.as_f64().is_some_and(|number| number > maximum)
+    {
+        return Err(format!("{path} must be at most {maximum}"));
+    }
+    if let Some(object) = value.as_object() {
+        let properties = schema.get("properties").and_then(Value::as_object);
+        if let Some(required) = schema.get("required").and_then(Value::as_array) {
+            for key in required.iter().filter_map(Value::as_str) {
+                if !object.contains_key(key) {
+                    return Err(format!("{path}.{key} is required"));
+                }
+            }
+        }
+        if schema.get("additionalProperties") == Some(&Value::Bool(false))
+            && object
+                .keys()
+                .any(|key| properties.is_none_or(|known| !known.contains_key(key)))
+        {
+            return Err(format!("{path} contains an unknown property"));
+        }
+        if let Some(properties) = properties {
+            for (key, child_schema) in properties {
+                if let Some(child) = object.get(key) {
+                    validate_schema(child, child_schema, &format!("{path}.{key}"))?;
+                }
+            }
+        }
+    }
+    if let (Some(array), Some(items)) = (value.as_array(), schema.get("items")) {
+        for (index, child) in array.iter().enumerate() {
+            validate_schema(child, items, &format!("{path}[{index}]"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Rejects schema vocabulary that the runtime validator does not implement.
+///
+/// # Errors
+///
+/// Returns a path-qualified message for unsupported or malformed schema vocabulary.
+pub fn validate_schema_definition(schema: &Value) -> Result<(), String> {
+    fn visit(schema: &Value, path: &str) -> Result<(), String> {
+        let object = schema
+            .as_object()
+            .ok_or_else(|| format!("{path} schema must be an object"))?;
+        for keyword in object.keys() {
+            if !matches!(
+                keyword.as_str(),
+                "type"
+                    | "properties"
+                    | "required"
+                    | "additionalProperties"
+                    | "enum"
+                    | "oneOf"
+                    | "const"
+                    | "items"
+                    | "minimum"
+                    | "maximum"
+                    | "default"
+                    | "deprecated"
+            ) {
+                return Err(format!("{path} uses unsupported keyword {keyword}"));
+            }
+        }
+        let supported_type = |kind: &str| {
+            matches!(
+                kind,
+                "object" | "array" | "string" | "integer" | "number" | "boolean" | "null"
+            )
+        };
+        if object.get("type").is_some_and(|value| {
+            !value.as_str().is_some_and(supported_type)
+                && value.as_array().is_none_or(|types| {
+                    types.is_empty()
+                        || types
+                            .iter()
+                            .any(|kind| !kind.as_str().is_some_and(supported_type))
+                })
+        }) || object
+            .get("properties")
+            .is_some_and(|value| !value.is_object())
+            || object.get("required").is_some_and(|value| {
+                value
+                    .as_array()
+                    .is_none_or(|items| items.iter().any(|item| !item.is_string()))
+            })
+            || object
+                .get("additionalProperties")
+                .is_some_and(|value| !value.is_boolean())
+            || object.get("enum").is_some_and(|value| !value.is_array())
+            || object
+                .get("oneOf")
+                .is_some_and(|value| value.as_array().is_none_or(Vec::is_empty))
+            || object.get("items").is_some_and(|value| !value.is_object())
+            || object
+                .get("minimum")
+                .is_some_and(|value| !value.is_number())
+            || object
+                .get("maximum")
+                .is_some_and(|value| !value.is_number())
+            || object
+                .get("deprecated")
+                .is_some_and(|value| !value.is_boolean())
+        {
+            return Err(format!("{path} has an invalid keyword value"));
+        }
+        if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+            for (name, child) in properties {
+                visit(child, &format!("{path}.properties.{name}"))?;
+            }
+        }
+        if let Some(items) = object.get("items") {
+            visit(items, &format!("{path}.items"))?;
+        }
+        if let Some(options) = object.get("oneOf").and_then(Value::as_array) {
+            for (index, child) in options.iter().enumerate() {
+                visit(child, &format!("{path}.oneOf[{index}]"))?;
+            }
+        }
+        Ok(())
+    }
+    visit(schema, "$schema")
+}
+
 /// MCP tool の実行インターフェース。
 ///
 /// 各 tool は wire 上の名前・説明・入力スキーマ（`tools/list` に載る IF）と、呼び出し方

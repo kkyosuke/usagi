@@ -1,14 +1,14 @@
 ---
 number: 483
 title: refactor(mcp): tool metadata・routing・authorization を単一 descriptor にする
-status: todo
+status: in-progress
 priority: medium
 labels: [review, v2, mcp, architecture]
 dependson: []
 related: [60, 97, 120, 400, 407]
 parent: 453
 created_at: 2026-07-20T12:06:48.850492+00:00
-updated_at: 2026-07-20T12:06:48.850492+00:00
+updated_at: 2026-07-21T12:27:03.569152+00:00
 ---
 
 ## 問題・影響
