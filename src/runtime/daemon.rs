@@ -1,6 +1,6 @@
 //! daemon 面へ Unix process / socket / signal を接続する composition adapter。
 
-#![coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_ipc_fixture_codex_survives_disconnect_and_replays_final
+#![coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_ipc_fixture_codex_survives_disconnect_and_replays_final,planned_stop_retires_generation_endpoint_and_allows_safe_autostart
 
 use std::backtrace::Backtrace;
 use std::cell::RefCell;
@@ -1094,7 +1094,7 @@ fn spawn_ipc_server(
     data_dir: &Path,
     info: &AppInfo,
     shutdown: Arc<AtomicBool>,
-) -> std::io::Result<()> {
+) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
     let generation = usagi_core::infrastructure::ipc::DaemonGeneration(
         usagi_core::domain::id::DaemonGeneration::new()
             .as_str()
@@ -1163,7 +1163,7 @@ fn spawn_ipc_server(
     consume_user_decision_events(&decisions)
         .map_err(|error| std::io::Error::other(error.message))?;
     start_decision_maintenance(Arc::clone(&decisions))?;
-    start_pr_refresh_worker(Arc::clone(&pr_inventory), shutdown)?;
+    start_pr_refresh_worker(Arc::clone(&pr_inventory), Arc::clone(&shutdown))?;
     start_ipc_accept_loop(
         listener,
         server,
@@ -1176,6 +1176,7 @@ fn spawn_ipc_server(
         Arc::new(Mutex::new(ProcessResourceSampler { previous: None })),
         pipeline_metrics,
         supervisor,
+        shutdown,
     )
 }
 
@@ -1456,13 +1457,17 @@ fn start_ipc_accept_loop(
     process_metrics: SharedProcessResourceSampler,
     pipeline_metrics: Arc<TerminalPipelineMetrics>,
     supervisor: SharedSupervisorRuntime,
-) -> std::io::Result<()> {
+    shutdown: Arc<AtomicBool>,
+) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
     std::thread::Builder::new()
         .name("usagi-ipc".to_string())
         .spawn(move || {
-            loop {
+            while !shutdown.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok(stream) => {
+                        if shutdown.load(Ordering::Acquire) {
+                            break;
+                        }
                         let server = server.clone();
                         let session = Arc::clone(&runtime);
                         let scope_sessions = Arc::clone(&runtime);
@@ -1523,8 +1528,8 @@ fn start_ipc_accept_loop(
                     Err(_) => std::thread::sleep(Duration::from_millis(10)),
                 }
             }
+            listener
         })
-        .map(|_| ())
 }
 
 fn dispatch_dispatch_tool(
@@ -3495,6 +3500,8 @@ struct IpcReady<'a> {
     info: &'a AppInfo,
     shutdown: Arc<AtomicBool>,
     published: AtomicBool,
+    worker: RefCell<Option<std::thread::JoinHandle<SecureUnixListener>>>,
+    listener: RefCell<Option<SecureUnixListener>>,
 }
 impl DaemonReady for IpcReady<'_> {
     fn publish(&self) -> std::io::Result<()> {
@@ -3502,34 +3509,92 @@ impl DaemonReady for IpcReady<'_> {
             .published
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
-            && let Err(error) =
-                spawn_ipc_server(self.data_dir, self.info, Arc::clone(&self.shutdown))
         {
-            self.published.store(false, Ordering::Release);
-            return Err(error);
+            match spawn_ipc_server(self.data_dir, self.info, Arc::clone(&self.shutdown)) {
+                Ok(worker) => {
+                    *self.worker.borrow_mut() = Some(worker);
+                }
+                Err(error) => {
+                    self.published.store(false, Ordering::Release);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn quiesce(&self) -> std::io::Result<()> {
+        self.shutdown.store(true, Ordering::Release);
+        let Some(worker) = self.worker.borrow_mut().take() else {
+            return Ok(());
+        };
+        let listener = worker
+            .join()
+            .map_err(|_| std::io::Error::other("daemon IPC accept loop panicked"))?;
+        *self.listener.borrow_mut() = Some(listener);
+        Ok(())
+    }
+
+    fn retire(&self) -> std::io::Result<()> {
+        self.quiesce()?;
+        if let Some(mut listener) = self.listener.borrow_mut().take() {
+            listener.retire()?;
         }
         Ok(())
     }
 }
 
-struct SignalShutdown(Arc<AtomicBool>);
+impl Drop for IpcReady<'_> {
+    fn drop(&mut self) {
+        let _ = DaemonReady::retire(self);
+    }
+}
+
+struct SignalShutdown {
+    shutdown: Arc<AtomicBool>,
+    signals: RefCell<Option<signal_hook::iterator::Signals>>,
+}
+
+impl SignalShutdown {
+    fn new(shutdown: Arc<AtomicBool>) -> Self {
+        Self {
+            shutdown,
+            signals: RefCell::new(None),
+        }
+    }
+}
+
 impl ShutdownSignal for SignalShutdown {
     #[cfg(unix)]
-    fn wait(&self) -> std::io::Result<()> {
-        unsafe {
-            let mut set: libc::sigset_t = std::mem::zeroed();
-            libc::sigemptyset(&raw mut set);
-            libc::sigaddset(&raw mut set, libc::SIGINT);
-            libc::sigaddset(&raw mut set, libc::SIGTERM);
-            if libc::sigprocmask(libc::SIG_BLOCK, &raw const set, std::ptr::null_mut()) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            let mut received: libc::c_int = 0;
-            if libc::sigwait(&raw const set, &raw mut received) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
+    fn prepare(&self) -> std::io::Result<()> {
+        let mut signals = self.signals.borrow_mut();
+        if signals.is_none() {
+            *signals = Some(signal_hook::iterator::Signals::new([
+                libc::SIGINT,
+                libc::SIGTERM,
+            ])?);
         }
-        self.0.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn prepare(&self) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "running the daemon is only supported on Unix",
+        ))
+    }
+
+    #[cfg(unix)]
+    fn wait(&self) -> std::io::Result<()> {
+        let mut signals = self.signals.borrow_mut();
+        let signals = signals
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("daemon shutdown delivery was not prepared"))?;
+        signals
+            .forever()
+            .next()
+            .ok_or_else(|| std::io::Error::other("daemon shutdown signal stream closed"))?;
+        self.shutdown.store(true, Ordering::Release);
         Ok(())
     }
     #[cfg(not(unix))]
@@ -3709,13 +3774,16 @@ fn run_inner(
         info,
         shutdown: Arc::new(AtomicBool::new(false)),
         published: AtomicBool::new(false),
+        worker: RefCell::new(None),
+        listener: RefCell::new(None),
     };
+    let shutdown = SignalShutdown::new(Arc::clone(&ready.shutdown));
     let env = DaemonEnv {
         store: &store,
         probe: &KillProbe,
         terminator: &SigtermTerminator,
         ready: &ready,
-        shutdown: &SignalShutdown(Arc::clone(&ready.shutdown)),
+        shutdown: &shutdown,
         launcher: &launcher,
         sleeper: &RealSleeper,
         lock: &lock,

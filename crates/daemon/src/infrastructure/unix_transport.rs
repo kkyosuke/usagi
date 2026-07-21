@@ -11,11 +11,13 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use usagi_core::infrastructure::ipc::DaemonGeneration;
 
 const DIR_MODE: u32 = 0o700;
 const SOCKET_MODE: u32 = 0o600;
+const LOCATOR_LOCK: &str = "current.lock";
 
 /// The atomically-published endpoint a client is allowed to connect to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,7 +38,9 @@ pub enum EndpointState {
 pub struct SecureUnixListener {
     listener: UnixListener,
     locator: EndpointLocator,
+    daemon: PathBuf,
     socket: PathBuf,
+    retired: bool,
 }
 
 impl SecureUnixListener {
@@ -79,12 +83,14 @@ impl SecureUnixListener {
             endpoint: relative_endpoint(&daemon, &socket)?,
             state: EndpointState::Active,
         };
-        write_locator(&daemon, &locator)?;
         listener.set_nonblocking(true)?;
+        write_locator(&daemon, &locator)?;
         Ok(Self {
             listener,
             locator,
+            daemon,
             socket,
+            retired: false,
         })
     }
 
@@ -113,12 +119,47 @@ impl SecureUnixListener {
         stream.set_nonblocking(true)?;
         Ok(stream)
     }
+
+    /// Retires this listener's generation endpoint. The locator is removed only
+    /// when it still names this exact generation and relative endpoint; the
+    /// generation-specific socket is always this listener's to reclaim.
+    /// Locator publication and conditional removal share an exclusive lock, so
+    /// a stale owner cannot win a compare/unlink race against a replacement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the locator cannot be inspected/removed safely or
+    /// this generation's socket cannot be unlinked.
+    #[coverage(off)]
+    pub fn retire(&mut self) -> io::Result<()> {
+        if self.retired {
+            return Ok(());
+        }
+
+        let locator_result = (|| {
+            let _lock = lock_locator(&self.daemon)?;
+            match read_locator(&self.daemon) {
+                Ok(current) if owns_endpoint(&current, &self.locator) => {
+                    remove_file_if_present(&self.daemon.join("current.json"))
+                }
+                Ok(_) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            }
+        })();
+        let socket_result = remove_file_if_present(&self.socket);
+
+        locator_result?;
+        socket_result?;
+        self.retired = true;
+        Ok(())
+    }
 }
 
 impl Drop for SecureUnixListener {
     #[coverage(off)]
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.socket);
+        let _ = self.retire();
     }
 }
 
@@ -161,6 +202,7 @@ pub fn read_locator(daemon: &Path) -> io::Result<EndpointLocator> {
 
 #[coverage(off)]
 fn write_locator(daemon: &Path, locator: &EndpointLocator) -> io::Result<()> {
+    let _lock = lock_locator(daemon)?;
     let temporary = daemon.join(".current.json.tmp");
     let bytes = serde_json::to_vec(locator).expect("endpoint locator serializes");
     let mut file = OpenOptions::new()
@@ -171,6 +213,41 @@ fn write_locator(daemon: &Path, locator: &EndpointLocator) -> io::Result<()> {
     file.write_all(&bytes)?;
     file.sync_all()?;
     fs::rename(temporary, daemon.join("current.json"))
+}
+
+fn owns_endpoint(current: &EndpointLocator, owner: &EndpointLocator) -> bool {
+    current.generation == owner.generation && current.endpoint == owner.endpoint
+}
+
+#[coverage(off)]
+fn lock_locator(daemon: &Path) -> io::Result<fs::File> {
+    let path = daemon.join(LOCATOR_LOCK);
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(SOCKET_MODE)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            verify_private(&path, SOCKET_MODE, false)?;
+            OpenOptions::new().read(true).write(true).open(&path)?
+        }
+        Err(error) => return Err(error),
+    };
+    verify_private(&path, SOCKET_MODE, false)?;
+    FileExt::lock_exclusive(&file)?;
+    Ok(file)
+}
+
+#[coverage(off)]
+fn remove_file_if_present(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn checked_endpoint(daemon: &Path, locator: &EndpointLocator) -> io::Result<PathBuf> {
@@ -328,6 +405,39 @@ mod tests {
         let client = connect_current(temp.path()).unwrap();
         let accepted = listener.accept().unwrap();
         drop((client, accepted));
+    }
+
+    #[test]
+    fn retirement_is_generation_fenced_and_removes_only_the_owned_endpoint() {
+        let temp = TempDir::new_in("/tmp").unwrap();
+        let mut old = SecureUnixListener::bind(temp.path(), generation()).unwrap();
+        let old_socket = old.socket.clone();
+        let old_locator = old.locator().clone();
+
+        let mut replacement = SecureUnixListener::bind(temp.path(), generation()).unwrap();
+        let replacement_socket = replacement.socket.clone();
+        let replacement_locator = replacement.locator().clone();
+        assert!(!owns_endpoint(&replacement_locator, &old_locator));
+
+        old.retire().unwrap();
+        // Retiring an already-retired owner is an idempotent no-op.
+        old.retire().unwrap();
+        assert!(!old_socket.exists());
+        assert_eq!(
+            read_locator(&temp.path().join("daemon")).unwrap(),
+            replacement_locator
+        );
+        assert!(replacement_socket.exists());
+        let client = connect_current(temp.path()).unwrap();
+        let accepted = replacement.accept().unwrap();
+        drop((client, accepted));
+
+        replacement.retire().unwrap();
+        assert!(!replacement_socket.exists());
+        assert_eq!(
+            connect_current(temp.path()).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
     }
 
     #[test]

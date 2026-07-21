@@ -20,6 +20,9 @@ libc.workspace = true
 portable-pty.workspace = true
 chrono.workspace = true
 anyhow.workspace = true
+# Serialize current locator publish/retire so a stale generation cannot win a
+# compare/unlink race against a replacement generation.
+fs2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

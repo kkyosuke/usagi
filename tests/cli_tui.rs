@@ -9,14 +9,14 @@ use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use usagi_core::infrastructure::ipc::{
     BuildIdentity, DaemonGeneration, Envelope, EnvelopeKind, ErrorCode, OperationId, ProtocolError,
     ResponseOutcome, read_json_frame, write_json_frame,
 };
 use usagi_daemon::infrastructure::unix_transport::{
-    EndpointLocator, EndpointState, SecureUnixListener,
+    EndpointLocator, EndpointState, SecureUnixListener, connect_current, read_locator,
 };
 
 /// Daemon lifecycle tests spawn the same test binary as a background daemon.
@@ -73,6 +73,70 @@ fn run_with_home(args: &[&OsStr], home: &Path) -> Output {
         .env("USAGI_HOME", home)
         .output()
         .expect("usagi バイナリを起動できる")
+}
+
+fn run_in_production(args: &[&OsStr], home: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_usagi"))
+        .args(args)
+        .env("USAGI_HOME", home)
+        .env("USAGI_RUNTIME_MODE", "production")
+        .output()
+        .expect("production runtime の usagi バイナリを起動できる")
+}
+
+fn daemon_pid(home: &Path) -> Option<u32> {
+    let bytes = std::fs::read(home.join("daemon/daemon.json")).ok()?;
+    serde_json::from_slice::<serde_json::Value>(&bytes).ok()?["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+}
+
+fn process_alive(pid: u32) -> bool {
+    libc::pid_t::try_from(pid).is_ok_and(|pid| unsafe { libc::kill(pid, 0) } == 0)
+}
+
+fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if condition() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    condition()
+}
+
+struct ProductionDaemonCleanup {
+    home: PathBuf,
+}
+
+impl ProductionDaemonCleanup {
+    fn new(home: &Path) -> Self {
+        Self {
+            home: home.to_path_buf(),
+        }
+    }
+}
+
+impl Drop for ProductionDaemonCleanup {
+    fn drop(&mut self) {
+        let Some(pid) = daemon_pid(&self.home) else {
+            return;
+        };
+        let locator = read_locator(&self.home.join("daemon")).ok();
+        let _ = run_in_production(&[OsStr::new("daemon"), OsStr::new("stop")], &self.home);
+        if !wait_until(Duration::from_secs(2), || !process_alive(pid))
+            && daemon_pid(&self.home) == Some(pid)
+            && read_locator(&self.home.join("daemon")).ok() == locator
+            && let Ok(pid) = libc::pid_t::try_from(pid)
+        {
+            // SAFETY: the isolated home still publishes the same daemon record
+            // and generation that this guard observed immediately before stop.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
 }
 
 fn stdout(output: &Output) -> String {
@@ -283,6 +347,66 @@ fn daemon_restart_initializes_a_private_endpoint_from_an_empty_data_dir() {
     assert!(stdout(&output).contains("daemon restarted"));
     assert_daemon_running(home.path());
     stop_daemon(home.path());
+}
+
+#[test]
+fn planned_stop_retires_generation_endpoint_and_allows_safe_autostart() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let _cleanup = ProductionDaemonCleanup::new(home.path());
+    let daemon_dir = home.path().join("daemon");
+
+    let start = run_in_production(&[OsStr::new("daemon"), OsStr::new("start")], home.path());
+    assert!(start.status.success(), "{}", stderr(&start));
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            daemon_dir.join("daemon.json").is_file() && daemon_dir.join("current.json").is_file()
+        }),
+        "daemon did not publish its production endpoint"
+    );
+    let old_pid = daemon_pid(home.path()).expect("started daemon records its pid");
+    let old_locator = read_locator(&daemon_dir).expect("started daemon publishes a locator");
+    let old_socket = daemon_dir.join(&old_locator.endpoint);
+    assert!(old_socket.exists());
+
+    let stop = run_in_production(&[OsStr::new("daemon"), OsStr::new("stop")], home.path());
+    assert!(stop.status.success(), "{}", stderr(&stop));
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            !process_alive(old_pid)
+                && !daemon_dir.join("daemon.json").exists()
+                && !daemon_dir.join("current.json").exists()
+                && !old_socket.exists()
+        }),
+        "planned stop left its process, record, locator, or generation socket behind"
+    );
+    assert_eq!(
+        connect_current(home.path()).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+
+    let client = run_in_production(
+        &[
+            OsStr::new("session"),
+            OsStr::new("remove"),
+            OsStr::new("missing"),
+        ],
+        home.path(),
+    );
+    assert_eq!(client.status.code(), Some(1));
+    assert!(stderr(&client).contains("session was not found"));
+    assert!(!stderr(&client).contains("daemon endpoint is unavailable"));
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            daemon_pid(home.path()).is_some() && daemon_dir.join("current.json").is_file()
+        }),
+        "NotFound bootstrap did not start a replacement daemon"
+    );
+    let replacement = read_locator(&daemon_dir).expect("replacement publishes a locator");
+    assert_ne!(replacement.generation, old_locator.generation);
+    assert!(!old_socket.exists());
 }
 
 #[test]

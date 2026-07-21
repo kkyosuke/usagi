@@ -90,6 +90,10 @@ impl Terminator for RecordingTerminator {
 pub struct ImmediateShutdown;
 
 impl ShutdownSignal for ImmediateShutdown {
+    fn prepare(&self) -> io::Result<()> {
+        Ok(())
+    }
+
     fn wait(&self) -> io::Result<()> {
         Ok(())
     }
@@ -99,6 +103,10 @@ impl ShutdownSignal for ImmediateShutdown {
 pub struct FailingShutdown;
 
 impl ShutdownSignal for FailingShutdown {
+    fn prepare(&self) -> io::Result<()> {
+        Ok(())
+    }
+
     fn wait(&self) -> io::Result<()> {
         Err(io::Error::other("wait failed"))
     }
@@ -110,6 +118,14 @@ pub struct NoopReady;
 
 impl DaemonReady for NoopReady {
     fn publish(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn quiesce(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn retire(&self) -> io::Result<()> {
         Ok(())
     }
 }

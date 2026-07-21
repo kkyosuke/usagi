@@ -68,13 +68,22 @@ pub trait Terminator {
     fn terminate(&self, pid: u32) -> io::Result<()>;
 }
 
-/// Blocks a running `serve` until the daemon is asked to shut down.
+/// Prepares for and then blocks a running `serve` until the daemon is asked to
+/// shut down.
 ///
 /// The real implementation waits for SIGINT / SIGTERM; it is real IO bound at
 /// the synthesis root, so the `serve` loop stays testable through a fake that
-/// returns immediately. Returning `Ok` means "shut down now"; the caller then
-/// clears its record and exits.
+/// returns immediately. Preparation happens before endpoint publication so
+/// shutdown delivery is installed before any worker starts. Returning `Ok` from
+/// [`wait`](ShutdownSignal::wait) means "shut down now"; the caller then
+/// quiesces and retires its endpoint before exiting.
 pub trait ShutdownSignal {
+    /// Prepare shutdown delivery before the daemon publishes or spawns workers.
+    ///
+    /// # Errors
+    /// Returns an error when shutdown delivery cannot be prepared safely.
+    fn prepare(&self) -> io::Result<()>;
+
     /// Block until the daemon should stop.
     ///
     /// # Errors
@@ -87,14 +96,31 @@ pub trait ShutdownSignal {
 ///
 /// [`crate::usecase::serve`] calls [`publish`](DaemonReady::publish) exactly
 /// once after acquiring the instance lock and saving its PID record, and never
-/// calls it when another daemon owns the lock. Implementations must therefore
-/// make repeated calls safe, but must not expose an endpoint before `publish`.
+/// calls it when another daemon owns the lock. On shutdown it calls
+/// [`quiesce`](DaemonReady::quiesce) before clearing the record, then
+/// [`retire`](DaemonReady::retire) while it still holds the instance lock.
+/// Implementations must make cleanup idempotent and must not expose an endpoint
+/// before `publish`.
 pub trait DaemonReady {
     /// Publish the endpoint for an already registered daemon.
     ///
     /// # Errors
     /// Returns an error when the endpoint cannot be made available.
     fn publish(&self) -> io::Result<()>;
+
+    /// Stop accepting new work and join the endpoint-serving worker without
+    /// removing the published generation locator yet.
+    ///
+    /// # Errors
+    /// Returns an error when the serving worker cannot be stopped and joined.
+    fn quiesce(&self) -> io::Result<()>;
+
+    /// Remove the quiesced endpoint if this owner still owns the published
+    /// generation. A stale owner must leave a replacement locator untouched.
+    ///
+    /// # Errors
+    /// Returns an error when the owned endpoint cannot be retired safely.
+    fn retire(&self) -> io::Result<()>;
 }
 
 /// Spawns a detached daemon process — the effecting half of `start`.
