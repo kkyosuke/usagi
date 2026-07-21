@@ -4971,15 +4971,6 @@
     },
     {
       "path": "src/runtime/bootstrap.rs",
-      "symbol": "fn:should_force_restart",
-      "occurrence": 1,
-      "reason": "migration_debt",
-      "owner": "root-cli",
-      "expires": "2027-01-31",
-      "tracking": "root-cli-follow-up"
-    },
-    {
-      "path": "src/runtime/bootstrap.rs",
       "symbol": "fn:wait_for_ready",
       "occurrence": 1,
       "reason": "migration_debt",
@@ -5243,24 +5234,6 @@
       "path": "src/runtime/daemon.rs",
       "symbol": "fn:client",
       "occurrence": 1,
-      "reason": "migration_debt",
-      "owner": "daemon",
-      "expires": "2027-01-31",
-      "tracking": "#486"
-    },
-    {
-      "path": "src/runtime/daemon.rs",
-      "symbol": "fn:invoked_by_cargo_run",
-      "occurrence": 1,
-      "reason": "migration_debt",
-      "owner": "daemon",
-      "expires": "2027-01-31",
-      "tracking": "#486"
-    },
-    {
-      "path": "src/runtime/daemon.rs",
-      "symbol": "fn:invoked_by_cargo_run",
-      "occurrence": 2,
       "reason": "migration_debt",
       "owner": "daemon",
       "expires": "2027-01-31",
