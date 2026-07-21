@@ -582,7 +582,7 @@ workspace の root scope と各 available session scope に属する **live**（
 可能）な Agent / Terminal を pane tab に復元する。
 
 このinventory復元はprovider conversation resumeを開始しない。`identity_unknown` / interrupted Agentは
-status上の再開可否だけを表示できるが、TUI起動、workspace open、daemon reconnectから `ResumeAgent` を自動送信せず、
+sidebar の第2行に `interrupted · resume available` またはIDを含まないsafe reasonを表示するが、TUI起動、workspace open、daemon reconnectから `ResumeAgent` を自動送信せず、
 利用者の `session resume <name>` 操作を必須とする。
 
 - **タイミング**: 初回 frame を paint した後に一度だけ、daemon の [`terminal inventory`](04-ipc.md#generic-terminal-request)

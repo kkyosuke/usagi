@@ -1396,6 +1396,7 @@ mod tests {
             has_notes: false,
             pr_summary: None,
             removing: false,
+            agent_resume: None,
         };
         let frame = runtime.render(
             20,

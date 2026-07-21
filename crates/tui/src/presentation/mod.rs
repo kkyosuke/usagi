@@ -23,7 +23,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use chrono::{DateTime, Utc};
 use usagi_core::domain::AppInfo;
-use usagi_core::domain::agent::AgentProfileId;
+use usagi_core::domain::agent::{AgentProfileId, ProviderResumeProjection};
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, UserDecisionId, WorkspaceId};
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
@@ -718,6 +718,8 @@ pub struct SessionCommandResult {
     /// refresh must carry these together so a session created during this TUI
     /// run can subsequently launch an Agent without falling back to a name.
     pub session_ids: Option<Vec<SessionId>>,
+    /// Safe provider resume state keyed by the same stable session identities.
+    pub agent_resumes: Option<BTreeMap<SessionId, ProviderResumeProjection>>,
     /// Monotonically increasing daemon lifecycle revision for this snapshot.
     /// The UI uses it to ignore a response that arrives after a newer command.
     pub revision: Option<u64>,
@@ -730,6 +732,7 @@ impl SessionCommandResult {
             message: message.into(),
             sessions: None,
             session_ids: None,
+            agent_resumes: None,
             revision: None,
         }
     }
@@ -888,6 +891,8 @@ struct WorkspaceUi {
     /// Snapshot revisions, rather than port ownership, order their results.
     session_commands: std::sync::Arc<dyn SessionCommandPort>,
     last_session_revision: u64,
+    /// Non-sensitive interrupted/resume state received from the daemon.
+    agent_resumes: BTreeMap<SessionId, ProviderResumeProjection>,
     session_completions: Receiver<SessionCommandCompletion>,
     session_completion_sender: Sender<SessionCommandCompletion>,
     /// Session displayed as a removal skeleton until its daemon command returns.
@@ -990,6 +995,7 @@ impl WorkspaceUi {
             workspace,
             session_commands: std::sync::Arc::from(session_commands),
             last_session_revision: 0,
+            agent_resumes: BTreeMap::new(),
             session_completions,
             session_completion_sender,
             removing_session: None,
@@ -1019,6 +1025,14 @@ impl WorkspaceUi {
             sessions,
             port: Some(port),
         });
+        self
+    }
+
+    fn with_agent_resumes(
+        mut self,
+        agent_resumes: BTreeMap<SessionId, ProviderResumeProjection>,
+    ) -> Self {
+        self.agent_resumes = agent_resumes;
         self
     }
 
@@ -1553,6 +1567,7 @@ fn apply_session_projection(
     ui: &mut WorkspaceUi,
     sessions: Option<Vec<usagi_core::domain::session::SessionRecord>>,
     session_ids: Option<Vec<SessionId>>,
+    agent_resumes: Option<BTreeMap<SessionId, ProviderResumeProjection>>,
 ) {
     let Some(sessions) = sessions else {
         return;
@@ -1565,6 +1580,9 @@ fn apply_session_projection(
         }
     } else {
         ui.workspace.replace_sessions(sessions);
+    }
+    if let Some(agent_resumes) = agent_resumes {
+        ui.agent_resumes = agent_resumes;
     }
 }
 
@@ -1599,7 +1617,12 @@ fn drain_session_completions(ui: &mut WorkspaceUi) {
                     ui.last_session_revision = revision;
                 }
                 if is_current {
-                    apply_session_projection(ui, result.sessions, result.session_ids);
+                    apply_session_projection(
+                        ui,
+                        result.sessions,
+                        result.session_ids,
+                        result.agent_resumes,
+                    );
                 }
                 match completion.completion {
                     SessionBackendCompletion::Create {
@@ -1924,6 +1947,7 @@ fn project_controller_sessions(ui: &WorkspaceUi) -> Vec<ProjectedSession> {
         .map(|(record, id)| {
             let mut projected = ProjectedSession::from_record(*id, record);
             projected.removing = ui.removing_session == Some(*id);
+            projected.agent_resume = ui.agent_resumes.get(id).copied();
             projected
         })
         .collect()
@@ -2566,6 +2590,7 @@ fn drive_workspace_controller(
     let session_ids = snapshot.session_ids.clone();
     let workspace_name = snapshot.workspace.name.clone();
     let root_cwd = snapshot.workspace.path.clone();
+    let agent_resumes = snapshot.agent_resumes.clone();
     let (host, host_rx) = ControllerHost::channel();
     let composition = backend_factory.create(&snapshot, host);
     let mut backend = composition.backend;
@@ -2573,6 +2598,7 @@ fn drive_workspace_controller(
     let workspace =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, session_ids.clone());
     let mut ui = WorkspaceUi::new(workspace, composition.session_commands)
+        .with_agent_resumes(agent_resumes)
         .with_agent_context(
             workspace_id,
             session_ids.clone(),
@@ -3775,6 +3801,7 @@ mod tests {
                 message: "daemon accepted".to_owned(),
                 sessions,
                 session_ids: None,
+                agent_resumes: None,
                 revision: None,
             })
         }
@@ -3829,6 +3856,7 @@ mod tests {
             has_notes: false,
             pr_summary: None,
             removing: false,
+            agent_resume: None,
         };
         let sessions = std::slice::from_ref(&projected);
         let git = std::collections::BTreeMap::new();
@@ -4322,6 +4350,7 @@ mod tests {
                     message: "newer".to_owned(),
                     sessions: Some(vec![newer_record]),
                     session_ids: Some(vec![newer]),
+                    agent_resumes: None,
                     revision: Some(2),
                 }),
                 completion: super::SessionBackendCompletion::Refresh {
@@ -4335,6 +4364,7 @@ mod tests {
                     message: "older".to_owned(),
                     sessions: Some(ui.workspace.sessions().to_vec()),
                     session_ids: Some(vec![original]),
+                    agent_resumes: None,
                     revision: Some(1),
                 }),
                 completion: super::SessionBackendCompletion::Refresh {
@@ -4374,6 +4404,7 @@ mod tests {
                     message: "created".to_owned(),
                     sessions: Some(records),
                     session_ids: Some(vec![existing, created]),
+                    agent_resumes: None,
                     revision: None,
                 }),
                 completion: super::SessionBackendCompletion::Create {
@@ -4427,6 +4458,7 @@ mod tests {
                     message: "same snapshot".to_owned(),
                     sessions: Some(records),
                     session_ids: Some(vec![session]),
+                    agent_resumes: None,
                     revision: None,
                 }),
                 completion: super::SessionBackendCompletion::Refresh { completions },

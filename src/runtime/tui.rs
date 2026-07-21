@@ -15,7 +15,8 @@ use crossterm::terminal::{
 };
 use crossterm::{execute, queue};
 use usagi_core::domain::AppInfo;
-use usagi_core::domain::id::{UserDecisionId, WorkspaceId};
+use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
+use usagi_core::domain::id::{SessionId, UserDecisionId, WorkspaceId};
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session::{SessionOrigin, SessionRecord};
@@ -1159,6 +1160,7 @@ struct LifecycleSnapshot {
     root_worktree_id: usagi_core::domain::id::WorktreeId,
     revision: u64,
     sessions: Vec<ManagedSession>,
+    agent_resumes: BTreeMap<SessionId, ProviderResumeProjection>,
 }
 
 impl LifecycleSnapshot {
@@ -1234,19 +1236,25 @@ fn lifecycle_snapshot(value: &serde_json::Value) -> Result<LifecycleSnapshot, St
                     "daemon session snapshot has an invalid root worktree ID".to_owned()
                 })
             })?;
-        let sessions = object
+        let session_values = object
             .get("sessions")
-            .cloned()
-            .ok_or_else(|| "daemon session snapshot has no sessions".to_owned())
-            .and_then(|sessions| {
-                serde_json::from_value(sessions)
-                    .map_err(|error| format!("invalid daemon session snapshot: {error}"))
-            })?;
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "daemon session snapshot has no sessions".to_owned())?;
+        let agent_resumes = session_values
+            .iter()
+            .map(provider_resume_projection)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        let sessions = serde_json::from_value(serde_json::Value::Array(session_values.clone()))
+            .map_err(|error| format!("invalid daemon session snapshot: {error}"))?;
         Ok(LifecycleSnapshot {
             workspace_id,
             root_worktree_id,
             revision,
             sessions,
+            agent_resumes,
         })
     })();
     if let Err(error) = &result {
@@ -1255,6 +1263,45 @@ fn lifecycle_snapshot(value: &serde_json::Value) -> Result<LifecycleSnapshot, St
         ErrorLog::record(&format!("daemon lifecycle snapshot rejected: {error}"));
     }
     result
+}
+
+fn provider_resume_projection(
+    item: &serde_json::Value,
+) -> Result<Option<(SessionId, ProviderResumeProjection)>, String> {
+    let Some(phase) = item.get("agent_phase") else {
+        return Ok(None);
+    };
+    let phase = phase
+        .as_str()
+        .ok_or_else(|| "daemon Agent phase is invalid".to_owned())?;
+    let session = item
+        .get("session_id")
+        .cloned()
+        .ok_or_else(|| "daemon Agent projection has no session ID".to_owned())
+        .and_then(|value| {
+            serde_json::from_value(value)
+                .map_err(|_| "daemon Agent projection has an invalid session ID".to_owned())
+        })?;
+    let resumable = item
+        .get("agent_resumable")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| "daemon Agent resume availability is invalid".to_owned())?;
+    let reason = item
+        .get("agent_resume_reason")
+        .cloned()
+        .ok_or_else(|| "daemon Agent resume reason is missing".to_owned())
+        .and_then(|value| {
+            serde_json::from_value::<ProviderResumeReason>(value)
+                .map_err(|_| "daemon Agent resume reason is invalid".to_owned())
+        })?;
+    Ok(Some((
+        session,
+        ProviderResumeProjection {
+            interrupted: phase == "interrupted",
+            resumable,
+            reason,
+        },
+    )))
 }
 
 impl SessionCommandPort for DaemonSessionCommandPort {
@@ -1367,6 +1414,7 @@ fn session_snapshot_result(
         message: message.into(),
         sessions: Some(snapshot.project(workspace, &legacy.sessions)),
         session_ids: Some(session_ids),
+        agent_resumes: Some(snapshot.agent_resumes.clone()),
         revision: Some(snapshot.revision),
     })
 }
@@ -1792,11 +1840,12 @@ impl WorkspaceLoader for FsWorkspaceLoader {
             .map(|session| session.session_id)
             .collect();
         state.sessions = lifecycle.project(&workspace, &state.sessions);
-        Ok(WorkspaceSnapshot::with_runtime_ids(
+        Ok(WorkspaceSnapshot::with_runtime_projection(
             workspace,
             state,
             workspace_id,
             session_ids,
+            lifecycle.agent_resumes,
         ))
     }
 
@@ -2140,10 +2189,11 @@ mod tests {
         EnvironmentStorePort, LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory,
         RepoEnvironmentStore, Start, TerminalChunk, TerminalError, control_key,
         created_session_hook, decode_terminal_poll, load_screen_graph_data, load_workspace_state,
-        passthrough_key, terminal_copy_key,
+        passthrough_key, provider_resume_projection, terminal_copy_key,
     };
     use chrono::Utc;
     use serde_json::json;
+    use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
     use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
@@ -2247,6 +2297,7 @@ mod tests {
             root_worktree_id: usagi_core::domain::id::WorktreeId::new(),
             revision: 1,
             sessions: vec![available, failed],
+            agent_resumes: std::collections::BTreeMap::new(),
         };
 
         assert_eq!(
@@ -2255,6 +2306,78 @@ mod tests {
                 .map(|session| session.name.as_str())
                 .collect::<Vec<_>>(),
             ["available"]
+        );
+    }
+
+    #[test]
+    fn provider_resume_projection_accepts_only_the_safe_typed_wire_vocabulary() {
+        let session = SessionId::new();
+        let item = json!({
+            "session_id": session,
+            "agent_phase": "interrupted",
+            "agent_resumable": true,
+            "agent_resume_reason": "explicit_resume_available",
+        });
+        assert_eq!(
+            provider_resume_projection(&item).unwrap(),
+            Some((
+                session,
+                ProviderResumeProjection {
+                    interrupted: true,
+                    resumable: true,
+                    reason: ProviderResumeReason::ExplicitResumeAvailable,
+                },
+            ))
+        );
+        assert_eq!(provider_resume_projection(&json!({})).unwrap(), None);
+        assert_eq!(
+            provider_resume_projection(&json!({
+                "session_id": session,
+                "agent_phase": "running",
+                "agent_resumable": false,
+                "agent_resume_reason": "live_or_ownership_unknown",
+            }))
+            .unwrap(),
+            Some((
+                session,
+                ProviderResumeProjection {
+                    interrupted: false,
+                    resumable: false,
+                    reason: ProviderResumeReason::LiveOrOwnershipUnknown,
+                },
+            ))
+        );
+        let malformed = [
+            json!({ "agent_phase": 1 }),
+            json!({ "agent_phase": "interrupted" }),
+            json!({
+                "session_id": "not-a-session-id",
+                "agent_phase": "interrupted",
+                "agent_resumable": false,
+                "agent_resume_reason": "provider_metadata_unavailable",
+            }),
+            json!({
+                "session_id": session,
+                "agent_phase": "interrupted",
+                "agent_resume_reason": "provider_metadata_unavailable",
+            }),
+            json!({
+                "session_id": session,
+                "agent_phase": "interrupted",
+                "agent_resumable": false,
+            }),
+        ];
+        for item in malformed {
+            assert!(provider_resume_projection(&item).is_err());
+        }
+        assert!(
+            provider_resume_projection(&json!({
+                "session_id": session,
+                "agent_phase": "interrupted",
+                "agent_resumable": false,
+                "agent_resume_reason": "provider raw output",
+            }))
+            .is_err()
         );
     }
 
@@ -2270,6 +2393,7 @@ mod tests {
             root_worktree_id: usagi_core::domain::id::WorktreeId::new(),
             revision: 2,
             sessions: vec![available],
+            agent_resumes: std::collections::BTreeMap::new(),
         };
         let legacy = SessionRecord {
             name: "legacy".into(),

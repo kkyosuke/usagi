@@ -2887,7 +2887,7 @@ fn dispatch_session_action(
                 "completed": admission.completed,
             }))
         }
-        SessionAction::Status => {
+        SessionAction::List | SessionAction::Status | SessionAction::Overview => {
             let mut status = sessions
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?

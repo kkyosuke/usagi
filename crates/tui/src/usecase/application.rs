@@ -4,10 +4,12 @@
 //! 行う。このモジュールは変換後の [`EntryScreen`] を受け取り、画面の具体的な描画・入力
 //! 処理を [`ScreenRunner`] へ委譲する。これにより画面遷移の判断を端末 IO から分離する。
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use usagi_core::domain::agent::ProviderResumeProjection;
 use usagi_core::domain::id::{SessionId, WorkspaceId};
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::domain::workspace_state::WorkspaceState;
@@ -57,6 +59,8 @@ pub struct WorkspaceSnapshot {
     pub workspace_id: WorkspaceId,
     /// Session identities in the same order as the display state projection.
     pub session_ids: Vec<SessionId>,
+    /// ID-free provider resume state keyed by stable daemon session identity.
+    pub agent_resumes: BTreeMap<SessionId, ProviderResumeProjection>,
 }
 
 impl WorkspaceSnapshot {
@@ -69,6 +73,7 @@ impl WorkspaceSnapshot {
             state,
             workspace_id: WorkspaceId::new(),
             session_ids,
+            agent_resumes: BTreeMap::new(),
         }
     }
 
@@ -86,6 +91,26 @@ impl WorkspaceSnapshot {
             state,
             workspace_id,
             session_ids,
+            agent_resumes: BTreeMap::new(),
+        }
+    }
+
+    /// Build a daemon-authoritative snapshot including the safe provider resume
+    /// projection used by the Home sidebar.
+    #[must_use]
+    pub fn with_runtime_projection(
+        workspace: Workspace,
+        state: WorkspaceState,
+        workspace_id: WorkspaceId,
+        session_ids: Vec<SessionId>,
+        agent_resumes: BTreeMap<SessionId, ProviderResumeProjection>,
+    ) -> Self {
+        Self {
+            workspace,
+            state,
+            workspace_id,
+            session_ids,
+            agent_resumes,
         }
     }
 }
@@ -318,9 +343,13 @@ pub fn run(entry: &EntryScreen, runner: &mut dyn ScreenRunner) -> io::Result<()>
 
 #[cfg(test)]
 mod tests {
-    use super::{EntryScreen, ScreenRunner, run};
+    use super::{EntryScreen, ScreenRunner, WorkspaceSnapshot, run};
     use std::io;
     use std::path::{Path, PathBuf};
+    use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
+    use usagi_core::domain::id::{SessionId, WorkspaceId};
+    use usagi_core::domain::workspace::Workspace;
+    use usagi_core::domain::workspace_state::WorkspaceState;
 
     #[derive(Debug, PartialEq, Eq)]
     enum Call {
@@ -450,5 +479,27 @@ mod tests {
 
         assert_eq!(error.to_string(), "doctor failed");
         assert_eq!(runner.calls, vec![Call::Doctor]);
+    }
+
+    #[test]
+    fn runtime_projection_constructor_preserves_daemon_resume_state() {
+        let workspace_id = WorkspaceId::new();
+        let session_id = SessionId::new();
+        let resume = ProviderResumeProjection {
+            interrupted: true,
+            resumable: true,
+            reason: ProviderResumeReason::ExplicitResumeAvailable,
+        };
+        let snapshot = WorkspaceSnapshot::with_runtime_projection(
+            Workspace::new("work", "/tmp/work"),
+            WorkspaceState::default(),
+            workspace_id,
+            vec![session_id],
+            std::collections::BTreeMap::from([(session_id, resume)]),
+        );
+
+        assert_eq!(snapshot.workspace_id, workspace_id);
+        assert_eq!(snapshot.session_ids, vec![session_id]);
+        assert_eq!(snapshot.agent_resumes.get(&session_id), Some(&resume));
     }
 }

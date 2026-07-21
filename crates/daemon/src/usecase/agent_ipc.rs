@@ -29,8 +29,8 @@ use usagi_core::{
         agent::{
             AgentCapability, AgentProfileId, AgentStatus, CallerRef, DispatchBinding, DispatchRun,
             InboxKind, InboxMessage, LaunchMode, LaunchRequest, LaunchScope, ModelSelector,
-            ProviderCaptureProvenance, ProviderKind, ProviderResumePhase, ProviderResumeRef,
-            ProviderResumeStatus, ProviderSessionId, RunStatus, WorkerRef,
+            ProviderCaptureProvenance, ProviderKind, ProviderResumePhase, ProviderResumeReason,
+            ProviderResumeRef, ProviderResumeStatus, ProviderSessionId, RunStatus, WorkerRef,
         },
         id::{
             AgentRuntimeId, AgentRuntimeRef, ClientId, CompletionFence, ConnectionId,
@@ -600,7 +600,7 @@ impl<
     /// Safe interrupted/resume projection for a managed session. Provider IDs
     /// are never returned; only availability and a stable reason cross IPC.
     #[must_use]
-    pub fn session_resume_status(&self, session: SessionId) -> (bool, &'static str) {
+    pub fn session_resume_status(&self, session: SessionId) -> (bool, ProviderResumeReason) {
         let records = self.coordinator.snapshot().records;
         if records.iter().any(|record| {
             record.runtime.session_id == Some(session)
@@ -615,7 +615,7 @@ impl<
                         )
                 )
         }) {
-            return (false, "live_or_ownership_unknown");
+            return (false, ProviderResumeReason::LiveOrOwnershipUnknown);
         }
         let resumable = records
             .iter()
@@ -643,16 +643,16 @@ impl<
             })
         });
         let Some(first) = identities.next() else {
-            return (false, "provider_metadata_unavailable");
+            return (false, ProviderResumeReason::ProviderMetadataUnavailable);
         };
         if !identities.all(|candidate| candidate == first) {
-            return (false, "ambiguous_provider_metadata");
+            return (false, ProviderResumeReason::AmbiguousProviderMetadata);
         }
         let Some(source) = resumable.first() else {
-            return (false, "provider_metadata_unavailable");
+            return (false, ProviderResumeReason::ProviderMetadataUnavailable);
         };
         let Some(reference) = source.provider_resume.as_ref() else {
-            return (false, "provider_metadata_unavailable");
+            return (false, ProviderResumeReason::ProviderMetadataUnavailable);
         };
         let profile_id = &source.launch.plan.profile_id;
         let internally_compatible = resumable.iter().all(|record| {
@@ -669,9 +669,9 @@ impl<
                 && provider_matches_profile(reference.provider, profile_id)
         });
         if internally_compatible && adapter_compatible {
-            (true, "explicit_resume_available")
+            (true, ProviderResumeReason::ExplicitResumeAvailable)
         } else {
-            (false, "incompatible_provider_metadata")
+            (false, ProviderResumeReason::IncompatibleProviderMetadata)
         }
     }
 
@@ -1067,6 +1067,10 @@ impl<
             },
             required_capabilities: [AgentCapability::McpWiring].into_iter().collect(),
         };
+        let superseded = candidates
+            .iter()
+            .map(|candidate| candidate.runtime.clone())
+            .collect::<Vec<_>>();
         let authorization = RuntimeAuthorization {
             runtime,
             operation: fence,
@@ -1122,7 +1126,7 @@ impl<
                 operation,
             },
         );
-        if let Err(error) = self.orchestrator.launch_with_semantic(
+        if let Err(error) = self.orchestrator.resume_with_semantic(
             &mut self.coordinator,
             &mut self.registry,
             &authorization,
@@ -1132,6 +1136,7 @@ impl<
             &mut self.pty,
             Some(credential.clone()),
             semantic_key.to_owned(),
+            &superseded,
         ) {
             self.mcp_callers.remove(&credential);
             let _ = self.dispatch.fail_admission(operation);
@@ -2251,7 +2256,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             runtime.session_resume_status(session),
-            (false, "live_or_ownership_unknown")
+            (false, ProviderResumeReason::LiveOrOwnershipUnknown)
         );
         let first_runtime = runtime
             .coordinator
@@ -2305,7 +2310,7 @@ mod tests {
         runtime.exit(&first.terminal, 0).unwrap();
         assert_eq!(
             runtime.session_resume_status(session),
-            (true, "explicit_resume_available")
+            (true, ProviderResumeReason::ExplicitResumeAvailable)
         );
         assert_eq!(
             runtime
@@ -2388,7 +2393,7 @@ mod tests {
         runtime.exit(&first.terminal, 0).unwrap();
         assert_eq!(
             runtime.session_resume_status(session),
-            (false, "provider_metadata_unavailable")
+            (false, ProviderResumeReason::ProviderMetadataUnavailable)
         );
         assert_eq!(
             runtime
@@ -2402,6 +2407,91 @@ mod tests {
                 .code,
             ErrorCode::Unavailable
         );
+    }
+
+    #[test]
+    fn restart_resume_supersedes_the_interrupted_runtime_without_leaking_capacity() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let resolved = scope();
+        let make_runtime = || {
+            AgentRuntime::with_dispatch_and_locator(
+                DaemonGeneration::new(),
+                claude_registry(),
+                Store::default(),
+                Journal::default(),
+                Pty::default(),
+                AgentProfileId::new("claude").unwrap(),
+                Geometry { cols: 80, rows: 24 },
+                DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+                AlwaysExecutable,
+            )
+        };
+        let mut first = make_runtime();
+        let initial = first
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(session),
+                    profile: Some(AgentProfileId::new("claude").unwrap()),
+                },
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap();
+        let initial_runtime = first
+            .coordinator
+            .runtime_for_terminal(&initial.terminal)
+            .unwrap();
+        let (reconciled, interrupted) = first
+            .coordinator
+            .snapshot()
+            .reconcile_after_daemon_restart();
+        assert_eq!(interrupted, 1);
+
+        let mut second = AgentRuntime::hydrate_with_dispatch_and_locator(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty::default(),
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+            AlwaysExecutable,
+            reconciled,
+        )
+        .unwrap();
+        assert_eq!(second.session_phase(session), "interrupted");
+        assert_eq!(second.coordinator.occupied_slots(), 1);
+
+        let resumed = second
+            .resume(
+                &OperationId::new().to_string(),
+                workspace,
+                session,
+                &FakeScope(Ok(resolved)),
+            )
+            .unwrap();
+        assert_ne!(resumed.terminal, initial.terminal);
+        assert_eq!(second.coordinator.occupied_slots(), 1);
+        let superseded = second.coordinator.record_for(&initial_runtime).unwrap();
+        assert_eq!(
+            superseded.state,
+            super::super::runtime::RuntimeState::Reclaimed
+        );
+        assert_eq!(
+            superseded
+                .provider_resume
+                .as_ref()
+                .unwrap()
+                .last_known_status,
+            ProviderResumeStatus::Exited
+        );
+
+        second.exit(&resumed.terminal, 0).unwrap();
+        assert_eq!(second.coordinator.occupied_slots(), 0);
+        assert_eq!(second.session_phase(session), "ended");
     }
 
     #[test]

@@ -8,7 +8,7 @@
     clippy::unused_self
 )] // Generic injected ports make individual error types and launch dependencies part of the contract.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use usagi_core::domain::{
     agent::{
@@ -390,12 +390,97 @@ impl RuntimeCoordinator {
         mcp_credential: Option<String>,
         semantic_key: String,
     ) -> Result<(), RuntimeError> {
+        self.launch_with_semantic_superseding(
+            request,
+            runtime,
+            operation,
+            geometry,
+            adapter,
+            store,
+            spawner,
+            mcp_credential,
+            semantic_key,
+            &[],
+        )
+    }
+
+    /// Reserves a replacement runtime while superseding interrupted runtime
+    /// incarnations in the same durable snapshot. Exited/reclaimed sources stay
+    /// as history; only `identity_unknown` sources release occupied capacity.
+    #[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=restart_resume_supersedes_the_interrupted_runtime_without_leaking_capacity
+    pub fn resume_with_semantic<A: AgentAdapter + ?Sized, S: RuntimeStore, P: PtySpawner>(
+        &mut self,
+        request: &LaunchRequest,
+        runtime: AgentRuntimeRef,
+        operation: CompletionFence,
+        geometry: Geometry,
+        adapter: &mut A,
+        store: &mut S,
+        spawner: &mut P,
+        mcp_credential: Option<String>,
+        semantic_key: String,
+        superseded: &[AgentRuntimeRef],
+    ) -> Result<(), RuntimeError> {
+        self.launch_with_semantic_superseding(
+            request,
+            runtime,
+            operation,
+            geometry,
+            adapter,
+            store,
+            spawner,
+            mcp_credential,
+            semantic_key,
+            superseded,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)] // Keep the reservation, source transition, and spawn compensation in one transactional flow.
+    #[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=restart_resume_supersedes_the_interrupted_runtime_without_leaking_capacity
+    fn launch_with_semantic_superseding<
+        A: AgentAdapter + ?Sized,
+        S: RuntimeStore,
+        P: PtySpawner,
+    >(
+        &mut self,
+        request: &LaunchRequest,
+        runtime: AgentRuntimeRef,
+        operation: CompletionFence,
+        geometry: Geometry,
+        adapter: &mut A,
+        store: &mut S,
+        spawner: &mut P,
+        mcp_credential: Option<String>,
+        semantic_key: String,
+        superseded: &[AgentRuntimeRef],
+    ) -> Result<(), RuntimeError> {
         self.validate_scope(&runtime, &operation)?;
         let key = runtime.agent_runtime_id.as_str();
         if self.records.contains_key(&key) {
             return Err(RuntimeError::RuntimeAlreadyExists);
         }
-        if self.occupied_slots() >= self.limit {
+        let mut superseded_keys = BTreeSet::new();
+        for source in superseded {
+            let record = self.record(source)?;
+            if !matches!(
+                record.state,
+                RuntimeState::Exited
+                    | RuntimeState::Reclaimed
+                    | RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown)
+            ) {
+                return Err(RuntimeError::ProviderResumeMismatch);
+            }
+            superseded_keys.insert(source.agent_runtime_id.as_str());
+        }
+        let released_slots = superseded_keys
+            .iter()
+            .filter(|source| {
+                self.records.get(*source).is_some_and(|record| {
+                    record.state == RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown)
+                })
+            })
+            .count();
+        if self.occupied_slots().saturating_sub(released_slots) >= self.limit {
             return Err(RuntimeError::ConcurrencyExhausted);
         }
         let mut resolved = adapter.resolve(request).map_err(RuntimeError::Adapter)?;
@@ -420,6 +505,19 @@ impl RuntimeCoordinator {
             || launch.plan.profile_revision == 0
         {
             return Err(RuntimeError::ScopeMismatch);
+        }
+        for source in superseded_keys {
+            let record = self
+                .records
+                .get_mut(&source)
+                .expect("validated resume source remains present");
+            if record.state == RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown) {
+                record.state = RuntimeState::Reclaimed;
+                if let Some(provider) = &mut record.provider_resume {
+                    provider.last_known_status = ProviderResumeStatus::Exited;
+                    provider.last_known_phase = Some(ProviderResumePhase::Ended);
+                }
+            }
         }
         self.records.insert(
             key.clone(),

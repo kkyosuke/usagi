@@ -267,11 +267,12 @@ impl ProviderSessionId {
     /// # Errors
     ///
     /// Returns [`LaunchValidationError::InvalidProviderSessionId`] for empty,
-    /// excessively large, or control-character-containing values.
+    /// excessively large, option-like, or control-character-containing values.
     pub fn new(value: impl Into<String>) -> Result<Self, LaunchValidationError> {
         let value = value.into();
         if value.is_empty()
             || value.len() > 512
+            || value.starts_with('-')
             || value.chars().any(char::is_control)
             || value.trim() != value
         {
@@ -324,6 +325,27 @@ pub enum ProviderResumePhase {
     Running,
     Interrupted,
     Ended,
+}
+
+/// Stable, non-sensitive explanation for provider resume availability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderResumeReason {
+    ExplicitResumeAvailable,
+    LiveOrOwnershipUnknown,
+    ProviderMetadataUnavailable,
+    AmbiguousProviderMetadata,
+    IncompatibleProviderMetadata,
+}
+
+/// ID-free provider resume material safe to project across IPC and into UI
+/// state. `interrupted` is independent of availability: legacy records can be
+/// interrupted while lacking enough metadata to resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderResumeProjection {
+    pub interrupted: bool,
+    pub resumable: bool,
+    pub reason: ProviderResumeReason,
 }
 
 /// Minimum durable metadata needed to start a new provider process which
@@ -599,6 +621,10 @@ mod tests {
         );
         assert_eq!(
             ProviderSessionId::new(" provider-id"),
+            Err(LaunchValidationError::InvalidProviderSessionId)
+        );
+        assert_eq!(
+            ProviderSessionId::new("--last"),
             Err(LaunchValidationError::InvalidProviderSessionId)
         );
         let provider_id = ProviderSessionId::new("provider-id").unwrap();
