@@ -133,7 +133,20 @@ daemon は intent の `(WorkspaceId, SessionId?)` を [available scope](05-daemo
 
 成功した launch は accepted response に producer `OperationId` と durable revision を返し、body に完全な `TerminalRef` を載せる。この `TerminalRef` は operation・workspace・session・worktree・daemon generation・terminal incarnation を fence する。PTY exit を daemon が一度だけ記録すると、同じ semantic intent の再送は成功時に `completed: true` と同じ `TerminalRef` を持つ final response を返す。non-zero exit は安全な `unavailable` final として replay される。同じ `OperationId` を異なる intent で送ると `idempotency_conflict` になる。spawn failure・ambiguous・persist-after-spawn は fenced safe failure（`unavailable` / `ownership_unknown`）として durable に記録され、resend は同じ安全な失敗を replay する。replacement spawn や terminal の推測は行わない。
 
-この replay 契約は daemon restart をまたぐ。daemon は Agent snapshot の load と operation ledger hydrate が完了するまで request admission を開始せず、成功 final、non-zero exit、safe failure を同じ意味で返す。restart 時に所有権を証明できない未終端 runtime は `identity_unknown` として inventory に `live: false` で現れ、attach / input / kill / replacement spawn を拒否する。snapshot が破損または未知 schema の場合は daemon startup が fail closed となり、Agent spawn と snapshot 更新を行わない。MCP caller credential は replay 対象ではなく restart で失効する。
+この replay 契約は daemon restart をまたぐ。daemon は Agent snapshot の load、generation coordinator と operation ledger の hydrate、新 generation の atomic activate が完了するまで request admission を開始しない。`agents.json` は runtime record と generation/terminal ownership を同じ snapshot に持ち、admission、terminal command、exit、completion はすべてこの単一 authority を通る。restart 時に所有権を証明できない未終端 runtime は `identity_unknown` として inventory に `live: false` で現れ、旧 `TerminalRef` の command と late outcome は effect なしで拒否される。runtime と ownership binding の不一致、破損、未知 schema は daemon startup を fail closed にし、Agent spawn と snapshot 更新を行わない。schema v1/v2 は既存 runtime fence を保持した `identity_unknown` へ保守的に移行する。MCP caller credential は replay 対象ではなく restart で失効する。
+
+```text
+Agent request / PTY observation / completion
+                  |
+                  v
+       GenerationCoordinator (single authority)
+        | active generation admission
+        | exact TerminalRef control/exit
+        | exact CompletionFence outcome
+                  |
+                  v
+ agents.json = generation ownership + runtime records (atomic)
+```
 
 Agent の pending pane は、同じ `OperationId` の成功 final が返した `TerminalRef` にだけ attach する。attach 以降の stream（`attach` / `resume` / `resync` / `input` / `resize` / `detach`）は [generic terminal request](#generic-terminal-request) と同じ vocabulary を共有し、daemon は `TerminalRef` の所有元（agent または generic）へ透過的に routing する。この pending pane の attach policy は [3. TUI](03-tui.md) を正本とする。
 

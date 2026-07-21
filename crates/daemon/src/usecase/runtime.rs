@@ -19,7 +19,11 @@ pub use super::terminal::{
     SpawnFailure, TerminalReconcileState as ReconcileState, TerminalRuntimeState as RuntimeState,
 };
 use super::{
-    generation::{ProcessIdentity, ProcessObservation},
+    generation::{
+        DEFAULT_GENERATION_LIMIT, GenerationCoordinator, GenerationError, GenerationRecord,
+        GenerationRole, GenerationSnapshot, ProcessIdentity, ProcessObservation, TerminalOwnership,
+        TerminalState,
+    },
     terminal::{
         Attached, Geometry, InputAck, InputRequest, Output, PtyWriter, RegistryError, Snapshot,
         TerminalRegistry,
@@ -66,7 +70,7 @@ pub enum DurableOperationOutcome {
     OwnershipUnknown,
 }
 
-const RUNTIME_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+const RUNTIME_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -74,6 +78,10 @@ pub struct RuntimeStoreSnapshot {
     #[serde(default = "legacy_runtime_snapshot_version")]
     pub schema_version: u32,
     pub records: Vec<DurableRuntimeRecord>,
+    /// Generation ownership is committed with runtime records as one atomic
+    /// snapshot. It is empty only for schema v1/v2 migration input.
+    #[serde(default)]
+    pub generation: GenerationSnapshot,
 }
 
 const fn legacy_runtime_snapshot_version() -> u32 {
@@ -85,6 +93,7 @@ impl Default for RuntimeStoreSnapshot {
         Self {
             schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
             records: Vec::new(),
+            generation: GenerationSnapshot::default(),
         }
     }
 }
@@ -114,16 +123,61 @@ impl RuntimeStoreSnapshot {
                 record.outcome = DurableOperationOutcome::OwnershipUnknown;
             }
         }
+        let mut generations = BTreeMap::new();
+        let mut terminals = Vec::new();
+        for record in &self.records {
+            let owner = record.runtime.terminal.daemon_generation;
+            generations
+                .entry(owner.as_str())
+                .or_insert(GenerationRecord {
+                    generation: owner,
+                    endpoint: "retired-agent-runtime".to_owned(),
+                    role: GenerationRole::Retired,
+                });
+            terminals.push(TerminalOwnership {
+                terminal: record.runtime.terminal.clone(),
+                process: record.process.clone(),
+                state: terminal_ownership_state(record.state),
+            });
+        }
+        self.generation = GenerationSnapshot {
+            current: None,
+            records: generations.into_values().collect(),
+            terminals,
+        };
         self.schema_version = RUNTIME_SNAPSHOT_SCHEMA_VERSION;
         (self, interrupted)
     }
 
     pub fn validate_schema(&self) -> Result<(), RuntimeSnapshotError> {
-        if matches!(self.schema_version, 1 | RUNTIME_SNAPSHOT_SCHEMA_VERSION) {
+        if matches!(self.schema_version, 1 | 2 | RUNTIME_SNAPSHOT_SCHEMA_VERSION) {
             Ok(())
         } else {
             Err(RuntimeSnapshotError::UnknownSchema(self.schema_version))
         }
+    }
+
+    /// Validates the atomic generation/runtime binding before restart is
+    /// allowed to normalize either half. Legacy v1/v2 input has no binding and
+    /// follows the conservative migration above.
+    pub fn validate_ownership(&self) -> Result<(), RuntimeSnapshotError> {
+        if self.schema_version < RUNTIME_SNAPSHOT_SCHEMA_VERSION {
+            return Ok(());
+        }
+        GenerationCoordinator::restore(self.generation.clone(), DEFAULT_GENERATION_LIMIT)
+            .map_err(|_| RuntimeSnapshotError::Generation)?;
+        if self.generation.terminals.len() != self.records.len()
+            || self.records.iter().any(|record| {
+                !self.generation.terminals.iter().any(|ownership| {
+                    ownership.terminal.fences(&record.runtime.terminal)
+                        && ownership.process == record.process
+                        && ownership.state == terminal_ownership_state(record.state)
+                })
+            })
+        {
+            return Err(RuntimeSnapshotError::Generation);
+        }
+        Ok(())
     }
 }
 
@@ -134,6 +188,8 @@ pub enum RuntimeSnapshotError {
     DuplicateOperation,
     ScopeMismatch,
     DispatchReconcile,
+    Generation,
+    OwnershipPersist,
 }
 
 pub trait RuntimeStore {
@@ -293,6 +349,7 @@ pub enum RuntimeError {
     ReconcileRequired(ReconcileState),
     UnknownRuntime,
     TerminalGenerationMismatch,
+    Generation(GenerationError),
 }
 
 /// The daemon owns this coordinator. Callers persist each mutation as one
@@ -302,6 +359,7 @@ pub struct RuntimeCoordinator {
     limit: usize,
     records: BTreeMap<String, DurableRuntimeRecord>,
     terminals: TerminalRegistry,
+    generation: GenerationCoordinator,
 }
 
 impl RuntimeCoordinator {
@@ -312,6 +370,7 @@ impl RuntimeCoordinator {
             limit,
             records: BTreeMap::new(),
             terminals: TerminalRegistry::new(journal_limit, input_cache_limit),
+            generation: GenerationCoordinator::new(DEFAULT_GENERATION_LIMIT),
         }
     }
 
@@ -321,12 +380,34 @@ impl RuntimeCoordinator {
         journal_limit: usize,
         input_cache_limit: usize,
     ) -> Result<Self, RuntimeSnapshotError> {
+        snapshot.validate_ownership()?;
+        let generation =
+            GenerationCoordinator::restore(snapshot.generation.clone(), DEFAULT_GENERATION_LIMIT)
+                .map_err(|_| RuntimeSnapshotError::Generation)?;
         let records = hydrated_records(snapshot)?;
         Ok(Self {
             limit,
             records,
             terminals: TerminalRegistry::new(journal_limit, input_cache_limit),
+            generation,
         })
+    }
+
+    /// Claims production ownership for this daemon generation. The caller
+    /// persists the returned snapshot before exposing any admission path.
+    pub fn activate_generation(
+        &mut self,
+        generation: usagi_core::domain::id::DaemonGeneration,
+    ) -> Result<(), RuntimeSnapshotError> {
+        self.generation
+            .register_standby(generation, "in-process-agent-runtime".to_owned())
+            .and_then(|()| self.generation.activate_initial(generation))
+            .map_err(|_| RuntimeSnapshotError::Generation)
+    }
+
+    #[must_use]
+    pub fn active_generation(&self) -> Option<usagi_core::domain::id::DaemonGeneration> {
+        self.generation.current()
     }
 
     #[coverage(off)]
@@ -357,6 +438,7 @@ impl RuntimeCoordinator {
     // LLVM counts this generic orchestration once per downstream adapter/store/spawner
     // monomorphization. Unit and real-file restart tests cover the shared behavior.
     #[coverage(off)]
+    #[allow(clippy::too_many_lines)] // Reservation, generation ownership, spawn, and compensation form one transaction.
     pub fn launch_with_semantic<A: AgentAdapter + ?Sized, S: RuntimeStore, P: PtySpawner>(
         &mut self,
         request: &LaunchRequest,
@@ -370,6 +452,21 @@ impl RuntimeCoordinator {
         semantic_key: String,
     ) -> Result<(), RuntimeError> {
         self.validate_scope(&runtime, &operation)?;
+        if self.generation.current().is_none() {
+            self.generation
+                .register_standby(
+                    operation.owner_daemon_generation,
+                    "in-process-agent-runtime".to_owned(),
+                )
+                .and_then(|()| {
+                    self.generation
+                        .activate_initial(operation.owner_daemon_generation)
+                })
+                .map_err(RuntimeError::Generation)?;
+        }
+        self.generation
+            .require_active(operation.owner_daemon_generation)
+            .map_err(RuntimeError::Generation)?;
         let key = runtime.agent_runtime_id.as_str();
         if self.records.contains_key(&key) {
             return Err(RuntimeError::RuntimeAlreadyExists);
@@ -410,6 +507,14 @@ impl RuntimeCoordinator {
                 credential_provenance,
             },
         );
+        self.generation
+            .reserve_terminal(runtime.terminal.clone())
+            .map_err(|error| match error {
+                GenerationError::TerminalOwnedElsewhere => {
+                    RuntimeError::Terminal(RegistryError::StaleTarget)
+                }
+                other => RuntimeError::Generation(other),
+            })?;
         self.persist(store)?; // durable reservation/snapshot precedes every external effect
         if let Err(error) = self.terminals.register(runtime.terminal.clone(), geometry) {
             // The store already contains a reservation. Keep it in memory too:
@@ -422,6 +527,9 @@ impl RuntimeCoordinator {
             &runtime.terminal,
         ) {
             Ok(process) => {
+                self.generation
+                    .record_spawn(&runtime.terminal, process.clone())
+                    .map_err(RuntimeError::Generation)?;
                 let record = self.records.get_mut(&key).expect("inserted");
                 record.process = Some(process);
                 record.state = RuntimeState::Running;
@@ -431,6 +539,9 @@ impl RuntimeCoordinator {
                 Ok(())
             }
             Err(SpawnFailure::Definite) => {
+                self.generation
+                    .resolve_orphan(&runtime.terminal, ProcessObservation::Gone, false)
+                    .map_err(RuntimeError::Generation)?;
                 let record = self.records.get_mut(&key).expect("inserted");
                 record.state = RuntimeState::SpawnFailed;
                 record.outcome = DurableOperationOutcome::SpawnUnavailable;
@@ -471,6 +582,13 @@ impl RuntimeCoordinator {
         spawner: &mut P,
     ) -> RuntimeError {
         let terminated = spawner.terminate_reap(&runtime.terminal).is_ok();
+        if terminated {
+            let _ = self.generation.resolve_orphan(
+                &runtime.terminal,
+                ProcessObservation::Unknown,
+                true,
+            );
+        }
         let record = self
             .record_mut(runtime)
             .expect("spawn compensation targets the reserved runtime");
@@ -540,9 +658,17 @@ impl RuntimeCoordinator {
         } else {
             DurableOperationOutcome::ExitUnavailable
         };
+        self.generation
+            .resolve_orphan(&runtime.terminal, ProcessObservation::Unknown, true)
+            .map_err(RuntimeError::Generation)?;
         if self.persist(store).is_err() {
             self.record_mut(runtime)?.state =
                 RuntimeState::ReconcileRequired(ReconcileState::PersistAfterExit);
+            let _ = self.generation.resolve_orphan(
+                &runtime.terminal,
+                ProcessObservation::Unknown,
+                false,
+            );
             return Err(RuntimeError::ReconcileRequired(
                 ReconcileState::PersistAfterExit,
             ));
@@ -559,16 +685,24 @@ impl RuntimeCoordinator {
         observation: ProcessObservation,
         store: &mut S,
     ) -> Result<(), RuntimeError> {
-        let record = self.record_mut(runtime)?;
-        record.state = match observation {
+        let identity_unknown = matches!(observation, ProcessObservation::Unknown);
+        let next_state = match &observation {
             ProcessObservation::Gone => RuntimeState::Reclaimed,
             ProcessObservation::VerifiedAlive(actual)
-                if record.process.as_ref() == Some(&actual) =>
+                if self.record(runtime)?.process.as_ref() == Some(actual) =>
             {
                 RuntimeState::ReconcileRequired(ReconcileState::OrphanRunning)
             }
             _ => RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown),
         };
+        if let Err(error) = self
+            .generation
+            .resolve_orphan(&runtime.terminal, observation, false)
+            && !(identity_unknown && error == GenerationError::TerminalUnavailable)
+        {
+            return Err(RuntimeError::Generation(error));
+        }
+        self.record_mut(runtime)?.state = next_state;
         self.persist(store)
     }
 
@@ -664,6 +798,9 @@ impl RuntimeCoordinator {
     #[must_use]
     #[coverage(off)]
     pub fn runtime_for_terminal(&self, terminal: &TerminalRef) -> Option<AgentRuntimeRef> {
+        if !self.generation.owns_terminal(terminal) {
+            return None;
+        }
         self.records
             .values()
             .find(|record| record.runtime.terminal.fences(terminal))
@@ -709,7 +846,17 @@ impl RuntimeCoordinator {
         RuntimeStoreSnapshot {
             schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
             records: self.records.values().cloned().collect(),
+            generation: self.generation.snapshot(),
         }
+    }
+
+    /// Accepts an Agent completion only while its exact generation and
+    /// terminal ownership are still live. Late outcomes are effect-free.
+    pub fn require_outcome_owner(&self, runtime: &AgentRuntimeRef) -> Result<(), RuntimeError> {
+        self.record(runtime)?;
+        self.generation
+            .require_terminal(&runtime.terminal)
+            .map_err(RuntimeError::Generation)
     }
     #[must_use]
     #[coverage(off)]
@@ -763,7 +910,10 @@ impl RuntimeCoordinator {
     #[coverage(off)]
     fn running(&self, runtime: &AgentRuntimeRef) -> Result<(), RuntimeError> {
         match self.record(runtime)?.state {
-            RuntimeState::Running => Ok(()),
+            RuntimeState::Running => self
+                .generation
+                .require_terminal(&runtime.terminal)
+                .map_err(RuntimeError::Generation),
             RuntimeState::Exited | RuntimeState::Reclaimed => {
                 Err(RuntimeError::Terminal(RegistryError::Exited))
             }
@@ -771,6 +921,24 @@ impl RuntimeCoordinator {
                 ReconcileState::IdentityUnknown,
             )),
         }
+    }
+}
+
+fn terminal_ownership_state(state: RuntimeState) -> TerminalState {
+    match state {
+        RuntimeState::Running => TerminalState::Available,
+        RuntimeState::ReconcileRequired(ReconcileState::OrphanRunning) => {
+            TerminalState::OrphanRunning
+        }
+        RuntimeState::Reserved
+        | RuntimeState::ReconcileRequired(
+            ReconcileState::SpawnAmbiguous
+            | ReconcileState::PersistAfterSpawn
+            | ReconcileState::PersistAfterExit
+            | ReconcileState::IdentityUnknown,
+        ) => TerminalState::IdentityUnknown,
+        RuntimeState::Exited => TerminalState::Terminated,
+        RuntimeState::SpawnFailed | RuntimeState::Reclaimed => TerminalState::Lost,
     }
 }
 
@@ -922,7 +1090,8 @@ mod tests {
         }
     }
     fn refs(request: &LaunchRequest) -> (AgentRuntimeRef, CompletionFence) {
-        let generation = DaemonGeneration::new();
+        static GENERATION: std::sync::OnceLock<DaemonGeneration> = std::sync::OnceLock::new();
+        let generation = *GENERATION.get_or_init(DaemonGeneration::new);
         let terminal = TerminalRef {
             daemon_generation: generation,
             terminal_id: TerminalId::new(),
@@ -981,6 +1150,7 @@ mod tests {
                     credential_provenance: Some(CredentialProvenance::DaemonMintedEphemeral),
                 },
             ],
+            generation: GenerationSnapshot::default(),
         };
 
         let (reconciled, interrupted) = snapshot.reconcile_after_daemon_restart();
@@ -1000,12 +1170,14 @@ mod tests {
             RuntimeStoreSnapshot {
                 schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
                 records: Vec::new(),
+                generation: GenerationSnapshot::default(),
             }
         );
         assert_eq!(
             hydrated_records(RuntimeStoreSnapshot {
                 schema_version: 99,
                 records: Vec::new(),
+                generation: GenerationSnapshot::default(),
             })
             .unwrap_err(),
             RuntimeSnapshotError::UnknownSchema(99)
@@ -1028,6 +1200,7 @@ mod tests {
             hydrated_records(RuntimeStoreSnapshot {
                 schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
                 records: vec![record.clone()],
+                generation: GenerationSnapshot::default(),
             })
             .unwrap()
             .len(),
@@ -1040,6 +1213,7 @@ mod tests {
             hydrated_records(RuntimeStoreSnapshot {
                 schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
                 records: vec![mismatched],
+                generation: GenerationSnapshot::default(),
             })
             .unwrap_err(),
             RuntimeSnapshotError::ScopeMismatch
@@ -1051,6 +1225,7 @@ mod tests {
             hydrated_records(RuntimeStoreSnapshot {
                 schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
                 records: vec![record.clone(), same_runtime],
+                generation: GenerationSnapshot::default(),
             })
             .unwrap_err(),
             RuntimeSnapshotError::DuplicateRuntime
@@ -1067,6 +1242,7 @@ mod tests {
             hydrated_records(RuntimeStoreSnapshot {
                 schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
                 records: vec![record.clone(), duplicate_operation],
+                generation: GenerationSnapshot::default(),
             })
             .unwrap_err(),
             RuntimeSnapshotError::DuplicateOperation
@@ -1086,6 +1262,34 @@ mod tests {
         assert_eq!(
             legacy.records[0].outcome,
             DurableOperationOutcome::OwnershipUnknown
+        );
+    }
+
+    #[test]
+    fn corrupt_generation_binding_fails_closed_before_hydrate() {
+        let request = request();
+        let (runtime, fence) = refs(&request);
+        let mut coordinator = RuntimeCoordinator::new(1, 64, 1);
+        let mut store = Store::default();
+        launch(
+            &mut coordinator,
+            &request,
+            runtime,
+            fence,
+            &mut Spawner(Ok(process())),
+            &mut store,
+        )
+        .unwrap();
+        let mut corrupt = coordinator.snapshot();
+        corrupt.generation.terminals[0].terminal.worktree_id = WorktreeId::new();
+
+        assert_eq!(
+            corrupt.validate_ownership(),
+            Err(RuntimeSnapshotError::Generation)
+        );
+        assert_eq!(
+            RuntimeCoordinator::hydrate(corrupt, 1, 64, 1).unwrap_err(),
+            RuntimeSnapshotError::Generation
         );
     }
 
@@ -1113,6 +1317,7 @@ mod tests {
                     outcome,
                     credential_provenance: Some(CredentialProvenance::DaemonMintedEphemeral),
                 }],
+                generation: GenerationSnapshot::default(),
             };
             assert_eq!(
                 serde_json::from_str::<RuntimeStoreSnapshot>(
