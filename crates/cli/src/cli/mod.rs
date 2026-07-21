@@ -108,8 +108,12 @@ pub enum Command {
     Config,
     /// 必要ツールの導入状況を診断する（TUI の Doctor を開く）
     Doctor,
-    /// 最新 release の usagi バイナリをダウンロードして更新する
-    Update,
+    /// usagi バイナリを GitHub Releases から更新する
+    Update {
+        /// 更新先の release を一覧から選択する
+        #[arg(short = 'v')]
+        select_version: bool,
+    },
     /// 指定シェルの補完スクリプトを標準出力に印字する（Tab 補完を有効化する）
     Completion {
         /// 補完スクリプトを生成する対象シェル
@@ -172,7 +176,7 @@ impl Command {
             Command::Open { path } => Box::new(h::Open { path }),
             Command::Config => Box::new(h::Config),
             Command::Doctor => Box::new(h::Doctor),
-            Command::Update => Box::new(h::Update),
+            Command::Update { select_version } => Box::new(h::Update { select_version }),
             Command::Completion { shell } => Box::new(h::Completion { shell }),
             Command::Version => Box::new(h::Version {
                 version: version.to_owned(),
@@ -310,7 +314,17 @@ mod tests {
         ));
         assert!(matches!(
             Cli::try_parse_from(["usagi", "update"]).unwrap().command,
-            Some(Command::Update)
+            Some(Command::Update {
+                select_version: false
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "update", "-v"])
+                .unwrap()
+                .command,
+            Some(Command::Update {
+                select_version: true
+            })
         ));
         assert!(matches!(
             Cli::try_parse_from(["usagi", "version"]).unwrap().command,
