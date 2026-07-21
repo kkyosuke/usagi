@@ -107,7 +107,8 @@ impl CreateSessionForm {
     }
 
     /// 入力のたびに name の live validation を反映する。空名は「入力途中」であって
-    /// error にはせず（submit 時にだけ弾く）、不正文字・64 文字超過・同名は即座に
+    /// error にはせず（submit 時にだけ弾く）、不正文字・64 文字超過・既知 worktree との
+    /// 同名は即座に
     /// 行の下の error として見せる。draft は決して失わない。
     fn revalidate(&mut self) {
         self.error = validate_session_name_live(&self.name, &self.existing);
@@ -116,7 +117,7 @@ impl CreateSessionForm {
     /// submit（Enter）時の検証。空名はここで初めて error になる。
     fn request(&mut self) -> Result<SessionCreateIntent, Notice> {
         // 空名は submit 時にだけ弾く（入力途中は error にしない）。非空の name は
-        // 不正文字・64 文字超過・同名を local validation で拒否する。
+        // 不正文字・64 文字超過・既知 worktree との同名を local validation で拒否する。
         let name = required_create_value(&self.name, "session name is required")?;
         if let Some(error) = validate_session_name_live(&self.name, &self.existing) {
             return Err(error);
@@ -130,7 +131,7 @@ impl CreateSessionForm {
 }
 
 /// 入力途中でも判定できる name の validation。空名（入力途中）は `None` を返し、
-/// 不正文字・64 文字超過・表示中 session との同名だけを safe な error にする。
+/// 不正文字・64 文字超過・既知 worktree との同名だけを safe な error にする。
 /// 返す message は利用者の入力を復唱せず、内部詳細も含めない。
 fn validate_session_name_live(name: &str, existing: &[String]) -> Option<Notice> {
     let trimmed = name.trim();
@@ -149,7 +150,10 @@ fn validate_session_name_live(name: &str, existing: &[String]) -> Option<Notice>
         return Some(Notice::new("name too long (max 64)"));
     }
     if existing.iter().any(|current| current == trimmed) {
-        return Some(Notice::new("name already exists"));
+        // `existing` is supplied from the daemon-authoritative sidebar
+        // snapshot. A matching session name owns `.usagi/sessions/<name>`, so
+        // surface this actionable conflict before a create request is sent.
+        return Some(Notice::new("worktree already exists"));
     }
     None
 }
@@ -3716,7 +3720,7 @@ mod tests {
         for character in "alpha".chars() {
             form.push(character);
         }
-        assert_eq!(form.error().unwrap().message, "name already exists");
+        assert_eq!(form.error().unwrap().message, "worktree already exists");
         assert!(form.request().is_err());
         assert_eq!(form.name(), "alpha", "draft is preserved");
         // A distinct name is accepted; the duplicate check is against the exact name.
@@ -3741,7 +3745,7 @@ mod tests {
             let _ = update(&mut state, AppEvent::Key(AppKey::Char(character)));
         }
         let form = state.create_session_form().unwrap();
-        assert_eq!(form.error().unwrap().message, "name already exists");
+        assert_eq!(form.error().unwrap().message, "worktree already exists");
     }
 
     #[test]
