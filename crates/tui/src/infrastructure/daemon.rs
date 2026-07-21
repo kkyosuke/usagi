@@ -4,8 +4,6 @@
 //! decode 済みの typed push だけを受け、`ProtocolError` の安全な envelope fields
 //! 以外を TUI state へ渡さない。
 
-#![coverage(off)] // Transport projection is an integration seam; reducer tests cover its accepted projections.
-
 use std::collections::VecDeque;
 
 use usagi_core::domain::id::{AgentRuntimeRef, UserDecisionId, WorkspaceId};
@@ -75,7 +73,6 @@ impl DaemonPushAdapter {
 
 /// Converts one decoded push without retaining any wire payload in UI state.
 #[must_use]
-#[coverage(off)] // Wire decode is exercised by the daemon IPC integration suite; this adapter only projects safe fields.
 pub fn adapt_push(push: DaemonPush) -> BackendEvent {
     match push {
         DaemonPush::RuntimePhase { runtime, phase } => {
@@ -128,6 +125,7 @@ fn safe_error(error: ProtocolError) -> SafeError {
 
 #[cfg(test)]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use serde_json::json;
     use usagi_core::domain::id::{
         AgentRuntimeId, DaemonGeneration, SessionId, TerminalId, TerminalRef, WorkspaceId,
@@ -210,6 +208,46 @@ mod tests {
                 message: SafeMessage::new("Session is busy"),
                 error_id: "err-safe-43".into(),
             }))
+        );
+
+        let workspace = WorkspaceId::new();
+        let decision_id = usagi_core::domain::id::UserDecisionId::new();
+        assert_eq!(
+            adapt_push(DaemonPush::DecisionsSnapshot {
+                workspace,
+                decisions: Vec::new(),
+            }),
+            BackendEvent::Decisions {
+                workspace,
+                decisions: Vec::new(),
+            }
+        );
+        assert_eq!(
+            adapt_push(DaemonPush::DecisionResolved {
+                workspace,
+                decision_id,
+            }),
+            BackendEvent::DecisionResolved {
+                workspace,
+                decision_id,
+            }
+        );
+        let mut decision_error = ProtocolError::new(ErrorCode::Busy, "Decision is busy");
+        decision_error.error_id = "err-safe-44".into();
+        assert_eq!(
+            adapt_push(DaemonPush::DecisionError {
+                workspace,
+                decision_id,
+                error: decision_error,
+            }),
+            BackendEvent::DecisionError {
+                workspace,
+                decision_id,
+                error: SafeError {
+                    message: SafeMessage::new("Decision is busy"),
+                    error_id: "err-safe-44".into(),
+                },
+            }
         );
     }
 }

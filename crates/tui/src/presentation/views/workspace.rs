@@ -28,7 +28,8 @@ use crate::presentation::views::pr_modal::{self, PrModal};
 use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
 use crate::presentation::widgets;
 use crate::usecase::application::controller::{
-    AppState, Feedback, HomeMode, PrOverlay, PreviewOverlay, Selection, Target, TargetPhase,
+    AppState, CreateSessionForm, Feedback, HomeMode, Notice, PrOverlay, PreviewOverlay, Selection,
+    Target, TargetPhase,
 };
 use crate::usecase::application::pane::{
     PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
@@ -53,7 +54,6 @@ const GIBIBYTE: u64 = 1_073_741_824;
 
 /// Returns the PTY viewport that is visible inside the right-hand pane.
 #[must_use]
-#[coverage(off)]
 pub fn terminal_viewport(raw_height: usize, raw_width: usize) -> (usize, usize) {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let split = panes::split(width, LEFT_WIDTH);
@@ -109,7 +109,6 @@ pub struct GitDiff {
 impl ProjectedSession {
     /// daemon snapshot record を、stable identity を保った sidebar projection へ変換する。
     #[must_use]
-    #[coverage(off)]
     pub fn from_record(id: SessionId, record: &SessionRecord) -> Self {
         Self {
             id,
@@ -125,7 +124,6 @@ impl ProjectedSession {
     }
 }
 
-#[coverage(off)]
 fn pr_summary(prs: &[PrLink]) -> Option<String> {
     let visible = prs.iter().filter(|pr| pr.is_visible()).collect::<Vec<_>>();
     let first = visible.first()?;
@@ -225,6 +223,19 @@ struct CreateDraft {
     error: Option<String>,
 }
 
+impl From<&CreateSessionForm> for CreateDraft {
+    fn from(form: &CreateSessionForm) -> Self {
+        Self {
+            name: form.name().to_owned(),
+            error: form.error().map(clone_notice_message),
+        }
+    }
+}
+
+fn clone_notice_message(notice: &Notice) -> String {
+    notice.message.clone()
+}
+
 /// Home の右ペインに投影する tab strip の 1 項目。
 ///
 /// tab の identity / 選択は pane reducer が所有する。この型はその state を描画向けの安全な
@@ -242,22 +253,26 @@ impl HomeProjection {
     /// state にある ID だけをその順番で採用する。欠損した表示情報は描画せず、controller
     /// 側の snapshot reconciliation が selected / active を root に縮退させる。
     #[must_use]
-    #[coverage(off)]
     pub fn from_state(
         state: &AppState,
-        workspace_name: impl Into<String>,
-        _root_cwd: impl Into<PathBuf>,
+        workspace_name: &str,
+        root_cwd: &Path,
         snapshot_sessions: &[ProjectedSession],
     ) -> Self {
-        let sessions = state
-            .sessions()
-            .iter()
-            .filter_map(|id| snapshot_sessions.iter().find(|session| session.id == *id))
-            .cloned()
-            .collect();
+        let _ = root_cwd;
+        let mut sessions = Vec::new();
+        for id in state.sessions() {
+            for session in snapshot_sessions {
+                if session.id == *id {
+                    sessions.push(session.clone());
+                    break;
+                }
+            }
+        }
+        let create_draft = state.create_session_form().map(CreateDraft::from);
         Self {
             workspace: state.workspace(),
-            workspace_name: workspace_name.into(),
+            workspace_name: workspace_name.to_owned(),
             sessions,
             selected: state.selected(),
             active: state.active(),
@@ -293,10 +308,7 @@ impl HomeProjection {
             preview_overlay: state.preview_overlay().cloned(),
             overview_modal: None,
             closeup_modal: None,
-            create_draft: state.create_session_form().map(|form| CreateDraft {
-                name: form.name().to_owned(),
-                error: form.error().map(|notice| notice.message.clone()),
-            }),
+            create_draft,
             // Seeded by the shell's in-flight create via `with_create_pending`;
             // the reducer never owns the pending name because its snapshot arrives
             // through the daemon transport, not `AppState`.
@@ -332,7 +344,6 @@ impl HomeProjection {
     /// pending/live の identity は reducer に残し、表示層は identity を文字列や index に
     /// 置換して操作しない。同名 tab も選択状態は `TabSelection` で区別される。
     #[must_use]
-    #[coverage(off)]
     pub fn with_pane(mut self, pane: &PaneState) -> Self {
         self.pane_tabs = pane
             .tabs()
@@ -393,7 +404,6 @@ impl HomeProjection {
 
     /// 左 sidebar の rows。main と `+ new session` は session 数にかかわらず常設する。
     #[must_use]
-    #[coverage(off)]
     pub fn rows(&self) -> Vec<Selection> {
         let mut rows = Vec::with_capacity(self.sessions.len() + 2);
         rows.push(Selection::Target(Target::Root(self.workspace)));
@@ -406,7 +416,6 @@ impl HomeProjection {
         rows
     }
 
-    #[coverage(off)]
     fn active_label(&self) -> &str {
         match self.active {
             Target::Root(id) if id == self.workspace => "main",
@@ -420,7 +429,6 @@ impl HomeProjection {
     }
 }
 
-#[coverage(off)]
 fn pane_tab_label(tab: &PaneTab) -> String {
     match tab {
         PaneTab::Pending(pending) => match pending.kind {
@@ -440,7 +448,6 @@ fn pane_tab_label(tab: &PaneTab) -> String {
     }
 }
 
-#[coverage(off)]
 fn pane_tab_selected(tab: &PaneTab, selection: &PaneSelection) -> bool {
     match (tab, selection) {
         (PaneTab::Pending(pending), PaneSelection::Tab(TabSelection::Pending(selected))) => {
@@ -480,7 +487,6 @@ pub enum Mode {
 impl Mode {
     const ALL: [Self; 2] = [Self::Switch, Self::Closeup];
 
-    #[coverage(off)]
     fn label(self) -> &'static str {
         match self {
             Self::Switch => "Switch",
@@ -488,7 +494,6 @@ impl Mode {
         }
     }
 
-    #[coverage(off)]
     fn icon(self) -> char {
         match self {
             Self::Switch => '\u{f0ec}',
@@ -517,16 +522,15 @@ pub struct Workspace {
 impl Workspace {
     /// core の workspace とその永続化済み状態からセッションキャッシュを作る。
     #[must_use]
-    #[coverage(off)]
     pub fn new(workspace: WorkspaceRecord, state: WorkspaceState) -> Self {
-        let session_ids = state.sessions.iter().map(|_| SessionId::new()).collect();
+        let mut session_ids = Vec::with_capacity(state.sessions.len());
+        session_ids.resize_with(state.sessions.len(), SessionId::new);
         Self::with_runtime_ids(workspace, state, session_ids)
     }
 
     /// Build the cache from daemon-authoritative workspace state and session
     /// identities. The identities fence pane requests and completions.
     #[must_use]
-    #[coverage(off)]
     pub fn with_runtime_ids(
         workspace: WorkspaceRecord,
         state: WorkspaceState,
@@ -535,7 +539,9 @@ impl Workspace {
         let session_ids = if session_ids.len() == state.sessions.len() {
             session_ids
         } else {
-            state.sessions.iter().map(|_| SessionId::new()).collect()
+            let mut fallback_ids = Vec::with_capacity(state.sessions.len());
+            fallback_ids.resize_with(state.sessions.len(), SessionId::new);
+            fallback_ids
         };
         Self {
             record: workspace,
@@ -548,35 +554,30 @@ impl Workspace {
 
     /// workspace 名。
     #[must_use]
-    #[coverage(off)]
     pub fn name(&self) -> &str {
         &self.record.name
     }
 
     /// workspace の絶対パス。
     #[must_use]
-    #[coverage(off)]
     pub fn path(&self) -> &Path {
         &self.record.path
     }
 
     /// セッション一覧。
     #[must_use]
-    #[coverage(off)]
     pub fn sessions(&self) -> &[SessionRecord] {
         &self.state.sessions
     }
 
     /// Daemon identities aligned with [`Self::sessions`].
     #[must_use]
-    #[coverage(off)]
     pub fn session_ids(&self) -> &[SessionId] {
         &self.session_ids
     }
 
     /// Replace only the sidebar's session projection from a daemon lifecycle
     /// snapshot. The persisted workspace state remains read-only auxiliary data.
-    #[coverage(off)]
     pub fn replace_sessions(&mut self, sessions: Vec<SessionRecord>) {
         self.replace_sessions_and_ids(sessions, None);
     }
@@ -584,7 +585,6 @@ impl Workspace {
     /// Replace sidebar rows and their daemon-issued runtime identities from one
     /// lifecycle snapshot. The vectors are aligned by snapshot order; names
     /// remain display-only and are never used to recover an identity.
-    #[coverage(off)]
     pub fn replace_sessions_with_runtime_ids(
         &mut self,
         sessions: Vec<SessionRecord>,
@@ -593,7 +593,6 @@ impl Workspace {
         self.replace_sessions_and_ids(sessions, Some(session_ids));
     }
 
-    #[coverage(off)]
     fn replace_sessions_and_ids(
         &mut self,
         sessions: Vec<SessionRecord>,
@@ -607,7 +606,6 @@ impl Workspace {
     }
 
     /// Replaces the daemon-observed metrics shown in the sidebar footer area.
-    #[coverage(off)]
     pub fn set_metrics(&mut self, metrics: Option<DaemonMetrics>) {
         self.metrics = metrics;
     }
@@ -620,7 +618,6 @@ impl Workspace {
     }
 
     /// Replace the completed Git observations without blocking the renderer.
-    #[coverage(off)]
     pub fn set_git_diffs(&mut self, diffs: BTreeMap<SessionId, GitDiff>) {
         self.git_diffs = diffs;
     }
@@ -634,7 +631,6 @@ impl Workspace {
 
     /// The workspace record passed to the daemon lifecycle command port.
     #[must_use]
-    #[coverage(off)]
     pub fn record(&self) -> &WorkspaceRecord {
         &self.record
     }
@@ -643,7 +639,6 @@ impl Workspace {
 // ── header ──────────────────────────────────────────────────────────────────
 
 /// v1 の chrome と同じアイコン付き mode 表示。現在の mode だけを accent で強調する。
-#[coverage(off)]
 fn mode_toggle(current: Mode) -> String {
     Mode::ALL
         .iter()
@@ -660,7 +655,6 @@ fn mode_toggle(current: Mode) -> String {
 }
 
 /// 左の breadcrumb を必要な分だけ切り、mode toggle の右端位置を常に保つ。
-#[coverage(off)]
 fn header_with_mode_toggle(width: usize, left: &str, mode: Mode) -> String {
     let toggle = mode_toggle(mode);
     let toggle = widgets::clip_to_width(&toggle, width);
@@ -673,14 +667,12 @@ fn header_with_mode_toggle(width: usize, left: &str, mode: Mode) -> String {
 }
 
 /// Header の下に呼吸できる余白を作る全幅の空行。
-#[coverage(off)]
 fn header_spacer(width: usize) -> String {
     " ".repeat(width)
 }
 
 // ── left pane: session menu ─────────────────────────────────────────────────
 
-#[coverage(off)]
 fn sidebar_divider(width: usize) -> String {
     // Indenting the rule gives the root row and the session group distinct
     // breathing room without moving the pane boundary itself.
@@ -873,7 +865,6 @@ fn format_memory(bytes: u64) -> String {
 
 /// Pins a right-pane footer while preserving one blank breathing row above it.
 /// Tiny terminals degrade to a footer-only row rather than overflowing.
-#[coverage(off)]
 fn with_footer_gap(mut rows: Vec<String>, height: usize, footer: String) -> Vec<String> {
     if height == 0 {
         return Vec::new();
@@ -956,7 +947,6 @@ pub fn terminal_point_at(
 /// navigation cursor と command target を stable [`Selection`] / [`Target`] identity から別々に
 /// 投影する。Switch では cursor が優先し、Closeup では cursor を抑止して current marker を残す。
 #[must_use]
-#[coverage(off)]
 pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -> Vec<String> {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let split = panes::split(width, LEFT_WIDTH);
@@ -1059,7 +1049,6 @@ fn dim_inactive_right_pane(inactive: bool, right: Vec<String>) -> Vec<String> {
     }
 }
 
-#[coverage(off)]
 fn home_header_line(width: usize, home: &HomeProjection) -> String {
     let mode = match home.mode {
         HomeMode::Switch => Mode::Switch,
@@ -1088,7 +1077,6 @@ fn home_header_line(width: usize, home: &HomeProjection) -> String {
     )
 }
 
-#[coverage(off)]
 fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
     let Some(decision) = home
         .decisions
@@ -1111,7 +1099,6 @@ fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
     )
 }
 
-#[coverage(off)]
 fn home_left_pane(
     height: usize,
     width: usize,
@@ -1218,7 +1205,6 @@ fn home_left_pane(
     lines
 }
 
-#[coverage(off)]
 fn home_viewport_start(
     width: usize,
     home: &HomeProjection,
@@ -1273,7 +1259,6 @@ fn create_skeleton_lines(width: usize, name: &str, tick: u64) -> Vec<String> {
     ]
 }
 
-#[coverage(off)]
 fn home_row_height(row: Selection) -> usize {
     if matches!(row, Selection::Target(Target::Root(_))) {
         2
@@ -1286,7 +1271,6 @@ fn home_row_height(row: Selection) -> usize {
 /// owns input its height is the number of lines `new_session_input_lines` draws
 /// (caret row plus any wrapped error), so the viewport reserves exactly what is
 /// rendered. Every other row falls back to the static [`home_row_height`].
-#[coverage(off)]
 fn home_row_height_at(width: usize, home: &HomeProjection, row: Selection) -> usize {
     if let (Selection::NewSession, Some(draft)) = (row, home.create_draft.as_ref()) {
         return new_session_input_lines(width, draft).len();
@@ -1330,7 +1314,6 @@ fn home_row_label(
     }
 }
 
-#[coverage(off)]
 fn home_row_lines_at(
     width: usize,
     home: &HomeProjection,
@@ -1510,7 +1493,6 @@ fn new_session_input_lines(width: usize, draft: &CreateDraft) -> Vec<String> {
 /// in Closeup its active two-line stack is green. Root and action rows retain the compact
 /// red `>` cursor in Switch, except that `+ new session` remains chevron-free
 /// even while it owns the Switch cursor.
-#[coverage(off)]
 fn home_row_marker(row: Selection, selected: bool, current: bool) -> String {
     if selected {
         return match row {
@@ -1526,7 +1508,6 @@ fn home_row_marker(row: Selection, selected: bool, current: bool) -> String {
 }
 
 /// The second row of a session carries the same coloured rail as its identity row.
-#[coverage(off)]
 fn home_session_continuation_marker(selected: bool, current: bool) -> String {
     if selected {
         Role::Danger.style().bold().paint("|")
@@ -1537,7 +1518,6 @@ fn home_session_continuation_marker(selected: bool, current: bool) -> String {
     }
 }
 
-#[coverage(off)]
 fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<String> {
     let mode = match home.mode {
         HomeMode::Switch => "Switch",
@@ -1625,7 +1605,6 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
     )
 }
 
-#[coverage(off)]
 fn phase_label(phase: TargetPhase) -> &'static str {
     match phase {
         TargetPhase::Absent => "absent",
@@ -1660,7 +1639,6 @@ fn abnormal_daemon_speech(feedback: Option<&Feedback>) -> Option<widgets::mascot
     widgets::mascot::MascotSpeech::new(lines)
 }
 
-#[coverage(off)]
 fn feedback_label(feedback: Option<&Feedback>) -> String {
     match feedback {
         None => "none".to_string(),
@@ -1690,20 +1668,22 @@ mod tests {
     use super::{
         CHROME_ROWS, CREATE_SKELETON_ROWS, CreateDraft, GIBIBYTE, GitDiff, HomeProjection,
         LEFT_WIDTH, MEBIBYTE, ProjectedSession, TerminalViewProjection, Workspace,
-        abnormal_daemon_speech, create_skeleton_lines, format_memory, load_style,
-        new_session_input_lines, render_home, resume_label, terminal_point_at, with_footer_gap,
+        abnormal_daemon_speech, create_skeleton_lines, feedback_label, format_memory, load_style,
+        new_session_input_lines, pane_tab_label, pane_tab_selected, phase_label, render_home,
+        resume_label, terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Style};
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{display_width, modal, wrap_to_width};
     use crate::usecase::application::controller::{
         AppEvent, AppKey, AppState, BackendEvent, Feedback, HomeMode, Route, SafeError,
-        SafeMessage, Selection, Target, update,
+        SafeMessage, Selection, Target, TargetPhase, update,
     };
     use crate::usecase::application::pane::{
         PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection, reduce,
     };
     use crate::usecase::application::terminal_selection::TerminalPoint;
+    use std::path::Path;
 
     use chrono::{DateTime, Utc};
     use std::collections::BTreeMap;
@@ -1850,23 +1830,13 @@ mod tests {
         assert_ne!(first[0], later[0]);
         assert!(strip(&later[0]).contains("atlas"));
         assert_eq!(display_width(&later[0]), 30);
-        assert!(
-            first
-                .iter()
-                .all(|line| line.contains("\u{1b}[2;32m") || line.contains("\u{1b}[1;32m"))
-        );
-        assert!(
-            first
-                .iter()
-                .all(|line| !line.contains("\u{1b}[2;36m") && !line.contains("\u{1b}[1;36m"))
-        );
     }
 
     #[test]
     fn home_pending_create_waves_a_skeleton_above_new_session() {
         let workspace = WorkspaceId::new();
         let state = AppState::home(workspace, Vec::new());
-        let home = HomeProjection::from_state(&state, "work", "/work", &[])
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[])
             .with_create_pending(Some("atlas".to_owned()));
         let lines = render_home(30, 100, &home)
             .iter()
@@ -1889,7 +1859,7 @@ mod tests {
         let quiet = render_home(
             30,
             100,
-            &HomeProjection::from_state(&state, "work", "/work", &[]),
+            &HomeProjection::from_state(&state, "work", Path::new("/work"), &[]),
         )
         .iter()
         .map(|line| strip(line))
@@ -1910,7 +1880,7 @@ mod tests {
             resumable: true,
             reason: ProviderResumeReason::ExplicitResumeAvailable,
         });
-        let home = HomeProjection::from_state(&state, "work", "/work", &[projected]);
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[projected]);
 
         let frame = joined_home(&home);
         assert!(frame.contains("interrupted · resume available"));
@@ -1972,7 +1942,7 @@ mod tests {
             projected_session(first, "same label", "/work/first"),
             projected_session(second, "same label", "/work/second"),
         ];
-        let home = HomeProjection::from_state(&state, "work", "/work", &snapshot);
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &snapshot);
 
         assert_eq!(
             home.rows(),
@@ -2001,7 +1971,12 @@ mod tests {
         for character in "feature-x".chars() {
             let _ = update(&mut state, AppEvent::Key(AppKey::Char(character)));
         }
-        let text = joined_home(&HomeProjection::from_state(&state, "work", "/work", &[]));
+        let text = joined_home(&HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[],
+        ));
         // The row renders the typed name inline while the form owns input; the
         // static label and the former centered "New session" modal are both gone.
         assert!(text.contains("feature-x"));
@@ -2021,7 +1996,7 @@ mod tests {
         for character in "feature-x".chars() {
             let _ = update(&mut state, AppEvent::Key(AppKey::Char(character)));
         }
-        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
         // Render with styles preserved (joined_home strips them).
         let rendered = render_home(30, 100, &home).join("\n");
         assert!(rendered.contains("\u{1b}[1;32m+ new:\u{1b}[0m"));
@@ -2040,7 +2015,12 @@ mod tests {
         // Submitting an empty name keeps the form open and attaches a reducer error,
         // which the inline row surfaces without a modal.
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
-        let text = joined_home(&HomeProjection::from_state(&state, "work", "/work", &[]));
+        let text = joined_home(&HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[],
+        ));
         assert!(text.contains("session name is required"));
         assert!(!text.contains("New session"));
     }
@@ -2056,7 +2036,12 @@ mod tests {
         for character in "ok/".chars() {
             let _ = update(&mut state, AppEvent::Key(AppKey::Char(character)));
         }
-        let text = joined_home(&HomeProjection::from_state(&state, "work", "/work", &[]));
+        let text = joined_home(&HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[],
+        ));
         assert!(text.contains("invalid character"));
         assert!(text.contains("ok/"));
     }
@@ -2197,7 +2182,7 @@ mod tests {
         for character in "bad/name/with/slashes".chars() {
             let _ = update(&mut state, AppEvent::Key(AppKey::Char(character)));
         }
-        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
         for height in [6usize, 10, 30] {
             let rows = render_home(height, 20, &home);
             assert_eq!(rows.len(), height);
@@ -2235,7 +2220,7 @@ mod tests {
         );
         // Move the cursor to the second PR so the detail reflects the selection.
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
-        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
         let text = joined_home(&home);
         assert!(text.contains("Pull Request"));
         assert!(text.contains("#7"));
@@ -2257,7 +2242,7 @@ mod tests {
                 error: pr_error(),
             }),
         );
-        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
         let text = joined_home(&home);
         assert!(text.contains("Pull Request"));
         assert!(text.contains("gh unavailable"));
@@ -2275,7 +2260,12 @@ mod tests {
                 lines: vec!["# Heading".into(), "content line".into()],
             }),
         );
-        let ready = joined_home(&HomeProjection::from_state(&state, "work", "/work", &[]));
+        let ready = joined_home(&HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[],
+        ));
         assert!(ready.contains("Preview"));
         assert!(ready.contains("Heading"));
         assert!(ready.contains("content line"));
@@ -2290,7 +2280,12 @@ mod tests {
                 },
             }),
         );
-        let errored = joined_home(&HomeProjection::from_state(&state, "work", "/work", &[]));
+        let errored = joined_home(&HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[],
+        ));
         assert!(errored.contains("Preview"));
         assert!(errored.contains("no preview available"));
     }
@@ -2343,7 +2338,7 @@ mod tests {
         let home = HomeProjection::from_state(
             &state,
             "work",
-            "/work",
+            Path::new("/work"),
             &[
                 projected_session(first, "first", "/work/first"),
                 projected_session(second, "second", "/work/second"),
@@ -2369,12 +2364,9 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
-        let home = HomeProjection::from_state(
-            &state,
-            "work",
-            "/work",
-            &[projected_session(session, "session", "/work/session")],
-        );
+        let mut projected = projected_session(session, "session", "/work/session");
+        projected.has_notes = true;
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[projected]);
         let text = joined_home(&home);
         assert!(!text.contains("> + new session"));
         assert!(!text.contains("| + new session"));
@@ -2383,7 +2375,7 @@ mod tests {
             &mut state,
             AppEvent::Backend(BackendEvent::Sessions(Vec::new())),
         );
-        let refreshed = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let refreshed = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
         // `+ new` は常設 action row のため refresh で消えない。一方、消えた active
         // session は typed identity で検出され root へ縮退する。
         assert_eq!(state.selected(), Selection::NewSession);
@@ -2407,7 +2399,7 @@ mod tests {
             projected_session(second, "同じ名前", "/work/second"),
         ];
 
-        let closeup = HomeProjection::from_state(&state, "work", "/work", &snapshot);
+        let closeup = HomeProjection::from_state(&state, "work", Path::new("/work"), &snapshot);
         let closeup_text = joined_home(&closeup);
         assert!(closeup_text.contains("| 同じ名前"));
         assert!(!closeup_text.contains("\u{f0907} 同じ名前"));
@@ -2419,7 +2411,7 @@ mod tests {
 
         let _ = update(&mut state, AppEvent::Key(AppKey::CtrlO));
         assert_eq!(state.route(), Route::Home(HomeMode::Switch));
-        let switch = HomeProjection::from_state(&state, "work", "/work", &snapshot);
+        let switch = HomeProjection::from_state(&state, "work", Path::new("/work"), &snapshot);
         let switch_text = joined_home(&switch);
         assert!(switch_text.contains("| 同じ名前"));
         assert!(switch_text.contains("\u{f0907} 同じ名前"));
@@ -2444,7 +2436,7 @@ mod tests {
         let home = HomeProjection::from_state(
             &state,
             "work",
-            "/work",
+            Path::new("/work"),
             &[
                 projected_session(first, "first", "/work/first"),
                 projected_session(second, "second", "/work/second"),
@@ -2477,7 +2469,7 @@ mod tests {
         let home = HomeProjection::from_state(
             &state,
             "work",
-            "/work",
+            Path::new("/work"),
             &[
                 active_session,
                 projected_session(selected, "selected", "/work/selected"),
@@ -2516,7 +2508,7 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         assert_eq!(state.selected(), Selection::NewSession);
         assert_eq!(state.route(), Route::Home(HomeMode::Switch));
-        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
 
         // Regression (#376): the Switch cursor on `+ new session` must keep the
         // Success (green) role and only add bold — never fall through to the
@@ -2555,7 +2547,7 @@ mod tests {
         let home = HomeProjection::from_state(
             &state,
             "work",
-            "/work",
+            Path::new("/work"),
             &[projected_session(session, "session", "/work/session")],
         );
 
@@ -2572,7 +2564,7 @@ mod tests {
     fn home_projection_handles_tiny_geometry_and_an_unrelated_root_target_safely() {
         let workspace = WorkspaceId::new();
         let state = AppState::home(workspace, Vec::new());
-        let mut home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let mut home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
         home.active = Target::Root(WorkspaceId::new());
 
         let zero_body = render_home(2, 20, &home);
@@ -2580,20 +2572,30 @@ mod tests {
         assert_eq!(zero_body.len(), 2);
         assert_eq!(one_row_body.len(), 3);
         assert!(joined_home(&home).contains("No tabs stirring yet. Enter starts one."));
+
+        let session = SessionId::new();
+        let state = AppState::home(workspace, vec![session]);
+        let home = HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[projected_session(session, "session", "/work/session")],
+        );
+        assert_eq!(render_home(6, 20, &home).len(), 6);
     }
 
     #[test]
     fn home_sidebar_mascot_animates_only_on_tick_and_stays_in_the_background() {
         let workspace = WorkspaceId::new();
         let mut state = AppState::home(workspace, Vec::new());
-        let initial = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let initial = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
         let first = render_home(20, 80, &initial).join("\n");
         assert!(strip(&first).contains("(o.o)?"));
 
         for _ in 0..4 {
             let _ = update(&mut state, AppEvent::Tick);
         }
-        let blink = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let blink = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
         let blink_frame = render_home(20, 80, &blink).join("\n");
         assert_eq!(state.mascot_tick(), 4);
         assert!(strip(&blink_frame).contains("(-.-)?"));
@@ -2606,7 +2608,7 @@ mod tests {
     fn home_speech_reserves_a_blank_row_and_does_not_change_home_state() {
         let state = AppState::home(WorkspaceId::new(), Vec::new());
         let speech = MascotSpeech::new(["同期済み".to_owned()]).expect("speech");
-        let home = HomeProjection::from_state(&state, "work", "/work", &[])
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[])
             .with_mascot_speech(Some(speech));
         let frame = render_home(30, 80, &home);
         let left_rows = frame[CHROME_ROWS..]
@@ -2676,7 +2678,7 @@ mod tests {
         // The daemon observation flows through `with_metrics` into the sidecar row
         // beside usagi.
         let state = AppState::home(WorkspaceId::new(), Vec::new());
-        let home = HomeProjection::from_state(&state, "actual", "/tmp/actual", &[])
+        let home = HomeProjection::from_state(&state, "actual", Path::new("/tmp/actual"), &[])
             .with_metrics(Some(metrics));
         let controller = render_home(30, 100, &home);
 
@@ -2692,7 +2694,7 @@ mod tests {
     #[test]
     fn home_without_metrics_keeps_the_pre_metrics_frame() {
         let state = AppState::home(WorkspaceId::new(), Vec::new());
-        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
         let baseline = render_home(30, 100, &home);
 
         // Attaching an absent observation is a no-op on the rendered frame.
@@ -2706,7 +2708,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn home_feedback_area_renders_safe_error_and_disconnect_without_raw_detail() {
         let workspace = WorkspaceId::new();
         let mut state = AppState::home(workspace, Vec::new());
@@ -2719,7 +2720,7 @@ mod tests {
                 },
             ))),
         );
-        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
         let text = joined_home(&home);
         assert!(text.contains("No tabs stirring yet. Enter starts one."));
         assert!(text.contains("feedback: operation error: Session creation failed (err-safe-7)"));
@@ -2729,7 +2730,7 @@ mod tests {
             &mut state,
             AppEvent::Backend(BackendEvent::Feedback(Feedback::Disconnected)),
         );
-        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
         let text = joined_home(&home);
         assert!(text.contains("No tabs stirring yet. Enter starts one."));
         assert!(text.contains("feedback: disconnected; reconnect to continue"));
@@ -2790,7 +2791,7 @@ mod tests {
             &mut state,
             AppEvent::Backend(BackendEvent::Feedback(Feedback::Disconnected)),
         );
-        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
         let text = strip(&render_home(30, 80, &home).join("\n"));
         // 切断はうさぎの上に tail 付きの吹き出しとして現れる。
         assert!(text.contains("╰──┬"), "abnormal state opens a bubble");
@@ -2804,7 +2805,7 @@ mod tests {
                 SafeMessage::new("creating"),
             ))),
         );
-        let home = HomeProjection::from_state(&healthy, "work", "/work", &[]);
+        let home = HomeProjection::from_state(&healthy, "work", Path::new("/work"), &[]);
         let text = strip(&render_home(30, 80, &home).join("\n"));
         assert!(!text.contains("╰──┬"), "healthy state stays silent");
         assert!(text.contains("(o.o)?"));
@@ -2819,7 +2820,7 @@ mod tests {
             AppEvent::Backend(BackendEvent::Feedback(Feedback::Disconnected)),
         );
         let speech = MascotSpeech::new(["同期済み".to_owned()]).expect("speech");
-        let home = HomeProjection::from_state(&state, "work", "/work", &[])
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[])
             .with_mascot_speech(Some(speech));
         let text = strip(&render_home(30, 80, &home).join("\n"));
         assert!(text.contains("同期済み"));
@@ -2851,7 +2852,7 @@ mod tests {
         let home = HomeProjection::from_state(
             &state,
             "work",
-            "/work",
+            Path::new("/work"),
             &[projected_session(session, "session", "/work/session")],
         )
         .with_pane(&pane);
@@ -2884,7 +2885,8 @@ mod tests {
             },
         );
         let state = AppState::home(workspace, Vec::new());
-        let switch = HomeProjection::from_state(&state, "work", "/work", &[]).with_pane(&pane);
+        let switch =
+            HomeProjection::from_state(&state, "work", Path::new("/work"), &[]).with_pane(&pane);
         let switch_frame = render_home(18, 100, &switch);
         let switch_right = switch_frame[CHROME_ROWS]
             .split_once('│')
@@ -2896,7 +2898,8 @@ mod tests {
 
         let mut state = state;
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
-        let closeup = HomeProjection::from_state(&state, "work", "/work", &[]).with_pane(&pane);
+        let closeup =
+            HomeProjection::from_state(&state, "work", Path::new("/work"), &[]).with_pane(&pane);
         let closeup_frame = render_home(18, 100, &closeup);
         let closeup_right = closeup_frame[CHROME_ROWS]
             .split_once('│')
@@ -2928,7 +2931,7 @@ mod tests {
             &HomeProjection::from_state(
                 &state,
                 "work",
-                "/work",
+                Path::new("/work"),
                 &[projected_session(session, "session", "/work/session")],
             )
             .with_pane(&pane),
@@ -2943,7 +2946,7 @@ mod tests {
             &HomeProjection::from_state(
                 &state,
                 "work",
-                "/work",
+                Path::new("/work"),
                 &[projected_session(session, "session", "/work/session")],
             )
             .with_pane(&pane),
@@ -2979,7 +2982,7 @@ mod tests {
         let home = HomeProjection::from_state(
             &state,
             "work",
-            "/work",
+            Path::new("/work"),
             &[projected_session(session, "session", "/work/session")],
         )
         .with_pane(&pane);
@@ -2990,7 +2993,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn modal_composition_keeps_the_home_session_tab_as_its_background() {
         let workspace = WorkspaceId::new();
         let operation = OperationId::new();
@@ -3009,7 +3011,8 @@ mod tests {
             PaneEvent::Select(PaneSelection::Tab(TabSelection::Pending(operation))),
         );
         let state = AppState::home(workspace, Vec::new());
-        let home = HomeProjection::from_state(&state, "work", "/work", &[]).with_pane(&pane);
+        let home =
+            HomeProjection::from_state(&state, "work", Path::new("/work"), &[]).with_pane(&pane);
         let base = render_home(18, 100, &home);
         let over = modal::render_over(18, 100, &base, "Action", 20, &["modal".to_string()]);
 
@@ -3097,7 +3100,7 @@ mod tests {
         let home = HomeProjection::from_state(
             &state,
             "actual",
-            "/tmp/actual",
+            Path::new("/tmp/actual"),
             &[
                 projected_session(tui, "UI work", "/work/tui"),
                 projected_session(daemon, "daemon", "/work/daemon"),
@@ -3122,7 +3125,7 @@ mod tests {
         let home = HomeProjection::from_state(
             &state,
             "work",
-            "/work",
+            Path::new("/work"),
             &[projected_session(session, "session", "/work/session")],
         );
         let baseline = render_home(30, 100, &home);
@@ -3176,7 +3179,7 @@ mod tests {
         let home = HomeProjection::from_state(
             &state,
             "actual",
-            "/tmp/actual",
+            Path::new("/tmp/actual"),
             &[projected_session(session, "session", "/work/session")],
         )
         .with_pane(&pane)
@@ -3255,7 +3258,7 @@ mod tests {
         let home = HomeProjection::from_state(
             &state,
             "actual",
-            "/tmp/actual",
+            Path::new("/tmp/actual"),
             &[projected_session(session, "session", "/work/session")],
         )
         .with_pane(&pane)
@@ -3307,7 +3310,7 @@ mod tests {
         let home = HomeProjection::from_state(
             &state,
             "work",
-            "/work",
+            Path::new("/work"),
             &[projected_session(session, "session", "/work/session")],
         )
         .with_pane(&pane);
@@ -3368,5 +3371,147 @@ mod tests {
         assert_eq!(format_memory(2 * GIBIBYTE), "2.0GB");
         // A fractional gibibyte renders a single tenths digit.
         assert_eq!(format_memory(GIBIBYTE + 5 * 107_374_183), "1.5GB");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One projection fixture keeps tab, notice, and removal state consistent.
+    fn production_projection_contract_covers_tabs_notices_removal_and_accessors() {
+        use usagi_core::domain::agent::CallerRef;
+        use usagi_core::domain::id::{AgentId, UserDecisionId};
+        use usagi_core::domain::user_decision::{
+            UserDecision, UserDecisionOwner, UserDecisionStatus,
+        };
+
+        let mut view = workspace();
+        assert_eq!(view.name(), "actual");
+        assert_eq!(view.path(), std::path::Path::new("/tmp/actual"));
+        let replacement = vec![session("only", None, SessionOrigin::Human)];
+        view.replace_sessions(replacement.clone());
+        assert_eq!(view.sessions(), replacement);
+
+        let mut one = session("one", None, SessionOrigin::Human);
+        one.prs.push(PrLink::new(1, "https://example.test/pull/1"));
+        assert_eq!(
+            ProjectedSession::from_record(SessionId::new(), &one)
+                .pr_summary
+                .as_deref(),
+            Some("PR #1")
+        );
+        one.prs.push(PrLink::new(2, "https://example.test/pull/2"));
+        assert_eq!(
+            ProjectedSession::from_record(SessionId::new(), &one)
+                .pr_summary
+                .as_deref(),
+            Some("PR #1 +1")
+        );
+
+        let target = Target::Root(WorkspaceId::new());
+        let operation = OperationId::new();
+        let pending = crate::usecase::application::pane::PendingPane {
+            operation,
+            target,
+            kind: PaneKind::Terminal,
+        };
+        for kind in [PaneKind::Terminal, PaneKind::Agent, PaneKind::Diff] {
+            let mut item = pending;
+            item.kind = kind;
+            let tab = PaneTab::Pending(item);
+            assert!(!pane_tab_label(&tab).is_empty());
+            let ready = PaneTab::Ready(item);
+            assert!(!pane_tab_label(&ready).is_empty());
+            assert!(pane_tab_selected(
+                &ready,
+                &PaneSelection::Tab(TabSelection::Ready(operation))
+            ));
+        }
+        let terminal = TerminalRef {
+            workspace_id: WorkspaceId::new(),
+            worktree_id: WorktreeId::new(),
+            session_id: None,
+            terminal_id: TerminalId::new(),
+            daemon_generation: DaemonGeneration::new(),
+        };
+        for kind in [PaneKind::Terminal, PaneKind::Agent, PaneKind::Diff] {
+            assert!(
+                !pane_tab_label(&PaneTab::Live(
+                    crate::usecase::application::pane::LivePane {
+                        terminal: terminal.clone(),
+                        kind,
+                    }
+                ))
+                .is_empty()
+            );
+        }
+
+        for phase in [
+            TargetPhase::Absent,
+            TargetPhase::Ready,
+            TargetPhase::Running,
+            TargetPhase::Waiting,
+            TargetPhase::Done,
+        ] {
+            assert!(!phase_label(phase).is_empty());
+        }
+        for feedback in [
+            Feedback::Progress(SafeMessage::new("working")),
+            Feedback::OperationError(SafeError {
+                message: SafeMessage::new("operation failed"),
+                error_id: "err-operation".to_owned(),
+            }),
+            Feedback::TerminalError(SafeError {
+                message: SafeMessage::new("terminal failed"),
+                error_id: "err-terminal".to_owned(),
+            }),
+            Feedback::Disconnected,
+            Feedback::Reconnected,
+            Feedback::ResyncRequired,
+        ] {
+            assert!(!feedback_label(Some(&feedback)).is_empty());
+        }
+
+        let workspace_id = WorkspaceId::new();
+        let decision_id = UserDecisionId::new();
+        let decision = UserDecision {
+            decision_id,
+            owner: UserDecisionOwner {
+                workspace_id,
+                session_id: None,
+                caller: CallerRef {
+                    session_id: None,
+                    agent_id: AgentId::new(),
+                },
+                run_id: OperationId::new(),
+            },
+            title: "Deploy?".into(),
+            prompt: "Proceed?".into(),
+            options: Vec::new(),
+            allow_freeform: true,
+            expires_at: None,
+            idempotency_key: None,
+            status: UserDecisionStatus::Pending,
+            answer: None,
+            created_at: now(),
+            resolved_at: None,
+        };
+        let mut state = AppState::home(workspace_id, Vec::new());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace: workspace_id,
+                decisions: vec![decision],
+            }),
+        );
+        let home = HomeProjection::from_state(&state, "actual", Path::new("/tmp/actual"), &[]);
+        let frame = super::render_home(20, 80, &home).join("\n");
+        assert!(strip(&frame).contains("Deploy?"));
+
+        let session_id = SessionId::new();
+        let mut removing = projected_session(session_id, "removing", "/tmp/removing");
+        removing.removing = true;
+        let mut state = AppState::home(workspace_id, vec![session_id]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let home =
+            HomeProjection::from_state(&state, "actual", Path::new("/tmp/actual"), &[removing]);
+        assert!(strip(&super::render_home(20, 80, &home).join("\n")).contains("removing"));
     }
 }

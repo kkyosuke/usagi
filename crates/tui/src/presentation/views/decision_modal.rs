@@ -1,7 +1,5 @@
 //! Durable user-decision list and answer editor overlays.
 
-#![coverage(off)] // ANSI-only composition over the shared modal primitive; state transitions are covered in the controller.
-
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::controller::DecisionOverlayState;
@@ -140,7 +138,6 @@ fn list_body(
 
 /// Render either the workspace pending list or the selected decision editor.
 #[must_use]
-#[coverage(off)] // Pure ANSI composition follows the shared modal primitive; controller/render integration is covered by workspace views.
 pub fn render_over(
     height: usize,
     width: usize,
@@ -165,4 +162,106 @@ pub fn render_over(
         inner_width,
         &modal::fixed_body(body, BODY_HEIGHT),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
+    use super::*;
+    use crate::usecase::application::controller::{
+        AppEvent, AppKey, AppState, BackendEvent, SafeError, SafeMessage, update,
+    };
+    use usagi_core::domain::agent::CallerRef;
+    use usagi_core::domain::id::{AgentId, OperationId, SessionId, UserDecisionId, WorkspaceId};
+    use usagi_core::domain::user_decision::{
+        UserDecision, UserDecisionOption, UserDecisionOwner, UserDecisionStatus,
+    };
+
+    fn decision(workspace: WorkspaceId, session_id: Option<SessionId>) -> UserDecision {
+        UserDecision {
+            decision_id: UserDecisionId::new(),
+            owner: UserDecisionOwner {
+                workspace_id: workspace,
+                session_id,
+                caller: CallerRef {
+                    session_id,
+                    agent_id: AgentId::new(),
+                },
+                run_id: OperationId::new(),
+            },
+            title: "Choose".to_owned(),
+            prompt: "Pick one\n\ncarefully".to_owned(),
+            options: vec![UserDecisionOption {
+                id: "safe".to_owned(),
+                label: "Safe".to_owned(),
+                description: Some("keep state".to_owned()),
+            }],
+            allow_freeform: true,
+            expires_at: Some(chrono::Utc::now()),
+            idempotency_key: None,
+            status: UserDecisionStatus::Pending,
+            answer: None,
+            created_at: chrono::Utc::now(),
+            resolved_at: None,
+        }
+    }
+
+    #[test]
+    fn renders_empty_list_root_and_session_rows_and_the_full_editor() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDecisions));
+        let empty = render_over(
+            24,
+            80,
+            &["base".to_owned()],
+            state.decision_overlay().unwrap(),
+            &[],
+        );
+        assert!(empty.join("\n").contains("(none)"));
+
+        let root = decision(workspace, None);
+        let scoped = decision(workspace, Some(session));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![root.clone(), scoped.clone()],
+            }),
+        );
+        let list = render_over(
+            24,
+            80,
+            &[],
+            state.decision_overlay().unwrap(),
+            &[root, scoped.clone()],
+        );
+        assert!(list.join("\n").contains("workspace root"));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::DecisionNext));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::DecisionPageNext));
+        let _ = update(&mut state, AppEvent::Key(AppKey::DecisionPagePrevious));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SetDecisionFreeform("custom".to_owned())),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::DecisionError {
+                workspace,
+                decision_id: scoped.decision_id,
+                error: SafeError {
+                    message: SafeMessage::new("retry"),
+                    error_id: "decision".to_owned(),
+                },
+            }),
+        );
+        let editor = render_over(24, 80, &[], state.decision_overlay().unwrap(), &[scoped]);
+        let text = editor.join("\n");
+        assert!(text.contains("freeform: custom"));
+        assert!(text.contains("expires:"));
+        assert!(text.contains("retry"));
+    }
 }

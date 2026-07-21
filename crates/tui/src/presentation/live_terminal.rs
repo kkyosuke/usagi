@@ -203,6 +203,7 @@ impl LiveTerminalControls {
 
 #[cfg(test)]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::LiveTerminalControls;
     use crate::usecase::application::pr::BrowserOpener;
     use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
@@ -403,7 +404,6 @@ mod tests {
     }
 
     impl BrowserOpener for FakeBrowser {
-        #[coverage(off)]
         fn open(&mut self, url: &str) -> Result<(), String> {
             if let Some(error) = &self.error {
                 return Err(error.clone());

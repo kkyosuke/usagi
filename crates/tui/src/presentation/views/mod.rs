@@ -8,7 +8,6 @@ pub mod closeup_modal;
 pub mod config;
 pub mod create_session_error_modal;
 pub mod decision_modal;
-#[coverage(off)] // filesystem を読む Tab 補完を含む New 画面は coverage 集計から除外する。
 pub mod new;
 pub mod open;
 pub mod overview_modal;

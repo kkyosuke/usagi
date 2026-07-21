@@ -60,7 +60,6 @@ impl RemoveModal {
             .collect()
     }
 
-    #[coverage(off)] // LLVM records the wrapping branch as an uncovered region despite its unit test.
     pub fn move_up(&mut self) {
         if !self.entries.is_empty() {
             self.cursor = self.cursor.checked_sub(1).unwrap_or(self.entries.len() - 1);
@@ -96,15 +95,30 @@ impl RemoveModal {
 
     /// Drop checked entries that no longer denote the same record in a fresh
     /// daemon snapshot. The selector never rebinds a checked entry by name.
-    #[coverage(off)] // LLVM attributes the retain closure as a separate uncovered function.
     pub fn reconcile(&mut self, current: &[SessionRecord]) {
-        self.entries.retain(|entry| {
-            current
-                .iter()
-                .any(|candidate| same_incarnation(candidate, entry))
-        });
-        self.selected
-            .retain(|name| self.entries.iter().any(|entry| entry.name == *name));
+        let mut retained = Vec::new();
+        for entry in std::mem::take(&mut self.entries) {
+            let mut current_incarnation = false;
+            for candidate in current {
+                if same_incarnation(candidate, &entry) {
+                    current_incarnation = true;
+                    break;
+                }
+            }
+            if current_incarnation {
+                retained.push(entry);
+            }
+        }
+        self.entries = retained;
+        let mut selected = BTreeSet::new();
+        for name in std::mem::take(&mut self.selected) {
+            for entry in &self.entries {
+                if entry.name == name {
+                    selected.insert(name.clone());
+                }
+            }
+        }
+        self.selected = selected;
         self.cursor = self.cursor.min(self.entries.len().saturating_sub(1));
     }
 }
@@ -184,6 +198,7 @@ pub fn render_over(
 
 #[cfg(test)]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use chrono::{TimeZone, Utc};
     use std::path::PathBuf;
     use usagi_core::domain::note::Scratchpad;
@@ -219,6 +234,7 @@ mod tests {
             vec![session("a", 1), session("b", 2)]
         );
         let mut empty = RemoveModal::new(Vec::new(), false);
+        empty.move_up();
         empty.move_down();
         empty.toggle();
         assert!(empty.selected_entries().is_empty());
@@ -234,6 +250,12 @@ mod tests {
         modal.reconcile(&[new]);
         assert!(modal.is_empty());
         assert!(modal.selected_entries().is_empty());
+
+        let retained = session("retained", 3);
+        let mut modal = RemoveModal::new(vec![retained.clone()], false);
+        modal.toggle();
+        modal.reconcile(std::slice::from_ref(&retained));
+        assert_eq!(modal.selected_entries(), vec![retained]);
     }
 
     #[test]

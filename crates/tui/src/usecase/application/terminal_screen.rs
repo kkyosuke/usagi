@@ -146,7 +146,6 @@ impl TerminalScreen {
     /// width (notably shell right prompts). Replaying those bytes at a smaller
     /// width duplicates rows. Resize the decoded cells instead: cells outside
     /// the new viewport are clipped and existing history keeps its row count.
-    #[coverage(off)] // Geometry changes are exercised through TerminalSession.
     pub fn resize(&mut self, rows: usize, cols: usize) {
         let rows = rows.max(1);
         let cols = cols.max(1);
@@ -213,7 +212,7 @@ impl TerminalScreen {
         // The visible grid is fixed-height, but its unused tail is not terminal
         // content. Dropping it lets the live viewport stay anchored to the last
         // meaningful output instead of a screenful of padding.
-        while rows.last().is_some_and(String::is_empty) {
+        while matches!(rows.last(), Some(last) if last.is_empty()) {
             rows.pop();
         }
         rows
@@ -241,7 +240,6 @@ impl TerminalScreen {
     /// Renders retained scrollback and the visible grid with the current PTY
     /// cursor as an inverted cell.
     #[must_use]
-    #[coverage(off)] // Iterator closure instrumentation is emitted twice by coverage builds.
     pub fn rows_with_scrollback_and_cursor(&self) -> Vec<String> {
         let links = self.link_cells();
         let scrollback_len = self.scrollback.len();
@@ -269,7 +267,6 @@ impl TerminalScreen {
 
     /// Renders scrollback and the visible grid with a cell-precise selection.
     #[must_use]
-    #[coverage(off)]
     pub fn rows_with_scrollback_and_cursor_selection(
         &self,
         anchor: (usize, usize),
@@ -345,7 +342,6 @@ impl TerminalScreen {
 
     /// Returns retained scrollback followed by the complete visible grid.
     #[must_use]
-    #[coverage(off)]
     pub fn cells_with_scrollback(&self) -> Vec<String> {
         let mut rows: Vec<String> = self
             .scrollback
@@ -724,7 +720,6 @@ impl TerminalScreen {
     }
 }
 
-#[coverage(off)] // Helper for the geometry adapter above.
 fn resize_row(row: &mut Vec<Cell>, cols: usize) {
     row.truncate(cols);
     row.resize(cols, Cell::blank());
@@ -733,7 +728,6 @@ fn resize_row(row: &mut Vec<Cell>, cols: usize) {
     }
 }
 
-#[coverage(off)] // Helper for the geometry adapter above.
 fn resize_grid(mut grid: Vec<Vec<Cell>>, rows: usize, cols: usize) -> Vec<Vec<Cell>> {
     grid.truncate(rows);
     for row in &mut grid {
@@ -743,7 +737,6 @@ fn resize_grid(mut grid: Vec<Vec<Cell>>, rows: usize, cols: usize) -> Vec<Vec<Ce
     grid
 }
 
-#[coverage(off)] // Helper for the geometry adapter above.
 fn resize_buffer(buffer: &mut ScreenBuffer, rows: usize, cols: usize, old_rows: usize) {
     buffer.grid = resize_grid(std::mem::take(&mut buffer.grid), rows, cols);
     for row in &mut buffer.scrollback {
@@ -873,6 +866,7 @@ fn utf8_len(lead: u8) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::*;
 
     fn screen_after(rows: usize, cols: usize, bytes: &[u8]) -> Vec<String> {
@@ -907,6 +901,49 @@ mod tests {
             screen.rows_with_scrollback(),
             vec!["first", "secon", "third"]
         );
+    }
+
+    #[test]
+    fn resize_covers_same_size_alternate_buffer_growth_and_reverse_selection() {
+        let mut screen = TerminalScreen::new(3, 4);
+        screen.advance(b"one\r\ntwo\r\nthree\r\nfour");
+        screen.resize(3, 4);
+        let _ = screen.rows_with_scrollback_and_cursor_selection((2, 1), (0, 0));
+
+        screen.advance(b"\x1b[?1049h\x1b7\x1b[2;3ralt");
+        screen.resize(1, 2);
+        screen.resize(4, 6);
+        screen.advance(b"\x1b[?1049l");
+        assert_eq!(screen.rows().len(), 4);
+
+        let mut row = vec![
+            Cell::blank(),
+            Cell {
+                continuation: true,
+                ..Cell::blank()
+            },
+        ];
+        resize_row(&mut row, 2);
+        assert!(!row[1].continuation);
+        let mut buffer = ScreenBuffer {
+            grid: vec![vec![Cell::blank(); 2]; 3],
+            scrollback: vec![Vec::new()],
+            cursor_row: 2,
+            cursor_col: 1,
+            style: String::new(),
+            saved_cursor: Some((2, 1)),
+            scroll_top: 0,
+            scroll_bottom: 1,
+        };
+        resize_buffer(&mut buffer, 2, 1, 3);
+        assert_eq!(buffer.saved_cursor, Some((1, 0)));
+        let mut partial_region = TerminalScreen::new(3, 3);
+        partial_region.advance(b"\x1b[1;2r");
+        partial_region.resize(4, 3);
+        assert_eq!(partial_region.rows().len(), 4);
+        let mut empty = TerminalScreen::new(2, 2);
+        empty.grid = vec![Vec::new(), Vec::new()];
+        assert!(empty.cells_with_scrollback().is_empty());
     }
 
     #[test]

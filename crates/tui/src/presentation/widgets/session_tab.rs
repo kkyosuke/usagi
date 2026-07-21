@@ -147,8 +147,8 @@ pub fn empty_pane_with_detail(
 }
 
 #[cfg(test)]
-#[coverage(off)] // Test assertion branches are not product coverage targets.
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{
         Tab, WAVE_TICKS_PER_POSITION, empty_pane, empty_pane_with_detail, pending_label, render,
     };

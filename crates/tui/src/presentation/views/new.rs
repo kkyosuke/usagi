@@ -452,7 +452,10 @@ fn directory_completion_base(value: &str) -> (std::path::PathBuf, String) {
     if value.ends_with(std::path::MAIN_SEPARATOR) {
         return (path.to_path_buf(), String::new());
     }
-    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let parent = match path.parent() {
+        Some(parent) => parent,
+        None => std::path::Path::new("."),
+    };
     let prefix = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -1019,6 +1022,10 @@ mod tests {
         assert_eq!(
             directory_completion_base("/tmp/"),
             (std::path::PathBuf::from("/tmp/"), String::new())
+        );
+        assert_eq!(
+            directory_completion_base(""),
+            (std::path::PathBuf::from("."), String::new())
         );
         assert_eq!(
             format_directory_candidate("pro", std::path::Path::new("."), "project"),

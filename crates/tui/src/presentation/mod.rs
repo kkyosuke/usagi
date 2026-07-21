@@ -263,7 +263,6 @@ pub trait DesktopNotificationPort {
 struct NoDesktopNotifications;
 #[cfg(test)]
 impl DesktopNotificationPort for NoDesktopNotifications {
-    #[coverage(off)]
     fn notify(&mut self, _: &str, _: &str) {}
 }
 
@@ -273,12 +272,10 @@ impl DesktopNotificationPort for NoDesktopNotifications {
 struct AgentStreamPort<'a>(&'a mut dyn AgentCommandPort);
 
 impl TerminalStreamPort for AgentStreamPort<'_> {
-    #[coverage(off)]
     fn resize(&mut self, terminal: &TerminalRef, geometry: Geometry) -> Result<(), TerminalError> {
         self.0.resize_terminal(terminal, geometry)
     }
 
-    #[coverage(off)]
     fn attach(
         &mut self,
         terminal: &TerminalRef,
@@ -286,7 +283,6 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
     ) -> Result<TerminalAttach, TerminalError> {
         self.0.attach_terminal(terminal, geometry)
     }
-    #[coverage(off)]
     fn poll(
         &mut self,
         terminal: &TerminalRef,
@@ -294,7 +290,6 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
     ) -> Result<Vec<TerminalChunk>, TerminalError> {
         self.0.poll_terminal(terminal, after_offset)
     }
-    #[coverage(off)]
     fn input(
         &mut self,
         terminal: &TerminalRef,
@@ -305,7 +300,6 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
         self.0
             .input_terminal(terminal, subscription, input_seq, bytes)
     }
-    #[coverage(off)]
     fn detach(&mut self, terminal: &TerminalRef, subscription: u64) {
         self.0.detach_terminal(terminal, subscription);
     }
@@ -314,7 +308,6 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
 /// Maps a management [`Key`] to the bytes a focused live terminal should
 /// receive. Reserved prefix actions ([`Key::Live`]) do not reach the shell;
 /// all other keys, including global controls, do while Closeup owns the pane.
-#[coverage(off)]
 fn key_to_terminal_bytes(key: Key) -> Option<Vec<u8>> {
     let bytes = match key {
         Key::Passthrough(bytes) => return (!bytes.is_empty()).then(|| bytes.clone()),
@@ -350,7 +343,6 @@ fn key_to_terminal_bytes(key: Key) -> Option<Vec<u8>> {
 /// Forward one ordinary key to the focused Closeup terminal. Returns `true`
 /// when the live pane owned the key, including the busy/error case where the
 /// keystroke could not be delivered and a safe notice was recorded.
-#[coverage(off)]
 fn forward_live_terminal_input(
     ui: &mut WorkspaceUi,
     runtime: &WorkspaceRuntime,
@@ -613,7 +605,6 @@ impl BackendOverlayPort for UnavailableBackendPort {
 /// # Errors
 ///
 /// `out` への書き込みに失敗した場合、そのエラーを返す。
-#[coverage(off)]
 pub fn write_banner(out: &mut impl Write, info: &AppInfo) -> std::io::Result<()> {
     writeln!(out, "{}", info.describe())
 }
@@ -687,7 +678,7 @@ enum OpenStep {
     Stay,
     Quit,
     Back,
-    Choose(Vec<PathBuf>),
+    Choose(PathBuf),
     ConfirmCleanup,
     ConfirmUnregister(PathBuf),
 }
@@ -710,7 +701,6 @@ pub trait SessionCommandPort: Send + Sync {
     /// # Errors
     ///
     /// Returns a safe message when the daemon cannot accept the request.
-    #[coverage(off)]
     fn execute(
         &self,
         _workspace: &usagi_core::domain::workspace::Workspace,
@@ -759,7 +749,6 @@ impl SessionCommandResult {
 struct UnavailableSessionCommandPort;
 
 impl SessionCommandPort for UnavailableSessionCommandPort {
-    #[coverage(off)]
     fn execute(
         &self,
         _workspace: &usagi_core::domain::workspace::Workspace,
@@ -777,7 +766,6 @@ impl SessionCommandPort for UnavailableSessionCommandPort {
 /// ローカルでプロセスを起動しない。
 struct UnavailableAgentCommandPort;
 impl AgentCommandPort for UnavailableAgentCommandPort {
-    #[coverage(off)] // Compatibility fallback for embedders without the daemon Agent port.
     fn launch(
         &mut self,
         _workspace: WorkspaceId,
@@ -794,12 +782,10 @@ impl AgentCommandPort for UnavailableAgentCommandPort {
 struct UnavailableDecisionCommandPort;
 #[cfg(test)]
 impl DecisionCommandPort for UnavailableDecisionCommandPort {
-    #[coverage(off)]
     fn refresh(&mut self, _workspace: WorkspaceId) -> BackendEvent {
         BackendEvent::Notice(Notice::new("User decisions are unavailable."))
     }
 
-    #[coverage(off)]
     fn resolve(
         &mut self,
         workspace: WorkspaceId,
@@ -825,7 +811,6 @@ impl DecisionCommandPort for UnavailableDecisionCommandPort {
 struct UnavailableEnvironmentStore;
 #[cfg(test)]
 impl EnvironmentStorePort for UnavailableEnvironmentStore {
-    #[coverage(off)]
     fn load(&mut self, target: Target) -> BackendEvent {
         BackendEvent::EnvironmentError {
             target,
@@ -833,7 +818,6 @@ impl EnvironmentStorePort for UnavailableEnvironmentStore {
         }
     }
 
-    #[coverage(off)]
     fn save(&mut self, target: Target, _entries: Vec<EnvironmentEntry>) -> BackendEvent {
         BackendEvent::EnvironmentError {
             target,
@@ -842,7 +826,6 @@ impl EnvironmentStorePort for UnavailableEnvironmentStore {
     }
 }
 
-#[coverage(off)]
 #[cfg(test)]
 fn unavailable_environment_error() -> SafeError {
     SafeError {
@@ -857,7 +840,6 @@ fn unavailable_environment_error() -> SafeError {
 struct UnavailablePrSnapshotPort;
 #[cfg(test)]
 impl PrSnapshotPort for UnavailablePrSnapshotPort {
-    #[coverage(off)] // Compatibility fallback for embedders without the daemon PR port.
     fn snapshot(
         &mut self,
         _session: SessionId,
@@ -869,7 +851,6 @@ impl PrSnapshotPort for UnavailablePrSnapshotPort {
 /// Browser-open fallback for entry points that do not inject a platform opener.
 struct UnavailableBrowserOpener;
 impl BrowserOpener for UnavailableBrowserOpener {
-    #[coverage(off)] // Compatibility fallback; production injects the composition-root opener.
     fn open(&mut self, _url: &str) -> Result<(), String> {
         Err("Browser opening is unavailable on this platform.".to_owned())
     }
@@ -1012,7 +993,6 @@ enum PaneLaunch {
 }
 
 impl WorkspaceUi {
-    #[coverage(off)]
     fn new(workspace: WorkspaceView, session_commands: Box<dyn SessionCommandPort>) -> Self {
         let (session_completion_sender, session_completions) = mpsc::channel();
         let (pane_completion_sender, pane_completions) = mpsc::channel();
@@ -1072,7 +1052,6 @@ impl WorkspaceUi {
     ///
     /// A failed attach still records the session so its safe feedback renders;
     /// it never spawns a local process.
-    #[coverage(off)]
     fn start_terminal_session(&mut self, terminal: TerminalRef, geometry: Geometry) {
         if let Some(port) = self
             .agent
@@ -1101,7 +1080,6 @@ impl WorkspaceUi {
         }
     }
 
-    #[coverage(off)]
     fn resize_terminals(&mut self, geometry: Geometry) {
         let Some(port) = self
             .agent
@@ -1117,7 +1095,6 @@ impl WorkspaceUi {
 
     /// Forward raw passthrough bytes to the live terminal `terminal`. Returns
     /// an error when the port is busy or the matching session cannot accept it.
-    #[coverage(off)]
     fn send_terminal_bytes(&mut self, terminal: &TerminalRef, bytes: &[u8]) -> Result<(), String> {
         let Some(port) = self
             .agent
@@ -1133,15 +1110,15 @@ impl WorkspaceUi {
         else {
             return Err("terminal session is no longer available".to_owned());
         };
-        session
-            .send_input(&mut AgentStreamPort(port), bytes)
-            .map_err(|error| error.message().to_owned())
+        match session.send_input(&mut AgentStreamPort(port), bytes) {
+            Ok(()) => Ok(()),
+            Err(error) => Err(error.message().to_owned()),
+        }
     }
 
     /// Poll every attached terminal once and return the refs of those the daemon
     /// reports as exited. Polling all of them (not just the focused pane) is what
     /// lets a background tab whose shell ran `exit` be detected and closed.
-    #[coverage(off)]
     fn poll_all_terminals(&mut self) -> Vec<TerminalRef> {
         let Some(agent) = self.agent.as_mut() else {
             return Vec::new();
@@ -1161,7 +1138,6 @@ impl WorkspaceUi {
     /// Release a terminal's client subscription and drop its coordinator. The
     /// daemon keeps the process; only this TUI detaches. Safe when no session
     /// matches (already pruned).
-    #[coverage(off)]
     fn close_terminal(&mut self, terminal: &TerminalRef) {
         if let Some(port) = self
             .agent
@@ -1180,7 +1156,6 @@ impl WorkspaceUi {
 
     /// Project the already-polled rows for `terminal`, optionally highlighting an
     /// in-progress selection. Returns `None` when no attached session matches.
-    #[coverage(off)]
     fn terminal_rows(
         &self,
         terminal: &TerminalRef,
@@ -1198,7 +1173,6 @@ impl WorkspaceUi {
 
     /// The stable visible cells for `terminal`, snapshotted so a drag selection
     /// stays fixed while later output arrives. `None` when no session matches.
-    #[coverage(off)]
     fn terminal_cells(&self, terminal: &TerminalRef) -> Option<Vec<String>> {
         self.terminals
             .iter()
@@ -1215,7 +1189,6 @@ impl WorkspaceUi {
 }
 
 /// welcome のメニュー操作を画面遷移へ写す。
-#[coverage(off)]
 fn welcome_action(action: MenuAction) -> WelcomeStep {
     match action {
         MenuAction::Quit => WelcomeStep::Quit,
@@ -1228,7 +1201,6 @@ fn welcome_action(action: MenuAction) -> WelcomeStep {
 
 /// Config 画面のキー処理。Save は dirty な Save 行でのみ有効で、Enter は save フローを
 /// 開始（loading）する。保存中の再入力は `begin_save` が弾く。
-#[coverage(off)]
 #[allow(clippy::needless_pass_by_value)]
 fn step_config(config: &mut Config, key: Key, _settings: &mut dyn SettingsPort) -> ConfigStep {
     match key {
@@ -1263,7 +1235,6 @@ fn step_config(config: &mut Config, key: Key, _settings: &mut dyn SettingsPort) 
 }
 
 /// welcome 画面のキー処理。最上位画面なので Esc も終了として扱う。
-#[coverage(off)]
 #[allow(clippy::needless_pass_by_value)]
 fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
     match key {
@@ -1306,7 +1277,6 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
 /// New 画面のキー処理（純粋）。矢印キーでフィールドを移り、←→ でモード切替（モード選択時）または
 /// キャレット移動、文字入力・Backspace で編集、Esc で welcome へ戻り、`Ctrl-C` で終了する。
 /// フォームの確定（作成）は作成処理が入るまで留まる。
-#[coverage(off)]
 #[allow(clippy::needless_pass_by_value)]
 fn step_new(form: &mut New, key: Key) -> NewStep {
     match key {
@@ -1410,7 +1380,6 @@ fn new_project_notice(error: &io::Error) -> String {
 
 /// New 画面の ←→ 操作。モード選択にフォーカスがあるときはモードを切り替え、テキスト欄では
 /// キャレットを左右へ動かす（`right` が右方向）。
-#[coverage(off)]
 fn step_new_horizontal(form: &mut New, right: bool) {
     if form.focus() == Field::Mode {
         form.toggle_mode();
@@ -1422,7 +1391,6 @@ fn step_new_horizontal(form: &mut New, right: bool) {
 }
 
 /// Open 画面のキー処理。Enter で選択 path を確定し、Esc で welcome へ戻る。
-#[coverage(off)]
 #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 fn step_open(open: &mut Open, key: Key) -> OpenStep {
     if open.unregistering_path().is_some() {
@@ -1512,11 +1480,10 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
                     .map(|workspace| vec![workspace.path.clone()])
                     .unwrap_or_default()
             };
-            if paths.is_empty() {
-                OpenStep::Stay
-            } else {
-                OpenStep::Choose(paths)
-            }
+            paths
+                .into_iter()
+                .next()
+                .map_or(OpenStep::Stay, OpenStep::Choose)
         }
         Key::Tab => {
             open.toggle_unite();
@@ -1550,7 +1517,6 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
 /// Run one daemon-owned session command without blocking the terminal event
 /// loop. Admission is bounded to one worker; a concurrent request completes as
 /// Busy without reaching the shared daemon port.
-#[coverage(off)]
 fn begin_session_command(
     ui: &mut WorkspaceUi,
     command: SessionCommand,
@@ -1603,7 +1569,6 @@ fn tick_session_refresh(
 /// The daemon-owned name for the session identified by `session`, if the current
 /// sidebar projection still holds it. A `RemoveSession` effect carries the stable
 /// identity, while the session command port speaks the daemon-facing name.
-#[coverage(off)]
 fn session_name_for(ui: &WorkspaceUi, session: SessionId) -> Option<String> {
     ui.workspace
         .session_ids()
@@ -1615,7 +1580,6 @@ fn session_name_for(ui: &WorkspaceUi, session: SessionId) -> Option<String> {
 /// Reconcile sidebar rows and the IDs used by Agent/terminal requests as one
 /// daemon-authoritative observation.  Legacy/test ports may provide rows only;
 /// they retain the existing non-runtime projection behaviour.
-#[coverage(off)]
 fn apply_session_projection(
     ui: &mut WorkspaceUi,
     sessions: Option<Vec<usagi_core::domain::session::SessionRecord>>,
@@ -1649,7 +1613,6 @@ fn apply_session_projection(
 /// the create-failure dialog; any other failure (e.g. remove) refluxes as a
 /// controller [`BackendEvent::Notice`]. Both are distinct from an in-form local
 /// validation error.
-#[coverage(off)]
 fn drain_session_completions(ui: &mut WorkspaceUi) {
     while let Ok(completion) = ui.session_completions.try_recv() {
         if ui.active_session_command != Some(completion.command_id) {
@@ -1776,7 +1739,6 @@ fn safe_session_error(message: &str) -> String {
 /// [`PaneLaunchCompletion`]. This is deliberately the same ownership pattern
 /// as session creation: a slow daemon request never blocks input, wave redraws,
 /// or the interaction marker that suppresses automatic focus.
-#[coverage(off)]
 fn drain_pane_launches(ui: &mut WorkspaceUi, geometry: Geometry) {
     let mut launches = std::mem::take(&mut ui.pane_launches);
     while !launches.is_empty() {
@@ -1952,7 +1914,6 @@ fn terminal_geometry(height: usize, width: usize) -> Geometry {
     }
 }
 
-#[coverage(off)]
 fn render_open(height: usize, width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
     let base = open::render(height, width, open, now);
     if let Some(path) = open.unregistering_path() {
@@ -2007,7 +1968,6 @@ fn render_open(height: usize, width: usize, open: &Open, now: DateTime<Utc>) -> 
 }
 
 /// Recent が指す単体 workspace path。Unite の runtime は今回の対象外なので開かない。
-#[coverage(off)]
 fn recent_path(recent: &Recent) -> Option<&Path> {
     match recent {
         Recent::Workspace(overview) => Some(&overview.workspace.path),
@@ -2017,7 +1977,6 @@ fn recent_path(recent: &Recent) -> Option<&Path> {
 
 /// Project the daemon-authoritative session records into the controller's Home
 /// row material, in the same order the runtime holds their IDs.
-#[coverage(off)]
 fn project_controller_sessions(ui: &WorkspaceUi) -> Vec<ProjectedSession> {
     ui.workspace
         .sessions()
@@ -2058,8 +2017,8 @@ pub fn render_home_snapshot(
     let state = AppState::home(snapshot.workspace_id, snapshot.session_ids.clone());
     let projection = HomeProjection::from_state(
         &state,
-        snapshot.workspace.name.clone(),
-        snapshot.workspace.path.clone(),
+        &snapshot.workspace.name,
+        &snapshot.workspace.path,
         &sessions,
     );
     render_home(height, width, &projection)
@@ -2067,7 +2026,6 @@ pub fn render_home_snapshot(
 
 /// Keep the controller's Home rows in step with the daemon session projection
 /// the legacy transport reconciled this frame.
-#[coverage(off)]
 fn sync_runtime_sessions(runtime: &mut WorkspaceRuntime, ui: &WorkspaceUi) {
     let ids = ui.workspace.session_ids().to_vec();
     if runtime.state().sessions() != ids.as_slice() {
@@ -2117,7 +2075,6 @@ fn session_worktree_names(workspace: &Path) -> Vec<String> {
 /// `with_terminal_view`, folding in the shell-owned scroll offset, selection
 /// highlight, and copy feedback tracked by `controls`. Focus changes reset those
 /// controls so nothing leaks between panes.
-#[coverage(off)]
 fn controller_terminal_view(
     ui: &WorkspaceUi,
     runtime: &WorkspaceRuntime,
@@ -2139,7 +2096,6 @@ fn controller_terminal_view(
 /// exited, then project the focused viewport from the freshly polled rows. Returns
 /// the projection plus its `(rows_len, scroll)` so a later pointer drag maps back
 /// to the exact retained cell.
-#[coverage(off)]
 fn poll_and_project_terminals(
     ui: &mut WorkspaceUi,
     runtime: &mut WorkspaceRuntime,
@@ -2148,9 +2104,10 @@ fn poll_and_project_terminals(
 ) -> (Option<TerminalViewProjection>, usize, usize) {
     close_exited_panes(ui, runtime);
     let terminal_view = controller_terminal_view(ui, runtime, controls, usize::from(geometry.rows));
-    let (rows_len, scroll) = terminal_view
-        .as_ref()
-        .map_or((0, 0), |view| (view.rows.len(), view.scroll));
+    let (rows_len, scroll) = match &terminal_view {
+        Some(view) => (view.rows.len(), view.scroll),
+        None => (0, 0),
+    };
     (terminal_view, rows_len, scroll)
 }
 
@@ -2159,7 +2116,6 @@ fn poll_and_project_terminals(
 /// the shell detaches the client subscription. This restores the pre-migration
 /// `close_exited_terminal` sweep so an `exit` in a live shell no longer strands a
 /// Live tab.
-#[coverage(off)]
 fn close_exited_panes(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime) {
     for terminal in ui.poll_all_terminals() {
         let _ = runtime.exit_pane(shell_target_for_terminal(&terminal), terminal.clone());
@@ -2169,7 +2125,6 @@ fn close_exited_panes(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime) {
 
 /// The pane target a terminal ref belongs to. Mirrors the pane reducer's own
 /// mapping so the shell routes an exit to the same registry entry.
-#[coverage(off)]
 fn shell_target_for_terminal(terminal: &TerminalRef) -> Target {
     terminal
         .session_id
@@ -2228,7 +2183,6 @@ fn restore_open_panes(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, geom
 /// the runtime reports: detach a live subscription, or drop a still-pending
 /// launch (both its queued work and its completion routing) so it cannot spawn a
 /// detached daemon terminal behind the vanished placeholder.
-#[coverage(off)]
 fn close_focused_terminal_pane(
     ui: &mut WorkspaceUi,
     runtime: &mut WorkspaceRuntime,
@@ -2240,16 +2194,21 @@ fn close_focused_terminal_pane(
     }
     if let Some(operation) = outcome.cancel {
         pending_targets.remove(&operation);
-        ui.pane_launches
-            .retain(|launch| pane_launch_operation(launch) != operation);
-    }
-}
-
-/// The operation id a queued pane launch will complete.
-#[coverage(off)]
-fn pane_launch_operation(launch: &PaneLaunch) -> OperationId {
-    match launch {
-        PaneLaunch::Agent { operation, .. } | PaneLaunch::Terminal { operation, .. } => *operation,
+        let mut found = None;
+        for (index, launch) in ui.pane_launches.iter().enumerate() {
+            let queued = match launch {
+                PaneLaunch::Agent { operation, .. } | PaneLaunch::Terminal { operation, .. } => {
+                    *operation
+                }
+            };
+            if queued == operation {
+                found = Some(index);
+                break;
+            }
+        }
+        if let Some(index) = found {
+            ui.pane_launches.remove(index);
+        }
     }
 }
 
@@ -2260,7 +2219,6 @@ fn pane_launch_operation(launch: &PaneLaunch) -> OperationId {
 /// mutually exclusive, so a drag-to-copy never also opens a link. `rows_len` /
 /// `scroll` describe the frame's projected viewport so the pointer maps back to
 /// the exact retained cell.
-#[coverage(off)]
 #[allow(clippy::too_many_arguments)]
 fn handle_terminal_pointer(
     ui: &WorkspaceUi,
@@ -2336,7 +2294,6 @@ fn copy_terminal_selection(controls: &mut LiveTerminalControls, term: &mut dyn T
 /// drag anchor, before crossterm delivers the first [`PointerKind::Drag`] event.
 /// Sidebar, chrome, modal, and out-of-content clicks retain their existing
 /// ownership and handling.
-#[coverage(off)]
 #[allow(clippy::too_many_arguments)]
 fn begin_terminal_selection_on_click(
     ui: &WorkspaceUi,
@@ -2351,9 +2308,9 @@ fn begin_terminal_selection_on_click(
     if !runtime.wants_live_input() {
         return false;
     }
-    let Some(terminal) = runtime.focused_terminal() else {
-        return false;
-    };
+    let terminal = runtime
+        .focused_terminal()
+        .expect("live input ownership requires a selected live terminal");
     let Some(point) = terminal_point_at(height, width, rows_len, scroll, pointer.0, pointer.1)
     else {
         return false;
@@ -2369,7 +2326,6 @@ fn begin_terminal_selection_on_click(
 /// copy, scroll, tab close, and pointer drag — returning `true` when the key was
 /// consumed here so the shell loop skips reducer dispatch. `rows_len` / `scroll`
 /// describe the frame's projected viewport for pointer mapping.
-#[coverage(off)]
 #[allow(clippy::too_many_arguments)]
 fn intercept_live_terminal_control(
     key: &Key,
@@ -2461,7 +2417,6 @@ fn render_controller_frame(
 /// Apply actions already routed by [`DaemonBackend`] to the stateful terminal
 /// host. This layer owns no Effect matching and therefore cannot diverge from
 /// the backend's route matrix.
-#[coverage(off)]
 #[allow(clippy::too_many_lines)]
 fn drain_controller_host_actions(
     actions: &Receiver<ControllerHostAction>,
@@ -2609,7 +2564,6 @@ fn drain_controller_host_actions(
 
 /// Apply completed pane launches: promote and focus the runtime tab, then attach
 /// the daemon terminal stream, so the live viewport renders next frame.
-#[coverage(off)]
 fn drain_pane_completions_into_runtime(
     ui: &mut WorkspaceUi,
     runtime: &mut WorkspaceRuntime,
@@ -2661,8 +2615,8 @@ fn sidebar_pointer_event(column: u16, row: u16, at: std::time::Duration) -> AppE
 /// metrics). This is the controller replacement for
 /// `drive_workspace_with_agent_port_and_selection_mode`; the composition root
 /// switches to it separately.
-#[coverage(off)]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=screen_graph_production_port_harness
 fn drive_workspace_controller(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
@@ -2822,7 +2776,6 @@ fn drive_workspace_controller(
 /// # Errors
 ///
 /// Returns terminal IO failures from the interactive loop.
-#[coverage(off)]
 #[allow(clippy::too_many_arguments)]
 pub fn run_workspace_controller_with_backend(
     term: &mut dyn Terminal,
@@ -2905,7 +2858,6 @@ impl ControllerBackendFactory for FixedBackendFactory {
 /// # Errors
 ///
 /// Returns terminal IO failures from the interactive workspace loop.
-#[coverage(off)]
 #[allow(clippy::too_many_arguments)]
 pub fn run_workspace_controller(
     term: &mut dyn Terminal,
@@ -2932,7 +2884,6 @@ pub fn run_workspace_controller(
 ///
 /// `Recent::Workspace` は各登録 workspace の集計済み表示値を持つ。互換呼び出しで
 /// projection が無いときだけ、生値から 0 件の overview を組み立てる。
-#[coverage(off)]
 fn open_from_registry(workspaces: Vec<Workspace>, recent: &[Recent]) -> Open {
     let open_overviews = recent
         .iter()
@@ -2960,7 +2911,6 @@ fn open_from_registry(workspaces: Vec<Workspace>, recent: &[Recent]) -> Open {
 /// # Errors
 ///
 /// workspace の読み込み、端末への描画、キー読み取りのいずれかに失敗した場合、そのエラーを返す。
-#[coverage(off)]
 #[allow(clippy::too_many_arguments)] // screen data と注入 port（loader / settings / session port factory）を合成側から受ける入口。
 pub fn run_with_settings(
     term: &mut dyn Terminal,
@@ -2992,8 +2942,8 @@ pub fn run_with_settings(
 /// # Errors
 ///
 /// Returns workspace loading or terminal IO failures from the screen graph.
-#[coverage(off)]
 #[allow(clippy::too_many_arguments)]
+#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=screen_graph_production_port_harness
 pub fn run_with_settings_and_agent_port_factory(
     term: &mut dyn Terminal,
     workspaces: Vec<Workspace>,
@@ -3024,8 +2974,8 @@ pub fn run_with_settings_and_agent_port_factory(
 /// # Errors
 ///
 /// Returns workspace loading or terminal IO failures from the screen graph.
-#[coverage(off)]
 #[allow(clippy::too_many_arguments)]
+#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=screen_graph_production_port_harness
 pub fn run_with_settings_and_agent_port_factory_and_model_availability(
     term: &mut dyn Terminal,
     workspaces: Vec<Workspace>,
@@ -3059,7 +3009,6 @@ pub fn run_with_settings_and_agent_port_factory_and_model_availability(
 /// # Errors
 ///
 /// Returns workspace loading or terminal IO failures from the screen graph.
-#[coverage(off)]
 #[allow(clippy::too_many_arguments)]
 pub fn run_with_settings_and_agent_and_metrics_port_factory_and_model_availability(
     term: &mut dyn Terminal,
@@ -3092,7 +3041,6 @@ pub fn run_with_settings_and_agent_and_metrics_port_factory_and_model_availabili
 /// Open one workspace snapshot through the controller runtime, supplying
 /// fallback ports for the screen-graph entry points that do not inject a daemon
 /// Agent / metrics factory (`run_with_settings`).
-#[coverage(off)]
 fn open_snapshot_via_controller(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
@@ -3151,7 +3099,6 @@ impl ControllerBackendFactory for CompatibilityBackendFactory<'_, '_, '_> {
 // The screen graph is an IO composition boundary.  Its choices are covered by
 // the injected loader/port tests; LLVM coverage excludes only this terminal
 // loop, consistently with the existing `run_with_settings` entry point.
-#[coverage(off)]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_with_settings_inner(
     term: &mut dyn Terminal,
@@ -3190,7 +3137,6 @@ fn run_with_settings_inner(
 /// # Errors
 ///
 /// Returns workspace loading, settings, or terminal IO failures.
-#[coverage(off)]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn run_screen_graph_with_backend(
     term: &mut dyn Terminal,
@@ -3243,32 +3189,21 @@ pub fn run_screen_graph_with_backend(
                     let snapshot = loader.open(&path)?;
                     welcome.record_opened(&snapshot.workspace);
                     open.record_opened(&snapshot.workspace);
-                    let workspace_step =
+                    let _ =
                         open_snapshot_via_controller(term, snapshot, settings, backend_factory)?;
-                    if workspace_step == WorkspaceStep::Quit {
-                        return Ok(Exit::Quit);
-                    }
+                    return Ok(Exit::Quit);
                 }
             },
             Screen::Open => match step_open(&mut open, key) {
                 OpenStep::Stay => {}
                 OpenStep::Quit => return Ok(Exit::Quit),
                 OpenStep::Back => screen = Screen::Welcome,
-                OpenStep::Choose(paths) => {
-                    for path in paths {
-                        let snapshot = loader.open(&path)?;
-                        welcome.record_opened(&snapshot.workspace);
-                        open.record_opened(&snapshot.workspace);
-                        let workspace_step = open_snapshot_via_controller(
-                            term,
-                            snapshot,
-                            settings,
-                            backend_factory,
-                        )?;
-                        if workspace_step == WorkspaceStep::Quit {
-                            return Ok(Exit::Quit);
-                        }
-                    }
+                OpenStep::Choose(path) => {
+                    let snapshot = loader.open(&path)?;
+                    welcome.record_opened(&snapshot.workspace);
+                    open.record_opened(&snapshot.workspace);
+                    return open_snapshot_via_controller(term, snapshot, settings, backend_factory)
+                        .map(|_| Exit::Quit);
                 }
                 OpenStep::ConfirmCleanup => {
                     let removed = loader.cleanup_missing(&open.workspaces())?;
@@ -3288,18 +3223,13 @@ pub fn run_screen_graph_with_backend(
                         new_form.set_notice(None);
                         welcome.record_opened(&snapshot.workspace);
                         open.record_opened(&snapshot.workspace);
-                        let workspace_step = open_snapshot_via_controller(
+                        return open_snapshot_via_controller(
                             term,
                             snapshot,
                             settings,
                             backend_factory,
-                        )?;
-                        if workspace_step == WorkspaceStep::Quit {
-                            return Ok(Exit::Quit);
-                        }
-                        // 作成した workspace を離れたら、フォームを白紙に戻して Welcome へ帰す。
-                        new_form = New::default();
-                        screen = Screen::Welcome;
+                        )
+                        .map(|_| Exit::Quit);
                     }
                     // 失敗時は入力中の draft を保持したまま notice を出して同画面に留まる。
                     Err(error) => new_form.set_notice(Some(new_project_notice(&error))),
@@ -3336,7 +3266,6 @@ pub fn run_screen_graph_with_backend(
 /// # Errors
 ///
 /// 端末サイズの取得、描画、フレーム間待機のいずれかに失敗した場合、そのエラーを返す。
-#[coverage(off)]
 pub fn play_startup_splash(term: &mut dyn Terminal) -> io::Result<()> {
     for frame in 0..splash::FRAMES {
         let (height, width) = term.size()?;
@@ -3352,7 +3281,6 @@ pub fn play_startup_splash(term: &mut dyn Terminal) -> io::Result<()> {
 /// # Errors
 ///
 /// Returns terminal or workspace loading errors from the screen graph.
-#[coverage(off)]
 pub fn run(
     term: &mut dyn Terminal,
     workspaces: Vec<Workspace>,
@@ -3378,7 +3306,6 @@ pub fn run(
 struct DefaultSettingsPort;
 
 impl SettingsPort for DefaultSettingsPort {
-    #[coverage(off)]
     fn read(
         &mut self,
         _scope: usagi_core::usecase::settings::SettingsScope,
@@ -3386,7 +3313,6 @@ impl SettingsPort for DefaultSettingsPort {
         Ok(usagi_core::domain::settings::Settings::default())
     }
 
-    #[coverage(off)]
     fn save(
         &mut self,
         _scope: usagi_core::usecase::settings::SettingsScope,
@@ -3407,50 +3333,45 @@ pub struct BannerScreenRunner<'a, W: Write + ?Sized> {
 impl<'a, W: Write + ?Sized> BannerScreenRunner<'a, W> {
     /// 注入された出力先とアプリ情報から runner を作る。
     #[must_use]
-    #[coverage(off)]
     pub fn new(out: &'a mut W, info: &'a AppInfo) -> Self {
         Self { out, info }
     }
 
     /// 画面を識別する `label` をアプリ情報とともに一行で書き出す。
-    #[coverage(off)]
     fn write_screen(&mut self, label: &str) -> io::Result<()> {
         writeln!(self.out, "{}: {label}", self.info.describe())
     }
 }
 
 impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
-    #[coverage(off)]
     fn welcome(&mut self) -> io::Result<()> {
         self.write_screen("welcome TUI")
     }
 
-    #[coverage(off)]
     fn workspace(&mut self, path: &Path) -> io::Result<()> {
         self.write_screen(&format!("workspace TUI ({})", path.display()))
     }
 
-    #[coverage(off)]
     fn config(&mut self) -> io::Result<()> {
         self.write_screen("config TUI")
     }
 
-    #[coverage(off)]
     fn doctor(&mut self) -> io::Result<()> {
         self.write_screen("doctor TUI")
     }
 }
 
 #[cfg(test)]
-#[coverage(off)] // Test assertion branches are not product coverage targets.
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{
         AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, BrowserOpener, Config,
-        ConfigStep, ControllerHost, ControllerHostAction, DefaultSettingsPort, Exit,
-        ExternalTerminalPort, FixedBackendFactory, Geometry, MetricsPort, MetricsPortFactory,
-        NewStep, NoDesktopNotifications, NoMetrics, NoMetricsFactory, SessionCommandPort,
-        SessionCommandPortFactory, SessionCommandResult, Start, TerminalAttach, TerminalChunk,
-        TerminalError, UnavailableAgentCommandPort, UnavailableBackendPort,
+        ConfigStep, ControllerHost, ControllerHostAction, DecisionCommandPort, DefaultSettingsPort,
+        DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort,
+        FixedBackendFactory, Geometry, MetricsPort, MetricsPortFactory, NewStep,
+        NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep, PaneLaunch,
+        SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, Start, TerminalAttach,
+        TerminalChunk, TerminalError, UnavailableAgentCommandPort, UnavailableBackendPort,
         UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
         UnavailableExternalTerminalPort, UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
         UnavailableSessionCommandPortFactory, WelcomeStep, WorkspaceLoader, WorkspaceRuntime,
@@ -3458,16 +3379,18 @@ mod tests {
         begin_terminal_selection_on_click, close_exited_panes, controller_terminal_view,
         copy_terminal_selection, drain_controller_host_actions, drain_session_completions,
         forward_live_terminal_input, handle_terminal_pointer, intercept_live_terminal_control,
-        key_to_terminal_bytes, new_project_notice, play_startup_splash, render_controller_frame,
-        render_home_snapshot, restore_open_panes, run as run_from_start, run_with_settings,
+        key_to_terminal_bytes, new_project_notice, play_startup_splash, poll_and_project_terminals,
+        render_controller_frame, render_home_snapshot, restore_open_panes, run as run_from_start,
+        run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_controller, run_workspace_controller_with_backend_and_settings,
         safe_session_error, session_worktree_names, sidebar_pointer_event, step_config, step_new,
-        terminal_geometry, tick_session_refresh, welcome_action, write_banner,
+        step_open, terminal_geometry, tick_session_refresh, welcome_action, write_banner,
     };
     use crate::presentation::live_terminal::LiveTerminalControls;
     use crate::presentation::views::config::AvailableAgentModels;
     use crate::presentation::views::new::{Field, Mode, New};
+    use crate::presentation::views::open::Open;
     use crate::presentation::views::welcome::MenuAction;
     use crate::usecase::application::controller::{
         AppEvent, AppKey, BackendEvent, Effect, EnvironmentEntry, NewRequest, PendingToken,
@@ -3475,6 +3398,7 @@ mod tests {
     };
     use crate::usecase::application::daemon_backend::DaemonBackend;
     use crate::usecase::application::pane::PaneKind;
+    use crate::usecase::application::pr::PrSnapshotPort;
     use crate::usecase::application::run as dispatch;
     use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
     use crate::usecase::application::{EntryScreen, Key, Terminal};
@@ -3496,9 +3420,10 @@ mod tests {
         WorkspaceId, WorktreeId,
     };
     use usagi_core::domain::note::Scratchpad;
+    use usagi_core::domain::settings::Settings;
     use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
     use usagi_core::domain::user_decision::UserDecisionAnswer;
-    use usagi_core::usecase::settings::SettingsPort;
+    use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
     use usagi_core::domain::recent::{Recent, UniteOverview};
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
@@ -3790,6 +3715,365 @@ mod tests {
         assert_eq!(backend.drain_events().len(), 10);
     }
 
+    #[test]
+    #[allow(clippy::too_many_lines)] // One host fixture verifies the ordered action-routing contract.
+    fn controller_host_executor_routes_busy_launch_terminal_and_tab_actions() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let mut pending = std::collections::HashMap::new();
+        let (host, actions) = ControllerHost::channel();
+        let mut backend = DaemonBackend::new(
+            Box::new(host.clone()),
+            Box::new(host),
+            Box::new(UnavailableBackendPort),
+            Box::new(UnavailableBackendPort),
+        );
+        let token = PendingToken::from_raw(90);
+
+        for effect in [
+            Effect::CreateSession {
+                workspace,
+                token,
+                operation_id: OperationId::new(),
+                intent: SessionCreateIntent {
+                    name: "feature".into(),
+                    profile: None,
+                    model: None,
+                },
+            },
+            Effect::RefreshSessions { workspace },
+            Effect::RemoveSession {
+                workspace,
+                session: SessionId::new(),
+                force: false,
+            },
+            Effect::LaunchAgent {
+                workspace,
+                session: Some(session),
+                operation_id: OperationId::new(),
+                profile: None,
+            },
+            Effect::ResumeAgent {
+                workspace,
+                session,
+                operation_id: OperationId::new(),
+            },
+            Effect::OpenTerminal {
+                target,
+                operation_id: OperationId::new(),
+                arguments: "new".into(),
+            },
+            Effect::OpenExternalTerminal { target },
+            Effect::OpenExternalTerminal {
+                target: Target::Session(SessionId::new()),
+            },
+            Effect::SelectTab {
+                direction: TabDirection::Previous,
+            },
+        ] {
+            backend.dispatch(effect);
+        }
+        drain_controller_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
+        let completed = (0..1)
+            .map(|_| {
+                ui.session_completions
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .expect("session command completion")
+            })
+            .collect::<Vec<_>>();
+        for completion in completed {
+            ui.session_completion_sender.send(completion).unwrap();
+        }
+        super::drain_session_completions(&mut ui);
+        let events = backend.drain_events();
+        assert_eq!(events.len(), 3);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::OperationResult(result) if result.token == token && !result.succeeded
+        )));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AppEvent::Backend(BackendEvent::Notice(_))))
+                .count(),
+            2
+        );
+        assert_eq!(ui.pane_launches.len(), 2);
+        assert!(!pending.is_empty());
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(SnapshotSessionPort(calls.clone())))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(SuccessfulAgentPort(live_terminal_ref(workspace, session))),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let mut pending = std::collections::HashMap::new();
+        let (host, actions) = ControllerHost::channel();
+        let mut backend = DaemonBackend::new(
+            Box::new(host.clone()),
+            Box::new(host),
+            Box::new(UnavailableBackendPort),
+            Box::new(UnavailableBackendPort),
+        );
+        backend.dispatch(Effect::RefreshSessions { workspace });
+        drain_controller_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        super::drain_session_completions(&mut ui);
+        backend.dispatch(Effect::RemoveSession {
+            workspace,
+            session,
+            force: true,
+        });
+        drain_controller_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        super::drain_session_completions(&mut ui);
+        backend.dispatch(Effect::OpenTerminal {
+            target,
+            operation_id: OperationId::new(),
+            arguments: "new".into(),
+        });
+        drain_controller_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
+        assert_eq!(calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One shell fixture keeps port absence and async completion in sequence.
+    fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_completion() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let terminal = live_terminal_ref(workspace, session);
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+
+        ui.resize_terminals(Geometry { cols: 20, rows: 5 });
+        assert!(ui.send_terminal_bytes(&terminal, b"x").is_err());
+        assert!(ui.poll_all_terminals().is_empty());
+        assert_eq!(
+            super::session_name_for(&ui, session).as_deref(),
+            Some("demo-session")
+        );
+        assert_eq!(super::session_name_for(&ui, SessionId::new()), None);
+
+        let records = ui.workspace.sessions().to_vec();
+        super::apply_session_projection(&mut ui, None, None, None);
+        super::apply_session_projection(&mut ui, Some(records.clone()), None, None);
+        super::apply_session_projection(&mut ui, Some(records), Some(vec![session]), None);
+        let records = ui.workspace.sessions().to_vec();
+        super::apply_session_projection(
+            &mut ui,
+            Some(records),
+            Some(vec![session]),
+            Some(std::collections::BTreeMap::new()),
+        );
+        let mut mismatched_runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        super::sync_runtime_sessions(&mut mismatched_runtime, &ui);
+        let mut no_controls = LiveTerminalControls::default();
+        let _ = super::poll_and_project_terminals(
+            &mut ui,
+            &mut mismatched_runtime,
+            &mut no_controls,
+            Geometry { cols: 20, rows: 5 },
+        );
+        let mut ui = ui.with_agent_context(
+            workspace,
+            vec![session],
+            Box::new(SuccessfulAgentPort(terminal.clone())),
+        );
+        assert!(ui.send_terminal_bytes(&terminal, b"missing").is_err());
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        for session in [Some(session), None] {
+            ui.pane_launches.push(super::PaneLaunch::Agent {
+                operation: OperationId::new(),
+                workspace,
+                session,
+                profile: None,
+                resume: true,
+            });
+            super::drain_pane_launches(&mut ui, Geometry { cols: 20, rows: 5 });
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            super::drain_pane_completions_into_runtime(
+                &mut ui,
+                &mut runtime,
+                &mut std::collections::HashMap::new(),
+                Geometry { cols: 20, rows: 5 },
+            );
+        }
+        let operation = OperationId::new();
+        runtime.on_effect(&Effect::LaunchAgent {
+            workspace,
+            session: Some(session),
+            operation_id: operation,
+            profile: None,
+        });
+        ui.pane_launches.push(super::PaneLaunch::Agent {
+            operation,
+            workspace,
+            session: Some(session),
+            profile: None,
+            resume: false,
+        });
+        let mut pending = std::collections::HashMap::from([(operation, target)]);
+        super::drain_pane_launches(&mut ui, Geometry { cols: 20, rows: 5 });
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        super::drain_pane_completions_into_runtime(
+            &mut ui,
+            &mut runtime,
+            &mut pending,
+            Geometry { cols: 20, rows: 5 },
+        );
+        assert!(pending.is_empty());
+        ui.resize_terminals(Geometry { cols: 30, rows: 6 });
+        let projected_records = ui.workspace.sessions().to_vec();
+        super::apply_session_projection(
+            &mut ui,
+            Some(projected_records),
+            Some(vec![session]),
+            None,
+        );
+
+        let operation = OperationId::new();
+        runtime.on_effect(&Effect::OpenTerminal {
+            target,
+            operation_id: operation,
+            arguments: "new".into(),
+        });
+        ui.pane_launches.push(super::PaneLaunch::Terminal {
+            operation,
+            workspace,
+            session: Some(session),
+            arguments: "new".into(),
+        });
+        pending.insert(operation, target);
+        super::drain_pane_launches(&mut ui, Geometry { cols: 20, rows: 5 });
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        super::drain_pane_completions_into_runtime(
+            &mut ui,
+            &mut runtime,
+            &mut pending,
+            Geometry { cols: 20, rows: 5 },
+        );
+
+        ui.pane_completion_sender
+            .send(super::PaneLaunchCompletion {
+                port: Box::new(SuccessfulAgentPort(terminal.clone())),
+                outcome: super::PaneLaunchOutcome::Agent {
+                    operation: OperationId::new(),
+                    result: Ok(terminal.clone()),
+                },
+            })
+            .unwrap();
+        super::drain_pane_completions_into_runtime(
+            &mut ui,
+            &mut runtime,
+            &mut pending,
+            Geometry { cols: 20, rows: 5 },
+        );
+
+        let cancel = OperationId::new();
+        runtime.on_effect(&Effect::OpenTerminal {
+            target,
+            operation_id: cancel,
+            arguments: "open".into(),
+        });
+        ui.pane_launches.push(super::PaneLaunch::Terminal {
+            operation: cancel,
+            workspace,
+            session: Some(session),
+            arguments: "open".into(),
+        });
+        pending.insert(cancel, target);
+        let _ = runtime.select_tab(TabDirection::Next);
+        super::close_focused_terminal_pane(&mut ui, &mut runtime, &mut pending);
+
+        ui.agent.as_mut().unwrap().port = None;
+        assert!(ui.poll_all_terminals().is_empty());
+        ui.pane_launches.push(super::PaneLaunch::Agent {
+            operation: OperationId::new(),
+            workspace,
+            session: Some(session),
+            profile: None,
+            resume: false,
+        });
+        ui.pane_launches.push(super::PaneLaunch::Terminal {
+            operation: OperationId::new(),
+            workspace,
+            session: Some(session),
+            arguments: "open".into(),
+        });
+        super::drain_pane_launches(&mut ui, Geometry { cols: 20, rows: 5 });
+        assert!(ui.pane_launches.len() >= 2);
+    }
+
+    #[test]
+    fn compatibility_ports_fail_explicitly_and_never_silently_succeed() {
+        struct DefaultSessionPort;
+        impl SessionCommandPort for DefaultSessionPort {}
+
+        let workspace_id = WorkspaceId::new();
+        let session_id = SessionId::new();
+        let target = Target::Root(workspace_id);
+        let workspace = ws("fallback");
+        assert!(
+            DefaultSessionPort
+                .execute(&workspace, None, SessionCommand::List)
+                .is_err()
+        );
+        assert!(
+            UnavailableSessionCommandPort
+                .execute(&workspace, None, SessionCommand::List)
+                .is_err()
+        );
+        assert!(
+            UnavailableAgentCommandPort
+                .launch(workspace_id, None, None)
+                .is_err()
+        );
+
+        let decision_id = UserDecisionId::new();
+        assert!(matches!(
+            UnavailableDecisionCommandPort.refresh(workspace_id),
+            BackendEvent::Notice(_)
+        ));
+        assert!(matches!(
+            UnavailableDecisionCommandPort.resolve(
+                workspace_id,
+                decision_id,
+                UserDecisionAnswer::Option {
+                    option_id: "safe".to_owned(),
+                },
+            ),
+            BackendEvent::DecisionError { .. }
+        ));
+        assert!(matches!(
+            UnavailableEnvironmentStore.load(target),
+            BackendEvent::EnvironmentError { .. }
+        ));
+        assert!(matches!(
+            UnavailableEnvironmentStore.save(target, Vec::new()),
+            BackendEvent::EnvironmentError { .. }
+        ));
+        assert!(UnavailablePrSnapshotPort.snapshot(session_id).is_err());
+        assert!(
+            UnavailableBrowserOpener
+                .open("https://example.com")
+                .is_err()
+        );
+        NoDesktopNotifications.notify("title", "body");
+
+        let mut settings = DefaultSettingsPort;
+        settings
+            .save(SettingsScope::Global, &Settings::default())
+            .unwrap();
+    }
+
     type SessionCommandCall = (String, Option<String>, SessionCommand);
 
     struct RecordingExternalTerminalPort(Arc<Mutex<Vec<PathBuf>>>);
@@ -3837,6 +4121,7 @@ mod tests {
 
     struct SuccessfulAgentPort(TerminalRef);
 
+    #[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=production_screen_graph_fake_port_contract
     impl AgentCommandPort for SuccessfulAgentPort {
         fn launch(
             &mut self,
@@ -3854,8 +4139,8 @@ mod tests {
     #[derive(Clone)]
     struct SnapshotSessionPort(Arc<Mutex<Vec<SessionCommandCall>>>);
 
+    #[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=production_screen_graph_fake_port_contract
     impl SessionCommandPort for SnapshotSessionPort {
-        #[coverage(off)]
         fn execute(
             &self,
             workspace: &Workspace,
@@ -3902,7 +4187,6 @@ mod tests {
     }
 
     impl SessionCommandPortFactory for SnapshotSessionPortFactory {
-        #[coverage(off)]
         fn create(&mut self) -> Box<dyn SessionCommandPort> {
             *self.created.lock().unwrap() += 1;
             Box::new(SnapshotSessionPort(self.calls.clone()))
@@ -4102,7 +4386,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn controller_loop_renders_home_and_detaches_on_quit_confirmation() {
         let snapshot = snapshot("demo");
         let terminal = TerminalRef {
@@ -4199,7 +4482,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn controller_loop_opens_the_create_form_from_the_new_session_row() {
         // An empty workspace shows only root and `+ new session`, so one Down
         // reaches the create entry deterministically.
@@ -4263,7 +4545,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn controller_loop_dispatches_each_ctrl_a_representation_once_to_the_session_port() {
         struct SignallingSessionPort {
             calls: Arc<AtomicUsize>,
@@ -4344,7 +4625,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn drain_session_completions_refluxes_create_failure_with_its_token() {
         let snapshot = snapshot("demo");
         let view = WorkspaceView::with_runtime_ids(
@@ -4480,7 +4760,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn drain_session_completions_refluxes_create_success_with_created_identity() {
         let snapshot = snapshot("demo");
         let existing = snapshot.session_ids[0];
@@ -4968,7 +5247,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn session_snapshot_adapter_preserves_reconciliation_boundary_for_pointer_state() {
         use crate::presentation::workspace_runtime::WorkspaceRuntime;
         use crate::usecase::application::controller::{HomeMode, Route};
@@ -5043,6 +5321,7 @@ mod tests {
         detaches: Arc<Mutex<Vec<u64>>>,
     }
 
+    #[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=terminal_reconnect_fake_port_contract
     impl AgentCommandPort for ScriptedAgentPort {
         fn launch(
             &mut self,
@@ -5079,9 +5358,13 @@ mod tests {
             _terminal: &TerminalRef,
             _subscription: u64,
             _input_seq: u64,
-            _bytes: &[u8],
+            bytes: &[u8],
         ) -> Result<(), TerminalError> {
-            Ok(())
+            if bytes == b"fail" {
+                Err(TerminalError::Unavailable)
+            } else {
+                Ok(())
+            }
         }
 
         fn detach_terminal(&mut self, _terminal: &TerminalRef, subscription: u64) {
@@ -5124,7 +5407,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn an_exited_terminal_auto_closes_its_pane_and_detaches_through_the_runtime() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -5154,7 +5436,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn reconnecting_and_stale_terminal_states_are_projected_into_the_pane_footer() {
         for (error, expected) in [
             (
@@ -5189,13 +5470,12 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn close_tab_live_action_detaches_the_focused_terminal() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let terminal = live_terminal_ref(workspace, session);
         let detaches = Arc::new(Mutex::new(Vec::new()));
-        let (mut ui, mut runtime) = focused_live_pane(
+        let (ui, mut runtime) = focused_live_pane(
             workspace,
             session,
             terminal.clone(),
@@ -5210,6 +5490,7 @@ mod tests {
         let mut controls = LiveTerminalControls::default();
         let mut term = FakeTerminal::default();
         let mut browser = UnavailableBrowserOpener;
+        let mut ui = ui;
         let mut pending_targets = std::collections::HashMap::new();
 
         assert!(intercept_live_terminal_control(
@@ -5231,7 +5512,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn close_tab_live_action_cancels_the_focused_pending_launch() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -5244,6 +5524,19 @@ mod tests {
         let operation = OperationId::new();
         let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
         let _ = runtime.select_tab(crate::usecase::application::controller::TabDirection::Next);
+        ui.pane_launches.push(PaneLaunch::Terminal {
+            operation: OperationId::new(),
+            workspace,
+            session: Some(session),
+            arguments: "open".to_owned(),
+        });
+        ui.pane_launches.push(PaneLaunch::Agent {
+            operation,
+            workspace,
+            session: Some(session),
+            profile: None,
+            resume: false,
+        });
         let mut pending_targets = std::collections::HashMap::from([(operation, target)]);
         let mut controls = LiveTerminalControls::default();
         let mut term = FakeTerminal::default();
@@ -5265,6 +5558,10 @@ mod tests {
 
         assert!(runtime.active_pane().tabs().is_empty());
         assert!(!pending_targets.contains_key(&operation));
+        assert!(matches!(
+            ui.pane_launches.as_slice(),
+            [PaneLaunch::Terminal { .. }]
+        ));
     }
 
     /// A daemon inventory double for restore-on-open. It returns a fixed set of
@@ -5276,6 +5573,7 @@ mod tests {
         fail: bool,
         inputs: RecordedTerminalInputs,
     }
+    #[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=terminal_restore_fake_port_contract
     impl AgentCommandPort for RestoreInventoryPort {
         fn launch(
             &mut self,
@@ -5337,7 +5635,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn restore_open_panes_projects_live_runtimes_and_skips_dead_and_duplicates() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -5400,7 +5697,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn restored_terminal_and_agent_tabs_deliver_ordinary_closeup_input() {
         let workspace = WorkspaceId::new();
         let terminal = scoped_terminal_ref(workspace, None);
@@ -5465,7 +5761,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn restore_open_panes_restores_nothing_on_daemon_failure_or_without_a_port() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -5501,7 +5796,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn a_live_terminal_drag_selects_and_release_copies_to_the_clipboard() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -5628,6 +5922,211 @@ mod tests {
         );
     }
 
+    #[test]
+    #[allow(clippy::too_many_lines)] // The pointer boundary matrix shares one geometry fixture.
+    fn pointer_classifier_covers_inert_scroll_drag_and_click_boundaries() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let (mut ui, mut runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(ScriptedAgentPort {
+                terminal,
+                subscription: 30,
+                replay: b"hello".to_vec(),
+                poll_error: None,
+                detaches: Arc::new(Mutex::new(Vec::new())),
+            }),
+        );
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        let mut browser = UnavailableBrowserOpener;
+        let inactive = WorkspaceRuntime::new(workspace, vec![session]);
+        assert!(!forward_live_terminal_input(
+            &mut ui,
+            &inactive,
+            &mut controls,
+            &mut term,
+            &Key::TerminalCopy {
+                fallback: Vec::new(),
+            },
+        ));
+        assert!(forward_live_terminal_input(
+            &mut ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            &Key::TerminalCopy {
+                fallback: Vec::new(),
+            },
+        ));
+        assert!(forward_live_terminal_input(
+            &mut ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            &Key::TerminalCopy {
+                fallback: b"fail".to_vec(),
+            },
+        ));
+        assert!(forward_live_terminal_input(
+            &mut ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            &Key::Passthrough(b"fail".to_vec()),
+        ));
+        let _ = poll_and_project_terminals(
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            Geometry { cols: 43, rows: 13 },
+        );
+
+        handle_terminal_pointer(
+            &ui,
+            &inactive,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            20,
+            80,
+            1,
+            0,
+            PointerEvent {
+                kind: PointerKind::Drag,
+                column: 40,
+                row: 5,
+            },
+        );
+        handle_terminal_pointer(
+            &ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            20,
+            80,
+            1,
+            0,
+            PointerEvent {
+                kind: PointerKind::Drag,
+                column: 0,
+                row: 0,
+            },
+        );
+        handle_terminal_pointer(
+            &ui,
+            &inactive,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            20,
+            80,
+            1,
+            0,
+            PointerEvent {
+                kind: PointerKind::Up,
+                column: 40,
+                row: 5,
+            },
+        );
+        handle_terminal_pointer(
+            &ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            20,
+            80,
+            1,
+            0,
+            PointerEvent {
+                kind: PointerKind::Up,
+                column: 0,
+                row: 0,
+            },
+        );
+        for column in [40, 41] {
+            handle_terminal_pointer(
+                &ui,
+                &runtime,
+                &mut controls,
+                &mut term,
+                &mut browser,
+                20,
+                80,
+                1,
+                0,
+                PointerEvent {
+                    kind: PointerKind::Drag,
+                    column,
+                    row: 5,
+                },
+            );
+        }
+        assert!(!begin_terminal_selection_on_click(
+            &ui,
+            &inactive,
+            &mut controls,
+            20,
+            80,
+            1,
+            0,
+            (40, 5),
+        ));
+        assert!(!begin_terminal_selection_on_click(
+            &ui,
+            &runtime,
+            &mut controls,
+            20,
+            80,
+            1,
+            0,
+            (0, 0),
+        ));
+        let empty_view = WorkspaceView::with_runtime_ids(ws("empty"), state("empty"), vec![]);
+        let empty_ui = WorkspaceUi::new(empty_view, Box::new(UnavailableSessionCommandPort));
+        assert!(!begin_terminal_selection_on_click(
+            &empty_ui,
+            &runtime,
+            &mut controls,
+            20,
+            80,
+            1,
+            0,
+            (40, 5),
+        ));
+
+        let mut pending = std::collections::HashMap::new();
+        for key in [
+            Key::Live(LiveTerminalAction::ScrollUp),
+            Key::Live(LiveTerminalAction::ScrollDown),
+            Key::Pointer(PointerEvent {
+                kind: PointerKind::Drag,
+                column: 0,
+                row: 0,
+            }),
+            Key::Click { column: 0, row: 0 },
+        ] {
+            let _ = intercept_live_terminal_control(
+                &key,
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &mut browser,
+                &mut pending,
+                20,
+                80,
+                1,
+                0,
+            );
+        }
+    }
+
     /// A recording [`BrowserOpener`] fake: it captures opened URLs so a pointer
     /// test can assert what (if anything) a click launched, and never runs IO.
     #[derive(Default)]
@@ -5636,7 +6135,6 @@ mod tests {
     }
 
     impl BrowserOpener for RecordingBrowser {
-        #[coverage(off)]
         fn open(&mut self, url: &str) -> Result<(), String> {
             self.opened.push(url.to_owned());
             Ok(())
@@ -5644,7 +6142,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn a_plain_click_on_a_terminal_link_opens_it_without_touching_the_pty() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -5715,7 +6212,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn a_terminal_press_anchors_a_drag_at_its_start_cell() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -5772,7 +6268,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn a_block_selection_over_padding_stays_visible_in_the_projected_rows() {
         // Regression: agents draw space-padded, mostly-blank screens. A block
         // drag across text, a blank line, and trailing padding must reach the
@@ -5813,7 +6308,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn scrolling_a_live_terminal_offsets_its_projected_viewport() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -5883,6 +6377,7 @@ mod tests {
         }
     }
 
+    #[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=production_screen_graph_terminal_harness
     impl Terminal for FakeTerminal {
         fn size(&mut self) -> io::Result<(usize, usize)> {
             if self.fail_size {
@@ -6216,6 +6711,9 @@ mod tests {
             step_config(&mut config, Key::Tab, &mut settings),
             ConfigStep::Stay
         ));
+        for key in [Key::Up, Key::Down, Key::Left, Key::Right, Key::CtrlQ] {
+            let _ = step_config(&mut config, key, &mut settings);
+        }
     }
 
     #[test]
@@ -6335,7 +6833,6 @@ mod tests {
     }
 
     impl SettingsPort for RecordingSettingsPort {
-        #[coverage(off)]
         fn read(
             &mut self,
             _scope: usagi_core::usecase::settings::SettingsScope,
@@ -6343,7 +6840,6 @@ mod tests {
             Ok(usagi_core::domain::settings::Settings::default())
         }
 
-        #[coverage(off)]
         fn save(
             &mut self,
             _scope: usagi_core::usecase::settings::SettingsScope,
@@ -6501,6 +6997,24 @@ mod tests {
         step_new(&mut form, Key::Left);
         step_new(&mut form, Key::Right);
         step_new(&mut form, Key::Backspace);
+        for key in [
+            Key::Home,
+            Key::End,
+            Key::LineStart,
+            Key::LineEnd,
+            Key::SelectLeft,
+            Key::SelectRight,
+            Key::SelectHome,
+            Key::SelectEnd,
+            Key::Delete,
+            Key::Tab,
+            Key::CtrlD,
+            Key::Live(LiveTerminalAction::NextTab),
+            Key::Click { column: 0, row: 0 },
+            Key::Passthrough(Vec::new()),
+        ] {
+            let _ = step_new(&mut form, key);
+        }
         assert_eq!(form.url(), "a");
         // Enter with a still-incomplete Clone form (no Location) validates,
         // surfaces the field error as a notice, and stays on the form.
@@ -6509,6 +7023,7 @@ mod tests {
         assert!(matches!(step_new(&mut form, Key::Other), NewStep::Stay));
         assert!(matches!(step_new(&mut form, Key::Escape), NewStep::Back));
         assert!(matches!(step_new(&mut form, Key::Quit), NewStep::Quit));
+        assert!(matches!(step_new(&mut form, Key::CtrlQ), NewStep::Quit));
     }
 
     #[test]
@@ -6975,6 +7490,85 @@ mod tests {
         .unwrap();
         assert!(term.frames[1].join("\n").contains("No workspaces yet"));
         assert_eq!(term.frames.len(), keys.len());
+
+        let keys = [Key::Char('o'), Key::Tab, Key::Enter, Key::Quit];
+        let mut term = FakeTerminal::with_keys(&keys);
+        run(
+            &mut term,
+            vec![ws("alpha")],
+            Vec::new(),
+            now(),
+            &mut FakeLoader::default(),
+        )
+        .unwrap();
+        assert_eq!(term.frames.len(), keys.len());
+    }
+
+    #[test]
+    fn open_key_classifier_covers_edit_selection_and_confirmation_paths() {
+        let mut open = Open::new(vec![ws("alpha"), ws("Alpha"), ws("beta")]);
+        for key in [
+            Key::Up,
+            Key::Down,
+            Key::Char('x'),
+            Key::Backspace,
+            Key::Left,
+            Key::Right,
+            Key::Home,
+            Key::End,
+            Key::LineStart,
+            Key::LineEnd,
+            Key::Delete,
+            Key::SelectLeft,
+            Key::SelectRight,
+            Key::SelectHome,
+            Key::SelectEnd,
+            Key::Other,
+        ] {
+            assert!(matches!(step_open(&mut open, key), OpenStep::Stay));
+        }
+        assert!(matches!(
+            step_open(&mut open, Key::Enter),
+            OpenStep::Choose(_)
+        ));
+        assert!(matches!(step_open(&mut open, Key::Escape), OpenStep::Back));
+        assert!(matches!(step_open(&mut open, Key::CtrlQ), OpenStep::Quit));
+
+        let _ = step_open(&mut open, Key::Tab);
+        let _ = step_open(&mut open, Key::Char(' '));
+        let _ = step_open(&mut open, Key::Char(' '));
+        let _ = step_open(&mut open, Key::Char(' '));
+        assert!(matches!(
+            step_open(&mut open, Key::Enter),
+            OpenStep::Choose(_)
+        ));
+
+        let _ = step_open(&mut open, Key::Char('C'));
+        assert!(matches!(step_open(&mut open, Key::Escape), OpenStep::Stay));
+        let _ = step_open(&mut open, Key::Char('C'));
+        assert!(matches!(
+            step_open(&mut open, Key::Enter),
+            OpenStep::ConfirmCleanup
+        ));
+
+        let _ = step_open(&mut open, Key::CtrlD);
+        let _ = step_open(&mut open, Key::Left);
+        assert!(matches!(step_open(&mut open, Key::Escape), OpenStep::Stay));
+        let _ = step_open(&mut open, Key::CtrlD);
+        assert!(matches!(
+            step_open(&mut open, Key::Char('y')),
+            OpenStep::ConfirmUnregister(_)
+        ));
+
+        for key in [Key::Right, Key::Tab, Key::Char('n'), Key::CtrlQ] {
+            let mut open = Open::new(vec![ws("fresh")]);
+            let _ = step_open(&mut open, Key::CtrlD);
+            let result = step_open(&mut open, key.clone());
+            assert!(matches!(result, OpenStep::Stay | OpenStep::Quit));
+        }
+        let mut open = Open::new(vec![ws("fresh")]);
+        let _ = step_open(&mut open, Key::Char('C'));
+        assert!(matches!(step_open(&mut open, Key::CtrlQ), OpenStep::Quit));
     }
 
     #[test]
@@ -7154,7 +7748,30 @@ mod tests {
         assert_eq!(key_to_terminal_bytes(Key::Up), Some(b"\x1b[A".to_vec()));
         assert_eq!(key_to_terminal_bytes(Key::Down), Some(b"\x1b[B".to_vec()));
         assert_eq!(key_to_terminal_bytes(Key::Right), Some(b"\x1b[C".to_vec()));
+        assert_eq!(
+            key_to_terminal_bytes(Key::SelectRight),
+            Some(b"\x1b[C".to_vec())
+        );
         assert_eq!(key_to_terminal_bytes(Key::Left), Some(b"\x1b[D".to_vec()));
+        assert_eq!(
+            key_to_terminal_bytes(Key::SelectLeft),
+            Some(b"\x1b[D".to_vec())
+        );
+        for key in [Key::Home, Key::LineStart, Key::SelectHome] {
+            assert_eq!(key_to_terminal_bytes(key), Some(vec![1]));
+        }
+        for key in [Key::End, Key::LineEnd, Key::SelectEnd] {
+            assert_eq!(key_to_terminal_bytes(key), Some(vec![5]));
+        }
+        assert_eq!(
+            key_to_terminal_bytes(Key::Delete),
+            Some(b"\x1b[3~".to_vec())
+        );
+        assert_eq!(key_to_terminal_bytes(Key::Passthrough(Vec::new())), None);
+        assert_eq!(
+            key_to_terminal_bytes(Key::Passthrough(vec![0xff])),
+            Some(vec![0xff])
+        );
         assert_eq!(key_to_terminal_bytes(Key::Quit), Some(vec![3]));
         assert_eq!(key_to_terminal_bytes(Key::CtrlQ), Some(vec![17]));
         assert_eq!(key_to_terminal_bytes(Key::CtrlD), Some(vec![4]));

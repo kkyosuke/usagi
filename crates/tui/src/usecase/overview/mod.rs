@@ -120,7 +120,6 @@ const SESSION_SUBCOMMANDS: &[&str] = &["create", "list", "overview", "remove", "
 
 /// Overview 固有コマンドの metadata を名前順に返す。
 #[must_use]
-#[coverage(off)]
 pub fn commands() -> impl ExactSizeIterator<Item = CommandInfo> {
     DEFINITIONS.iter().map(|definition| definition.info)
 }
@@ -139,7 +138,6 @@ pub trait CommandRegistry {
 pub struct DefaultRegistry;
 
 impl CommandRegistry for DefaultRegistry {
-    #[coverage(off)]
     fn commands(&self) -> Vec<CommandInfo> {
         commands().collect()
     }
@@ -147,7 +145,6 @@ impl CommandRegistry for DefaultRegistry {
 
 /// `input` の先頭 token に前方一致する command metadata。
 #[must_use]
-#[coverage(off)]
 pub fn complete(registry: &impl CommandRegistry, input: &str) -> Vec<CommandInfo> {
     let typed = input.split_whitespace().next().unwrap_or_default();
     registry
@@ -246,7 +243,6 @@ fn parse_remove(arguments: &str) -> Result<SessionCommand, &'static str> {
 
 /// `input` の先頭 token と一致する command の help metadata。
 #[must_use]
-#[coverage(off)]
 pub fn help(registry: &impl CommandRegistry, input: &str) -> Option<CommandInfo> {
     let name = input.split_whitespace().next()?;
     registry
@@ -258,7 +254,6 @@ pub fn help(registry: &impl CommandRegistry, input: &str) -> Option<CommandInfo>
 impl Command {
     /// registry に登録された command 名。
     #[must_use]
-    #[coverage(off)]
     pub const fn name(&self) -> &'static str {
         match self {
             Self::Config { .. } => "config",
@@ -269,7 +264,6 @@ impl Command {
     }
     /// 解釈済みコマンドを、その実行方法を知る個別ハンドラへ変換する。
     #[must_use]
-    #[coverage(off)]
     pub fn into_handler(self) -> Box<dyn Run> {
         use commands as h;
 
@@ -293,7 +287,6 @@ pub enum CommandResult {
 }
 
 impl CommandResult {
-    #[coverage(off)]
     fn not_implemented(command: &'static str, arguments: &str) -> Self {
         Self::NotImplemented {
             command,
@@ -312,7 +305,6 @@ pub enum ParseError {
 }
 
 impl fmt::Display for ParseError {
-    #[coverage(off)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => f.write_str("overview command is empty"),
@@ -331,7 +323,6 @@ impl std::error::Error for ParseError {}
 ///
 /// 入力が空の場合は [`ParseError::Empty`]、登録されていないコマンド名の場合は
 /// [`ParseError::Unknown`] を返す。
-#[coverage(off)]
 pub fn interpret(input: &str) -> Result<Command, ParseError> {
     let input = input.trim();
     if input.is_empty() {
@@ -354,13 +345,13 @@ pub fn interpret(input: &str) -> Result<Command, ParseError> {
 /// # Errors
 ///
 /// [`interpret`] が入力を解釈できなかった場合、その [`ParseError`] を返す。
-#[coverage(off)]
 pub fn dispatch(input: &str) -> Result<CommandResult, ParseError> {
     Ok(interpret(input)?.into_handler().run())
 }
 
 #[cfg(test)]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{
         Command, CommandInfo, CommandRegistry, CommandResult, DefaultRegistry, ParseError,
         SessionCommand, commands, complete, completion, dispatch, help, interpret, parse_session,
@@ -383,6 +374,24 @@ mod tests {
             definitions
                 .iter()
                 .all(|command| !command.description.is_empty() && !command.usage.is_empty())
+        );
+        assert_eq!(
+            [
+                Command::Config {
+                    arguments: String::new()
+                },
+                Command::Env {
+                    arguments: String::new()
+                },
+                Command::Issue {
+                    arguments: String::new()
+                },
+                Command::Session {
+                    arguments: String::new()
+                },
+            ]
+            .map(|command| command.name()),
+            ["config", "env", "issue", "session"]
         );
     }
 
@@ -484,7 +493,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn interprets_every_registered_command_and_trims_arguments() {
         let cases = [
             (

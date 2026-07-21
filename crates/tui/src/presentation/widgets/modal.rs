@@ -647,6 +647,7 @@ pub fn render_over(
 
 #[cfg(test)]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{
         ConfirmationModal, ConfirmationView, boxed, caption, columns, confirmation_buttons,
         content_line, empty_notice, fixed_body, footer, heading, list_window, modal_inner_width,
@@ -935,7 +936,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_modal_centers_the_box_over_a_blank_frame() {
         let lines = render_modal(10, 40, "T", 10, &["hi".to_string()]);
         assert_eq!(lines.len(), 10);

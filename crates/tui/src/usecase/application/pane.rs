@@ -85,7 +85,6 @@ pub struct PaneState {
 impl PaneState {
     /// target または tab の現在の選択で空の pane state を作る。
     #[must_use]
-    #[coverage(off)]
     pub fn new(selected: PaneSelection) -> Self {
         Self {
             tabs: Vec::new(),
@@ -96,7 +95,6 @@ impl PaneState {
 
     /// local storage から復元した live tabs で state を作る。
     #[must_use]
-    #[coverage(off)]
     pub fn with_live(selected: PaneSelection, tabs: Vec<LivePane>) -> Self {
         Self {
             tabs: tabs.into_iter().map(PaneTab::Live).collect(),
@@ -107,28 +105,24 @@ impl PaneState {
 
     /// tab の表示順。
     #[must_use]
-    #[coverage(off)]
     pub fn tabs(&self) -> &[PaneTab] {
         &self.tabs
     }
 
     /// 現在の target / tab 選択。
     #[must_use]
-    #[coverage(off)]
     pub fn selected(&self) -> &PaneSelection {
         &self.selected
     }
 
     /// 直近の safe pane error。
     #[must_use]
-    #[coverage(off)]
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
 
     /// tab を一つでも所有しているか。
     #[must_use]
-    #[coverage(off)]
     pub fn has_tabs(&self) -> bool {
         !self.tabs.is_empty()
     }
@@ -197,7 +191,6 @@ pub enum PaneRegistryEffect {
 impl PaneRegistry {
     /// `active` target を持つ空の registry を作る。
     #[must_use]
-    #[coverage(off)]
     pub fn new(active: Target) -> Self {
         Self {
             active,
@@ -207,14 +200,12 @@ impl PaneRegistry {
 
     /// 現在表示する target。
     #[must_use]
-    #[coverage(off)]
     pub const fn active(&self) -> Target {
         self.active
     }
 
     /// `target` 固有の pane state。未訪問 target は空 state として投影する。
     #[must_use]
-    #[coverage(off)]
     pub fn pane(&self, target: Target) -> Option<&PaneState> {
         self.entries
             .iter()
@@ -229,7 +220,6 @@ impl PaneRegistry {
     /// Panics if the registry invariant that every active target has an entry
     /// is broken internally.
     #[must_use]
-    #[coverage(off)]
     pub fn active_pane(&self) -> &PaneState {
         // `new` and `entry_mut` always create the active entry.
         &self
@@ -242,7 +232,6 @@ impl PaneRegistry {
 
     /// action modal の表示 predicate。空 pane は常に modal が所有する。
     #[must_use]
-    #[coverage(off)]
     pub fn action_modal_visible(&self, target: Target) -> bool {
         self.entries
             .iter()
@@ -252,7 +241,6 @@ impl PaneRegistry {
 
     /// active target の input owner。
     #[must_use]
-    #[coverage(off)]
     pub fn input_owner(&self) -> PaneInputOwner {
         if self.action_modal_visible(self.active) {
             PaneInputOwner::ActionModal
@@ -261,7 +249,6 @@ impl PaneRegistry {
         }
     }
 
-    #[coverage(off)]
     fn entry_mut(&mut self, target: Target) -> &mut PaneRegistryEntry {
         if let Some(index) = self.entries.iter().position(|entry| entry.target == target) {
             return &mut self.entries[index];
@@ -274,7 +261,6 @@ impl PaneRegistry {
 }
 
 impl PaneRegistryEntry {
-    #[coverage(off)]
     fn empty(target: Target) -> Self {
         Self {
             target,
@@ -286,7 +272,6 @@ impl PaneRegistryEntry {
 
 /// `event` を一つの target entry へ還元する。
 #[must_use]
-#[coverage(off)]
 pub fn reduce_registry(
     registry: &mut PaneRegistry,
     event: PaneRegistryEvent,
@@ -330,7 +315,6 @@ pub fn reduce_registry(
 
 /// Route a tab command only when the active target's tab owns input.
 #[must_use]
-#[coverage(off)]
 pub fn route_tab_command(
     registry: &mut PaneRegistry,
     command: PaneTabCommand,
@@ -358,7 +342,6 @@ pub fn route_tab_command(
     }
 }
 
-#[coverage(off)]
 fn event_belongs_to_target(event: &PaneEvent, target: Target) -> bool {
     match event {
         PaneEvent::Select(PaneSelection::Target(selected)) => *selected == target,
@@ -375,7 +358,6 @@ fn event_belongs_to_target(event: &PaneEvent, target: Target) -> bool {
     }
 }
 
-#[coverage(off)]
 fn target_for_terminal(terminal: &TerminalRef) -> Target {
     terminal
         .session_id
@@ -431,7 +413,6 @@ pub enum PaneEffect {
 
 /// `event` を pane state へ還元し、必要な局所 effect を返す。
 #[must_use]
-#[coverage(off)]
 pub fn reduce(state: &mut PaneState, event: PaneEvent) -> Vec<PaneEffect> {
     match event {
         PaneEvent::Select(selection) => {
@@ -462,7 +443,6 @@ pub fn reduce(state: &mut PaneState, event: PaneEvent) -> Vec<PaneEffect> {
     }
 }
 
-#[coverage(off)]
 fn close_selected(state: &mut PaneState) -> Vec<PaneEffect> {
     let Some(index) = state
         .tabs
@@ -513,7 +493,6 @@ fn close_selected(state: &mut PaneState) -> Vec<PaneEffect> {
     Vec::new()
 }
 
-#[coverage(off)]
 fn request(state: &mut PaneState, pending: PendingPane) -> Vec<PaneEffect> {
     if state.tabs.iter().any(
         |tab| matches!(tab, PaneTab::Pending(current) if current.operation == pending.operation),
@@ -525,7 +504,6 @@ fn request(state: &mut PaneState, pending: PendingPane) -> Vec<PaneEffect> {
     Vec::new()
 }
 
-#[coverage(off)]
 fn succeed(
     state: &mut PaneState,
     operation: OperationId,
@@ -608,7 +586,6 @@ fn resolve(state: &mut PaneState, operation: OperationId) -> Vec<PaneEffect> {
     Vec::new()
 }
 
-#[coverage(off)]
 fn fail(state: &mut PaneState, operation: OperationId, message: String) -> Vec<PaneEffect> {
     let Some((index, target)) = state
         .tabs
@@ -634,7 +611,6 @@ fn fail(state: &mut PaneState, operation: OperationId, message: String) -> Vec<P
     Vec::new()
 }
 
-#[coverage(off)]
 fn exit(state: &mut PaneState, terminal: &TerminalRef) -> Vec<PaneEffect> {
     let Some(index) = state
         .tabs
@@ -659,7 +635,6 @@ fn exit(state: &mut PaneState, terminal: &TerminalRef) -> Vec<PaneEffect> {
     Vec::new()
 }
 
-#[coverage(off)]
 fn restore(state: &mut PaneState, pane: LivePane) -> Vec<PaneEffect> {
     if state
         .tabs
@@ -680,7 +655,6 @@ fn restore(state: &mut PaneState, pane: LivePane) -> Vec<PaneEffect> {
         .collect()
 }
 
-#[coverage(off)]
 fn selection_for(tab: &PaneTab) -> PaneSelection {
     match tab {
         PaneTab::Pending(pending) => PaneSelection::Tab(TabSelection::Pending(pending.operation)),
@@ -691,6 +665,7 @@ fn selection_for(tab: &PaneTab) -> PaneSelection {
 
 #[cfg(test)]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use usagi_core::domain::id::{
         DaemonGeneration, SessionId, TerminalId, WorkspaceId, WorktreeId,
     };
@@ -1268,5 +1243,119 @@ mod tests {
         );
         assert!(!registry.pane(target).unwrap().has_tabs());
         assert_eq!(registry.input_owner(), PaneInputOwner::ActionModal);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One pane fixture keeps target fences and close transitions ordered.
+    fn coverage_contract_covers_target_fences_ready_and_root_live_close() {
+        let target = target();
+        let foreign = Target::Session(SessionId::new());
+        let mut registry = PaneRegistry::new(target);
+        assert!(
+            reduce_registry(
+                &mut registry,
+                PaneRegistryEvent::Pane {
+                    target,
+                    event: PaneEvent::Request {
+                        operation: OperationId::new(),
+                        target: foreign,
+                        kind: PaneKind::Terminal,
+                    },
+                },
+            )
+            .is_empty()
+        );
+        assert!(
+            reduce_registry(
+                &mut registry,
+                PaneRegistryEvent::Pane {
+                    target,
+                    event: PaneEvent::Restore(LivePane {
+                        terminal: terminal(foreign),
+                        kind: PaneKind::Terminal,
+                    }),
+                },
+            )
+            .is_empty()
+        );
+
+        let operation = registry_request(&mut registry, target, PaneKind::Diff);
+        let _ = reduce_registry(
+            &mut registry,
+            PaneRegistryEvent::Pane {
+                target,
+                event: PaneEvent::Resolved { operation },
+            },
+        );
+        let _ = reduce_registry(
+            &mut registry,
+            PaneRegistryEvent::Pane {
+                target,
+                event: PaneEvent::Select(PaneSelection::Tab(TabSelection::Live(terminal(target)))),
+            },
+        );
+        assert!(
+            reduce_registry(
+                &mut registry,
+                PaneRegistryEvent::Pane {
+                    target,
+                    event: PaneEvent::CloseSelected,
+                },
+            )
+            .is_empty()
+        );
+        let _ = route_tab_command(
+            &mut registry,
+            PaneTabCommand::Select(TabSelection::Ready(operation)),
+        );
+        assert_eq!(
+            route_tab_command(&mut registry, PaneTabCommand::Close),
+            vec![PaneRegistryEffect::Pane {
+                target,
+                effect: PaneEffect::ReturnToCloseup,
+            }]
+        );
+
+        let workspace = WorkspaceId::new();
+        let root = Target::Root(workspace);
+        let mut state = PaneState::new(PaneSelection::Target(root));
+        let root_terminal = TerminalRef {
+            workspace_id: workspace,
+            worktree_id: WorktreeId::new(),
+            session_id: None,
+            terminal_id: TerminalId::new(),
+            daemon_generation: DaemonGeneration::new(),
+        };
+        let _ = reduce(
+            &mut state,
+            PaneEvent::Restore(LivePane {
+                terminal: root_terminal.clone(),
+                kind: PaneKind::Terminal,
+            }),
+        );
+        let _ = reduce(
+            &mut state,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Live(root_terminal))),
+        );
+        assert_eq!(
+            reduce(&mut state, PaneEvent::CloseSelected),
+            vec![PaneEffect::ReturnToCloseup]
+        );
+        assert!(reduce(&mut state, PaneEvent::CloseSelected).is_empty());
+
+        let mut ready = PaneState::new(PaneSelection::Target(target));
+        let first = request(&mut ready, target, PaneKind::Diff);
+        let second = request(&mut ready, target, PaneKind::Diff);
+        let _ = reduce(&mut ready, PaneEvent::Resolved { operation: first });
+        let _ = reduce(&mut ready, PaneEvent::Resolved { operation: second });
+        let _ = reduce(
+            &mut ready,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Ready(first))),
+        );
+        assert!(reduce(&mut ready, PaneEvent::CloseSelected).is_empty());
+        assert_eq!(
+            ready.selected(),
+            &PaneSelection::Tab(TabSelection::Ready(second))
+        );
     }
 }
