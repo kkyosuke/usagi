@@ -345,13 +345,6 @@ fi
   printf '%s\n' '{{"jsonrpc":"2.0","method":"notifications/initialized"}}'
   printf '%s\n' '{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"user_decision_request","arguments":{{"title":"Deploy?","prompt":"Choose","options":[{{"id":"yes","label":"Yes"}}]}}}}}}'
 }} | env -i PATH="$PATH" USAGI_HOME="$USAGI_HOME" USAGI_MCP_CALLER_CREDENTIAL="$USAGI_MCP_CALLER_CREDENTIAL" "{executable}" mcp >> "$USAGI_MCP_FIXTURE_LOG"
-while [ ! -f "$USAGI_MCP_FIXTURE_LOG.decision" ]; do sleep 1; done
-decision_id=$(sed -n '1p' "$USAGI_MCP_FIXTURE_LOG.decision")
-{{
-  printf '%s\n' '{{"jsonrpc":"2.0","id":3,"method":"initialize","params":{{"protocolVersion":"2025-06-18","clientInfo":{{"name":"decision-agent","version":"1"}}}}}}'
-  printf '%s\n' '{{"jsonrpc":"2.0","method":"notifications/initialized"}}'
-  printf '{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"user_decision_get","arguments":{{"decision_id":"%s"}}}}}}\n' "$decision_id"
-}} | env -i PATH="$PATH" USAGI_HOME="$USAGI_HOME" USAGI_MCP_CALLER_CREDENTIAL="$USAGI_MCP_CALLER_CREDENTIAL" "{executable}" mcp >> "$USAGI_MCP_FIXTURE_LOG"
 "#,
         ),
     );
@@ -433,14 +426,11 @@ decision_id=$(sed -n '1p' "$USAGI_MCP_FIXTURE_LOG.decision")
         .unwrap();
     assert!(matches!(cancelled, DaemonReply::Ok(ref body) if body["status"] == "cancelled"));
 
-    fs::write(
-        mcp.fixture_log().with_extension("log.decision"),
-        format!("{decision_id}\n"),
-    )
-    .unwrap();
     wait_until(|| {
-        fs::read_to_string(mcp.fixture_log())
-            .is_ok_and(|output| output.contains("\\\"status\\\":\\\"resolved\\\""))
+        fs::read_to_string(mcp.fixture_log()).is_ok_and(|output| {
+            output.contains("\\\"status\\\":\\\"resolved\\\"")
+                && output.contains("\\\"option_id\\\":\\\"yes\\\"")
+        })
     });
     let durable: serde_json::Value =
         serde_json::from_slice(&fs::read(decision_path).unwrap()).unwrap();

@@ -48,7 +48,7 @@ impl Tool for UserDecisionRequest {
         "user_decision_request"
     }
     fn description(&self) -> &'static str {
-        "現在の agent run に人間の判断を durable に要求し、待たずに decision ID を返す"
+        "現在の agent run に人間の判断を durable に要求し、回答を同期的に返す"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"title":{"type":"string"},"prompt":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"label":{"type":"string"},"description":{"type":"string"}},"required":["id","label"],"additionalProperties":false}},"allow_freeform":{"type":"boolean"},"expires_at":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["title","prompt","options"],"additionalProperties":false}"#
