@@ -167,23 +167,23 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
             let name = path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .with_context(|| format!("source filename is not UTF-8: {}", path.display()))?;
+                .context(format!("source filename is not UTF-8: {}", path.display()))?;
             let name = name.as_bytes();
             hasher.update((name.len() as u64).to_be_bytes());
             hasher.update(name);
 
-            let mut file = fs::File::open(&path)
-                .with_context(|| format!("failed to read {}", path.display()))?;
+            let mut file =
+                fs::File::open(&path).context(format!("failed to read {}", path.display()))?;
             let length = file
                 .metadata()
-                .with_context(|| format!("failed to inspect {}", path.display()))?
+                .context(format!("failed to inspect {}", path.display()))?
                 .len();
             hasher.update(length.to_be_bytes());
             let mut buffer = [0_u8; 16 * 1024];
             loop {
                 let read = file
                     .read(&mut buffer)
-                    .with_context(|| format!("failed to read {}", path.display()))?;
+                    .context(format!("failed to read {}", path.display()))?;
                 if read == 0 {
                     break;
                 }
