@@ -147,7 +147,12 @@ fn detects_only_a_configured_origin_remote() {
 
     run(
         dir.path(),
-        &["remote", "add", "upstream", "https://example.com/upstream.git"],
+        &[
+            "remote",
+            "add",
+            "upstream",
+            "https://example.com/upstream.git",
+        ],
     );
     assert!(!has_origin(dir.path()));
 
