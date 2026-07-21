@@ -1,14 +1,14 @@
 ---
 number: 509
 title: feat(daemon): interrupted AgentRuntime を exact target で resume 可能にする
-status: todo
+status: in-progress
 priority: high
 labels: [review, v2, daemon, agent, recovery]
 dependson: [503]
 related: [214, 350, 363, 504]
 parent: 505
 created_at: 2026-07-21T21:20:52.038648+00:00
-updated_at: 2026-07-21T21:32:04.020240+00:00
+updated_at: 2026-07-21T22:16:36.690585+00:00
 ---
 
 ## 問題・影響

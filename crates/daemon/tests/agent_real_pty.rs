@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 use usagi_core::domain::agent::{
-    AgentProfile, AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName, LaunchMode,
-    LaunchPlan,
+    AgentProfile, AgentProfileId, AgentResumeTarget, DurableLaunchSnapshot,
+    EnvironmentVariableName, LaunchMode, LaunchPlan, ProviderResumeReason,
 };
 use usagi_core::domain::id::{
     ClientId, ConnectionId, DaemonGeneration, OperationId, RequestId, SessionId, TerminalId,
@@ -56,6 +56,15 @@ struct MemoryStore(Vec<RuntimeStoreSnapshot>);
 impl RuntimeStore for MemoryStore {
     fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
         self.0.push(snapshot);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Default)]
+struct SharedMemoryStore(Arc<Mutex<Vec<RuntimeStoreSnapshot>>>);
+impl RuntimeStore for SharedMemoryStore {
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
+        self.0.lock().map_err(|_| ())?.push(snapshot);
         Ok(())
     }
 }
@@ -225,6 +234,27 @@ fn handled(outcome: TerminalOutcome) -> Value {
     }
 }
 
+fn finish_real_pty(
+    runtime: &mut AgentRuntime,
+    observations: &Receiver<Observation>,
+    terminal: &TerminalRef,
+) {
+    loop {
+        match observations.recv_timeout(Duration::from_secs(10)) {
+            Ok(Observation::Output(reference, bytes)) => {
+                assert_eq!(&reference, terminal);
+                runtime.output(&reference, bytes).unwrap();
+            }
+            Ok(Observation::Exited(reference, status)) => {
+                assert_eq!(&reference, terminal);
+                runtime.exit(&reference, status).unwrap();
+                return;
+            }
+            Err(error) => panic!("real PTY produced no exit before the timeout: {error}"),
+        }
+    }
+}
+
 // ---- happy path: a real shell PTY streams output and commits an exit --------
 
 /// A test adapter that renders a harmless real shell into the durable plan so
@@ -361,18 +391,7 @@ fn agent_real_pty_rebuilds_the_allowlisted_environment_and_commits_exit() {
         },
     ));
 
-    loop {
-        match observations.recv_timeout(Duration::from_secs(10)) {
-            Ok(Observation::Output(reference, bytes)) => {
-                runtime.output(&reference, bytes).unwrap();
-            }
-            Ok(Observation::Exited(reference, status)) => {
-                runtime.exit(&reference, status).unwrap();
-                break;
-            }
-            Err(error) => panic!("real PTY produced no exit before the timeout: {error}"),
-        }
-    }
+    finish_real_pty(&mut runtime, &observations, &terminal);
 
     let resync = handled(runtime.handle_terminal(
         connection,
@@ -642,6 +661,149 @@ impl ClaudeProvisioner for UnavailableBinaryProvisioner {
             spawn: SpawnProvision::new([], Vec::new()),
         })
     }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One production fixture covers every legacy status over exact histories.
+fn production_resume_status_distinguishes_exact_claude_histories() {
+    let binaries = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink("/usr/bin/true", binaries.path().join("claude")).unwrap();
+    if std::env::var_os("USAGI_RESUME_STATUS_PTY_TEST_HELPER").is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "production_resume_status_distinguishes_exact_claude_histories",
+                "--nocapture",
+            ])
+            .env("USAGI_RESUME_STATUS_PTY_TEST_HELPER", "1")
+            .env("PATH", binaries.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let (sender, observations): (Sender<Observation>, Receiver<Observation>) = mpsc::channel();
+    let mut registry = AdapterRegistry::new();
+    let adapter = ClaudeAdapter::new(UnavailableBinaryProvisioner);
+    registry
+        .register(adapter.profile().clone(), Box::new(adapter))
+        .unwrap();
+    let shell_profile = AgentProfile::new(
+        AgentProfileId::new("shell").unwrap(),
+        "Shell",
+        1,
+        [],
+        [LaunchMode::Interactive],
+    );
+    registry
+        .register(
+            shell_profile.clone(),
+            Box::new(ShellAdapter {
+                profile: shell_profile,
+                script: "exit 0".to_owned(),
+            }),
+        )
+        .unwrap();
+    let store = SharedMemoryStore::default();
+    let spawns = Arc::new(AtomicUsize::new(0));
+    let mut runtime = AgentRuntime::new(
+        DaemonGeneration::new(),
+        registry,
+        store.clone(),
+        MemoryJournal::default(),
+        RealPtySpawner {
+            observations: sender,
+            environment: vec![(
+                "PATH".to_owned(),
+                binaries.path().to_string_lossy().into_owned(),
+            )],
+            terminals: BTreeMap::new(),
+            spawns: Arc::clone(&spawns),
+            terminations: Arc::new(AtomicUsize::new(0)),
+            break_registry_after_spawn: None,
+        },
+        AgentProfileId::new("claude").unwrap(),
+        Geometry { cols: 80, rows: 24 },
+    );
+    let scope = FixedScope {
+        worktree_id: WorktreeId::new(),
+        working_directory: PathBuf::from("/"),
+    };
+    let history = intent(Some("claude"));
+    let session = history.session.unwrap();
+
+    let first = runtime
+        .launch(&OperationId::new().to_string(), &history, &scope)
+        .unwrap();
+    finish_real_pty(&mut runtime, &observations, &first.terminal);
+    assert_eq!(
+        runtime.session_resume_status(session),
+        (true, ProviderResumeReason::ExplicitResumeAvailable)
+    );
+
+    let source = store
+        .0
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .records
+        .iter()
+        .find(|record| record.runtime.terminal == first.terminal)
+        .unwrap()
+        .clone();
+    let target = AgentResumeTarget {
+        continuation: source.continuation.unwrap(),
+        source: source.resume_source.unwrap(),
+        workspace_id: source.runtime.terminal.workspace_id,
+        session_id: source.runtime.session_id,
+        worktree_id: source.runtime.terminal.worktree_id,
+        runtime_id: source.runtime.agent_runtime_id,
+        adapter_revision: source.launch.plan.profile_revision,
+    };
+    let replacement = runtime
+        .resume_exact(&OperationId::new().to_string(), &target, &scope)
+        .unwrap();
+    let double_click = runtime
+        .resume_exact(&OperationId::new().to_string(), &target, &scope)
+        .unwrap();
+    assert_eq!(double_click.terminal, replacement.terminal);
+    assert_eq!(double_click.resume_relation, replacement.resume_relation);
+    assert_eq!(spawns.load(Ordering::SeqCst), 2);
+    finish_real_pty(&mut runtime, &observations, &replacement.terminal);
+
+    let second = runtime
+        .launch(&OperationId::new().to_string(), &history, &scope)
+        .unwrap();
+    finish_real_pty(&mut runtime, &observations, &second.terminal);
+    assert_eq!(
+        runtime.session_resume_status(session),
+        (false, ProviderResumeReason::AmbiguousProviderMetadata)
+    );
+
+    let live = runtime
+        .launch(&OperationId::new().to_string(), &history, &scope)
+        .unwrap();
+    assert_eq!(
+        runtime.session_resume_status(session),
+        (false, ProviderResumeReason::LiveOrOwnershipUnknown)
+    );
+    assert_eq!(
+        runtime.session_resume_status(SessionId::new()),
+        (false, ProviderResumeReason::ProviderMetadataUnavailable)
+    );
+    finish_real_pty(&mut runtime, &observations, &live.terminal);
+
+    let unavailable = intent(Some("shell"));
+    let unavailable_session = unavailable.session.unwrap();
+    let admission = runtime
+        .launch(&OperationId::new().to_string(), &unavailable, &scope)
+        .unwrap();
+    finish_real_pty(&mut runtime, &observations, &admission.terminal);
+    assert_eq!(
+        runtime.session_resume_status(unavailable_session),
+        (false, ProviderResumeReason::ProviderMetadataUnavailable)
+    );
 }
 
 #[test]

@@ -364,6 +364,42 @@ fn execute_tool(
     client: &mut dyn DaemonClient,
 ) -> Value {
     match descriptor.route() {
+        ToolRoute::AgentInventory => {
+            let Some(workspace) = exact_workspace_id(&arguments) else {
+                return protocol::error(
+                    id,
+                    error_code::INVALID_PARAMS,
+                    "workspace_id must be a canonical resource ID",
+                );
+            };
+            daemon_body_response(
+                id,
+                client.request(DaemonRequest::AgentInventory { workspace }),
+            )
+        }
+        ToolRoute::AgentResume => {
+            let operation_id = usagi_core::domain::id::OperationId::new().as_str();
+            let request = if let Some(target) = arguments.get("target").cloned() {
+                let Ok(target) = serde_json::from_value(target) else {
+                    return protocol::error(
+                        id,
+                        error_code::INVALID_PARAMS,
+                        "target must be an exact Agent resume target",
+                    );
+                };
+                DaemonRequest::ResumeAgent {
+                    operation_id,
+                    target,
+                }
+            } else {
+                DaemonRequest::Session {
+                    action: usagi_core::usecase::client::SessionAction::ResumeAgent,
+                    operation_id,
+                    payload: arguments,
+                }
+            };
+            daemon_body_response(id, client.request(request))
+        }
         ToolRoute::Session(action) => {
             let operation_id = usagi_core::domain::id::OperationId::new().as_str();
             match client.request(DaemonRequest::Session {
@@ -388,23 +424,18 @@ fn execute_tool(
         }
         ToolRoute::Dispatch(action) => {
             let operation_id = usagi_core::domain::id::OperationId::new().as_str();
-            match client.request(DaemonRequest::DispatchTool {
-                action,
-                operation_id,
-                payload: arguments,
-                caller_context: std::env::var("USAGI_MCP_CALLER_CREDENTIAL")
-                    .ok()
-                    .filter(|credential| !credential.is_empty())
-                    .map(|credential| McpCallerContext { credential }),
-            }) {
-                Ok(DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body)) => {
-                    protocol::success(
-                        id,
-                        json!({"content":[{"type":"text","text":body.to_string()}]}),
-                    )
-                }
-                Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
-            }
+            daemon_body_response(
+                id,
+                client.request(DaemonRequest::DispatchTool {
+                    action,
+                    operation_id,
+                    payload: arguments,
+                    caller_context: std::env::var("USAGI_MCP_CALLER_CREDENTIAL")
+                        .ok()
+                        .filter(|credential| !credential.is_empty())
+                        .map(|credential| McpCallerContext { credential }),
+                }),
+            )
         }
         ToolRoute::Supervisor(action) => {
             let operation_id = arguments
@@ -414,19 +445,14 @@ fn execute_tool(
                     || usagi_core::domain::id::OperationId::new().as_str(),
                     ToOwned::to_owned,
                 );
-            match client.request(DaemonRequest::SupervisorTool {
-                action,
-                operation_id,
-                payload: arguments,
-            }) {
-                Ok(DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body)) => {
-                    protocol::success(
-                        id,
-                        json!({"content":[{"type":"text","text":body.to_string()}]}),
-                    )
-                }
-                Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
-            }
+            daemon_body_response(
+                id,
+                client.request(DaemonRequest::SupervisorTool {
+                    action,
+                    operation_id,
+                    payload: arguments,
+                }),
+            )
         }
         ToolRoute::Store => store_tool_call(id, descriptor, &arguments),
         ToolRoute::Unavailable(reason) => protocol::error(
@@ -434,6 +460,23 @@ fn execute_tool(
             error_code::INTERNAL_ERROR,
             &format!("tool unavailable: {reason}"),
         ),
+    }
+}
+
+fn exact_workspace_id(arguments: &Value) -> Option<usagi_core::domain::id::WorkspaceId> {
+    arguments
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .and_then(|value| usagi_core::domain::id::WorkspaceId::parse(value).ok())
+}
+
+fn daemon_body_response(id: Value, reply: Result<DaemonReply, ClientError>) -> Value {
+    match reply {
+        Ok(DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body)) => protocol::success(
+            id,
+            json!({"content":[{"type":"text","text":body.to_string()}]}),
+        ),
+        Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
     }
 }
 
@@ -655,7 +698,7 @@ mod tests {
     fn tools_list_returns_every_tool_with_schema() {
         let v = call(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 48);
+        assert_eq!(tools.len(), 49);
         // 各要素が name / description / inputSchema(object) を持つ。
         for tool in tools {
             assert!(tool["name"].as_str().is_some());
@@ -930,6 +973,68 @@ mod tests {
             serve_with_client(input.as_bytes(), &mut out, "9.9.9", &mut client).unwrap();
             assert_eq!(client.requests.len(), 1);
             assert!(String::from_utf8(out).unwrap().contains("content"));
+        }
+    }
+
+    #[test]
+    fn agent_resume_tools_forward_safe_exact_wire_requests() {
+        use usagi_core::domain::{
+            agent::AgentResumeTarget,
+            id::{
+                AgentContinuationRef, AgentResumeSourceId, AgentRuntimeId, SessionId, WorkspaceId,
+                WorktreeId,
+            },
+        };
+
+        let workspace = WorkspaceId::new();
+        let target = AgentResumeTarget {
+            continuation: AgentContinuationRef::new(),
+            source: AgentResumeSourceId::new(),
+            workspace_id: workspace,
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+            runtime_id: AgentRuntimeId::new(),
+            adapter_revision: 1,
+        };
+        for (name, arguments) in [
+            (
+                "agent_resume_inventory",
+                serde_json::json!({"workspace_id": workspace}),
+            ),
+            (
+                "session_resume",
+                serde_json::json!({"target": target.clone()}),
+            ),
+            ("session_resume", serde_json::json!({"name": "legacy"})),
+        ] {
+            let request = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#
+            ) + "\n";
+            let input = initialized_input(&request);
+            let mut out = Vec::new();
+            let mut client = RecordingClient {
+                reply: Ok(DaemonReply::Ok(serde_json::json!({"safe":true}))),
+                requests: vec![],
+            };
+            serve_with_client(input.as_bytes(), &mut out, "9.9.9", &mut client).unwrap();
+            assert_eq!(client.requests.len(), 1);
+            let actual = &client.requests[0];
+            assert!(
+                (name == "agent_resume_inventory"
+                    && matches!(actual, DaemonRequest::AgentInventory { workspace: actual } if *actual == workspace))
+                    || (arguments.get("target").is_some()
+                        && matches!(actual, DaemonRequest::ResumeAgent { target: actual, .. } if actual == &target))
+                    || (arguments.get("target").is_none()
+                        && matches!(
+                            actual,
+                            DaemonRequest::Session {
+                                action: usagi_core::usecase::client::SessionAction::ResumeAgent,
+                                payload,
+                                ..
+                            } if payload == &arguments
+                        ))
+            );
+            assert!(String::from_utf8(out).unwrap().contains("safe"));
         }
     }
 

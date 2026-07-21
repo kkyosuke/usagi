@@ -193,6 +193,15 @@ pub enum SessionCommand {
     Resume {
         name: String,
     },
+    /// Resume one exact target returned by `resume-inventory`. The target is a
+    /// secret-free JSON object; provider-native IDs are never accepted.
+    ResumeExact {
+        target: String,
+    },
+    /// List root and managed-session Agent resume targets for one workspace ID.
+    ResumeInventory {
+        workspace_id: String,
+    },
     /// Validate legacy sessions without changing state unless `--apply` is set.
     RecoverLegacy {
         /// Persist the fully validated adoption plan.
@@ -277,6 +286,30 @@ impl Run for Session {
                 SessionAction::ResumeAgent,
                 serde_json::json!({"name": name}),
             ),
+            SessionCommand::ResumeExact { target } => {
+                let target = serde_json::from_str(target).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "resume target must be a valid exact-target JSON object",
+                    )
+                })?;
+                return Ok(RunOutcome::DaemonRequest(DaemonRequest::ResumeAgent {
+                    operation_id: usagi_core::domain::id::OperationId::new().as_str(),
+                    target,
+                }));
+            }
+            SessionCommand::ResumeInventory { workspace_id } => {
+                let workspace =
+                    usagi_core::domain::id::WorkspaceId::parse(workspace_id).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "workspace_id must be a canonical resource ID",
+                        )
+                    })?;
+                return Ok(RunOutcome::DaemonRequest(DaemonRequest::AgentInventory {
+                    workspace,
+                }));
+            }
             SessionCommand::RecoverLegacy { apply } => (
                 SessionAction::RecoverLegacy,
                 serde_json::json!({"apply": apply}),
@@ -518,6 +551,36 @@ mod tests {
         assert!(matches!(
             SessionCommand::Create { name: "a".into() },
             SessionCommand::Create { .. }
+        ));
+
+        let target = usagi_core::domain::agent::AgentResumeTarget {
+            continuation: usagi_core::domain::id::AgentContinuationRef::new(),
+            source: usagi_core::domain::id::AgentResumeSourceId::new(),
+            workspace_id: usagi_core::domain::id::WorkspaceId::new(),
+            session_id: None,
+            worktree_id: usagi_core::domain::id::WorktreeId::new(),
+            runtime_id: usagi_core::domain::id::AgentRuntimeId::new(),
+            adapter_revision: 1,
+        };
+        let (exact, _) = super::execute(Command::Session {
+            command: SessionCommand::ResumeExact {
+                target: serde_json::to_string(&target).unwrap(),
+            },
+        });
+        assert!(matches!(
+            exact,
+            RunOutcome::DaemonRequest(usagi_core::usecase::client::DaemonRequest::ResumeAgent { target: actual, .. })
+                if actual == target
+        ));
+        let (inventory, _) = super::execute(Command::Session {
+            command: SessionCommand::ResumeInventory {
+                workspace_id: target.workspace_id.to_string(),
+            },
+        });
+        assert!(matches!(
+            inventory,
+            RunOutcome::DaemonRequest(usagi_core::usecase::client::DaemonRequest::AgentInventory { workspace })
+                if workspace == target.workspace_id
         ));
     }
 

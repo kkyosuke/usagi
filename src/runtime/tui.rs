@@ -789,6 +789,20 @@ fn map_terminal_error(error: &usagi_core::usecase::client::ClientError) -> Termi
     }
 }
 
+fn agent_inventory_request(workspace: WorkspaceId) -> DaemonRequest {
+    DaemonRequest::AgentInventory { workspace }
+}
+
+fn exact_agent_resume_request(
+    operation_id: usagi_core::domain::id::OperationId,
+    target: usagi_core::domain::agent::AgentResumeTarget,
+) -> DaemonRequest {
+    DaemonRequest::ResumeAgent {
+        operation_id: operation_id.to_string(),
+        target,
+    }
+}
+
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=daemon_terminal_decode_and_reconnect_contract
 impl AgentCommandPort for DaemonAgentCommandPort {
     fn launch(
@@ -840,6 +854,47 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                 payload: serde_json::json!({"session_id": session}),
             })
             .map_err(|_| "provider resume failed; inspect session status".to_owned())?
+        {
+            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => body
+                .get("terminal")
+                .cloned()
+                .ok_or_else(|| "provider resume returned no terminal".to_owned())
+                .and_then(|terminal| {
+                    serde_json::from_value(terminal)
+                        .map_err(|_| "provider resume returned an invalid terminal".to_owned())
+                }),
+        }
+    }
+
+    fn resume_inventory(
+        &mut self,
+        workspace: WorkspaceId,
+    ) -> Result<usagi_core::domain::agent::AgentInventory, String> {
+        let mut client =
+            crate::runtime::daemon::client(usagi_core::usecase::client::ClientPolicy::tui())
+                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        match client
+            .request(agent_inventory_request(workspace))
+            .map_err(|_| "Agent resume inventory is unavailable".to_owned())?
+        {
+            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => {
+                serde_json::from_value(body)
+                    .map_err(|_| "daemon returned an invalid Agent inventory".to_owned())
+            }
+        }
+    }
+
+    fn resume_exact(
+        &mut self,
+        target: usagi_core::domain::agent::AgentResumeTarget,
+        operation_id: usagi_core::domain::id::OperationId,
+    ) -> Result<usagi_core::domain::id::TerminalRef, String> {
+        let mut client =
+            crate::runtime::daemon::client(usagi_core::usecase::client::ClientPolicy::tui())
+                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        match client
+            .request(exact_agent_resume_request(operation_id, target))
+            .map_err(|_| "provider resume failed; refresh Agent inventory".to_owned())?
         {
             DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => body
                 .get("terminal")
@@ -2146,10 +2201,11 @@ mod tests {
     use super::{
         DaemonDecisionCommandPort, EnvironmentStorePort, LifecycleSnapshot, PersistentSettingsPort,
         ProductionBackendFactory, RepoEnvironmentStore, Start, TerminalChunk, TerminalError,
-        classify_terminal_input, created_session_hook, daemon_error_reason, decode_terminal_poll,
-        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
-        passthrough_key, probe_path, provider_resume_projection, session_snapshot_result,
-        terminal_copy_key, validate_workspace_directory,
+        agent_inventory_request, classify_terminal_input, created_session_hook,
+        daemon_error_reason, decode_terminal_poll, exact_agent_resume_request, lifecycle_snapshot,
+        load_screen_graph_data, load_workspace_state, map_terminal_error, passthrough_key,
+        probe_path, provider_resume_projection, session_snapshot_result, terminal_copy_key,
+        validate_workspace_directory,
     };
     use chrono::Utc;
     use serde_json::json;
@@ -2343,6 +2399,32 @@ mod tests {
                 "agent_resume_reason": "provider raw output",
             }))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn tui_agent_resume_helpers_use_the_shared_exact_wire_contract() {
+        let workspace = WorkspaceId::new();
+        let operation = OperationId::new();
+        let target = usagi_core::domain::agent::AgentResumeTarget {
+            continuation: usagi_core::domain::id::AgentContinuationRef::new(),
+            source: usagi_core::domain::id::AgentResumeSourceId::new(),
+            workspace_id: workspace,
+            session_id: None,
+            worktree_id: usagi_core::domain::id::WorktreeId::new(),
+            runtime_id: usagi_core::domain::id::AgentRuntimeId::new(),
+            adapter_revision: 1,
+        };
+        assert_eq!(
+            agent_inventory_request(workspace),
+            usagi_core::usecase::client::DaemonRequest::AgentInventory { workspace }
+        );
+        assert_eq!(
+            exact_agent_resume_request(operation, target.clone()),
+            usagi_core::usecase::client::DaemonRequest::ResumeAgent {
+                operation_id: operation.to_string(),
+                target,
+            }
         );
     }
 

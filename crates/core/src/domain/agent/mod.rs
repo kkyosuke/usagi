@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use chrono::{DateTime, Utc};
 
-use crate::domain::id::{AgentId, OperationId, SessionId, WorkspaceId, WorktreeId};
+use crate::domain::id::{
+    AgentContinuationRef, AgentId, AgentResumeSourceId, AgentRuntimeId, AgentRuntimeRef,
+    OperationId, SessionId, TerminalRef, WorkspaceId, WorktreeId,
+};
 
 /// A dispatchable agent which outlives any one runtime process.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -336,6 +339,7 @@ pub enum ProviderResumeReason {
     ProviderMetadataUnavailable,
     AmbiguousProviderMetadata,
     IncompatibleProviderMetadata,
+    SourceAlreadySuperseded,
 }
 
 /// ID-free provider resume material safe to project across IPC and into UI
@@ -346,6 +350,75 @@ pub struct ProviderResumeProjection {
     pub interrupted: bool,
     pub resumable: bool,
     pub reason: ProviderResumeReason,
+}
+
+/// Client-safe exact source for one provider conversation resume.
+///
+/// Every field is daemon-issued or already part of the public scope vocabulary.
+/// Provider-native IDs, paths, argv, environment, and transcripts never enter
+/// this target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentResumeTarget {
+    pub continuation: AgentContinuationRef,
+    pub source: AgentResumeSourceId,
+    pub workspace_id: WorkspaceId,
+    /// Owning managed session; absent for a workspace-root Agent.
+    pub session_id: Option<SessionId>,
+    pub worktree_id: WorktreeId,
+    /// Incarnation fence for the interrupted runtime represented by `source`.
+    pub runtime_id: AgentRuntimeId,
+    pub adapter_revision: u32,
+}
+
+/// Safe availability of one exact interrupted runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentResumableInventoryItem {
+    pub runtime_id: AgentRuntimeId,
+    /// Absent only for a legacy record predating daemon-issued lineage IDs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<AgentResumeTarget>,
+    pub available: bool,
+    pub reason: ProviderResumeReason,
+}
+
+/// Safe state of one durable Agent runtime in workspace-wide inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRuntimeInventoryState {
+    Reserved,
+    Live,
+    Interrupted,
+    Exited,
+    Reclaimed,
+    Unavailable,
+}
+
+/// Public Agent runtime projection. It contains complete resource fences but no
+/// provider-native identity or process provision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRuntimeInventoryItem {
+    pub runtime: AgentRuntimeRef,
+    pub continuation: AgentContinuationRef,
+    pub state: AgentRuntimeInventoryState,
+    /// Exact source from which this runtime was resumed, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_from: Option<AgentResumeSourceId>,
+}
+
+/// Deterministic workspace-wide inventory for root and managed-session Agents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentInventory {
+    pub workspace_id: WorkspaceId,
+    pub runtimes: Vec<AgentRuntimeInventoryItem>,
+    pub resumable: Vec<AgentResumableInventoryItem>,
+}
+
+/// Explicit source-to-replacement relation returned by a successful resume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentResumeRelation {
+    pub source: AgentResumeSourceId,
+    pub replacement_runtime: AgentRuntimeId,
+    pub replacement_terminal: TerminalRef,
 }
 
 /// Minimum durable metadata needed to start a new provider process which

@@ -10,7 +10,9 @@ use std::io::{Read, Write};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::domain::agent::{AgentProfileId, CallerRef, ModelSelector, ProviderSessionId};
+use crate::domain::agent::{
+    AgentProfileId, AgentResumeTarget, CallerRef, ModelSelector, ProviderSessionId,
+};
 use crate::domain::id::{AgentId, SessionId, TerminalRef, WorkspaceId};
 use crate::domain::pr_inventory::{PrEntry, PrInventory};
 use crate::domain::terminal_launch::{
@@ -60,6 +62,14 @@ pub enum DaemonRequest {
     CodexSessionCapture {
         native_session_id: ProviderSessionId,
         caller_context: McpCallerContext,
+    },
+    /// Read the safe Agent runtime and interrupted-source inventory for one
+    /// workspace. Root and managed-session records share this response.
+    AgentInventory { workspace: WorkspaceId },
+    /// Resume exactly one interrupted runtime selected from `AgentInventory`.
+    ResumeAgent {
+        operation_id: String,
+        target: AgentResumeTarget,
     },
     /// Immediately dispatch a prompt to one durable Agent.  Session creation
     /// and Agent launch remain daemon-owned; this request only names the

@@ -1487,7 +1487,7 @@ fn start_ipc_accept_loop(
                                         .and_then(serde_json::Value::as_str)
                                     {
                                         Some("session") => dispatch_session(&session, &agent_launch, &pr_inventory, request_id, &body, hello),
-                                        Some("agent") => dispatch_agent(&agent_launch, &scope_sessions, request_id, &body, hello),
+                                        Some("agent" | "agent_inventory" | "resume_agent") => dispatch_agent(&agent_launch, &scope_sessions, request_id, &body, hello),
                                         Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, request_id, &body, hello),
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &scope_sessions, request_id, &body, hello),
                                         Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
@@ -2874,35 +2874,57 @@ fn dispatch_session_action(
 
     match action {
         SessionAction::ResumeAgent => {
-            let supplied_id = payload
-                .get("session_id")
+            let exact_target = payload
+                .get("target")
                 .cloned()
                 .map(serde_json::from_value)
                 .transpose()
                 .map_err(|_| SessionRuntimeError::InvalidRequest)?;
-            let (name, id) = if let Some(id) = supplied_id {
+            let (name, id) = if let Some(id) = exact_target
+                .as_ref()
+                .and_then(|target: &usagi_core::domain::agent::AgentResumeTarget| target.session_id)
+            {
                 (None, id)
             } else {
-                let name = string("name")?;
-                (Some(name), named_session(name)?)
+                let supplied_id = payload
+                    .get("session_id")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|_| SessionRuntimeError::InvalidRequest)?;
+                if let Some(id) = supplied_id {
+                    (None, id)
+                } else {
+                    let name = string("name")?;
+                    (Some(name), named_session(name)?)
+                }
             };
             let target = sessions
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
                 .session_scope_by_id(id)?;
             let resolver = SharedScopeResolver(Arc::clone(sessions));
-            let admission = agent
-                .lock()
-                .map_err(|_| SessionRuntimeError::Storage)?
-                .resume(operation_id, target.workspace_id, id, &resolver)
-                .map_err(|error| SessionRuntimeError::AgentFailure {
-                    code: error.code,
-                    message: error.message,
-                })?;
+            let admission = if let Some(exact_target) = exact_target {
+                agent
+                    .lock()
+                    .map_err(|_| SessionRuntimeError::Storage)?
+                    .resume_exact(operation_id, &exact_target, &resolver)
+            } else {
+                agent
+                    .lock()
+                    .map_err(|_| SessionRuntimeError::Storage)?
+                    .resume_legacy(operation_id, target.workspace_id, Some(id), &resolver)
+            }
+            .map_err(|error| SessionRuntimeError::AgentFailure {
+                code: error.code,
+                message: error.message,
+            })?;
             reply(serde_json::json!({
                 "name": name,
                 "session_id": id,
                 "terminal": admission.terminal,
+                "continuation": admission.continuation,
+                "resume_relation": admission.resume_relation,
                 "completed": admission.completed,
             }))
         }
@@ -3245,23 +3267,54 @@ fn dispatch_agent(
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
     use usagi_core::usecase::client::DaemonRequest;
+    enum Request {
+        Launch(String, usagi_core::usecase::client::AgentLaunchIntent),
+        Inventory(usagi_core::domain::id::WorkspaceId),
+        Resume(String, usagi_core::domain::agent::AgentResumeTarget),
+    }
     let request = serde_json::from_value::<DaemonRequest>(body.clone())
         .ok()
         .and_then(|request| match request {
             DaemonRequest::Agent {
                 operation_id,
                 intent,
-            } => Some((operation_id, intent)),
+            } => Some(Request::Launch(operation_id, intent)),
+            DaemonRequest::AgentInventory { workspace } => Some(Request::Inventory(workspace)),
+            DaemonRequest::ResumeAgent {
+                operation_id,
+                target,
+            } => Some(Request::Resume(operation_id, target)),
             _ => None,
         });
-    let Some((operation_id, intent)) = request else {
+    let Some(request) = request else {
         return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
     };
     let scope = SharedScopeResolver(Arc::clone(scope_sessions));
     let result = agent
         .lock()
-        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
-        .and_then(|mut agent| agent.launch(&operation_id, &intent, &scope));
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"));
+    if let Request::Inventory(workspace) = &request {
+        return match result {
+            Ok(agent) => envelope(
+                hello,
+                request_id,
+                ResponseOutcome::Ok,
+                serde_json::to_value(agent.inventory(*workspace))
+                    .expect("safe Agent inventory is serializable"),
+            ),
+            Err(error) => envelope(
+                hello,
+                request_id,
+                ResponseOutcome::Error(error),
+                serde_json::Value::Null,
+            ),
+        };
+    }
+    let result = result.and_then(|mut agent| match &request {
+        Request::Launch(operation_id, intent) => agent.launch(operation_id, intent, &scope),
+        Request::Resume(operation_id, target) => agent.resume_exact(operation_id, target, &scope),
+        Request::Inventory(_) => unreachable!("inventory returned above"),
+    });
     match result {
         Ok(admission) => {
             let outcome = if admission.completed {
@@ -3280,6 +3333,8 @@ fn dispatch_agent(
                 outcome,
                 serde_json::json!({
                     "terminal": admission.terminal,
+                    "continuation": admission.continuation,
+                    "resume_relation": admission.resume_relation,
                     "completed": admission.completed,
                 }),
             )

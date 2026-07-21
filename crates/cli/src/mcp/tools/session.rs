@@ -17,6 +17,7 @@ pub fn tools() -> Vec<Box<dyn Tool>> {
         Box::new(SessionPr),
         Box::new(SessionRemove),
         Box::new(SessionResume),
+        Box::new(AgentResumeInventory),
         Box::new(SessionRecoverLegacy),
         Box::new(SessionNoteGet),
         Box::new(SessionNoteUpdate),
@@ -240,10 +241,25 @@ impl Tool for SessionResume {
         "session_resume"
     }
     fn description(&self) -> &'static str {
-        "中断したセッションを provider-native ID で明示再開する。daemon が scope・adapter revision・live Agent・operation fence を検証し、旧 PTY へは再接続しない。"
+        "agent_resume_inventory が返した exact target を指定して中断 runtime を再開する。互換用 name は eligible target が厳密に 1 件のときだけ daemon が解決する。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"name":{"type":"string"},"target":{"type":"object","properties":{"continuation":{"type":"string"},"source":{"type":"string"},"workspace_id":{"type":"string"},"session_id":{"type":["string","null"]},"worktree_id":{"type":"string"},"runtime_id":{"type":"string"},"adapter_revision":{"type":"integer","minimum":1}},"required":["continuation","source","workspace_id","session_id","worktree_id","runtime_id","adapter_revision"],"additionalProperties":false}},"oneOf":[{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false},{"type":"object","properties":{"target":{"type":"object","properties":{"continuation":{"type":"string"},"source":{"type":"string"},"workspace_id":{"type":"string"},"session_id":{"type":["string","null"]},"worktree_id":{"type":"string"},"runtime_id":{"type":"string"},"adapter_revision":{"type":"integer","minimum":1}},"required":["continuation","source","workspace_id","session_id","worktree_id","runtime_id","adapter_revision"],"additionalProperties":false}},"required":["target"],"additionalProperties":false}],"additionalProperties":false}"#
+    }
+}
+
+/// `agent_resume_inventory` — returns safe exact targets for root and managed
+/// Agent histories in one workspace.
+pub struct AgentResumeInventory;
+impl Tool for AgentResumeInventory {
+    fn name(&self) -> &'static str {
+        "agent_resume_inventory"
+    }
+    fn description(&self) -> &'static str {
+        "workspace の root / managed session に属する Agent runtime と exact resume target を provider ID なしで列挙する。"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"workspace_id":{"type":"string"}},"required":["workspace_id"],"additionalProperties":false}"#
     }
 }
 

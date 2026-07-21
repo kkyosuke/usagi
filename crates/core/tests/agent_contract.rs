@@ -5,11 +5,15 @@ use std::{collections::BTreeSet, path::PathBuf};
 use usagi_core::{
     domain::{
         agent::{
-            AgentCapability, AgentProfile, AgentProfileId, DurableLaunchSnapshot,
-            EnvironmentVariableName, LaunchMode, LaunchPlan, LaunchRequest, LaunchScope,
-            LaunchValidationError,
+            AgentCapability, AgentInventory, AgentProfile, AgentProfileId,
+            AgentResumableInventoryItem, AgentResumeTarget, AgentRuntimeInventoryItem,
+            AgentRuntimeInventoryState, DurableLaunchSnapshot, EnvironmentVariableName, LaunchMode,
+            LaunchPlan, LaunchRequest, LaunchScope, LaunchValidationError, ProviderResumeReason,
         },
-        id::{SessionId, WorkspaceId, WorktreeId},
+        id::{
+            AgentContinuationRef, AgentResumeSourceId, AgentRuntimeId, AgentRuntimeRef,
+            DaemonGeneration, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
+        },
     },
     usecase::agent::{AgentProfileCatalog, validate_request, validate_snapshot},
 };
@@ -173,6 +177,62 @@ fn durable_snapshot_is_fail_closed_for_schema_and_revision_changes() {
         validate_snapshot(&catalog, &invalid_snapshot),
         Err(LaunchValidationError::EmptyPrompt)
     );
+}
+
+#[test]
+fn exact_resume_inventory_round_trips_only_public_resource_fences() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let worktree = WorktreeId::new();
+    let runtime_id = AgentRuntimeId::new();
+    let continuation = AgentContinuationRef::new();
+    let source = AgentResumeSourceId::new();
+    let terminal = TerminalRef {
+        daemon_generation: DaemonGeneration::new(),
+        terminal_id: TerminalId::new(),
+        workspace_id: workspace,
+        session_id: Some(session),
+        worktree_id: worktree,
+    };
+    let target = AgentResumeTarget {
+        continuation,
+        source,
+        workspace_id: workspace,
+        session_id: Some(session),
+        worktree_id: worktree,
+        runtime_id,
+        adapter_revision: 7,
+    };
+    let inventory = AgentInventory {
+        workspace_id: workspace,
+        runtimes: vec![AgentRuntimeInventoryItem {
+            runtime: AgentRuntimeRef::new(runtime_id, terminal, Some(session)).unwrap(),
+            continuation,
+            state: AgentRuntimeInventoryState::Interrupted,
+            resumed_from: None,
+        }],
+        resumable: vec![AgentResumableInventoryItem {
+            runtime_id,
+            target: Some(target),
+            available: true,
+            reason: ProviderResumeReason::ExplicitResumeAvailable,
+        }],
+    };
+
+    let encoded = serde_json::to_string(&inventory).unwrap();
+    assert_eq!(
+        serde_json::from_str::<AgentInventory>(&encoded).unwrap(),
+        inventory
+    );
+    for forbidden in [
+        "native_session_id",
+        "argv",
+        "environment",
+        "transcript",
+        "cwd",
+    ] {
+        assert!(!encoded.contains(forbidden));
+    }
 }
 
 #[test]
