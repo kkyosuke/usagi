@@ -109,6 +109,11 @@ mod tests {
 
     #[test]
     fn reader_admits_only_well_formed_runtime_specific_allowlists() {
+        let injected =
+            WorkspaceAgentConfig::from_allowlists(vec!["opus".into()], vec!["gpt-5".into()]);
+        assert!(injected.allows("claude", "opus"));
+        assert!(injected.allows("codex", "gpt-5"));
+
         let workspace = tempdir().unwrap();
         std::fs::create_dir(workspace.path().join(".usagi")).unwrap();
         std::fs::write(

@@ -74,7 +74,6 @@ pub struct ProtocolLimits {
 }
 
 impl Default for ProtocolLimits {
-    #[coverage(off)]
     fn default() -> Self {
         Self {
             max_frame_bytes: 1_048_576,
@@ -247,7 +246,6 @@ pub struct ProtocolError {
 
 impl ProtocolError {
     #[must_use]
-    #[coverage(off)]
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         let retry_mode = match code {
             ErrorCode::ResyncRequired => RetryMode::Resync,
@@ -281,7 +279,6 @@ pub struct ServerProtocol {
 }
 
 /// Negotiate version/capabilities, rejecting mismatched generation before normal traffic.
-#[coverage(off)]
 pub fn negotiate(
     hello: &ClientHello,
     server: &ServerProtocol,
@@ -357,14 +354,12 @@ pub struct ResponseCache {
 }
 impl ResponseCache {
     #[must_use]
-    #[coverage(off)]
     pub fn new(capacity: usize) -> Self {
         Self {
             capacity,
             ..Self::default()
         }
     }
-    #[coverage(off)]
     pub fn get(
         &self,
         client: &ClientId,
@@ -380,7 +375,6 @@ impl ResponseCache {
             None => Ok(None),
         }
     }
-    #[coverage(off)]
     pub fn insert(&mut self, client: ClientId, request: RequestId, entry: CachedResponse) {
         if self.capacity == 0 {
             return;
@@ -416,7 +410,6 @@ pub struct IdempotencyJournal {
     keys: HashMap<OperationId, (String, String)>,
 }
 impl IdempotencyJournal {
-    #[coverage(off)]
     pub fn decide(&mut self, key: OperationKey) -> IdempotencyDecision {
         match self.keys.get(&key.operation_id) {
             Some((scope, digest))
@@ -435,11 +428,9 @@ impl IdempotencyJournal {
 }
 
 /// Write one bounded u32-big-endian JSON payload frame.
-#[coverage(off)]
 pub fn write_frame(writer: &mut dyn Write, payload: &[u8]) -> io::Result<()> {
     write_frame_with_limit(writer, payload, DEFAULT_MAX_FRAME_BYTES)
 }
-#[coverage(off)]
 pub fn write_frame_with_limit(
     writer: &mut dyn Write,
     payload: &[u8],
@@ -457,11 +448,9 @@ pub fn write_frame_with_limit(
     writer.write_all(payload)
 }
 /// Read one bounded frame. Only EOF before reading any prefix byte is a clean close.
-#[coverage(off)]
 pub fn read_frame(reader: &mut dyn Read) -> io::Result<Option<Vec<u8>>> {
     read_frame_with_limit(reader, DEFAULT_MAX_FRAME_BYTES)
 }
-#[coverage(off)]
 pub fn read_frame_with_limit(
     reader: &mut dyn Read,
     max_frame_bytes: usize,
@@ -493,7 +482,6 @@ pub fn read_frame_with_limit(
     Ok(Some(payload))
 }
 /// Decode exactly one JSON value from a bounded frame.
-#[coverage(off)]
 pub fn read_json_frame<T: for<'de> Deserialize<'de>>(
     reader: &mut dyn Read,
     max_frame_bytes: usize,
@@ -506,7 +494,6 @@ pub fn read_json_frame<T: for<'de> Deserialize<'de>>(
         .transpose()
 }
 /// Serialize one JSON value and frame it within a negotiated limit.
-#[coverage(off)]
 pub fn write_json_frame<T: Serialize>(
     writer: &mut dyn Write,
     value: &T,
@@ -534,7 +521,6 @@ pub struct QueueLimits {
 }
 
 impl Default for QueueLimits {
-    #[coverage(off)]
     fn default() -> Self {
         Self {
             control_frames: 256,
@@ -560,7 +546,6 @@ impl PendingFrame {
     ///
     /// Panics if the payload cannot be represented by the `u32` wire length.
     #[must_use]
-    #[coverage(off)]
     pub fn new(payload: Vec<u8>) -> Self {
         let mut bytes = Vec::with_capacity(payload.len() + 4);
         let length = u32::try_from(payload.len()).expect("IPC frame fits in u32");
@@ -570,12 +555,10 @@ impl PendingFrame {
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn remaining(&self) -> usize {
         self.bytes.len() - self.offset
     }
 
-    #[coverage(off)]
     pub fn write_to(&mut self, writer: &mut dyn Write) -> io::Result<bool> {
         match writer.write(&self.bytes[self.offset..]) {
             Ok(0) => Err(io::Error::new(io::ErrorKind::WriteZero, "IPC peer closed")),
@@ -608,7 +591,6 @@ pub struct OutboundQueues {
 
 impl OutboundQueues {
     #[must_use]
-    #[coverage(off)]
     pub fn new(limits: QueueLimits) -> Self {
         Self {
             limits,
@@ -619,7 +601,6 @@ impl OutboundQueues {
         }
     }
 
-    #[coverage(off)]
     pub fn push_control(&mut self, payload: Vec<u8>) -> Result<(), QueueError> {
         let frame = PendingFrame::new(payload);
         if self.control.len() >= self.limits.control_frames
@@ -638,7 +619,6 @@ impl OutboundQueues {
 
     /// Output admission fails explicitly; the caller must issue a
     /// `resync_required` protocol error rather than silently dropping output.
-    #[coverage(off)]
     pub fn push_output(&mut self, payload: Vec<u8>) -> Result<(), QueueError> {
         let frame = PendingFrame::new(payload);
         if self.output.len() >= self.limits.output_frames
@@ -652,7 +632,6 @@ impl OutboundQueues {
     }
 
     /// Writes control first and never interleaves a partially written frame.
-    #[coverage(off)]
     pub fn flush_one(&mut self, writer: &mut dyn Write) -> io::Result<bool> {
         let (queue, bytes) = if self.control.is_empty() {
             (&mut self.output, &mut self.output_bytes)
@@ -672,7 +651,6 @@ impl OutboundQueues {
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn is_empty(&self) -> bool {
         self.control.is_empty() && self.output.is_empty()
     }

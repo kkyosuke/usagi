@@ -1,4 +1,5 @@
 use super::*;
+use serde::ser::{Error as _, Serializer};
 use serde_json::json;
 use std::io::{self, Cursor, Read};
 
@@ -95,6 +96,69 @@ fn invalid_json_is_protocol_error() {
             .kind(),
         io::ErrorKind::InvalidData
     );
+}
+
+#[test]
+fn json_write_and_queue_error_paths_are_explicit() {
+    struct RefusesSerialization;
+    impl serde::Serialize for RefusesSerialization {
+        fn serialize<S: Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(S::Error::custom("refused"))
+        }
+    }
+    struct ZeroWriter;
+    impl io::Write for ZeroWriter {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Ok(0)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    struct OtherErrorWriter;
+    impl io::Write for OtherErrorWriter {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("write failed"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    assert_eq!(
+        write_json_frame(
+            &mut Vec::new(),
+            &RefusesSerialization,
+            DEFAULT_MAX_FRAME_BYTES
+        )
+        .unwrap_err()
+        .kind(),
+        io::ErrorKind::InvalidData
+    );
+    let mut frame = PendingFrame::new(b"x".to_vec());
+    assert_eq!(
+        frame.write_to(&mut ZeroWriter).unwrap_err().kind(),
+        io::ErrorKind::WriteZero
+    );
+    assert_eq!(
+        frame.write_to(&mut OtherErrorWriter).unwrap_err().kind(),
+        io::ErrorKind::Other
+    );
+
+    let mut queue = OutboundQueues::new(QueueLimits {
+        control_frames: 0,
+        control_bytes: 0,
+        output_frames: 1,
+        output_bytes: 16,
+        control_reserve_bytes: 0,
+    });
+    assert_eq!(
+        queue.push_control(vec![]),
+        Err(QueueError::ResourceExhausted)
+    );
+    assert!(!queue.flush_one(&mut Vec::new()).unwrap());
+    queue.push_output(b"output".to_vec()).unwrap();
+    assert!(queue.flush_one(&mut Vec::new()).unwrap());
 }
 #[test]
 fn negotiation_uses_protocol_not_build_identity() {

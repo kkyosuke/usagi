@@ -49,7 +49,6 @@ pub(crate) trait MarkdownEntry: Sync {
 
     /// Write extra derived files after `index.json`. Stores without such files
     /// keep only the cache.
-    #[coverage(off)]
     fn write_extra_derived(_dir: &Path, _summaries: &[Self::Summary]) -> Result<()> {
         Ok(())
     }
@@ -66,7 +65,6 @@ pub(crate) struct MarkdownStore<E: MarkdownEntry> {
 }
 
 impl<E: MarkdownEntry> MarkdownStore<E> {
-    #[coverage(off)]
     pub(crate) fn new(dir: PathBuf) -> Self {
         Self {
             dir,
@@ -74,23 +72,19 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
         }
     }
 
-    #[coverage(off)]
     pub(crate) fn dir(&self) -> &Path {
         &self.dir
     }
 
-    #[coverage(off)]
     pub(crate) fn index_path(&self) -> PathBuf {
         self.dir.join(INDEX_FILE)
     }
 
-    #[coverage(off)]
     fn dirty_path(&self) -> PathBuf {
         self.dir.join(DIRTY_FILE)
     }
 
     /// Read and parse every entry markdown file, sorted by its store-specific key.
-    #[coverage(off)]
     pub(crate) fn scan(&self) -> Result<Vec<E::Entry>> {
         use rayon::prelude::*;
 
@@ -106,7 +100,6 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     /// Like [`scan`](Self::scan), but records unreadable/unparseable files to the
     /// error log and skips them so one corrupt sibling cannot break listings or
     /// cache rebuilds.
-    #[coverage(off)]
     pub(crate) fn scan_lenient(&self) -> Result<Vec<E::Entry>> {
         use rayon::prelude::*;
 
@@ -136,7 +129,6 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
 
     /// Paths of every source markdown file in the directory. Empty when the
     /// directory does not exist.
-    #[coverage(off)]
     pub(crate) fn entry_files(&self) -> Result<Vec<PathBuf>> {
         let entries = match fs::read_dir(&self.dir) {
             Ok(entries) => entries,
@@ -155,7 +147,6 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
         Ok(files)
     }
 
-    #[coverage(off)]
     pub(crate) fn files_for_key(&self, key: &E::Key) -> Result<Vec<PathBuf>> {
         Ok(self
             .entry_files()?
@@ -167,14 +158,12 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     // Takes `&self` for call-site consistency with the store's other methods
     // even though it only needs `path` and `E`.
     #[allow(clippy::unused_self)]
-    #[coverage(off)]
     pub(crate) fn read_existing_path(&self, path: &Path) -> Result<E::Entry> {
         let text =
             fs::read_to_string(path).context(format!("failed to read {}", path.display()))?;
         E::parse_markdown(&text).with_context(|| format!("failed to parse {}", path.display()))
     }
 
-    #[coverage(off)]
     pub(crate) fn write_markdown(&self, entry: &E::Entry) -> Result<PathBuf> {
         fs::create_dir_all(&self.dir)
             .context(format!("failed to create {}", self.dir.display()))?;
@@ -186,7 +175,6 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     /// Durably schedule a rebuild before changing source Markdown. A crash at
     /// any later point leaves enough information for the next reader to repair
     /// derived files from the source state that actually reached disk.
-    #[coverage(off)]
     pub(crate) fn mark_derived_dirty(&self) -> Result<()> {
         fs::create_dir_all(&self.dir)
             .context(format!("failed to create {}", self.dir.display()))?;
@@ -196,7 +184,6 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     /// Convert a derived refresh result into the outcome of an already
     /// committed source mutation. Derived errors are logged and retained as a
     /// dirty marker; they never masquerade as an unapplied source error.
-    #[coverage(off)]
     pub(crate) fn finish_committed<T>(&self, value: T, refresh: Result<()>) -> MutationOutcome<T> {
         match refresh.and_then(|()| self.clear_derived_dirty()) {
             Ok(()) => MutationOutcome::new(value, DerivedState::Fresh),
@@ -212,7 +199,6 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
 
     /// Repair a previously scheduled rebuild while the caller holds the store
     /// lock. Missing markers make this a no-op.
-    #[coverage(off)]
     pub(crate) fn repair_derived_locked(&self) -> Result<()> {
         if !self.dirty_path().exists() {
             return Ok(());
@@ -221,12 +207,10 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
         self.clear_derived_dirty()
     }
 
-    #[coverage(off)]
     pub(crate) fn derived_is_dirty(&self) -> bool {
         self.dirty_path().exists()
     }
 
-    #[coverage(off)]
     fn clear_derived_dirty(&self) -> Result<()> {
         match fs::remove_file(self.dirty_path()) {
             Ok(()) => Ok(()),
@@ -240,7 +224,6 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
 
     /// Patch the derived cache/extra files after `entry` was written. Falls back
     /// to a full rebuild when the cache is missing or unreadable.
-    #[coverage(off)]
     pub(crate) fn reindex_after_write(&self, entry: &E::Entry) -> Result<()> {
         let Some(mut summaries) = self.load_index()?.map(|index| index.summaries) else {
             return self.rebuild_derived().map(|_| ());
@@ -256,7 +239,6 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
 
     /// Patch the derived cache/extra files after `key` was removed. Falls back to
     /// a full rebuild when the cache is missing or unreadable.
-    #[coverage(off)]
     pub(crate) fn reindex_after_remove(&self, key: &E::Key) -> Result<()> {
         let Some(mut summaries) = self.load_index()?.map(|index| index.summaries) else {
             return self.rebuild_derived().map(|_| ());
@@ -270,7 +252,6 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
 
     /// Metadata summaries for every entry. The index is used only when it is
     /// parseable and fresh relative to the markdown files.
-    #[coverage(off)]
     pub(crate) fn summaries(&self) -> Result<Vec<E::Summary>> {
         match self.load_fresh_index()? {
             Some(index) => Ok(index.summaries),
@@ -279,20 +260,17 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     }
 
     /// Build summaries directly from source without publishing derived files.
-    #[coverage(off)]
     pub(crate) fn source_summaries(&self) -> Result<Vec<E::Summary>> {
         Ok(self.scan_lenient()?.iter().map(E::summary).collect())
     }
 
     /// Write `index.json` and any store-specific derived artifact.
-    #[coverage(off)]
     pub(crate) fn write_derived(&self, summaries: &[E::Summary]) -> Result<()> {
         self.write_index(summaries)?;
         E::write_extra_derived(&self.dir, summaries)
     }
 
     /// Write the sorted summaries to `index.json` as a rebuildable cache.
-    #[coverage(off)]
     pub(crate) fn write_index(&self, summaries: &[E::Summary]) -> Result<()> {
         fs::create_dir_all(&self.dir)
             .context(format!("failed to create {}", self.dir.display()))?;
@@ -301,7 +279,6 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     }
 
     /// Rebuild all derived files from the markdown source of truth.
-    #[coverage(off)]
     pub(crate) fn rebuild_derived(&self) -> Result<Vec<E::Summary>> {
         let summaries = self.source_summaries()?;
         if summaries.is_empty() && !self.dir.exists() {
@@ -314,7 +291,6 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     /// Load `index.json` only when it is fresh relative to the markdown files.
     /// A missing, unreadable, corrupt, count-mismatched, or older cache returns
     /// `None` so callers rebuild from the markdown source of truth.
-    #[coverage(off)]
     fn load_fresh_index(&self) -> Result<Option<MarkdownIndex<E>>> {
         let Ok(index_mtime) = fs::metadata(self.index_path()).and_then(|m| m.modified()) else {
             return Ok(None);
@@ -339,7 +315,6 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
 
     /// Load `index.json`, returning `None` when it is missing or corrupt. A
     /// present-but-corrupt cache is recoverable but logged before rebuilding.
-    #[coverage(off)]
     fn load_index(&self) -> Result<Option<MarkdownIndex<E>>> {
         let text = match fs::read_to_string(self.index_path()) {
             Ok(text) => text,

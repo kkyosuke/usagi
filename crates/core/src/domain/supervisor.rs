@@ -20,26 +20,22 @@ pub struct SupervisorRunId(Uuid);
 impl SupervisorRunId {
     #[must_use]
     #[allow(clippy::new_without_default)]
-    #[coverage(off)]
     pub fn new() -> Self {
         Self(Uuid::now_v7())
     }
 }
 
 impl fmt::Display for SupervisorRunId {
-    #[coverage(off)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0.hyphenated())
     }
 }
 impl Serialize for SupervisorRunId {
-    #[coverage(off)]
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.to_string())
     }
 }
 impl<'de> Deserialize<'de> for SupervisorRunId {
-    #[coverage(off)]
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = String::deserialize(deserializer)?;
         let uuid = Uuid::parse_str(&value).map_err(de::Error::custom)?;
@@ -63,7 +59,6 @@ impl TaskId {
     ///
     /// # Errors
     /// Returns [`SupervisorError::InvalidTaskId`] for an empty key.
-    #[coverage(off)]
     pub fn new(value: impl Into<String>) -> Result<Self, SupervisorError> {
         let value = value.into();
         if value.trim().is_empty() {
@@ -315,7 +310,6 @@ pub struct SupervisorRun {
 
 impl SupervisorRun {
     #[must_use]
-    #[coverage(off)]
     pub fn new(
         root_caller_ref: String,
         root_task_digest: String,
@@ -334,7 +328,6 @@ impl SupervisorRun {
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn new_with_id(
         supervisor_run_id: SupervisorRunId,
         root_caller_ref: String,
@@ -365,7 +358,6 @@ impl SupervisorRun {
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn with_policy(mut self, policy: ExecutionPolicy) -> Self {
         self.policy = policy;
         self
@@ -373,7 +365,6 @@ impl SupervisorRun {
 
     /// Returns a redaction-safe projection for callers.
     #[must_use]
-    #[coverage(off)]
     pub fn query(&self) -> SupervisorRunQuery {
         SupervisorRunQuery {
             supervisor_run_id: self.supervisor_run_id,
@@ -449,7 +440,6 @@ pub enum SupervisorError {
     SequenceGap { expected: u64, actual: u64 },
 }
 impl fmt::Display for SupervisorError {
-    #[coverage(off)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self:?}")
     }
@@ -1877,5 +1867,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(failed.state, SupervisorRunState::Failed);
+    }
+
+    #[test]
+    fn identifiers_and_errors_cover_rejection_display_paths() {
+        assert_eq!(
+            TaskId::new(" \t").unwrap_err(),
+            SupervisorError::InvalidTaskId
+        );
+        assert_eq!(
+            SupervisorError::SequenceGap {
+                expected: 2,
+                actual: 4,
+            }
+            .to_string(),
+            "SequenceGap { expected: 2, actual: 4 }"
+        );
+
+        let v4 = uuid::Uuid::new_v4().hyphenated().to_string();
+        assert!(serde_json::from_str::<SupervisorRunId>(&format!("\"{v4}\"")).is_err());
+        let upper = SupervisorRunId::new().to_string().to_uppercase();
+        assert!(serde_json::from_str::<SupervisorRunId>(&format!("\"{upper}\"")).is_err());
     }
 }

@@ -28,7 +28,6 @@ use crate::infrastructure::store::state::WorkspaceStateStore;
 /// # Errors
 ///
 /// Returns an error when `state.json` exists but cannot be read or parsed.
-#[coverage(off)]
 pub fn list(store: &WorkspaceStateStore) -> Result<Vec<SessionRecord>> {
     Ok(store
         .load()?
@@ -41,7 +40,6 @@ pub fn list(store: &WorkspaceStateStore) -> Result<Vec<SessionRecord>> {
 /// # Errors
 ///
 /// Returns an error when `state.json` exists but cannot be read or parsed.
-#[coverage(off)]
 pub fn get(store: &WorkspaceStateStore, name: &str) -> Result<Option<SessionRecord>> {
     Ok(list(store)?.into_iter().find(|s| s.name == name))
 }
@@ -53,7 +51,6 @@ pub fn get(store: &WorkspaceStateStore, name: &str) -> Result<Option<SessionReco
 ///
 /// Returns an error when the lock cannot be taken or the state cannot be read or
 /// written.
-#[coverage(off)]
 pub fn touch(
     store: &WorkspaceStateStore,
     name: &str,
@@ -82,7 +79,6 @@ pub fn touch(
 ///
 /// Returns an error when the lock cannot be taken or the state cannot be read or
 /// written.
-#[coverage(off)]
 pub fn record(
     store: &WorkspaceStateStore,
     session: SessionRecord,
@@ -106,7 +102,6 @@ pub fn record(
 ///
 /// Returns an error when the lock cannot be taken or the state cannot be read or
 /// written.
-#[coverage(off)]
 pub fn remove_record(store: &WorkspaceStateStore, name: &str, now: DateTime<Utc>) -> Result<bool> {
     let _lock = store.lock()?;
     let Some(mut state) = store.load()? else {
@@ -144,7 +139,6 @@ pub struct NewSession {
 /// # Errors
 ///
 /// Returns an error when `git worktree add` fails or the state cannot be written.
-#[coverage(off)]
 pub fn create(
     runner: &dyn GitRunner,
     store: &WorkspaceStateStore,
@@ -190,7 +184,6 @@ pub fn create(
 ///
 /// Returns an error when `git worktree remove` fails, or the state cannot be read
 /// or written.
-#[coverage(off)]
 pub fn remove(
     runner: &dyn GitRunner,
     store: &WorkspaceStateStore,

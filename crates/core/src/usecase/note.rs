@@ -30,7 +30,6 @@ pub enum Target<'a> {
 
 /// The scratchpad for `target` within `state`, or `None` when a named session
 /// does not exist. The root always resolves.
-#[coverage(off)]
 fn scratchpad<'a>(state: &'a WorkspaceState, target: Target<'_>) -> Option<&'a Scratchpad> {
     match target {
         Target::Root => Some(&state.root_notes),
@@ -43,7 +42,6 @@ fn scratchpad<'a>(state: &'a WorkspaceState, target: Target<'_>) -> Option<&'a S
 }
 
 /// Mutable counterpart of [`scratchpad`].
-#[coverage(off)]
 fn scratchpad_mut<'a>(
     state: &'a mut WorkspaceState,
     target: Target<'_>,
@@ -60,7 +58,6 @@ fn scratchpad_mut<'a>(
 
 /// Read the target's scratchpad, or a default (empty) one when there is no
 /// `state.json` or the target session does not exist.
-#[coverage(off)]
 fn read(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Scratchpad> {
     Ok(store
         .load()?
@@ -72,7 +69,6 @@ fn read(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Scratchpad> {
 
 /// Apply `edit` to the target's scratchpad and persist, stamping `now`. Returns
 /// `false` (without writing) when the target session does not exist.
-#[coverage(off)]
 fn mutate(
     store: &WorkspaceStateStore,
     target: Target<'_>,
@@ -97,7 +93,6 @@ fn mutate(
 /// # Errors
 ///
 /// Returns an error when `state.json` cannot be read or parsed.
-#[coverage(off)]
 pub fn note(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Option<String>> {
     Ok(read(store, target)?.note.filter(|n| !n.is_empty()))
 }
@@ -108,7 +103,6 @@ pub fn note(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Option<St
 /// # Errors
 ///
 /// Returns an error when the store cannot be locked, read, or written.
-#[coverage(off)]
 pub fn set_note(
     store: &WorkspaceStateStore,
     target: Target<'_>,
@@ -130,7 +124,6 @@ pub fn set_note(
 /// # Errors
 ///
 /// Returns an error when `state.json` cannot be read or parsed.
-#[coverage(off)]
 pub fn todos(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Vec<SessionTodo>> {
     Ok(read(store, target)?.todos)
 }
@@ -141,7 +134,6 @@ pub fn todos(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Vec<Sess
 /// # Errors
 ///
 /// Returns an error when the store cannot be locked, read, or written.
-#[coverage(off)]
 pub fn add_todo(
     store: &WorkspaceStateStore,
     target: Target<'_>,
@@ -161,7 +153,6 @@ pub fn add_todo(
 /// # Errors
 ///
 /// Returns an error when the store cannot be locked, read, or written.
-#[coverage(off)]
 pub fn update_todo(
     store: &WorkspaceStateStore,
     target: Target<'_>,
@@ -190,7 +181,6 @@ pub fn update_todo(
 /// # Errors
 ///
 /// Returns an error when the store cannot be locked, read, or written.
-#[coverage(off)]
 pub fn remove_todo(
     store: &WorkspaceStateStore,
     target: Target<'_>,
@@ -211,7 +201,6 @@ pub fn remove_todo(
 /// # Errors
 ///
 /// Returns an error when `state.json` cannot be read or parsed.
-#[coverage(off)]
 pub fn decisions(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Vec<SessionDecision>> {
     Ok(read(store, target)?.decisions)
 }
@@ -222,7 +211,6 @@ pub fn decisions(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Vec<
 /// # Errors
 ///
 /// Returns an error when the store cannot be locked, read, or written.
-#[coverage(off)]
 pub fn log_decision(
     store: &WorkspaceStateStore,
     target: Target<'_>,

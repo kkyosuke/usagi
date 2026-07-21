@@ -57,7 +57,6 @@ pub struct LifecycleCapabilities {
 
 impl SessionLifecycle {
     #[must_use]
-    #[coverage(off)]
     pub const fn capabilities(self) -> LifecycleCapabilities {
         match self {
             Self::Creating | Self::Initializing => LifecycleCapabilities {
@@ -137,7 +136,6 @@ pub struct ManagedSession {
 
 impl ManagedSession {
     #[must_use]
-    #[coverage(off)]
     pub fn new_creating(name: String, operation_id: OperationId, now: DateTime<Utc>) -> Self {
         Self {
             session_id: SessionId::new(),
@@ -157,7 +155,6 @@ impl ManagedSession {
     /// worktree effect.  Its identity is minted exactly once when the daemon
     /// lifecycle store is initialized.
     #[must_use]
-    #[coverage(off)]
     pub fn adopt_available(name: String, created_at: DateTime<Utc>) -> Self {
         Self {
             session_id: SessionId::new(),
@@ -188,7 +185,6 @@ pub enum OperationStatus {
 }
 impl OperationStatus {
     #[must_use]
-    #[coverage(off)]
     pub const fn terminal(self) -> bool {
         matches!(
             self,
@@ -238,7 +234,6 @@ pub enum LifecycleError {
     MissingOperation,
 }
 impl std::fmt::Display for LifecycleError {
-    #[coverage(off)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
@@ -249,7 +244,6 @@ impl WorkspaceLifecycleState {
     pub const FORMAT: &'static str = "usagi-workspace-lifecycle";
     pub const MAJOR: u16 = 2;
     #[must_use]
-    #[coverage(off)]
     pub fn new(workspace_id: WorkspaceId, now: DateTime<Utc>) -> Self {
         Self {
             format: Self::FORMAT.into(),
@@ -267,7 +261,6 @@ impl WorkspaceLifecycleState {
     /// # Errors
     ///
     /// Returns an error when the envelope is not the exact version this reducer understands.
-    #[coverage(off)]
     pub fn validate(&self) -> Result<(), LifecycleError> {
         if self.format != Self::FORMAT {
             return Err(LifecycleError::UnsupportedFormat);
@@ -331,7 +324,6 @@ impl WorkspaceLifecycleState {
         }
         repaired
     }
-    #[coverage(off)]
     fn changed(&mut self, now: DateTime<Utc>) {
         self.state_revision += 1;
         self.updated_at = now;
@@ -376,7 +368,6 @@ pub enum LifecycleEvent {
 /// # Errors
 ///
 /// Returns an error for an invalid transition, unsupported envelope, or stale fence.
-#[coverage(off)]
 pub fn reduce(
     state: &mut WorkspaceLifecycleState,
     event: LifecycleEvent,
@@ -440,12 +431,7 @@ pub fn reduce(
         LifecycleEvent::CreateCompleted { fence, setup_plan } => {
             create_completed(state, &fence, setup_plan, now)
         }
-        LifecycleEvent::Completed { fence } => complete(state, &fence, now, |s| {
-            if s.lifecycle != SessionLifecycle::Deleting {
-                return Err(LifecycleError::InvalidTransition);
-            }
-            Ok(true)
-        }),
+        LifecycleEvent::Completed { fence } => complete(state, &fence, now),
         LifecycleEvent::Failed { fence, failure } => fail(state, &fence, failure, now),
         LifecycleEvent::ReconcileInterrupted {
             session_id,
@@ -481,7 +467,6 @@ pub fn reduce(
     }
 }
 
-#[coverage(off)]
 fn create_completed(
     state: &mut WorkspaceLifecycleState,
     fence: &CompletionFence,
@@ -509,7 +494,6 @@ fn create_completed(
     Ok(())
 }
 
-#[coverage(off)]
 fn fenced_session(
     state: &WorkspaceLifecycleState,
     fence: &CompletionFence,
@@ -543,33 +527,23 @@ fn fenced_session(
     Ok((session_pos, operation_pos))
 }
 
-#[coverage(off)]
-fn complete<F>(
+fn complete(
     state: &mut WorkspaceLifecycleState,
     fence: &CompletionFence,
     now: DateTime<Utc>,
-    mutate: F,
-) -> Result<(), LifecycleError>
-where
-    F: FnOnce(&mut ManagedSession) -> Result<bool, LifecycleError>,
-{
+) -> Result<(), LifecycleError> {
     let (pos, operation_pos) = fenced_session(state, fence)?;
+    if state.sessions[pos].lifecycle != SessionLifecycle::Deleting {
+        return Err(LifecycleError::InvalidTransition);
+    }
     let op = &mut state.operations[operation_pos];
-    let remove = mutate(&mut state.sessions[pos])?;
     op.status = OperationStatus::Succeeded;
     op.progress_revision += 1;
-    if remove {
-        state.sessions.remove(pos);
-    } else {
-        let s = &mut state.sessions[pos];
-        s.operation_id = None;
-        s.changed_at = now;
-    }
+    state.sessions.remove(pos);
     state.changed(now);
     Ok(())
 }
 
-#[coverage(off)]
 fn fail(
     state: &mut WorkspaceLifecycleState,
     fence: &CompletionFence,
@@ -625,6 +599,11 @@ mod tests {
         assert!(SessionLifecycle::Available.capabilities().can_use);
         assert_eq!(AgentPhase::Running, AgentPhase::Running);
         assert_eq!(BranchStatus::Dirty, BranchStatus::Dirty);
+        let adopted = ManagedSession::adopt_available("legacy".into(), now());
+        assert_eq!(adopted.name, "legacy");
+        assert_eq!(adopted.lifecycle, SessionLifecycle::Available);
+        assert_eq!(adopted.changed_at, now());
+        assert!(adopted.operation_id.is_none());
     }
     #[test]
     fn creation_completion_and_reverse_snapshot_are_fenced() {
@@ -1045,5 +1024,51 @@ mod tests {
         assert_eq!(state.operations[1].status, OperationStatus::Failed);
         assert_eq!(state.sessions[0].operation_id, Some(remove.operation_id));
         assert_eq!(state.repair_legacy_failed_outcomes(now()), 0);
+
+        let mut skipped = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
+        skipped
+            .sessions
+            .push(ManagedSession::adopt_available("available".into(), now()));
+        let mut failed_without_detail = ManagedSession::adopt_available("missing".into(), now());
+        failed_without_detail.lifecycle = SessionLifecycle::Failed;
+        skipped.sessions.push(failed_without_detail);
+        let mut failed_create = ManagedSession::adopt_available("create".into(), now());
+        failed_create.lifecycle = SessionLifecycle::Failed;
+        failed_create.failure = Some(Failure {
+            stage: FailureStage::Create,
+            summary: "failed".into(),
+        });
+        skipped.sessions.push(failed_create);
+        assert_eq!(skipped.repair_legacy_failed_outcomes(now()), 0);
+    }
+
+    #[test]
+    fn reconcile_rejects_a_terminal_operation_as_stale() {
+        let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
+        let operation = op();
+        reduce(
+            &mut state,
+            LifecycleEvent::ReserveCreate {
+                name: "terminal".into(),
+                operation: operation.clone(),
+            },
+            now(),
+        )
+        .unwrap();
+        state.operations[0].status = OperationStatus::Succeeded;
+        let session_id = state.sessions[0].session_id;
+
+        assert_eq!(
+            reduce(
+                &mut state,
+                LifecycleEvent::ReconcileInterrupted {
+                    session_id,
+                    operation_id: operation.operation_id,
+                    stage: FailureStage::Create,
+                },
+                now(),
+            ),
+            Err(LifecycleError::StaleCompletion)
+        );
     }
 }

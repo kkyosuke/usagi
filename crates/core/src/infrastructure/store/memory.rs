@@ -295,7 +295,6 @@ impl MemoryStore {
         self.inner.summaries()
     }
 
-    #[coverage(off)]
     fn repair_derived_best_effort(&self) {
         if !self.inner.derived_is_dirty() {
             return;

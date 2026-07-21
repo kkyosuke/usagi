@@ -40,24 +40,20 @@ pub struct DaemonLifecycleStore {
 
 impl DaemonLifecycleStore {
     #[must_use]
-    #[coverage(off)]
     pub fn new(dir: &Path) -> Self {
         Self { dir: dir.into() }
     }
     #[must_use]
-    #[coverage(off)]
     pub fn state_path(&self) -> PathBuf {
         self.dir.join(STATE_FILE)
     }
     /// # Errors
     /// Returns an error when the durable state cannot be read.
-    #[coverage(off)]
     pub fn load(&self) -> Result<Option<WorkspaceLifecycleState>> {
         Ok(self.load_persisted()?.map(|persisted| persisted.state))
     }
     /// # Errors
     /// Returns an error when the shared lifecycle record cannot be read.
-    #[coverage(off)]
     pub fn load_with_workspace(&self) -> Result<Option<(PathBuf, WorkspaceLifecycleState)>> {
         Ok(self
             .load_persisted()?
@@ -67,7 +63,6 @@ impl DaemonLifecycleStore {
     ///
     /// # Errors
     /// Returns an error for an ownership mismatch, reducer rejection, lock failure, or failed write.
-    #[coverage(off)]
     pub fn apply(
         &self,
         daemon: DaemonGeneration,
@@ -90,7 +85,6 @@ impl DaemonLifecycleStore {
     }
     /// # Errors
     /// Returns an error when the state cannot be durably initialized.
-    #[coverage(off)]
     pub fn initialize(
         &self,
         state: &WorkspaceLifecycleState,
@@ -116,7 +110,6 @@ impl DaemonLifecycleStore {
     /// # Errors
     ///
     /// Returns an error when the state is absent, cannot be locked, or written.
-    #[coverage(off)]
     pub fn ensure_root_worktree_id(&self) -> Result<WorktreeId> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut persisted = self
@@ -139,7 +132,6 @@ impl DaemonLifecycleStore {
     ///
     /// Returns an error when the state is absent, changed concurrently, or
     /// cannot be written.
-    #[coverage(off)]
     pub fn replace_if_revision(
         &self,
         expected_revision: u64,
@@ -164,7 +156,6 @@ impl DaemonLifecycleStore {
         )
     }
 
-    #[coverage(off)]
     fn load_persisted(&self) -> Result<Option<PersistedLifecycle>> {
         json_file::read(&self.state_path())
     }
@@ -288,5 +279,48 @@ mod tests {
             Some(root.into())
         );
         assert_eq!(store.state_path(), tmp.path().join(STATE_FILE));
+    }
+
+    #[test]
+    fn root_identity_backfill_and_revision_replace_are_atomic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DaemonLifecycleStore::new(tmp.path());
+        assert!(
+            store
+                .ensure_root_worktree_id()
+                .unwrap_err()
+                .to_string()
+                .contains("not been initialized")
+        );
+        let state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
+        assert!(
+            store
+                .replace_if_revision(0, &state)
+                .unwrap_err()
+                .to_string()
+                .contains("not been initialized")
+        );
+
+        let legacy = PersistedLifecycle {
+            repository_root: PathBuf::from("/repository"),
+            root_worktree_id: None,
+            state: state.clone(),
+        };
+        json_file::write_atomic(tmp.path(), &store.state_path(), &legacy).unwrap();
+        let generated = store.ensure_root_worktree_id().unwrap();
+        assert_eq!(store.ensure_root_worktree_id().unwrap(), generated);
+
+        assert!(
+            store
+                .replace_if_revision(state.state_revision + 1, &state)
+                .unwrap_err()
+                .to_string()
+                .contains("changed during recovery")
+        );
+        let mut replacement = state;
+        replacement.state_revision += 1;
+        store.replace_if_revision(0, &replacement).unwrap();
+        assert_eq!(store.load().unwrap(), Some(replacement));
+        assert_eq!(store.ensure_root_worktree_id().unwrap(), generated);
     }
 }

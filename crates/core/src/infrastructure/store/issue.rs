@@ -322,7 +322,6 @@ impl IssueStore {
         self.inner.summaries()
     }
 
-    #[coverage(off)]
     fn repair_derived_best_effort(&self) {
         if !self.inner.derived_is_dirty() {
             return;
@@ -339,7 +338,6 @@ impl IssueStore {
 
     /// Write the number-sorted `summaries` to `index.json` as the derived cache.
     #[cfg(test)]
-    #[coverage(off)]
     fn write_index(&self, summaries: &[IssueSummary]) -> Result<()> {
         self.inner.write_index(summaries)
     }
@@ -349,7 +347,6 @@ impl IssueStore {
         self.inner.files_for_key(&number)
     }
 
-    #[coverage(off)]
     fn allocation_dir(&self) -> Result<PathBuf> {
         let dot_git = self.repo_root.join(".git");
         if dot_git.is_dir() {
@@ -386,7 +383,6 @@ impl IssueStore {
 }
 
 /// Resolve a worktree's `.git` file to its private git directory.
-#[coverage(off)]
 fn git_dir_from_dot_git(dot_git: &Path) -> Result<PathBuf> {
     let text = fs::read_to_string(dot_git).context(format!(
         "failed to read git directory file {}",
@@ -402,10 +398,7 @@ fn git_dir_from_dot_git(dot_git: &Path) -> Result<PathBuf> {
     Ok(if path.is_absolute() {
         path.to_path_buf()
     } else {
-        dot_git
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(path)
+        dot_git.with_file_name(path)
     })
 }
 
@@ -1137,5 +1130,93 @@ mod tests {
         unsafe {
             std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
         }
+    }
+
+    #[test]
+    fn allocation_directory_resolves_git_and_worktree_layouts() {
+        let repository = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(repository.path());
+        fs::create_dir(repository.path().join(".git")).unwrap();
+        assert_eq!(
+            store.allocation_dir().unwrap(),
+            repository.path().join(".git").join(ALLOCATION_DIR_NAME)
+        );
+
+        fs::remove_dir(repository.path().join(".git")).unwrap();
+        let private_git = repository.path().join("private-git");
+        fs::create_dir(&private_git).unwrap();
+        fs::write(repository.path().join(".git"), "gitdir: private-git\n").unwrap();
+        assert_eq!(
+            store.allocation_dir().unwrap(),
+            private_git.join(ALLOCATION_DIR_NAME)
+        );
+
+        let common = repository.path().join("common-git");
+        fs::create_dir(&common).unwrap();
+        fs::write(
+            private_git.join("commondir"),
+            common.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            store.allocation_dir().unwrap(),
+            common.join(ALLOCATION_DIR_NAME)
+        );
+
+        fs::write(private_git.join("commondir"), "../relative-common\n").unwrap();
+        assert_eq!(
+            store.allocation_dir().unwrap(),
+            private_git
+                .join("../relative-common")
+                .join(ALLOCATION_DIR_NAME)
+        );
+    }
+
+    #[test]
+    fn malformed_git_indirection_and_common_directory_io_are_errors() {
+        let repository = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(repository.path());
+        fs::write(repository.path().join(".git"), "not a gitdir\n").unwrap();
+        assert!(
+            store
+                .allocation_dir()
+                .unwrap_err()
+                .to_string()
+                .contains("invalid git directory file")
+        );
+        fs::write(repository.path().join(".git"), "gitdir: \n").unwrap();
+        assert!(git_dir_from_dot_git(&repository.path().join(".git")).is_err());
+
+        let private_git = repository.path().join("private-git");
+        fs::create_dir(&private_git).unwrap();
+        fs::write(
+            repository.path().join(".git"),
+            format!("gitdir:\t{}\n", private_git.display()),
+        )
+        .unwrap();
+        fs::create_dir(private_git.join("commondir")).unwrap();
+        assert!(
+            store
+                .allocation_dir()
+                .unwrap_err()
+                .to_string()
+                .contains("failed to read git common directory")
+        );
+        assert!(
+            git_dir_from_dot_git(&repository.path().join("missing-dot-git"))
+                .unwrap_err()
+                .to_string()
+                .contains("failed to read git directory file")
+        );
+    }
+
+    #[test]
+    fn derived_marker_clear_failure_keeps_rebuild_scheduled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        fs::create_dir_all(store.dir().join(".derived-dirty")).unwrap();
+        let outcome = store.inner.finish_committed((), Ok(()));
+        assert_eq!(outcome.derived, DerivedState::RebuildNeeded);
+        assert!(store.inner.derived_is_dirty());
     }
 }
