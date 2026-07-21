@@ -1871,16 +1871,43 @@ fn sync_runtime_sessions(runtime: &mut WorkspaceRuntime, ui: &WorkspaceUi) {
         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Sessions(ids)));
     }
     // Keep the reducer's advisory name copy in step so the create form can reject
-    // a duplicate name locally before it ever reaches the daemon.
-    let names: Vec<String> = ui
+    // a known worktree collision locally before it ever reaches the daemon. The
+    // lifecycle snapshot supplies managed sessions; the directory scan also
+    // catches a stale `.usagi/sessions/<name>` that has no lifecycle record.
+    let mut names: std::collections::BTreeSet<String> = ui
         .workspace
         .sessions()
         .iter()
         .map(|record| record.name.clone())
         .collect();
+    names.extend(session_worktree_names(ui.workspace.path()));
+    let names: Vec<String> = names.into_iter().collect();
     if runtime.state().session_names() != names.as_slice() {
         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionNames(names)));
     }
+}
+
+/// Names of worktree directories which would collide with a new session.
+///
+/// This is a read-only, best-effort preflight fact for the inline form. The
+/// daemon remains the sole authority that creates or removes worktrees; an
+/// unreadable directory simply contributes no local hint and is checked again
+/// by the daemon when the user submits the request.
+fn session_worktree_names(workspace: &Path) -> Vec<String> {
+    let sessions = workspace.join(".usagi").join("sessions");
+    std::fs::read_dir(sessions)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            entry
+                .file_type()
+                .ok()
+                .filter(std::fs::FileType::is_dir)
+                .map(|_| entry)
+        })
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect()
 }
 
 /// Project the focused live terminal's already-polled rows for
@@ -3235,8 +3262,8 @@ mod tests {
         run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_controller, run_workspace_controller_with_backend_and_settings,
-        safe_session_error, sidebar_pointer_event, step_config, step_new, terminal_geometry,
-        tick_session_refresh, welcome_action, write_banner,
+        safe_session_error, session_worktree_names, sidebar_pointer_event, step_config, step_new,
+        terminal_geometry, tick_session_refresh, welcome_action, write_banner,
     };
     use crate::presentation::live_terminal::LiveTerminalControls;
     use crate::presentation::views::config::AvailableAgentModels;
@@ -3276,6 +3303,7 @@ mod tests {
     use usagi_core::domain::recent::{Recent, UniteOverview};
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
 
+    use tempfile::tempdir;
     use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
     use usagi_core::domain::workspace_state::WorkspaceState;
     use usagi_core::usecase::client::DaemonMetrics;
@@ -3442,6 +3470,16 @@ mod tests {
 
     fn snapshot(name: &str) -> WorkspaceSnapshot {
         WorkspaceSnapshot::new(ws(name), state(name))
+    }
+
+    #[test]
+    fn session_worktree_names_include_stale_directories_only() {
+        let temp = tempdir().unwrap();
+        let sessions = temp.path().join(".usagi/sessions");
+        std::fs::create_dir_all(sessions.join("stale-session")).unwrap();
+        std::fs::write(sessions.join("not-a-worktree"), "marker").unwrap();
+
+        assert_eq!(session_worktree_names(temp.path()), vec!["stale-session"]);
     }
 
     #[test]
