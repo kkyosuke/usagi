@@ -1,14 +1,14 @@
 ---
 number: 493
 title: fix(daemon): PR RefreshScheduler を production worker に配線する
-status: todo
+status: in-progress
 priority: medium
 labels: [review, v2, daemon, pullrequest]
 dependson: []
 related: [346]
 parent: 453
 created_at: 2026-07-20T12:06:52.141783+00:00
-updated_at: 2026-07-20T12:06:52.141783+00:00
+updated_at: 2026-07-21T01:38:39.450854+00:00
 ---
 
 ## 問題・影響

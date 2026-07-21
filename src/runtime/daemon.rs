@@ -51,7 +51,9 @@ use usagi_daemon::usecase::generic_terminal::{
 };
 use usagi_daemon::usecase::metrics::{MetricsBroker, MetricsObserver, MetricsSample};
 use usagi_daemon::usecase::orchestration::AdapterRegistry;
-use usagi_daemon::usecase::pr_inventory::OutputPrProjector;
+use usagi_daemon::usecase::pr_inventory::{
+    GhProcessPort, OutputPrProjector, RefreshClock, RefreshWorker,
+};
 use usagi_daemon::usecase::runtime::{
     OutputJournal, ProvisionContext, PtySpawner, RuntimeStore, RuntimeStoreSnapshot,
     SpawnProvision, TerminateReapError,
@@ -922,6 +924,62 @@ type SharedTerminalRuntime = Arc<
 >;
 type SharedPrInventory = Arc<Mutex<OutputPrProjector<PrInventoryStore>>>;
 
+const PR_REFRESH_TICK: Duration = Duration::from_millis(250);
+const PR_REFRESH_FRESHNESS_MS: u64 = 60_000;
+const PR_REFRESH_PER_TICK: usize = 2;
+
+struct ProductionRefreshClock {
+    started: Instant,
+}
+
+impl RefreshClock for ProductionRefreshClock {
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+}
+
+struct GhProcess;
+
+impl GhProcessPort for GhProcess {
+    type Error = std::io::Error;
+
+    fn run(
+        &mut self,
+        program: &str,
+        argv: &[String],
+        timeout_ms: u64,
+    ) -> Result<String, Self::Error> {
+        let mut child = Command::new(program)
+            .args(argv)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            if let Some(status) = child.try_wait()? {
+                let mut output = String::new();
+                if let Some(mut stdout) = child.stdout.take() {
+                    stdout.read_to_string(&mut output)?;
+                }
+                return status
+                    .success()
+                    .then_some(output)
+                    .ok_or_else(|| std::io::Error::other("PR provider failed"));
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "PR provider timed out",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
 /// Supplies raw process-resource observations to the metrics authority.
 struct ProcessResourceSampler {
     previous: Option<(Instant, u64)>,
@@ -1003,7 +1061,11 @@ use super::launchd;
 
 #[allow(clippy::too_many_lines)] // IPC request routing remains in the composition adapter.
 #[coverage(off)]
-fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
+fn spawn_ipc_server(
+    data_dir: &Path,
+    info: &AppInfo,
+    shutdown: Arc<AtomicBool>,
+) -> std::io::Result<()> {
     let generation = usagi_core::infrastructure::ipc::DaemonGeneration(
         usagi_core::domain::id::DaemonGeneration::new()
             .as_str()
@@ -1072,6 +1134,7 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
     consume_user_decision_events(&decisions)
         .map_err(|error| std::io::Error::other(error.message))?;
     start_decision_maintenance(Arc::clone(&decisions))?;
+    start_pr_refresh_worker(Arc::clone(&pr_inventory), shutdown)?;
     start_ipc_accept_loop(
         listener,
         server,
@@ -1085,6 +1148,74 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         pipeline_metrics,
         supervisor,
     )
+}
+
+/// Starts the only production PR refresh worker. Remote calls happen outside
+/// the shared inventory lock, so snapshot and terminal paths continue to make
+/// progress while `gh` is slow.
+fn start_pr_refresh_worker(
+    pr_inventory: SharedPrInventory,
+    shutdown: Arc<AtomicBool>,
+) -> std::io::Result<()> {
+    spawn_pr_refresh_worker(
+        pr_inventory,
+        shutdown,
+        GhProcess,
+        ProductionRefreshClock {
+            started: Instant::now(),
+        },
+        PR_REFRESH_TICK,
+    )
+    .map(|_| ())
+}
+
+fn spawn_pr_refresh_worker<R, C>(
+    pr_inventory: SharedPrInventory,
+    shutdown: Arc<AtomicBool>,
+    runner: R,
+    clock: C,
+    tick: Duration,
+) -> std::io::Result<std::thread::JoinHandle<()>>
+where
+    R: GhProcessPort + Send + 'static,
+    C: RefreshClock + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("usagi-pr-refresh".to_string())
+        .spawn(move || {
+            let mut worker =
+                RefreshWorker::new(runner, clock, PR_REFRESH_PER_TICK, PR_REFRESH_FRESHNESS_MS);
+            if let Ok(projector) = pr_inventory.lock()
+                && worker.rebuild(&projector).is_err()
+            {
+                ErrorLog::record("PR refresh schedule rebuild failed");
+            }
+            while !shutdown.load(Ordering::Acquire) {
+                let due = pr_inventory
+                    .lock()
+                    .ok()
+                    .and_then(|projector| worker.claim_due(&projector).ok())
+                    .unwrap_or_default();
+                for identity in due {
+                    if shutdown.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let result = worker.fetch(&identity);
+                    if shutdown.load(Ordering::Acquire) {
+                        break;
+                    }
+                    if let Ok(mut projector) = pr_inventory.lock()
+                        && worker.complete(&mut projector, &identity, result).is_err()
+                    {
+                        ErrorLog::record("PR refresh snapshot publish failed");
+                    }
+                }
+                let deadline = Instant::now() + tick;
+                while !shutdown.load(Ordering::Acquire) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        })
 }
 
 /// Keeps decision deadlines progressing even when no subsequent MCP/TUI
@@ -3188,6 +3319,7 @@ impl Terminator for SigtermTerminator {
 struct IpcReady<'a> {
     data_dir: &'a Path,
     info: &'a AppInfo,
+    shutdown: Arc<AtomicBool>,
     published: AtomicBool,
 }
 impl DaemonReady for IpcReady<'_> {
@@ -3197,7 +3329,8 @@ impl DaemonReady for IpcReady<'_> {
             .published
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
-            && let Err(error) = spawn_ipc_server(self.data_dir, self.info)
+            && let Err(error) =
+                spawn_ipc_server(self.data_dir, self.info, Arc::clone(&self.shutdown))
         {
             self.published.store(false, Ordering::Release);
             return Err(error);
@@ -3206,7 +3339,7 @@ impl DaemonReady for IpcReady<'_> {
     }
 }
 
-struct SignalShutdown;
+struct SignalShutdown(Arc<AtomicBool>);
 impl ShutdownSignal for SignalShutdown {
     #[cfg(unix)]
     #[coverage(off)]
@@ -3224,6 +3357,7 @@ impl ShutdownSignal for SignalShutdown {
                 return Err(std::io::Error::last_os_error());
             }
         }
+        self.0.store(true, Ordering::Release);
         Ok(())
     }
     #[cfg(not(unix))]
@@ -3403,6 +3537,7 @@ fn run_inner<W: Write>(out: &mut W, command: Option<&str>, info: &AppInfo) -> st
     let ready = IpcReady {
         data_dir: &data_dir,
         info,
+        shutdown: Arc::new(AtomicBool::new(false)),
         published: AtomicBool::new(false),
     };
     let env = DaemonEnv {
@@ -3410,7 +3545,7 @@ fn run_inner<W: Write>(out: &mut W, command: Option<&str>, info: &AppInfo) -> st
         probe: &KillProbe,
         terminator: &SigtermTerminator,
         ready: &ready,
-        shutdown: &SignalShutdown,
+        shutdown: &SignalShutdown(Arc::clone(&ready.shutdown)),
         launcher: &launcher,
         sleeper: &RealSleeper,
         lock: &lock,
@@ -3520,6 +3655,7 @@ pub(crate) fn ensure_ready() -> Result<(), ClientError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
     use usagi_core::domain::{
         id::{
             ClientId, ConnectionId, DaemonGeneration, RequestId, SessionId, TerminalId,
@@ -3534,6 +3670,101 @@ mod tests {
     use usagi_daemon::usecase::terminal_ipc::{
         ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
     };
+
+    struct FixedRefreshClock {
+        calls: Arc<AtomicUsize>,
+        shutdown_after: Option<(usize, Arc<AtomicBool>)>,
+    }
+    impl RefreshClock for FixedRefreshClock {
+        fn now_ms(&self) -> u64 {
+            let call = self.calls.fetch_add(1, Ordering::AcqRel) + 1;
+            if let Some((after, shutdown)) = &self.shutdown_after
+                && call >= *after
+            {
+                shutdown.store(true, Ordering::Release);
+            }
+            0
+        }
+    }
+
+    struct CompositionGh {
+        calls: Arc<AtomicUsize>,
+        inventory: SharedPrInventory,
+        unlocked_during_call: Arc<AtomicBool>,
+    }
+    impl GhProcessPort for CompositionGh {
+        type Error = ();
+        fn run(&mut self, _: &str, _: &[String], _: u64) -> Result<String, ()> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            self.unlocked_during_call
+                .store(self.inventory.try_lock().is_ok(), Ordering::Release);
+            Ok("{\"title\":\"production\",\"state\":\"MERGED\"}".into())
+        }
+    }
+
+    #[test]
+    fn production_pr_worker_rebuilds_publishes_without_locking_and_honors_shutdown() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = SessionId::new();
+        let identity =
+            usagi_core::domain::pr_inventory::canonicalize("https://github.com/o/r/pull/493")
+                .unwrap();
+        let inventory = Arc::new(Mutex::new(OutputPrProjector::new(PrInventoryStore::new(
+            directory.path(),
+        ))));
+        inventory
+            .lock()
+            .unwrap()
+            .observe_committed(
+                TerminalId::new(),
+                Some(session),
+                identity.as_url().as_bytes(),
+            )
+            .unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let unlocked = Arc::new(AtomicBool::new(false));
+        let handle = spawn_pr_refresh_worker(
+            Arc::clone(&inventory),
+            Arc::clone(&shutdown),
+            CompositionGh {
+                calls: Arc::clone(&calls),
+                inventory: Arc::clone(&inventory),
+                unlocked_during_call: Arc::clone(&unlocked),
+            },
+            FixedRefreshClock {
+                calls: Arc::new(AtomicUsize::new(0)),
+                shutdown_after: Some((3, Arc::clone(&shutdown))),
+            },
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        handle.join().unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert!(unlocked.load(Ordering::Acquire));
+        let snapshot = inventory.lock().unwrap().snapshot(session).unwrap();
+        assert_eq!(snapshot.entries[0].title.as_deref(), Some("production"));
+
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let cancelled_calls = Arc::new(AtomicUsize::new(0));
+        let handle = spawn_pr_refresh_worker(
+            Arc::clone(&inventory),
+            Arc::clone(&cancelled),
+            CompositionGh {
+                calls: Arc::clone(&cancelled_calls),
+                inventory,
+                unlocked_during_call: Arc::new(AtomicBool::new(false)),
+            },
+            FixedRefreshClock {
+                calls: Arc::new(AtomicUsize::new(0)),
+                shutdown_after: None,
+            },
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        handle.join().unwrap();
+        assert_eq!(cancelled_calls.load(Ordering::Acquire), 0);
+    }
 
     fn session_test_hello() -> usagi_core::infrastructure::ipc::ServerHello {
         use usagi_core::infrastructure::ipc::{
