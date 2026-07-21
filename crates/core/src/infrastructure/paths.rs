@@ -168,7 +168,6 @@ mod tests {
     #[test]
     fn runtime_mode_env_explicitly_selects_development_or_device() {
         let _guard = crate::test_support::process_env_guard();
-        let previous = std::env::var_os(RUNTIME_MODE_ENV);
         unsafe { std::env::set_var(RUNTIME_MODE_ENV, "device") };
         assert_eq!(runtime_mode(), RuntimeMode::Device);
 
@@ -176,19 +175,12 @@ mod tests {
         assert_eq!(runtime_mode(), RuntimeMode::Development);
 
         unsafe { std::env::set_var(RUNTIME_MODE_ENV, "invalid") };
-        assert_eq!(
-            runtime_mode(),
-            if cfg!(debug_assertions) {
-                RuntimeMode::Development
-            } else {
-                RuntimeMode::Device
-            }
-        );
-
-        if let Some(value) = previous {
-            unsafe { std::env::set_var(RUNTIME_MODE_ENV, value) };
-        } else {
-            unsafe { std::env::remove_var(RUNTIME_MODE_ENV) };
+        #[cfg(debug_assertions)]
+        assert_eq!(runtime_mode(), RuntimeMode::Development);
+        #[cfg(not(debug_assertions))]
+        {
+            assert_eq!(runtime_mode(), RuntimeMode::Device);
         }
+        unsafe { std::env::remove_var(RUNTIME_MODE_ENV) };
     }
 }
