@@ -2,7 +2,7 @@
 //! created under it and the workspace-root note scratchpad.
 //!
 //! The state lives inside the repository's channel-specific runtime directory
-//! (`<repo>/.usagi/dev/state.json` for debug builds), a
+//! (`<repo>/.usagi/dev/state.json` in development mode), a
 //! versioned JSON file written through a temp file + rename so a crash never
 //! leaves it half-written. `state.json` is read-modify-write (load, edit the
 //! session list, save the whole file), so mutations take the store lock across
@@ -21,7 +21,7 @@ use crate::infrastructure::persistence::store_lock::StoreLock;
 const STATE_FILE: &str = "state.json";
 
 /// File-based persistence rooted at a repository's channel-specific runtime
-/// directory (`.usagi/dev/` for debug builds).
+/// directory (`.usagi/dev/` in development mode).
 pub struct WorkspaceStateStore {
     dir: PathBuf,
 }

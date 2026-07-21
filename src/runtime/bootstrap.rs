@@ -118,15 +118,6 @@ fn build_status(actual: &BuildIdentity, expected: &BuildIdentity) -> Result<bool
     Ok(actual == expected)
 }
 
-/// Only an interactive debug `cargo run` forces a same-build rollover. Test
-/// harnesses and directly executed debug binaries still use their isolated
-/// development channel, but reuse a matching daemon like release binaries.
-#[must_use]
-#[coverage(off)]
-pub(crate) const fn should_force_restart(debug_build: bool, cargo_run_parent: bool) -> bool {
-    debug_build && cargo_run_parent
-}
-
 #[coverage(off)]
 fn wait_for_ready<S, C>(connect: &mut C) -> io::Result<S>
 where
@@ -406,13 +397,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(mismatch, BootstrapError::ReplacementBuildMismatch));
-    }
-
-    #[test]
-    fn only_a_debug_cargo_run_forces_a_same_build_restart() {
-        assert!(super::should_force_restart(true, true));
-        assert!(!super::should_force_restart(true, false));
-        assert!(!super::should_force_restart(false, true));
     }
 
     #[test]

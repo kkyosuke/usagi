@@ -5,10 +5,10 @@
 //! - **Per-repository metadata** at `<repo>/.usagi` ([`STATE_DIR`]): the issue /
 //!   memory stores and the `.gitignore` writer join it. Lives next to the code
 //!   it describes and is committed with it.
-//! - **The global per-user data directory** ([`data_dir`]): the production
-//!   `$USAGI_HOME` / `~/.usagi`, or its `dev/` child for a debug build.
-//!   The channel split prevents `cargo run` from touching a released daemon's
-//!   endpoint, record, or owned state.
+//! - **The global per-user data directory** ([`data_dir`]): the selected
+//!   `dev/` or `device/` child of `$USAGI_HOME` / `~/.usagi`. The mode split
+//!   prevents local development and device validation from touching each other
+//!   or an existing usagi installation.
 //!
 //! The two share the `.usagi` basename by convention but are independent
 //! directories with different contents and lifetimes.
@@ -20,8 +20,10 @@ use anyhow::{Context, Result};
 /// The repository-relative directory holding usagi's per-project metadata.
 pub const STATE_DIR: &str = ".usagi";
 
-/// The single directory name used for debug runtime state.
+/// The directory name used by development runtime state.
 pub const DEV_DIR: &str = "dev";
+/// The directory name used by device-validation runtime state.
+pub const DEVICE_DIR: &str = "device";
 
 /// The directory under [`STATE_DIR`] that holds session worktrees, one per
 /// session: `<repo>/.usagi/sessions/<name>`.
@@ -29,33 +31,47 @@ pub const SESSIONS_DIR: &str = "sessions";
 
 /// Environment variable that overrides the default data directory.
 pub const DATA_DIR_ENV: &str = "USAGI_HOME";
+/// Environment variable selecting the isolated runtime state mode.
+pub const RUNTIME_MODE_ENV: &str = "USAGI_RUNTIME_MODE";
 /// Directory created under the user's home directory by default.
 const DATA_DIR_NAME: &str = ".usagi";
 
-/// The build channel used to isolate development runtime state from releases.
+/// The runtime mode used to isolate local development from device validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuildChannel {
-    Production,
+pub enum RuntimeMode {
+    /// Local development state, stored below the `dev/` child directory.
     Development,
+    /// State used while validating the real executable on a device.
+    Device,
 }
 
-/// Returns the compile-time channel for this binary. `cargo run --release`
-/// selects production because debug assertions are disabled in that profile.
-#[cfg(debug_assertions)]
-const BUILD_CHANNEL: BuildChannel = BuildChannel::Development;
-#[cfg(not(debug_assertions))]
-const BUILD_CHANNEL: BuildChannel = BuildChannel::Production;
-
+/// Returns the selected runtime mode.
+///
+/// [`RUNTIME_MODE_ENV`] accepts `development` and `device`. When it is absent
+/// (or invalid), debug builds default to development and release builds default
+/// to device, preserving the existing safe separation.
 #[must_use]
-pub const fn build_channel() -> BuildChannel {
-    BUILD_CHANNEL
+pub fn runtime_mode() -> RuntimeMode {
+    match std::env::var(RUNTIME_MODE_ENV).as_deref() {
+        Ok("development") => RuntimeMode::Development,
+        Ok("device") => RuntimeMode::Device,
+        _ => {
+            #[cfg(debug_assertions)]
+            {
+                RuntimeMode::Development
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                RuntimeMode::Device
+            }
+        }
+    }
 }
 
 /// Resolve the directory where usagi stores its per-user data.
 ///
 /// `$USAGI_HOME` takes precedence; otherwise `~/.usagi` is used as the base.
-/// Debug builds append [`DEV_DIR`] to that base while release builds retain the
-/// base itself, preserving the established production location.
+/// Both runtime modes append their own child directory to that base.
 ///
 /// # Errors
 ///
@@ -69,30 +85,29 @@ pub fn data_dir() -> Result<PathBuf> {
             .context("could not determine the home directory")?
             .join(DATA_DIR_NAME)
     };
-    Ok(channel_data_dir(base))
+    Ok(mode_data_dir(&base, runtime_mode()))
 }
 
-/// Resolve the build-channel-specific directory rooted at `base`.
+/// Resolve the selected-mode directory rooted at `base`.
 ///
-/// Debug builds use `base/dev`; release builds use `base` unchanged. This is
-/// shared by global and project-local runtime state so their channel split
-/// cannot drift.
+/// Development mode uses `base/dev`; device mode uses `base/device`. This is
+/// shared by global and project-local runtime state so their split cannot drift.
 #[must_use]
 pub fn channel_data_dir(base: impl AsRef<Path>) -> PathBuf {
-    channel_data_dir_for(base.as_ref(), build_channel())
+    mode_data_dir(base.as_ref(), runtime_mode())
 }
 
-fn channel_data_dir_for(base: &Path, channel: BuildChannel) -> PathBuf {
-    match channel {
-        BuildChannel::Production => base.to_path_buf(),
-        BuildChannel::Development => base.join(DEV_DIR),
+fn mode_data_dir(base: &Path, mode: RuntimeMode) -> PathBuf {
+    match mode {
+        RuntimeMode::Device => base.join(DEVICE_DIR),
+        RuntimeMode::Development => base.join(DEV_DIR),
     }
 }
 
-/// Resolve the build-channel-specific runtime-state directory for a project.
+/// Resolve the selected-mode runtime-state directory for a project.
 ///
-/// Debug builds use `<project_root>/.usagi/dev`; release builds use
-/// `<project_root>/.usagi`.
+/// Development mode uses `<project_root>/.usagi/dev`; device mode uses
+/// `<project_root>/.usagi/device`.
 #[must_use]
 pub fn project_data_dir(project_root: impl AsRef<Path>) -> PathBuf {
     channel_data_dir(project_root.as_ref().join(STATE_DIR))
@@ -130,24 +145,42 @@ mod tests {
     }
 
     #[test]
-    fn channel_data_dir_for_separates_both_build_channels() {
+    fn mode_data_dir_separates_both_runtime_modes() {
         let base = Path::new("/data");
         assert_eq!(
-            channel_data_dir_for(base, BuildChannel::Production),
-            PathBuf::from("/data")
+            mode_data_dir(base, RuntimeMode::Device),
+            PathBuf::from("/data/device")
         );
         assert_eq!(
-            channel_data_dir_for(base, BuildChannel::Development),
+            mode_data_dir(base, RuntimeMode::Development),
             PathBuf::from("/data/dev")
         );
     }
 
     #[test]
-    fn build_channel_variants_are_distinct() {
-        assert_eq!(build_channel(), BUILD_CHANNEL);
-        assert_ne!(BuildChannel::Production, BuildChannel::Development);
-        assert_eq!(BuildChannel::Production.clone(), BuildChannel::Production);
-        assert_eq!(format!("{:?}", BuildChannel::Production), "Production");
-        assert_eq!(format!("{:?}", BuildChannel::Development), "Development");
+    fn runtime_mode_variants_are_distinct() {
+        assert_ne!(RuntimeMode::Device, RuntimeMode::Development);
+        assert_eq!(RuntimeMode::Device, RuntimeMode::Device);
+        assert_eq!(format!("{:?}", RuntimeMode::Device), "Device");
+        assert_eq!(format!("{:?}", RuntimeMode::Development), "Development");
+    }
+
+    #[test]
+    fn runtime_mode_env_explicitly_selects_development_or_device() {
+        let _guard = crate::test_support::process_env_guard();
+        unsafe { std::env::set_var(RUNTIME_MODE_ENV, "device") };
+        assert_eq!(runtime_mode(), RuntimeMode::Device);
+
+        unsafe { std::env::set_var(RUNTIME_MODE_ENV, "development") };
+        assert_eq!(runtime_mode(), RuntimeMode::Development);
+
+        unsafe { std::env::set_var(RUNTIME_MODE_ENV, "invalid") };
+        #[cfg(debug_assertions)]
+        assert_eq!(runtime_mode(), RuntimeMode::Development);
+        #[cfg(not(debug_assertions))]
+        {
+            assert_eq!(runtime_mode(), RuntimeMode::Device);
+        }
+        unsafe { std::env::remove_var(RUNTIME_MODE_ENV) };
     }
 }
