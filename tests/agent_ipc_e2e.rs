@@ -82,8 +82,9 @@ fn fixture_repo() -> tempfile::TempDir {
 fn write_codex(bin: &Path, count: &Path, ready_status: i32) {
     fs::create_dir_all(bin).unwrap();
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit {ready_status}; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nprintf '%s\\n' spawn >> \"{}\"\nprintf 'ready\\n'\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
-        count.display()
+        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit {ready_status}; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | \"{}\" codex-session-capture || exit 8\nfi\nprintf '%s\\n' spawn >> \"{}\"\nprintf 'ready\\n'\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
+        env!("CARGO_BIN_EXE_usagi"),
+        count.display(),
     );
     let path = bin.join("codex");
     fs::write(&path, script).unwrap();
@@ -259,6 +260,48 @@ fn wait_for_agent_completion(
     }
 }
 
+fn resume(client: &mut impl DaemonClient, session_name: &str) -> (String, TerminalRef) {
+    let operation = OperationId::new().to_string();
+    let reply = client
+        .request(DaemonRequest::Session {
+            action: SessionAction::ResumeAgent,
+            operation_id: operation.clone(),
+            payload: serde_json::json!({"name": session_name}),
+        })
+        .expect("captured Codex conversation resumes through root IPC");
+    let DaemonReply::Accepted { body, .. } = reply else {
+        panic!("resume must be admitted as a daemon operation")
+    };
+    (
+        operation,
+        serde_json::from_value(body["terminal"].clone()).unwrap(),
+    )
+}
+
+fn wait_for_resume_completion(client: &mut impl DaemonClient, operation: &str, session_name: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let reply = client
+            .request(DaemonRequest::Session {
+                action: SessionAction::ResumeAgent,
+                operation_id: operation.to_owned(),
+                payload: serde_json::json!({"name": session_name}),
+            })
+            .expect("resume replay is available");
+        let body = match reply {
+            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => body,
+        };
+        if body["completed"] == true {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "resumed fixture Agent did not exit"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn safe_readiness_error(error: ClientError) {
     let ClientError::Protocol(error) = error else {
         panic!("readiness failure must be a daemon protocol error");
@@ -338,30 +381,26 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
     };
     assert_eq!(snapshot["exited"], 0);
     assert!(snapshot["replay"].as_array().unwrap().len() >= b"ready\r\ninput:go\r\n".len());
+    let durable = fs::read_to_string(data_dir.join("daemon/agents.json")).unwrap();
+    assert!(durable.contains("provider_structured"));
 
-    let (explicit_operation, explicit_terminal) =
-        launch(&mut reattached, workspace, session, Some("codex"));
-    let explicit_subscription = attach(&mut reattached, &explicit_terminal);
+    let (resume_operation, resumed_terminal) = resume(&mut reattached, "agent-e2e");
+    assert_ne!(terminal, resumed_terminal);
+    let resumed_subscription = attach(&mut reattached, &resumed_terminal);
     reattached
         .request(DaemonRequest::Terminal {
             action: TerminalAction::Input,
             payload: serde_json::to_value(TerminalRequest::Input {
-                terminal: explicit_terminal,
-                subscription: explicit_subscription,
+                terminal: resumed_terminal,
+                subscription: resumed_subscription,
                 input_seq: 0,
                 bytes: b"done\n".to_vec(),
             })
             .unwrap(),
         })
         .unwrap();
-    assert_ne!(operation, explicit_operation);
-    wait_for_agent_completion(
-        &mut reattached,
-        &explicit_operation,
-        workspace,
-        session,
-        Some("codex"),
-    );
+    assert_ne!(operation, resume_operation);
+    wait_for_resume_completion(&mut reattached, &resume_operation, "agent-e2e");
     assert_eq!(fs::read_to_string(count).unwrap().lines().count(), 2);
 }
 

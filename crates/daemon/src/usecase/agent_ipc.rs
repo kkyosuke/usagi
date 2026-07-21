@@ -602,6 +602,33 @@ impl AgentRuntime {
         outcome
     }
 
+    /// Resolves one daemon-issued process credential to its exact live Codex
+    /// runtime, then forwards the documented `SessionStart` session ID to the
+    /// product-neutral structured capture boundary.
+    pub fn capture_codex_session(
+        &mut self,
+        credential: &str,
+        native_session_id: ProviderSessionId,
+    ) -> Result<(), ProtocolError> {
+        let caller = self.mcp_callers.get(credential).cloned().ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "Codex runtime credential is unknown",
+            )
+        })?;
+        if self.mcp_caller(credential).is_none() {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "Codex runtime credential is not live",
+            ));
+        }
+        self.capture_structured_provider_session(
+            &caller.runtime,
+            ProviderKind::Codex,
+            native_session_id,
+        )
+    }
+
     /// Accepts only a provider session ID delivered by a documented structured
     /// adapter channel. No filesystem or transcript discovery exists at this
     /// boundary; absence of such a call leaves Codex resume unavailable.
@@ -2345,7 +2372,18 @@ mod tests {
             .coordinator
             .runtime_for_terminal(&first.terminal)
             .unwrap();
+        let credential = runtime.mcp_callers.keys().next().cloned().unwrap();
         let native_id = ProviderSessionId::new("structured-codex-session").unwrap();
+        assert_eq!(
+            runtime
+                .capture_codex_session(
+                    "unknown-credential",
+                    ProviderSessionId::new("ignored-session").unwrap(),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
         assert_eq!(
             runtime
                 .capture_structured_provider_session(
@@ -2358,17 +2396,12 @@ mod tests {
             ErrorCode::InvalidArgument
         );
         runtime
-            .capture_structured_provider_session(
-                &first_runtime,
-                ProviderKind::Codex,
-                native_id.clone(),
-            )
+            .capture_codex_session(&credential, native_id.clone())
             .unwrap();
         assert_eq!(
             runtime
-                .capture_structured_provider_session(
-                    &first_runtime,
-                    ProviderKind::Codex,
+                .capture_codex_session(
+                    &credential,
                     ProviderSessionId::new("different-session").unwrap(),
                 )
                 .unwrap_err()
@@ -2391,6 +2424,16 @@ mod tests {
         );
 
         runtime.exit(&first.terminal, 0).unwrap();
+        assert_eq!(
+            runtime
+                .capture_codex_session(
+                    &credential,
+                    ProviderSessionId::new("late-session").unwrap(),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
         assert_eq!(
             runtime
                 .admit_resume(

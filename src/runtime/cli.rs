@@ -49,6 +49,33 @@ pub(crate) fn dispatch(
                 }
             }
         }
+        RunOutcome::CaptureCodexSession => {
+            let stdin = std::io::stdin();
+            let mut input = stdin.lock();
+            let credential = std::env::var("USAGI_MCP_CALLER_CREDENTIAL").ok();
+            let request = match usagi_cli::cli::hooks::codex_session_capture::request_from_hook(
+                &mut input, credential,
+            ) {
+                Ok(request) => request,
+                Err(error) => {
+                    writeln!(err, "Codex session capture failed: {error}")?;
+                    return Ok(ExitCode::FAILURE);
+                }
+            };
+            match daemon::client(ClientPolicy::cli()) {
+                Ok(mut client) => match client.request(request) {
+                    Ok(_) => Ok(ExitCode::SUCCESS),
+                    Err(error) => {
+                        write_client_error(err, "Codex session capture failed", &error)?;
+                        Ok(ExitCode::FAILURE)
+                    }
+                },
+                Err(error) => {
+                    write_client_error(err, "Codex session capture failed", &error)?;
+                    Ok(ExitCode::FAILURE)
+                }
+            }
+        }
         RunOutcome::DaemonRequest(request) => match daemon::client(ClientPolicy::cli()) {
             Ok(mut client) => write_daemon_outcome(client.request(request), out, err),
             Err(error) => {

@@ -217,7 +217,7 @@ impl CodexProvisioner for RootCodexProvisioner {
                     .map_err(|()| CodexProvisionFailure::MaterializationFailed)?,
                 context
                     .inject_mcp
-                    .then(|| codex_mcp_arguments(&self.mcp_command))
+                    .then(|| codex_integration_arguments(&self.mcp_command))
                     .transpose()
                     .map_err(|()| CodexProvisionFailure::MaterializationFailed)?
                     .unwrap_or_default(),
@@ -307,11 +307,13 @@ fn mcp_environment(
         .map(Iterator::collect)
 }
 
-/// Product-specific MCP launch arguments.  They stay ephemeral in
+/// Product-specific MCP and structured-hook launch arguments. They stay ephemeral in
 /// [`SpawnProvision`] so the durable launch plan never stores configuration
 /// paths or rendered product payloads.
-fn codex_mcp_arguments(command: &Path) -> Result<Vec<String>, ()> {
+fn codex_integration_arguments(command: &Path) -> Result<Vec<String>, ()> {
     let command = command.to_str().ok_or(())?;
+    let hook_command = format!("{} codex-session-capture", shell_quote(command));
+    let hook_command = serde_json::to_string(&hook_command).map_err(|_| ())?;
     let command = serde_json::to_string(command).map_err(|_| ())?;
     Ok(vec![
         "-c".into(),
@@ -328,7 +330,21 @@ fn codex_mcp_arguments(command: &Path) -> Result<Vec<String>, ()> {
         r#"mcp_servers.usagi.env_vars = ["USAGI_HOME", "USAGI_RUNTIME_MODE", "USAGI_MCP_CALLER_CREDENTIAL"]"#.into(),
         "-c".into(),
         r#"mcp_servers.usagi.default_tools_approval_mode = "approve""#.into(),
+        // SessionStart is Codex's documented structured lifecycle channel. It
+        // sends a JSON object containing the current `session_id` on stdin.
+        // Restrict capture to a newly-created provider conversation: explicit
+        // resume already carries its validated durable provider identity.
+        "-c".into(),
+        r"features.hooks = true".into(),
+        "-c".into(),
+        format!(
+            r#"hooks.SessionStart = [{{ matcher = "^startup$", hooks = [{{ type = "command", command = {hook_command}, timeout = 10 }}] }}]"#
+        ),
     ])
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r#"'"'"'"#))
 }
 
 fn claude_mcp_arguments(command: &Path) -> Result<Vec<String>, ()> {
@@ -1472,6 +1488,7 @@ fn start_ipc_accept_loop(
                                     {
                                         Some("session") => dispatch_session(&session, &agent_launch, &pr_inventory, request_id, &body, hello),
                                         Some("agent") => dispatch_agent(&agent_launch, &scope_sessions, request_id, &body, hello),
+                                        Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, request_id, &body, hello),
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &scope_sessions, request_id, &body, hello),
                                         Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
                                         Some("pr") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
@@ -3276,6 +3293,58 @@ fn dispatch_agent(
     }
 }
 
+fn dispatch_codex_session_capture(
+    agent: &SharedAgentRuntime,
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    body: &serde_json::Value,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
+
+    let request = serde_json::from_value::<DaemonRequest>(body.clone())
+        .ok()
+        .and_then(|request| match request {
+            DaemonRequest::CodexSessionCapture {
+                native_session_id,
+                caller_context,
+            } => Some((native_session_id, caller_context)),
+            _ => None,
+        });
+    let Some((native_session_id, caller_context)) = request else {
+        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+    };
+    let result = (!caller_context.credential.is_empty())
+        .then_some(())
+        .ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "Codex runtime credential is unknown",
+            )
+        })
+        .and_then(|()| {
+            agent
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                })?
+                .capture_codex_session(&caller_context.credential, native_session_id)
+        });
+    match result {
+        Ok(()) => envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Ok,
+            serde_json::Value::Null,
+        ),
+        Err(error) => envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Error(error),
+            serde_json::Value::Null,
+        ),
+    }
+}
+
 fn envelope(
     hello: &usagi_core::infrastructure::ipc::ServerHello,
     request_id: usagi_core::infrastructure::ipc::RequestId,
@@ -3958,7 +4027,7 @@ mod tests {
         let command = Path::new("/opt/usagi/bin/usagi");
 
         assert_eq!(
-            codex_mcp_arguments(command).unwrap(),
+            codex_integration_arguments(command).unwrap(),
             [
                 "-c",
                 "mcp_servers.usagi.command = \"/opt/usagi/bin/usagi\"",
@@ -3968,6 +4037,10 @@ mod tests {
                 "mcp_servers.usagi.env_vars = [\"USAGI_HOME\", \"USAGI_RUNTIME_MODE\", \"USAGI_MCP_CALLER_CREDENTIAL\"]",
                 "-c",
                 "mcp_servers.usagi.default_tools_approval_mode = \"approve\"",
+                "-c",
+                "features.hooks = true",
+                "-c",
+                "hooks.SessionStart = [{ matcher = \"^startup$\", hooks = [{ type = \"command\", command = \"'/opt/usagi/bin/usagi' codex-session-capture\", timeout = 10 }] }]",
             ]
         );
         assert_eq!(

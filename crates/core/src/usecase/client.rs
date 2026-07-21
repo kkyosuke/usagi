@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::domain::agent::{AgentProfileId, CallerRef, ModelSelector};
+use crate::domain::agent::{AgentProfileId, CallerRef, ModelSelector, ProviderSessionId};
 use crate::domain::id::{AgentId, SessionId, TerminalRef, WorkspaceId};
 use crate::domain::pr_inventory::{PrEntry, PrInventory};
 use crate::domain::terminal_launch::{
@@ -53,6 +53,13 @@ pub enum DaemonRequest {
     Agent {
         operation_id: String,
         intent: AgentLaunchIntent,
+    },
+    /// Private Codex `SessionStart` hook delivery. The opaque credential binds
+    /// the provider-owned ID to one live daemon runtime; callers cannot name a
+    /// runtime, session, path, or provider themselves.
+    CodexSessionCapture {
+        native_session_id: ProviderSessionId,
+        caller_context: McpCallerContext,
     },
     /// Immediately dispatch a prompt to one durable Agent.  Session creation
     /// and Agent launch remain daemon-owned; this request only names the
