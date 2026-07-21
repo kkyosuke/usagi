@@ -1,13 +1,13 @@
 ---
 number: 504
 title: feat(daemon): Codex structured capture channel を配線して resume を有効化する
-status: in-progress
+status: done
 priority: high
 labels: [daemon, agent, recovery]
 dependson: [503]
 related: [350, 388, 390]
 created_at: 2026-07-21T12:00:00+00:00
-updated_at: 2026-07-21T22:31:34.564673+00:00
+updated_at: 2026-07-21T22:42:31.293558+00:00
 ---
 
 ## 背景
