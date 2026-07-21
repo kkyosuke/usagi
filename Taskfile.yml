@@ -1,0 +1,37 @@
+version: '3'
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+
+  run:
+    desc: Run usagi with .usagi/local runtime state
+    cmds:
+      - USAGI_RUNTIME_MODE=local cargo run
+
+  dev:
+    desc: Run usagi with .usagi/dev runtime state
+    cmds:
+      - USAGI_RUNTIME_MODE=development cargo run
+
+  prd:
+    desc: Run the release build with .usagi runtime state
+    cmds:
+      - USAGI_RUNTIME_MODE=production cargo run --release
+
+  'daemon:restart':
+    desc: Restart the daemon using .usagi/local runtime state
+    cmds:
+      - USAGI_RUNTIME_MODE=local cargo run -- daemon restart
+
+  'daemon:restart:dev':
+    desc: Restart the daemon using .usagi/dev runtime state
+    cmds:
+      - USAGI_RUNTIME_MODE=development cargo run -- daemon restart
+
+  'daemon:restart:prd':
+    desc: Restart the release daemon using .usagi runtime state
+    cmds:
+      - USAGI_RUNTIME_MODE=production cargo run --release -- daemon restart
