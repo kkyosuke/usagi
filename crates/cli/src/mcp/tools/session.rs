@@ -465,7 +465,7 @@ impl Tool for SessionDelegateIssue {
         "session_delegate_issue"
     }
     fn description(&self) -> &'static str {
-        "既存の committed issue を新しいセッションに委譲して着手させるときに使う。issue のプロンプト化→session 作成→起動時キュー投入を 1 tool で行う。number 必須。"
+        "既存の committed issue を新しいセッションに委譲して着手させるときに使う。issue のプロンプト化→session 作成→起動時キュー投入を 1 tool で行う。number 必須。同番号 source が複数ある場合は委譲を拒否し、session を作成しない。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"number":{"type":"integer"},"name":{"type":"string"},"runtime":{"type":"string","enum":["claude","codex"]},"agent_cli":{"type":"string","deprecated":true},"model":{"type":"string"}},"required":["number"]}"#

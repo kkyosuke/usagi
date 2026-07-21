@@ -233,8 +233,22 @@ reopen 後の最初の read が store lock 下で source を走査し、derived 
 
 update / remove の再送は source key（issue number / memory name）に対して冪等である。issue
 create の再送は、初期 status と request fields が一致する committed source を同じ store 内で
-先に照合し、同一 content identity なら既存番号を返す。したがって derived failure や応答消失の
-後に同じ mutation を再送しても、別番号の issue や二重削除を作らない。
+先に照合し、その番号が一意な同一 content identity なら既存番号を返す。matching source の番号が
+重複していれば既存番号を任意に返さず ambiguity error になる。したがって derived failure や応答
+消失の後に同じ mutation を再送しても、別番号の issue や二重削除を作らない。
+
+issue number は番号指定 CRUD の identity である。同じ番号 prefix の source Markdown が複数ある場合、
+point get / update / delete と同番号への write は、番号と衝突した全 exact path を辞書順で保持する typed
+`AmbiguousIssueNumber` error で fail-closed になる。検査は dirty marker、source write、source remove より
+前に行うため、全 sibling と derived state は不変のまま残る。番号だけを指定する通常 CRUD は正しい sibling を
+推測せず、自動 renumber や自動削除を repair として行わない。
+
+list / search は source set の診断面でもあるため、同番号 sibling を collapse せず parse 可能な Markdown ごとの
+row として exact filename 付きで列挙し続ける。parse 不能な sibling も filename prefix により衝突数へ含めるので、
+残った parse 可能な search row は `ambiguous: true` と `ready: false` になり、重複番号を参照する依存もその番号を
+`unmet_deps` に残す。全文 query は番号集合でなく source ごとに照合する。重複を修復するときは ambiguity
+error が示す exact path ごとに git 履歴と参照元を監査し、残す identity と新番号へ移す identity を明示的に
+決める。番号指定 delete は repair 手段に使わない。
 
 ## 依存ルール
 

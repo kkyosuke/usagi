@@ -8,6 +8,8 @@
 //! Markdown files are meant to be committed and shared; `index.json` is a local
 //! rebuildable cache, so it is never relied upon for correctness — only speed.
 
+use std::collections::BTreeMap;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -16,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::frontmatter::FrontmatterDoc;
 use crate::domain::issue::{Issue, IssueSummary};
+use crate::infrastructure::error_log::ErrorLog;
 use crate::infrastructure::paths::STATE_DIR;
 use crate::infrastructure::persistence::json_file::write_text_atomic;
 use crate::infrastructure::persistence::markdown_store::{MarkdownEntry, MarkdownStore};
@@ -25,6 +28,33 @@ use crate::infrastructure::store::MutationOutcome;
 const ISSUES_DIR_NAME: &str = "issues";
 const ALLOCATION_DIR_NAME: &str = "usagi-issue-sequence";
 const ALLOCATION_FILE_NAME: &str = "next";
+
+/// More than one Markdown source file claims the same issue number.
+///
+/// Exact paths are retained in deterministic order so callers can present a
+/// repair plan without guessing which sibling is authoritative.
+#[derive(Debug)]
+pub struct AmbiguousIssueNumber {
+    pub number: u32,
+    pub files: Vec<PathBuf>,
+}
+
+impl fmt::Display for AmbiguousIssueNumber {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "issue #{} is ambiguous; refusing to choose among these files: {}",
+            self.number,
+            self.files
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+impl std::error::Error for AmbiguousIssueNumber {}
 
 #[derive(Debug, Deserialize)]
 struct IndexFile {
@@ -101,6 +131,20 @@ pub struct IssueStore {
     repo_root: PathBuf,
 }
 
+/// A parseable issue paired with the exact Markdown file that supplied it.
+pub(crate) struct IssueSource {
+    pub issue: Issue,
+    pub file: String,
+}
+
+impl IssueSource {
+    pub fn summary(self) -> IssueSummary {
+        let mut summary = self.issue.summary();
+        summary.file = self.file;
+        summary
+    }
+}
+
 impl IssueStore {
     /// Open the issue store for the repository at `repo_root`.
     #[must_use]
@@ -150,12 +194,58 @@ impl IssueStore {
     ///
     /// Returns an error when the directory itself cannot be read.
     pub fn scan_lenient(&self) -> Result<Vec<Issue>> {
-        self.inner.scan_lenient()
+        Ok(self
+            .scan_sources_lenient()?
+            .into_iter()
+            .map(|source| source.issue)
+            .collect())
     }
 
     /// Paths of every issue markdown file. Empty when the directory is missing.
     fn issue_files(&self) -> Result<Vec<PathBuf>> {
         self.inner.entry_files()
+    }
+
+    /// Numbers claimed by source filenames, retaining duplicates and corrupt
+    /// files so listing diagnostics use the same identity as point CRUD.
+    pub(crate) fn source_numbers(&self) -> Result<Vec<u32>> {
+        Ok(self
+            .issue_files()?
+            .iter()
+            .filter_map(|path| number_from_filename(path))
+            .collect())
+    }
+
+    /// Parse source files leniently while retaining their exact filenames.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the directory cannot be read or a source filename
+    /// cannot be represented as UTF-8. Individual read and parse failures are
+    /// logged and skipped.
+    pub(crate) fn scan_sources_lenient(&self) -> Result<Vec<IssueSource>> {
+        let mut sources = Vec::new();
+        for path in self.issue_files()? {
+            let file = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context(format!("source filename is not UTF-8: {}", path.display()))?
+                .to_owned();
+            match self.inner.read_existing_path(&path) {
+                Ok(issue) => sources.push(IssueSource { issue, file }),
+                Err(error) => ErrorLog::record(&format!(
+                    "skipping unparseable issue file {}: {error:#}",
+                    path.display()
+                )),
+            }
+        }
+        sources.sort_by(|left, right| {
+            left.issue
+                .number
+                .cmp(&right.issue.number)
+                .then_with(|| left.file.cmp(&right.file))
+        });
+        Ok(sources)
     }
 
     /// The highest issue number currently stored, or 0 if there are none.
@@ -215,8 +305,12 @@ impl IssueStore {
     /// # Errors
     ///
     /// Returns an error when the directory cannot be read or the backing file
-    /// cannot be read or parsed.
+    /// cannot be read or parsed, or when more than one source file claims
+    /// `number`.
     pub fn read(&self, number: u32) -> Result<Option<Issue>> {
+        // Fail before a scheduled derived repair can rewrite index state. The
+        // second check in read_locked closes the race after repair as well.
+        self.unique_files_for(number)?;
         self.repair_derived_best_effort();
         self.read_locked(number)
     }
@@ -225,9 +319,10 @@ impl IssueStore {
     ///
     /// # Errors
     ///
-    /// Returns an error when the directory or source file cannot be read.
+    /// Returns an error when the directory or source file cannot be read, or
+    /// when more than one source file claims `number`.
     pub fn read_locked(&self, number: u32) -> Result<Option<Issue>> {
-        let Some(path) = self.files_for(number)?.into_iter().next() else {
+        let Some(path) = self.unique_files_for(number)?.into_iter().next() else {
             return Ok(None);
         };
         Ok(Some(self.inner.read_existing_path(&path)?))
@@ -238,8 +333,9 @@ impl IssueStore {
     ///
     /// # Errors
     ///
-    /// Returns an error when the lock cannot be acquired or source cannot be
-    /// committed. A derived refresh failure is returned in the outcome.
+    /// Returns an error when the lock cannot be acquired, the issue number is
+    /// ambiguous, or source cannot be committed. A derived refresh failure is
+    /// returned in the outcome.
     pub fn write(&self, issue: &Issue) -> Result<MutationOutcome<()>> {
         let lock = self.lock()?;
         self.write_locked(&lock, issue)
@@ -247,17 +343,19 @@ impl IssueStore {
 
     /// Like [`write`](Self::write) but assumes the caller already holds this
     /// store's [`lock`](Self::lock). If the title changes, the new file is written
-    /// before stale-named siblings for the same number are removed.
+    /// before the one stale-named existing file is removed.
     ///
     /// # Errors
     ///
-    /// Returns an error when the markdown cannot be written, a stale sibling
-    /// cannot be removed, or the dirty marker cannot be scheduled.
+    /// Returns an error when the number is ambiguous, the markdown cannot be
+    /// written, the stale name cannot be removed, or the dirty marker cannot be
+    /// scheduled. Ambiguity is detected before any source or derived mutation.
     pub fn write_locked(&self, _lock: &StoreLock, issue: &Issue) -> Result<MutationOutcome<()>> {
+        let existing = self.unique_files_for(issue.number)?;
         let rebuild_required = self.inner.derived_is_dirty();
         self.inner.mark_derived_dirty()?;
         let target = self.inner.write_markdown(issue)?;
-        for stale in self.files_for(issue.number)? {
+        for stale in existing {
             if stale != target {
                 fs::remove_file(&stale).context(format!("failed to remove {}", stale.display()))?;
             }
@@ -275,8 +373,9 @@ impl IssueStore {
     ///
     /// # Errors
     ///
-    /// Returns an error when the lock cannot be acquired or source cannot be
-    /// removed. A derived refresh failure does not change the returned delete.
+    /// Returns an error when the lock cannot be acquired, the issue number is
+    /// ambiguous, or source cannot be removed. A derived refresh failure does
+    /// not change the returned delete.
     pub fn remove(&self, number: u32) -> Result<bool> {
         Ok(self.remove_with_outcome(number)?.value)
     }
@@ -286,10 +385,11 @@ impl IssueStore {
     ///
     /// # Errors
     ///
-    /// Returns an error only before the source removal commits.
+    /// Returns an error only before the source removal commits, including when
+    /// more than one source file claims `number`.
     pub fn remove_with_outcome(&self, number: u32) -> Result<MutationOutcome<bool>> {
         let _lock = self.lock()?;
-        let files = self.files_for(number)?;
+        let files = self.unique_files_for(number)?;
         if files.is_empty() {
             let repair = self.inner.repair_derived_locked();
             return Ok(self.inner.finish_committed(false, repair));
@@ -316,9 +416,47 @@ impl IssueStore {
     pub fn summaries(&self) -> Result<Vec<IssueSummary>> {
         self.repair_derived_best_effort();
         if self.inner.derived_is_dirty() {
-            return self.inner.source_summaries();
+            return self.source_summaries();
         }
-        self.inner.summaries()
+        let files = self.issue_files()?;
+        let mut files_by_number = BTreeMap::new();
+        for path in &files {
+            let Some(number) = number_from_filename(path) else {
+                return self.source_summaries();
+            };
+            let file = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context(format!("source filename is not UTF-8: {}", path.display()))?
+                .to_owned();
+            if files_by_number.insert(number, file).is_some() {
+                return self.source_summaries();
+            }
+        }
+
+        let mut summaries = self.inner.summaries()?;
+        if summaries.len() != files_by_number.len() {
+            return self.source_summaries();
+        }
+        for summary in &mut summaries {
+            let Some(file) = files_by_number.remove(&summary.number) else {
+                return self.source_summaries();
+            };
+            summary.file = file;
+        }
+        if files_by_number.is_empty() {
+            Ok(summaries)
+        } else {
+            self.source_summaries()
+        }
+    }
+
+    fn source_summaries(&self) -> Result<Vec<IssueSummary>> {
+        Ok(self
+            .scan_sources_lenient()?
+            .into_iter()
+            .map(IssueSource::summary)
+            .collect())
     }
 
     fn repair_derived_best_effort(&self) {
@@ -344,6 +482,19 @@ impl IssueStore {
     /// Every file that backs `number` (normally zero or one).
     fn files_for(&self, number: u32) -> Result<Vec<PathBuf>> {
         self.inner.files_for_key(&number)
+    }
+
+    /// Return the zero or one source file that can safely represent `number`.
+    ///
+    /// Sorting before reporting an ambiguity makes the typed error independent
+    /// of filesystem directory iteration order.
+    fn unique_files_for(&self, number: u32) -> Result<Vec<PathBuf>> {
+        let mut files = self.files_for(number)?;
+        files.sort();
+        if files.len() > 1 {
+            return Err(AmbiguousIssueNumber { number, files }.into());
+        }
+        Ok(files)
     }
 
     fn allocation_dir(&self) -> Result<PathBuf> {
@@ -408,7 +559,7 @@ fn is_issue_file(path: &Path) -> bool {
 
 /// The issue number encoded in an issue file's name (`NNN-slug.md`), or `None`
 /// when the name has no numeric prefix.
-fn number_from_filename(path: &Path) -> Option<u32> {
+pub(crate) fn number_from_filename(path: &Path) -> Option<u32> {
     path.file_name()
         .and_then(|name| name.to_str())
         .and_then(|name| name.split_once('-'))
@@ -487,6 +638,41 @@ mod tests {
         assert!(store.index_path().is_file());
         assert_eq!(store.read(1).unwrap().unwrap(), i);
         assert_eq!(store.max_number().unwrap(), 1);
+    }
+
+    #[test]
+    fn duplicate_number_read_write_and_remove_fail_closed_without_changing_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(7, "First")).unwrap();
+        let first = store.dir().join("007-first.md");
+        let second = store.dir().join("007-second.md");
+        fs::write(&second, issue(7, "Second").to_markdown()).unwrap();
+        let source_before = [fs::read(&first).unwrap(), fs::read(&second).unwrap()];
+        let index_before = fs::read(store.index_path()).unwrap();
+        let dirty = store.dir().join(".derived-dirty");
+        fs::write(&dirty, b"pre-existing rebuild request\n").unwrap();
+        let dirty_before = fs::read(&dirty).unwrap();
+
+        for error in [
+            store.read(7).unwrap_err(),
+            store.write(&issue(7, "Replacement")).unwrap_err(),
+            store.remove(7).unwrap_err(),
+        ] {
+            let message = error.to_string();
+            assert!(message.contains("issue #7 is ambiguous"));
+            assert!(message.contains(first.to_str().unwrap()));
+            assert!(message.contains(second.to_str().unwrap()));
+            let ambiguity = error.downcast_ref::<AmbiguousIssueNumber>().unwrap();
+            assert_eq!(ambiguity.number, 7);
+            assert_eq!(ambiguity.files, vec![first.clone(), second.clone()]);
+        }
+
+        assert_eq!(fs::read(&first).unwrap(), source_before[0]);
+        assert_eq!(fs::read(&second).unwrap(), source_before[1]);
+        assert_eq!(fs::read(store.index_path()).unwrap(), index_before);
+        assert_eq!(fs::read(dirty).unwrap(), dirty_before);
+        assert!(!store.dir().join("007-replacement.md").exists());
     }
 
     #[test]

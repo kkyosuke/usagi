@@ -260,6 +260,90 @@ fn production_store_tools_round_trip_through_stdio_and_durable_files() {
     assert!(mcp.cwd().join(".usagi/memory/mcp-fact.md").is_file());
 }
 
+#[test]
+fn production_issue_point_tools_reject_duplicate_numbers_without_changing_siblings() {
+    let mut mcp = McpHarness::start_in_session("duplicate-issue-e2e");
+    let created = tool_text(&mcp.tool("issue_create", &json!({"title":"First"})));
+    let number = created["number"].as_u64().unwrap();
+    let issues_dir = mcp.cwd().join(".usagi/issues");
+    let first = issues_dir.join(format!("{number:03}-first.md"));
+    let second = issues_dir.join(format!("{number:03}-second.md"));
+    let first_source = fs::read(&first).unwrap();
+    fs::write(&second, &first_source).unwrap();
+
+    let listed = tool_text(&mcp.tool("issue_search", &json!({})));
+    assert_eq!(listed.as_array().unwrap().len(), 2);
+    let mut listed_files: Vec<_> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|issue| issue["file"].as_str().unwrap().to_owned())
+        .collect();
+    listed_files.sort();
+    assert_eq!(
+        listed_files,
+        [
+            format!("{number:03}-first.md"),
+            format!("{number:03}-second.md")
+        ]
+    );
+    assert!(
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|issue| issue["ambiguous"] == true && issue["ready"] == false)
+    );
+    let matching = tool_text(&mcp.tool("issue_search", &json!({"query":"First"})));
+    let mut matching_files: Vec<_> = matching
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|issue| issue["file"].as_str().unwrap().to_owned())
+        .collect();
+    matching_files.sort();
+    assert_eq!(
+        matching_files,
+        [
+            format!("{number:03}-first.md"),
+            format!("{number:03}-second.md")
+        ]
+    );
+    let source_before = [fs::read(&first).unwrap(), fs::read(&second).unwrap()];
+    let index = issues_dir.join("index.json");
+    let index_before = fs::read(&index).unwrap();
+    let dirty = issues_dir.join(".derived-dirty");
+    fs::write(&dirty, b"pre-existing rebuild request\n").unwrap();
+    let dirty_before = fs::read(&dirty).unwrap();
+
+    for response in [
+        mcp.tool("issue_create", &json!({"title":"First"})),
+        mcp.tool("issue_get", &json!({"number":number})),
+        mcp.tool("issue_to_prompt", &json!({"number":number})),
+        mcp.tool(
+            "issue_update",
+            &json!({"number":number,"title":"Replacement"}),
+        ),
+        mcp.tool("issue_delete", &json!({"number":number})),
+    ] {
+        assert_eq!(response["error"]["code"], -32603);
+        let message = response["error"]["message"].as_str().unwrap();
+        assert!(message.contains(&format!("issue #{number} is ambiguous")));
+        assert!(message.contains(first.to_str().unwrap()));
+        assert!(message.contains(second.to_str().unwrap()));
+    }
+
+    assert_eq!(fs::read(&first).unwrap(), source_before[0]);
+    assert_eq!(fs::read(&second).unwrap(), source_before[1]);
+    assert_eq!(fs::read(index).unwrap(), index_before);
+    assert_eq!(fs::read(dirty).unwrap(), dirty_before);
+    assert!(
+        !issues_dir
+            .join(format!("{number:03}-replacement.md"))
+            .exists()
+    );
+}
+
 fn tool_text(response: &serde_json::Value) -> serde_json::Value {
     assert!(response.get("error").is_none(), "{response}");
     serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap()

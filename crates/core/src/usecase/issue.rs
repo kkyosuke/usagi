@@ -7,16 +7,16 @@
 //! this layer stays clock-free and fully testable; the concrete store and clock
 //! are bound by the caller.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Component, Path};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::domain::issue::{Issue, IssuePriority, IssueStatus, IssueSummary};
-use crate::infrastructure::store::issue::IssueStore;
+use crate::infrastructure::store::issue::{IssueSource, IssueStore, number_from_filename};
 
 /// The fields supplied when creating an issue. The number, status, and timestamps
 /// are assigned by [`create`], so they are not part of the request.
@@ -76,6 +76,8 @@ pub struct IssueFilter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListedIssue {
     pub summary: IssueSummary,
+    /// More than one source Markdown file claims this issue number.
+    pub ambiguous: bool,
     /// Dependencies that are missing or not yet done.
     pub unmet_deps: Vec<u32>,
 }
@@ -84,7 +86,7 @@ impl ListedIssue {
     /// Whether the issue can be started now.
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        self.summary.status != IssueStatus::Done && self.unmet_deps.is_empty()
+        !self.ambiguous && self.summary.status != IssueStatus::Done && self.unmet_deps.is_empty()
     }
 }
 
@@ -148,14 +150,37 @@ pub fn ensure_write_allowed(repo_root: &Path) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Returns an error when the store cannot allocate a number or write the issue.
+/// Returns an error when a matching retry resolves to an ambiguous number, or
+/// when the store cannot allocate a number or write the issue.
 pub fn create(store: &IssueStore, spec: NewIssue, now: DateTime<Utc>) -> Result<Issue> {
     let lock = store.lock()?;
-    if let Some(existing) = store
-        .scan_lenient()?
+    if let Some(matching) = store
+        .scan_sources_lenient()?
         .into_iter()
-        .find(|issue| matches_new_issue_source(issue, &spec))
+        .find(|source| matches_new_issue_source(&source.issue, &spec))
     {
+        let source_number = number_from_filename(Path::new(&matching.file)).context(format!(
+            "matching issue source {} has no numeric filename prefix",
+            matching.file
+        ))?;
+        let existing = store.read_locked(source_number)?.context(format!(
+            "matching issue source {} disappeared while validating create retry",
+            matching.file
+        ))?;
+        if existing.number != source_number {
+            bail!(
+                "matching issue source {} declares #{} but its filename claims #{}; refusing create retry",
+                matching.file,
+                existing.number,
+                source_number
+            );
+        }
+        if !matches_new_issue_source(&existing, &spec) {
+            bail!(
+                "matching issue source {} changed while validating create retry",
+                matching.file
+            );
+        }
         return Ok(existing);
     }
     let number = store.reserve_next_number()?;
@@ -197,7 +222,8 @@ fn matches_new_issue_source(issue: &Issue, spec: &NewIssue) -> bool {
 ///
 /// # Errors
 ///
-/// Returns an error when the backing file cannot be read or parsed.
+/// Returns an error when the backing file cannot be read or parsed, or when
+/// multiple source files claim `number`.
 pub fn get(store: &IssueStore, number: u32) -> Result<Option<Issue>> {
     store.read(number)
 }
@@ -220,35 +246,39 @@ pub fn list(store: &IssueStore) -> Result<Vec<IssueSummary>> {
 /// Returns an error when the store cannot be scanned or indexed.
 pub fn search(store: &IssueStore, query: &str, filter: &IssueFilter) -> Result<Vec<ListedIssue>> {
     let all = store.summaries()?;
+    let mut identity_counts = HashMap::<u32, usize>::new();
+    for number in store.source_numbers()? {
+        *identity_counts.entry(number).or_default() += 1;
+    }
     let done: HashSet<u32> = all
         .iter()
-        .filter(|summary| summary.status == IssueStatus::Done)
+        .filter(|summary| {
+            summary.status == IssueStatus::Done
+                && number_from_filename(Path::new(&summary.file)) == Some(summary.number)
+                && identity_counts.get(&summary.number) == Some(&1)
+        })
         .map(|summary| summary.number)
         .collect();
     let needle = query.to_lowercase();
-    let matching: Option<HashSet<u32>> = if needle.is_empty() {
-        None
+    let candidates = if needle.is_empty() {
+        all
     } else {
-        Some(
-            store
-                .scan_lenient()?
-                .into_iter()
-                .filter(|issue| {
-                    issue.title.to_lowercase().contains(&needle)
-                        || issue.body.to_lowercase().contains(&needle)
-                })
-                .map(|issue| issue.number)
-                .collect(),
-        )
+        store
+            .scan_sources_lenient()?
+            .into_iter()
+            .filter(|source| {
+                source.issue.title.to_lowercase().contains(&needle)
+                    || source.issue.body.to_lowercase().contains(&needle)
+            })
+            .map(IssueSource::summary)
+            .collect()
     };
-    Ok(all
+    Ok(candidates
         .into_iter()
-        .filter(|summary| {
-            matching
-                .as_ref()
-                .is_none_or(|numbers| numbers.contains(&summary.number))
-        })
         .map(|summary| ListedIssue {
+            ambiguous: number_from_filename(Path::new(&summary.file))
+                .and_then(|number| identity_counts.get(&number))
+                .is_some_and(|count| *count > 1),
             unmet_deps: summary
                 .dependson
                 .iter()
@@ -334,7 +364,8 @@ pub fn to_prompt(issue: &Issue) -> String {
 ///
 /// # Errors
 ///
-/// Returns an error when the issue cannot be read or the write fails.
+/// Returns an error when the issue cannot be read unambiguously or the write
+/// fails.
 pub fn update(
     store: &IssueStore,
     number: u32,
@@ -381,7 +412,8 @@ pub fn update(
 ///
 /// # Errors
 ///
-/// Returns an error when the lock cannot be taken or a file cannot be removed.
+/// Returns an error when the lock cannot be taken, the issue number is
+/// ambiguous, or a file cannot be removed.
 pub fn delete(store: &IssueStore, number: u32) -> Result<bool> {
     store.remove(number)
 }
@@ -392,9 +424,10 @@ mod tests {
         IssueFilter, IssuePatch, NewIssue, create, delete, ensure_write_allowed, get, list, search,
         to_prompt, update,
     };
+    use crate::domain::frontmatter::FrontmatterDoc;
     use crate::domain::issue::{IssuePriority, IssueStatus};
     use crate::infrastructure::persistence::json_file::{AtomicWriteStage, fail_next_atomic_write};
-    use crate::infrastructure::store::issue::IssueStore;
+    use crate::infrastructure::store::issue::{AmbiguousIssueNumber, IssueStore};
     use chrono::{DateTime, TimeZone, Utc};
     use std::fs;
     use std::sync::{Arc, Barrier};
@@ -451,6 +484,40 @@ mod tests {
         unsafe {
             std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
         }
+    }
+
+    #[test]
+    fn create_retry_rejects_an_ambiguous_matching_number() {
+        let (_tmp, store) = store();
+        let created = create(&store, spec("same request"), ts(20)).unwrap();
+        let first = store.dir().join(created.file_name());
+        let second = store.dir().join("001-other.md");
+        let mut duplicate = created;
+        duplicate.title = "other".to_string();
+        fs::write(&second, duplicate.to_markdown()).unwrap();
+        let source_before = [fs::read(&first).unwrap(), fs::read(&second).unwrap()];
+
+        let error = create(&store, spec("same request"), ts(21)).unwrap_err();
+        let ambiguity = error.downcast_ref::<AmbiguousIssueNumber>().unwrap();
+        assert_eq!(ambiguity.number, 1);
+        assert_eq!(ambiguity.files, vec![second.clone(), first.clone()]);
+        assert_eq!(fs::read(first).unwrap(), source_before[0]);
+        assert_eq!(fs::read(second).unwrap(), source_before[1]);
+    }
+
+    #[test]
+    fn create_retry_checks_the_matching_source_filename_identity() {
+        let (_tmp, store) = store();
+        let first = create(&store, spec("other"), ts(20)).unwrap();
+        let retry = create(&store, spec("same request"), ts(20)).unwrap();
+        let first = store.dir().join(first.file_name());
+        let moved = store.dir().join("001-retry.md");
+        fs::rename(store.dir().join(retry.file_name()), &moved).unwrap();
+
+        let error = create(&store, spec("same request"), ts(21)).unwrap_err();
+        let ambiguity = error.downcast_ref::<AmbiguousIssueNumber>().unwrap();
+        assert_eq!(ambiguity.number, 1);
+        assert_eq!(ambiguity.files, vec![first, moved]);
     }
 
     #[test]
@@ -537,6 +604,121 @@ mod tests {
             .map(|s| s.number)
             .collect();
         assert_eq!(numbers, vec![1, 2]);
+    }
+
+    #[test]
+    fn duplicate_number_point_crud_fails_closed_while_lists_expose_every_sibling() {
+        let (_tmp, store) = store();
+        let created = create(&store, spec("first"), ts(20)).unwrap();
+        let first = store.dir().join(created.file_name());
+        let second = store.dir().join("001-second.md");
+        let mut duplicate = created;
+        duplicate.title = "second".to_string();
+        duplicate.status = IssueStatus::Done;
+        fs::write(&second, duplicate.to_markdown()).unwrap();
+        let mut dependent = spec("dependent");
+        dependent.dependson = vec![1];
+        create(&store, dependent, ts(20)).unwrap();
+        let source_before = [fs::read(&first).unwrap(), fs::read(&second).unwrap()];
+
+        let mut listed_files: Vec<_> = list(&store)
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.file)
+            .collect();
+        listed_files.sort();
+        assert_eq!(
+            listed_files,
+            ["001-first.md", "001-second.md", "002-dependent.md"]
+        );
+        let listed = search(&store, "", &IssueFilter::default()).unwrap();
+        let duplicate_rows: Vec<_> = listed
+            .iter()
+            .filter(|issue| issue.summary.number == 1)
+            .collect();
+        assert_eq!(duplicate_rows.len(), 2);
+        assert!(duplicate_rows.iter().all(|issue| issue.ambiguous));
+        assert!(duplicate_rows.iter().all(|issue| !issue.is_ready()));
+        let dependent = listed
+            .iter()
+            .find(|issue| issue.summary.number == 2)
+            .unwrap();
+        assert_eq!(dependent.unmet_deps, vec![1]);
+        assert!(!dependent.is_ready());
+
+        let matching = search(&store, "first", &IssueFilter::default()).unwrap();
+        assert_eq!(matching.len(), 1);
+        assert_eq!(matching[0].summary.file, "001-first.md");
+
+        let errors = [
+            get(&store, 1).unwrap_err(),
+            update(
+                &store,
+                1,
+                IssuePatch {
+                    status: Some(IssueStatus::Done),
+                    ..Default::default()
+                },
+                ts(21),
+            )
+            .unwrap_err(),
+            delete(&store, 1).unwrap_err(),
+        ];
+        for error in errors {
+            let ambiguity = error.downcast_ref::<AmbiguousIssueNumber>().unwrap();
+            assert_eq!(ambiguity.number, 1);
+            assert_eq!(ambiguity.files, vec![first.clone(), second.clone()]);
+        }
+
+        assert_eq!(fs::read(&first).unwrap(), source_before[0]);
+        assert_eq!(fs::read(&second).unwrap(), source_before[1]);
+    }
+
+    #[test]
+    fn duplicate_diagnostics_use_source_paths_and_count_unparseable_siblings() {
+        let (_tmp, store) = store();
+        let created = create(&store, spec("first"), ts(20)).unwrap();
+        let first = store.dir().join(created.file_name());
+        let copied = store.dir().join("001-copied.md");
+        fs::copy(&first, &copied).unwrap();
+
+        let mut copied_rows: Vec<_> = search(&store, "first", &IssueFilter::default())
+            .unwrap()
+            .into_iter()
+            .map(|issue| {
+                let ready = issue.is_ready();
+                (issue.summary.file, issue.ambiguous, ready)
+            })
+            .collect();
+        copied_rows.sort();
+        assert_eq!(
+            copied_rows,
+            vec![
+                ("001-copied.md".to_string(), true, false),
+                ("001-first.md".to_string(), true, false),
+            ]
+        );
+
+        let mismatched = fs::read_to_string(&first)
+            .unwrap()
+            .replacen("number: 1", "number: 2", 1);
+        fs::write(&copied, mismatched).unwrap();
+        let mismatched_row = search(&store, "first", &IssueFilter::default())
+            .unwrap()
+            .into_iter()
+            .find(|issue| issue.summary.file == "001-copied.md")
+            .unwrap();
+        assert_eq!(mismatched_row.summary.number, 2);
+        assert!(mismatched_row.ambiguous);
+        assert!(!mismatched_row.is_ready());
+
+        fs::remove_file(&copied).unwrap();
+        fs::write(&copied, "not an issue").unwrap();
+        let rows = search(&store, "", &IssueFilter::default()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].summary.file, "001-first.md");
+        assert!(rows[0].ambiguous);
+        assert!(!rows[0].is_ready());
     }
 
     #[test]
