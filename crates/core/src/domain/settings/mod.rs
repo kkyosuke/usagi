@@ -96,7 +96,7 @@ impl Settings {
 }
 
 /// Per-workspace overrides stored in `<workspace>/.usagi/settings.json` (or the
-/// build-channel-specific `dev` directory).
+/// development-mode-specific `dev` directory).
 ///
 /// An absent or unrecognised field defers to the global value. This keeps a
 /// file written by a newer usagi safe to load without turning an unknown local

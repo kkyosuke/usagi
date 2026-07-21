@@ -251,14 +251,19 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
 }
 
 fn mcp_environment_allowlist(context: &ProvisionContext) -> BTreeSet<EnvironmentVariableName> {
-    context
-        .inject_mcp
-        .then(|| {
-            EnvironmentVariableName::new(usagi_core::infrastructure::paths::DATA_DIR_ENV)
-                .expect("literal environment variable name is valid")
-        })
+    if context.inject_mcp {
+        [
+            usagi_core::infrastructure::paths::DATA_DIR_ENV,
+            usagi_core::infrastructure::paths::RUNTIME_MODE_ENV,
+        ]
         .into_iter()
+        .map(|name| {
+            EnvironmentVariableName::new(name).expect("literal environment variable name is valid")
+        })
         .collect()
+    } else {
+        BTreeSet::new()
+    }
 }
 
 fn mcp_environment(
@@ -268,14 +273,28 @@ fn mcp_environment(
     context
         .inject_mcp
         .then(|| {
-            Ok((
-                EnvironmentVariableName::new(usagi_core::infrastructure::paths::DATA_DIR_ENV)
+            Ok([
+                (
+                    EnvironmentVariableName::new(usagi_core::infrastructure::paths::DATA_DIR_ENV)
+                        .expect("literal environment variable name is valid"),
+                    data_home.to_str().ok_or(())?.to_owned(),
+                ),
+                (
+                    EnvironmentVariableName::new(
+                        usagi_core::infrastructure::paths::RUNTIME_MODE_ENV,
+                    )
                     .expect("literal environment variable name is valid"),
-                data_home.to_str().ok_or(())?.to_owned(),
-            ))
+                    match paths::runtime_mode() {
+                        paths::RuntimeMode::Development => "development",
+                        paths::RuntimeMode::Device => "device",
+                    }
+                    .to_owned(),
+                ),
+            ])
         })
         .transpose()
         .map(Option::into_iter)
+        .map(Iterator::flatten)
         .map(Iterator::collect)
 }
 
@@ -297,7 +316,7 @@ fn codex_mcp_arguments(command: &Path) -> Result<Vec<String>, ()> {
         // Forward the daemon-selected data home and runtime-fenced credential
         // so the MCP child reaches the owning daemon and proves its owner.
         "-c".into(),
-        r#"mcp_servers.usagi.env_vars = ["USAGI_HOME", "USAGI_MCP_CALLER_CREDENTIAL"]"#.into(),
+        r#"mcp_servers.usagi.env_vars = ["USAGI_HOME", "USAGI_RUNTIME_MODE", "USAGI_MCP_CALLER_CREDENTIAL"]"#.into(),
         "-c".into(),
         r#"mcp_servers.usagi.default_tools_approval_mode = "approve""#.into(),
     ])
@@ -1094,7 +1113,7 @@ fn open_agent_runtime(
     let snapshot = store.reconcile_after_restart()?;
     let mut registry = AdapterRegistry::new();
     let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness);
-    let data_home = if cfg!(debug_assertions) {
+    let data_home = if matches!(paths::runtime_mode(), paths::RuntimeMode::Development) {
         data_dir.parent().unwrap_or(data_dir).to_path_buf()
     } else {
         data_dir.to_path_buf()
@@ -3419,43 +3438,10 @@ pub(crate) fn client(
         || run_lifecycle(&exe, "start"),
         || run_lifecycle(&exe, "restart"),
         &expected_build,
-        bootstrap::should_force_restart(
-            matches!(paths::build_channel(), paths::BuildChannel::Development),
-            invoked_by_cargo_run(),
-        ),
+        false,
         IpcClient::server_build,
     )
     .map_err(|error| ClientError::Lifecycle(error.to_string()))
-}
-
-/// `cargo run` remains the only debug entry point that intentionally replaces
-/// a matching development daemon. Integration tests execute the binary from a
-/// test harness, so their parent is not Cargo and they reuse the endpoint.
-#[cfg(unix)]
-#[coverage(off)]
-fn invoked_by_cargo_run() -> bool {
-    let parent = unsafe { libc::getppid() };
-    let Ok(output) = std::process::Command::new("ps")
-        .args(["-p", &parent.to_string(), "-o", "command="])
-        .output()
-    else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
-    }
-    let command = String::from_utf8_lossy(&output.stdout);
-    let words: Vec<_> = command.split_whitespace().collect();
-    words
-        .first()
-        .is_some_and(|program| program.rsplit('/').next() == Some("cargo"))
-        && words.get(1).is_some_and(|argument| *argument == "run")
-}
-
-#[cfg(not(unix))]
-#[coverage(off)]
-fn invoked_by_cargo_run() -> bool {
-    false
 }
 
 #[coverage(off)]
@@ -3722,7 +3708,7 @@ mod tests {
                 "-c",
                 "mcp_servers.usagi.args = [\"mcp\"]",
                 "-c",
-                "mcp_servers.usagi.env_vars = [\"USAGI_HOME\", \"USAGI_MCP_CALLER_CREDENTIAL\"]",
+                "mcp_servers.usagi.env_vars = [\"USAGI_HOME\", \"USAGI_RUNTIME_MODE\", \"USAGI_MCP_CALLER_CREDENTIAL\"]",
                 "-c",
                 "mcp_servers.usagi.default_tools_approval_mode = \"approve\"",
             ]
