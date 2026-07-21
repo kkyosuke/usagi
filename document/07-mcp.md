@@ -103,7 +103,7 @@ tool は系統ごとに分かれ、`tools/list` に載る `name` と `inputSchem
 | `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す |
 | `session_complete` | 認証済み session Agent の完了メッセージを workspace root coordinator へ `auto` 配送する |
 | `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child の session worktree にある machine-local scratchpad を core usecase 経由で読み書きする |
-| `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合して user-decision store を操作する。request は durable な待機 ID を即時に返し、解決回答は同じ run へ continuation prompt として自動配送する。agent 経路は作成した owner/run の decision だけを操作できる |
+| `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合して user-decision store を操作する。request は durable な pending decision を作成し、TUI の resolve 後に `decision_id` と回答を同じ MCP 応答で返す。agent 経路は作成した owner/run の decision だけを操作できる |
 | `issue_*` / `memory_*` | cwd の Markdown store を core usecase 経由で操作する |
 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` | caller credential を live Agent runtime と照合し、daemon-owned worker PTY と dispatch store/inbox を操作する |
 | `supervisor_start` / `supervisor_get` / `supervisor_list` / `supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` | IPC connection から daemon が導出した caller provenance の範囲で、durable supervisor aggregate を作成・観測・制御する |

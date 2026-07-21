@@ -1048,9 +1048,9 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         Arc::clone(&supervisor),
     )?;
     let decisions = Arc::new(UserDecisionStore::new(data_dir.join("daemon")));
-    consume_user_decision_events(&decisions, &agent)
+    consume_user_decision_events(&decisions)
         .map_err(|error| std::io::Error::other(error.message))?;
-    start_decision_maintenance(Arc::clone(&decisions), Arc::clone(&agent))?;
+    start_decision_maintenance(Arc::clone(&decisions))?;
     start_ipc_accept_loop(
         listener,
         server,
@@ -1067,19 +1067,16 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
     )
 }
 
-/// Keeps decision deadlines and the durable outbox progressing even when no
-/// subsequent MCP/TUI request arrives.  Every action is idempotent, so a
-/// daemon restart simply resumes from the JSON store.
-fn start_decision_maintenance(
-    decisions: Arc<UserDecisionStore>,
-    agent: SharedAgentRuntime,
-) -> std::io::Result<()> {
+/// Keeps decision deadlines progressing even when no subsequent MCP/TUI
+/// request arrives. Every action is idempotent, so a daemon restart simply
+/// resumes from the JSON store.
+fn start_decision_maintenance(decisions: Arc<UserDecisionStore>) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("usagi-decision-maintenance".to_string())
         .spawn(move || {
             loop {
                 let _ = decisions.expire_due(chrono::Utc::now());
-                let _ = consume_user_decision_events(&decisions, &agent);
+                let _ = consume_user_decision_events(&decisions);
                 std::thread::sleep(Duration::from_millis(250));
             }
         })
@@ -2195,10 +2192,10 @@ fn dispatch_user_decision(
         ))
     });
     let response = owner.and_then(|(workspace, owner)| {
-        // Delivery is asynchronous from the durable commit.  A temporary PTY
-        // failure must not turn an already-persisted TUI answer into a false
-        // error; the maintenance worker retries the still-unacknowledged event.
-        let _ = consume_user_decision_events(store, agent);
+        // Resolved events are retained only for atomicity with legacy durable
+        // records. Their acknowledgement must not inject a continuation while
+        // this MCP call is waiting for its own synchronous response.
+        let _ = consume_user_decision_events(store);
         let request_owner = owner.clone();
         let decision_for = |id| -> Result<UserDecision, UserDecisionError> {
             let decision = store
@@ -2219,7 +2216,7 @@ fn dispatch_user_decision(
                 let owner = owner.ok_or(UserDecisionError::Terminal)?;
                 let input = serde_json::from_value::<RequestPayload>(payload)
                     .map_err(|_| UserDecisionError::Terminal)?;
-                store
+                let decision = store
                     .create(UserDecision {
                         decision_id: UserDecisionId::new(), owner, title: input.title, prompt: input.prompt,
                         options: input.options, allow_freeform: input.allow_freeform, expires_at: input.expires_at,
@@ -2227,7 +2224,8 @@ fn dispatch_user_decision(
                         created_at: now, resolved_at: None,
                     })
                     .map_err(|_| UserDecisionError::Terminal)?
-                    .map(|decision| serde_json::json!({"decision_id": decision.decision_id, "status": "waiting_for_user"}))
+                    ?;
+                wait_for_user_decision(store, workspace, &decision)
             }
             DispatchToolAction::UserDecisionGet => {
                 let input = serde_json::from_value::<DecisionIdPayload>(payload).map_err(|_| UserDecisionError::Terminal)?;
@@ -2267,9 +2265,7 @@ fn dispatch_user_decision(
             };
             ProtocolError::new(code, message)
         })?;
-        if action == DispatchToolAction::UserDecisionResolve {
-            let _ = consume_user_decision_events(store, agent);
-        }
+        let _ = consume_user_decision_events(store);
         Ok(value)
     });
     match response {
@@ -2283,24 +2279,52 @@ fn dispatch_user_decision(
     }
 }
 
+fn wait_for_user_decision(
+    decisions: &UserDecisionStore,
+    workspace: usagi_core::domain::id::WorkspaceId,
+    requested: &usagi_core::domain::user_decision::UserDecision,
+) -> Result<serde_json::Value, usagi_core::domain::user_decision::UserDecisionError> {
+    use usagi_core::domain::user_decision::UserDecisionStatus;
+
+    loop {
+        let decision = decisions
+            .get(workspace, requested.decision_id)
+            .map_err(|_| usagi_core::domain::user_decision::UserDecisionError::Terminal)?
+            .ok_or(usagi_core::domain::user_decision::UserDecisionError::Terminal)?;
+        match decision.status {
+            UserDecisionStatus::Pending => std::thread::sleep(Duration::from_millis(25)),
+            UserDecisionStatus::Resolved => {
+                let answer = decision
+                    .answer
+                    .ok_or(usagi_core::domain::user_decision::UserDecisionError::Terminal)?;
+                return Ok(serde_json::json!({
+                    "decision_id": decision.decision_id,
+                    "status": "resolved",
+                    "answer": answer,
+                }));
+            }
+            UserDecisionStatus::Cancelled => {
+                return Err(usagi_core::domain::user_decision::UserDecisionError::Terminal);
+            }
+            UserDecisionStatus::Expired => {
+                return Err(usagi_core::domain::user_decision::UserDecisionError::Expired);
+            }
+        }
+    }
+}
+
 fn consume_user_decision_events(
     decisions: &UserDecisionStore,
-    agent: &SharedAgentRuntime,
 ) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
-    use usagi_core::domain::agent::RunStatus;
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
 
-    // The decision record is the durable source of truth.  Do not clear an
-    // event until its exact originating run has accepted the continuation
-    // prompt; a restarted daemon can therefore retry pending delivery.
+    // A resolved event and its answer are atomically persisted together. The
+    // caller now receives that answer from its still-open MCP request, so the
+    // outbox has no asynchronous PTY continuation to deliver.
     for event in decisions
         .events()
         .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "decision outbox is unavailable"))?
     {
-        let mut runtime = agent.lock().map_err(|_| {
-            ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
-        })?;
-        let dispatch = runtime.dispatch_store();
         let Some(decision) = decisions.get_for_event(&event).map_err(|_| {
             ProtocolError::new(ErrorCode::Unavailable, "decision outbox is unavailable")
         })?
@@ -2310,35 +2334,7 @@ fn consume_user_decision_events(
                 "decision delivery record is inconsistent",
             ));
         };
-        let live_run = dispatch
-            .runs()
-            .map_err(|_| {
-                ProtocolError::new(ErrorCode::Unavailable, "dispatch provenance is unavailable")
-            })?
-            .into_iter()
-            .any(|run| run.run_id == decision.owner.run_id && run.status == RunStatus::Running);
-        let binding_matches = dispatch
-            .binding(decision.owner.run_id)
-            .map_err(|_| {
-                ProtocolError::new(ErrorCode::Unavailable, "dispatch provenance is unavailable")
-            })?
-            .is_some_and(|binding| binding.caller == event.recipient);
-        if !live_run || !binding_matches {
-            // A terminal or stale incarnation must never receive a late human
-            // answer.  It is intentionally discarded rather than queued.
-            decisions.ack_event(event.decision_id).map_err(|_| {
-                ProtocolError::new(ErrorCode::Unavailable, "decision outbox is unavailable")
-            })?;
-            continue;
-        }
-        let answer = serde_json::to_string(&event.answer).map_err(|_| {
-            ProtocolError::new(ErrorCode::Unavailable, "decision answer is unavailable")
-        })?;
-        let prompt = format!(
-            "User decision {} resolved. Continue the current task using this answer: {answer}",
-            event.decision_id
-        );
-        runtime.prompt_run(decision.owner.run_id, &prompt)?;
+        let _ = decision;
         decisions.ack_event(event.decision_id).map_err(|_| {
             ProtocolError::new(ErrorCode::Unavailable, "decision outbox is unavailable")
         })?;
