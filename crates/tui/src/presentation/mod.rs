@@ -320,7 +320,11 @@ fn key_to_terminal_bytes(key: Key) -> Option<Vec<u8>> {
         Key::Quit => vec![3],
         Key::CtrlQ => vec![17],
         Key::CtrlD => vec![4],
-        Key::Live(_) | Key::Click { .. } | Key::Pointer(_) | Key::Other => {
+        Key::Live(_)
+        | Key::TerminalCopy { .. }
+        | Key::Click { .. }
+        | Key::Pointer(_)
+        | Key::Other => {
             return None;
         }
     };
@@ -335,8 +339,26 @@ fn forward_live_terminal_input(
     ui: &mut WorkspaceUi,
     runtime: &WorkspaceRuntime,
     controls: &mut LiveTerminalControls,
+    term: &mut dyn Terminal,
     key: &Key,
 ) -> bool {
+    if let Key::TerminalCopy { fallback } = key {
+        let Some(terminal) = runtime
+            .wants_live_input()
+            .then(|| runtime.focused_terminal())
+            .flatten()
+        else {
+            return false;
+        };
+        if controls.has_selection() {
+            copy_terminal_selection(controls, term);
+        } else if fallback.is_empty() {
+            controls.set_feedback("no terminal text is selected");
+        } else if let Err(message) = ui.send_terminal_bytes(&terminal, fallback) {
+            controls.set_feedback(message);
+        }
+        return true;
+    }
     let Some((terminal, bytes)) = runtime
         .wants_live_input()
         .then(|| runtime.focused_terminal())
@@ -1204,6 +1226,7 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
         | Key::Click { .. }
         | Key::Pointer(_)
         | Key::Passthrough(_)
+        | Key::TerminalCopy { .. }
         | Key::Other => WelcomeStep::Stay,
     }
 }
@@ -1289,6 +1312,7 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
         | Key::Click { .. }
         | Key::Pointer(_)
         | Key::Passthrough(_)
+        | Key::TerminalCopy { .. }
         | Key::Other => NewStep::Stay,
     }
 }
@@ -1442,9 +1466,12 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
             open.push_filter(ch);
             OpenStep::Stay
         }
-        Key::Live(_) | Key::Click { .. } | Key::Pointer(_) | Key::Passthrough(_) | Key::Other => {
-            OpenStep::Stay
-        }
+        Key::Live(_)
+        | Key::Click { .. }
+        | Key::Pointer(_)
+        | Key::Passthrough(_)
+        | Key::TerminalCopy { .. }
+        | Key::Other => OpenStep::Stay,
     }
 }
 
@@ -1720,6 +1747,20 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         Key::Char(character) => AppKey::Char(character),
         Key::Quit => AppKey::CtrlC,
         Key::CtrlQ => AppKey::CtrlQ,
+        Key::TerminalCopy { fallback } => {
+            return {
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = fallback;
+                    Some(AppEvent::Key(AppKey::CtrlC))
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = fallback;
+                    None
+                }
+            };
+        }
         // Input the Home reducer never consumes: raw PTY passthrough, terminal
         // pointer drags and clicks (a shell + `TerminalSession` concern), Ctrl-D
         // (Open Workspace only), and the caret/selection keys that have meaning
@@ -1754,8 +1795,7 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
         LiveTerminalAction::QuitConfirmation => Some(AppKey::OpenQuitConfirmation),
         LiveTerminalAction::CloseTab
         | LiveTerminalAction::ScrollUp
-        | LiveTerminalAction::ScrollDown
-        | LiveTerminalAction::CopyTerminalSelection => None,
+        | LiveTerminalAction::ScrollDown => None,
     }
 }
 
@@ -2201,9 +2241,6 @@ fn intercept_live_terminal_control(
     scroll: usize,
 ) -> bool {
     match key {
-        Key::Live(LiveTerminalAction::CopyTerminalSelection) => {
-            copy_terminal_selection(controls, term);
-        }
         Key::Live(LiveTerminalAction::ScrollUp) => controls.scroll_up(),
         Key::Live(LiveTerminalAction::ScrollDown) => controls.scroll_down(),
         Key::Live(LiveTerminalAction::CloseTab) => {
@@ -2587,7 +2624,7 @@ fn drive_workspace_controller(
         {
             let _ = backend.dispatch(effect);
         }
-        if forward_live_terminal_input(&mut ui, &runtime, &mut controls, &key) {
+        if forward_live_terminal_input(&mut ui, &runtime, &mut controls, term, &key) {
             continue;
         }
         // Live-terminal view controls the reducer does not own (scroll, tab close,
@@ -3421,10 +3458,14 @@ mod tests {
             LiveTerminalAction::CloseTab,
             LiveTerminalAction::ScrollUp,
             LiveTerminalAction::ScrollDown,
-            LiveTerminalAction::CopyTerminalSelection,
         ] {
             assert_eq!(app_event_from_key(Key::Live(action)), None);
         }
+        let terminal_copy_event = app_event_from_key(Key::TerminalCopy { fallback: vec![3] });
+        #[cfg(target_os = "windows")]
+        assert_eq!(terminal_copy_event, Some(AppEvent::Key(AppKey::CtrlC)));
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(terminal_copy_event, None);
     }
 
     #[test]
@@ -4676,6 +4717,7 @@ mod tests {
             );
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
 
         restore_open_panes(&mut ui, &mut runtime, terminal_geometry(20, 80));
         // Inventory restoration stays in Switch, but preselects the first tab so
@@ -4689,6 +4731,7 @@ mod tests {
             &mut ui,
             &runtime,
             &mut controls,
+            &mut term,
             &Key::Char('x'),
         ));
 
@@ -4698,6 +4741,7 @@ mod tests {
             &mut ui,
             &runtime,
             &mut controls,
+            &mut term,
             &Key::Enter,
         ));
         assert_eq!(
@@ -4748,7 +4792,7 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let terminal = live_terminal_ref(workspace, session);
-        let (mut ui, mut runtime) = focused_live_pane(
+        let (mut ui, runtime) = focused_live_pane(
             workspace,
             session,
             terminal.clone(),
@@ -4819,20 +4863,16 @@ mod tests {
         );
 
         assert_eq!(term.copied, vec!["hello".to_owned()]);
-        // The completed selection is retained, so Ctrl-O c copies it again
-        // without needing another mouse release.
-        assert!(intercept_live_terminal_control(
-            &Key::Live(LiveTerminalAction::CopyTerminalSelection),
+        // The completed selection is retained, so the native copy shortcut can
+        // copy it again without needing another mouse release.
+        assert!(forward_live_terminal_input(
             &mut ui,
-            &mut runtime,
+            &runtime,
             &mut controls,
             &mut term,
-            &mut browser,
-            &mut std::collections::HashMap::new(),
-            20,
-            80,
-            rows_len,
-            0,
+            &Key::TerminalCopy {
+                fallback: Vec::new(),
+            },
         ));
         assert_eq!(term.copied, vec!["hello".to_owned(), "hello".to_owned()]);
         // Releasing the mouse keeps the range highlighted instead of clearing it,

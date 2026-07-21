@@ -202,6 +202,9 @@ pub enum Key {
     /// Exact bytes classified as ordinary live-pane input.  This preserves
     /// paste and backend-native encodings for the focused daemon terminal.
     Passthrough(Vec<u8>),
+    /// An OS-native terminal copy shortcut. A focused live pane copies its
+    /// selection; `fallback` reaches the PTY when there is no selection.
+    TerminalCopy { fallback: Vec<u8> },
     /// Pointer input intended for the terminal output viewport.
     Pointer(crate::usecase::terminal_input::PointerEvent),
     /// 選択を 1 つ上へ移す。
