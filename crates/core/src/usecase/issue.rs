@@ -18,6 +18,27 @@ use serde::Deserialize;
 use crate::domain::issue::{Issue, IssuePriority, IssueStatus, IssueSummary};
 use crate::infrastructure::store::issue::{IssueSource, IssueStore, number_from_filename};
 
+#[cfg(test)]
+thread_local! {
+    static CREATE_RETRY_VALIDATION_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Inject a source change between retry discovery and validation.
+#[cfg(test)]
+fn set_create_retry_validation_hook(hook: impl FnOnce() + 'static) {
+    CREATE_RETRY_VALIDATION_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_create_retry_validation_hook() {
+    CREATE_RETRY_VALIDATION_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
 /// The fields supplied when creating an issue. The number, status, and timestamps
 /// are assigned by [`create`], so they are not part of the request.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -163,6 +184,8 @@ pub fn create(store: &IssueStore, spec: NewIssue, now: DateTime<Utc>) -> Result<
             "matching issue source {} has no numeric filename prefix",
             matching.file
         ))?;
+        #[cfg(test)]
+        run_create_retry_validation_hook();
         let existing = store.read_locked(source_number)?.context(format!(
             "matching issue source {} disappeared while validating create retry",
             matching.file
@@ -422,7 +445,7 @@ pub fn delete(store: &IssueStore, number: u32) -> Result<bool> {
 mod tests {
     use super::{
         IssueFilter, IssuePatch, NewIssue, create, delete, ensure_write_allowed, get, list, search,
-        to_prompt, update,
+        set_create_retry_validation_hook, to_prompt, update,
     };
     use crate::domain::frontmatter::FrontmatterDoc;
     use crate::domain::issue::{IssuePriority, IssueStatus};
@@ -518,6 +541,69 @@ mod tests {
         let ambiguity = error.downcast_ref::<AmbiguousIssueNumber>().unwrap();
         assert_eq!(ambiguity.number, 1);
         assert_eq!(ambiguity.files, vec![first, moved]);
+    }
+
+    #[test]
+    fn create_retry_rejects_noncanonical_or_changed_matching_sources() {
+        {
+            let (_tmp, store) = store();
+            let created = create(&store, spec("no prefix"), ts(20)).unwrap();
+            fs::rename(
+                store.dir().join(created.file_name()),
+                store.dir().join("retry.md"),
+            )
+            .unwrap();
+            assert!(
+                create(&store, spec("no prefix"), ts(21))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("has no numeric filename prefix")
+            );
+        }
+
+        {
+            let (_tmp, store) = store();
+            let created = create(&store, spec("mismatched"), ts(20)).unwrap();
+            fs::rename(
+                store.dir().join(created.file_name()),
+                store.dir().join("002-retry.md"),
+            )
+            .unwrap();
+            assert!(
+                create(&store, spec("mismatched"), ts(21))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("declares #1 but its filename claims #2")
+            );
+        }
+
+        {
+            let (_tmp, store) = store();
+            let created = create(&store, spec("disappears"), ts(20)).unwrap();
+            let source = store.dir().join(created.file_name());
+            set_create_retry_validation_hook(move || fs::remove_file(source).unwrap());
+            assert!(
+                create(&store, spec("disappears"), ts(21))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("disappeared while validating create retry")
+            );
+        }
+
+        {
+            let (_tmp, store) = store();
+            let mut created = create(&store, spec("changes"), ts(20)).unwrap();
+            let source = store.dir().join(created.file_name());
+            created.body = "changed concurrently".to_string();
+            let changed = created.to_markdown();
+            set_create_retry_validation_hook(move || fs::write(source, changed).unwrap());
+            assert!(
+                create(&store, spec("changes"), ts(21))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("changed while validating create retry")
+            );
+        }
     }
 
     #[test]

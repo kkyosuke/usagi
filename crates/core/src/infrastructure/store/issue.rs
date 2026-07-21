@@ -444,11 +444,7 @@ impl IssueStore {
             };
             summary.file = file;
         }
-        if files_by_number.is_empty() {
-            Ok(summaries)
-        } else {
-            self.source_summaries()
-        }
+        Ok(summaries)
     }
 
     fn source_summaries(&self) -> Result<Vec<IssueSummary>> {
@@ -673,6 +669,29 @@ mod tests {
         assert_eq!(fs::read(store.index_path()).unwrap(), index_before);
         assert_eq!(fs::read(dirty).unwrap(), dirty_before);
         assert!(!store.dir().join("007-replacement.md").exists());
+    }
+
+    #[test]
+    fn summaries_retain_exact_files_when_filename_identity_is_noncanonical() {
+        let no_prefix_tmp = tempfile::tempdir().unwrap();
+        let no_prefix_store = IssueStore::new(no_prefix_tmp.path());
+        no_prefix_store.write(&issue(1, "One")).unwrap();
+        fs::rename(
+            no_prefix_store.dir().join("001-one.md"),
+            no_prefix_store.dir().join("manual.md"),
+        )
+        .unwrap();
+        assert_eq!(no_prefix_store.summaries().unwrap()[0].file, "manual.md");
+
+        let mismatch_tmp = tempfile::tempdir().unwrap();
+        let mismatch_store = IssueStore::new(mismatch_tmp.path());
+        mismatch_store.write(&issue(1, "One")).unwrap();
+        fs::rename(
+            mismatch_store.dir().join("001-one.md"),
+            mismatch_store.dir().join("002-moved.md"),
+        )
+        .unwrap();
+        assert_eq!(mismatch_store.summaries().unwrap()[0].file, "002-moved.md");
     }
 
     #[test]
