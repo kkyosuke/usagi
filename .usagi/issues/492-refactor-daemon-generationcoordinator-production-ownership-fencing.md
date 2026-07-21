@@ -8,7 +8,7 @@ dependson: [458]
 related: [209, 365]
 parent: 453
 created_at: 2026-07-20T12:06:51.807676+00:00
-updated_at: 2026-07-21T12:59:03.837838+00:00
+updated_at: 2026-07-21T13:09:22.704119+00:00
 ---
 
 ## 問題・影響
@@ -25,10 +25,10 @@ production で Agent generation replacement/restart、old terminal command、lat
 
 ## 受入条件
 
-- [ ] production composition が coordinator を生成し、全 Agent generation admission/control/outcome を通す。
-- [ ] restart で durable generation/owner を hydrate し、old/stale ref と late event を effect 0 で拒否する。
-- [ ] duplicate binding/map を削除し、generation transition を atomic に snapshot と同期する。
-- [ ] identity unknown は ownership を推測せず fail closed にする。
+- [x] production composition が coordinator を生成し、全 Agent generation admission/control/outcome を通す。
+- [x] restart で durable generation/owner を hydrate し、old/stale ref と late event を effect 0 で拒否する。
+- [x] duplicate binding/map を削除し、generation transition を atomic に snapshot と同期する。
+- [x] identity unknown は ownership を推測せず fail closed にする。
 
 ## 必須回帰テスト
 
