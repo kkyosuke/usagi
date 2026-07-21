@@ -1503,6 +1503,9 @@ impl Terminal for CrosstermTerminal {
                     if let LiveInput::Mouse { column, row } = input {
                         return Ok(Key::Click { column, row });
                     }
+                    if let Some(key) = terminal_copy_key(&input) {
+                        return Ok(key);
+                    }
                     // Global control chords stay outside the live-prefix classifier.
                     if let Some(key) = control_key(&input) {
                         return Ok(key);
@@ -1536,6 +1539,35 @@ impl Terminal for CrosstermTerminal {
         use usagi_tui::usecase::application::terminal_selection::ClipboardPort;
         self.clipboard.write_text(text)
     }
+}
+
+/// Maps each supported platform's terminal copy chord to a selection-aware
+/// request. Windows retains Ctrl-C as a PTY SIGINT when there is no selection.
+fn terminal_copy_key(input: &LiveInput) -> Option<Key> {
+    let LiveInput::Key(key) = input else {
+        return None;
+    };
+    let only = |control, shift, super_| {
+        key.modifiers.control == control
+            && key.modifiers.shift == shift
+            && key.modifiers.super_ == super_
+            && !key.modifiers.alt
+            && !key.modifiers.hyper
+            && !key.modifiers.meta
+    };
+    #[cfg(target_os = "macos")]
+    let matches_copy = matches!(key.code, KeyCode::Char('c')) && only(false, false, true);
+    #[cfg(target_os = "windows")]
+    let matches_copy = matches!(key.code, KeyCode::Char('c')) && only(true, false, false);
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let matches_copy = matches!(key.code, KeyCode::Char('c')) && only(true, true, false);
+
+    #[cfg(target_os = "windows")]
+    let fallback = vec![3];
+    #[cfg(not(target_os = "windows"))]
+    let fallback = Vec::new();
+
+    matches_copy.then_some(Key::TerminalCopy { fallback })
 }
 
 /// Map global control chords before their bytes can reach a text field.
@@ -2071,7 +2103,7 @@ mod tests {
         EnvironmentStorePort, LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory,
         RepoEnvironmentStore, Start, TerminalChunk, TerminalError, control_key,
         created_session_hook, decode_terminal_poll, load_screen_graph_data, load_workspace_state,
-        passthrough_key,
+        passthrough_key, terminal_copy_key,
     };
     use chrono::Utc;
     use serde_json::json;
@@ -2309,6 +2341,47 @@ mod tests {
             KeyEventKind::Press,
         ));
         assert_eq!(control_key(&key), Some(Key::Quit));
+    }
+
+    #[test]
+    fn native_terminal_copy_shortcut_is_selection_aware() {
+        let modifiers = {
+            #[cfg(target_os = "macos")]
+            {
+                Modifiers {
+                    super_: true,
+                    ..Modifiers::default()
+                }
+            }
+            #[cfg(target_os = "windows")]
+            {
+                control()
+            }
+            #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+            {
+                Modifiers {
+                    control: true,
+                    shift: true,
+                    ..Modifiers::default()
+                }
+            }
+        };
+        let fallback = {
+            #[cfg(target_os = "windows")]
+            {
+                vec![3]
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                Vec::new()
+            }
+        };
+
+        assert_eq!(
+            terminal_copy_key(&live_key(KeyCode::Char('c'), modifiers)),
+            Some(Key::TerminalCopy { fallback })
+        );
+        assert_eq!(terminal_copy_key(&LiveInput::Text("c".into())), None);
     }
 
     #[test]
