@@ -3,11 +3,13 @@
 //! トレイトによる多態 dispatch である。各コマンドの中身は今後ハンドラ（`commands`）に
 //! 実装していく。
 //!
-//! ここに置くのは **ターミナルから `usagi <cmd>` で叩く人間向けコマンド** だけである。
-//! エージェント向けの issue / memory 操作は MCP 面（`crate::mcp`）が受け持ち、CLI には置かない。
+//! この tree は引数なし TUI、人間向け command、daemon control plane、MCP server を含む
+//! process argv 全体を解釈する。エージェント向け issue / memory 操作そのものは MCP 面
+//! （`crate::mcp`）が受け持ち、CLI command には置かない。
 //!
-//! TUI を開くコマンドは [`RunOutcome::LaunchTui`]、daemon command は
-//! [`RunOutcome::DaemonRequest`] を返し、合成ルートが各実行面と終了 status へ接続する。
+//! TUI・daemon・MCP を開く command は typed な [`RunOutcome`] を返し、managed session
+//! command は [`RunOutcome::DaemonRequest`] を返す。合成ルートは解析済み outcome だけを
+//! 各実行面と終了 status へ接続する。
 
 pub mod commands;
 pub mod hooks;
@@ -46,6 +48,10 @@ pub enum RunOutcome {
     Exit(i32),
     /// 合成ルートに TUI の起動を依頼する。
     LaunchTui(TuiRequest),
+    /// daemon control plane の起動を依頼する。
+    LaunchDaemon(DaemonCommand),
+    /// stdio MCP server の起動を依頼する。
+    LaunchMcp,
     /// A managed session mutation to be sent by the composition root through
     /// the daemon client. It deliberately is not executed against local state.
     DaemonRequest(DaemonRequest),
@@ -69,9 +75,9 @@ pub trait Run {
 
 /// `usagi` の CLI コマンドツリー（`clap` による引数解析の入口）。
 ///
-/// 第 1 引数で面を選ぶ合成ルート（ルート `main.rs`）は、TUI（引数なし）・daemon
-/// （`usagi daemon`）・MCP（`usagi mcp`）を先に振り分け、それ以外のサブコマンドを
-/// この parser に渡す。したがってここには **人間向け CLI サブコマンド** だけを定義する。
+/// 引数なしの TUI、人間向け CLI、daemon control plane、MCP server を含む完全な argv を
+/// 副作用より前にこの tree で解析する。合成ルートは解析済みの [`RunOutcome`] だけを実 IO
+/// へ接続するため、特殊な実行面も未知 verb や余分な引数を黙殺しない。
 #[derive(Debug, Parser)]
 #[command(
     name = "usagi",
@@ -91,9 +97,8 @@ pub struct Cli {
 /// CLI サブコマンドの一覧。各バリアントがそのコマンドの受け付けるオプションを型として表す。
 /// `help` は clap が自動で用意する。
 ///
-/// 大半は人間向けだが、末尾の 2 つ（`AgentPhase` / `GuardWorkspace`）は usagi が
-/// エージェント起動時に Claude のフックへ配線する**内部コマンド**で、`--help` には出さない
-/// （`hide = true`）。人手で叩くものではない。
+/// 大半は人間向けだが、MCP と末尾の hook command は usagi が agent integration へ
+/// 配線する内部入口で、`--help` には出さない（`hide = true`）。
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Welcome TUI を開く（引数なし起動の互換 alias）
@@ -121,6 +126,15 @@ pub enum Command {
     },
     /// バージョンを表示する
     Version,
+    /// daemon process lifecycle を操作する
+    Daemon {
+        /// 実行する lifecycle verb。省略時は前景 serve。
+        #[command(subcommand)]
+        command: Option<DaemonCommand>,
+    },
+    /// （ヘルプ非表示・内部）stdio MCP server を起動する
+    #[command(hide = true)]
+    Mcp,
     /// Managed session lifecycle operation (always daemon-owned).
     Session {
         #[command(subcommand)]
@@ -135,6 +149,29 @@ pub enum Command {
     /// （ヘルプ非表示・内部）worktree の外へ出るツール呼び出しを拒否する（`PreToolUse` フックが呼ぶ）
     #[command(hide = true)]
     GuardWorkspace,
+}
+
+/// daemon control plane が受理する閉じた lifecycle verb。
+///
+/// 引数なしの `usagi daemon` は [`DaemonCommand::Serve`] と同じである。各 variant は
+/// 追加の positional/option を持たないため、clap が余分な argv を runtime 起動前に拒否する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
+pub enum DaemonCommand {
+    /// 前景で daemon を serve する（内部用）
+    #[command(hide = true)]
+    Serve,
+    /// detached daemon を起動する
+    Start,
+    /// daemon の状態を表示する
+    Status,
+    /// daemon を停止する
+    Stop,
+    /// daemon を再起動する
+    Restart,
+    /// macOS `LaunchAgent` を install する
+    InstallService,
+    /// macOS `LaunchAgent` を uninstall する
+    UninstallService,
 }
 
 /// The session mutations exposed by the human CLI.
@@ -186,11 +223,33 @@ impl Command {
             Command::Version => Box::new(h::Version {
                 version: version.to_owned(),
             }),
+            Command::Daemon { command } => Box::new(DaemonEntry {
+                command: command.unwrap_or(DaemonCommand::Serve),
+            }),
+            Command::Mcp => Box::new(McpEntry),
             Command::Session { command } => Box::new(Session { command }),
             // エージェント統合フックは commands/ ではなく hooks/ に置く。
             Command::AgentPhase { phase } => Box::new(hooks::AgentPhase { phase }),
             Command::GuardWorkspace => Box::new(hooks::GuardWorkspace),
         }
+    }
+}
+
+struct DaemonEntry {
+    command: DaemonCommand,
+}
+
+impl Run for DaemonEntry {
+    fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
+        Ok(RunOutcome::LaunchDaemon(self.command))
+    }
+}
+
+struct McpEntry;
+
+impl Run for McpEntry {
+    fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
+        Ok(RunOutcome::LaunchMcp)
     }
 }
 
@@ -269,7 +328,7 @@ pub fn run(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> io::Result<RunOutcome> {
-    let mut command = Cli::command().version(version.to_owned());
+    let command = Cli::command().version(version.to_owned());
     let matches = match command.clone().try_get_matches_from(args) {
         Ok(matches) => matches,
         Err(e) => {
@@ -289,16 +348,13 @@ pub fn run(
     if let Some(command) = cli.command {
         command.into_handler(version).run(out)
     } else {
-        // 引数なしの `usagi` は合成ルートが TUI に振り分けるため、ここに到達するのは
-        // グローバルフラグだけが与えられた場合。トップレベルのヘルプを表示する。
-        write!(out, "{}", command.render_long_help())?;
-        Ok(RunOutcome::Exit(0))
+        Ok(RunOutcome::LaunchTui(TuiRequest::Welcome))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, RunOutcome, SessionCommand, Shell, TuiRequest, run};
+    use super::{Cli, Command, DaemonCommand, RunOutcome, SessionCommand, Shell, TuiRequest, run};
     use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
     /// `&str` の並びを `run` が受け取る argv（`Vec<OsString>`）に変換する。
@@ -355,6 +411,41 @@ mod tests {
             cli.command,
             Some(Command::AgentPhase { phase }) if phase == "ended"
         ));
+    }
+
+    /// daemon/MCP も通常 command と同じ clap tree を通り、typed な起動要求になる。
+    #[test]
+    fn special_entries_return_typed_launch_requests() {
+        for (tokens, expected) in [
+            (&["usagi", "daemon"][..], DaemonCommand::Serve),
+            (&["usagi", "daemon", "serve"][..], DaemonCommand::Serve),
+            (&["usagi", "daemon", "start"][..], DaemonCommand::Start),
+            (&["usagi", "daemon", "status"][..], DaemonCommand::Status),
+            (&["usagi", "daemon", "stop"][..], DaemonCommand::Stop),
+            (&["usagi", "daemon", "restart"][..], DaemonCommand::Restart),
+            (
+                &["usagi", "daemon", "install-service"][..],
+                DaemonCommand::InstallService,
+            ),
+            (
+                &["usagi", "daemon", "uninstall-service"][..],
+                DaemonCommand::UninstallService,
+            ),
+        ] {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let outcome = run(argv(tokens), "9.9.9", &mut out, &mut err).unwrap();
+            assert_eq!(outcome, RunOutcome::LaunchDaemon(expected));
+            assert!(out.is_empty());
+            assert!(err.is_empty());
+        }
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let outcome = run(argv(&["usagi", "mcp"]), "9.9.9", &mut out, &mut err).unwrap();
+        assert_eq!(outcome, RunOutcome::LaunchMcp);
+        assert!(out.is_empty());
+        assert!(err.is_empty());
     }
 
     /// `open` は任意のパス、`completion` は `value_enum` を受け取る。
@@ -442,15 +533,15 @@ mod tests {
         }
     }
 
-    /// サブコマンドなしはトップレベルのヘルプを `out` に出す。
+    /// サブコマンドなしは副作用を起こさず Welcome TUI の起動要求を返す。
     #[test]
-    fn run_without_subcommand_prints_help() {
+    fn run_without_subcommand_returns_welcome_request() {
         let mut out = Vec::new();
         let mut err = Vec::new();
         let outcome = run(argv(&["usagi"]), "9.9.9", &mut out, &mut err).unwrap();
-        assert_eq!(outcome, RunOutcome::Exit(0));
+        assert_eq!(outcome, RunOutcome::LaunchTui(TuiRequest::Welcome));
+        assert!(out.is_empty());
         assert!(err.is_empty());
-        assert!(String::from_utf8(out).unwrap().contains("Usage"));
     }
 
     /// `--help` は `out` に出て終了コード 0。
@@ -494,21 +585,24 @@ mod tests {
         assert!(!err.is_empty());
     }
 
-    /// 余分な引数は clap の使い方エラーになり、TUI 起動要求へ到達しない。
+    /// 余分な引数と未知 daemon verb は clap の使い方エラーになり、起動要求へ到達しない。
     #[test]
-    fn run_rejects_extra_tui_command_arguments_without_launching() {
+    fn run_rejects_invalid_arguments_without_launching() {
         for tokens in [
             &["usagi", "hop", "extra"][..],
             &["usagi", "open", "one", "two"][..],
             &["usagi", "config", "extra"][..],
             &["usagi", "doctor", "extra"][..],
+            &["usagi", "daemon", "bogus"][..],
+            &["usagi", "daemon", "status", "extra"][..],
+            &["usagi", "mcp", "extra"][..],
         ] {
             let mut out = Vec::new();
             let mut err = Vec::new();
             let outcome = run(argv(tokens), "9.9.9", &mut out, &mut err).unwrap();
             assert_eq!(outcome, RunOutcome::Exit(2));
             assert!(out.is_empty());
-            assert!(!err.is_empty());
+            assert!(String::from_utf8(err).unwrap().contains("Usage:"));
         }
     }
 

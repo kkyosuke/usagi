@@ -668,6 +668,65 @@ fn clap_errors_do_not_launch_a_tui() {
     }
 }
 
+#[test]
+fn special_entry_argv_errors_are_rejected_before_runtime_side_effects() {
+    struct Case {
+        name: &'static str,
+        args: &'static [&'static str],
+    }
+
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cases = [
+        Case {
+            name: "unknown daemon verb",
+            args: &["daemon", "bogus"],
+        },
+        Case {
+            name: "daemon verb with an extra argument",
+            args: &["daemon", "status", "extra"],
+        },
+        Case {
+            name: "mcp with an extra argument",
+            args: &["mcp", "extra"],
+        },
+    ];
+
+    // Observe every case before asserting so this regression test also cleans
+    // up the daemon that the old `mcp extra` path started before reading EOF.
+    let observations = cases
+        .into_iter()
+        .map(|case| {
+            let home = short_home();
+            let output = Command::new(env!("CARGO_BIN_EXE_usagi"))
+                .args(case.args)
+                .env("USAGI_HOME", home.path())
+                .current_dir(home.path())
+                .stdin(Stdio::null())
+                .output()
+                .expect("usagi バイナリを起動できる");
+            let created_channel_data = channel_data_dir(home.path()).exists();
+            if created_channel_data {
+                stop_daemon(home.path());
+            }
+            (case, output, home, created_channel_data)
+        })
+        .collect::<Vec<_>>();
+
+    for (case, output, home, created_channel_data) in observations {
+        assert_eq!(output.status.code(), Some(2), "{}", case.name);
+        assert!(output.stdout.is_empty(), "{}", case.name);
+        assert!(stderr(&output).contains("Usage"), "{}", case.name);
+        assert!(
+            !created_channel_data,
+            "{} created runtime data at {}",
+            case.name,
+            channel_data_dir(home.path()).display()
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn open_accepts_an_existing_non_utf8_workspace_path_when_supported() {

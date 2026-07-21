@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use fs2::FileExt;
 use serde::Deserialize;
+use usagi_cli::cli::DaemonCommand as CliDaemonCommand;
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::{AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName};
 use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId, WorktreeId};
@@ -34,7 +35,7 @@ use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
 use usagi_core::usecase::client::{DaemonRequest, DispatchToolAction, SupervisorToolAction};
 use usagi_daemon::infrastructure::pty::PtyTerminal;
 use usagi_daemon::infrastructure::unix_transport::{SecureUnixListener, ensure_private_dir};
-use usagi_daemon::presentation::DaemonEnv;
+use usagi_daemon::presentation::{DaemonCommand as PresentationDaemonCommand, DaemonEnv};
 use usagi_daemon::usecase::agent_ipc::{
     AgentRuntime, AgentTerminalActor, ResolvedAgentScope, ScopeResolveError, SessionScopeResolver,
     SharedTerminalOwner, TerminalOutcome,
@@ -3461,9 +3462,9 @@ impl InstanceLock for FileInstanceLock {
 }
 
 /// `usagi daemon` の実行時資源を組み立てて daemon presentation へ渡す。
-pub(crate) fn run<W: Write>(
-    out: &mut W,
-    command: Option<&str>,
+pub(crate) fn run(
+    out: &mut dyn Write,
+    command: CliDaemonCommand,
     info: &AppInfo,
 ) -> std::io::Result<()> {
     install_panic_logger();
@@ -3510,7 +3511,11 @@ fn format_panic(info: &PanicHookInfo<'_>) -> String {
         Backtrace::force_capture()
     )
 }
-fn run_inner<W: Write>(out: &mut W, command: Option<&str>, info: &AppInfo) -> std::io::Result<()> {
+fn run_inner(
+    out: &mut dyn Write,
+    command: CliDaemonCommand,
+    info: &AppInfo,
+) -> std::io::Result<()> {
     let daemon_dir = paths::data_dir()
         .map_err(|err| std::io::Error::other(format!("{err:#}")))?
         .join("daemon");
@@ -3523,8 +3528,8 @@ fn run_inner<W: Write>(out: &mut W, command: Option<&str>, info: &AppInfo) -> st
             )
         })?
         .to_path_buf();
-    match command {
-        Some("install-service") => {
+    let command = match command {
+        CliDaemonCommand::InstallService => {
             let path = launchd::install(&std::env::current_exe()?, &data_dir)?;
             return writeln!(
                 out,
@@ -3533,7 +3538,7 @@ fn run_inner<W: Write>(out: &mut W, command: Option<&str>, info: &AppInfo) -> st
                 path.display()
             );
         }
-        Some("uninstall-service") => {
+        CliDaemonCommand::UninstallService => {
             let path = launchd::uninstall()?;
             return writeln!(
                 out,
@@ -3542,8 +3547,12 @@ fn run_inner<W: Write>(out: &mut W, command: Option<&str>, info: &AppInfo) -> st
                 path.display()
             );
         }
-        _ => {}
-    }
+        CliDaemonCommand::Serve => PresentationDaemonCommand::Serve,
+        CliDaemonCommand::Start => PresentationDaemonCommand::Start,
+        CliDaemonCommand::Status => PresentationDaemonCommand::Status,
+        CliDaemonCommand::Stop => PresentationDaemonCommand::Stop,
+        CliDaemonCommand::Restart => PresentationDaemonCommand::Restart,
+    };
     // The lifecycle lock is acquired before the listener binds. Prepare the
     // endpoint directory with the same private-mode invariant that the
     // listener enforces, so a first launch cannot leave it at create_dir_all's

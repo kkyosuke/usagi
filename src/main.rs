@@ -2,15 +2,13 @@
 
 //! 配布バイナリの合成ルート。
 //!
-//! 実 IO の adapter は `runtime/` に責務別に置く。このファイルは各面の選択だけを担い、
-//! CLI / TUI / daemon のライブラリクレート間の依存を作らない。
+//! 実 IO の adapter は `runtime/` に責務別に置く。このファイルは process argv と
+//! stdout/stderr を解析済み dispatch へ束ねるだけで、CLI / TUI / daemon の
+//! ライブラリクレート間に依存を作らない。
 
-use std::io::Write;
 use std::process::ExitCode;
 
 use usagi_core::domain::AppInfo;
-use usagi_core::usecase::client::ClientPolicy;
-use usagi_tui::usecase::application::EntryScreen;
 
 mod runtime;
 mod tui_input;
@@ -23,35 +21,6 @@ fn main() -> std::io::Result<ExitCode> {
     };
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     let mut stdout = std::io::stdout();
-
-    match args.get(1).and_then(|arg| arg.to_str()) {
-        Some("daemon") => {
-            let command = args.get(2).map(|arg| arg.to_string_lossy());
-            runtime::daemon::run(&mut stdout, command.as_deref(), &info).map(|()| ExitCode::SUCCESS)
-        }
-        Some("mcp") => {
-            let stdin = std::io::stdin();
-            match runtime::daemon::client(ClientPolicy::mcp()) {
-                Ok(mut client) => usagi_cli::mcp::serve_with_client(
-                    stdin.lock(),
-                    &mut stdout,
-                    info.version,
-                    &mut client,
-                )
-                .map(|()| ExitCode::SUCCESS),
-                Err(error) => {
-                    writeln!(std::io::stderr(), "daemon unavailable: {error}")?;
-                    Ok(ExitCode::FAILURE)
-                }
-            }
-        }
-        None if args.get(1).is_none() => {
-            runtime::tui::launch(&mut stdout, &info, &EntryScreen::Welcome)
-                .map(|()| ExitCode::SUCCESS)
-        }
-        _ => {
-            let mut stderr = std::io::stderr();
-            runtime::cli::dispatch(args, &mut stdout, &mut stderr, &info)
-        }
-    }
+    let mut stderr = std::io::stderr();
+    runtime::cli::dispatch(args, &mut stdout, &mut stderr, &info)
 }
