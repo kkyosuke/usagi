@@ -271,6 +271,14 @@ verbose な detail は漏らさない）。その safe message は dialog 幅に
 これは入力段階の inline validation（未受付の名前を行の下に error 表示する挙動）とは別で、dialog は受付後の
 daemon 失敗だけを扱う。
 
+session create / remove / refresh の admission は workspace ごとに容量 1 とし、queue は持たない。先行 command の
+worker が daemon port を所有している間に届いた 2 件目は backend action を開始せず、create なら要求 token に対応する
+失敗 `OperationResult`、remove / refresh なら安全な Busy notice を即座に 1 件返す。したがって 2 件目の skeleton や
+pending overlay は残らず、実行順序・queue cancel policy は発生しない。worker panic は安全な失敗 completion に変換して
+admission を回復し、遅延・順序外の worker completion は command 世代で fence して現在の pending 表示を上書きしない。
+workspace を離れた場合は実行中の daemon operation 自体を取り消さず、worker は completion 経路を 1 回完了して終了する。
+閉じた workspace の receiver はその completion を破棄し、次に開く workspace は factory から fresh port を取得する。
+
 GIF はこの projection に含めない。diff の詳細表示や実行 shortcut は実行可能な daemon command が無いため追加せず、sidebar は read-only の Git summary だけを表示する。既存の Closeup / overlay の入力所有者と操作だけを維持する。
 
 狭幅では cursor / active marker、表示名、note icon を優先し、補足行を ANSI-safe・Unicode display width 準拠で
