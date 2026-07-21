@@ -378,12 +378,17 @@ mod tests {
         for (value, schema) in [
             (json!("x"), json!({"oneOf":[{"type":"integer"}]})),
             (json!("x"), json!({"const":"y"})),
+            (json!("x"), json!({"enum":["y"]})),
             (json!(null), json!({"type":"unsupported"})),
             (json!(-1), json!({"type":"integer","minimum":0})),
             (json!(2), json!({"type":"integer","maximum":1})),
             (
                 json!({"extra":true}),
                 json!({"type":"object","additionalProperties":false}),
+            ),
+            (
+                json!({"child":1}),
+                json!({"type":"object","properties":{"child":{"type":"string"}}}),
             ),
             (
                 json!([false]),
@@ -393,6 +398,13 @@ mod tests {
             assert!(validate_schema(&value, &schema, "$").is_err());
         }
         assert!(validate_schema(&json!(0), &json!({"type":["integer","null"]}), "$").is_ok());
+        for (value, kind) in [
+            (json!(1.5), "number"),
+            (json!(true), "boolean"),
+            (json!(null), "null"),
+        ] {
+            assert!(validate_schema(&value, &json!({"type":kind}), "$").is_ok());
+        }
         assert!(validate_schema(&json!({}), &json!({"type":"object"}), "$").is_ok());
         assert!(
             validate_schema(
@@ -424,12 +436,20 @@ mod tests {
             json!({"enum":{}}),
             json!({"oneOf":[]}),
             json!({"items":[]}),
+            json!({"items":{"pattern":"x"}}),
+            json!({"oneOf":[{"pattern":"x"}]}),
             json!({"minimum":"zero"}),
             json!({"maximum":"one"}),
             json!({"deprecated":"yes"}),
         ];
         for schema in malformed {
             assert!(validate_schema_definition(&schema).is_err());
+        }
+        for schema in [
+            json!({"type":"array","items":{"type":"string"}}),
+            json!({"oneOf":[{"type":"string"}]}),
+        ] {
+            assert!(validate_schema_definition(&schema).is_ok());
         }
     }
 }
