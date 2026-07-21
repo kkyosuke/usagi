@@ -240,21 +240,6 @@ mod tests {
         }
     }
 
-    struct FailingReady;
-    impl DaemonReady for FailingReady {
-        fn publish(&self) -> io::Result<()> {
-            Err(io::Error::other("publish failed"))
-        }
-
-        fn quiesce(&self) -> io::Result<()> {
-            Ok(())
-        }
-
-        fn retire(&self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
     struct OrderedShutdown<'a> {
         events: &'a RefCell<Vec<&'static str>>,
         store: &'a DaemonRecordStore<InMemoryRecordFile>,
@@ -296,18 +281,25 @@ mod tests {
         }
     }
 
-    struct PrepareFailure;
-    impl usagi_core::infrastructure::daemon::ShutdownSignal for PrepareFailure {
+    struct ConfigurableShutdown {
+        fail_prepare: bool,
+    }
+    impl usagi_core::infrastructure::daemon::ShutdownSignal for ConfigurableShutdown {
         fn prepare(&self) -> io::Result<()> {
-            Err(io::Error::other("prepare failed"))
+            if self.fail_prepare {
+                Err(io::Error::other("prepare failed"))
+            } else {
+                Ok(())
+            }
         }
 
         fn wait(&self) -> io::Result<()> {
-            panic!("wait must not run after prepare fails")
+            Ok(())
         }
     }
 
     struct CleanupReady {
+        fail_publish: bool,
         fail_quiesce: bool,
         fail_retire: bool,
         quiesces: Cell<u8>,
@@ -315,7 +307,11 @@ mod tests {
     }
     impl DaemonReady for CleanupReady {
         fn publish(&self) -> io::Result<()> {
-            Ok(())
+            if self.fail_publish {
+                Err(io::Error::other("publish failed"))
+            } else {
+                Ok(())
+            }
         }
 
         fn quiesce(&self) -> io::Result<()> {
@@ -384,7 +380,7 @@ mod tests {
                 &mut Vec::new(),
                 &store,
                 &NoopReady,
-                &PrepareFailure,
+                &ConfigurableShutdown { fail_prepare: true },
                 &FakeLock::Acquired,
                 2222,
                 &info(),
@@ -397,6 +393,7 @@ mod tests {
     #[test]
     fn cleanup_failures_are_reported_without_skipping_retirement() {
         let quiesce_failure = CleanupReady {
+            fail_publish: false,
             fail_quiesce: true,
             fail_retire: false,
             quiesces: Cell::new(0),
@@ -420,6 +417,7 @@ mod tests {
         assert!(store.load().unwrap().is_some());
 
         let retire_failure = CleanupReady {
+            fail_publish: false,
             fail_quiesce: false,
             fail_retire: true,
             quiesces: Cell::new(0),
@@ -454,7 +452,9 @@ mod tests {
             &mut Vec::new(),
             &store,
             &ready,
-            &ImmediateShutdown,
+            &ConfigurableShutdown {
+                fail_prepare: false,
+            },
             &FakeLock::Acquired,
             2222,
             &info(),
@@ -483,11 +483,18 @@ mod tests {
     #[test]
     fn clears_the_record_when_endpoint_publication_fails() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let ready = CleanupReady {
+            fail_publish: true,
+            fail_quiesce: false,
+            fail_retire: false,
+            quiesces: Cell::new(0),
+            retires: Cell::new(0),
+        };
         assert!(
             serve(
                 &mut Vec::new(),
                 &store,
-                &FailingReady,
+                &ready,
                 &ImmediateShutdown,
                 &FakeLock::Acquired,
                 2222,
@@ -496,6 +503,8 @@ mod tests {
             .is_err()
         );
         assert_eq!(store.load().unwrap(), None);
+        assert_eq!(ready.quiesces.get(), 0);
+        assert_eq!(ready.retires.get(), 0);
     }
 
     #[test]
