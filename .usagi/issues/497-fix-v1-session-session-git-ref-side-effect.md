@@ -1,14 +1,14 @@
 ---
 number: 497
 title: fix(v1/session): session 名を Git ref 規則で side effect 前に検証する
-status: todo
+status: in-progress
 priority: medium
 labels: [review, v1, session, git]
 dependson: []
 related: [30, 49, 361, 370]
 parent: 453
 created_at: 2026-07-20T12:07:08.029028+00:00
-updated_at: 2026-07-20T12:07:08.029028+00:00
+updated_at: 2026-07-21T01:39:02.861145+00:00
 ---
 
 ## 問題・影響

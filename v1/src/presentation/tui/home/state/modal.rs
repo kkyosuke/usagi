@@ -1533,8 +1533,9 @@ impl CloseupMenu {
 ///
 /// An empty (or all-whitespace) name returns `None` — the input does not nag
 /// while nothing has been typed; the empty case is rejected only on Enter (see
-/// [`CreateInput::confirm`]). The name-format rules (path separators, a leading
-/// `-`) are delegated to [`crate::usecase::session::name_format_error`] so the
+/// [`CreateInput::confirm`]). The name-format rules (path safety, Git ref
+/// validity, and length) are delegated to
+/// [`crate::usecase::session::name_format_error`] so the
 /// inline message is exactly the one `create` would raise; the duplicate /
 /// namespace checks here work against the pre-fetched branch list rather than
 /// touching git:
@@ -1669,6 +1670,13 @@ mod tests {
         assert!(validate_session_name("-x", &[])
             .unwrap()
             .contains("must not start with"));
+        // Git-ref-invalid names use the same shared message as every creation
+        // entry point, before the background create task starts doing IO.
+        for invalid in ["a..b", "a@{b", ".hidden", "x.lock", "x.", "x y", "x~"] {
+            assert!(validate_session_name(invalid, &[])
+                .unwrap()
+                .contains("valid Git branch"));
+        }
         // The name is matched against the `usagi/<name>` branch it would cut, so
         // an existing `usagi/feature` is an exact duplicate...
         let taken = vec!["usagi/feature".to_string()];

@@ -315,7 +315,7 @@ pub(super) fn input_line(state: &HomeState) -> String {
     }
     match state.mode() {
         Mode::Switch if state.list().create_row_selected() => {
-            style(" Type a session name to create".to_string())
+            style(" Type a Git-ref-safe session name to create".to_string())
                 .green()
                 .to_string()
         }

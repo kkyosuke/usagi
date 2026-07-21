@@ -1035,7 +1035,7 @@ fn suggest_filters_commands_by_prefix() {
         registry().suggest("s", CommandScope::Workspace),
         Hint::Commands(vec![CommandHint {
             name: "session",
-            description: "Create, list, or switch sessions (branch + worktree)",
+            description: "Create, list, or switch sessions (new names must be Git-ref-safe)",
         }])
     );
     // The scopes are separate, so "s" matches nothing in session scope (no

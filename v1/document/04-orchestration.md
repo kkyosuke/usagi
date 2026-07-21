@@ -193,10 +193,17 @@ Git / filesystem error でも、その試行で作った worktree・branch・ses
 データ構造は [data/02-workspace.md](data/02-workspace.md) を参照してください。
 
 セッション名は `session create <name>` の引数で渡すほか、名前を省くと[選択（Overview）モード](design/home/02-layout.md#選択overview既定)の
-左ペイン内インライン入力で指定できます。次の名前はバリデーションで弾かれます。
+左ペイン内インライン入力で指定できます。新規作成では filesystem・Git・setup command を変更する前に名前を検証します。
+既存セッションの読取・削除にはこの検証を適用しないため、過去に作られた現在の規則外の名前も移行や rename なしで扱えます。
+次の名前はバリデーションで弾かれます。
 
 - **空文字・パス区切り**（`/` `\` `.` `..`）を含む名前。
 - **`-` で始まる**名前。セッション名は worktree のパスや `usagi/<name>` ブランチ名の一部として git コマンドの引数に渡るため、先頭が `-` だと git にオプション（`-D` など）と誤認される。
+- **Git ref として不正**な名前。最終的な `usagi/<name>` を `git check-ref-format` と同じ規則で検証するため、
+  `..`、`@{`、ASCII control/space、`~` `^` `:` `?` `*` `[` を含む名前、`.` で始まる名前、
+  `.lock` または `.` で終わる名前は使えない。これらに該当しない Unicode は使える。
+- **UTF-8 で 250 byte を超える**名前。Git ref 自体に固定長上限はないが、Git が loose ref の作成時に加える
+  `.lock` を含めて filesystem component を 255 byte の移植可能な境界に収めるため、usagi が上限を設ける。
 - **既存セッションと重複**する名前。
 - **既存ブランチの名前空間と衝突**する名前。セッションは各リポジトリで `usagi/<name>` ブランチを切るため、
   すでに `usagi/<name>/…` 配下にブランチがあると git が `usagi/<name>` ブランチを作れない。

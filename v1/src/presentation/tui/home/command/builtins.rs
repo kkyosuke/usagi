@@ -222,7 +222,7 @@ impl Command for SessionCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Create, list, or switch sessions (branch + worktree)"
+        "Create, list, or switch sessions (new names must be Git-ref-safe)"
     }
 
     fn usage(&self) -> &'static str {
