@@ -39,6 +39,8 @@ pub enum Field {
     Theme,
     ModalSelectionMode,
     DefaultModel,
+    Issue,
+    Memory,
     Save,
 }
 
@@ -181,11 +183,13 @@ impl Config {
         self.field = match self.field {
             Field::Theme => Field::ModalSelectionMode,
             Field::ModalSelectionMode => Field::DefaultModel,
-            Field::DefaultModel => Field::Save,
+            Field::DefaultModel => Field::Issue,
+            Field::Issue => Field::Memory,
+            Field::Memory => Field::Save,
             Field::Save => Field::Theme,
         };
         if self.field == Field::DefaultModel && self.available_models.is_empty() {
-            self.field = Field::Save;
+            self.field = Field::Issue;
         }
         self.notice = None;
     }
@@ -196,7 +200,9 @@ impl Config {
             Field::Theme => Field::Save,
             Field::ModalSelectionMode => Field::Theme,
             Field::DefaultModel => Field::ModalSelectionMode,
-            Field::Save => Field::DefaultModel,
+            Field::Issue => Field::DefaultModel,
+            Field::Memory => Field::Issue,
+            Field::Save => Field::Memory,
         };
         if self.field == Field::DefaultModel && self.available_models.is_empty() {
             self.field = Field::ModalSelectionMode;
@@ -274,12 +280,28 @@ impl Config {
         self.notice = None;
     }
 
+    /// Toggle availability of the issue MCP tool family.
+    pub fn cycle_issue_enabled(&mut self) {
+        let enabled = &mut self.current_mut().draft.issue_enabled;
+        *enabled = !*enabled;
+        self.notice = None;
+    }
+
+    /// Toggle availability of the memory MCP tool family.
+    pub fn cycle_memory_enabled(&mut self) {
+        let enabled = &mut self.current_mut().draft.memory_enabled;
+        *enabled = !*enabled;
+        self.notice = None;
+    }
+
     /// Change the focused select value. Returns false for the Save action.
     pub fn cycle_selected(&mut self, forward: bool) -> bool {
         match self.field {
             Field::Theme => self.cycle_theme(forward),
             Field::ModalSelectionMode => self.cycle_modal_selection_mode(),
             Field::DefaultModel => self.cycle_default_model(),
+            Field::Issue => self.cycle_issue_enabled(),
+            Field::Memory => self.cycle_memory_enabled(),
             Field::Save => return false,
         }
         true
@@ -414,6 +436,26 @@ pub fn render(raw_height: usize, raw_width: usize, config: &Config) -> Vec<Strin
                 },
                 Style::new(),
             ),
+            mascot_screen::centered_line(
+                width,
+                &select::render(
+                    "Issue",
+                    enabled_name(config.settings().issue_enabled),
+                    config.field() == Field::Issue,
+                    config.settings().issue_enabled != config.current().saved.issue_enabled,
+                ),
+                Style::new(),
+            ),
+            mascot_screen::centered_line(
+                width,
+                &select::render(
+                    "Memory",
+                    enabled_name(config.settings().memory_enabled),
+                    config.field() == Field::Memory,
+                    config.settings().memory_enabled != config.current().saved.memory_enabled,
+                ),
+                Style::new(),
+            ),
             String::new(),
             mascot_screen::centered_line(
                 width,
@@ -456,6 +498,10 @@ fn default_model_name(model: DefaultModel) -> &'static str {
         DefaultModel::Claude => "Claude",
         DefaultModel::OpenAi => "OpenAI",
     }
+}
+
+fn enabled_name(enabled: bool) -> &'static str {
+    if enabled { "on" } else { "off" }
 }
 
 #[cfg(test)]
@@ -581,6 +627,8 @@ mod tests {
         assert!(frame.contains("Theme") && frame.contains("system"));
         assert!(frame.contains("Modal mode") && frame.contains("action"));
         assert!(frame.contains("Agent model") && frame.contains("OpenAI"));
+        assert!(frame.contains("Issue") && frame.contains("on"));
+        assert!(frame.contains("Memory") && frame.contains("on"));
         assert!(frame.contains("[ Save ]"));
         assert!(frame.contains("Esc: back"));
     }
@@ -616,9 +664,13 @@ mod tests {
         config.next_field();
         config.next_field();
         config.next_field();
+        config.next_field();
+        config.next_field();
         assert_eq!(config.field(), Field::Save);
         assert!(!config.can_save());
 
+        config.previous_field();
+        config.previous_field();
         config.previous_field();
         config.previous_field();
         config.cycle_modal_selection_mode();
@@ -628,6 +680,8 @@ mod tests {
             config.settings().modal_selection_mode,
             ModalSelectionMode::Prompt
         );
+        config.next_field();
+        config.next_field();
         config.next_field();
         config.next_field();
         assert!(config.can_save());
@@ -648,11 +702,17 @@ mod tests {
         assert!(!config.begin_save());
 
         config.previous_field();
+        assert_eq!(config.field(), Field::Memory);
+        config.previous_field();
+        assert_eq!(config.field(), Field::Issue);
+        config.previous_field();
         assert_eq!(config.field(), Field::DefaultModel);
         config.previous_field();
         assert_eq!(config.field(), Field::ModalSelectionMode);
         config.previous_field();
         assert_eq!(config.field(), Field::Theme);
+        config.next_field();
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -674,6 +734,8 @@ mod tests {
         assert_eq!(config.settings().default_model, DefaultModel::OpenAi);
         config.cycle_selected(true);
         assert_eq!(config.settings().default_model, DefaultModel::Claude);
+        config.next_field();
+        config.next_field();
         config.next_field();
         assert!(config.begin_save());
         assert!(config.commit_save(&mut port));
@@ -729,15 +791,44 @@ mod tests {
         assert_eq!(config.settings().default_model, DefaultModel::OpenAi);
         config.next_field();
         config.next_field();
-        assert_eq!(config.field(), Field::Save);
+        assert_eq!(config.field(), Field::Issue);
         config.previous_field();
         assert_eq!(config.field(), Field::ModalSelectionMode);
+    }
+
+    #[test]
+    fn issue_and_memory_availability_toggle_independently() {
+        let mut port = FakeSettingsPort::default();
+        let mut config = Config::load(&mut port);
+        config.next_field();
+        config.next_field();
+        config.next_field();
+        assert_eq!(config.field(), Field::Issue);
+        assert!(config.cycle_selected(true));
+        assert!(!config.settings().issue_enabled);
+        assert!(config.settings().memory_enabled);
+
+        config.next_field();
+        assert_eq!(config.field(), Field::Memory);
+        assert!(config.cycle_selected(false));
+        assert!(!config.settings().memory_enabled);
+        let frame = render(24, 80, &config).join("\n");
+        assert!(frame.contains("Issue") && frame.contains("off"));
+        assert!(frame.contains("Memory") && frame.contains("off"));
+
+        config.next_field();
+        assert!(config.begin_save());
+        assert!(config.commit_save(&mut port));
+        assert!(!port.global.issue_enabled);
+        assert!(!port.global.memory_enabled);
     }
 
     /// Drive the Save row to the dirty state used by the phase tests.
     fn dirty_on_save_row(port: &mut FakeSettingsPort) -> Config {
         let mut config = Config::load(port);
         config.cycle_theme(true);
+        config.next_field();
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -772,6 +863,8 @@ mod tests {
         let mut config = {
             let mut base = Config::load(&mut port);
             base.cycle_theme(true);
+            base.next_field();
+            base.next_field();
             base.next_field();
             base.next_field();
             base.next_field();

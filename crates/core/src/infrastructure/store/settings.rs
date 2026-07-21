@@ -71,6 +71,7 @@ mod tests {
 
         let settings = LocalSettings {
             modal_selection_mode: Some(ModalSelectionMode::Prompt),
+            issue_enabled: Some(false),
             ..LocalSettings::default()
         };
         let _lock = store.lock().unwrap();

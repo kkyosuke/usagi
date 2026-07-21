@@ -207,13 +207,13 @@ impl CodexProvisioner for RootCodexProvisioner {
         self.readiness
             .ready("codex")
             .map_err(|()| CodexProvisionFailure::ExecutableUnavailable)?;
-        let working_directory = working_directory(&self.sessions, context)
+        let (working_directory, workspace_root) = working_directories(&self.sessions, context)
             .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
         Ok(CodexProvision {
             working_directory,
             environment_allowlist: mcp_environment_allowlist(context),
             spawn: SpawnProvision::new(
-                mcp_environment(context, &self.data_home)
+                mcp_environment(context, &self.data_home, &workspace_root)
                     .map_err(|()| CodexProvisionFailure::MaterializationFailed)?,
                 context
                     .inject_mcp
@@ -239,13 +239,13 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         self.readiness
             .ready("claude")
             .map_err(|()| ClaudeProvisionFailure::ExecutableUnavailable)?;
-        let working_directory = working_directory(&self.sessions, context)
+        let (working_directory, workspace_root) = working_directories(&self.sessions, context)
             .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
         Ok(ClaudeProvision {
             working_directory,
             environment_allowlist: mcp_environment_allowlist(context),
             spawn: SpawnProvision::new(
-                mcp_environment(context, &self.data_home)
+                mcp_environment(context, &self.data_home, &workspace_root)
                     .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?,
                 context
                     .inject_mcp
@@ -263,6 +263,7 @@ fn mcp_environment_allowlist(context: &ProvisionContext) -> BTreeSet<Environment
         [
             usagi_core::infrastructure::paths::DATA_DIR_ENV,
             usagi_core::infrastructure::paths::RUNTIME_MODE_ENV,
+            usagi_core::infrastructure::paths::WORKSPACE_ROOT_ENV,
         ]
         .into_iter()
         .map(|name| {
@@ -277,6 +278,7 @@ fn mcp_environment_allowlist(context: &ProvisionContext) -> BTreeSet<Environment
 fn mcp_environment(
     context: &ProvisionContext,
     data_home: &Path,
+    workspace_root: &Path,
 ) -> Result<Vec<(EnvironmentVariableName, String)>, ()> {
     context
         .inject_mcp
@@ -298,6 +300,13 @@ fn mcp_environment(
                         paths::RuntimeMode::Local => "local",
                     }
                     .to_owned(),
+                ),
+                (
+                    EnvironmentVariableName::new(
+                        usagi_core::infrastructure::paths::WORKSPACE_ROOT_ENV,
+                    )
+                    .expect("literal environment variable name is valid"),
+                    workspace_root.to_str().ok_or(())?.to_owned(),
                 ),
             ])
         })
@@ -327,7 +336,7 @@ fn codex_integration_arguments(command: &Path) -> Result<Vec<String>, ()> {
         // Forward the daemon-selected data home and runtime-fenced credential
         // so the MCP child reaches the owning daemon and proves its owner.
         "-c".into(),
-        r#"mcp_servers.usagi.env_vars = ["USAGI_HOME", "USAGI_RUNTIME_MODE", "USAGI_MCP_CALLER_CREDENTIAL"]"#.into(),
+        r#"mcp_servers.usagi.env_vars = ["USAGI_HOME", "USAGI_RUNTIME_MODE", "USAGI_WORKSPACE_ROOT", "USAGI_MCP_CALLER_CREDENTIAL"]"#.into(),
         "-c".into(),
         r#"mcp_servers.usagi.default_tools_approval_mode = "approve""#.into(),
         // SessionStart is Codex's documented structured lifecycle channel. It
@@ -396,14 +405,15 @@ impl AgentReadinessProbe for SystemAgentReadiness {
             .ok_or(())
     }
 }
-fn working_directory(
+fn working_directories(
     sessions: &SharedSessionRuntime,
     context: &ProvisionContext,
-) -> Result<PathBuf, ()> {
+) -> Result<(PathBuf, PathBuf), ()> {
     let runtime = sessions.lock().map_err(|_| ())?;
+    let workspace_root = runtime.repository_root().to_path_buf();
     // A workspace-root launch has no session; its trusted cwd is the repository
     // root. A session launch resolves that session's worktree path.
-    match context.scope.session_id {
+    let working_directory = match context.scope.session_id {
         None => runtime
             .resolve_root_scope(context.scope.workspace_id, context.scope.worktree_id)
             .map_err(|_| ()),
@@ -415,7 +425,8 @@ fn working_directory(
             )
             .map(|scope| scope.path)
             .map_err(|_| ()),
-    }
+    }?;
+    Ok((working_directory, workspace_root))
 }
 
 /// The #268 scope resolver, adapted to the Agent owner's product-neutral
@@ -4034,7 +4045,7 @@ mod tests {
                 "-c",
                 "mcp_servers.usagi.args = [\"mcp\"]",
                 "-c",
-                "mcp_servers.usagi.env_vars = [\"USAGI_HOME\", \"USAGI_RUNTIME_MODE\", \"USAGI_MCP_CALLER_CREDENTIAL\"]",
+                "mcp_servers.usagi.env_vars = [\"USAGI_HOME\", \"USAGI_RUNTIME_MODE\", \"USAGI_WORKSPACE_ROOT\", \"USAGI_MCP_CALLER_CREDENTIAL\"]",
                 "-c",
                 "mcp_servers.usagi.default_tools_approval_mode = \"approve\"",
                 "-c",

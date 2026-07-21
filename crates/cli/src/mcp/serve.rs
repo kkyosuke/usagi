@@ -9,8 +9,12 @@
 //! tool 個別または daemon のエラーを JSON-RPC エラーへ変換する。
 
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 
 use serde_json::{Value, json};
+use usagi_core::infrastructure::paths::WORKSPACE_ROOT_ENV;
+use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
+use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
     ClientError, DaemonClient, DaemonReply, DaemonRequest, McpCallerContext,
 };
@@ -18,6 +22,7 @@ use usagi_core::usecase::client::{
 use super::protocol::{self, error_code};
 use super::runtime_model::{PathExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig};
 use super::tool::{CallerPolicy, ToolDescriptor, ToolError, ToolRoute};
+use super::tools::ToolAvailability;
 use super::{resources, tools};
 
 /// サーバが対応する MCP プロトコルバージョン。
@@ -28,6 +33,12 @@ enum ServerState {
     AwaitingInitialize,
     AwaitingInitialized,
     Ready,
+}
+
+#[derive(Clone, Copy)]
+struct ServerCapabilities<'a> {
+    runtime_models: &'a RuntimeModelSnapshot,
+    tools: ToolAvailability,
 }
 
 /// stdin の JSON-RPC を行ごとに処理し、応答を stdout へ書く。EOF で正常終了する。
@@ -65,10 +76,20 @@ pub fn serve_with_client(
     client: &mut dyn DaemonClient,
 ) -> io::Result<()> {
     let workspace = std::env::current_dir()?;
+    let settings_root = std::env::var_os(WORKSPACE_ROOT_ENV)
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| workspace.clone(), PathBuf::from);
+    let global = Storage::open_default()
+        .and_then(|storage| storage.load_settings())
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let local = WorkspaceSettingsStore::new(settings_root)
+        .load()
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let availability = ToolAvailability::from(&global.with_local(&local));
     let locator = PathExecutableLocator;
     let config = WorkspaceAgentConfig::read(&workspace);
     let snapshot = RuntimeModelSnapshot::capture(&config, &locator);
-    serve_with_client_and_snapshot(input, out, version, client, &snapshot)
+    serve_with_client_and_features(input, out, version, client, &snapshot, availability)
 }
 
 /// As [`serve_with_client`], with a pre-captured runtime/model snapshot.
@@ -80,16 +101,46 @@ pub fn serve_with_client(
 /// responses so serving continues.
 #[coverage(off)]
 pub fn serve_with_client_and_snapshot(
-    mut input: impl BufRead,
+    input: impl BufRead,
     out: &mut dyn Write,
     version: &str,
     client: &mut dyn DaemonClient,
     snapshot: &RuntimeModelSnapshot,
 ) -> io::Result<()> {
+    serve_with_client_and_features(
+        input,
+        out,
+        version,
+        client,
+        snapshot,
+        ToolAvailability::default(),
+    )
+}
+
+/// As [`serve_with_client_and_snapshot`], with feature availability captured for
+/// the same server lifetime. Disabled families are absent from both
+/// `tools/list` and `tools/call`.
+///
+/// # Errors
+///
+/// Returns stdin/stdout IO errors; protocol and validation errors remain MCP
+/// responses so serving continues.
+pub fn serve_with_client_and_features(
+    mut input: impl BufRead,
+    out: &mut dyn Write,
+    version: &str,
+    client: &mut dyn DaemonClient,
+    snapshot: &RuntimeModelSnapshot,
+    availability: ToolAvailability,
+) -> io::Result<()> {
     // Fail before accepting input if metadata, route, schema, or capability drifted.
-    drop(tools::registry());
+    drop(tools::registry_with_availability(availability));
     let mut buf = Vec::new();
     let mut state = ServerState::AwaitingInitialize;
+    let capabilities = ServerCapabilities {
+        runtime_models: snapshot,
+        tools: availability,
+    };
     loop {
         buf.clear();
         // 生バイトで 1 行読む。真の IO エラーだけ `?` で伝播する。
@@ -102,7 +153,8 @@ pub fn serve_with_client_and_snapshot(
         if line.is_empty() {
             continue;
         }
-        if let Some(response) = handle_line_with_client(line, version, client, snapshot, &mut state)
+        if let Some(response) =
+            handle_line_with_client(line, version, client, capabilities, &mut state)
         {
             writeln!(out, "{response}")?;
         }
@@ -129,7 +181,10 @@ fn handle_line(line: &str, version: &str) -> Option<String> {
         line,
         version,
         &mut unavailable,
-        &RuntimeModelSnapshot::default(),
+        ServerCapabilities {
+            runtime_models: &RuntimeModelSnapshot::default(),
+            tools: ToolAvailability::default(),
+        },
         &mut state,
     )
 }
@@ -139,7 +194,7 @@ fn handle_line_with_client(
     line: &str,
     version: &str,
     client: &mut dyn DaemonClient,
-    snapshot: &RuntimeModelSnapshot,
+    capabilities: ServerCapabilities<'_>,
     state: &mut ServerState,
 ) -> Option<String> {
     let Ok(request) = serde_json::from_str::<Value>(line) else {
@@ -193,7 +248,7 @@ fn handle_line_with_client(
             object.get("params"),
             version,
             client,
-            snapshot,
+            capabilities,
             state,
         )
         .to_string(),
@@ -218,7 +273,7 @@ fn respond(
     params: Option<&Value>,
     version: &str,
     client: &mut dyn DaemonClient,
-    snapshot: &RuntimeModelSnapshot,
+    capabilities: ServerCapabilities<'_>,
     state: &mut ServerState,
 ) -> Value {
     if method == "initialize" {
@@ -249,8 +304,17 @@ fn respond(
     }
     match method {
         "ping" => protocol::success(id, json!({})),
-        "tools/list" => protocol::success(id, tools_list_result(snapshot)),
-        "tools/call" => tools_call(id, params, client, snapshot),
+        "tools/list" => protocol::success(
+            id,
+            tools_list_result(capabilities.runtime_models, capabilities.tools),
+        ),
+        "tools/call" => tools_call(
+            id,
+            params,
+            client,
+            capabilities.runtime_models,
+            capabilities.tools,
+        ),
         "resources/list" => protocol::success(id, resources::list_result()),
         "resources/read" => resources_read(id, params),
         other => protocol::error(
@@ -282,8 +346,8 @@ fn initialize_result(params: Option<&Value>, version: &str) -> Result<Value, &'s
 
 /// `tools/list` の結果（全 tool の name / description / inputSchema）。
 #[coverage(off)]
-fn tools_list_result(snapshot: &RuntimeModelSnapshot) -> Value {
-    let tools: Vec<Value> = tools::registry()
+fn tools_list_result(snapshot: &RuntimeModelSnapshot, availability: ToolAvailability) -> Value {
+    let tools: Vec<Value> = tools::registry_with_availability(availability)
         .iter()
         .map(|tool| {
             // 各 tool の input_schema は妥当な JSON（tools のテストで検証済み）。
@@ -309,6 +373,7 @@ fn tools_call(
     params: Option<&Value>,
     client: &mut dyn DaemonClient,
     snapshot: &RuntimeModelSnapshot,
+    availability: ToolAvailability,
 ) -> Value {
     let Some(name) = params.and_then(|p| p.get("name")).and_then(Value::as_str) else {
         return protocol::error(id, error_code::INVALID_PARAMS, "missing tool name");
@@ -327,7 +392,7 @@ fn tools_call(
         .and_then(|p| p.get("arguments"))
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let registry = tools::registry();
+    let registry = tools::registry_with_availability(availability);
     let Some(descriptor) = registry.iter().find(|descriptor| descriptor.name() == name) else {
         return protocol::error(
             id,
@@ -494,12 +559,14 @@ fn resources_read(id: Value, params: Option<&Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        SUPPORTED_PROTOCOL_VERSION, ServerState, handle_line, handle_line_with_client, serve,
-        serve_with_client, serve_with_client_and_snapshot,
+        SUPPORTED_PROTOCOL_VERSION, ServerCapabilities, ServerState, handle_line,
+        handle_line_with_client, serve, serve_with_client_and_features,
+        serve_with_client_and_snapshot,
     };
     use crate::mcp::runtime_model::{
         ExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig,
     };
+    use crate::mcp::tools::ToolAvailability;
     use serde_json::Value;
     use usagi_core::usecase::client::{ClientError, DaemonClient, DaemonReply, DaemonRequest};
 
@@ -601,7 +668,10 @@ mod tests {
                 line,
                 "9.9.9",
                 &mut client,
-                &RuntimeModelSnapshot::default(),
+                ServerCapabilities {
+                    runtime_models: &RuntimeModelSnapshot::default(),
+                    tools: ToolAvailability::default(),
+                },
                 &mut state,
             )
             .unwrap(),
@@ -662,6 +732,50 @@ mod tests {
             assert!(tool["description"].as_str().is_some());
             assert_eq!(tool["inputSchema"]["type"], "object");
         }
+    }
+
+    #[test]
+    fn disabled_tool_families_are_neither_listed_nor_callable() {
+        let input = initialized_input(concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_search\",\"arguments\":{}}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_search\",\"arguments\":{}}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"session_delegate_issue\",\"arguments\":{\"number\":1}}}\n",
+        ));
+        let mut out = Vec::new();
+        let mut client = RecordingClient {
+            reply: Ok(DaemonReply::Ok(serde_json::json!({"unexpected": true}))),
+            requests: vec![],
+        };
+        serve_with_client_and_features(
+            input.as_bytes(),
+            &mut out,
+            "9.9.9",
+            &mut client,
+            &RuntimeModelSnapshot::default(),
+            ToolAvailability::new(false, false),
+        )
+        .unwrap();
+
+        let responses = std::str::from_utf8(&out)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let names = responses[1]["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names.len(), 37);
+        assert!(names.iter().all(|name| !name.starts_with("issue_")));
+        assert!(names.iter().all(|name| !name.starts_with("memory_")));
+        assert!(!names.contains(&"session_delegate_issue"));
+        for response in &responses[2..] {
+            assert_eq!(response["error"]["code"], -32601);
+        }
+        assert!(client.requests.is_empty());
     }
 
     #[test]
@@ -837,7 +951,14 @@ mod tests {
             reply: Ok(DaemonReply::Ok(serde_json::json!({"effect":true}))),
             requests: vec![],
         };
-        serve_with_client(input.as_bytes(), &mut output, "9.9.9", &mut client).unwrap();
+        serve_with_client_and_snapshot(
+            input.as_bytes(),
+            &mut output,
+            "9.9.9",
+            &mut client,
+            &RuntimeModelSnapshot::default(),
+        )
+        .unwrap();
         let responses: Vec<Value> = std::str::from_utf8(&output)
             .unwrap()
             .lines()
@@ -927,7 +1048,14 @@ mod tests {
                 reply,
                 requests: vec![],
             };
-            serve_with_client(input.as_bytes(), &mut out, "9.9.9", &mut client).unwrap();
+            serve_with_client_and_snapshot(
+                input.as_bytes(),
+                &mut out,
+                "9.9.9",
+                &mut client,
+                &RuntimeModelSnapshot::default(),
+            )
+            .unwrap();
             assert_eq!(client.requests.len(), 1);
             assert!(String::from_utf8(out).unwrap().contains("content"));
         }
@@ -962,7 +1090,14 @@ mod tests {
                 reply: Ok(DaemonReply::Ok(serde_json::json!({"connected":true}))),
                 requests: vec![],
             };
-            serve_with_client(input.as_bytes(), &mut out, "9.9.9", &mut client).unwrap();
+            serve_with_client_and_snapshot(
+                input.as_bytes(),
+                &mut out,
+                "9.9.9",
+                &mut client,
+                &RuntimeModelSnapshot::default(),
+            )
+            .unwrap();
             assert_eq!(client.requests.len(), 1, "{name}");
             assert!(String::from_utf8(out).unwrap().contains("connected"));
         }

@@ -32,12 +32,12 @@ fn theme_degrades_an_unrecognised_token_to_system() {
 
 #[test]
 fn settings_default_uses_the_system_theme() {
-    assert_eq!(Settings::default().theme, Theme::System);
-    assert_eq!(
-        Settings::default().modal_selection_mode,
-        ModalSelectionMode::Action
-    );
-    assert_eq!(Settings::default().default_model, DefaultModel::OpenAi);
+    let settings = Settings::default();
+    assert_eq!(settings.theme, Theme::System);
+    assert_eq!(settings.modal_selection_mode, ModalSelectionMode::Action);
+    assert_eq!(settings.default_model, DefaultModel::OpenAi);
+    assert!(settings.issue_enabled);
+    assert!(settings.memory_enabled);
 }
 
 #[test]
@@ -46,11 +46,15 @@ fn settings_round_trip_through_json() {
         theme: Theme::Dark,
         modal_selection_mode: ModalSelectionMode::Prompt,
         default_model: DefaultModel::Claude,
+        issue_enabled: false,
+        memory_enabled: false,
     };
     let json = serde_json::to_string(&settings).unwrap();
     assert!(json.contains("\"theme\":\"dark\""));
     assert!(json.contains("\"modal_selection_mode\":\"prompt\""));
     assert!(json.contains("\"default_model\":\"claude\""));
+    assert!(json.contains("\"issue_enabled\":false"));
+    assert!(json.contains("\"memory_enabled\":false"));
     let back: Settings = serde_json::from_str(&json).unwrap();
     assert_eq!(back, settings);
     // Exercise the derived Clone / Debug.
@@ -108,9 +112,12 @@ fn local_settings_overlay_only_explicit_fields() {
         theme: Theme::Dark,
         modal_selection_mode: ModalSelectionMode::Action,
         default_model: DefaultModel::Claude,
+        issue_enabled: true,
+        memory_enabled: false,
     };
     let local = LocalSettings {
         modal_selection_mode: Some(ModalSelectionMode::Prompt),
+        issue_enabled: Some(false),
         ..LocalSettings::default()
     };
 
@@ -120,6 +127,8 @@ fn local_settings_overlay_only_explicit_fields() {
             theme: Theme::Dark,
             modal_selection_mode: ModalSelectionMode::Prompt,
             default_model: DefaultModel::Claude,
+            issue_enabled: false,
+            memory_enabled: false,
         }
     );
 }
@@ -143,6 +152,8 @@ fn full_settings_convert_to_explicit_local_overrides() {
         theme: Theme::Light,
         modal_selection_mode: ModalSelectionMode::Prompt,
         default_model: DefaultModel::Claude,
+        issue_enabled: false,
+        memory_enabled: true,
     };
     let local = LocalSettings::from(&settings);
     assert_eq!(Settings::default().with_local(&local), settings);

@@ -33,6 +33,8 @@ pub const SESSIONS_DIR: &str = "sessions";
 pub const DATA_DIR_ENV: &str = "USAGI_HOME";
 /// Environment variable selecting the isolated runtime state mode.
 pub const RUNTIME_MODE_ENV: &str = "USAGI_RUNTIME_MODE";
+/// Trusted workspace root forwarded to a daemon-provisioned MCP child.
+pub const WORKSPACE_ROOT_ENV: &str = "USAGI_WORKSPACE_ROOT";
 /// Directory created under the user's home directory by default.
 const DATA_DIR_NAME: &str = ".usagi";
 

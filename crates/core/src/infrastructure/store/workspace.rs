@@ -182,6 +182,8 @@ mod tests {
             theme: crate::domain::settings::Theme::Dark,
             modal_selection_mode: crate::domain::settings::ModalSelectionMode::Prompt,
             default_model: crate::domain::settings::DefaultModel::Claude,
+            issue_enabled: false,
+            memory_enabled: false,
         };
         assert_eq!(storage.load_settings().unwrap(), Settings::default());
         storage.save_settings(&settings).unwrap();

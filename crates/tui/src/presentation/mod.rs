@@ -6728,6 +6728,8 @@ mod tests {
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
         // Enter on the dirty Save row begins the save flow (loading).
         assert!(matches!(
             step_config(&mut config, Key::Enter, &mut settings),
@@ -6854,8 +6856,16 @@ mod tests {
     }
 
     // Focus the dirty Save row from Config: cycle the theme, then step down to
-    // Save (Theme → Modal mode → Agent model → Save).
-    const CONFIG_SAVE_KEYS: [Key; 5] = [Key::Right, Key::Down, Key::Down, Key::Down, Key::Enter];
+    // Save (Theme → Modal mode → Agent model → Issue → Memory → Save).
+    const CONFIG_SAVE_KEYS: [Key; 7] = [
+        Key::Right,
+        Key::Down,
+        Key::Down,
+        Key::Down,
+        Key::Down,
+        Key::Down,
+        Key::Enter,
+    ];
 
     #[test]
     fn config_save_shows_loading_then_saved_then_returns_home_on_its_own() {
