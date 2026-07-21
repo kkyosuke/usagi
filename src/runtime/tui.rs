@@ -71,7 +71,8 @@ use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::overview;
 use usagi_tui::usecase::overview::SessionCommand;
 use usagi_tui::usecase::terminal_input::{
-    KeyCode, KeyEventKind, LiveInput, LiveInputClassifier, LiveInputOutput, Modifiers, RuntimeEvent,
+    GlobalControlChord, KeyCode, KeyEventKind, LiveInput, LiveInputClassifier, LiveInputOutput,
+    Modifiers, RuntimeEvent,
 };
 
 use crate::runtime::clipboard::PlatformClipboard;
@@ -1576,30 +1577,9 @@ impl Terminal for CrosstermTerminal {
         loop {
             match self.input.next(self.input_started.elapsed())? {
                 RuntimeEvent::Input(input) => {
-                    if let LiveInput::Pointer(pointer) = input {
-                        return Ok(Key::Pointer(pointer));
-                    }
-                    if let LiveInput::Mouse { column, row } = input {
-                        return Ok(Key::Click { column, row });
-                    }
-                    if let Some(key) = terminal_copy_key(&input) {
-                        return Ok(key);
-                    }
-                    // Global control chords stay outside the live-prefix classifier.
-                    if let Some(key) = control_key(&input) {
-                        return Ok(key);
-                    }
                     let now = self.input_started.elapsed();
-                    match self.live_input.classify(now, input.clone()) {
-                        // A resolved `Ctrl-O` prefix action drives the live runtime.
-                        LiveInputOutput::Action(action) => return Ok(Key::Live(action)),
-                        // Leader pending, unknown follow-up, or key release: keep reading.
-                        LiveInputOutput::Swallowed => {}
-                        // Everything else is a normal key; preserve the prior mapping so
-                        // non-prefix keys and future PTY passthrough are unchanged.
-                        LiveInputOutput::Passthrough(bytes) => {
-                            return Ok(passthrough_key(&input, bytes));
-                        }
+                    if let Some(key) = classify_terminal_input(&mut self.live_input, now, &input) {
+                        return Ok(key);
                     }
                 }
                 RuntimeEvent::Resize { .. } => {
@@ -1617,6 +1597,33 @@ impl Terminal for CrosstermTerminal {
     fn copy_text(&mut self, text: &str) -> Result<(), String> {
         use usagi_tui::usecase::application::terminal_selection::ClipboardPort;
         self.clipboard.write_text(text)
+    }
+}
+
+/// Apply the live-input ordering policy before projecting terminal input into the
+/// management [`Key`] vocabulary. `LiveInputClassifier` is the sole owner of
+/// leader precedence; this adapter only translates its resolved output.
+fn classify_terminal_input(
+    classifier: &mut LiveInputClassifier,
+    now: Duration,
+    input: &LiveInput,
+) -> Option<Key> {
+    match classifier.classify(now, input.clone()) {
+        LiveInputOutput::Action(action) => Some(Key::Live(action)),
+        LiveInputOutput::GlobalControl(control) => Some(match control {
+            GlobalControlChord::CtrlC => terminal_copy_key(input).unwrap_or(Key::Quit),
+            GlobalControlChord::CtrlQ => Key::CtrlQ,
+            GlobalControlChord::CtrlD => Key::CtrlD,
+        }),
+        LiveInputOutput::Swallowed => None,
+        LiveInputOutput::Passthrough(bytes) => match input {
+            LiveInput::Pointer(pointer) => Some(Key::Pointer(*pointer)),
+            LiveInput::Mouse { column, row } => Some(Key::Click {
+                column: *column,
+                row: *row,
+            }),
+            _ => terminal_copy_key(input).or_else(|| Some(passthrough_key(input, bytes))),
+        },
     }
 }
 
@@ -1647,30 +1654,6 @@ fn terminal_copy_key(input: &LiveInput) -> Option<Key> {
     let fallback = Vec::new();
 
     matches_copy.then_some(Key::TerminalCopy { fallback })
-}
-
-/// Map global control chords before their bytes can reach a text field.
-///
-/// [`Key::CtrlD`] has an effect only in Open Workspace; other screens explicitly
-/// ignore it. Keeping it as a dedicated key prevents a U+0004 control character
-/// from being inserted into their inputs.
-#[coverage(off)]
-fn control_key(input: &LiveInput) -> Option<Key> {
-    let LiveInput::Key(key) = input else {
-        return None;
-    };
-    (key.modifiers.control
-        && !key.modifiers.shift
-        && !key.modifiers.alt
-        && !key.modifiers.super_
-        && !key.modifiers.hyper
-        && !key.modifiers.meta)
-        .then_some(match key.code {
-            KeyCode::Char('c') => Some(Key::Quit),
-            KeyCode::Char('q') => Some(Key::CtrlQ),
-            KeyCode::Char('d') => Some(Key::CtrlD),
-            _ => None,
-        })?
 }
 
 /// Map a non-prefix live input to the management `Key` vocabulary. The classifier
@@ -2179,9 +2162,11 @@ pub(crate) fn launch(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::{
         EnvironmentStorePort, LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory,
-        RepoEnvironmentStore, Start, TerminalChunk, TerminalError, control_key,
+        RepoEnvironmentStore, Start, TerminalChunk, TerminalError, classify_terminal_input,
         created_session_hook, decode_terminal_poll, load_screen_graph_data, load_workspace_state,
         passthrough_key, provider_resume_projection, terminal_copy_key,
     };
@@ -2473,29 +2458,59 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_d_maps_to_the_dedicated_open_workspace_unregister_key() {
-        let key = LiveInput::Key(KeyEvent::new(
-            KeyCode::Char('d'),
-            Modifiers {
-                control: true,
-                ..Modifiers::default()
-            },
-            KeyEventKind::Press,
-        ));
-        assert_eq!(control_key(&key), Some(Key::CtrlD));
+    fn terminal_adapter_maps_global_chords_after_classifier_resolution() {
+        let cases = [
+            (live_key(KeyCode::Char('c'), control()), Key::Quit),
+            (LiveInput::Raw(vec![3]), Key::Quit),
+            (live_key(KeyCode::Char('q'), control()), Key::CtrlQ),
+            (LiveInput::Raw(vec![17]), Key::CtrlQ),
+            (live_key(KeyCode::Char('d'), control()), Key::CtrlD),
+            (LiveInput::Raw(vec![4]), Key::CtrlD),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                classify_terminal_input(
+                    &mut usagi_tui::usecase::terminal_input::LiveInputClassifier::default(),
+                    Duration::ZERO,
+                    &input,
+                ),
+                Some(expected)
+            );
+        }
     }
 
     #[test]
-    fn ctrl_c_maps_to_quit_so_a_live_terminal_receives_sigint() {
-        let key = LiveInput::Key(KeyEvent::new(
-            KeyCode::Char('c'),
-            Modifiers {
-                control: true,
-                ..Modifiers::default()
-            },
-            KeyEventKind::Press,
-        ));
-        assert_eq!(control_key(&key), Some(Key::Quit));
+    fn terminal_adapter_swallows_leader_global_follow_up_then_reads_next_key_fresh() {
+        for follow_up in [
+            live_key(KeyCode::Char('c'), control()),
+            LiveInput::Raw(vec![3]),
+            live_key(KeyCode::Char('q'), control()),
+            LiveInput::Raw(vec![17]),
+            live_key(KeyCode::Char('d'), control()),
+            LiveInput::Raw(vec![4]),
+        ] {
+            let mut classifier = usagi_tui::usecase::terminal_input::LiveInputClassifier::default();
+            assert_eq!(
+                classify_terminal_input(
+                    &mut classifier,
+                    Duration::ZERO,
+                    &live_key(KeyCode::Char('o'), control()),
+                ),
+                None
+            );
+            assert_eq!(
+                classify_terminal_input(&mut classifier, Duration::from_millis(1), &follow_up,),
+                None
+            );
+            assert_eq!(
+                classify_terminal_input(
+                    &mut classifier,
+                    Duration::from_millis(2),
+                    &live_key(KeyCode::Char('z'), Modifiers::default()),
+                ),
+                Some(Key::Char('z'))
+            );
+        }
     }
 
     #[test]
