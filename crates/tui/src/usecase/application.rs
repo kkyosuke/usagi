@@ -321,7 +321,6 @@ pub trait Terminal {
     /// # Errors
     ///
     /// Returns an adapter-safe message when the clipboard is unavailable.
-    #[coverage(off)]
     fn copy_text(&mut self, _text: &str) -> Result<(), String> {
         Err("clipboard is unavailable".to_owned())
     }
@@ -343,9 +342,11 @@ pub fn run(entry: &EntryScreen, runner: &mut dyn ScreenRunner) -> io::Result<()>
 
 #[cfg(test)]
 mod tests {
-    use super::{EntryScreen, ScreenRunner, WorkspaceSnapshot, run};
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
+    use super::{EntryScreen, Key, ScreenRunner, Terminal, WorkspaceSnapshot, run};
     use std::io;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
     use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
     use usagi_core::domain::id::{SessionId, WorkspaceId};
     use usagi_core::domain::workspace::Workspace;
@@ -365,6 +366,25 @@ mod tests {
         fail_doctor: bool,
     }
 
+    struct DefaultClipboardTerminal;
+
+    impl Terminal for DefaultClipboardTerminal {
+        fn size(&mut self) -> io::Result<(usize, usize)> {
+            Ok((1, 1))
+        }
+
+        fn draw(&mut self, _: &[String]) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn wait(&mut self, _: Duration) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn read_key(&mut self) -> io::Result<Key> {
+            Ok(Key::Quit)
+        }
+    }
     impl ScreenRunner for RecordingRunner {
         fn welcome(&mut self) -> io::Result<()> {
             self.calls.push(Call::Welcome);
@@ -415,6 +435,14 @@ mod tests {
                 Call::Config,
                 Call::Doctor,
             ]
+        );
+    }
+
+    #[test]
+    fn default_terminal_clipboard_is_an_explicit_error() {
+        assert_eq!(
+            DefaultClipboardTerminal.copy_text("text"),
+            Err("clipboard is unavailable".to_owned())
         );
     }
 
@@ -501,5 +529,23 @@ mod tests {
         assert_eq!(snapshot.workspace_id, workspace_id);
         assert_eq!(snapshot.session_ids, vec![session_id]);
         assert_eq!(snapshot.agent_resumes.get(&session_id), Some(&resume));
+    }
+
+    #[test]
+    fn runtime_identity_constructor_preserves_daemon_ids() {
+        let workspace_id = WorkspaceId::new();
+        let session_id = SessionId::new();
+        let workspace = Workspace::new("demo", "/tmp/demo");
+        let snapshot = WorkspaceSnapshot::with_runtime_ids(
+            workspace.clone(),
+            WorkspaceState::default(),
+            workspace_id,
+            vec![session_id],
+        );
+
+        assert_eq!(snapshot.workspace, workspace);
+        assert_eq!(snapshot.workspace_id, workspace_id);
+        assert_eq!(snapshot.session_ids, vec![session_id]);
+        assert!(snapshot.agent_resumes.is_empty());
     }
 }

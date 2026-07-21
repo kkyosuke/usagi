@@ -16,8 +16,6 @@
 //! so the executor itself stays fully testable with in-memory fakes and no
 //! `#[coverage(off)]`.
 
-#![coverage(off)] // Effect execution is a composition seam; reducer and injected-port tests cover its contracts.
-
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use usagi_core::domain::agent::AgentProfileId;
@@ -195,7 +193,6 @@ pub trait DecisionPort {
 }
 
 struct NoDecisions;
-#[coverage(off)] // Production composition injects DecisionPort; this safe default preserves legacy embedders.
 impl DecisionPort for NoDecisions {
     fn refresh(&mut self, _: WorkspaceId, completions: Completions) {
         unavailable(&completions, "user decisions are unavailable");
@@ -229,7 +226,6 @@ pub trait OverlayPort {
 }
 
 struct NoOverlay;
-#[coverage(off)] // Production composition injects OverlayPort; this safe default preserves legacy embedders.
 impl OverlayPort for NoOverlay {
     fn load_pull_requests(&mut self, _: Target, completions: Completions) {
         unavailable(&completions, "Pull Request data is unavailable");
@@ -444,6 +440,7 @@ impl DaemonBackend {
 
 #[cfg(test)]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::*;
     use crate::usecase::application::controller::{
         BackendEvent, Notice, OperationResult, SafeError, SafeMessage,
@@ -510,6 +507,30 @@ mod tests {
         fn select_tab(&mut self, direction: TabDirection) {
             self.tabs.push(direction);
         }
+    }
+
+    struct DefaultResumeAgent;
+
+    impl AgentPort for DefaultResumeAgent {
+        fn launch_agent(&mut self, _: LaunchAgentRequest) {}
+
+        fn open_terminal(&mut self, _: OpenTerminalRequest) {}
+
+        fn open_external_terminal(&mut self, _: Target) {}
+
+        fn select_tab(&mut self, _: TabDirection) {}
+    }
+
+    #[test]
+    fn default_resume_agent_is_an_explicit_no_op() {
+        AgentPort::resume_agent(
+            &mut DefaultResumeAgent,
+            ResumeAgentRequest {
+                workspace: WorkspaceId::new(),
+                session: SessionId::new(),
+                operation_id: OperationId::new(),
+            },
+        );
     }
 
     #[derive(Default)]
@@ -848,6 +869,25 @@ mod tests {
             assert_eq!(backend.dispatch(effect), Flow::Continue);
         }
         assert_eq!(backend.drain_events().len(), 3);
+    }
+
+    #[test]
+    fn decision_effects_complete_with_explicit_errors_without_a_decision_port() {
+        let mut backend = backend();
+        let workspace = WorkspaceId::new();
+        for effect in [
+            Effect::RefreshDecisions { workspace },
+            Effect::ResolveDecision {
+                workspace,
+                decision_id: UserDecisionId::new(),
+                answer: UserDecisionAnswer::Option {
+                    option_id: "safe".to_owned(),
+                },
+            },
+        ] {
+            assert_eq!(backend.dispatch(effect), Flow::Continue);
+        }
+        assert_eq!(backend.drain_events().len(), 2);
     }
 
     #[test]

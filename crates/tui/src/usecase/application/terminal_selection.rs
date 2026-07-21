@@ -36,14 +36,12 @@ impl TerminalSelection {
 
     /// The immutable drag origin.
     #[must_use]
-    #[coverage(off)]
     pub const fn anchor(&self) -> TerminalPoint {
         self.anchor
     }
 
     /// The current drag endpoint.
     #[must_use]
-    #[coverage(off)]
     pub const fn focus(&self) -> TerminalPoint {
         self.focus
     }
@@ -124,6 +122,7 @@ fn extract_columns(line: &str, from: usize, to: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::*;
 
     #[test]
@@ -168,7 +167,6 @@ mod tests {
     }
 
     impl ClipboardPort for FakeClipboard {
-        #[coverage(off)]
         fn write_text(&mut self, text: &str) -> Result<(), String> {
             if let Some(error) = &self.error {
                 return Err(error.clone());

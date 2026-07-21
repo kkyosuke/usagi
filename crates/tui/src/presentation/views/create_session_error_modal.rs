@@ -60,6 +60,7 @@ pub fn render_over(height: usize, width: usize, base: &[String], message: &str) 
 
 #[cfg(test)]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{INNER_WIDTH, render_over};
     use crate::presentation::widgets::{
         display_width, modal, normalize_size, strip_ansi, wrap_to_width,
@@ -189,7 +190,6 @@ mod tests {
     // The submit match keeps an unreachable panic arm for a clear failure; the
     // covered render paths live in the two tests above.
     #[test]
-    #[coverage(off)]
     fn reducer_failure_populates_the_message_this_view_draws() {
         let mut state = AppState::home(WorkspaceId::new(), Vec::new());
         let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));

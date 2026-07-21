@@ -5,8 +5,6 @@
 //! session-scoped pane runtime; neither the controller nor a renderer opens a
 //! local process.
 
-#![coverage(off)] // Composition host: adapter and pane-reducer behavior are covered through their injected-port tests.
-
 use std::collections::HashMap;
 
 use super::{
@@ -193,6 +191,7 @@ impl<P: AgentLaunchPort + TerminalPort> AgentRuntimeHost<P> {
 
 #[cfg(test)]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::super::pane::PaneTab;
     use super::super::pane_runtime::{TerminalError, TerminalInventory, TerminalSnapshot};
     use super::*;
@@ -220,6 +219,7 @@ mod tests {
             Ok(AgentLaunchEvent::Accepted { operation })
         }
     }
+    #[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=agent_runtime_fake_port_contract
     impl TerminalPort for Fake {
         fn inventory(&mut self) -> Result<Vec<TerminalInventory>, TerminalError> {
             Ok(self
@@ -278,6 +278,7 @@ mod tests {
         let (workspace, session, terminal) = ids();
         let operation = OperationId::new();
         let mut host = AgentRuntimeHost::new(Fake::default());
+        host.dispatch(Effect::Detach);
         host.dispatch(Effect::LaunchAgent {
             workspace,
             session: Some(session),
@@ -294,6 +295,7 @@ mod tests {
             operation,
             terminal: terminal.clone(),
         });
+        host.port_mut().terminal = Some(terminal.clone());
         host.select_live(Target::Session(session), &terminal);
         assert!(
             matches!(host.pane(Target::Session(session)).unwrap().pane().selected(), PaneSelection::Tab(TabSelection::Live(selected)) if *selected == terminal)
@@ -306,6 +308,17 @@ mod tests {
                 rows: 30,
             },
         );
+        host.stream(
+            Target::Session(session),
+            TerminalStreamEvent::Output {
+                terminal: terminal.clone(),
+                start_offset: 0,
+                end_offset: 2,
+                data: b"ok".to_vec(),
+            },
+        );
+        host.reconnect(Target::Session(session));
+        host.detach();
         assert_eq!(host.port().input, vec![b"hello".to_vec()]);
         assert_eq!(
             host.port().resized,
@@ -376,6 +389,7 @@ mod tests {
         let (workspace, session, _) = ids();
         let mut runtime =
             AgentRuntime::new(AppState::home(workspace, vec![session]), Fake::default());
+        assert_eq!(runtime.state().workspace(), workspace);
 
         let _ = runtime.update(AppEvent::Key(controller::AppKey::Down));
         let _ = runtime.update(AppEvent::Key(controller::AppKey::Enter));
@@ -403,6 +417,11 @@ mod tests {
             }]
         ));
         assert_eq!(runtime.host().port().launches.len(), 2);
+        let operation = runtime.host().port().launches[1].0;
+        runtime.apply(&AgentLaunchEvent::Failed {
+            operation,
+            message: "failed".to_owned(),
+        });
         assert_eq!(
             runtime.host().port().launches[1]
                 .1

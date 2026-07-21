@@ -104,6 +104,21 @@ Overview / Closeup を生成する Home runtime へ渡す。この束縛は work
 開いた workspace の port や modal state を次の workspace へ持ち越さない。Config へ入るたびにも現在の束縛から
 両 scope を読み直すため、保存後の再 entry とプロセス再起動で同じ値になる。
 
+## Production screen graph harness
+
+TUI の production wiring は、direct Workspace、Welcome の Recent、Open の選択、New の作成成功を
+`run_screen_graph_with_backend` の同じ deterministic harness で検証する。harness は terminal、workspace loader、
+settings、controller backend factory、Agent/terminal port を注入し、実端末や daemon socket を開かずに、各入口が
+同じ settings と production port set を受け取ること、全 Effect route、成功・失敗 completion、`Ctrl-O` を含む
+global chord、terminal reconnect を固定する。unit test module の harness 組み立て自体は production code ではないため
+`composition` 例外とし、そこで駆動される controller・presentation・runtime mapping は coverage 対象に保つ。
+
+実端末の raw mode / draw / read、daemon socket、filesystem、platform process の薄い adapter だけを `real_io`、
+production port の束縛だけを `composition`、fake port の generic 単相化だけを `generic_monomorphization` として
+機械可読コメント付きで除外する。reducer、Effect routing、entry selection、input classifier、completion / error
+projection は除外しない。例外の理由・期限・証拠 test は
+[coverage exclusion policy](06-conventions.md#coverageoff-例外)に従い、`scripts/coverage-off-lint.rb` で検査する。
+
 各 Effect は実 action を 1 回開始するか、安全な明示 error completion を 1 件返す。session create は成功時も
 要求 token と作成された `SessionId` を持つ `OperationResult` を返す。失敗だけを返して成功を snapshot 更新に
 暗黙化しない。terminal の `open` は同じ target の live terminal を再利用し、`new` は target の worktree を

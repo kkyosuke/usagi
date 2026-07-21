@@ -302,7 +302,6 @@ impl OverviewModal {
     }
 
     /// 選択を前の候補へ（先頭で末尾へ回り込む）。候補が無ければ何もしない。
-    #[coverage(off)] // The empty-match branch is exercised through the reducer integration path.
     pub fn select_prev(&mut self) {
         if self.expanded {
             let len = self.subcommands().len();
@@ -342,7 +341,6 @@ fn hint_row(hint: overview::CommandInfo, selected: bool, inner: usize) -> String
 }
 
 /// コマンドパレットのボディ（枠の内側の行）。入力行・候補一覧・フッタからなる。
-#[coverage(off)] // Rendering branches are covered by frame snapshots; LLVM misses ANSI subcommand rows.
 fn body(state: &OverviewModal) -> Vec<String> {
     let matches = state.matches();
     let mut lines = vec![
@@ -438,6 +436,7 @@ pub fn render_over(
 
 #[cfg(test)]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{OverviewModal, PaletteResult, render, render_over};
     use crate::presentation::widgets::{display_width, strip_ansi};
     use usagi_core::domain::settings::ModalSelectionMode;
@@ -544,6 +543,12 @@ mod tests {
         assert_eq!(modal.submission(), "session remove");
         modal.select_next();
         assert_eq!(modal.submission(), "session list");
+        modal.select_prev();
+        assert_eq!(modal.submission(), "session remove");
+        let expanded = joined(&modal);
+        assert!(expanded.contains("list"));
+        assert!(expanded.contains("overview"));
+        assert!(expanded.contains("remove"));
         assert!(modal.collapse());
         assert!(!modal.collapse());
     }
@@ -603,7 +608,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn history_recall_moves_between_submissions_without_duplicating_them() {
         let mut modal = OverviewModal::new();
         type_str(&mut modal, "issue list");
@@ -722,6 +726,10 @@ mod tests {
         assert!(text.contains("config"));
         assert!(text.contains("Edit this workspace's local settings"));
         assert!(text.contains("Esc: close"));
+        let prompt = joined(&OverviewModal::with_selection_mode(
+            ModalSelectionMode::Prompt,
+        ));
+        assert!(prompt.contains("Enter: run"));
     }
 
     #[test]

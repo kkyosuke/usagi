@@ -53,8 +53,8 @@ pub trait AgentLaunchPort {
 /// IPC transport implementation. An accepted reply deliberately leaves the
 /// pane pending; a later subscribed/replayed [`AgentLaunchEvent::Succeeded`]
 /// is the only way it becomes attachable.
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=agent_launch_ipc_fake_transport_contract
 impl<S: std::io::Read + std::io::Write> AgentLaunchPort for IpcClient<S> {
-    #[coverage(off)] // Framed transport is exercised through the injected port tests; its concrete generic instantiations otherwise skew the workspace coverage gate.
     fn launch(
         &mut self,
         operation: OperationId,
@@ -82,20 +82,20 @@ impl<S: std::io::Read + std::io::Write> AgentLaunchPort for IpcClient<S> {
                 Err("daemon returned a mismatched operation".to_owned())
             }
             DaemonReply::Ok(value) => {
-                let terminal = value
-                    .get("terminal")
-                    .cloned()
-                    .ok_or_else(|| "daemon did not accept agent launch".to_owned())
-                    .and_then(|terminal| {
-                        serde_json::from_value(terminal)
-                            .map_err(|_| "daemon final had an invalid terminal".to_owned())
-                    })?;
-                (value.get("completed").and_then(serde_json::Value::as_bool) == Some(true))
-                    .then_some(AgentLaunchEvent::Succeeded {
+                let Some(terminal) = value.get("terminal").cloned() else {
+                    return Err("daemon did not accept agent launch".to_owned());
+                };
+                let Ok(terminal) = serde_json::from_value(terminal) else {
+                    return Err("daemon final had an invalid terminal".to_owned());
+                };
+                if value.get("completed").and_then(serde_json::Value::as_bool) == Some(true) {
+                    Ok(AgentLaunchEvent::Succeeded {
                         operation,
                         terminal,
                     })
-                    .ok_or_else(|| "daemon did not complete agent launch".to_owned())
+                } else {
+                    Err("daemon did not complete agent launch".to_owned())
+                }
             }
         }
     }
@@ -216,6 +216,7 @@ impl<P: AgentLaunchPort + TerminalPort> AgentLaunchAdapter<P> {
 
 #[cfg(test)]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use std::collections::VecDeque;
     use std::io::{self, Cursor, Read, Write};
 

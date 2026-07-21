@@ -261,7 +261,6 @@ impl TerminalSession {
 
     /// Projects the retained output with a cell-precise visual selection.
     #[must_use]
-    #[coverage(off)]
     pub fn display_rows_with_scrollback_selection(
         &self,
         selection: &TerminalSelection,
@@ -275,7 +274,6 @@ impl TerminalSession {
     /// Complete visible screen cells for selection/copy. Unlike [`Self::rows`]
     /// this retains trailing spaces, while still containing no ANSI styling.
     #[must_use]
-    #[coverage(off)]
     pub fn cells(&self) -> Vec<String> {
         self.screen.cells_with_scrollback()
     }
@@ -284,7 +282,6 @@ impl TerminalSession {
     /// Later stream output, reconnects, and screen replacement do not mutate
     /// the returned selection's copy text.
     #[must_use]
-    #[coverage(off)]
     pub fn begin_selection(&self, anchor: TerminalPoint) -> TerminalSelection {
         TerminalSelection::begin(self.cells(), anchor)
     }
@@ -350,7 +347,6 @@ impl TerminalSession {
 
     /// Resizes the daemon PTY and decoded terminal cells without replaying
     /// historical cursor movement sequences at the new width.
-    #[coverage(off)] // Transport adapter; state outcomes are covered by its fake-port tests.
     pub fn resize<P: TerminalStreamPort>(&mut self, port: &mut P, geometry: Geometry) {
         if self.geometry != geometry {
             match port.resize(&self.terminal, geometry) {
@@ -505,6 +501,7 @@ fn screen_for(geometry: Geometry) -> TerminalScreen {
 
 #[cfg(test)]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::*;
     use usagi_core::domain::id::{
         DaemonGeneration, SessionId, TerminalId, WorkspaceId, WorktreeId,
@@ -659,6 +656,7 @@ mod tests {
         session.connect(&mut port);
         let resized = Geometry { cols: 40, rows: 8 };
         session.resize(&mut port, resized);
+        session.resize(&mut port, resized);
 
         assert_eq!(port.resized, vec![geometry(), resized]);
         assert_eq!(session.rows()[0], "old");
@@ -771,6 +769,14 @@ mod tests {
         session.resize(&mut port, geometry());
         assert_eq!(port.resized, vec![geometry(), geometry()]);
         assert_eq!(session.error(), None);
+
+        let changed = Geometry { cols: 30, rows: 4 };
+        port.resize_error = Some(TerminalError::Stale);
+        session.resize(&mut port, changed);
+        assert!(session.error().unwrap().contains("no longer available"));
+        port.resize_error = Some(TerminalError::Unavailable);
+        session.resize(&mut port, geometry());
+        assert!(session.error().unwrap().contains("reconnecting"));
     }
 
     #[test]
@@ -1113,5 +1119,14 @@ mod tests {
         assert_eq!(session.send_input(&mut port, b"x"), Ok(()));
         session.detach(&mut port);
         restarted_server.join().unwrap();
+    }
+
+    #[test]
+    fn begin_selection_snapshots_the_current_terminal_cells() {
+        let session = TerminalSession::new(terminal(), geometry());
+        let point = TerminalPoint { row: 0, column: 0 };
+        let selection = session.begin_selection(point);
+        assert_eq!(selection.anchor(), point);
+        assert_eq!(selection.focus(), point);
     }
 }

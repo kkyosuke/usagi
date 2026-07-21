@@ -4,6 +4,8 @@
 //! [`LiveInput`] と [`RuntimeEvent`] にする。`EventPump::next` は terminal、backend、tick
 //! をこの順に観測するため、同じ poll cycle で同時に ready だった event の順序も決定的である。
 
+#[cfg(test)]
+use std::collections::VecDeque;
 use std::io;
 use std::time::Duration;
 
@@ -24,14 +26,56 @@ pub trait CrosstermEventSource {
 }
 
 /// 実端末の crossterm source。
-pub struct CrosstermSource;
+#[derive(Default)]
+pub struct CrosstermSource {
+    #[cfg(test)]
+    scripted: bool,
+    #[cfg(test)]
+    events: VecDeque<Event>,
+    #[cfg(test)]
+    delayed: bool,
+}
 
+#[cfg(test)]
+impl CrosstermSource {
+    fn scripted(events: impl IntoIterator<Item = Event>) -> Self {
+        Self {
+            scripted: true,
+            events: events.into_iter().collect(),
+            delayed: false,
+        }
+    }
+
+    fn delayed(event: Event) -> Self {
+        Self {
+            scripted: true,
+            events: VecDeque::from([event]),
+            delayed: true,
+        }
+    }
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
 impl CrosstermEventSource for CrosstermSource {
     fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
+        #[cfg(test)]
+        if self.scripted {
+            if self.delayed && timeout.is_zero() {
+                return Ok(false);
+            }
+            return Ok(!self.events.is_empty());
+        }
         event::poll(timeout)
     }
 
     fn read(&mut self) -> io::Result<Event> {
+        #[cfg(test)]
+        if self.scripted {
+            return self
+                .events
+                .pop_front()
+                .ok_or_else(|| io::Error::other("scripted crossterm source is empty"));
+        }
         event::read()
     }
 }
@@ -55,7 +99,7 @@ impl<B> BackendReceiver for NoBackend<B> {
     // The production `NoBackend<()>` monomorphization only returns this constant;
     // the EventPump tests cover the same no-backend behavior with their test event
     // type. Exclude the duplicate runtime-only instantiation from LLVM coverage.
-    #[coverage(off)]
+    #[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=multiplexes_terminal_backend_and_tick_in_a_deterministic_order
     fn try_recv(&mut self) -> Option<Self::Event> {
         None
     }
@@ -90,10 +134,10 @@ where
     /// 先に ready 済みの terminal event を drain せず 1 件だけ返し、その後 backend、期限に
     /// 達した tick を観測する。いずれも ready でなければ、次の tick まで terminal を poll
     /// して terminal event のみを返す。backend はこの待機後の次 cycle で観測する。
-    #[coverage(off)]
+    #[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=source_poll_and_read_errors_are_projected_from_each_pump_phase
     pub fn next(&mut self, now: Duration) -> io::Result<RuntimeEvent<R::Event>> {
-        while self.source.poll(Duration::ZERO)? {
-            if let Some(event) = adapt_event(self.source.read()?) {
+        while let Some(event) = poll_source(&mut self.source, Duration::ZERO)? {
+            if let Some(event) = adapt_event(event) {
                 return Ok(event);
             }
         }
@@ -101,33 +145,47 @@ where
             return Ok(RuntimeEvent::Backend(event));
         }
         if now >= self.next_tick_at {
-            self.advance_tick(now);
+            advance_tick(&mut self.next_tick_at, self.tick_interval, now);
             return Ok(RuntimeEvent::Tick);
         }
 
         let timeout = self.next_tick_at.saturating_sub(now);
         loop {
-            if self.source.poll(timeout)? {
-                if let Some(event) = adapt_event(self.source.read()?) {
+            if let Some(event) = poll_source(&mut self.source, timeout)? {
+                if let Some(event) = adapt_event(event) {
                     return Ok(event);
                 }
                 continue;
             }
-            self.advance_tick(now.saturating_add(timeout));
+            advance_tick(
+                &mut self.next_tick_at,
+                self.tick_interval,
+                now.saturating_add(timeout),
+            );
             return Ok(RuntimeEvent::Tick);
         }
     }
+}
 
-    fn advance_tick(&mut self, now: Duration) {
-        while self.next_tick_at <= now {
-            self.next_tick_at = self.next_tick_at.saturating_add(self.tick_interval);
-        }
+fn poll_source(
+    source: &mut dyn CrosstermEventSource,
+    timeout: Duration,
+) -> io::Result<Option<Event>> {
+    if source.poll(timeout)? {
+        source.read().map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn advance_tick(next_tick_at: &mut Duration, tick_interval: Duration, now: Duration) {
+    while *next_tick_at <= now {
+        *next_tick_at = next_tick_at.saturating_add(tick_interval);
     }
 }
 
 /// crossterm event を、保持可能な TUI runtime 語彙へ変換する。
 #[must_use]
-#[coverage(off)] // Generic `RuntimeEvent<B>` coverage is emitted per consumer monomorphization.
 pub fn adapt_event<B>(event: Event) -> Option<RuntimeEvent<B>> {
     match event {
         Event::Key(key) => Some(RuntimeEvent::Input(LiveInput::Key(adapt_key(key)))),
@@ -204,6 +262,7 @@ pub fn adapt_key(key: KeyEvent) -> InputKeyEvent {
 
 #[cfg(test)]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use std::collections::VecDeque;
 
     use crossterm::event::{
@@ -247,6 +306,27 @@ mod tests {
 
         fn read(&mut self) -> io::Result<Event> {
             Ok(self.0.take().expect("read after ready poll"))
+        }
+    }
+
+    enum ErrorSource {
+        ImmediatePoll,
+        DelayedPoll,
+        Read,
+    }
+
+    impl CrosstermEventSource for ErrorSource {
+        fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
+            match self {
+                Self::ImmediatePoll => Err(io::Error::other("immediate poll failed")),
+                Self::DelayedPoll if timeout.is_zero() => Ok(false),
+                Self::DelayedPoll => Err(io::Error::other("delayed poll failed")),
+                Self::Read => Ok(true),
+            }
+        }
+
+        fn read(&mut self) -> io::Result<Event> {
+            Err(io::Error::other("read failed"))
         }
     }
 
@@ -318,6 +398,31 @@ mod tests {
             })),
             None
         );
+        for (kind, expected) in [
+            (
+                MouseEventKind::Drag(MouseButton::Left),
+                Some(RuntimeEvent::Input(LiveInput::Pointer(PointerEvent {
+                    kind: PointerKind::Drag,
+                    column: 12,
+                    row: 7,
+                }))),
+            ),
+            (
+                MouseEventKind::Up(MouseButton::Left),
+                Some(RuntimeEvent::Input(LiveInput::Pointer(PointerEvent {
+                    kind: PointerKind::Up,
+                    column: 12,
+                    row: 7,
+                }))),
+            ),
+        ] {
+            assert_eq!(
+                adapt_event::<()>(Event::Mouse(MouseEvent { kind, ..left })),
+                expected
+            );
+        }
+        assert_eq!(adapt_event::<()>(Event::FocusLost), None);
+        assert_eq!(NoBackend::<()>::default().try_recv(), None);
     }
 
     #[test]
@@ -392,11 +497,65 @@ mod tests {
     }
 
     #[test]
+    fn source_poll_and_read_errors_are_projected_from_each_pump_phase() {
+        for source in [ErrorSource::ImmediatePoll, ErrorSource::Read] {
+            let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0);
+            assert!(pump.next(T0).is_err());
+        }
+
+        let mut delayed =
+            EventPump::new(ErrorSource::DelayedPoll, FakeBackend::default(), TICK, T0);
+        assert!(delayed.next(T0).is_err());
+    }
+
+    #[test]
+    fn production_crossterm_pump_reaches_the_same_tick_state_machine() {
+        let mut pump = EventPump::new(
+            CrosstermSource::scripted(Vec::new()),
+            NoBackend::<()>::default(),
+            TICK,
+            T0,
+        );
+        assert_eq!(pump.next(T0).unwrap(), RuntimeEvent::Tick);
+
+        let mut immediate = EventPump::new(
+            CrosstermSource::scripted([Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            ))]),
+            NoBackend::<()>::default(),
+            TICK,
+            T0,
+        );
+        assert!(matches!(
+            immediate.next(T0).unwrap(),
+            RuntimeEvent::Input(_)
+        ));
+        let mut delayed = EventPump::new(
+            CrosstermSource::delayed(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            ))),
+            NoBackend::<()>::default(),
+            TICK,
+            T0,
+        );
+        assert!(matches!(delayed.next(T0).unwrap(), RuntimeEvent::Input(_)));
+    }
+
+    #[test]
     fn ignores_non_input_events_received_while_waiting_for_a_tick() {
         let source = DelayedSource(Some(Event::FocusLost));
         let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0);
 
         assert_eq!(pump.next(T0).unwrap(), RuntimeEvent::Tick);
+
+        let source = DelayedSource(Some(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))));
+        let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0);
+        assert!(matches!(pump.next(T0).unwrap(), RuntimeEvent::Input(_)));
     }
 
     #[test]

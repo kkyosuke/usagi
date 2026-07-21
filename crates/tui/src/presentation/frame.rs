@@ -110,7 +110,6 @@ impl Frame {
         self.input_cursor
     }
 
-    #[coverage(off)] // Cursor precedence is covered through the terminal integration path.
     fn set_line(&mut self, row: usize, line: &str) {
         if self.width == 0 {
             return;
@@ -194,7 +193,6 @@ impl Frame {
         start + self.cell(row, start).map_or(1, Cell::width)
     }
 
-    #[coverage(off)] // ANSI style reopening is covered by the renderer integration path.
     fn span_text(&self, row: usize, start: usize, end: usize) -> String {
         // The terminal keeps SGR state across cursor moves and across our
         // incremental writes. A diff span has no reliable knowledge of the
@@ -206,24 +204,20 @@ impl Frame {
         // SGR 開始列がなくても `style` には現在の属性が残っているので、span の先頭で
         // 再出力する。これをしないと、後から追記された入力文字だけが terminal の
         // reset 後に白く描画される。
-        let reopened_style = match self.cell(row, start) {
-            Some(Cell::Glyph {
-                text: glyph, style, ..
-            }) if !style.is_empty() && !glyph.starts_with(ESC) => {
-                text.push_str(style);
-                true
-            }
-            _ => false,
-        };
+        if let Some(Cell::Glyph {
+            text: glyph, style, ..
+        }) = self.cell(row, start)
+            && !style.is_empty()
+            && !glyph.starts_with(ESC)
+        {
+            text.push_str(style);
+        }
         for column in start..end {
             match self.cell(row, column).expect("span is inside frame") {
                 Cell::Empty => text.push(' '),
                 Cell::Glyph { text: glyph, .. } => text.push_str(glyph),
                 Cell::Continuation => {}
             }
-        }
-        if reopened_style && !text.ends_with(RESET) {
-            text.push_str(RESET);
         }
         if !text.ends_with(RESET) {
             text.push_str(RESET);
@@ -397,6 +391,7 @@ fn update_active_style(active_style: &mut String, sequence: &str) {
 
 #[cfg(test)]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{
         Cell, Frame, FrameRenderer, INPUT_CURSOR_MARKER, Span, TERMINAL_CURSOR_MARKER,
         update_active_style,
@@ -486,6 +481,10 @@ mod tests {
             ],
         );
         assert_eq!(rendered.input_cursor(), Some((0, 0)));
+        let terminal_only = frame(8, 1, &[&format!("x{TERMINAL_CURSOR_MARKER}y")]);
+        assert_eq!(terminal_only.input_cursor(), Some((0, 1)));
+        let styled = frame(2, 1, &["\u{1b}[31ma"]);
+        assert!(styled.span_text(0, 0, 1).ends_with("\u{1b}[0m"));
     }
 
     #[test]

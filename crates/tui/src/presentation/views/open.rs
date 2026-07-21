@@ -47,7 +47,6 @@ pub struct Open {
 impl Open {
     /// workspace 一覧から、session などの集計値なしのメニューを組む。
     #[must_use]
-    #[coverage(off)]
     pub fn new(workspaces: Vec<Workspace>) -> Self {
         Self::with_overviews(
             workspaces
@@ -59,14 +58,18 @@ impl Open {
 
     /// 集計済み overview から名前順のメニューを組む。
     #[must_use]
-    #[coverage(off)]
     pub fn with_overviews(mut workspaces: Vec<WorkspaceOverview>) -> Self {
         workspaces.sort_by(|left, right| {
-            left.workspace
+            let folded = left
+                .workspace
                 .name
                 .to_lowercase()
-                .cmp(&right.workspace.name.to_lowercase())
-                .then_with(|| left.workspace.name.cmp(&right.workspace.name))
+                .cmp(&right.workspace.name.to_lowercase());
+            if folded == std::cmp::Ordering::Equal {
+                left.workspace.name.cmp(&right.workspace.name)
+            } else {
+                folded
+            }
         });
         Self {
             workspaces,
@@ -82,7 +85,6 @@ impl Open {
 
     /// 一覧の workspace。
     #[must_use]
-    #[coverage(off)]
     pub fn workspaces(&self) -> Vec<Workspace> {
         self.workspaces
             .iter()
@@ -92,21 +94,18 @@ impl Open {
 
     /// 選択中の項目の添字。
     #[must_use]
-    #[coverage(off)]
     pub fn selected_index(&self) -> usize {
         self.selected_index
     }
 
     /// 一覧が空か。
     #[must_use]
-    #[coverage(off)]
     pub fn is_empty(&self) -> bool {
         self.workspaces.is_empty()
     }
 
     /// 選択中の workspace。空のときは `None`。
     #[must_use]
-    #[coverage(off)]
     pub fn selected(&self) -> Option<&Workspace> {
         self.filtered()
             .get(self.selected_index)
@@ -115,124 +114,105 @@ impl Open {
 
     /// 常時表示する、大文字・小文字を区別しない workspace 名フィルタ。
     #[must_use]
-    #[coverage(off)]
     pub fn filter(&self) -> &str {
         self.filter.value()
     }
 
     /// Whether selection builds a Unite set rather than choosing one workspace.
     #[must_use]
-    #[coverage(off)]
     pub const fn is_unite(&self) -> bool {
         self.unite
     }
 
     /// Whether cleanup has been explicitly requested and awaits y/n confirmation.
     #[must_use]
-    #[coverage(off)]
     pub const fn cleanup_confirming(&self) -> bool {
         self.cleanup_confirming
     }
 
     /// Path whose registry entry awaits explicit removal confirmation.
     #[must_use]
-    #[coverage(off)]
     pub fn unregistering_path(&self) -> Option<&std::path::Path> {
         self.unregistering_path.as_deref()
     }
 
     /// Whether the destructive action is selected in the unregister modal.
     #[must_use]
-    #[coverage(off)]
     pub const fn unregister_confirm_selected(&self) -> bool {
         self.unregister_confirmation.is_confirm_selected()
     }
 
     /// Shared confirmation-modal state for the pending unregister action.
     #[must_use]
-    #[coverage(off)]
     pub const fn unregister_confirmation(&self) -> ConfirmationModal {
         self.unregister_confirmation
     }
 
     /// Append one character to the filter and return selection to its first hit.
-    #[coverage(off)]
     pub fn push_filter(&mut self, ch: char) {
         self.filter.insert(ch);
         self.selected_index = 0;
     }
 
     /// Delete one filter character and return selection to its first hit.
-    #[coverage(off)]
     pub fn pop_filter(&mut self) {
         self.filter.backspace();
         self.selected_index = 0;
     }
 
     /// Move the always-active filter cursor one character left.
-    #[coverage(off)]
     pub fn filter_left(&mut self) {
         self.filter.move_left();
     }
 
     /// Move the always-active filter cursor one character right.
-    #[coverage(off)]
     pub fn filter_right(&mut self) {
         self.filter.move_right();
     }
 
     /// Move the filter caret to the start of the line (Home / Ctrl-A).
-    #[coverage(off)]
     pub fn filter_home(&mut self) {
         self.filter.move_home();
     }
 
     /// Move the filter caret to the end of the line (End / Ctrl-E).
-    #[coverage(off)]
     pub fn filter_end(&mut self) {
         self.filter.move_end();
     }
 
     /// Forward-delete at the filter caret (Delete), returning to the first hit.
-    #[coverage(off)]
     pub fn filter_delete_forward(&mut self) {
         self.filter.delete_forward();
         self.selected_index = 0;
     }
 
     /// Extend the filter selection one character left (Shift+Left).
-    #[coverage(off)]
     pub fn filter_select_left(&mut self) {
         self.filter.select_left();
     }
 
     /// Extend the filter selection one character right (Shift+Right).
-    #[coverage(off)]
     pub fn filter_select_right(&mut self) {
         self.filter.select_right();
     }
 
     /// Extend the filter selection to the start of the line (Shift+Home).
-    #[coverage(off)]
     pub fn filter_select_home(&mut self) {
         self.filter.select_home();
     }
 
     /// Extend the filter selection to the end of the line (Shift+End).
-    #[coverage(off)]
     pub fn filter_select_end(&mut self) {
         self.filter.select_end();
     }
 
     /// Switch between Single and Unite selection. A new Unite set starts empty.
-    #[coverage(off)]
     pub fn toggle_unite(&mut self) {
         self.unite = !self.unite;
         self.unite_paths.clear();
     }
 
     /// Add or remove the selected workspace from the Unite set.
-    #[coverage(off)]
     pub fn toggle_unite_member(&mut self) {
         let Some(path) = self.selected().map(|workspace| workspace.path.clone()) else {
             return;
@@ -244,7 +224,6 @@ impl Open {
 
     /// Return selected Unite paths in registry order.
     #[must_use]
-    #[coverage(off)]
     pub fn unite_paths(&self) -> Vec<std::path::PathBuf> {
         self.workspaces
             .iter()
@@ -254,13 +233,11 @@ impl Open {
     }
 
     /// Ask for an explicit cleanup confirmation.
-    #[coverage(off)]
     pub fn request_cleanup(&mut self) {
         self.cleanup_confirming = true;
     }
 
     /// Dismiss a cleanup confirmation without mutating the registry.
-    #[coverage(off)]
     pub fn cancel_cleanup(&mut self) {
         self.cleanup_confirming = false;
     }
@@ -269,27 +246,23 @@ impl Open {
     ///
     /// This records only the entry path. The caller owns the actual registry
     /// mutation, so this view can never delete the workspace directory or data.
-    #[coverage(off)]
     pub fn request_unregister(&mut self) {
         self.unregistering_path = self.selected().map(|workspace| workspace.path.clone());
         self.unregister_confirmation.select_confirm();
     }
 
     /// Dismiss a selected-entry unregister confirmation without mutation.
-    #[coverage(off)]
     pub fn cancel_unregister(&mut self) {
         self.unregistering_path = None;
         self.unregister_confirmation.select_confirm();
     }
 
     /// Move the unregister modal focus between its confirm and cancel buttons.
-    #[coverage(off)]
     pub fn toggle_unregister_choice(&mut self) {
         self.unregister_confirmation.toggle();
     }
 
     /// Consume the path selected for confirmed registry removal.
-    #[coverage(off)]
     pub fn confirm_unregister(&mut self) -> Option<std::path::PathBuf> {
         if !self.unregister_confirmation.is_confirm_selected() {
             self.cancel_unregister();
@@ -299,7 +272,6 @@ impl Open {
     }
 
     /// Finish a confirmed cleanup, removing the returned registry paths locally.
-    #[coverage(off)]
     pub fn remove_paths(&mut self, paths: &[std::path::PathBuf]) {
         self.workspaces
             .retain(|overview| !paths.iter().any(|path| path == &overview.workspace.path));
@@ -310,7 +282,6 @@ impl Open {
         self.selected_index = 0;
     }
 
-    #[coverage(off)]
     fn filtered(&self) -> Vec<&WorkspaceOverview> {
         let filter = self.filter.value().to_lowercase();
         self.workspaces
@@ -322,7 +293,6 @@ impl Open {
     /// `workspace` と同じ path の項目に touch 後の値を反映する。
     ///
     /// Open list は名前順なので、最終利用時刻の更新で行を並べ替えない。
-    #[coverage(off)]
     pub(crate) fn record_opened(&mut self, workspace: &Workspace) {
         let selected_path = self.selected().map(|selected| selected.path.clone());
         let Some(current) = self
@@ -343,34 +313,25 @@ impl Open {
     }
 
     /// 選択を 1 つ下へ（末尾から先頭へ回り込む）。空一覧では何もしない。
-    #[coverage(off)]
     pub fn select_next(&mut self) {
         if self.filtered().is_empty() {
             return;
         }
         let len = self.filtered().len();
-        if len == 0 {
-            return;
-        }
         self.selected_index = (self.selected_index + 1) % len;
     }
 
     /// 選択を 1 つ上へ（先頭から末尾へ回り込む）。空一覧では何もしない。
-    #[coverage(off)]
     pub fn select_prev(&mut self) {
         if self.filtered().is_empty() {
             return;
         }
         let len = self.filtered().len();
-        if len == 0 {
-            return;
-        }
         self.selected_index = self.selected_index.checked_sub(1).unwrap_or(len - 1);
     }
 }
 
 /// ANSI 付き断片を表示幅 `width` に詰める（広ければ切り、狭ければ空白で右を埋める）。
-#[coverage(off)]
 fn fit(text: &str, width: usize) -> String {
     let clipped = widgets::clip_to_width(text, width);
     let visible = widgets::display_width(&clipped);
@@ -378,7 +339,6 @@ fn fit(text: &str, width: usize) -> String {
 }
 
 /// 一覧の名前行。選択行はカーソルと名前を強調する。
-#[coverage(off)]
 fn workspace_name_row(workspace: &Workspace, is_selected: bool) -> String {
     let cursor = if is_selected {
         Role::Danger.style().bold().paint(">")
@@ -395,7 +355,6 @@ fn workspace_name_row(workspace: &Workspace, is_selected: bool) -> String {
 }
 
 /// 一覧の名前行の下に置く、workspace の状態をひと目で読める補助行。
-#[coverage(off)]
 fn workspace_stats_row(overview: &WorkspaceOverview, now: DateTime<Utc>) -> String {
     let sessions = overview.session_count;
     let session_label = if sessions == 1 { "session" } else { "sessions" };
@@ -407,7 +366,6 @@ fn workspace_stats_row(overview: &WorkspaceOverview, now: DateTime<Utc>) -> Stri
 }
 
 /// 共通 [`TextInput`] の編集位置を明示した、常時フォーカスされる Filter 行。
-#[coverage(off)]
 fn filter_line(open: &Open) -> String {
     let input = &open.filter;
     // 共通 widget が input 全体を accent で描き、編集位置だけを block cursor にする。
@@ -430,7 +388,6 @@ fn filter_line(open: &Open) -> String {
 }
 
 /// 一覧ブロック（見出し＋各 workspace 行＋選択中パス）を組み、端末幅 `width` に中央寄せする。
-#[coverage(off)]
 fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
     let left_pad = " ".repeat(widgets::centered_padding(width, BLOCK_WIDTH));
     let indent = |line: &str| format!("{left_pad}{}", widgets::clip_to_width(line, BLOCK_WIDTH));
@@ -485,7 +442,6 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
 /// マスコット・タイトル・フッタの配置は共通の [`mascot_screen`] レイアウトに任せ、この関数は
 /// ボディ（workspace 一覧）だけを組む。`now` は相対時刻に使うので呼び出し側が渡す。
 #[must_use]
-#[coverage(off)]
 pub fn render(raw_height: usize, raw_width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
     mascot_screen::render(raw_height, raw_width, TITLE, FOOTER, |width| {
         body_lines(width, open, now)
@@ -494,6 +450,7 @@ pub fn render(raw_height: usize, raw_width: usize, open: &Open, now: DateTime<Ut
 
 #[cfg(test)]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{Open, render};
     use crate::presentation::widgets::display_width;
     use chrono::{DateTime, Duration, Utc};
@@ -685,6 +642,10 @@ mod tests {
 
     #[test]
     fn unite_members_follow_registry_order_and_cleanup_removes_them() {
+        let mut empty = Open::new(Vec::new());
+        empty.toggle_unite_member();
+        assert!(empty.unite_paths().is_empty());
+
         let mut open = Open::new(vec![workspace("alpha", 1), workspace("beta", 2)]);
         open.toggle_unite();
         open.toggle_unite_member();
@@ -756,5 +717,26 @@ mod tests {
         assert!(joined.contains("⎇ 3 sessions  ·  ● 2 open  ·  ◷ updated 2h ago"));
         assert!(joined.contains("Workspaces"));
         assert!(!joined.contains("A–Z"));
+    }
+
+    #[test]
+    fn filter_editor_routes_every_caret_selection_and_delete_operation() {
+        let mut open = Open::new(vec![workspace("alpha", 1)]);
+        for ch in "alpha".chars() {
+            open.push_filter(ch);
+        }
+        open.filter_home();
+        open.filter_right();
+        open.filter_select_right();
+        open.filter_select_end();
+        open.push_filter('x');
+        open.filter_end();
+        open.filter_select_left();
+        open.filter_select_home();
+        open.push_filter('a');
+        open.filter_left();
+        open.filter_delete_forward();
+        open.pop_filter();
+        assert_eq!(open.selected_index(), 0);
     }
 }

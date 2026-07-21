@@ -637,8 +637,9 @@ impl WorkspaceRuntime {
         git_diffs: &BTreeMap<SessionId, GitDiff>,
         terminal_view: Option<TerminalViewProjection>,
     ) -> Vec<String> {
+        let root_cwd = root_cwd.into();
         let projection =
-            HomeProjection::from_state(&self.state, workspace_name, root_cwd, sessions)
+            HomeProjection::from_state(&self.state, workspace_name, &root_cwd, sessions)
                 .with_pane(self.panes.active_pane())
                 .with_metrics(metrics)
                 .with_git_diffs(git_diffs)

@@ -80,7 +80,6 @@ impl PrModal {
 
     /// Builds the modal from the daemon-owned PR snapshot projection.
     #[must_use]
-    #[coverage(off)] // Daemon snapshot conversion is exercised through the injected workspace port; this legacy modal's layout tests use persisted links.
     pub fn from_entries(entries: &[PrEntry]) -> Self {
         Self::new(
             entries
@@ -153,7 +152,6 @@ impl PrModal {
 }
 
 /// PR の状態のラベルと色（open=success / merged=feature / dismissed=dim）。
-#[coverage(off)]
 fn state_label(pr: &PrLink) -> (&'static str, Style) {
     if pr.lookup_error.as_deref() == Some("closed") {
         return ("closed", Style::new().dim());
@@ -266,8 +264,10 @@ pub fn render_over(
 
 #[cfg(test)]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{PrModal, render, render_over};
     use crate::presentation::widgets::{display_width, strip_ansi};
+    use usagi_core::domain::pr_inventory::{PrEntry, PrRefreshState, PrState, canonicalize};
     use usagi_core::domain::pullrequest::PrLink;
 
     #[test]
@@ -299,6 +299,37 @@ mod tests {
         assert_eq!(modal.selected_pr().map(|p| p.number), Some(812));
         // derive された Clone / Debug も触れる。
         assert!(format!("{:?}", modal.clone()).contains("812"));
+    }
+
+    #[test]
+    fn daemon_entries_project_every_state_and_refresh_flag() {
+        let states = [
+            PrState::Open,
+            PrState::Closed,
+            PrState::Merged,
+            PrState::Dismissed,
+        ];
+        let entries = states
+            .into_iter()
+            .enumerate()
+            .map(|(index, state)| PrEntry {
+                identity: canonicalize(&format!("https://github.com/o/r/pull/{}", index + 1))
+                    .unwrap(),
+                title: Some(format!("PR {index}")),
+                state,
+                pinned: false,
+                refresh: if index == 0 {
+                    PrRefreshState::Pending
+                } else {
+                    PrRefreshState::Idle
+                },
+            })
+            .collect::<Vec<_>>();
+        let modal = PrModal::from_entries(&entries);
+        assert_eq!(modal.prs().len(), 4);
+        assert!(modal.prs()[0].refreshing);
+        let rendered = joined(&modal);
+        assert!(rendered.contains("open"));
     }
 
     #[test]

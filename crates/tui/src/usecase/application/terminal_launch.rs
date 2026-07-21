@@ -140,8 +140,8 @@ impl<P: TerminalLaunchPort + TerminalPort> TerminalLaunchAdapter<P> {
 }
 
 #[cfg(test)]
-#[coverage(off)] // Fake transport plumbing is exercised through adapter outcomes.
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::*;
     use crate::usecase::application::{
         controller::Target,
@@ -178,6 +178,7 @@ mod tests {
             Ok(self.inventory[0].clone())
         }
     }
+    #[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=terminal_launch_fake_port_contract
     impl TerminalPort for Fake {
         fn inventory(
             &mut self,
@@ -206,12 +207,12 @@ mod tests {
         }
         fn resync(
             &mut self,
-            _: &TerminalRef,
+            terminal: &TerminalRef,
         ) -> Result<
             super::super::pane_runtime::TerminalSnapshot,
             super::super::pane_runtime::TerminalError,
         > {
-            unreachable!()
+            self.attach(terminal, None)
         }
         fn input(
             &mut self,
@@ -273,8 +274,16 @@ mod tests {
         adapter.dispatch(&mut runtime, effect.clone());
         adapter.dispatch(&mut runtime, effect);
         assert_eq!(adapter.port().launched, 0);
-        assert_eq!(adapter.port().attached, vec![terminal]);
+        assert_eq!(adapter.port().attached, vec![terminal.clone()]);
         assert!(matches!(runtime.pane().tabs(), [PaneTab::Live(_)]));
+
+        let port = adapter.port_mut();
+        assert!(port.inventory().unwrap().is_empty());
+        let _ = port.resync(&terminal).unwrap();
+        port.input(&terminal, b"input").unwrap();
+        port.resize(&terminal, Geometry { cols: 1, rows: 1 })
+            .unwrap();
+        port.detach(&terminal);
     }
     #[test]
     fn new_launches_once_then_attaches_returned_ref() {
