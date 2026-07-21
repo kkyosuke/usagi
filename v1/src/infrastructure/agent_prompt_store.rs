@@ -25,6 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::workspace_state::SessionAgent;
 use crate::infrastructure::store_lock::{self, StoreLock};
 use crate::infrastructure::worktree_keyed_store::{
     self, dir, file_name, key, read_ours, write_stamped, WorktreeStamped,
@@ -142,6 +143,17 @@ pub fn set(worktree: &Path, prompt: &str) -> Result<()> {
 /// uses this opt-in when it chose the launch channel only because no TUI marker
 /// was present.
 pub fn set_with_live_handoff(worktree: &Path, prompt: &str, reuse_live_agent: bool) -> Result<()> {
+    set_with_agent_handoff(worktree, prompt, reuse_live_agent, SessionAgent::default())
+}
+
+/// Queue a prompt together with the session identity snapshot selected by the
+/// caller's inventory port.
+pub fn set_with_agent_handoff(
+    worktree: &Path,
+    prompt: &str,
+    reuse_live_agent: bool,
+    agent: SessionAgent,
+) -> Result<()> {
     let key = key(worktree);
     let dir = dir(PROMPT_SUBDIR)?;
     // Hold the store lock across the write so a concurrent `take` (in the TUI
@@ -162,7 +174,7 @@ pub fn set_with_live_handoff(worktree: &Path, prompt: &str, reuse_live_agent: bo
     // Publish the launch transaction only after the prompt record is durable.
     // session_prompt saves its SessionAgent override before calling this API, so
     // the request pins the authoritative CLI/model generation it belongs to.
-    crate::infrastructure::agent_start_store::publish(worktree, prompt, reuse_live_agent)?;
+    crate::infrastructure::agent_start_store::publish(worktree, prompt, reuse_live_agent, agent)?;
     Ok(())
 }
 
@@ -468,7 +480,10 @@ pub fn requeue_front_with_state(
             reuse_live_agent,
         },
     )?;
-    crate::infrastructure::agent_start_store::publish(worktree, &merged, reuse_live_agent)?;
+    let agent = crate::infrastructure::agent_start_store::read(worktree)
+        .map(|request| request.agent)
+        .unwrap_or_default();
+    crate::infrastructure::agent_start_store::publish(worktree, &merged, reuse_live_agent, agent)?;
     Ok(())
 }
 
@@ -553,6 +568,29 @@ mod tests {
             assert_eq!(take(wt.path()), Some("implement issue #50".to_string()));
             // Taking again finds nothing: the prompt is one-shot.
             assert_eq!(take(wt.path()), None);
+        });
+    }
+
+    #[test]
+    fn set_with_agent_handoff_persists_the_supplied_identity_snapshot() {
+        use crate::domain::settings::AgentCli;
+
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            let agent = SessionAgent {
+                cli: Some(AgentCli::Codex),
+                model: Some("gpt-snapshot".into()),
+            };
+
+            set_with_agent_handoff(wt.path(), "queued", false, agent.clone()).unwrap();
+
+            assert_eq!(
+                crate::infrastructure::agent_start_store::read(wt.path())
+                    .unwrap()
+                    .agent,
+                agent
+            );
+            assert_eq!(take(wt.path()).as_deref(), Some("queued"));
         });
     }
 

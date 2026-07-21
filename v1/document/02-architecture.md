@@ -40,6 +40,19 @@ presentation ──> usecase/settings ──> Settings snapshot
                                          └──────────────┴──> infrastructure/process
 ```
 
+session lifecycle では usecase が inventory と setup execution の port を所有します。
+合成ルートは filesystem/process adapter を port に束縛し、agent start store には解決済みの
+`SessionAgent` snapshot を渡します。store 自身が session 一覧を取得することはありません。
+
+```text
+composition ──> usecase/session ports <── fake ports (tests)
+     │                    │
+     ├──> filesystem inventory adapter ──> SessionRecord snapshot
+     └──> setup process adapter
+
+usecase/session ──> SessionAgent snapshot ──> agent start store
+```
+
 ## 各層の責務
 
 各層の代表的な型・モジュールは下の[モジュール構成](#モジュール構成src)を参照してください。
@@ -57,6 +70,7 @@ presentation ──> usecase/settings ──> Settings snapshot
 src/
 ├── main.rs                     # エントリポイント
 ├── lib.rs                      # クレートルート（層モジュールの公開）
+├── composition.rs              # session inventory/setup port と production adapter の束縛
 ├── test_support.rs             # テスト用ヘルパ
 │
 ├── domain/                     # 純粋なエンティティ（他層非依存。永続化用の serde・時刻の chrono のみ許容）
@@ -87,7 +101,7 @@ src/
 │   ├── settings.rs             # グローバル設定の load/更新、ローカル設定と実効設定の解決（effective）
 │   ├── search.rs               # 全文検索のマッチ規則の正本（Unicode-aware case-fold + contains。issue/memory 検索が共用）
 │   ├── session/               # セッションのライフサイクル
-│   │   ├── mod.rs             # create / remove と state.json への記録（SessionRecord）
+│   │   ├── mod.rs             # create / remove、inventory/setup port と state.json への記録（SessionRecord）
 │   │   ├── tree.rs            # ルート再帰走査・worktree 構築・非 git コピー・リポジトリ探索
 │   │   └── reconcile.rs       # state.json と .usagi/sessions/ の照合・孤児ディレクトリの強制削除
 │   ├── doctor/                 # 依存ツール・Agent CLI の導入状況チェック（mod=診断 / runner=CommandRunner / fix=--fix 導入）
@@ -119,6 +133,8 @@ src/
 │   ├── env_resolver/           # 注入された実効 Settings snapshot の op:// binding を process primitive で解決（global usecase には依存しない）
 │   ├── resource.rs             # sysinfo による実プロセスの CPU/メモリ計測（ResourceSampler トレイト + SysinfoSampler。集計は domain/resource）
 │   ├── session_monitor.rs      # 入力待ち判定の純粋ロジック（phase 優先・ベル基準値・待ち集合・アタッチ）
+│   ├── session_inventory.rs    # state.json を読む production inventory adapter の filesystem primitive
+│   ├── setup_runner.rs         # setup command を platform shell で実行する process primitive
 │   ├── skills.rs               # バイナリ同梱スキル（assets/skills/）を ~/.usagi/skills/ へ展開（materialize）し worktree の .claude/skills/<name> をスキルごとに symlink（link、プロジェクト独自スキルと共存）。配布の仕組みは 04-orchestration が正本
 │   ├── worktree_keyed_store.rs # worktree → ファイル名（canonical path のハッシュ）導出の正本。agent_state_store / agent_prompt_store / agent_live_prompt_store / agent_live_pane_store / pr_link_store が共用
 │   ├── agent_state_store.rs    # worktree 別の Agent phase の記録/読み出し・フック JSON のパース（~/.usagi/agent-state/。遷移ポリシーは usecase/agent_phase）
@@ -170,7 +186,8 @@ src/
 - 依存方向を逆流させない（例: `domain` から `infrastructure` を参照しない、`infrastructure` から `usecase` を参照しない）。
 - `presentation/` と `usecase/` は `infrastructure/` を利用してよいが、`infrastructure/` は上位層を知らない。
   `tests/architecture_dependencies.rs` が実コードの `crate::presentation` / `crate::usecase` 参照を拒否する。
-  #496 が扱う session inventory/setup の既存 2 ファイルだけを固定 exception とし、新しい exception は許可しない。
+  exception は設けず、新しい逆依存も許可しない。session inventory/setup adapter は合成ルートで
+  usecase-owned port に束縛する。
 - 各 TUI 画面は `state.rs`（状態）・`ui.rs`（描画）・`event.rs`（イベントループ）に分離し、
   ホーム画面はさらにコマンド解析/補完を `command/` に分離する。
 

@@ -1,14 +1,14 @@
 ---
 number: 496
 title: refactor(v1): session inventory と setup runner を port で反転する
-status: todo
+status: done
 priority: medium
 labels: [review, v1, architecture, session]
 dependson: []
 related: [59, 113]
 parent: 453
 created_at: 2026-07-20T12:07:07.703409+00:00
-updated_at: 2026-07-20T12:07:07.703409+00:00
+updated_at: 2026-07-21T13:54:50.912897+00:00
 ---
 
 ## 問題・影響

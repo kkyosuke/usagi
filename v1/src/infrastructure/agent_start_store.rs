@@ -71,36 +71,21 @@ fn write_at(base: &Path, request: &StartRequest) -> Result<()> {
     write_stamped(base, &path, request)
 }
 
-fn authoritative_agent(worktree: &Path) -> SessionAgent {
-    let workspace = crate::usecase::session::workspace_root(worktree);
-    let Ok(sessions) = crate::usecase::session::list(&workspace) else {
-        return SessionAgent::default();
-    };
-    for session in sessions {
-        if session.root == worktree {
-            return session.agent;
-        }
-        for candidate in &session.worktrees {
-            if candidate.path == worktree {
-                return session.agent;
-            }
-        }
-    }
-    SessionAgent::default()
-}
-
 /// Publish or replace the launch transaction after the authoritative session
 /// state has been saved. The monotonically increasing generation prevents a
 /// late consumer from substituting a newer launch pair into an older request.
-pub fn publish(worktree: &Path, prompt: &str, reuse_live_agent: bool) -> Result<StartRequest> {
+///
+/// `agent` is the identity snapshot selected by session orchestration. This
+/// store deliberately does not discover sessions: callers must resolve the
+/// snapshot before crossing the persistence boundary.
+pub fn publish(
+    worktree: &Path,
+    prompt: &str,
+    reuse_live_agent: bool,
+    agent: SessionAgent,
+) -> Result<StartRequest> {
     let base = dir(SUBDIR)?;
-    publish_in(
-        &base,
-        worktree,
-        prompt,
-        reuse_live_agent,
-        authoritative_agent(worktree),
-    )
+    publish_in(&base, worktree, prompt, reuse_live_agent, agent)
 }
 
 fn publish_in(
@@ -261,11 +246,6 @@ pub fn queued_worktrees_in(base: &Path) -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use crate::domain::settings::AgentCli;
-    use crate::domain::workspace_state::{
-        BranchStatus, SessionRecord, WorkspaceState, WorktreeState,
-    };
-    use crate::infrastructure::workspace_store::WorkspaceStore;
-    use chrono::Utc;
 
     fn agent(cli: AgentCli, model: &str) -> SessionAgent {
         SessionAgent {
@@ -361,7 +341,7 @@ mod tests {
         std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
 
         assert!(claim(&wt, "none", SystemTime::now()).unwrap().is_none());
-        let mut request = publish(&wt, "go", false).unwrap();
+        let mut request = publish(&wt, "go", false, SessionAgent::default()).unwrap();
         assert_eq!(read(&wt).unwrap().id, request.id);
         assert_eq!(
             queued_worktrees_in(&home.path().join(SUBDIR)),
@@ -410,84 +390,6 @@ mod tests {
                 state
             );
         }
-    }
-
-    fn session(root: PathBuf, worktrees: Vec<WorktreeState>, agent: SessionAgent) -> SessionRecord {
-        SessionRecord {
-            name: "work".into(),
-            display_name: None,
-            note: None,
-            label_id: None,
-            agent,
-            origin: Default::default(),
-            started_from: None,
-            root,
-            worktrees,
-            worktree_provenance: Vec::new(),
-            todos: Vec::new(),
-            decisions: Vec::new(),
-            created_at: Utc::now(),
-            last_active: None,
-        }
-    }
-
-    #[test]
-    fn authoritative_agent_covers_root_worktree_and_unreadable_state() {
-        let workspace = tempfile::tempdir().unwrap();
-        let session_root = workspace.path().join(".usagi/sessions/work");
-        fs::create_dir_all(&session_root).unwrap();
-        let pair = agent(AgentCli::Codex, "root-model");
-        let store = WorkspaceStore::new(workspace.path());
-        store
-            .save(&WorkspaceState {
-                sessions: vec![session(session_root.clone(), Vec::new(), pair.clone())],
-                ..WorkspaceState::default()
-            })
-            .unwrap();
-        assert_eq!(authoritative_agent(&session_root), pair);
-
-        let secondary = session_root.join("repo");
-        fs::create_dir(&secondary).unwrap();
-        let pair = agent(AgentCli::Claude, "secondary-model");
-        store
-            .save(&WorkspaceState {
-                sessions: vec![session(
-                    session_root.clone(),
-                    vec![
-                        WorktreeState {
-                            branch: Some("other".into()),
-                            path: session_root.join("other"),
-                            head: "def5678".into(),
-                            primary: false,
-                            upstream: None,
-                            status: BranchStatus::New,
-                            diff: None,
-                            ahead_behind: None,
-                            pr: Vec::new(),
-                            updated_at: Utc::now(),
-                        },
-                        WorktreeState {
-                            branch: Some("work".into()),
-                            path: secondary.clone(),
-                            head: "abc1234".into(),
-                            primary: false,
-                            upstream: None,
-                            status: BranchStatus::New,
-                            diff: None,
-                            ahead_behind: None,
-                            pr: Vec::new(),
-                            updated_at: Utc::now(),
-                        },
-                    ],
-                    pair.clone(),
-                )],
-                ..WorkspaceState::default()
-            })
-            .unwrap();
-        assert_eq!(authoritative_agent(&secondary), pair);
-
-        fs::write(store.state_path(), "not json").unwrap();
-        assert_eq!(authoritative_agent(&session_root), SessionAgent::default());
     }
 
     #[test]

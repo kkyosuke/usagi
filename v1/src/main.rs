@@ -32,10 +32,12 @@ impl AgentBackend for CliAgentBackend {
         delivery: LaunchPromptDelivery,
     ) -> Result<String, String> {
         let reuse_live_agent = delivery == LaunchPromptDelivery::ReuseLiveAgent;
-        usagi::infrastructure::agent_prompt_store::set_with_live_handoff(
+        let agent = usagi::composition::agent_snapshot(worktree).map_err(|e| e.to_string())?;
+        usagi::infrastructure::agent_prompt_store::set_with_agent_handoff(
             worktree,
             prompt,
             reuse_live_agent,
+            agent,
         )
         .map_err(|e| e.to_string())?;
         match delivery {

@@ -41,7 +41,6 @@ use crate::domain::workspace_state::{
     SessionRecord, SessionRemovalPhase, SessionTodo, WorkspaceState,
 };
 use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR};
-use crate::infrastructure::setup_runner::SystemSetupCommandRunner;
 use crate::infrastructure::workspace_store::WorkspaceStore;
 use crate::infrastructure::{
     agent_live_pane_store, agent_live_prompt_store, agent_prompt_store, agent_state_store, git,
@@ -97,6 +96,33 @@ pub trait SetupCommandRunner {
     fn run(&self, cwd: &Path, command: &str) -> Result<()>;
 }
 
+/// Read the stable session inventory needed to select a launch identity.
+///
+/// Filesystem adapters return a snapshot; orchestration owns matching a
+/// worktree to a session and choosing its agent override.
+pub trait SessionInventory {
+    fn workspace_root(&self, start: &Path) -> PathBuf;
+    fn sessions(&self, workspace_root: &Path) -> Result<Vec<SessionRecord>>;
+}
+
+/// Resolve the agent identity for `worktree` from one injected inventory
+/// snapshot. Unknown worktrees intentionally use the workspace default.
+pub fn agent_snapshot(inventory: &dyn SessionInventory, worktree: &Path) -> Result<SessionAgent> {
+    let workspace_root = inventory.workspace_root(worktree);
+    Ok(inventory
+        .sessions(&workspace_root)?
+        .into_iter()
+        .find(|session| {
+            session.root == worktree
+                || session
+                    .worktrees
+                    .iter()
+                    .any(|candidate| candidate.path == worktree)
+        })
+        .map(|session| session.agent)
+        .unwrap_or_default())
+}
+
 /// Create session `name` under `workspace_root`, following the workspace's
 /// effective agent settings for its launches.
 ///
@@ -149,7 +175,7 @@ pub fn create_with_agent(
         agent,
         origin,
         started_from,
-        &SystemSetupCommandRunner,
+        &crate::composition::ProductionSetupRunner,
         None,
     )
 }
@@ -174,7 +200,7 @@ pub fn create_with_agent_at_base(
         agent,
         origin,
         started_from,
-        &SystemSetupCommandRunner,
+        &crate::composition::ProductionSetupRunner,
         Some(base_commit),
     )
 }
@@ -1615,8 +1641,8 @@ pub fn session_roots(workspace_root: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::composition::ProductionSetupRunner;
     use crate::infrastructure::git::test_command as git_cmd;
-    use crate::infrastructure::setup_runner::SystemSetupCommandRunner;
     use crate::usecase::settings;
     use anyhow::anyhow;
     use chrono::TimeZone;
@@ -1660,6 +1686,91 @@ mod tests {
         fail_on: Option<String>,
     }
 
+    struct FakeInventory {
+        calls: RefCell<Vec<(&'static str, PathBuf)>>,
+        sessions: Result<Vec<SessionRecord>, &'static str>,
+    }
+
+    impl SessionInventory for FakeInventory {
+        fn workspace_root(&self, start: &Path) -> PathBuf {
+            self.calls
+                .borrow_mut()
+                .push(("workspace_root", start.to_path_buf()));
+            PathBuf::from("/workspace")
+        }
+
+        fn sessions(&self, workspace_root: &Path) -> Result<Vec<SessionRecord>> {
+            self.calls
+                .borrow_mut()
+                .push(("sessions", workspace_root.to_path_buf()));
+            self.sessions.clone().map_err(|error| anyhow!(error))
+        }
+    }
+
+    fn inventory_session(root: PathBuf, agent: SessionAgent) -> SessionRecord {
+        SessionRecord {
+            name: "work".into(),
+            display_name: None,
+            note: None,
+            todos: Vec::new(),
+            decisions: Vec::new(),
+            label_id: None,
+            agent,
+            origin: SessionOrigin::Mcp,
+            started_from: None,
+            root,
+            worktrees: Vec::new(),
+            worktree_provenance: Vec::new(),
+            created_at: Utc::now(),
+            last_active: None,
+        }
+    }
+
+    #[test]
+    fn fake_inventory_fixes_start_identity_success_fallback_failure_and_order() {
+        use crate::domain::settings::AgentCli;
+
+        let workspace = PathBuf::from("/workspace");
+        let worktree = workspace.join(".usagi/sessions/work");
+        let selected = SessionAgent {
+            cli: Some(AgentCli::Codex),
+            model: Some("gpt-test".into()),
+        };
+        let inventory = FakeInventory {
+            calls: RefCell::new(Vec::new()),
+            sessions: Ok(vec![inventory_session(worktree.clone(), selected.clone())]),
+        };
+
+        assert_eq!(agent_snapshot(&inventory, &worktree).unwrap(), selected);
+        assert_eq!(
+            agent_snapshot(&inventory, &workspace.join("unknown")).unwrap(),
+            SessionAgent::default()
+        );
+        assert_eq!(
+            inventory.calls.borrow().as_slice(),
+            [
+                ("workspace_root", worktree.clone()),
+                ("sessions", workspace.clone()),
+                ("workspace_root", workspace.join("unknown")),
+                ("sessions", workspace.clone()),
+            ],
+            "each start resolves its workspace before reading one inventory snapshot",
+        );
+
+        let failing = FakeInventory {
+            calls: RefCell::new(Vec::new()),
+            sessions: Err("inventory unavailable"),
+        };
+        assert!(agent_snapshot(&failing, &worktree)
+            .unwrap_err()
+            .to_string()
+            .contains("inventory unavailable"));
+        assert_eq!(
+            failing.calls.borrow().as_slice(),
+            [("workspace_root", worktree), ("sessions", workspace),]
+        );
+    }
+
     impl SetupCommandRunner for RecordingSetupRunner {
         fn run(&self, cwd: &Path, command: &str) -> Result<()> {
             self.calls
@@ -1676,7 +1787,7 @@ mod tests {
     #[test]
     fn system_setup_runner_runs_in_the_given_directory_and_reports_failure() {
         let dir = tempfile::tempdir().unwrap();
-        let runner = SystemSetupCommandRunner;
+        let runner = ProductionSetupRunner;
         #[cfg(not(windows))]
         let command = "printf hello > setup.txt";
         #[cfg(windows)]
