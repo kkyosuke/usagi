@@ -3266,7 +3266,7 @@ mod tests {
         SessionCommandPortFactory, SessionCommandResult, Start, TerminalAttach, TerminalChunk,
         TerminalError, UnavailableAgentCommandPort, UnavailableBackendPort,
         UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
-        UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
+        UnavailableExternalTerminalPort, UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
         UnavailableSessionCommandPortFactory, WelcomeStep, WorkspaceLoader, WorkspaceRuntime,
         WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
         begin_terminal_selection_on_click, close_exited_panes, controller_terminal_view,
@@ -3596,6 +3596,14 @@ mod tests {
             self.0.lock().unwrap().push(directory.to_path_buf());
             Ok(())
         }
+    }
+
+    #[test]
+    fn unavailable_external_terminal_port_returns_a_safe_error() {
+        assert_eq!(
+            UnavailableExternalTerminalPort.open(Path::new("/tmp/worktree")),
+            Err("external terminal launch is unavailable".to_owned())
+        );
     }
 
     #[test]
