@@ -98,7 +98,8 @@ tool は系統ごとに分かれ、`tools/list` に載る `name` と `inputSchem
 | `session_create` / `session_remove` / `session_recover_legacy` | daemon IPC を通じて session lifecycle store と worktree を操作する |
 | `session_list` / `session_status` | daemon の durable lifecycle snapshot を返す。`session_status` は agent phase と worktree の branch/status/dirty/merged も投影する |
 | `session_prompt` | `auto` / `queue` / `live` を daemon が解決し、次回 Agent launch 用の durable queue または live Agent PTY へ配送する |
-| `session_delegate_issue` / `session_delegate_brief` | session 作成と durable prompt queue 投入を 1 回の daemon request で完了する |
+| `session_delegate_issue` | session 作成と durable prompt queue 投入を 1 回の daemon request で完了する |
+| `session_delegate_brief` | session を作成し、認証済み caller が一意に選択した worker へ brief を直ちに dispatch する |
 | `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す |
 | `session_complete` | 認証済み session Agent の完了メッセージを workspace root coordinator へ `auto` 配送する |
 | `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child の session worktree にある machine-local scratchpad を core usecase 経由で読み書きする |
@@ -114,6 +115,9 @@ dispatch 系は credential から caller と current run を復元する。`sess
 その session worktree で worker PTY を起動して run/agent/binding を durable に保存する。worker の
 `agent_complete` / `agent_fail` は保存済み binding の caller inbox だけへ配送され、`agent_inbox` は
 認証済み caller 自身の inbox だけを返す。payload の caller 名や cwd から identity を補完しない。
+
+`session_delegate_brief` も同じ credential/provenance と worker selector を使う。`agent` は既存 worker の
+`id`、または allowlist にある `runtime` と `model` の組のいずれか一方だけであり、混在・部分指定は受理しない。
 
 `supervisor_start` は root task と初期 DAG を snapshot と append-only event journal に保存し、同じ
 `idempotency_key` の再送では同じ run を返す。get/list/events の応答は instruction body を含まない安全な

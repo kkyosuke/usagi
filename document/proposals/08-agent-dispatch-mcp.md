@@ -219,7 +219,7 @@ worktree 内で子プロセスとして起動する**ため、実行コンテキ
 
 | 既存 tool | 関係 | 移行方針 |
 |---|---|---|
-| `session_delegate_brief` | 起源フロー（事前 issue 不要でトリアージ session を起こす） | 維持。dispatch は「特定 agent への即時実行＋報告」で目的が異なる |
+| `session_delegate_brief` | 起源フロー（事前 issue 不要でトリアージ session を起こす） | 維持。`agent` selector を受け、同じ dispatch 経路で直ちに worker を起動する |
 | `session_delegate_issue` | 遂行フロー（committed issue を新 session へ委譲） | 維持。基点コミット検証（#110）もそのまま |
 | `issue_to_prompt` | issue → prompt 整形 | 維持。dispatch の prompt 生成に組み合わせて使える |
 | `session_prompt` | session の agent へ prompt 送信（`mode` 公開） | 維持。dispatch は `mode` を隠蔽した即時実行の上位入口 |
@@ -283,7 +283,7 @@ MCP server は起動時に workspace 設定と PATH executable locator を一度
 | new Claude agent | `{ runtime: "claude", model: enum }` | Claude allowlist と executable が必要 |
 | new Codex agent | `{ runtime: "codex", model: enum }` | Codex allowlist と executable が必要 |
 
-schema を迂回する caller に備え、MCP parser と daemon も id/runtime/model の排他性、runtime/model の完全組、allowlist membership を検証する。既存 `session_create` / `session_delegate_issue` / `session_delegate_brief` の `agent_cli` は破壊的変更を避けるため deprecated alias として移行期間だけ受けるが、`runtime` または `agent.id` と混在すれば migration error にする。
+schema を迂回する caller に備え、MCP parser と daemon も id/runtime/model の排他性、runtime/model の完全組、allowlist membership を検証する。既存 `session_create` / `session_delegate_issue` の `agent_cli` は破壊的変更を避けるため deprecated alias として移行期間だけ受けるが、`runtime` または `agent.id` と混在すれば migration error にする。`session_delegate_brief` は legacy alias を受けず、`session_dispatch` と同じ必須 `agent` selector を使う。
 
 schema は server lifetime の snapshot である。CLI install/uninstall、PATH、workspace allowlist の変更後は MCP server の再起動または client 再接続でのみ選択肢を再生成する。listing ごとに schema を変動させない。一方 daemon は dispatch launch の直前に current workspace allowlist と executable availability を再検証する。schema 発行後に設定が狭まる、CLI が削除される、PATH が変わる場合は spawn 前に safe invalid-argument / unavailable として拒否する。
 

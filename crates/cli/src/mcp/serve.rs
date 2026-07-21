@@ -287,7 +287,7 @@ fn tools_list_result(snapshot: &RuntimeModelSnapshot) -> Value {
         .map(|tool| {
             // 各 tool の input_schema は妥当な JSON（tools のテストで検証済み）。
             let mut schema: Value = serde_json::from_str(tool.input_schema()).unwrap();
-            if tool.name() == "session_dispatch" {
+            if matches!(tool.name(), "session_dispatch" | "session_delegate_brief") {
                 schema["properties"]["agent"] = snapshot.agent_schema();
             }
             json!({
@@ -327,7 +327,7 @@ fn tools_call(
         .cloned()
         .unwrap_or_else(|| json!({}));
     attach_session_caller(name, &mut arguments);
-    if name == "session_dispatch" {
+    if matches!(name, "session_dispatch" | "session_delegate_brief") {
         let Some(agent) = arguments.get("agent") else {
             return protocol::error(id, error_code::INVALID_PARAMS, "missing agent");
         };
@@ -335,10 +335,8 @@ fn tools_call(
             return protocol::error(id, error_code::INVALID_PARAMS, &message);
         }
     }
-    if matches!(
-        name,
-        "session_create" | "session_delegate_issue" | "session_delegate_brief"
-    ) && let Err(message) = snapshot.normalize_legacy_agent(&mut arguments)
+    if matches!(name, "session_create" | "session_delegate_issue")
+        && let Err(message) = snapshot.normalize_legacy_agent(&mut arguments)
     {
         return protocol::error(id, error_code::INVALID_PARAMS, &message);
     }
@@ -444,6 +442,7 @@ fn attach_session_caller(name: &str, arguments: &mut Value) {
             | "session_todo_remove"
             | "session_decision_list"
             | "session_decision_log"
+            | "session_delegate_brief"
     ) && let Ok(credential) = std::env::var("USAGI_MCP_CALLER_CREDENTIAL")
         && !credential.is_empty()
     {
@@ -932,8 +931,13 @@ mod tests {
             "session_delegate_issue",
             "session_delegate_brief",
         ] {
+            let arguments = if name == "session_delegate_brief" {
+                r#"{"brief":"triage this","agent":{"id":"00000000-0000-4000-8000-000000000000"}}"#
+            } else {
+                "{}"
+            };
             let request = format!(
-                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{{}}}}}}"#
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#
             ) + "\n";
             let input = initialized_input(&request);
             let mut out = Vec::new();
@@ -944,6 +948,39 @@ mod tests {
             serve_with_client(input.as_bytes(), &mut out, "9.9.9", &mut client).unwrap();
             assert_eq!(client.requests.len(), 1, "{name}");
             assert!(String::from_utf8(out).unwrap().contains("connected"));
+        }
+    }
+
+    #[test]
+    fn delegate_brief_requires_one_validated_agent_selector() {
+        let snapshot = RuntimeModelSnapshot::capture(
+            &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
+            &FakeLocator(&["claude"]),
+        );
+        for arguments in [
+            r#"{"brief":"triage"}"#,
+            r#"{"brief":"triage","agent":{"id":"a","runtime":"claude","model":"sonnet"}}"#,
+            r#"{"brief":"triage","agent":{"runtime":"claude"}}"#,
+        ] {
+            let request = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"session_delegate_brief","arguments":{arguments}}}}}"#
+            ) + "\n";
+            let input = initialized_input(&request);
+            let mut out = Vec::new();
+            let mut client = RecordingClient {
+                reply: Ok(DaemonReply::Ok(serde_json::json!({"unexpected":true}))),
+                requests: vec![],
+            };
+            serve_with_client_and_snapshot(
+                input.as_bytes(),
+                &mut out,
+                "9.9.9",
+                &mut client,
+                &snapshot,
+            )
+            .unwrap();
+            assert_eq!(client.requests.len(), 0);
+            assert_eq!(last_response(&out)["error"]["code"], -32602);
         }
     }
 

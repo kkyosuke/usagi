@@ -85,16 +85,34 @@ fn production_session_prompt_is_durable_and_status_observes_the_session() {
 }
 
 #[test]
-fn production_delegate_brief_creates_a_session_and_queues_the_wrapped_prompt() {
+fn production_delegate_brief_immediately_dispatches_an_isolated_triage_worker() {
     let mut mcp = McpHarness::start();
+    let caller_credential = mcp.launch_caller();
+    mcp.restart_with_credential(&caller_credential);
+    mcp.replace_fixture_agent(
+        "codex",
+        r#"#!/bin/sh
+if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
+printf '%s\n%s\n%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"brief-worker","version":"1"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_complete","arguments":{"summary":"brief triaged"}}}' \
+  | "$USAGI_E2E_USAGI" mcp >> "$USAGI_MCP_FIXTURE_LOG"
+"#,
+    );
     let response = mcp.tool(
         "session_delegate_brief",
-        &json!({"name":"brief-target","brief":"investigate flaky startup"}),
+        &json!({
+            "name":"brief-target",
+            "brief":"investigate flaky startup",
+            "agent":{"runtime":"codex","model":"fixture-codex"}
+        }),
     );
     assert!(response.get("error").is_none(), "{response}");
     let delegated = tool_text(&response);
     assert_eq!(delegated["name"], "brief-target");
-    assert_eq!(delegated["delivered_to"], "queue");
+    assert!(delegated["run_id"].is_string());
+    assert!(delegated["terminal"].is_object());
     assert!(
         mcp.workspace()
             .join(".usagi/sessions/brief-target/.git")
@@ -102,6 +120,38 @@ fn production_delegate_brief_creates_a_session_and_queues_the_wrapped_prompt() {
     );
     let dispatch = fs::read_to_string(mcp.data_dir().join("daemon/dispatch.json")).unwrap();
     assert!(dispatch.contains("investigate flaky startup"));
+    wait_until(|| {
+        let inbox = mcp.tool("agent_inbox", &json!({}));
+        inbox.get("error").is_none()
+            && tool_text(&inbox)["messages"]
+                .as_array()
+                .is_some_and(|messages| {
+                    messages.iter().any(|message| {
+                        message["run_id"] == delegated["run_id"]
+                            && message["kind"] == "completed"
+                            && message["summary"] == "brief triaged"
+                    })
+                })
+    });
+}
+
+#[test]
+fn production_delegate_brief_rejects_an_unknown_caller_without_creating_a_session() {
+    let mut mcp = McpHarness::start();
+    let response = mcp.tool(
+        "session_delegate_brief",
+        &json!({
+            "name":"unowned-brief",
+            "brief":"must not create a worktree",
+            "agent":{"runtime":"codex","model":"fixture-codex"}
+        }),
+    );
+    assert_eq!(response["error"]["code"], -32603);
+    assert!(
+        !mcp.workspace()
+            .join(".usagi/sessions/unowned-brief")
+            .exists()
+    );
 }
 
 #[test]
