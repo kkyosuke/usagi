@@ -644,6 +644,17 @@ mod tests {
         let due = worker.claim_due(&projector).unwrap();
         let result = worker.fetch(&due[0]);
         assert!(worker.complete(&mut projector, &id, result).unwrap());
+        assert!(
+            !projector
+                .publish_success(
+                    &id,
+                    &GhPrView {
+                        title: Some("fresh".into()),
+                        state: PrState::Open,
+                    },
+                )
+                .unwrap()
+        );
         assert!(worker.claim_due(&projector).unwrap().is_empty());
         clock.set(12_000);
         assert_eq!(worker.claim_due(&projector).unwrap(), vec![id]);
