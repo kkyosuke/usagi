@@ -8,11 +8,11 @@
 //! that extraction, so it is excluded from coverage (see `scripts/coverage.sh`).
 
 use std::collections::BTreeMap;
-use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use super::collect_resolved;
+use crate::domain::settings::Settings;
 use crate::infrastructure::process::{self, Limits, Outcome};
 
 const OP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -22,7 +22,7 @@ const OP_REAP_GRACE: Duration = Duration::from_millis(250);
 const MAX_OP_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_OP_STDERR_BYTES: usize = 4 * 1024;
 
-/// Resolve the secret environment configured for `workspace_root`.
+/// Resolve the secret environment from already-merged immutable `settings`.
 ///
 /// The returned map contains only variables whose name/reference pass
 /// [`Settings::env`](crate::domain::settings::Settings::env) and whose
@@ -36,8 +36,7 @@ const MAX_OP_STDERR_BYTES: usize = 4 * 1024;
 /// that made launching a pane feel frozen — now resolves in one round-trip's
 /// time. Completion order does not matter: the results are keyed into a
 /// `BTreeMap` by name via [`collect_resolved`].
-pub fn resolve_workspace_env(workspace_root: &Path) -> BTreeMap<String, String> {
-    let settings = crate::usecase::settings::effective_for(workspace_root).unwrap_or_default();
+pub fn resolve_workspace_env(settings: &Settings) -> BTreeMap<String, String> {
     // The service account token stored by `usagi op login` (if any) is shared by
     // every binding's `op read`.
     let token = service_account_token();

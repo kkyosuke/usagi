@@ -9,9 +9,11 @@
 //! error log and omitted; a missing or locked 1Password account should not make
 //! the pane impossible to open.
 //!
-//! The pure resolution logic lives here behind the [`SecretResolver`] trait so it
-//! is unit-tested without shelling out; the real `op` CLI subprocess IO that
-//! backs [`resolve_workspace_env`] lives in [`op_cli`].
+//! The caller resolves global/workspace configuration and injects the resulting
+//! immutable [`Settings`](crate::domain::settings::Settings). The pure secret
+//! resolution logic lives here behind the [`SecretResolver`] trait so it is
+//! unit-tested without shelling out; the real `op` CLI subprocess IO that backs
+//! [`resolve_workspace_env`] lives in [`op_cli`].
 
 mod op_cli;
 
@@ -70,6 +72,7 @@ mod tests {
     struct FakeResolver {
         calls: RefCell<Vec<String>>,
         fail: &'static str,
+        error: &'static str,
     }
 
     impl FakeResolver {
@@ -77,6 +80,15 @@ mod tests {
             Self {
                 calls: RefCell::new(Vec::new()),
                 fail,
+                error: "nope",
+            }
+        }
+
+        fn failing_with(fail: &'static str, error: &'static str) -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                fail,
+                error,
             }
         }
     }
@@ -85,7 +97,7 @@ mod tests {
         fn read(&self, reference: &str) -> Result<String, String> {
             self.calls.borrow_mut().push(reference.to_string());
             if reference == self.fail {
-                Err("nope".to_string())
+                Err(self.error.to_string())
             } else {
                 Ok(format!("value:{reference}"))
             }
@@ -120,5 +132,54 @@ mod tests {
             Some("value:op://Private/GitHub/token")
         );
         assert!(!env.contains_key("FAIL"));
+    }
+
+    #[test]
+    fn resolve_env_treats_a_fake_port_timeout_as_one_failed_binding() {
+        let mut settings = Settings::default();
+        settings
+            .env
+            .insert("SLOW".to_string(), "op://Private/Slow/token".to_string());
+        settings
+            .env
+            .insert("FAST".to_string(), "op://Private/Fast/token".to_string());
+        let resolver = FakeResolver::failing_with(
+            "op://Private/Slow/token",
+            "op exceeded its 30s end-to-end deadline",
+        );
+
+        let env = resolve_env(&settings, &resolver);
+
+        assert_eq!(
+            env.get("FAST").map(String::as_str),
+            Some("value:op://Private/Fast/token")
+        );
+        assert!(!env.contains_key("SLOW"));
+    }
+
+    #[test]
+    fn resolve_env_observes_each_injected_settings_snapshot() {
+        let resolver = FakeResolver::new("");
+        let mut first = Settings::default();
+        first
+            .env
+            .insert("TOKEN".to_string(), "op://first/token".to_string());
+        let mut second = Settings::default();
+        second
+            .env
+            .insert("TOKEN".to_string(), "op://second/token".to_string());
+
+        assert_eq!(
+            resolve_env(&first, &resolver)
+                .get("TOKEN")
+                .map(String::as_str),
+            Some("value:op://first/token")
+        );
+        assert_eq!(
+            resolve_env(&second, &resolver)
+                .get("TOKEN")
+                .map(String::as_str),
+            Some("value:op://second/token")
+        );
     }
 }
