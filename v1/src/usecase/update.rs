@@ -122,7 +122,10 @@ pub fn run(cwd: &Path, dry_run: bool) -> Result<UpdateReport> {
 
     // 1. Refresh each source repository's default branch from the remote.
     let mut repos = Vec::new();
-    for repo in session::source_repos(&root) {
+    for repo in session::source_repos(&root)
+        .into_iter()
+        .filter(|repo| git::has_origin(repo))
+    {
         let branch = git::default_branch(&repo);
         let outcome = match git::fetch(&repo) {
             Err(e) => DefaultOutcome::FetchFailed(format!("{e}")),
@@ -145,6 +148,13 @@ pub fn run(cwd: &Path, dry_run: bool) -> Result<UpdateReport> {
         let mut worktrees = Vec::new();
         for wt in &record.worktrees {
             let repo = git::primary_worktree(&wt.path).unwrap_or_else(|_| wt.path.clone());
+            // Local-only repositories are not update targets. In particular,
+            // recursively scanning a broad workspace (such as the user's home)
+            // commonly reaches editor/plugin scratch repositories without an
+            // `origin`; do not turn those into noisy fetch failures.
+            if git::is_repository(&repo) && !git::has_origin(&repo) {
+                continue;
+            }
             let outcome = match ensure_fetched(&mut fetched, &repo) {
                 Some(_) => WorktreeOutcome::FetchFailed,
                 None => {
@@ -454,22 +464,17 @@ mod tests {
     }
 
     #[test]
-    fn reports_fetch_failure_for_a_repo_without_a_remote() {
-        // A workspace whose repo has no `origin` remote: fetch fails, and a
-        // session in it is reported as fetch-failed too rather than touched.
+    fn skips_a_repo_without_an_origin_remote() {
+        // Local-only repositories (including editor/plugin scratch repos) are
+        // outside update's contract and must not be rendered as fetch errors.
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
         session::create(root.path(), "feat").unwrap();
 
         let report = run_update(root.path(), false);
-        assert!(matches!(
-            default_outcome(&report),
-            DefaultOutcome::FetchFailed(_)
-        ));
-        assert_eq!(
-            *session_outcome(&report, "feat"),
-            WorktreeOutcome::FetchFailed
-        );
+        assert!(report.repos.is_empty());
+        assert_eq!(report.sessions.len(), 1);
+        assert!(report.sessions[0].worktrees.is_empty());
     }
 
     #[test]
@@ -564,19 +569,25 @@ mod tests {
 
     #[test]
     fn handles_a_non_git_multi_repo_root() {
-        // A non-git root containing two repositories: both default branches are
-        // examined. Neither has a remote, so both report a fetch failure — which
-        // exercises the multi-repo, non-git-root resolution path.
+        // A non-git root can contain both a remotely managed repository and a
+        // local-only scratch repository. Only the former is an update target.
         let root = tempfile::tempdir().unwrap();
-        init_repo(&root.path().join("app-a"));
-        init_repo(&root.path().join("app-b"));
+        let app = root.path().join("app");
+        let scratch = root.path().join("scratch");
+        init_repo(&app);
+        init_repo(&scratch);
+        run(
+            &app,
+            &["remote", "add", "origin", "/definitely/missing/repo.git"],
+        );
 
         let report = run_update(root.path(), false);
-        assert_eq!(report.repos.len(), 2);
-        assert!(report
-            .repos
-            .iter()
-            .all(|r| matches!(r.outcome, DefaultOutcome::FetchFailed(_))));
+        assert_eq!(report.repos.len(), 1);
+        assert_eq!(report.repos[0].repo, app);
+        assert!(matches!(
+            report.repos[0].outcome,
+            DefaultOutcome::FetchFailed(_)
+        ));
     }
 
     // --- helpers reused across the tests above -----------------------------

@@ -140,6 +140,25 @@ fn default_branch_falls_back_without_remote() {
 }
 
 #[test]
+fn detects_only_a_configured_origin_remote() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    assert!(!has_origin(dir.path()));
+
+    run(
+        dir.path(),
+        &["remote", "add", "upstream", "https://example.com/upstream.git"],
+    );
+    assert!(!has_origin(dir.path()));
+
+    run(
+        dir.path(),
+        &["remote", "add", "origin", "https://example.com/origin.git"],
+    );
+    assert!(has_origin(dir.path()));
+}
+
+#[test]
 fn default_branch_falls_back_to_main_when_detached() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());

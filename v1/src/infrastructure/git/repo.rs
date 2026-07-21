@@ -66,6 +66,18 @@ pub fn is_repository(path: &Path) -> bool {
         == Some("true")
 }
 
+/// Return `true` when `path` has an `origin` remote configured.
+///
+/// A recursively discovered workspace can contain local-only repositories
+/// created by editor/plugin caches. They are valid Git repositories, but they
+/// are not candidates for an update from `origin`.
+pub fn has_origin(path: &Path) -> bool {
+    git_capture(path, &["remote", "get-url", "origin"])
+        .ok()
+        .flatten()
+        .is_some_and(|url| !url.is_empty())
+}
+
 /// Shorten a full commit hash to its 7-character abbreviation.
 pub fn short_hash(head: &str) -> String {
     head.chars().take(7).collect()

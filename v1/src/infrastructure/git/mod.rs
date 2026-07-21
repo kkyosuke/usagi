@@ -24,7 +24,7 @@ pub use branch::{
     list_branches, local_branches, resolve_base_ref, resolve_commit, IntegrationBase,
 };
 pub use merge::{fetch, merge, MergeStatus};
-pub use repo::{clone, is_repository, short_hash};
+pub use repo::{clone, has_origin, is_repository, short_hash};
 pub use worktree::{
     add_worktree, ensure_all_excluded, ensure_excluded, git_common_dir, init_submodules,
     list_worktrees, primary_worktree, prune_worktrees, remove_worktree, worktree_status,
