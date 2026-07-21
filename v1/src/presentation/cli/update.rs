@@ -10,12 +10,20 @@ use crate::usecase::self_update;
 /// The installer downloads the platform-specific release archive and replaces
 /// `~/.usagi/bin/usagi`. The currently running process keeps its old binary;
 /// the replacement is used after restarting usagi.
-pub fn run() -> anyhow::Result<()> {
-    run_with(&SystemRunner, env!("CARGO_PKG_REPOSITORY"))
+pub fn run(select_version: bool) -> anyhow::Result<()> {
+    run_with(&SystemRunner, env!("CARGO_PKG_REPOSITORY"), select_version)
 }
 
-fn run_with(runner: &dyn CommandRunner, repository: &str) -> anyhow::Result<()> {
-    let (ok, message) = self_update::run(runner, repository);
+fn run_with(
+    runner: &dyn CommandRunner,
+    repository: &str,
+    select_version: bool,
+) -> anyhow::Result<()> {
+    let (ok, message) = if select_version {
+        self_update::select_version(runner, repository)
+    } else {
+        self_update::run(runner, repository)
+    };
     println!("{message}");
     if ok {
         Ok(())
@@ -55,7 +63,17 @@ mod tests {
 
     #[test]
     fn reports_the_installer_result_as_the_command_exit_status() {
-        assert!(run_with(&FakeRunner(true), "https://github.com/KKyosuke/usagi").is_ok());
-        assert!(run_with(&FakeRunner(false), "https://github.com/KKyosuke/usagi").is_err());
+        assert!(run_with(
+            &FakeRunner(true),
+            "https://github.com/KKyosuke/usagi",
+            false
+        )
+        .is_ok());
+        assert!(run_with(
+            &FakeRunner(false),
+            "https://github.com/KKyosuke/usagi",
+            false
+        )
+        .is_err());
     }
 }

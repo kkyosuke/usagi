@@ -96,6 +96,11 @@ run_installer() {
         PATH="$FAKE_BIN:$PATH" bash "$INSTALLER")
 }
 
+run_installer_for_version() {
+    (cd "$CWD_DIR" && HOME="$HOME_DIR" FIXTURE_DIR="$FIXTURE_DIR" \
+        PATH="$FAKE_BIN:$PATH" USAGI_VERSION=v2.0.0 bash "$INSTALLER")
+}
+
 assert_old_preserved() {
     cmp "$CASE_DIR/old-bytes" "$HOME_DIR/.usagi/bin/usagi"
     [ "$(mode "$HOME_DIR/.usagi/bin/usagi")" = 751 ]
@@ -118,6 +123,10 @@ run_installer >/dev/null
 [ "$(mode "$HOME_DIR/.usagi/bin/usagi")" = 755 ]
 cmp "$CASE_DIR/sentinel" "$CWD_DIR/usagi"
 [ -z "$(find "$HOME_DIR/.usagi/bin" -maxdepth 1 -name '.update.*' -print)" ]
+
+prepare_case selected-version
+run_installer_for_version >/dev/null
+[ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
 
 prepare_case bad-checksum
 printf '%064d  %s\n' 0 "$ASSET" > "$FIXTURE_DIR/$ASSET.sha256"

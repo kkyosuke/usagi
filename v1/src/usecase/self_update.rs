@@ -60,14 +60,31 @@ fn valid_github_slug(slug: &str) -> Option<()> {
 /// message tells the user to restart — the replaced binary only takes effect on
 /// the next launch.
 pub fn run(runner: &dyn CommandRunner, repo_url: &str) -> (bool, String) {
-    let Some(command) = install_command(repo_url) else {
+    run_with(runner, repo_url, false)
+}
+
+/// Run the installer in its interactive release-selection mode.
+pub fn select_version(runner: &dyn CommandRunner, repo_url: &str) -> (bool, String) {
+    run_with(runner, repo_url, true)
+}
+
+fn run_with(runner: &dyn CommandRunner, repo_url: &str, select_version: bool) -> (bool, String) {
+    let Some(mut command) = install_command(repo_url) else {
         return (
             false,
             "アップデートに失敗したぴょん…このビルドの repository URL が GitHub 形式ではないよ"
                 .to_string(),
         );
     };
-    match runner.run_quiet("bash", &["-c", &command]) {
+    if select_version {
+        command.push_str(" -s -- --select-version");
+    }
+    let result = if select_version {
+        runner.run("bash", &["-c", &command])
+    } else {
+        runner.run_quiet("bash", &["-c", &command])
+    };
+    match result {
         Ok(true) => (
             true,
             "アップデートしたよ！反映するには usagi を再起動してね 󰤇".to_string(),
@@ -84,8 +101,8 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    /// A runner that records the one quiet command it is asked to run and replies
-    /// with a scripted exit status (or an I/O error).
+    /// A runner that records commands and replies with a scripted exit status
+    /// (or an I/O error).
     #[derive(Default)]
     struct FakeRunner {
         result: Option<std::io::Result<bool>>,
@@ -96,8 +113,16 @@ mod tests {
         fn available(&self, _program: &str) -> bool {
             true
         }
-        fn run(&self, _program: &str, _args: &[&str]) -> std::io::Result<bool> {
-            Ok(true)
+        fn run(&self, program: &str, args: &[&str]) -> std::io::Result<bool> {
+            self.seen.borrow_mut().push((
+                program.to_string(),
+                args.iter().map(|arg| arg.to_string()).collect(),
+            ));
+            match &self.result {
+                Some(Ok(ok)) => Ok(*ok),
+                Some(Err(error)) => Err(std::io::Error::new(error.kind(), "boom")),
+                None => Ok(true),
+            }
         }
         fn run_quiet(&self, program: &str, args: &[&str]) -> std::io::Result<bool> {
             self.seen.borrow_mut().push((
@@ -210,10 +235,20 @@ mod tests {
     }
 
     #[test]
-    fn the_self_update_only_drives_run_quiet() {
-        // The self-update runs the script through `run_quiet` alone; the fake's
-        // other `CommandRunner` methods exist only to satisfy the trait. Exercise
-        // them directly so the fake is fully covered and to pin that contract.
+    fn selecting_a_version_uses_the_interactive_installer_argument() {
+        let runner = FakeRunner::default();
+        let (ok, _) = select_version(&runner, "https://github.com/KKyosuke/usagi");
+        assert!(ok);
+        let seen = runner.seen.borrow();
+        assert_eq!(seen[0].0, "bash");
+        assert!(seen[0].1[1].ends_with("bash -s -- --select-version"));
+    }
+
+    #[test]
+    fn the_default_self_update_only_drives_run_quiet() {
+        // The normal self-update runs the script through `run_quiet`; interactive
+        // version selection deliberately uses `run` so it can read the terminal.
+        // Exercise the fake's remaining methods so they stay covered.
         let runner = FakeRunner::default();
         assert!(runner.available("bash"));
         assert!(runner.run("bash", &["-c", "true"]).unwrap());

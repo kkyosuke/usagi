@@ -8,30 +8,41 @@ use crate::cli::{Run, RunOutcome};
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 
 /// `usagi update` のハンドラ。実際の subprocess は合成ルートが実行する。
-pub struct Update;
+pub struct Update {
+    pub select_version: bool,
+}
 
 impl Run for Update {
     #[coverage(off)]
     fn run(&self, out: &mut dyn Write) -> io::Result<RunOutcome> {
-        let command = install_command(REPOSITORY)
+        let command = install_command(REPOSITORY, self.select_version)
             .ok_or_else(|| io::Error::other("usagi repository URL is not a GitHub URL"))?;
-        writeln!(
-            out,
-            "downloading and installing the latest usagi release..."
-        )?;
+        if self.select_version {
+            writeln!(out, "select a usagi release to install...")?;
+        } else {
+            writeln!(
+                out,
+                "downloading and installing the latest usagi release..."
+            )?;
+        }
         Ok(RunOutcome::SelfUpdate { command })
     }
 }
 
 /// Build the documented installer invocation for a GitHub repository URL.
-fn install_command(repository: &str) -> Option<String> {
+fn install_command(repository: &str, select_version: bool) -> Option<String> {
     let slug = repository
         .trim_end_matches('/')
         .trim_end_matches(".git")
         .strip_prefix("https://github.com/")?;
     valid_github_slug(slug)?;
+    let option = if select_version {
+        " -s -- --select-version"
+    } else {
+        ""
+    };
     Some(format!(
-        "set -o pipefail; cd /; curl -fsSL https://raw.githubusercontent.com/{slug}/main/scripts/install.sh | bash"
+        "set -o pipefail; cd /; curl -fsSL https://raw.githubusercontent.com/{slug}/main/scripts/install.sh | bash{option}"
     ))
 }
 
@@ -60,21 +71,37 @@ mod tests {
     #[test]
     fn installer_command_uses_the_release_downloading_script() {
         assert_eq!(
-            install_command("https://github.com/KKyosuke/usagi.git"),
+            install_command("https://github.com/KKyosuke/usagi.git", false),
             Some("set -o pipefail; cd /; curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash".into())
         );
-        assert_eq!(install_command("https://example.com/usagi"), None);
-        assert_eq!(install_command("https://github.com/owner/repo;false"), None);
-        assert_eq!(install_command("https://github.com/owner/repo/extra"), None);
+        assert_eq!(install_command("https://example.com/usagi", false), None);
+        assert_eq!(
+            install_command("https://github.com/owner/repo;false", false),
+            None
+        );
+        assert_eq!(
+            install_command("https://github.com/owner/repo/extra", false),
+            None
+        );
     }
 
     #[test]
     fn handler_requests_a_self_update_from_the_composition_root() {
         let mut out = Vec::new();
-        let outcome = Update.run(&mut out).unwrap();
+        let outcome = Update {
+            select_version: false,
+        }
+        .run(&mut out)
+        .unwrap();
         assert!(
             matches!(outcome, RunOutcome::SelfUpdate { command } if command.contains("scripts/install.sh"))
         );
         assert!(String::from_utf8(out).unwrap().contains("downloading"));
+    }
+
+    #[test]
+    fn version_selection_requests_the_interactive_installer_mode() {
+        let command = install_command("https://github.com/KKyosuke/usagi", true).unwrap();
+        assert!(command.ends_with("bash -s -- --select-version"));
     }
 }
