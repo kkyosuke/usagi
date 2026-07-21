@@ -308,6 +308,7 @@ mod tests {
         assert_eq!(registry.len(), 48);
         validate_registry(&registry).unwrap();
         for descriptor in &registry {
+            assert!(!descriptor.description().is_empty());
             let schema: serde_json::Value =
                 serde_json::from_str(descriptor.input_schema()).unwrap();
             let valid = valid_value(&schema);
