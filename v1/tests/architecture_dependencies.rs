@@ -1,13 +1,6 @@
 use std::path::{Path, PathBuf};
 
 const FORBIDDEN_LAYERS: [&str; 2] = ["presentation", "usecase"];
-// #496 owns the existing session setup port inversion. Keep that one explicit
-// while preventing this boundary from accumulating any additional exceptions.
-const TRACKED_EXCEPTIONS: [(&str, &str); 2] = [
-    ("agent_start_store.rs", "usecase"),
-    ("setup_runner.rs", "usecase"),
-];
-
 #[test]
 fn infrastructure_does_not_depend_on_upper_layers() {
     let infrastructure = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/infrastructure");
@@ -18,12 +11,6 @@ fn infrastructure_does_not_depend_on_upper_layers() {
     for path in rust_files {
         let source = std::fs::read_to_string(&path).unwrap();
         for layer in forbidden_dependencies(&source) {
-            if TRACKED_EXCEPTIONS
-                .iter()
-                .any(|(suffix, allowed_layer)| path.ends_with(suffix) && layer == *allowed_layer)
-            {
-                continue;
-            }
             violations.push(format!("{} -> {layer}", path.display()));
         }
     }
