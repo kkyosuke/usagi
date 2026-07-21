@@ -52,6 +52,8 @@ pub enum RunOutcome {
     LaunchDaemon(DaemonCommand),
     /// stdio MCP server の起動を依頼する。
     LaunchMcp,
+    /// Codex `SessionStart` hook の structured payload を daemon へ渡す。
+    CaptureCodexSession,
     /// A managed session mutation to be sent by the composition root through
     /// the daemon client. It deliberately is not executed against local state.
     DaemonRequest(DaemonRequest),
@@ -146,6 +148,9 @@ pub enum Command {
         /// フックが報告する phase（例: `ended`）
         phase: String,
     },
+    /// （ヘルプ非表示・内部）Codex `SessionStart` の session ID を daemon へ渡す。
+    #[command(hide = true)]
+    CodexSessionCapture,
     /// （ヘルプ非表示・内部）worktree の外へ出るツール呼び出しを拒否する（`PreToolUse` フックが呼ぶ）
     #[command(hide = true)]
     GuardWorkspace,
@@ -230,6 +235,7 @@ impl Command {
             Command::Session { command } => Box::new(Session { command }),
             // エージェント統合フックは commands/ ではなく hooks/ に置く。
             Command::AgentPhase { phase } => Box::new(hooks::AgentPhase { phase }),
+            Command::CodexSessionCapture => Box::new(hooks::CodexSessionCapture),
             Command::GuardWorkspace => Box::new(hooks::GuardWorkspace),
         }
     }
@@ -410,6 +416,12 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::AgentPhase { phase }) if phase == "ended"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "codex-session-capture"])
+                .unwrap()
+                .command,
+            Some(Command::CodexSessionCapture)
         ));
     }
 
