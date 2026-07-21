@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="500" viewBox="0 0 900 500" role="img" aria-labelledby="title desc">
+  <title id="title">usagi update release selector</title>
+  <desc id="desc">A terminal window showing five releases with the latest release selected.</desc>
+  <rect width="900" height="500" fill="#f4eefe"/>
+  <circle cx="86" cy="75" r="115" fill="#f7c8ff" opacity="0.42"/>
+  <circle cx="827" cy="448" r="170" fill="#bdefff" opacity="0.45"/>
+  <rect x="102" y="70" width="696" height="392" rx="18" fill="#30283d" opacity="0.24"/>
+  <rect x="90" y="50" width="720" height="400" rx="18" fill="#17131f"/>
+  <rect x="90" y="50" width="720" height="48" rx="18" fill="#241d30"/>
+  <rect x="90" y="80" width="720" height="18" fill="#241d30"/>
+  <circle cx="122" cy="74" r="7" fill="#ff6b83"/>
+  <circle cx="146" cy="74" r="7" fill="#ffd166"/>
+  <circle cx="170" cy="74" r="7" fill="#5ed6a6"/>
+  <text x="450" y="80" text-anchor="middle" fill="#9c92ab" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14">usagi update -v</text>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">
+    <rect x="180" y="130" width="540" height="310" rx="8" fill="none" stroke="#ed73ff" stroke-width="2"/>
+    <path d="M180 210H720 M180 378H720" fill="none" stroke="#ed73ff" stroke-width="2"/>
+    <rect x="198" y="119" width="185" height="24" fill="#17131f"/>
+    <text x="206" y="138" fill="#ed73ff">usagi update</text>
+    <text x="206" y="171" font-weight="700" fill="#ffffff">Choose a version</text>
+    <text x="206" y="196" fill="#82788f">↑/↓ move  •  Enter install  •  q cancel</text>
+    <text x="206" y="241" fill="#ed73ff">&gt;</text>
+    <text x="232" y="241" font-weight="700" fill="#ffffff">v0.8.2</text>
+    <text x="626" y="241" text-anchor="end" fill="#65d9ef">latest</text>
+    <text x="232" y="270" font-weight="700" fill="#ffffff">v0.8.1</text>
+    <text x="232" y="299" font-weight="700" fill="#ffffff">v0.8.0</text>
+    <text x="232" y="328" font-weight="700" fill="#ffffff">v0.7.4</text>
+    <text x="232" y="357" font-weight="700" fill="#ffffff">v0.7.3</text>
+    <text x="206" y="414" fill="#82788f">1 / 12</text>
+  </g>
+</svg>

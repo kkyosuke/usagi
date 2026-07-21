@@ -65,7 +65,36 @@ while [ "$#" -gt 0 ]; do
         *) url=$1; shift ;;
     esac
 done
-[ -n "$output" ] && [ -n "$url" ]
+[ -n "$url" ]
+if [ -z "$output" ] && [ "${url#https://api.github.com/repos/}" != "$url" ]; then
+    printf '%s\n' \
+        '[' \
+        '  {' \
+        '    "tag_name": "v7.0.0",' \
+        '  },' \
+        '  {' \
+        '    "tag_name": "v6.0.0",' \
+        '  },' \
+        '  {' \
+        '    "tag_name": "v5.0.0",' \
+        '  },' \
+        '  {' \
+        '    "tag_name": "v4.0.0",' \
+        '  },' \
+        '  {' \
+        '    "tag_name": "v3.0.0",' \
+        '  },' \
+        '  {' \
+        '    "tag_name": "v2.0.0",' \
+        '  },' \
+        '  {' \
+        '    "tag_name": "v1.0.0"' \
+        '  }' \
+        ']'
+    exit 0
+fi
+[ -n "$output" ]
+[ -z "${FAKE_CURL_LOG:-}" ] || printf '%s\n' "$url" >> "$FAKE_CURL_LOG"
 [ "$(LC_ALL=C ls -ld "$(dirname "$output")" | cut -c1-10)" = "drwx------" ] || exit 71
 if [ -n "${FAKE_CURL_GUARD:-}" ]; then
     mkdir "$FAKE_CURL_GUARD" || exit 70
@@ -127,6 +156,76 @@ cmp "$CASE_DIR/sentinel" "$CWD_DIR/usagi"
 prepare_case selected-version
 run_installer_for_version >/dev/null
 [ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
+
+prepare_case interactive-selector
+FAKE_CURL_LOG="$CASE_DIR/curl.log"
+export FAKE_CURL_LOG
+python3 - "$INSTALLER" "$HOME_DIR" "$FIXTURE_DIR" "$FAKE_BIN" "$CWD_DIR" > "$CASE_DIR/selector.out" <<'PY'
+import os
+import pty
+import select
+import sys
+import time
+
+installer, home, fixture, fake_bin, cwd = sys.argv[1:]
+env = os.environ.copy()
+env.update(HOME=home, FIXTURE_DIR=fixture, PATH=f"{fake_bin}:{env['PATH']}")
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir(cwd)
+    os.execvpe("bash", ["bash", installer, "--select-version"], env)
+
+captured = bytearray()
+deadline = time.time() + 10
+sent = False
+status = None
+while time.time() < deadline:
+    ready, _, _ = select.select([fd], [], [], 0.1)
+    if ready:
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:
+            chunk = b""
+        if not chunk:
+            pass
+        else:
+            captured.extend(chunk)
+            if not sent and b"usagi update" in captured and captured.count(b"\n") >= 10:
+                os.write(fd, b"\x1b[A" + b"\x1b[B" * 5 + b"\r")
+                sent = True
+    done, status = os.waitpid(pid, os.WNOHANG)
+    if done:
+        if os.waitstatus_to_exitcode(status) != 0:
+            sys.stderr.buffer.write(captured)
+            raise SystemExit(os.waitstatus_to_exitcode(status))
+        break
+else:
+    os.kill(pid, 9)
+    raise SystemExit("interactive selector timed out")
+
+if status is None:
+    raise SystemExit("interactive selector did not exit")
+
+sys.stdout.buffer.write(captured)
+PY
+unset FAKE_CURL_LOG
+grep -q 'releases/download/v2.0.0/' "$CASE_DIR/curl.log"
+[ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
+python3 - "$CASE_DIR/selector.out" <<'PY'
+import re
+import sys
+
+text = open(sys.argv[1], "rb").read().decode(errors="replace")
+plain = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
+assert "Choose a version" in plain
+assert "↑/↓ move  •  Enter install  •  q cancel" in plain
+assert text.count("\x1b[12A") == 6
+first_frame = plain.split("╰", 1)[0]
+rows = [line for line in first_frame.splitlines() if line.startswith("│")]
+release_rows = rows[2:7]
+assert len(release_rows) == 5, release_rows
+assert sum("v" in row for row in release_rows) == 5, release_rows
+PY
 
 prepare_case bad-checksum
 printf '%064d  %s\n' 0 "$ASSET" > "$FIXTURE_DIR/$ASSET.sha256"
