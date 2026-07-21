@@ -763,6 +763,7 @@ impl NoteEditor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvEditor {
     area: TextArea,
+    baseline: crate::domain::settings::SecretEnv,
 }
 
 impl EnvEditor {
@@ -771,6 +772,7 @@ impl EnvEditor {
     pub(super) fn new(env: &crate::domain::settings::SecretEnv) -> Self {
         Self {
             area: TextArea::from_text(&crate::domain::settings::format_env_bindings(env)),
+            baseline: env.clone(),
         }
     }
 
@@ -787,8 +789,13 @@ impl EnvEditor {
 
     /// The valid bindings currently in the buffer (see
     /// [`crate::domain::settings::parse_env_bindings`] for the filtering rule).
-    pub(super) fn bindings(&self) -> crate::domain::settings::SecretEnv {
+    pub(crate) fn bindings(&self) -> crate::domain::settings::SecretEnv {
         crate::domain::settings::parse_env_bindings(&self.area.text())
+    }
+
+    /// Content identity captured when the editor opened.
+    pub(crate) fn baseline(&self) -> &crate::domain::settings::SecretEnv {
+        &self.baseline
     }
 }
 

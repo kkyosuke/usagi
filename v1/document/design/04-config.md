@@ -193,6 +193,13 @@
   （削除はしません）。
 - 詳細なデータ仕様は [../data/02-workspace.md](../data/02-workspace.md) の `settings.json`（ローカル設定）を参照。
 
+## 保存と競合
+
+両スコープとも Config を開いた時点の内容を保存基準にし、Save 時に store lock 内で最新設定と三方向マージします。
+Config が変更していない field（map 型では entry）は別 process の最新値を保持し、同じ field が双方で異なる値へ変更されて
+いれば `Failed to save: settings conflict in <field>` を通知行に表示して書き込みません。conflict や I/O error の後も未保存の
+`●`、編集値、選択位置は残るため、内容を調整して再度 Save できます。成功時はマージ後の内容を新しい保存基準にします。
+
 ## widget による値の表示
 
 設定値は共通の chooser widget（`src/presentation/tui/widgets/` の `chooser`）で統一して描画します。

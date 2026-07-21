@@ -1,14 +1,14 @@
 ---
 number: 498
 title: fix(v1/config): TUI と env editor の設定保存を revision-aware にする
-status: todo
+status: in-progress
 priority: medium
 labels: [review, v1, tui, config, concurrency]
 dependson: []
 related: [15, 22, 29, 153]
 parent: 453
 created_at: 2026-07-20T12:07:08.331319+00:00
-updated_at: 2026-07-20T12:07:08.331319+00:00
+updated_at: 2026-07-21T13:24:40.886304+00:00
 ---
 
 ## 問題・影響

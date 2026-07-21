@@ -36,8 +36,11 @@ fn installed_config() -> Config {
 
 /// A persistence stub that accepts every change (and is itself exercised by
 /// [`saving_succeeds_with_a_noop_save`]).
-fn noop_save(_: &Settings, _: Option<&LocalSettings>) -> Result<()> {
-    Ok(())
+fn noop_save(settings: &Settings, local: Option<&LocalSettings>) -> Result<SavedSettings> {
+    Ok(match local {
+        Some(local) => SavedSettings::Local(local.clone()),
+        None => SavedSettings::Global(settings.clone()),
+    })
 }
 
 /// A runtime-install stub that succeeds without doing anything.
@@ -57,7 +60,7 @@ fn run_recording(keys: Vec<io::Result<Key>>, config: Config) -> (Outcome, Vec<Se
     let saved = RefCell::new(Vec::new());
     let mut save = |s: &Settings, _: Option<&LocalSettings>| {
         saved.borrow_mut().push(s.clone());
-        Ok(())
+        Ok(SavedSettings::Global(s.clone()))
     };
     let mut install: fn(&str) -> Result<()> = ok_install;
     let mut pull: fn(&str) -> Result<()> = ok_pull;
@@ -247,6 +250,47 @@ fn a_save_failure_is_shown_as_a_notice_and_recovers() {
 }
 
 #[test]
+fn save_failure_keeps_the_config_draft_for_retry() {
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(vec![
+        Ok(Key::ArrowRight), // edit theme
+        Ok(Key::ArrowUp),    // Save
+        Ok(Key::Enter),      // fails
+        Ok(Key::Enter),      // retries the same draft successfully
+        Ok(Key::Enter),      // clean: no third persistence call
+        Ok(Key::Escape),
+    ]);
+    let attempts = RefCell::new(Vec::new());
+    let mut save = |settings: &Settings, _: Option<&LocalSettings>| {
+        attempts.borrow_mut().push(settings.clone());
+        if attempts.borrow().len() == 1 {
+            Err(anyhow::anyhow!("disk full"))
+        } else {
+            Ok(SavedSettings::Global(settings.clone()))
+        }
+    };
+    let mut install: fn(&str) -> Result<()> = ok_install;
+    let mut pull: fn(&str) -> Result<()> = ok_pull;
+    assert!(matches!(
+        event_loop(
+            &term,
+            &mut reader,
+            sample_config(),
+            &mut save,
+            &mut install,
+            &mut pull,
+            None,
+        )
+        .unwrap(),
+        Outcome::Back
+    ));
+    let attempts = attempts.into_inner();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0], attempts[1]);
+    assert_eq!(attempts[0].theme, Theme::Light);
+}
+
+#[test]
 fn saving_succeeds_with_a_noop_save() {
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(vec![
@@ -255,7 +299,7 @@ fn saving_succeeds_with_a_noop_save() {
         Ok(Key::Enter),
         Ok(Key::Escape),
     ]);
-    let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
+    let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<SavedSettings> = noop_save;
     let mut install: fn(&str) -> Result<()> = ok_install;
     let mut pull: fn(&str) -> Result<()> = ok_pull;
     let outcome = event_loop(
@@ -275,7 +319,7 @@ fn saving_succeeds_with_a_noop_save() {
 fn initial_notice_is_displayed() {
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(vec![Ok(Key::Escape)]);
-    let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
+    let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<SavedSettings> = noop_save;
     let mut install: fn(&str) -> Result<()> = ok_install;
     let mut pull: fn(&str) -> Result<()> = ok_pull;
     let outcome = event_loop(
@@ -316,7 +360,7 @@ fn saving_a_local_override_passes_it_to_save() {
     let captured: RefCell<Option<LocalSettings>> = RefCell::new(None);
     let mut save = |_: &Settings, local: Option<&LocalSettings>| {
         *captured.borrow_mut() = local.cloned();
-        Ok(())
+        Ok(SavedSettings::Local(local.cloned().unwrap()))
     };
     let mut install: fn(&str) -> Result<()> = ok_install;
     let mut pull: fn(&str) -> Result<()> = ok_pull;
@@ -376,7 +420,7 @@ fn setup_commands_modal_applies_to_local_settings_before_save() {
     let captured: RefCell<Option<LocalSettings>> = RefCell::new(None);
     let mut save = |_: &Settings, local: Option<&LocalSettings>| {
         *captured.borrow_mut() = local.cloned();
-        Ok(())
+        Ok(SavedSettings::Local(local.cloned().unwrap()))
     };
     let mut install: fn(&str) -> Result<()> = ok_install;
     let mut pull: fn(&str) -> Result<()> = ok_pull;
@@ -424,7 +468,7 @@ fn setup_commands_modal_can_be_cancelled_and_can_quit() {
     let captured: RefCell<Option<LocalSettings>> = RefCell::new(None);
     let mut save = |_: &Settings, local: Option<&LocalSettings>| {
         *captured.borrow_mut() = local.cloned();
-        Ok(())
+        Ok(SavedSettings::Local(local.cloned().unwrap()))
     };
     let mut install: fn(&str) -> Result<()> = ok_install;
     let mut pull: fn(&str) -> Result<()> = ok_pull;
@@ -446,7 +490,7 @@ fn setup_commands_modal_can_be_cancelled_and_can_quit() {
     let mut keys = to_setup();
     keys.extend([Ok(Key::Enter), Ok(Key::CtrlC)]);
     let mut reader = ScriptedReader::new(keys);
-    let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
+    let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<SavedSettings> = noop_save;
     assert!(matches!(
         event_loop(
             &term,
@@ -513,7 +557,7 @@ fn env_vars_modal_applies_to_local_settings_before_save() {
     let captured: RefCell<Option<LocalSettings>> = RefCell::new(None);
     let mut save = |_: &Settings, local: Option<&LocalSettings>| {
         *captured.borrow_mut() = local.cloned();
-        Ok(())
+        Ok(SavedSettings::Local(local.cloned().unwrap()))
     };
     let mut install: fn(&str) -> Result<()> = ok_install;
     let mut pull: fn(&str) -> Result<()> = ok_pull;
@@ -563,7 +607,7 @@ fn env_vars_modal_can_be_cancelled_and_can_quit() {
     let captured: RefCell<Option<LocalSettings>> = RefCell::new(None);
     let mut save = |_: &Settings, local: Option<&LocalSettings>| {
         *captured.borrow_mut() = local.cloned();
-        Ok(())
+        Ok(SavedSettings::Local(local.cloned().unwrap()))
     };
     let mut install: fn(&str) -> Result<()> = ok_install;
     let mut pull: fn(&str) -> Result<()> = ok_pull;
@@ -585,7 +629,7 @@ fn env_vars_modal_can_be_cancelled_and_can_quit() {
     let mut keys = to_env();
     keys.extend([Ok(Key::Enter), Ok(Key::CtrlC)]);
     let mut reader = ScriptedReader::new(keys);
-    let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
+    let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<SavedSettings> = noop_save;
     assert!(matches!(
         event_loop(
             &term,
@@ -659,7 +703,7 @@ fn session_labels_modal_applies_to_local_settings_before_save() {
     let captured: RefCell<Option<LocalSettings>> = RefCell::new(None);
     let mut save = |_: &Settings, local: Option<&LocalSettings>| {
         *captured.borrow_mut() = local.cloned();
-        Ok(())
+        Ok(SavedSettings::Local(local.cloned().unwrap()))
     };
     let mut install: fn(&str) -> Result<()> = ok_install;
     let mut pull: fn(&str) -> Result<()> = ok_pull;
@@ -711,7 +755,7 @@ fn session_labels_modal_can_be_cancelled_and_can_quit() {
     let captured: RefCell<Option<LocalSettings>> = RefCell::new(None);
     let mut save = |_: &Settings, local: Option<&LocalSettings>| {
         *captured.borrow_mut() = local.cloned();
-        Ok(())
+        Ok(SavedSettings::Local(local.cloned().unwrap()))
     };
     let mut install: fn(&str) -> Result<()> = ok_install;
     let mut pull: fn(&str) -> Result<()> = ok_pull;
@@ -734,7 +778,7 @@ fn session_labels_modal_can_be_cancelled_and_can_quit() {
     let mut keys = to_labels();
     keys.extend([Ok(Key::Enter), Ok(Key::CtrlC)]);
     let mut reader = ScriptedReader::new(keys);
-    let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
+    let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<SavedSettings> = noop_save;
     assert!(matches!(
         event_loop(
             &term,
@@ -764,7 +808,7 @@ fn interrupted_read_returns_quit() {
 fn unexpected_read_error_is_propagated() {
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(vec![Err(io::Error::other("boom"))]);
-    let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
+    let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<SavedSettings> = noop_save;
     let mut install: fn(&str) -> Result<()> = ok_install;
     let mut pull: fn(&str) -> Result<()> = ok_pull;
     let err = event_loop(
@@ -793,7 +837,7 @@ fn run_with_install(
 ) -> (Outcome, Vec<String>, Vec<String>) {
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(keys);
-    let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
+    let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<SavedSettings> = noop_save;
     let passwords = RefCell::new(Vec::new());
     let pulled = RefCell::new(Vec::new());
     let mut install = |password: &str| {
@@ -1192,7 +1236,7 @@ fn unhandled_keys_inside_the_setup_modal_are_silently_ignored() {
         Ok(Key::Escape),    // leave config
     ];
     let mut reader = ScriptedReader::new(keys);
-    let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
+    let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<SavedSettings> = noop_save;
     let mut install: fn(&str) -> Result<()> = ok_install;
     let mut pull: fn(&str) -> Result<()> = ok_pull;
     let outcome = event_loop(

@@ -335,6 +335,11 @@ impl Config {
         &self.settings
     }
 
+    /// Global content identity captured when the editor opened or last saved.
+    pub fn baseline(&self) -> &Settings {
+        &self.baseline
+    }
+
     /// Record which agent CLIs are installed on the PATH, in [`AgentCli::ALL`]
     /// order. Called when the screen opens, after probing the system, so the
     /// Agent CLI selector only cycles through agents the user can actually launch.
@@ -638,6 +643,26 @@ impl Config {
                 }
             }
         }
+    }
+
+    /// Adopt the revision-aware save result, including fields merged from a
+    /// concurrent writer, as both the visible value and the next baseline.
+    pub fn adopt_saved_global(&mut self, saved: Settings) {
+        self.baseline = saved.clone();
+        self.settings = saved;
+    }
+
+    /// Local counterpart to [`Self::adopt_saved_global`].
+    pub fn adopt_saved_local(&mut self, saved: LocalSettings) {
+        if let Some(local) = &mut self.local {
+            local.baseline = saved.clone();
+            local.settings = saved;
+        }
+    }
+
+    /// Local content identity captured when the editor opened or last saved.
+    pub fn local_baseline(&self) -> Option<&LocalSettings> {
+        self.local.as_ref().map(|local| &local.baseline)
     }
 
     /// Move the cursor up one row, wrapping to the bottom (the Save button).

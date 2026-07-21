@@ -95,19 +95,28 @@ pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
     let mut reader = TermKeyReader::new(term.clone());
     // The scope decides what is written: a project context saves only the
     // project-local overrides, otherwise only the global settings.
-    let mut save = |global: &Settings, local: Option<&LocalSettings>| -> Result<()> {
-        match repo_root.as_ref() {
-            Some(root) => {
-                if let Some(local) = local {
-                    // Always write the file, even when every override is cleared:
-                    // an empty file simply means "defer to the global settings".
-                    settings::save_local(root, local)?;
+    let mut save_baseline_global = config.baseline().clone();
+    let mut save_baseline_local = config.local_baseline().cloned();
+    let mut save =
+        |global: &Settings, local: Option<&LocalSettings>| -> Result<event::SavedSettings> {
+            match repo_root.as_ref() {
+                Some(root) => {
+                    if let (Some(baseline), Some(local)) = (&save_baseline_local, local) {
+                        // Always write the file, even when every override is cleared:
+                        // an empty file simply means "defer to the global settings".
+                        let saved = settings::save_local_revisioned(root, baseline, local)?;
+                        save_baseline_local = Some(saved.clone());
+                        return Ok(event::SavedSettings::Local(saved));
+                    }
+                    anyhow::bail!("workspace settings editor has no local draft")
+                }
+                None => {
+                    let saved = settings::save_revisioned(&storage, &save_baseline_global, global)?;
+                    save_baseline_global = saved.clone();
+                    Ok(event::SavedSettings::Global(saved))
                 }
             }
-            None => settings::save(&storage, global)?,
-        }
-        Ok(())
-    };
+        };
     // Provisioning runs on a background thread and returns immediately, so the
     // user can keep using usagi (and leave this screen) while it proceeds; the
     // global install task surfaces a loading rabbit on every screen until it

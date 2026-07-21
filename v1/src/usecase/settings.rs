@@ -1,6 +1,8 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use serde::{de::DeserializeOwned, Serialize};
 
 use crate::domain::settings::{AgentCli, LocalSettings, Settings, Theme};
 use crate::infrastructure::storage::Storage;
@@ -87,6 +89,142 @@ pub fn save_local(repo_root: &Path, local: &LocalSettings) -> Result<()> {
     store.save_settings(local)
 }
 
+/// Persist a Config-screen draft with optimistic, field-level reconciliation.
+///
+/// `baseline` is the content loaded when the editor opened. Under the store
+/// lock, each changed field or map entry is applied to the latest settings.
+/// Fields changed only by another writer are preserved; a field
+/// changed by both writers to different values aborts the write with a conflict.
+pub fn save_revisioned(
+    storage: &Storage,
+    baseline: &Settings,
+    draft: &Settings,
+) -> Result<Settings> {
+    let _lock = storage.lock()?;
+    let current = storage.load_settings()?;
+    let merged = merge_fields(baseline, draft, &current)?;
+    storage.save_settings(&merged)?;
+    Ok(merged)
+}
+
+/// Local-settings counterpart to [`save_revisioned`].
+pub fn save_local_revisioned(
+    repo_root: &Path,
+    baseline: &LocalSettings,
+    draft: &LocalSettings,
+) -> Result<LocalSettings> {
+    let store = WorkspaceStore::new(repo_root);
+    let _lock = store.lock()?;
+    let current = store.load_settings()?;
+    let merged = merge_fields(baseline, draft, &current)?;
+    store.save_settings(&merged)?;
+    Ok(merged)
+}
+
+/// Atomically patch only workspace environment bindings from an editor draft.
+/// Other local fields always come from the latest file. A concurrent env edit
+/// conflicts, while an identical concurrent result is accepted idempotently.
+pub fn save_local_env_revisioned(
+    repo_root: &Path,
+    baseline: &crate::domain::settings::SecretEnv,
+    draft: &crate::domain::settings::SecretEnv,
+) -> Result<LocalSettings> {
+    let store = WorkspaceStore::new(repo_root);
+    let _lock = store.lock()?;
+    let mut current = store.load_settings()?;
+    if draft == baseline {
+        return Ok(current);
+    }
+    if current.env != *baseline && current.env != *draft {
+        return Err(conflict_error(&["env".to_string()]));
+    }
+    current.env = draft.clone();
+    store.save_settings(&current)?;
+    Ok(current)
+}
+
+/// Three-way merge over serialized fields. Object children are reconciled
+/// recursively, so independent `local_llm`, skill-feature, and env-map entries
+/// remain disjoint while arrays and scalar leaves conflict as one field.
+fn merge_fields<T>(baseline: &T, draft: &T, current: &T) -> Result<T>
+where
+    T: Serialize + DeserializeOwned,
+{
+    let baseline = serde_json::to_value(baseline)?;
+    let draft = serde_json::to_value(draft)?;
+    let current = serde_json::to_value(current)?;
+    if !baseline.is_object() || !draft.is_object() || !current.is_object() {
+        return Err(anyhow!("settings must serialize as an object"));
+    }
+    let mut conflicts = Vec::new();
+    let merged = merge_value(
+        Some(&baseline),
+        Some(&draft),
+        Some(&current),
+        "",
+        &mut conflicts,
+    )
+    .expect("root settings object is never removed");
+    if !conflicts.is_empty() {
+        return Err(conflict_error(&conflicts));
+    }
+    Ok(serde_json::from_value(merged)?)
+}
+
+fn merge_value(
+    baseline: Option<&serde_json::Value>,
+    draft: Option<&serde_json::Value>,
+    current: Option<&serde_json::Value>,
+    path: &str,
+    conflicts: &mut Vec<String>,
+) -> Option<serde_json::Value> {
+    if draft == baseline {
+        return current.cloned();
+    }
+    if current == baseline || current == draft {
+        return draft.cloned();
+    }
+    if let (Some(baseline), Some(draft), Some(current)) = (
+        baseline.and_then(serde_json::Value::as_object),
+        draft.and_then(serde_json::Value::as_object),
+        current.and_then(serde_json::Value::as_object),
+    ) {
+        let fields: BTreeSet<_> = baseline
+            .keys()
+            .chain(draft.keys())
+            .chain(current.keys())
+            .cloned()
+            .collect();
+        let mut merged = serde_json::Map::new();
+        for field in fields {
+            let child_path = if path.is_empty() {
+                field.clone()
+            } else {
+                format!("{path}.{field}")
+            };
+            if let Some(value) = merge_value(
+                baseline.get(&field),
+                draft.get(&field),
+                current.get(&field),
+                &child_path,
+                conflicts,
+            ) {
+                merged.insert(field, value);
+            }
+        }
+        return Some(serde_json::Value::Object(merged));
+    }
+    conflicts.push(path.to_string());
+    current.cloned()
+}
+
+fn conflict_error(fields: &[String]) -> anyhow::Error {
+    anyhow!(
+        "settings conflict in {}; reload or reconcile the concurrent change, then retry",
+        fields.join(", ")
+    )
+}
+
 /// The effective settings for a project: the global settings with the
 /// repository's local overrides applied on top.
 pub fn effective(storage: &Storage, repo_root: &Path) -> Result<Settings> {
@@ -121,6 +259,141 @@ pub fn set_local_notifications_enabled(
 mod tests {
     use super::*;
     use crate::domain::settings::SkillFeature;
+    use std::sync::{Arc, Barrier};
+
+    fn env(name: &str, value: &str) -> crate::domain::settings::SecretEnv {
+        [(name.to_string(), value.to_string())]
+            .into_iter()
+            .collect()
+    }
+
+    fn run_after_barrier(writer: impl FnOnce() + Send + 'static) {
+        let barrier = Arc::new(Barrier::new(2));
+        let writer_barrier = Arc::clone(&barrier);
+        let handle = std::thread::spawn(move || {
+            writer_barrier.wait();
+            writer();
+        });
+        barrier.wait();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn config_and_setter_merge_disjoint_fields_and_conflict_on_same_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("global");
+        let storage = Storage::new(&path);
+        let baseline = load(&storage).unwrap();
+        let mut draft = baseline.clone();
+        draft.theme = Theme::Dark;
+
+        let writer_path = path.clone();
+        run_after_barrier(move || {
+            set_notifications_enabled(&Storage::new(writer_path), false).unwrap();
+        });
+        let merged = save_revisioned(&storage, &baseline, &draft).unwrap();
+        assert_eq!(merged.theme, Theme::Dark);
+        assert!(!merged.notifications_enabled);
+
+        let baseline = merged;
+        let mut draft = baseline.clone();
+        draft.theme = Theme::Light;
+        let writer_path = path.clone();
+        run_after_barrier(move || {
+            set_theme(&Storage::new(writer_path), Theme::System).unwrap();
+        });
+        let error = save_revisioned(&storage, &baseline, &draft).unwrap_err();
+        assert!(error.to_string().contains("settings conflict in theme"));
+        assert_eq!(load(&storage).unwrap().theme, Theme::System);
+    }
+
+    #[test]
+    fn env_editor_and_setter_merge_disjoint_fields_and_conflict_on_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let baseline = load_local(&repo).unwrap();
+        let draft_env = env("EDITOR", "op://editor/value");
+
+        let writer_repo = repo.clone();
+        run_after_barrier(move || {
+            set_local_agent_cli(&writer_repo, Some(AgentCli::Gemini)).unwrap();
+        });
+        let merged = save_local_env_revisioned(&repo, &baseline.env, &draft_env).unwrap();
+        assert_eq!(merged.agent_cli, Some(AgentCli::Gemini));
+        assert_eq!(merged.env, draft_env);
+
+        let baseline_env = merged.env;
+        let draft_env = env("EDITOR", "op://editor/new");
+        let writer_repo = repo.clone();
+        run_after_barrier(move || {
+            let current = load_local(&writer_repo).unwrap();
+            save_local_env_revisioned(
+                &writer_repo,
+                &current.env,
+                &env("EDITOR", "op://setter/new"),
+            )
+            .unwrap();
+        });
+        let error = save_local_env_revisioned(&repo, &baseline_env, &draft_env).unwrap_err();
+        assert!(error.to_string().contains("settings conflict in env"));
+        assert_eq!(load_local(&repo).unwrap().env["EDITOR"], "op://setter/new");
+    }
+
+    #[test]
+    fn config_and_env_editor_merge_disjoint_fields_and_conflict_on_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let baseline = load_local(&repo).unwrap();
+        let mut config_draft = baseline.clone();
+        config_draft.notifications_enabled = Some(false);
+
+        let writer_repo = repo.clone();
+        let writer_baseline = baseline.env.clone();
+        run_after_barrier(move || {
+            save_local_env_revisioned(
+                &writer_repo,
+                &writer_baseline,
+                &env("TOKEN", "op://env/value"),
+            )
+            .unwrap();
+        });
+        let merged = save_local_revisioned(&repo, &baseline, &config_draft).unwrap();
+        assert_eq!(merged.notifications_enabled, Some(false));
+        assert_eq!(merged.env["TOKEN"], "op://env/value");
+
+        let baseline = merged;
+        let mut config_draft = baseline.clone();
+        config_draft.env = env("TOKEN", "op://config/new");
+        let writer_repo = repo.clone();
+        let writer_baseline = baseline.env.clone();
+        run_after_barrier(move || {
+            save_local_env_revisioned(
+                &writer_repo,
+                &writer_baseline,
+                &env("TOKEN", "op://env/new"),
+            )
+            .unwrap();
+        });
+        let error = save_local_revisioned(&repo, &baseline, &config_draft).unwrap_err();
+        assert!(error.to_string().contains("settings conflict in env"));
+        assert_eq!(load_local(&repo).unwrap().env["TOKEN"], "op://env/new");
+    }
+
+    #[test]
+    fn failed_env_save_can_retry_with_the_same_draft() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let repo = file.path().to_path_buf();
+        let baseline = crate::domain::settings::SecretEnv::new();
+        let draft = env("TOKEN", "op://draft/value");
+
+        assert!(save_local_env_revisioned(&repo, &baseline, &draft).is_err());
+        assert_eq!(draft["TOKEN"], "op://draft/value");
+
+        drop(file);
+        std::fs::create_dir_all(&repo).unwrap();
+        let saved = save_local_env_revisioned(&repo, &baseline, &draft).unwrap();
+        assert_eq!(saved.env, draft);
+    }
 
     #[test]
     fn local_overrides_round_trip_and_resolve_against_global() {
