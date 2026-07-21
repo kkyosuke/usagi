@@ -336,6 +336,10 @@ mod tests {
     #[test]
     fn registry_rejects_duplicate_name_duplicate_route_and_unadvertised_route() {
         assert_eq!(FixtureTool("description").description(), "fixture");
+        assert!(matches!(
+            FixtureTool("call").call("{}"),
+            Err(ToolError::Unimplemented(_))
+        ));
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 descriptor(Box::new(FixtureTool("unknown")));
@@ -410,6 +414,14 @@ mod tests {
     fn registry_rejects_schema_and_policy_drift() {
         assert_eq!(UnsupportedSchema.description(), "fixture");
         assert_eq!(SchemaFixture("fixture", "{}").description(), "fixture");
+        assert!(matches!(
+            UnsupportedSchema.call("{}"),
+            Err(ToolError::Unimplemented(_))
+        ));
+        assert!(matches!(
+            SchemaFixture("call", "{}").call("{}"),
+            Err(ToolError::Unimplemented(_))
+        ));
         let unsupported_schema = [ToolDescriptor::new(
             Box::new(UnsupportedSchema),
             ToolRoute::Store,

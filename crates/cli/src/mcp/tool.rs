@@ -376,6 +376,7 @@ mod tests {
     #[test]
     fn runtime_schema_validator_covers_constraints_and_nested_values() {
         for (value, schema) in [
+            (json!("x"), json!({"oneOf":[{"type":"integer"}]})),
             (json!("x"), json!({"const":"y"})),
             (json!(null), json!({"type":"unsupported"})),
             (json!(-1), json!({"type":"integer","minimum":0})),
