@@ -317,13 +317,15 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
         return Some(LiveTerminalAction::CloseTab);
     }
     // Plain follow-ups for the live-terminal view controls the Home reducer does
-    // not own: scroll the retained PTY output and close the focused tab. A
+    // not own: copy the retained selection, scroll the PTY output, and close the
+    // focused tab. A
     // modified variant (other than the control chords above) is not a prefix
     // action and falls through to the PTY.
     if key.modifiers != Modifiers::default() {
         return None;
     }
     match key.code {
+        KeyCode::Char('c') => Some(LiveTerminalAction::CopyTerminalSelection),
         KeyCode::Char('x') => Some(LiveTerminalAction::CloseTab),
         KeyCode::Char('u') | KeyCode::Up => Some(LiveTerminalAction::ScrollUp),
         KeyCode::Char('d') | KeyCode::Down => Some(LiveTerminalAction::ScrollDown),
@@ -581,7 +583,11 @@ mod tests {
                 follow_up: ctrl('p'),
                 action: LiveTerminalAction::PreviousTab,
             },
-            // View controls the reducer does not own: tab close and scroll.
+            // View controls the reducer does not own: copy, tab close, and scroll.
+            Case {
+                follow_up: key(KeyCode::Char('c')),
+                action: LiveTerminalAction::CopyTerminalSelection,
+            },
             Case {
                 follow_up: key(KeyCode::Char('x')),
                 action: LiveTerminalAction::CloseTab,
