@@ -28,6 +28,44 @@ fail() {
     exit 1
 }
 
+select_release() {
+    local releases selection index version
+    if [ ! -r /dev/tty ]; then
+        fail "a terminal is required to select a release"
+    fi
+    releases="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" | sed -nE 's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"v?([0-9]+\.[0-9]+\.[0-9]+)"[,]?$/\1/p' | awk '!seen[$0]++')"
+    [ -n "$releases" ] || fail "could not find any stable releases"
+
+    echo "Available usagi releases:" > /dev/tty
+    index=1
+    while IFS= read -r version; do
+        printf '  %d) v%s\n' "$index" "$version" > /dev/tty
+        index=$((index + 1))
+    done <<EOF
+$releases
+EOF
+
+    printf 'Select a release number and press Enter: ' > /dev/tty
+    IFS= read -r selection < /dev/tty || fail "could not read release selection"
+    case "$selection" in
+        ''|*[!0-9]*) fail "invalid release selection" ;;
+    esac
+    version="$(printf '%s\n' "$releases" | sed -n "${selection}p")"
+    [ -n "$version" ] || fail "invalid release selection"
+    USAGI_VERSION="v${version}"
+}
+
+case "${1:-}" in
+    --select-version)
+        select_release
+        ;;
+    '')
+        ;;
+    *)
+        fail "unknown option: $1"
+        ;;
+esac
+
 read_version() {
     local bin=$1 output
     [ -x "$bin" ] || return 0
@@ -132,7 +170,15 @@ verify_expected_version() {
 acquire_lock
 
 ASSET_NAME="$(platform_asset)"
-BASE_URL="https://github.com/${REPO}/releases/latest/download"
+if [ -n "${USAGI_VERSION:-}" ]; then
+    case "$USAGI_VERSION" in
+        v[0-9]*.[0-9]*.[0-9]*) ;;
+        *) fail "invalid requested release version" ;;
+    esac
+    BASE_URL="https://github.com/${REPO}/releases/download/${USAGI_VERSION}"
+else
+    BASE_URL="https://github.com/${REPO}/releases/latest/download"
+fi
 
 mkdir -p -- "$BIN_DIR"
 chmod 700 "$BIN_DIR"

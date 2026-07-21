@@ -332,8 +332,12 @@ enum Commands {
     },
     /// Sync the current repository's worktree state to .usagi/state.json
     Status,
-    /// Download and install the latest released usagi binary
-    Update,
+    /// Download and install a released usagi binary
+    Update {
+        /// Choose the release version to install
+        #[arg(short = 'v')]
+        select_version: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -437,7 +441,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Run { n } => usagi::presentation::cli::run::run(n),
         Commands::Status => usagi::presentation::cli::status::run(),
-        Commands::Update => usagi::presentation::cli::update::run(),
+        Commands::Update { select_version } => {
+            usagi::presentation::cli::update::run(select_version)
+        }
     };
 
     trace_command(name, result.is_ok());
@@ -469,7 +475,7 @@ fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Op { .. } => Some("op"),
         Commands::Run { .. } => Some("run"),
         Commands::Status => Some("status"),
-        Commands::Update => Some("update"),
+        Commands::Update { .. } => Some("update"),
         Commands::LlmMcp { .. } | Commands::Mcp => None,
     }
 }
