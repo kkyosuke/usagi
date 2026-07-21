@@ -5,10 +5,10 @@
 //! - **Per-repository metadata** at `<repo>/.usagi` ([`STATE_DIR`]): the issue /
 //!   memory stores and the `.gitignore` writer join it. Lives next to the code
 //!   it describes and is committed with it.
-//! - **The global per-user data directory** ([`data_dir`]): the selected
-//!   `dev/` or `device/` child of `$USAGI_HOME` / `~/.usagi`. The mode split
-//!   prevents local development and device validation from touching each other
-//!   or an existing usagi installation.
+//! - **The global per-user data directory** ([`data_dir`]): `$USAGI_HOME` /
+//!   `~/.usagi` for production, or its selected `dev/` / `local/` child for
+//!   development and local use. The mode split prevents those
+//!   non-production uses from touching production state.
 //!
 //! The two share the `.usagi` basename by convention but are independent
 //! directories with different contents and lifetimes.
@@ -22,8 +22,8 @@ pub const STATE_DIR: &str = ".usagi";
 
 /// The directory name used by development runtime state.
 pub const DEV_DIR: &str = "dev";
-/// The directory name used by device-validation runtime state.
-pub const DEVICE_DIR: &str = "device";
+/// The directory name used by local runtime state.
+pub const LOCAL_DIR: &str = "local";
 
 /// The directory under [`STATE_DIR`] that holds session worktrees, one per
 /// session: `<repo>/.usagi/sessions/<name>`.
@@ -36,35 +36,29 @@ pub const RUNTIME_MODE_ENV: &str = "USAGI_RUNTIME_MODE";
 /// Directory created under the user's home directory by default.
 const DATA_DIR_NAME: &str = ".usagi";
 
-/// The runtime mode used to isolate local development from device validation.
+/// The runtime mode used to isolate production, development, and local state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeMode {
+    /// Production state, stored directly in the base data directory.
+    Production,
     /// Local development state, stored below the `dev/` child directory.
     Development,
-    /// State used while validating the real executable on a device.
-    Device,
+    /// Local state, stored below the `local/` child directory.
+    Local,
 }
 
 /// Returns the selected runtime mode.
 ///
-/// [`RUNTIME_MODE_ENV`] accepts `development` and `device`. When it is absent
-/// (or invalid), debug builds default to development and release builds default
-/// to device, preserving the existing safe separation.
+/// [`RUNTIME_MODE_ENV`] accepts `production`, `development`, and `local`.
+/// When it is absent (or invalid), local is the safe default for every
+/// build profile; production requires an explicit selection.
 #[must_use]
 pub fn runtime_mode() -> RuntimeMode {
     match std::env::var(RUNTIME_MODE_ENV).as_deref() {
+        Ok("production") => RuntimeMode::Production,
         Ok("development") => RuntimeMode::Development,
-        Ok("device") => RuntimeMode::Device,
-        _ => {
-            #[cfg(debug_assertions)]
-            {
-                RuntimeMode::Development
-            }
-            #[cfg(not(debug_assertions))]
-            {
-                RuntimeMode::Device
-            }
-        }
+        Ok("local") => RuntimeMode::Local,
+        _ => RuntimeMode::Local,
     }
 }
 
@@ -90,8 +84,9 @@ pub fn data_dir() -> Result<PathBuf> {
 
 /// Resolve the selected-mode directory rooted at `base`.
 ///
-/// Development mode uses `base/dev`; device mode uses `base/device`. This is
-/// shared by global and project-local runtime state so their split cannot drift.
+/// Production mode uses `base`; development mode uses `base/dev`; local mode
+/// uses `base/local`. This is shared by global and project-local runtime state
+/// so their split cannot drift.
 #[must_use]
 pub fn channel_data_dir(base: impl AsRef<Path>) -> PathBuf {
     mode_data_dir(base.as_ref(), runtime_mode())
@@ -99,15 +94,17 @@ pub fn channel_data_dir(base: impl AsRef<Path>) -> PathBuf {
 
 fn mode_data_dir(base: &Path, mode: RuntimeMode) -> PathBuf {
     match mode {
-        RuntimeMode::Device => base.join(DEVICE_DIR),
+        RuntimeMode::Production => base.to_path_buf(),
+        RuntimeMode::Local => base.join(LOCAL_DIR),
         RuntimeMode::Development => base.join(DEV_DIR),
     }
 }
 
 /// Resolve the selected-mode runtime-state directory for a project.
 ///
-/// Development mode uses `<project_root>/.usagi/dev`; device mode uses
-/// `<project_root>/.usagi/device`.
+/// Production mode uses `<project_root>/.usagi`; development mode uses
+/// `<project_root>/.usagi/dev`; local mode uses
+/// `<project_root>/.usagi/local`.
 #[must_use]
 pub fn project_data_dir(project_root: impl AsRef<Path>) -> PathBuf {
     channel_data_dir(project_root.as_ref().join(STATE_DIR))
@@ -139,17 +136,21 @@ mod tests {
     }
 
     #[test]
-    fn project_data_dir_uses_the_same_dev_directory_definition() {
+    fn project_data_dir_uses_the_selected_mode_definition() {
         let expected = channel_data_dir("/project/.usagi");
         assert_eq!(project_data_dir("/project"), expected);
     }
 
     #[test]
-    fn mode_data_dir_separates_both_runtime_modes() {
+    fn mode_data_dir_separates_all_runtime_modes() {
         let base = Path::new("/data");
         assert_eq!(
-            mode_data_dir(base, RuntimeMode::Device),
-            PathBuf::from("/data/device")
+            mode_data_dir(base, RuntimeMode::Production),
+            PathBuf::from("/data")
+        );
+        assert_eq!(
+            mode_data_dir(base, RuntimeMode::Local),
+            PathBuf::from("/data/local")
         );
         assert_eq!(
             mode_data_dir(base, RuntimeMode::Development),
@@ -159,28 +160,30 @@ mod tests {
 
     #[test]
     fn runtime_mode_variants_are_distinct() {
-        assert_ne!(RuntimeMode::Device, RuntimeMode::Development);
-        assert_eq!(RuntimeMode::Device, RuntimeMode::Device);
-        assert_eq!(format!("{:?}", RuntimeMode::Device), "Device");
+        assert_ne!(RuntimeMode::Production, RuntimeMode::Local);
+        assert_ne!(RuntimeMode::Production, RuntimeMode::Development);
+        assert_ne!(RuntimeMode::Local, RuntimeMode::Development);
+        assert_eq!(RuntimeMode::Local, RuntimeMode::Local);
+        assert_eq!(format!("{:?}", RuntimeMode::Local), "Local");
         assert_eq!(format!("{:?}", RuntimeMode::Development), "Development");
+        assert_eq!(format!("{:?}", RuntimeMode::Production), "Production");
     }
 
     #[test]
-    fn runtime_mode_env_explicitly_selects_development_or_device() {
+    fn runtime_mode_env_explicitly_selects_each_mode() {
         let _guard = crate::test_support::process_env_guard();
-        unsafe { std::env::set_var(RUNTIME_MODE_ENV, "device") };
-        assert_eq!(runtime_mode(), RuntimeMode::Device);
+        unsafe { std::env::set_var(RUNTIME_MODE_ENV, "production") };
+        assert_eq!(runtime_mode(), RuntimeMode::Production);
+
+        unsafe { std::env::set_var(RUNTIME_MODE_ENV, "local") };
+        assert_eq!(runtime_mode(), RuntimeMode::Local);
 
         unsafe { std::env::set_var(RUNTIME_MODE_ENV, "development") };
         assert_eq!(runtime_mode(), RuntimeMode::Development);
 
         unsafe { std::env::set_var(RUNTIME_MODE_ENV, "invalid") };
-        #[cfg(debug_assertions)]
-        assert_eq!(runtime_mode(), RuntimeMode::Development);
-        #[cfg(not(debug_assertions))]
-        {
-            assert_eq!(runtime_mode(), RuntimeMode::Device);
-        }
+        assert_eq!(runtime_mode(), RuntimeMode::Local);
         unsafe { std::env::remove_var(RUNTIME_MODE_ENV) };
+        assert_eq!(runtime_mode(), RuntimeMode::Local);
     }
 }
