@@ -181,6 +181,17 @@ pub enum LiveTerminalAction {
     ScrollDown,
 }
 
+/// A control chord reserved globally when no live-terminal leader is pending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlobalControlChord {
+    /// Interrupt / quit (`Ctrl-C`).
+    CtrlC,
+    /// Open workspace quit confirmation (`Ctrl-Q`).
+    CtrlQ,
+    /// Unregister the selected workspace (`Ctrl-D`).
+    CtrlD,
+}
+
 /// A classifier result that an adapter can dispatch without daemon wire types.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveInputOutput {
@@ -188,6 +199,8 @@ pub enum LiveInputOutput {
     Passthrough(Vec<u8>),
     /// Perform a TUI-local management operation.
     Action(LiveTerminalAction),
+    /// Dispatch a global control chord after leader precedence has been resolved.
+    GlobalControl(GlobalControlChord),
     /// Consume input without forwarding it (leader, unknown follow-up, release).
     Swallowed,
 }
@@ -222,11 +235,16 @@ impl LiveInputClassifier {
                 self.leader_at = None;
                 LiveInputOutput::Action(LiveTerminalAction::ScrollDown)
             }
-            LiveInput::Text(text) => self.forward_non_key(text.into_bytes()),
-            LiveInput::Paste(bytes) | LiveInput::Raw(bytes) => self.forward_non_key(bytes),
+            LiveInput::Text(text) => self.classify_bytes(leader_alive, text.into_bytes()),
+            LiveInput::Raw(bytes) => self.classify_bytes(leader_alive, bytes),
+            LiveInput::Paste(bytes) => self.forward_non_key(bytes),
             LiveInput::Mouse { .. } | LiveInput::Pointer(_) => {
                 self.leader_at = None;
-                LiveInputOutput::Swallowed
+                if leader_alive {
+                    LiveInputOutput::Swallowed
+                } else {
+                    LiveInputOutput::Passthrough(Vec::new())
+                }
             }
         }
     }
@@ -243,6 +261,17 @@ impl LiveInputClassifier {
         LiveInputOutput::Passthrough(bytes)
     }
 
+    fn classify_bytes(&mut self, leader_alive: bool, bytes: Vec<u8>) -> LiveInputOutput {
+        self.leader_at = None;
+        if leader_alive {
+            return LiveInputOutput::Swallowed;
+        }
+        global_control_bytes(&bytes).map_or(
+            LiveInputOutput::Passthrough(bytes),
+            LiveInputOutput::GlobalControl,
+        )
+    }
+
     fn classify_key(
         &mut self,
         now: Duration,
@@ -250,6 +279,7 @@ impl LiveInputClassifier {
         key: &KeyEvent,
     ) -> LiveInputOutput {
         if key.kind == KeyEventKind::Release {
+            self.leader_at = None;
             return LiveInputOutput::Swallowed;
         }
         if leader_alive {
@@ -260,7 +290,31 @@ impl LiveInputClassifier {
             self.leader_at = Some(now);
             return LiveInputOutput::Swallowed;
         }
+        if let Some(control) = global_control_key(key) {
+            return LiveInputOutput::GlobalControl(control);
+        }
         LiveInputOutput::Passthrough(encode_key(key))
+    }
+}
+
+fn global_control_key(key: &KeyEvent) -> Option<GlobalControlChord> {
+    match key.code {
+        KeyCode::Char('\u{3}') => Some(GlobalControlChord::CtrlC),
+        KeyCode::Char('\u{11}') => Some(GlobalControlChord::CtrlQ),
+        KeyCode::Char('\u{4}') => Some(GlobalControlChord::CtrlD),
+        KeyCode::Char('c') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlC),
+        KeyCode::Char('q') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlQ),
+        KeyCode::Char('d') if is_only_control(key.modifiers) => Some(GlobalControlChord::CtrlD),
+        _ => None,
+    }
+}
+
+fn global_control_bytes(bytes: &[u8]) -> Option<GlobalControlChord> {
+    match bytes {
+        [3] => Some(GlobalControlChord::CtrlC),
+        [17] => Some(GlobalControlChord::CtrlQ),
+        [4] => Some(GlobalControlChord::CtrlD),
+        _ => None,
     }
 }
 
@@ -478,16 +532,6 @@ mod tests {
                 expected: b"\x1b[6~".to_vec(),
             },
             Case {
-                name: "ctrl c",
-                input: ctrl('c'),
-                expected: vec![3],
-            },
-            Case {
-                name: "ctrl q",
-                input: ctrl('q'),
-                expected: vec![17],
-            },
-            Case {
                 name: "alt chord",
                 input: LiveInput::Key(KeyEvent::new(
                     KeyCode::Char('f'),
@@ -643,6 +687,57 @@ mod tests {
     }
 
     #[test]
+    fn global_control_table_matches_semantic_and_raw_forms_without_a_leader() {
+        let cases = [
+            (ctrl('c'), GlobalControlChord::CtrlC),
+            (key(KeyCode::Char('\u{3}')), GlobalControlChord::CtrlC),
+            (LiveInput::Raw(vec![3]), GlobalControlChord::CtrlC),
+            (ctrl('q'), GlobalControlChord::CtrlQ),
+            (key(KeyCode::Char('\u{11}')), GlobalControlChord::CtrlQ),
+            (LiveInput::Raw(vec![17]), GlobalControlChord::CtrlQ),
+            (ctrl('d'), GlobalControlChord::CtrlD),
+            (key(KeyCode::Char('\u{4}')), GlobalControlChord::CtrlD),
+            (LiveInput::Raw(vec![4]), GlobalControlChord::CtrlD),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                LiveInputClassifier::default().classify(T0, input),
+                LiveInputOutput::GlobalControl(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn pending_leader_consumes_every_global_control_form_and_resets() {
+        let follow_ups = [
+            ctrl('c'),
+            key(KeyCode::Char('\u{3}')),
+            LiveInput::Raw(vec![3]),
+            ctrl('q'),
+            key(KeyCode::Char('\u{11}')),
+            LiveInput::Raw(vec![17]),
+            ctrl('d'),
+            key(KeyCode::Char('\u{4}')),
+            LiveInput::Raw(vec![4]),
+        ];
+        for follow_up in follow_ups {
+            let mut classifier = LiveInputClassifier::default();
+            assert_eq!(
+                classifier.classify(T0, ctrl('o')),
+                LiveInputOutput::Swallowed
+            );
+            assert_eq!(
+                classifier.classify(Duration::from_millis(1), follow_up),
+                LiveInputOutput::Swallowed
+            );
+            assert_eq!(
+                classifier.classify(Duration::from_millis(2), key(KeyCode::Char('z'))),
+                LiveInputOutput::Passthrough(b"z".to_vec())
+            );
+        }
+    }
+
+    #[test]
     fn every_non_leader_key_is_forwarded_to_the_pane() {
         let cases = [
             (ctrl('r'), vec![0x12]),
@@ -680,6 +775,47 @@ mod tests {
             LiveInputOutput::Passthrough(b"q".to_vec())
         );
         assert!(!classifier.leader_pending(LEADER_TIMEOUT));
+    }
+
+    #[test]
+    fn timeout_boundary_restores_global_control_semantics() {
+        let mut classifier = LiveInputClassifier::default();
+        assert_eq!(
+            classifier.classify(T0, ctrl('o')),
+            LiveInputOutput::Swallowed
+        );
+        assert_eq!(
+            classifier.classify(LEADER_TIMEOUT, LiveInput::Raw(vec![3])),
+            LiveInputOutput::GlobalControl(GlobalControlChord::CtrlC)
+        );
+        assert!(!classifier.leader_pending(LEADER_TIMEOUT));
+    }
+
+    #[test]
+    fn release_and_repeat_follow_ups_consume_and_reset_a_pending_leader() {
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            let mut classifier = LiveInputClassifier::default();
+            assert_eq!(
+                classifier.classify(T0, ctrl('o')),
+                LiveInputOutput::Swallowed
+            );
+            let follow_up = LiveInput::Key(KeyEvent::new(
+                KeyCode::Char('c'),
+                Modifiers {
+                    control: true,
+                    ..Modifiers::default()
+                },
+                kind,
+            ));
+            assert_eq!(
+                classifier.classify(Duration::from_millis(1), follow_up),
+                LiveInputOutput::Swallowed
+            );
+            assert_eq!(
+                classifier.classify(Duration::from_millis(2), ctrl('q')),
+                LiveInputOutput::GlobalControl(GlobalControlChord::CtrlQ)
+            );
+        }
     }
 
     #[test]
@@ -744,6 +880,23 @@ mod tests {
             LiveInputOutput::Swallowed
         );
         assert!(!classifier.leader_pending(Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn pointer_inputs_without_a_leader_are_left_for_the_terminal_adapter() {
+        for input in [
+            LiveInput::Mouse { column: 4, row: 9 },
+            LiveInput::Pointer(PointerEvent {
+                kind: PointerKind::Drag,
+                column: 4,
+                row: 9,
+            }),
+        ] {
+            assert_eq!(
+                LiveInputClassifier::default().classify(T0, input),
+                LiveInputOutput::Passthrough(Vec::new())
+            );
+        }
     }
 
     #[test]
