@@ -217,13 +217,16 @@ impl PrInventory {
 
     /// Records a retryable refresh failure without discarding the last known
     /// title or state. This is observational metadata, not an inventory revision.
-    pub fn mark_refresh_backoff(&mut self, identity: &PrIdentity) {
+    pub fn mark_refresh_backoff(&mut self, identity: &PrIdentity) -> bool {
         if let Some(entry) = self.entries.get_mut(identity)
             && !entry.pinned
             && entry.state != PrState::Dismissed
+            && entry.refresh != PrRefreshState::BackingOff
         {
             entry.refresh = PrRefreshState::BackingOff;
+            return true;
         }
+        false
     }
     /// Applies a user-owned state change.
     pub fn set_user_state(&mut self, identity: &PrIdentity, state: PrState, pinned: bool) -> bool {

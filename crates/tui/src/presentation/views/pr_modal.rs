@@ -109,6 +109,10 @@ impl PrModal {
                     };
                     pr.refreshing =
                         entry.refresh == usagi_core::domain::pr_inventory::PrRefreshState::Pending;
+                    if entry.refresh == usagi_core::domain::pr_inventory::PrRefreshState::BackingOff
+                    {
+                        pr.attempts = 1;
+                    }
                     pr
                 })
                 .collect(),
@@ -177,6 +181,13 @@ fn pr_row(pr: &PrLink, selected: bool, inner: usize) -> String {
 /// 選択中 PR の詳細ブロック（状態・URL）。
 fn detail_lines(pr: &PrLink) -> Vec<String> {
     let (label, style) = state_label(pr);
+    let detail = if pr.refreshing {
+        format!("refresh pending · {}", pr.url)
+    } else if pr.attempts != 0 {
+        format!("last refresh failed; retrying · {}", pr.url)
+    } else {
+        pr.url.clone()
+    };
     vec![
         modal::content_line(
             &format!(
@@ -189,7 +200,7 @@ fn detail_lines(pr: &PrLink) -> Vec<String> {
             ),
             INNER_WIDTH,
         ),
-        modal::caption(&pr.url),
+        modal::caption(&detail),
     ]
 }
 
@@ -380,6 +391,21 @@ mod tests {
         let text = joined(&modal);
         assert!(text.contains("#7"));
         assert!(text.contains("(no title)"));
+    }
+
+    #[test]
+    fn daemon_refresh_metadata_is_rendered_as_safe_status() {
+        use usagi_core::domain::pr_inventory::{PrInventory, PrRefreshState, canonicalize};
+
+        let identity = canonicalize("https://github.com/o/r/pull/7").unwrap();
+        let mut inventory = PrInventory::default();
+        inventory.discover([identity.clone()]);
+        let entries = inventory.entries.values().cloned().collect::<Vec<_>>();
+        assert!(joined(&PrModal::from_entries(&entries)).contains("refresh pending"));
+
+        inventory.entries.get_mut(&identity).unwrap().refresh = PrRefreshState::BackingOff;
+        let entries = inventory.entries.values().cloned().collect::<Vec<_>>();
+        assert!(joined(&PrModal::from_entries(&entries)).contains("last refresh failed; retrying"));
     }
 
     #[test]

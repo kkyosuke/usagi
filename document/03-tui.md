@@ -311,6 +311,11 @@ reservation は durable state に残っていても選択対象にしない。
 や TUI scanner を production の fallback にしない。Open、Closed、Merged、Dismissed と title を表示し、
 dismissed を新規検出として通知しない。
 
+snapshot の `refresh` は daemon-owned freshness metadata である。`pending` は初回取得待ち、`idle` は freshness
+window 内の成功、`backing_off` は last-known title/state を表示したまま remote retry を待つ状態を表す。TUI は
+独自 timer、`gh` 呼び出し、失敗時の空 snapshot への置換を行わない。refresh の間隔、dedupe、backoff、restart、
+shutdown の正本は [daemon の PR refresh scheduler](05-daemon.md#pr-refresh-scheduler) とする。
+
 Enter は選択中の canonical HTTPS PR URL を browser effect に 1 回渡す。合成ルートは macOS では
 `open`、Linux では `xdg-open`、Windows では `cmd /C start "" <url>`（空文字は `start` が消費する
 window title 引数）を argv として実行する。URL を shell command に補間せず、検証失敗、
