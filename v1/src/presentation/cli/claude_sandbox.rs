@@ -55,6 +55,18 @@ pub fn run(
         .context("failed to prepare Claude's sandbox temporary directory")?;
     extra_writable_roots.push(claude_state);
     extra_writable_roots.push(usagi_state);
+
+    // `sandbox-exec` cannot create a second Seatbelt profile.  This is normal
+    // when usagi itself is launched by a sandboxed host (for example Codex).
+    // In that case the child inherits the host's already-active OS boundary,
+    // so starting Claude directly preserves the boundary rather than dropping
+    // it.  Do not use this as a general fallback: every other sandbox failure
+    // still follows the fail-closed path below.
+    #[cfg(target_os = "macos")]
+    if inherits_macos_sandbox()? {
+        return run_inherited_sandbox(&command, &sandbox_tmp);
+    }
+
     run_in(
         &cwd,
         mode,
@@ -68,6 +80,40 @@ pub fn run(
                 .with_context(|| format!("failed to start OS sandbox {}", program.display()))
         },
     )
+}
+
+/// Whether the current process already has a macOS Seatbelt profile that
+/// rejects nested `sandbox-exec` invocations.
+#[cfg(target_os = "macos")]
+fn inherits_macos_sandbox() -> Result<bool> {
+    let output = Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+        .output()
+        .context("failed to probe the macOS Claude sandbox")?;
+    Ok(!output.status.success() && is_nested_sandbox_rejection(&output.stderr))
+}
+
+#[cfg(target_os = "macos")]
+fn is_nested_sandbox_rejection(stderr: &[u8]) -> bool {
+    String::from_utf8_lossy(stderr).contains("sandbox_apply: Operation not permitted")
+}
+
+/// Start Claude without a second profile only after [`inherits_macos_sandbox`]
+/// established that the parent profile is inherited by this child process.
+#[cfg(target_os = "macos")]
+fn run_inherited_sandbox(command: &[OsString], sandbox_tmp: &Path) -> Result<()> {
+    let (program, args) = command
+        .split_first()
+        .context("Claude sandbox refused an empty command")?;
+    let status = Command::new(program)
+        .args(args)
+        .env("TMPDIR", sandbox_tmp)
+        .status()
+        .context("failed to start Claude inside the inherited macOS sandbox")?;
+    if !status.success() {
+        bail!("Claude inside the inherited macOS sandbox exited with {status}");
+    }
+    Ok(())
 }
 
 fn run_in(
@@ -224,6 +270,19 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("sandbox unavailable"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn nested_sandbox_probe_accepts_only_the_known_seatbelt_rejection() {
+        // This test documents the exact macOS error that enables the inherited
+        // sandbox path. Other failures remain fail-closed in `run_in`.
+        assert!(is_nested_sandbox_rejection(
+            b"sandbox-exec: sandbox_apply: Operation not permitted\n"
+        ));
+        assert!(!is_nested_sandbox_rejection(
+            b"sandbox-exec: profile invalid\n"
+        ));
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
