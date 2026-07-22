@@ -100,17 +100,32 @@ pub trait ShutdownSignal {
     fn wait(&self) -> io::Result<()>;
 }
 
-/// Publishes the daemon's externally connectable endpoint after it has become
-/// the registered single process owner.
+/// Recovers any stale endpoint left by a previous owner, then publishes the
+/// daemon's externally connectable endpoint after it has become the registered
+/// single process owner.
 ///
-/// [`crate::usecase::serve`] calls [`publish`](DaemonReady::publish) exactly
-/// once after acquiring the instance lock and saving its PID record, and never
-/// calls it when another daemon owns the lock. On shutdown it calls
+/// [`crate::usecase::serve`] acquires the instance lock, snapshots the previous
+/// lifecycle record, and calls
+/// [`recover_stale_endpoint`](DaemonReady::recover_stale_endpoint) before
+/// replacing that record or calling [`publish`](DaemonReady::publish). The
+/// recovery must be idempotent and generation-fenced: it may remove artifacts
+/// owned by the previous inactive daemon, but must leave a replacement
+/// generation untouched. On shutdown `serve` calls
 /// [`quiesce`](DaemonReady::quiesce) before clearing the record, then
 /// [`retire`](DaemonReady::retire) while it still holds the instance lock.
-/// Implementations must make cleanup idempotent and must not expose an endpoint
-/// before `publish`.
+/// Implementations must not expose a new endpoint before `publish`.
 pub trait DaemonReady {
+    /// Retire stale endpoint artifacts before this process registers itself.
+    ///
+    /// This is called while the instance lock is held, including when no
+    /// previous lifecycle record exists. Successful return proves that startup
+    /// may proceed without inheriting an endpoint from an inactive owner.
+    ///
+    /// # Errors
+    /// Returns an error when stale endpoint ownership cannot be proved or its
+    /// artifacts cannot be retired safely.
+    fn recover_stale_endpoint(&self) -> io::Result<()>;
+
     /// Publish the endpoint for an already registered daemon.
     ///
     /// # Errors

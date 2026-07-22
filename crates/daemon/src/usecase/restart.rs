@@ -3,7 +3,7 @@
 //!
 //! It composes the two existing control-plane usecases: [`stop`](crate::usecase::stop)
 //! asks a running daemon to stop and waits for its endpoint retirement / exact
-//! record clear (or reclaims an initially stale record), then
+//! record clear (or lock-fenced endpoint and record recovery when initially stale), then
 //! [`launch_and_confirm`](crate::usecase::start::launch_and_confirm) spawns
 //! a detached `serve` and waits for it to register. The store, probe, terminator,
 //! launcher, and sleeper are injected, so this stays pure and fully testable.
@@ -19,6 +19,7 @@ use usagi_core::infrastructure::daemon::{
     DaemonLauncher, DaemonRecordStore, LivenessProbe, RecordFile, Sleeper, Terminator,
 };
 
+use crate::usecase::stop::StaleDaemonCleanup;
 use crate::usecase::{start, stop};
 
 /// Stop any running or stale daemon, then launch and confirm a fresh one.
@@ -33,12 +34,13 @@ pub fn restart<F: RecordFile, P: LivenessProbe, T: Terminator, L: DaemonLauncher
     terminator: &T,
     launcher: &L,
     sleeper: &K,
+    stale_cleanup: &dyn StaleDaemonCleanup,
     info: &AppInfo,
 ) -> io::Result<String> {
     // Bring down whatever is there (running → signal + owner cleanup wait,
-    // stale → exact-record clear, absent → nothing); its report line is not
+    // stale → endpoint cleanup + exact-record clear, absent → nothing); its report line is not
     // surfaced by restart.
-    stop::stop(store, probe, terminator, sleeper, info)?;
+    stop::stop(store, probe, terminator, sleeper, stale_cleanup, info)?;
     let pid = start::launch_and_confirm(store, probe, launcher, sleeper)?;
     Ok(format!("{}: daemon restarted (pid {pid})", info.describe()))
 }
@@ -47,7 +49,7 @@ pub fn restart<F: RecordFile, P: LivenessProbe, T: Terminator, L: DaemonLauncher
 mod tests {
     use super::restart;
     use crate::test_support::{
-        FixedProbe, InMemoryRecordFile, NoopSleeper, RecordingTerminator, TestLauncher,
+        FixedProbe, InMemoryRecordFile, NoopReady, NoopSleeper, RecordingTerminator, TestLauncher,
     };
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::daemon::DaemonRecord;
@@ -89,6 +91,7 @@ mod tests {
                 &terminator,
                 &launcher,
                 &sleeper,
+                &NoopReady,
                 &info()
             )
             .unwrap(),
@@ -111,6 +114,7 @@ mod tests {
                 &terminator,
                 &launcher,
                 &NoopSleeper,
+                &NoopReady,
                 &info()
             )
             .unwrap(),
@@ -133,6 +137,7 @@ mod tests {
                 &terminator,
                 &launcher,
                 &NoopSleeper,
+                &NoopReady,
                 &info()
             )
             .is_err()
@@ -152,6 +157,7 @@ mod tests {
                 &terminator,
                 &launcher,
                 &NoopSleeper,
+                &NoopReady,
                 &info()
             )
             .is_err()

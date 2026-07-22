@@ -53,8 +53,8 @@ production graph の検査方法は [Production screen graph harness](03-tui.md#
 |---|---:|---|
 | `crates/cli/src/**` | 22 | command/MCP parser・error mapping は削除対象。stdio / process 境界だけ `real_io` 候補 |
 | `src/main.rs` | 1 | ロジックを持たない composition なら `composition` 候補 |
-| `src/runtime/bootstrap.rs` | 6 | 設定判断を coverage 対象へ戻し、process composition だけ候補 |
+| `src/runtime/bootstrap.rs` | 3 | bootstrap recovery 判断を coverage 対象へ戻し、readiness/build helper だけ返済候補 |
 | `src/runtime/cli.rs` | 2 | CLI routing を coverage 対象へ戻し、実行面の束縛だけ候補 |
 | `src/runtime/clipboard.rs` | 3 | platform process IO だけ `real_io` 候補 |
 | `src/runtime/launchd.rs` | 5 | plist 生成・判断は削除対象、launchd process IO だけ `real_io` 候補 |
-| **合計** | **39** | owner `root-cli`、期限 2027-01-31 |
+| **合計** | **36** | owner `root-cli`、期限 2027-01-31 |

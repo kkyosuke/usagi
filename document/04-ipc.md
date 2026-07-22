@@ -330,26 +330,61 @@ locator は `0600` で、所有 UID・mode・symlink でないことを discover
 `SecureUnixListener::bind` は endpoint bind と current publish を一つの処理で行うため、active locator を変えずに
 private standby endpoint だけを ready にする段階はない。
 
+private directory は、検証済みの trusted parent directory の直下に `0700` を mkdir syscall へ指定して作る。
+そのため process が mkdir と事後 chmod の間で停止しても group / other に公開された directory は残らない。
+既存 path は symlink でない directory、effective UID、pathname と opened directory fd の device / inode を
+検証する。abnormal exit が残した permission bit が `0700` の部分集合である owner directory だけを exact inode の
+まま `0700` へ修復できる。所有者不一致、group / other bit を持つ directory、non-directory、path replacement は
+修復せず拒否する。同時 first boot は同じ規則で作成済み path を再検証するため、一方の transient state を unsafe
+directory として採用しない。first-use の作成・修復は検証済み parent directory fd の lock 下で直列化する。
+selected runtime data directory が複数 component 未作成の場合は、effective UID owner かつ group / other
+writable でない最深の既存 directory（または root-owned exact `01777` temporary anchor）から各 component を
+同じ `0700` 規則で順に作成・修復する。intermediate component が restrictive umask と crash により mode `000` を
+残しても、trusted anchor まで巻き戻して exact inode を修復してから traversal を再開する。
+ただし root-owned exact `01777` temporary anchor は caller 所有ではなく parent fd lock を取得できないため、その直下の
+最初の component だけは atomic `mkdir(0700)` と sticky / trusted-anchor 検証で競合を解決する。作成済み path は同じ
+invariant で再検証し、それ以降の owner directory component は parent fd lock 下で直列化する。
+
 current locator の publish と retire は owner-only の `current.lock` で直列化する。listener owner は
 自分が publish した `(generation, endpoint)` と現在の locator が一致する場合だけ `current.json` を
-unlink し、自 generation 固有の socket だけを回収する。したがって stale generation の遅延 retire / Drop が
+unlink し、自 generation 固有の socket だけを回収する。retire は socket の不在を先に確定し、その後だけ exact locator を
+unlink するため、locator の消去が endpoint cleanup の commit fence になる。したがって stale generation の遅延 retire / Drop が
 replacement generation の locator または socket を削除することはない。planned generation end は accept loop の
 停止・join 後にこの retire を完了し、client discovery を `NotFound` へ戻す。
+`current.lock` を含む lifecycle lock node の secure create / reopen と pathname identity の契約は
+[5. daemon data directory](05-daemon.md#daemon-data-directory) を正本とする。
 
 lock を保持した locator writer は writer ごとに一意な private temporary file を `create_new` と
 `O_NOFOLLOW | O_CLOEXEC` で開き、file descriptor を `fchmod(0600)` した後に regular file・所有 UID・
-exact mode を検証する。JSON 全体の write と file fsync が成功した場合だけ `current.json` へ atomic rename
-する。rename された inode は temp の fd 上で検証済みであり、discovery も `current.json` を
-`O_NOFOLLOW | O_CLOEXEC` で開いた同じ fd から regular file・所有 UID・exact mode を再検証して読む。
-rename 前の create / write / sync / rename failure は既存 locator を置換せず、その writer が作成した temporary
-file だけを回収する。process crash が残した旧 fixed temp や別 writer の temp は推測削除せず、一意な次の
-temp で publication を継続する。rename 後の parent directory fsync は best-effort であり、commit 済み
-publication を失敗として報告しない。atomic publication は generation の新旧順序を推測せず、旧 generation の
-locator や socket を回収する根拠にも使わない。
+exact mode・`nlink == 1` を検証する。JSON 全体の write と file fsync 後にも同じ fd を再検証し、その場合だけ
+`current.json` へ atomic rename する。rename 後は final path を `O_NOFOLLOW | O_CLOEXEC` で開き、同じ inode、
+regular file、所有 UID、exact mode、single link であることを検証する。discovery も final path を secure-open した
+同じ fd からこれらの invariant を再検証して読むため、symlink、hardlink、non-regular node を拒否する。
 
-publish が commit 前に失敗した generation は、まだ owner object が構築されていなくても自 socket と当該 writer の
-temporary の rollback を試み、rollback failure も error として返す。planned generation end は accept loop の
-停止・join 後に retire を完了し、client discovery を `NotFound` へ戻す。
+replacement publish は secure-open した old locator の exact bytes を別の private single-link temporary に保持する。
+rename 前の create / write / sync / verify / rename failure は既存 locator を置換せず、writer 所有 temporary を回収する。
+rename 後の final verify が失敗した場合は、final path がまだ prepared inode と一致する場合だけ `current.lock` を保持したまま
+old bytes を atomic rename で復元する。old locator が無かった場合も同じ identity の new locator だけを消去する。final path が
+既に別 inode へ置換されていれば replacement を上書きせず、writer 所有 temporary をすべて回収して fail closed とする。
+したがって caller が error を受けた ordinary failure では old locator の bytes と接続可能性を維持し、concurrent replacement を
+破壊しない。bind 側は new generation socket と `.sock.bind` を安全に回収できる。rollback image は hardlink を使わないため、
+公開中の old locator の `nlink == 1` を崩さない。rollback rename / unlink 後の parent directory fsync も best-effort で行う。
+
+process crash が残した旧 fixed temp や別 writer の temp は publication 時に推測削除せず、一意な次の temp で継続する。
+rename と final verify の完了後に行う parent directory fsync は best-effort であり、commit 済み publication を失敗として
+報告しない。atomic publication は generation の新旧順序を推測せず、旧 generation の locator や socket を回収する根拠にも
+使わない。
+
+publish が失敗した generation は、まだ owner object が構築されていなくても自 socket、`.sock.bind`、当該 writer の
+temporary、新 locator の rollback を試み、rollback failure も error として返す。bind 成功後は listener fd と独立した
+exact endpoint cleanup token を daemon owner が保持する。startup failure、accept-loop panic、join / Drop / retire failure で
+listener ownership を失っても token から socket-first cleanup を再試行し、完了前に lifecycle record を消去しない。
+stale recovery の singleton-lock / exact-record fence は [5. daemon process lifecycle](05-daemon.md#daemon-process-lifecycle) を
+正本とする。
+
+client discovery は read-only であり、daemon directory を作成しない。未起動時の polling client が mkdir と chmod の途中を
+startup owner に観測させることはない。stale recovery が generation nodes を走査する場合は `generations/` root 自体も
+owner-only directory かつ symlink でないことを先に検証し、daemon directory 外の socket を回収対象にしない。
 
 accept 時は OS peer credential の UID が daemon UID と一致しなければ、protocol byte を読む前に接続を
 閉じる。client は active locator だけを解決でき、draining locator や generation directory 外を指す

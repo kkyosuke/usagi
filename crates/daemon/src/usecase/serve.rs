@@ -6,12 +6,14 @@
 //! 1. **single-instance guard** — acquire the [`InstanceLock`]; if another
 //!    daemon holds it, refuse rather than start a second one;
 //! 2. **prepare** — arrange shutdown delivery before any worker is spawned;
-//! 3. **register** — overwrite any stale record with this process's pid in
-//!    `daemon.json`;
-//! 4. **publish** — expose its endpoint only after the lock and record prove it
+//! 3. **recover** — snapshot the previous lifecycle record, retire its stale
+//!    endpoint, and prove that the record was not concurrently replaced;
+//! 4. **register** — replace the unchanged stale record with this process's pid
+//!    in `daemon.json`;
+//! 5. **publish** — expose its endpoint only after the lock and record prove it
 //!    is the active daemon;
-//! 5. **run** — block until asked to shut down;
-//! 6. **retire** — stop and join endpoint admission, generation-conditionally
+//! 6. **run** — block until asked to shut down;
+//! 7. **retire** — stop and join endpoint admission, generation-conditionally
 //!    unlink the endpoint, then conditionally clear this exact lifecycle record.
 //!    The lock is released by the OS when the process exits.
 //!
@@ -103,15 +105,29 @@ pub fn serve(
     // can therefore only take the owner cleanup path below.
     shutdown.prepare()?;
 
-    // We hold the lock. Overwrite any stale record and register this process.
+    // The instance lock proves that the previous process is inactive, but its
+    // endpoint and lifecycle record may remain after an abnormal exit. Retire
+    // the endpoint before replacing the record so cleanup remains attributable
+    // to the previous incarnation. An exact recheck fences a concurrent
+    // stop/replacement from being overwritten after recovery.
+    let previous = store.load()?;
+    ready.recover_stale_endpoint()?;
+    if store.load()? != previous {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "daemon record changed during stale endpoint recovery",
+        ));
+    }
+
+    // Recovery has proved that no inactive endpoint remains and the snapshot is
+    // still current. Register this process before publishing its new endpoint.
     let record = DaemonRecord::new(pid);
     store.save(&record)?;
     if let Err(error) = ready.publish() {
-        // A failed endpoint was never usable, so leave no live-looking record
-        // for a process that has not begun serving. Preserve the publish error:
-        // a cleanup failure only leaves a stale record, which status/stop can
-        // safely reclaim after this process exits.
-        let _ = store.clear_if(&record);
+        // Binding may already have published a locator before a later startup
+        // step failed. Clear the lifecycle fence only after retryable endpoint
+        // ownership proves every artifact was retired.
+        clear_after_retire(ready, store, &record);
         return Err(error);
     }
     if let Err(error) = writeln!(out, "{describe}: daemon serving (pid {pid})") {
@@ -234,6 +250,10 @@ mod tests {
         published: Cell<u8>,
     }
     impl DaemonReady for RecordingReady<'_> {
+        fn recover_stale_endpoint(&self) -> io::Result<()> {
+            Ok(())
+        }
+
         fn publish(&self) -> io::Result<()> {
             assert_eq!(
                 self.store.load().unwrap().map(|record| record.pid),
@@ -279,6 +299,10 @@ mod tests {
         replacement: RefCell<Option<DaemonRecord>>,
     }
     impl DaemonReady for ReplacingReady<'_> {
+        fn recover_stale_endpoint(&self) -> io::Result<()> {
+            Ok(())
+        }
+
         fn publish(&self) -> io::Result<()> {
             Ok(())
         }
@@ -300,6 +324,12 @@ mod tests {
         }
     }
     impl DaemonReady for OrderedReady<'_> {
+        fn recover_stale_endpoint(&self) -> io::Result<()> {
+            assert_eq!(self.store.load().unwrap(), None);
+            self.events.borrow_mut().push("recover");
+            Ok(())
+        }
+
         fn publish(&self) -> io::Result<()> {
             assert!(self.store.load().unwrap().is_some());
             self.events.borrow_mut().push("publish");
@@ -344,6 +374,10 @@ mod tests {
         retires: Cell<u8>,
     }
     impl DaemonReady for CleanupReady {
+        fn recover_stale_endpoint(&self) -> io::Result<()> {
+            Ok(())
+        }
+
         fn publish(&self) -> io::Result<()> {
             if self.fail_publish {
                 Err(io::Error::other("publish failed"))
@@ -368,6 +402,83 @@ mod tests {
             } else {
                 Ok(())
             }
+        }
+    }
+
+    struct CountingRecoveryReady {
+        recoveries: Cell<u8>,
+        publishes: Cell<u8>,
+    }
+    impl DaemonReady for CountingRecoveryReady {
+        fn recover_stale_endpoint(&self) -> io::Result<()> {
+            self.recoveries.set(self.recoveries.get() + 1);
+            Ok(())
+        }
+
+        fn publish(&self) -> io::Result<()> {
+            self.publishes.set(self.publishes.get() + 1);
+            Ok(())
+        }
+
+        fn quiesce(&self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn retire(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FailOnceRecoveryReady {
+        recoveries: Cell<u8>,
+        publishes: Cell<u8>,
+    }
+    impl DaemonReady for FailOnceRecoveryReady {
+        fn recover_stale_endpoint(&self) -> io::Result<()> {
+            let attempt = self.recoveries.get() + 1;
+            self.recoveries.set(attempt);
+            if attempt == 1 {
+                Err(io::Error::other("recovery failed"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn publish(&self) -> io::Result<()> {
+            self.publishes.set(self.publishes.get() + 1);
+            Ok(())
+        }
+
+        fn quiesce(&self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn retire(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct ReplacingDuringRecoveryReady<'a> {
+        store: &'a DaemonRecordStore<InMemoryRecordFile>,
+        replacement: DaemonRecord,
+        publishes: Cell<u8>,
+    }
+    impl DaemonReady for ReplacingDuringRecoveryReady<'_> {
+        fn recover_stale_endpoint(&self) -> io::Result<()> {
+            self.store.save(&self.replacement)
+        }
+
+        fn publish(&self) -> io::Result<()> {
+            self.publishes.set(self.publishes.get() + 1);
+            Ok(())
+        }
+
+        fn quiesce(&self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn retire(&self) -> io::Result<()> {
+            Ok(())
         }
     }
 
@@ -406,8 +517,128 @@ mod tests {
         .unwrap();
         assert_eq!(
             events.into_inner(),
-            ["prepare", "publish", "wait", "quiesce", "retire"]
+            ["prepare", "recover", "publish", "wait", "quiesce", "retire"]
         );
+    }
+
+    #[test]
+    fn recovery_failure_preserves_the_previous_record_and_retry_can_start() {
+        let previous = DaemonRecord::new(1111);
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        store.save(&previous).unwrap();
+        let ready = FailOnceRecoveryReady {
+            recoveries: Cell::new(0),
+            publishes: Cell::new(0),
+        };
+
+        assert!(
+            serve(
+                &mut Vec::new(),
+                &store,
+                &ready,
+                &ImmediateShutdown,
+                &FakeLock::Acquired,
+                2222,
+                &info(),
+            )
+            .is_err()
+        );
+        assert_eq!(store.load().unwrap(), Some(previous));
+        assert_eq!(ready.recoveries.get(), 1);
+        assert_eq!(ready.publishes.get(), 0);
+
+        serve(
+            &mut Vec::new(),
+            &store,
+            &ready,
+            &ImmediateShutdown,
+            &FakeLock::Acquired,
+            2222,
+            &info(),
+        )
+        .unwrap();
+        assert_eq!(store.load().unwrap(), None);
+        assert_eq!(ready.recoveries.get(), 2);
+        assert_eq!(ready.publishes.get(), 1);
+    }
+
+    #[test]
+    fn exact_recheck_preserves_a_replacement_and_never_publishes() {
+        let previous = DaemonRecord::new(1111);
+        let replacement = DaemonRecord::new(3333);
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        store.save(&previous).unwrap();
+        let ready = ReplacingDuringRecoveryReady {
+            store: &store,
+            replacement: replacement.clone(),
+            publishes: Cell::new(0),
+        };
+
+        let error = serve(
+            &mut Vec::new(),
+            &store,
+            &ready,
+            &ImmediateShutdown,
+            &FakeLock::Acquired,
+            2222,
+            &info(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(store.load().unwrap(), Some(replacement));
+        assert_eq!(ready.publishes.get(), 0);
+    }
+
+    #[test]
+    fn recheck_read_failure_preserves_the_previous_record_and_never_publishes() {
+        let previous = DaemonRecord::new(1111);
+        let contents = serde_json::to_string(&previous).unwrap();
+        let store = DaemonRecordStore::new(InMemoryRecordFile::failing_read_on(&contents, 1));
+        let ready = CountingRecoveryReady {
+            recoveries: Cell::new(0),
+            publishes: Cell::new(0),
+        };
+
+        assert!(
+            serve(
+                &mut Vec::new(),
+                &store,
+                &ready,
+                &ImmediateShutdown,
+                &FakeLock::Acquired,
+                2222,
+                &info(),
+            )
+            .is_err()
+        );
+        assert_eq!(store.load().unwrap(), Some(previous));
+        assert_eq!(ready.recoveries.get(), 1);
+        assert_eq!(ready.publishes.get(), 0);
+    }
+
+    #[test]
+    fn recovers_before_registration_even_when_the_previous_record_is_absent() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let ready = CountingRecoveryReady {
+            recoveries: Cell::new(0),
+            publishes: Cell::new(0),
+        };
+
+        serve(
+            &mut Vec::new(),
+            &store,
+            &ready,
+            &ImmediateShutdown,
+            &FakeLock::Acquired,
+            2222,
+            &info(),
+        )
+        .unwrap();
+
+        assert_eq!(ready.recoveries.get(), 1);
+        assert_eq!(ready.publishes.get(), 1);
+        assert_eq!(store.load().unwrap(), None);
     }
 
     #[test]
@@ -564,7 +795,34 @@ mod tests {
         );
         assert_eq!(store.load().unwrap(), None);
         assert_eq!(ready.quiesces.get(), 0);
-        assert_eq!(ready.retires.get(), 0);
+        assert_eq!(ready.retires.get(), 1);
+    }
+
+    #[test]
+    fn publication_cleanup_failure_retains_the_record_for_stale_recovery() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let ready = CleanupReady {
+            fail_publish: true,
+            fail_quiesce: false,
+            fail_retire: true,
+            quiesces: Cell::new(0),
+            retires: Cell::new(0),
+        };
+
+        assert!(
+            serve(
+                &mut Vec::new(),
+                &store,
+                &ready,
+                &ImmediateShutdown,
+                &FakeLock::Acquired,
+                2222,
+                &info(),
+            )
+            .is_err()
+        );
+        assert_eq!(ready.retires.get(), 1);
+        assert!(store.load().unwrap().is_some());
     }
 
     #[test]
