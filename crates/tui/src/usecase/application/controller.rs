@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use usagi_core::domain::agent::{AgentProfileId, ModelSelector};
 use usagi_core::domain::id::{
-    AgentRuntimeRef, OperationId, SessionId, UserDecisionId, WorkspaceId,
+    AgentContinuationRef, AgentRuntimeRef, OperationId, SessionId, UserDecisionId, WorkspaceId,
 };
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::pullrequest::PrLink;
@@ -1400,6 +1400,12 @@ pub enum Effect {
         workspace: WorkspaceId,
         session: SessionId,
         operation_id: OperationId,
+    },
+    /// Clear one local continuation-scoped dismissal. This effect never asks
+    /// the daemon to spawn or provider-resume a runtime.
+    ReopenAgent {
+        workspace: WorkspaceId,
+        continuation: AgentContinuationRef,
     },
     /// selected session を削除する。root はこの effect に変換しない。
     RemoveSession {
@@ -3119,6 +3125,19 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
         closeup::Command::Diff { .. } => {
             state.notice = Some(Notice::new(format!("{command_name} is not available")));
             None
+        }
+        closeup::Command::Reopen { arguments } => {
+            if let Ok(continuation) = AgentContinuationRef::parse(arguments.trim()) {
+                Some(Effect::ReopenAgent {
+                    workspace: state.workspace,
+                    continuation,
+                })
+            } else {
+                state.notice = Some(Notice::new(
+                    "reopen requires a valid Agent continuation reference",
+                ));
+                None
+            }
         }
     };
     if effect.is_some() {
@@ -6297,6 +6316,17 @@ mod tests {
         state.active = Target::Session(session);
         state.overlay = Some(Overlay::Closeup);
         let _ = submit_closeup(&mut state, "close invalid");
+        state.overlay = Some(Overlay::Closeup);
+        assert!(matches!(
+            submit_closeup(
+                &mut state,
+                &format!("reopen {}", AgentContinuationRef::new())
+            )
+            .as_slice(),
+            [Effect::ReopenAgent { .. }]
+        ));
+        state.overlay = Some(Overlay::Closeup);
+        assert!(submit_closeup(&mut state, "reopen invalid").is_empty());
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::NotesLoaded {

@@ -1,14 +1,14 @@
 ---
 number: 506
 title: feat(tui): Agent tab intent を永続化し daemon inventory と再 open 時に reconcile する
-status: todo
+status: in-progress
 priority: high
 labels: [review, v2, tui, agent, persistence, recovery]
 dependson: [509]
 related: [388, 463, 503]
 parent: 505
 created_at: 2026-07-21T21:20:48.446114+00:00
-updated_at: 2026-07-21T21:30:20.973763+00:00
+updated_at: 2026-07-22T00:03:07.080686+00:00
 ---
 
 ## 問題・影響

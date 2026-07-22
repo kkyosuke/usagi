@@ -19,7 +19,9 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use usagi_core::domain::agent::AgentProfileId;
-use usagi_core::domain::id::{OperationId, SessionId, UserDecisionId, WorkspaceId};
+use usagi_core::domain::id::{
+    AgentContinuationRef, OperationId, SessionId, UserDecisionId, WorkspaceId,
+};
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::user_decision::UserDecisionAnswer;
 
@@ -101,6 +103,13 @@ pub struct ResumeAgentRequest {
     pub operation_id: OperationId,
 }
 
+/// Local dismissal-clear request derived from [`Effect::ReopenAgent`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReopenAgentRequest {
+    pub workspace: WorkspaceId,
+    pub continuation: AgentContinuationRef,
+}
+
 /// A generic-terminal request derived from [`Effect::OpenTerminal`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenTerminalRequest {
@@ -139,6 +148,8 @@ pub trait AgentPort {
     fn launch_agent(&mut self, request: LaunchAgentRequest);
     /// Resume one interrupted provider conversation in a new daemon runtime.
     fn resume_agent(&mut self, _request: ResumeAgentRequest) {}
+    /// Clear a local Agent-tab dismissal without spawning or resuming.
+    fn reopen_agent(&mut self, _request: ReopenAgentRequest) {}
     /// Open or reuse a generic terminal for a stable target.
     fn open_terminal(&mut self, request: OpenTerminalRequest);
     /// Open the target's worktree in the platform terminal without creating a
@@ -367,6 +378,13 @@ impl DaemonBackend {
                 session,
                 operation_id,
             }),
+            Effect::ReopenAgent {
+                workspace,
+                continuation,
+            } => self.agent.reopen_agent(ReopenAgentRequest {
+                workspace,
+                continuation,
+            }),
             Effect::OpenTerminal {
                 target,
                 operation_id,
@@ -482,6 +500,7 @@ mod tests {
     struct FakeAgent {
         launched: Vec<LaunchAgentRequest>,
         resumed: Vec<ResumeAgentRequest>,
+        reopened: Vec<ReopenAgentRequest>,
         opened: Vec<OpenTerminalRequest>,
         external: Vec<Target>,
         tabs: Vec<TabDirection>,
@@ -494,6 +513,10 @@ mod tests {
 
         fn resume_agent(&mut self, request: ResumeAgentRequest) {
             self.resumed.push(request);
+        }
+
+        fn reopen_agent(&mut self, request: ReopenAgentRequest) {
+            self.reopened.push(request);
         }
 
         fn open_terminal(&mut self, request: OpenTerminalRequest) {
@@ -522,13 +545,20 @@ mod tests {
     }
 
     #[test]
-    fn default_resume_agent_is_an_explicit_no_op() {
+    fn default_resume_and_reopen_agent_are_explicit_no_ops() {
         AgentPort::resume_agent(
             &mut DefaultResumeAgent,
             ResumeAgentRequest {
                 workspace: WorkspaceId::new(),
                 session: SessionId::new(),
                 operation_id: OperationId::new(),
+            },
+        );
+        AgentPort::reopen_agent(
+            &mut DefaultResumeAgent,
+            ReopenAgentRequest {
+                workspace: WorkspaceId::new(),
+                continuation: AgentContinuationRef::new(),
             },
         );
     }
@@ -733,6 +763,13 @@ mod tests {
                 workspace: WorkspaceId::new(),
                 session: SessionId::new(),
                 operation_id: OperationId::new(),
+            }),
+            Flow::Continue
+        );
+        assert_eq!(
+            backend.dispatch(Effect::ReopenAgent {
+                workspace: WorkspaceId::new(),
+                continuation: AgentContinuationRef::new(),
             }),
             Flow::Continue
         );

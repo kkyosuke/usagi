@@ -169,6 +169,10 @@ pub enum LiveTerminalAction {
     NextTab,
     /// Select the previous tab.
     PreviousTab,
+    /// Move the selected tab one slot toward the next tab.
+    MoveTabNext,
+    /// Move the selected tab one slot toward the previous tab.
+    MoveTabPrevious,
     /// Open or reattach the agent pane.
     Agent,
     /// Close the active tab.
@@ -377,6 +381,8 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
     }
     match key.code {
         KeyCode::Char('x') => Some(LiveTerminalAction::CloseTab),
+        KeyCode::Char(']') => Some(LiveTerminalAction::MoveTabNext),
+        KeyCode::Char('[') => Some(LiveTerminalAction::MoveTabPrevious),
         KeyCode::Char('u') | KeyCode::Up => Some(LiveTerminalAction::ScrollUp),
         KeyCode::Char('d') | KeyCode::Down => Some(LiveTerminalAction::ScrollDown),
         _ => None,
@@ -635,6 +641,14 @@ mod tests {
             Case {
                 follow_up: key(KeyCode::Char('\u{18}')),
                 action: LiveTerminalAction::CloseTab,
+            },
+            Case {
+                follow_up: key(KeyCode::Char(']')),
+                action: LiveTerminalAction::MoveTabNext,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('[')),
+                action: LiveTerminalAction::MoveTabPrevious,
             },
             Case {
                 follow_up: key(KeyCode::Char('u')),
