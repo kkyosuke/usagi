@@ -18,12 +18,22 @@
 use std::io;
 
 use usagi_core::domain::AppInfo;
-use usagi_core::domain::daemon::{DaemonState, classify};
+use usagi_core::domain::daemon::{DaemonRecord, DaemonState, classify};
 use usagi_core::infrastructure::daemon::{
     DaemonRecordStore, LivenessProbe, RecordFile, Sleeper, Terminator,
 };
 
 const MAX_CLEANUP_POLLS: usize = 40;
+
+trait RecordLoader {
+    fn load_record(&self) -> io::Result<Option<DaemonRecord>>;
+}
+
+impl<F: RecordFile> RecordLoader for DaemonRecordStore<F> {
+    fn load_record(&self) -> io::Result<Option<DaemonRecord>> {
+        self.load()
+    }
+}
 
 /// Stop the recorded daemon and report the outcome.
 ///
@@ -71,21 +81,21 @@ pub fn stop<F: RecordFile, P: LivenessProbe, T: Terminator, K: Sleeper>(
     }
 }
 
-fn wait_for_owner_cleanup<F: RecordFile, P: LivenessProbe, K: Sleeper>(
-    store: &DaemonRecordStore<F>,
-    probe: &P,
-    sleeper: &K,
-    expected: &usagi_core::domain::daemon::DaemonRecord,
+fn wait_for_owner_cleanup(
+    store: &dyn RecordLoader,
+    probe: &dyn LivenessProbe,
+    sleeper: &dyn Sleeper,
+    expected: &DaemonRecord,
 ) -> io::Result<()> {
     for poll in 0..=MAX_CLEANUP_POLLS {
-        match store.load()? {
+        match store.load_record()? {
             Some(current) if current == *expected => {
                 if !probe.is_alive(expected.pid) {
                     // The owner may retire, clear, and exit between our record
                     // read and liveness probe. Recheck the completion fence so
                     // a successful cleanup in that window is not reported as
                     // an incomplete shutdown.
-                    return match store.load()? {
+                    return match store.load_record()? {
                         Some(current) if current == *expected => Err(io::Error::other(format!(
                             "daemon {} exited before endpoint cleanup completed",
                             expected.pid
@@ -242,6 +252,28 @@ mod tests {
     }
 
     #[test]
+    fn running_stop_observes_owner_cleanup_before_its_first_poll() {
+        let record = DaemonRecord::new(4321);
+        let contents = serde_json::to_string(&record).unwrap();
+        let store = DaemonRecordStore::new(InMemoryRecordFile::clearing_on_read(&contents, 1));
+        let terminator = RecordingTerminator::default();
+
+        assert_eq!(
+            stop(
+                &store,
+                &FixedProbe(true),
+                &terminator,
+                &NoopSleeper,
+                &info(),
+            )
+            .unwrap(),
+            "usagi v0.1.0: daemon stopped (pid 4321)"
+        );
+        assert_eq!(terminator.terminated(), vec![4321]);
+        assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[test]
     fn clears_stale_record_without_terminating() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         store.save(&DaemonRecord::new(4321)).unwrap();
@@ -343,6 +375,65 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn propagates_stale_record_clear_error_and_preserves_the_record() {
+        let record = DaemonRecord::new(4321);
+        let contents = serde_json::to_string(&record).unwrap();
+        let store = DaemonRecordStore::new(InMemoryRecordFile::failing_remove(&contents));
+
+        let error = stop(
+            &store,
+            &FixedProbe(false),
+            &RecordingTerminator::default(),
+            &NoopSleeper,
+            &info(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "remove failed");
+        assert_eq!(store.load().unwrap(), Some(record));
+    }
+
+    #[test]
+    fn propagates_owner_cleanup_load_error_and_preserves_the_record() {
+        let record = DaemonRecord::new(4321);
+        let contents = serde_json::to_string(&record).unwrap();
+        let store = DaemonRecordStore::new(InMemoryRecordFile::failing_read_on(&contents, 1));
+
+        let error = stop(
+            &store,
+            &FixedProbe(true),
+            &RecordingTerminator::default(),
+            &NoopSleeper,
+            &info(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "read failed");
+        assert_eq!(store.load().unwrap(), Some(record));
+    }
+
+    #[test]
+    fn propagates_owner_cleanup_recheck_error_and_preserves_the_record() {
+        let record = DaemonRecord::new(4321);
+        let contents = serde_json::to_string(&record).unwrap();
+        let store = DaemonRecordStore::new(InMemoryRecordFile::failing_read_on(&contents, 2));
+
+        let error = stop(
+            &store,
+            &AliveThenGoneProbe {
+                calls: Cell::new(0),
+            },
+            &RecordingTerminator::default(),
+            &NoopSleeper,
+            &info(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "read failed");
+        assert_eq!(store.load().unwrap(), Some(record));
     }
 
     #[test]

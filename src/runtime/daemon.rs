@@ -4188,52 +4188,6 @@ mod tests {
     }
 
     #[test]
-    fn production_stop_clears_a_stale_record_under_the_record_lock() {
-        const FIXTURE: &str = "USAGI_TEST_STALE_DAEMON_STOP";
-        if std::env::var_os(FIXTURE).is_none() {
-            let directory = tempfile::tempdir().unwrap();
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "runtime::daemon::tests::production_stop_clears_a_stale_record_under_the_record_lock",
-                    "--nocapture",
-                ])
-                .env(FIXTURE, "1")
-                .env(paths::DATA_DIR_ENV, directory.path())
-                .env(paths::RUNTIME_MODE_ENV, "production")
-                .status()
-                .unwrap();
-            assert!(status.success());
-            return;
-        }
-
-        let path = paths::data_dir()
-            .unwrap()
-            .join("daemon")
-            .join("daemon.json");
-        let store = DaemonRecordStore::new(FsRecordFile { path });
-        let record = usagi_core::domain::daemon::DaemonRecord::new(u32::MAX);
-        store.save(&record).unwrap();
-
-        let mut output = Vec::new();
-        run_inner(
-            &mut output,
-            CliDaemonCommand::Stop,
-            &AppInfo {
-                name: "usagi",
-                version: "0.1.0",
-            },
-        )
-        .unwrap();
-
-        assert_eq!(
-            String::from_utf8(output).unwrap(),
-            "usagi v0.1.0: cleared stale daemon record\n"
-        );
-        assert_eq!(store.load().unwrap(), None);
-    }
-
-    #[test]
     fn failed_atomic_record_save_preserves_old_record_and_removes_temporary() {
         use std::os::unix::fs::PermissionsExt;
 

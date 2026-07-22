@@ -343,6 +343,38 @@ fn daemon_status_reports_not_running_with_a_fresh_data_dir() {
 }
 
 #[test]
+fn daemon_stop_clears_a_stale_production_record() {
+    let home = short_home();
+    let daemon_dir = home.path().join("daemon");
+    std::fs::create_dir(&daemon_dir).unwrap();
+    std::fs::set_permissions(&daemon_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let record_path = daemon_dir.join("daemon.json");
+    let record = usagi_core::domain::daemon::DaemonRecord::new(u32::MAX);
+    std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+    std::fs::set_permissions(&record_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let output = run_in_production(&[OsStr::new("daemon"), OsStr::new("stop")], home.path());
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "usagi v{}: cleared stale daemon record\n",
+            env!("CARGO_PKG_VERSION")
+        )
+    );
+    assert!(!record_path.exists());
+    assert_eq!(
+        std::fs::metadata(daemon_dir.join("record.lock"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+
+#[test]
 fn daemon_restart_initializes_a_private_endpoint_from_an_empty_data_dir() {
     let _guard = DAEMON_LIFECYCLE_LOCK
         .lock()

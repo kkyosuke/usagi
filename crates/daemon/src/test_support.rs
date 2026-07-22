@@ -1,7 +1,7 @@
 //! Test doubles for the injected daemon seams (record file and liveness probe),
 //! shared by the usecase and presentation unit tests.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io;
 
 use usagi_core::domain::daemon::DaemonRecord;
@@ -14,6 +14,10 @@ use usagi_core::infrastructure::daemon::{
 #[derive(Default)]
 pub struct InMemoryRecordFile {
     contents: RefCell<Option<String>>,
+    read_calls: Cell<usize>,
+    fail_read_on: Option<usize>,
+    clear_on_read: Option<usize>,
+    fail_remove: bool,
 }
 
 impl InMemoryRecordFile {
@@ -21,13 +25,50 @@ impl InMemoryRecordFile {
     pub fn with(contents: &str) -> Self {
         Self {
             contents: RefCell::new(Some(contents.to_string())),
+            ..Self::default()
+        }
+    }
+
+    /// A seeded file whose selected zero-based read call fails.
+    pub fn failing_read_on(contents: &str, call: usize) -> Self {
+        Self {
+            contents: RefCell::new(Some(contents.to_string())),
+            fail_read_on: Some(call),
+            ..Self::default()
+        }
+    }
+
+    /// A seeded file which disappears immediately before the selected read.
+    pub fn clearing_on_read(contents: &str, call: usize) -> Self {
+        Self {
+            contents: RefCell::new(Some(contents.to_string())),
+            clear_on_read: Some(call),
+            ..Self::default()
+        }
+    }
+
+    /// A seeded file whose conditional removal fails.
+    pub fn failing_remove(contents: &str) -> Self {
+        Self {
+            contents: RefCell::new(Some(contents.to_string())),
+            fail_remove: true,
+            ..Self::default()
         }
     }
 }
 
 impl RecordFile for InMemoryRecordFile {
     fn read(&self) -> io::Result<Option<String>> {
-        Ok(self.contents.borrow().clone())
+        let call = self.read_calls.get();
+        self.read_calls.set(call + 1);
+        if self.fail_read_on == Some(call) {
+            Err(io::Error::other("read failed"))
+        } else {
+            if self.clear_on_read == Some(call) {
+                self.contents.borrow_mut().take();
+            }
+            Ok(self.contents.borrow().clone())
+        }
     }
 
     fn write(&self, contents: &str) -> io::Result<()> {
@@ -36,6 +77,9 @@ impl RecordFile for InMemoryRecordFile {
     }
 
     fn remove_if(&self, expected: &str) -> io::Result<bool> {
+        if self.fail_remove {
+            return Err(io::Error::other("remove failed"));
+        }
         let mut contents = self.contents.borrow_mut();
         if contents.as_deref() == Some(expected) {
             *contents = None;
