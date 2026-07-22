@@ -1,4 +1,4 @@
-//! Workspace-local settings persistence.
+//! Workspace-local Agent, Issue, and Memory settings persistence.
 
 use std::path::{Path, PathBuf};
 
@@ -55,12 +55,28 @@ impl WorkspaceSettingsStore {
     pub fn save(&self, settings: &LocalSettings) -> Result<()> {
         json_file::write_versioned(&self.dir, &self.path(), settings)
     }
+
+    /// Persist workspace defaults when no local settings file exists yet.
+    ///
+    /// The project lock makes concurrent initializers converge on the first
+    /// complete file. Existing workspace choices are never overwritten.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lock, existence check, or write fails.
+    pub fn initialize(&self, settings: &LocalSettings) -> Result<()> {
+        let _lock = self.lock()?;
+        if self.path().try_exists()? {
+            return Ok(());
+        }
+        self.save(settings)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::settings::{LocalSettings, ModalSelectionMode};
+    use crate::domain::settings::{DefaultModel, LocalSettings};
     use std::fs;
 
     #[test]
@@ -70,7 +86,7 @@ mod tests {
         assert_eq!(store.load().unwrap(), LocalSettings::default());
 
         let settings = LocalSettings {
-            modal_selection_mode: Some(ModalSelectionMode::Prompt),
+            default_model: Some(DefaultModel::Claude),
             issue_enabled: Some(false),
             ..LocalSettings::default()
         };
@@ -93,5 +109,21 @@ mod tests {
         fs::create_dir_all(store.path().parent().unwrap()).unwrap();
         fs::write(store.path(), "{ broken").unwrap();
         assert!(store.load().is_err());
+    }
+
+    #[test]
+    fn initialize_writes_once_without_overwriting_workspace_choices() {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = WorkspaceSettingsStore::new(workspace.path());
+        let initial = LocalSettings {
+            default_model: Some(DefaultModel::Claude),
+            issue_enabled: Some(false),
+            memory_enabled: Some(true),
+        };
+        store.initialize(&initial).unwrap();
+        assert_eq!(store.load().unwrap(), initial);
+
+        store.initialize(&LocalSettings::default()).unwrap();
+        assert_eq!(store.load().unwrap(), initial);
     }
 }

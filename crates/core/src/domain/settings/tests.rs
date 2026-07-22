@@ -107,7 +107,7 @@ fn modal_selection_mode_tokens_round_trip_and_unknown_values_use_action() {
 }
 
 #[test]
-fn local_settings_overlay_only_explicit_fields() {
+fn local_settings_overlay_only_workspace_owned_fields() {
     let global = Settings {
         theme: Theme::Dark,
         modal_selection_mode: ModalSelectionMode::Action,
@@ -116,7 +116,7 @@ fn local_settings_overlay_only_explicit_fields() {
         memory_enabled: false,
     };
     let local = LocalSettings {
-        modal_selection_mode: Some(ModalSelectionMode::Prompt),
+        default_model: Some(DefaultModel::OpenAi),
         issue_enabled: Some(false),
         ..LocalSettings::default()
     };
@@ -125,8 +125,8 @@ fn local_settings_overlay_only_explicit_fields() {
         global.with_local(&local),
         Settings {
             theme: Theme::Dark,
-            modal_selection_mode: ModalSelectionMode::Prompt,
-            default_model: DefaultModel::Claude,
+            modal_selection_mode: ModalSelectionMode::Action,
+            default_model: DefaultModel::OpenAi,
             issue_enabled: false,
             memory_enabled: false,
         }
@@ -134,7 +134,7 @@ fn local_settings_overlay_only_explicit_fields() {
 }
 
 #[test]
-fn local_settings_missing_and_unknown_values_defer_to_global() {
+fn local_settings_ignore_global_only_and_unknown_workspace_values() {
     let local: LocalSettings = serde_json::from_str(
         r#"{"theme":"future","modal_selection_mode":"future","default_model":"future"}"#,
     )
@@ -147,7 +147,7 @@ fn local_settings_missing_and_unknown_values_defer_to_global() {
 }
 
 #[test]
-fn full_settings_convert_to_explicit_local_overrides() {
+fn full_settings_convert_to_workspace_owned_values_only() {
     let settings = Settings {
         theme: Theme::Light,
         modal_selection_mode: ModalSelectionMode::Prompt,
@@ -156,7 +156,19 @@ fn full_settings_convert_to_explicit_local_overrides() {
         memory_enabled: true,
     };
     let local = LocalSettings::from(&settings);
-    assert_eq!(Settings::default().with_local(&local), settings);
-    assert!(format!("{local:?}").contains("Prompt"));
+    assert_eq!(
+        Settings::default().with_local(&local),
+        Settings {
+            theme: Theme::System,
+            modal_selection_mode: ModalSelectionMode::Action,
+            default_model: DefaultModel::Claude,
+            issue_enabled: false,
+            memory_enabled: true,
+        }
+    );
+    let json = serde_json::to_string(&local).unwrap();
+    assert!(!json.contains("theme"));
+    assert!(!json.contains("modal_selection_mode"));
+    assert!(format!("{local:?}").contains("Claude"));
     assert_eq!(local.clone(), local);
 }

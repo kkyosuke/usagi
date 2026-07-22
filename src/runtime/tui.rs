@@ -1921,6 +1921,13 @@ impl FsWorkspaceLoader {
             storage: Storage::open_default().map_err(io_error)?,
         })
     }
+
+    fn initialize_workspace_settings(&self, path: &Path) -> std::io::Result<()> {
+        let defaults = self.storage.load_settings().map_err(io_error)?;
+        WorkspaceSettingsStore::new(path)
+            .initialize(&LocalSettings::from(&defaults))
+            .map_err(io_error)
+    }
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_screen_graph_workspace_loader_contract
@@ -1929,6 +1936,11 @@ impl WorkspaceLoader for FsWorkspaceLoader {
         validate_workspace_directory(path)?;
         let workspace =
             workspace_usecase::open(&self.storage, path, Utc::now()).map_err(io_error)?;
+        // New workspaces copy Global's Agent / Issue / Memory defaults. For a
+        // pre-existing registration from before workspace settings existed,
+        // the first open performs the same one-time initialization. The store
+        // never overwrites an existing workspace file.
+        self.initialize_workspace_settings(&workspace.path)?;
         let mut state = load_workspace_state(&workspace.path)?;
         let lifecycle = request_lifecycle_snapshot().map_err(io_error)?;
         let workspace_id = lifecycle.workspace_id;
@@ -2297,14 +2309,15 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        DaemonAgentCommandPort, DaemonDecisionCommandPort, EnvironmentStorePort, Geometry,
-        LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore,
-        Start, TerminalChunk, TerminalError, TerminalInputOutcome, agent_inventory_request,
-        classify_terminal_input, created_session_hook, daemon_error_reason,
-        decode_terminal_input_ack, decode_terminal_poll, exact_agent_resume_request,
-        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
-        passthrough_key, probe_path, provider_resume_projection, session_snapshot_result,
-        terminal_copy_key, validate_workspace_directory,
+        DaemonAgentCommandPort, DaemonDecisionCommandPort, EnvironmentStorePort, FsWorkspaceLoader,
+        Geometry, LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory,
+        RepoEnvironmentStore, Start, TerminalChunk, TerminalError, TerminalInputOutcome,
+        agent_inventory_request, classify_terminal_input, created_session_hook,
+        daemon_error_reason, decode_terminal_input_ack, decode_terminal_poll,
+        exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
+        load_workspace_state, map_terminal_error, passthrough_key, probe_path,
+        provider_resume_projection, session_snapshot_result, terminal_copy_key,
+        validate_workspace_directory,
     };
     use chrono::Utc;
     use serde_json::json;
@@ -3531,7 +3544,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_settings_overlay_is_durable_and_rebound_per_workspace() {
+    fn workspace_settings_keep_global_ui_values_and_durable_local_tool_values() {
         let temporary = tempfile::tempdir().unwrap();
         let global_dir = temporary.path().join("global");
         let workspace_a = temporary.path().join("a");
@@ -3552,19 +3565,80 @@ mod tests {
         port.select_workspace(&workspace_a).unwrap();
         assert_eq!(port.read(SettingsScope::Workspace).unwrap(), global);
         let local_a = Settings {
+            theme: Theme::Light,
             modal_selection_mode: ModalSelectionMode::Prompt,
+            default_model: usagi_core::domain::settings::DefaultModel::Claude,
+            issue_enabled: false,
             ..global.clone()
         };
         port.save(SettingsScope::Workspace, &local_a).unwrap();
+        let effective_a = Settings {
+            theme: Theme::Dark,
+            modal_selection_mode: ModalSelectionMode::Action,
+            default_model: usagi_core::domain::settings::DefaultModel::Claude,
+            issue_enabled: false,
+            ..global.clone()
+        };
 
         let mut reopened = PersistentSettingsPort {
             storage: Storage::new(&global_dir),
             workspace: None,
         };
         reopened.select_workspace(&workspace_a).unwrap();
-        assert_eq!(reopened.read(SettingsScope::Workspace).unwrap(), local_a);
+        assert_eq!(
+            reopened.read(SettingsScope::Workspace).unwrap(),
+            effective_a
+        );
+        let changed_global = Settings {
+            theme: Theme::Light,
+            modal_selection_mode: ModalSelectionMode::Prompt,
+            ..Settings::default()
+        };
+        reopened
+            .save(SettingsScope::Global, &changed_global)
+            .unwrap();
+        assert_eq!(
+            reopened.read(SettingsScope::Workspace).unwrap(),
+            Settings {
+                default_model: usagi_core::domain::settings::DefaultModel::Claude,
+                issue_enabled: false,
+                ..changed_global.clone()
+            }
+        );
         reopened.select_workspace(&workspace_b).unwrap();
-        assert_eq!(reopened.read(SettingsScope::Workspace).unwrap(), global);
+        assert_eq!(
+            reopened.read(SettingsScope::Workspace).unwrap(),
+            changed_global
+        );
+    }
+
+    #[test]
+    fn new_workspace_settings_copy_global_defaults_once() {
+        let temporary = tempfile::tempdir().unwrap();
+        let global_dir = temporary.path().join("global");
+        let workspace = temporary.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let initial = Settings {
+            theme: Theme::Dark,
+            modal_selection_mode: ModalSelectionMode::Prompt,
+            default_model: usagi_core::domain::settings::DefaultModel::Claude,
+            issue_enabled: false,
+            memory_enabled: false,
+        };
+        let storage = Storage::new(&global_dir);
+        storage.save_settings(&initial).unwrap();
+        let loader = FsWorkspaceLoader { storage };
+
+        loader.initialize_workspace_settings(&workspace).unwrap();
+        let saved = WorkspaceSettingsStore::new(&workspace).load().unwrap();
+        assert_eq!(saved, LocalSettings::from(&initial));
+
+        loader.storage.save_settings(&Settings::default()).unwrap();
+        loader.initialize_workspace_settings(&workspace).unwrap();
+        assert_eq!(
+            WorkspaceSettingsStore::new(&workspace).load().unwrap(),
+            saved
+        );
     }
 
     #[test]

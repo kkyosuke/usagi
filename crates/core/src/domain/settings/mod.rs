@@ -1,7 +1,9 @@
 //! Application settings.
 //!
 //! The global, per-user preferences persisted as `settings.json` in the data
-//! directory, plus optional per-workspace overrides persisted beside a project.
+//! directory, plus workspace settings persisted beside a project. Theme and
+//! modal interaction stay global; Agent, Issue, and Memory values are copied to
+//! a workspace when it is registered and may then be changed independently.
 //!
 //! Enum-valued settings degrade an unrecognised stored token to a sensible
 //! default rather than failing the whole file, so a value written by a newer
@@ -95,15 +97,10 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Apply the fields explicitly set by `local` over this global baseline.
+    /// Apply workspace-owned Agent, Issue, and Memory values over this global
+    /// baseline. Theme and modal interaction always remain global.
     #[must_use]
     pub fn with_local(mut self, local: &LocalSettings) -> Self {
-        if let Some(theme) = local.theme {
-            self.theme = theme;
-        }
-        if let Some(mode) = local.modal_selection_mode {
-            self.modal_selection_mode = mode;
-        }
         if let Some(model) = local.default_model {
             self.default_model = model;
         }
@@ -117,19 +114,16 @@ impl Settings {
     }
 }
 
-/// Per-workspace overrides stored in `<workspace>/.usagi/settings.json` (or the
-/// development-mode-specific `dev` directory).
+/// Per-workspace Agent, Issue, and Memory settings stored in
+/// `<workspace>/.usagi/settings.json` (or the development-mode-specific `dev`
+/// directory).
 ///
-/// An absent or unrecognised field defers to the global value. This keeps a
-/// file written by a newer usagi safe to load without turning an unknown local
-/// token into an unintended override.
+/// These values are initialized from the global workspace defaults when a
+/// workspace is registered. An absent or unrecognised field temporarily defers
+/// to the global value, which keeps older and hand-edited files safe to load.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LocalSettings {
-    #[serde(deserialize_with = "deserialize_local_theme")]
-    pub theme: Option<Theme>,
-    #[serde(deserialize_with = "deserialize_local_modal_selection_mode")]
-    pub modal_selection_mode: Option<ModalSelectionMode>,
     #[serde(deserialize_with = "deserialize_local_default_model")]
     pub default_model: Option<DefaultModel>,
     pub issue_enabled: Option<bool>,
@@ -139,40 +133,11 @@ pub struct LocalSettings {
 impl From<&Settings> for LocalSettings {
     fn from(settings: &Settings) -> Self {
         Self {
-            theme: Some(settings.theme),
-            modal_selection_mode: Some(settings.modal_selection_mode),
             default_model: Some(settings.default_model),
             issue_enabled: Some(settings.issue_enabled),
             memory_enabled: Some(settings.memory_enabled),
         }
     }
-}
-
-fn deserialize_local_theme<'de, D>(deserializer: D) -> Result<Option<Theme>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let token = Option::<String>::deserialize(deserializer)?;
-    Ok(match token.as_deref() {
-        Some("light") => Some(Theme::Light),
-        Some("dark") => Some(Theme::Dark),
-        Some("system") => Some(Theme::System),
-        _ => None,
-    })
-}
-
-fn deserialize_local_modal_selection_mode<'de, D>(
-    deserializer: D,
-) -> Result<Option<ModalSelectionMode>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let token = Option::<String>::deserialize(deserializer)?;
-    Ok(match token.as_deref() {
-        Some("prompt") => Some(ModalSelectionMode::Prompt),
-        Some("action") => Some(ModalSelectionMode::Action),
-        _ => None,
-    })
 }
 
 fn deserialize_local_default_model<'de, D>(

@@ -7,24 +7,30 @@ use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
 use crate::presentation::layouts::mascot_screen;
 use crate::presentation::theme::Style;
-use crate::presentation::widgets::{modal, select};
+use crate::presentation::widgets::{self, modal, select};
 
 const TITLE: &str = "Config";
-const FOOTER: &str = "Tab: scope  ↑↓: select  ←→: change  ●: unsaved  Enter: save  Esc: back";
+const FOOTER: &str = "↑↓: select  ←→: change  ●: unsaved  Enter: save  Esc: back";
 const MODAL_INNER_WIDTH: usize = 64;
-const MODAL_BODY_HEIGHT: usize = 12;
-const MODAL_FOOTER: &str = "Tab: scope  ↑↓: select  ←→: change  Enter: save  Esc: back";
+const MODAL_BODY_HEIGHT: usize = 9;
+const MODAL_FOOTER: &str = "↑↓: select  ←→: change  Enter: save  Esc: back";
+const SECTION_HEADING_WIDTH: usize = 35;
 
-/// How long the `saved` confirmation stays on screen before the Config screen
+/// Time between frames while the Save button's highlight wave is moving.
+pub const SAVE_WAVE_TICK: Duration = Duration::from_millis(60);
+/// A full sweep across the four-letter Save caption, including its fade-out.
+pub const SAVE_WAVE_FRAMES: usize = 6;
+
+/// How long the `done` confirmation stays on screen before the Config screen
 /// returns home on its own, with no key press. Short enough to feel immediate,
 /// long enough to read — a peer of the other screen-timing constants
 /// (`splash::ANIM_TICK`, `SIDEBAR_DOUBLE_CLICK`). This constant is the single
 /// source of truth for the Config save confirmation dwell.
-pub const SAVED_DISPLAY: Duration = Duration::from_millis(600);
+pub const DONE_DISPLAY: Duration = Duration::from_millis(600);
 
 /// The Save action's lifecycle across a single save. The screen graph draws the
-/// `Saving` frame before the blocking write and holds the `Saved` frame for
-/// [`SAVED_DISPLAY`] before returning home; a failed write drops back to `Idle`.
+/// `Saving` wave before the blocking write and holds the `Done` frame for
+/// [`DONE_DISPLAY`] before returning home; a failed write drops back to `Idle`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum SavePhase {
     /// No save in flight; the button reads `Save`.
@@ -33,7 +39,7 @@ enum SavePhase {
     /// A save has begun and the blocking write is about to run (loading).
     Saving,
     /// The write succeeded; the confirmation is on screen until the dwell ends.
-    Saved,
+    Done,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -109,67 +115,67 @@ impl ScopeSettings {
     }
 }
 
-/// Editable Config screen state.  Each scope owns an independent saved value
-/// and draft, so switching scopes never discards an unsaved edit.
+/// Editable Config screen state. Global Config edits application preferences
+/// and workspace defaults; the Overview modal edits only the current
+/// workspace's Agent, Issue, and Memory choices.
 #[derive(Debug, Clone)]
 pub struct Config {
     scope: SettingsScope,
     field: Field,
-    global: ScopeSettings,
-    workspace: ScopeSettings,
+    settings: ScopeSettings,
     available_models: AvailableAgentModels,
     notice: Option<String>,
     save_phase: SavePhase,
+    save_animation_frame: usize,
 }
 
 impl Config {
-    /// Read both settings scopes from `port` and initialise independent drafts.
-    /// A failed initial read falls back to defaults while surfacing a safe error.
+    /// Read Global settings from `port` and initialize its draft. A failed read
+    /// falls back to defaults while surfacing a safe error.
     #[must_use]
     pub fn load(port: &mut dyn SettingsPort) -> Self {
         Self::load_with_available_models(port, AvailableAgentModels::all())
     }
 
-    /// Read both settings scopes and constrain Agent model choices to installed CLIs.
+    /// Read Global settings and constrain Agent choices to installed CLIs.
     #[must_use]
     pub fn load_with_available_models(
         port: &mut dyn SettingsPort,
         available_models: AvailableAgentModels,
     ) -> Self {
-        let (global, global_error) = read_scope(port, SettingsScope::Global);
-        let (workspace, workspace_error) = read_scope(port, SettingsScope::Workspace);
-        let global_draft = available_models
+        Self::load_scope(port, SettingsScope::Global, available_models)
+    }
+
+    fn load_scope(
+        port: &mut dyn SettingsPort,
+        scope: SettingsScope,
+        available_models: AvailableAgentModels,
+    ) -> Self {
+        let (saved, error) = read_scope(port, scope);
+        let draft = available_models
             .first()
-            .filter(|_| !available_models.contains(global.default_model))
-            .map_or(global.clone(), |model| Settings {
+            .filter(|_| !available_models.contains(saved.default_model))
+            .map_or(saved.clone(), |model| Settings {
                 default_model: model,
-                ..global
+                ..saved.clone()
             });
-        let workspace_draft = available_models
-            .first()
-            .filter(|_| !available_models.contains(workspace.default_model))
-            .map_or(workspace.clone(), |model| Settings {
-                default_model: model,
-                ..workspace
-            });
+        let field = match scope {
+            SettingsScope::Global => Field::Theme,
+            SettingsScope::Workspace if available_models.is_empty() => Field::Issue,
+            SettingsScope::Workspace => Field::DefaultModel,
+        };
         Self {
-            scope: SettingsScope::Global,
-            field: Field::Theme,
-            global: ScopeSettings {
-                saved: global,
-                draft: global_draft,
-            },
-            workspace: ScopeSettings {
-                saved: workspace,
-                draft: workspace_draft,
-            },
+            scope,
+            field,
+            settings: ScopeSettings { saved, draft },
             available_models,
-            notice: global_error.or(workspace_error),
+            notice: error,
             save_phase: SavePhase::Idle,
+            save_animation_frame: 0,
         }
     }
 
-    /// Read both settings scopes and open the editor on the current workspace.
+    /// Read the current workspace settings and open its focused editor.
     ///
     /// Overview uses this entry point so `config` targets the workspace that owns
     /// the command palette instead of initially presenting the global defaults.
@@ -178,9 +184,7 @@ impl Config {
         port: &mut dyn SettingsPort,
         available_models: AvailableAgentModels,
     ) -> Self {
-        let mut config = Self::load_with_available_models(port, available_models);
-        config.scope = SettingsScope::Workspace;
-        config
+        Self::load_scope(port, SettingsScope::Workspace, available_models)
     }
 
     /// Returns the selected persistence scope.
@@ -197,13 +201,21 @@ impl Config {
 
     /// Move to the next setting or Save action.
     pub fn next_field(&mut self) {
-        self.field = match self.field {
-            Field::Theme => Field::ModalSelectionMode,
-            Field::ModalSelectionMode => Field::DefaultModel,
-            Field::DefaultModel => Field::Issue,
-            Field::Issue => Field::Memory,
-            Field::Memory => Field::Save,
-            Field::Save => Field::Theme,
+        self.field = match self.scope {
+            SettingsScope::Global => match self.field {
+                Field::Theme => Field::ModalSelectionMode,
+                Field::ModalSelectionMode => Field::DefaultModel,
+                Field::DefaultModel => Field::Issue,
+                Field::Issue => Field::Memory,
+                Field::Memory => Field::Save,
+                Field::Save => Field::Theme,
+            },
+            SettingsScope::Workspace => match self.field {
+                Field::DefaultModel => Field::Issue,
+                Field::Issue => Field::Memory,
+                Field::Memory => Field::Save,
+                Field::Save | Field::Theme | Field::ModalSelectionMode => Field::DefaultModel,
+            },
         };
         if self.field == Field::DefaultModel && self.available_models.is_empty() {
             self.field = Field::Issue;
@@ -213,16 +225,27 @@ impl Config {
 
     /// Move to the previous editable setting.
     pub fn previous_field(&mut self) {
-        self.field = match self.field {
-            Field::Theme => Field::Save,
-            Field::ModalSelectionMode => Field::Theme,
-            Field::DefaultModel => Field::ModalSelectionMode,
-            Field::Issue => Field::DefaultModel,
-            Field::Memory => Field::Issue,
-            Field::Save => Field::Memory,
+        self.field = match self.scope {
+            SettingsScope::Global => match self.field {
+                Field::Theme => Field::Save,
+                Field::ModalSelectionMode => Field::Theme,
+                Field::DefaultModel => Field::ModalSelectionMode,
+                Field::Issue => Field::DefaultModel,
+                Field::Memory => Field::Issue,
+                Field::Save => Field::Memory,
+            },
+            SettingsScope::Workspace => match self.field {
+                Field::Issue => Field::DefaultModel,
+                Field::Memory => Field::Issue,
+                Field::Save => Field::Memory,
+                Field::DefaultModel | Field::Theme | Field::ModalSelectionMode => Field::Save,
+            },
         };
         if self.field == Field::DefaultModel && self.available_models.is_empty() {
-            self.field = Field::ModalSelectionMode;
+            self.field = match self.scope {
+                SettingsScope::Global => Field::ModalSelectionMode,
+                SettingsScope::Workspace => Field::Save,
+            };
         }
         self.notice = None;
     }
@@ -239,31 +262,10 @@ impl Config {
         &self.current().draft
     }
 
-    /// Returns the saved global modal interaction for newly opened workspaces.
-    #[must_use]
-    pub fn global_modal_selection_mode(&self) -> ModalSelectionMode {
-        self.global.saved.modal_selection_mode
-    }
-
-    /// Returns the saved global default model for newly opened workspaces.
-    #[must_use]
-    pub fn global_default_model(&self) -> DefaultModel {
-        self.global.saved.default_model
-    }
-
     /// Returns the latest save or load feedback, if any.
     #[must_use]
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
-    }
-
-    /// Switch between global and workspace settings without changing drafts.
-    pub fn toggle_scope(&mut self) {
-        self.scope = match self.scope {
-            SettingsScope::Global => SettingsScope::Workspace,
-            SettingsScope::Workspace => SettingsScope::Global,
-        };
-        self.notice = None;
     }
 
     /// Cycle the selected scope's theme. Either arrow direction uses the same
@@ -339,12 +341,19 @@ impl Config {
             return false;
         }
         self.save_phase = SavePhase::Saving;
+        self.save_animation_frame = 0;
         self.notice = None;
         true
     }
 
+    /// Advance the highlight wave drawn across the Save button while its write
+    /// is pending. The screen graph calls this between animation frames.
+    pub fn advance_save_animation(&mut self) {
+        self.save_animation_frame = self.save_animation_frame.wrapping_add(1);
+    }
+
     /// Persist the selected scope's dirty draft. On success it records the saved
-    /// value, enters the `Saved` phase, and returns true; on failure it drops
+    /// value, enters the `Done` phase, and returns true; on failure it drops
     /// back to `Idle`, keeps the draft dirty, and surfaces a safe error so the
     /// user can retry. Returns false without touching the port when not dirty.
     pub fn commit_save(&mut self, port: &mut dyn SettingsPort) -> bool {
@@ -357,8 +366,8 @@ impl Config {
         match port.save(scope, &draft) {
             Ok(()) => {
                 self.current_mut().saved = draft;
-                self.save_phase = SavePhase::Saved;
-                self.notice = Some("saved".to_string());
+                self.save_phase = SavePhase::Done;
+                self.notice = None;
                 true
             }
             Err(error) => {
@@ -373,30 +382,24 @@ impl Config {
     /// so a later visit to Config starts from a clean Save row.
     pub fn reset_save(&mut self) {
         self.save_phase = SavePhase::Idle;
+        self.save_animation_frame = 0;
         self.notice = None;
     }
 
     /// The Save button's current label, driven by the save phase.
     fn save_label(&self) -> &'static str {
         match self.save_phase {
-            SavePhase::Idle => "Save",
-            SavePhase::Saving => "saving…",
-            SavePhase::Saved => "saved",
+            SavePhase::Idle | SavePhase::Saving => "Save",
+            SavePhase::Done => "done",
         }
     }
 
     fn current(&self) -> &ScopeSettings {
-        match self.scope {
-            SettingsScope::Global => &self.global,
-            SettingsScope::Workspace => &self.workspace,
-        }
+        &self.settings
     }
 
     fn current_mut(&mut self) -> &mut ScopeSettings {
-        match self.scope {
-            SettingsScope::Global => &mut self.global,
-            SettingsScope::Workspace => &mut self.workspace,
-        }
+        &mut self.settings
     }
 }
 
@@ -426,16 +429,14 @@ pub fn render_over(
     base: &[String],
     config: &Config,
 ) -> Vec<String> {
-    let mut lines = form_rows(config)
-        .into_iter()
-        .map(|line| {
-            if line.is_empty() {
-                line
-            } else {
-                modal::content_line(&line, MODAL_INNER_WIDTH)
-            }
-        })
-        .collect::<Vec<_>>();
+    let mut lines = vec![String::new()];
+    lines.extend(form_rows(config).into_iter().map(|line| {
+        if line.is_empty() {
+            line
+        } else {
+            modal::content_line(&line, MODAL_INNER_WIDTH)
+        }
+    }));
     lines.push(String::new());
     lines.push(modal::footer(MODAL_FOOTER));
     modal::render_body_over(
@@ -450,13 +451,35 @@ pub fn render_over(
 }
 
 fn form_rows(config: &Config) -> Vec<String> {
-    let scope = match config.scope() {
-        SettingsScope::Global => "Scope: Global",
-        SettingsScope::Workspace => "Scope: Workspace",
+    let mut lines = match config.scope() {
+        SettingsScope::Global => global_rows(config),
+        SettingsScope::Workspace => workspace_rows(config),
     };
+    lines.push(String::new());
+    lines.push(save_action(config));
+    if let Some(notice) = config.notice() {
+        lines.push(Style::new().dim().paint(notice));
+    }
+    lines
+}
+
+fn save_action(config: &Config) -> String {
+    if config.save_phase == SavePhase::Saving {
+        let marker = modal::selection_marker(config.field() == Field::Save);
+        let caption = widgets::shimmer_text("Save", config.save_animation_frame);
+        format!("{marker}   [ {caption} ]")
+    } else {
+        select::action(
+            config.save_label(),
+            config.field() == Field::Save,
+            config.is_dirty() || config.save_phase == SavePhase::Done,
+        )
+    }
+}
+
+fn global_rows(config: &Config) -> Vec<String> {
     let mut lines = vec![
-        scope.to_owned(),
-        String::new(),
+        section_heading("Global"),
         select::render(
             "Theme",
             theme_name(config.settings().theme),
@@ -469,11 +492,24 @@ fn form_rows(config: &Config) -> Vec<String> {
             config.field() == Field::ModalSelectionMode,
             config.settings().modal_selection_mode != config.current().saved.modal_selection_mode,
         ),
+        String::new(),
+        section_heading("Workspace init"),
+    ];
+    lines.extend(workspace_setting_rows(config));
+    lines
+}
+
+fn workspace_rows(config: &Config) -> Vec<String> {
+    workspace_setting_rows(config)
+}
+
+fn workspace_setting_rows(config: &Config) -> Vec<String> {
+    vec![
         if config.available_models.is_empty() {
-            select::disabled("Agent model", "none")
+            select::disabled("Agent", "none")
         } else {
             select::render(
-                "Agent model",
+                "Agent",
                 default_model_name(config.settings().default_model),
                 config.field() == Field::DefaultModel,
                 config.settings().default_model != config.current().saved.default_model,
@@ -491,17 +527,14 @@ fn form_rows(config: &Config) -> Vec<String> {
             config.field() == Field::Memory,
             config.settings().memory_enabled != config.current().saved.memory_enabled,
         ),
-        String::new(),
-        select::action(
-            config.save_label(),
-            config.field() == Field::Save,
-            config.is_dirty(),
-        ),
-    ];
-    if let Some(notice) = config.notice() {
-        lines.push(Style::new().dim().paint(notice));
-    }
-    lines
+    ]
+}
+
+fn section_heading(label: &str) -> String {
+    let rule_width = SECTION_HEADING_WIDTH - label.len() - 1;
+    Style::new()
+        .dim()
+        .paint(&format!("{label} {}", "─".repeat(rule_width)))
 }
 
 fn theme_name(theme: Theme) -> &'static str {
@@ -590,16 +623,13 @@ mod tests {
     }
 
     #[test]
-    fn scopes_keep_independent_drafts_and_saved_values() {
+    fn global_and_workspace_entries_save_only_their_own_target() {
         let mut port = FakeSettingsPort {
             global: Settings {
                 theme: Theme::Light,
                 ..Settings::default()
             },
-            workspace: Settings {
-                theme: Theme::Dark,
-                ..Settings::default()
-            },
+            workspace: Settings::default(),
             ..FakeSettingsPort::default()
         };
         let mut config = Config::load(&mut port);
@@ -607,20 +637,19 @@ mod tests {
         assert!(initial.contains("Theme") && initial.contains("light"));
         config.cycle_theme(true);
         config.commit_save(&mut port);
-        config.toggle_scope();
-
-        assert_eq!(config.settings().theme, Theme::Dark);
-        assert!(!config.is_dirty());
         assert_eq!(port.global.theme, Theme::System);
-        assert_eq!(port.workspace.theme, Theme::Dark);
 
-        let workspace = render(24, 80, &config).join("\n");
-        assert!(workspace.contains("Theme") && workspace.contains("dark"));
-        config.cycle_theme(false);
-        config.commit_save(&mut port);
-        assert_eq!(port.workspace.theme, Theme::System);
-        config.toggle_scope();
-        assert_eq!(config.scope(), SettingsScope::Global);
+        let mut workspace =
+            Config::load_workspace_with_available_models(&mut port, AvailableAgentModels::all());
+        assert_eq!(workspace.scope(), SettingsScope::Workspace);
+        assert_eq!(workspace.field(), Field::DefaultModel);
+        workspace.next_field();
+        workspace.cycle_issue_enabled();
+        workspace.next_field();
+        workspace.next_field();
+        assert!(workspace.commit_save(&mut port));
+        assert!(!port.workspace.issue_enabled);
+        assert_eq!(port.global.theme, Theme::System);
     }
 
     #[test]
@@ -644,24 +673,83 @@ mod tests {
     }
 
     #[test]
-    fn render_shows_scope_theme_state_and_footer() {
+    fn global_render_groups_application_settings_and_workspace_defaults() {
         let mut port = FakeSettingsPort::default();
         let config = Config::load(&mut port);
-        let frame = render(24, 80, &config).join("\n");
+        let plain = render(24, 80, &config)
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>();
+        let frame = plain.join("\n");
 
         assert!(frame.contains("Config"));
-        assert!(frame.contains("Scope: Global"));
+        assert!(frame.contains("Global"));
         assert!(frame.contains("Theme") && frame.contains("system"));
         assert!(frame.contains("Modal mode") && frame.contains("action"));
-        assert!(frame.contains("Agent model") && frame.contains("OpenAI"));
+        assert!(frame.contains("Workspace init"));
+        assert!(frame.contains("Agent") && frame.contains("OpenAI"));
         assert!(frame.contains("Issue") && frame.contains("on"));
         assert!(frame.contains("Memory") && frame.contains("on"));
+        assert!(!frame.contains("Scope:"));
+        assert!(!frame.contains("Tab: scope"));
         assert!(frame.contains("[ Save ]"));
         assert!(frame.contains("Esc: back"));
+
+        let global = plain.iter().find(|line| line.contains("Global")).unwrap();
+        let workspace = plain
+            .iter()
+            .find(|line| line.contains("Workspace init"))
+            .unwrap();
+        assert_eq!(global.find("Global"), workspace.find("Workspace init"));
     }
 
     #[test]
-    fn workspace_entry_starts_on_the_selected_workspace_scope() {
+    fn global_chevrons_align_with_the_heading_without_moving_controls() {
+        let mut port = FakeSettingsPort::default();
+        let mut config = Config::load(&mut port);
+        let plain = render(24, 80, &config)
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>();
+        let heading = plain.iter().find(|line| line.contains("Global")).unwrap();
+        let theme = plain.iter().find(|line| line.contains("Theme")).unwrap();
+        let heading_column = heading.find("Global").unwrap();
+        let chevron_column = heading_column + 1;
+        let changed_column = heading_column + 3;
+        let label_column = heading_column + 5;
+        let column_of = |line: &str, needle: &str| {
+            display_width(&line[..line.find(needle).expect("rendered field")])
+        };
+
+        assert_eq!(column_of(theme, "›"), chevron_column);
+        assert_eq!(column_of(theme, "Theme"), label_column);
+        assert_eq!(column_of(theme, "<"), 43);
+
+        config.cycle_theme(true);
+        let dirty = render(24, 80, &config)
+            .iter()
+            .map(|line| strip_ansi(line))
+            .find(|line| line.contains("Theme"))
+            .unwrap();
+        assert_eq!(column_of(&dirty, "●"), changed_column);
+
+        for _ in 0..5 {
+            config.next_field();
+        }
+        let save_frame = render(24, 80, &config)
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>();
+        let save = save_frame
+            .iter()
+            .find(|line| line.contains("[ Save ]"))
+            .unwrap();
+        assert_eq!(column_of(save, "›"), chevron_column);
+        assert_eq!(column_of(save, "["), 38);
+    }
+
+    #[test]
+    fn workspace_entry_starts_on_agent_and_hides_global_only_settings() {
         let mut port = FakeSettingsPort {
             global: Settings {
                 issue_enabled: true,
@@ -678,12 +766,53 @@ mod tests {
             Config::load_workspace_with_available_models(&mut port, AvailableAgentModels::all());
 
         assert_eq!(config.scope(), SettingsScope::Workspace);
+        assert_eq!(config.field(), Field::DefaultModel);
         assert!(!config.settings().issue_enabled);
-        assert!(
-            render(24, 80, &config)
-                .join("\n")
-                .contains("Scope: Workspace")
+        let frame = render(24, 80, &config).join("\n");
+        assert!(frame.contains("Agent"));
+        assert!(frame.contains("Issue"));
+        assert!(frame.contains("Memory"));
+        assert!(!frame.contains("Scope:"));
+        assert!(!frame.contains("Theme"));
+        assert!(!frame.contains("Modal mode"));
+    }
+
+    #[test]
+    fn workspace_navigation_wraps_its_three_settings_and_skips_missing_agents() {
+        let mut port = FakeSettingsPort::default();
+        let mut config =
+            Config::load_workspace_with_available_models(&mut port, AvailableAgentModels::all());
+        config.previous_field();
+        assert_eq!(config.field(), Field::Save);
+        config.previous_field();
+        assert_eq!(config.field(), Field::Memory);
+        config.previous_field();
+        assert_eq!(config.field(), Field::Issue);
+        config.next_field();
+        assert_eq!(config.field(), Field::Memory);
+        config.next_field();
+        assert_eq!(config.field(), Field::Save);
+        config.next_field();
+        assert_eq!(config.field(), Field::DefaultModel);
+
+        let mut without_agents = Config::load_workspace_with_available_models(
+            &mut port,
+            AvailableAgentModels::new(false, false),
         );
+        assert_eq!(without_agents.field(), Field::Issue);
+        without_agents.previous_field();
+        assert_eq!(without_agents.field(), Field::Save);
+        without_agents.next_field();
+        assert_eq!(without_agents.field(), Field::Issue);
+
+        // Defensive normalization keeps an externally restored stale focus
+        // inside the rows visible for Workspace Config.
+        without_agents.field = Field::Theme;
+        without_agents.next_field();
+        assert_eq!(without_agents.field(), Field::Issue);
+        without_agents.field = Field::ModalSelectionMode;
+        without_agents.previous_field();
+        assert_eq!(without_agents.field(), Field::Save);
     }
 
     #[test]
@@ -705,32 +834,45 @@ mod tests {
         assert_eq!(frame.len(), 24);
         assert!(joined.contains("home background 0"));
         assert!(joined.contains("Config"));
-        assert!(joined.contains("Scope: Workspace"));
+        assert!(joined.contains("Agent"));
+        assert!(!joined.contains("Scope:"));
+        assert!(!joined.contains("Theme"));
         assert!(joined.contains("Esc: back"));
         assert!(plain.iter().all(|line| display_width(line) <= 80));
+
+        let top = plain
+            .iter()
+            .position(|line| line.contains("Config"))
+            .unwrap();
+        let first_body = &plain[top + 1];
+        let left_border = first_body.find('│').unwrap();
+        let right_border = first_body.rfind('│').unwrap();
+        assert!(
+            first_body[left_border + '│'.len_utf8()..right_border]
+                .trim()
+                .is_empty()
+        );
     }
 
     #[test]
     fn load_error_and_workspace_draft_are_rendered_without_losing_the_form() {
         let mut port = FakeSettingsPort {
-            fail_read: Some(SettingsScope::Global),
-            workspace: Settings {
-                theme: Theme::Dark,
-                ..Settings::default()
-            },
+            fail_read: Some(SettingsScope::Workspace),
+            workspace: Settings::default(),
             ..FakeSettingsPort::default()
         };
-        let mut config = Config::load(&mut port);
+        let mut config =
+            Config::load_workspace_with_available_models(&mut port, AvailableAgentModels::all());
 
         assert_eq!(config.notice(), Some("Load failed: settings unavailable"));
         let error_frame = render(24, 80, &config).join("\n");
         assert!(error_frame.contains("Load failed: settings unavailable"));
-        config.toggle_scope();
-        config.cycle_theme(true);
+        config.next_field();
+        config.cycle_issue_enabled();
         let frame = render(24, 80, &config).join("\n");
 
-        assert!(frame.contains("Scope: Workspace"));
-        assert!(frame.contains("Theme") && frame.contains("light"));
+        assert!(!frame.contains("Scope:"));
+        assert!(frame.contains("Issue") && frame.contains("off"));
         assert!(frame.contains('●'));
     }
 
@@ -764,9 +906,9 @@ mod tests {
         assert!(config.can_save());
         assert!(config.begin_save());
         assert!(config.commit_save(&mut port));
-        assert_eq!(config.notice(), Some("saved"));
+        assert_eq!(config.notice(), None);
         assert!(!config.is_dirty());
-        assert!(render(24, 80, &config).join("\n").contains("[ saved ]"));
+        assert!(render(24, 80, &config).join("\n").contains("[ done ]"));
     }
 
     #[test]
@@ -817,13 +959,6 @@ mod tests {
         assert!(config.begin_save());
         assert!(config.commit_save(&mut port));
         assert_eq!(port.global.default_model, DefaultModel::Claude);
-        assert_eq!(config.global_default_model(), DefaultModel::Claude);
-        // The saved modal interaction accessor reads the same global scope, used
-        // when a workspace is opened from the screen graph.
-        assert_eq!(
-            config.global_modal_selection_mode(),
-            port.global.modal_selection_mode
-        );
     }
 
     #[test]
@@ -853,6 +988,12 @@ mod tests {
         assert_eq!(open_ai_only.settings().default_model, DefaultModel::OpenAi);
         open_ai_only.cycle_default_model();
         assert_eq!(open_ai_only.settings().default_model, DefaultModel::OpenAi);
+
+        port.global.default_model = DefaultModel::Claude;
+        let claude_saved =
+            Config::load_with_available_models(&mut port, AvailableAgentModels::new(true, false));
+        assert_eq!(claude_saved.settings().default_model, DefaultModel::Claude);
+        assert!(!claude_saved.is_dirty());
     }
 
     #[test]
@@ -862,7 +1003,7 @@ mod tests {
             Config::load_with_available_models(&mut port, AvailableAgentModels::new(false, false));
 
         let frame = render(24, 80, &config).join("\n");
-        assert!(frame.contains("Agent model") && frame.contains("< none   >"));
+        assert!(frame.contains("Agent") && frame.contains("< none   >"));
         assert!(frame.contains("\u{1b}[2m"));
         config.cycle_default_model();
         assert_eq!(config.settings().default_model, DefaultModel::OpenAi);
@@ -915,7 +1056,7 @@ mod tests {
     }
 
     #[test]
-    fn save_moves_from_loading_to_saved_and_labels_each_phase() {
+    fn save_moves_from_an_animated_wave_to_done() {
         let mut port = FakeSettingsPort::default();
         let mut config = dirty_on_save_row(&mut port);
         assert!(render(24, 80, &config).join("\n").contains("[ Save ]"));
@@ -924,13 +1065,21 @@ mod tests {
         assert!(config.begin_save());
         assert!(config.is_dirty());
         assert_eq!(config.notice(), None);
-        assert!(render(24, 80, &config).join("\n").contains("[ saving… ]"));
+        let first_wave = render(24, 80, &config);
+        let first_plain = first_wave
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(first_plain.contains("[ Save ]"));
+        config.advance_save_animation();
+        assert_ne!(first_wave, render(24, 80, &config));
 
-        // commit_save persists, settles to Saved, and stops being dirty.
+        // commit_save persists, settles to Done, and stops being dirty.
         assert!(config.commit_save(&mut port));
-        assert_eq!(config.notice(), Some("saved"));
+        assert_eq!(config.notice(), None);
         assert!(!config.is_dirty());
-        assert!(render(24, 80, &config).join("\n").contains("[ saved ]"));
+        assert!(render(24, 80, &config).join("\n").contains("[ done ]"));
         assert_eq!(port.global.theme, Theme::Dark);
     }
 
@@ -978,7 +1127,7 @@ mod tests {
         assert!(config.begin_save());
         assert!(config.commit_save(&mut port));
         assert!(!config.is_dirty());
-        assert!(render(24, 80, &config).join("\n").contains("[ saved ]"));
+        assert!(render(24, 80, &config).join("\n").contains("[ done ]"));
     }
 
     #[test]
@@ -987,7 +1136,7 @@ mod tests {
         let mut config = dirty_on_save_row(&mut port);
         assert!(config.begin_save());
         assert!(config.commit_save(&mut port));
-        assert_eq!(config.notice(), Some("saved"));
+        assert_eq!(config.notice(), None);
 
         config.reset_save();
         assert_eq!(config.notice(), None);

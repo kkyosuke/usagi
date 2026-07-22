@@ -78,16 +78,17 @@ Welcome の **New** を選ぶと新規 workspace 作成フォーム（New 画面
 キャレット移動で編集する。Esc で Welcome へ戻る。フォームの確定（実際の作成）は作成処理が入るまで
 留まる。
 
-Welcome の **Config**、または `usagi config` を選ぶと設定画面（Config 画面）へ進む。Tab で global /
-workspace scope を切り替え、`↑↓` で Theme / Modal mode / Agent model / Issue / Memory / Save を選ぶ。Theme と Modal mode は `←→` で編集し、
+Welcome の **Config**、または `usagi config` を選ぶと設定画面（Config 画面）へ進む。`Global` の Theme / Modal mode と、
+`Workspace init` の Agent / Issue / Memory を表示し、`↑↓` で項目と Save を選ぶ。Theme と Modal mode は `←→` で編集し、
 Modal mode は Overview / Closeup で action を選択する **Action** と command を入力する **Prompt** を切り替える。
-Agent model はインストール済み CLI に対応する `Claude` / `OpenAI` だけを表示し、新しい Agent pane の既定 profile としてそれぞれ `claude` / `codex` を選ぶ。どちらの CLI もない場合は灰色で無効化する。
-Issue と Memory は対応する MCP tool 群を on / off し、どちらも Global の既定値では on である。
-scope ごとに独立した draft と dirty state を持ち、変更があるときだけ Save を有効にする。保存成功時は `saved` を表示して
-Welcome へ戻り、保存失敗時は draft を保って error を表示する。Global は user data directory の `settings.json`、
-Workspace は対象 repository の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は `.usagi/local/settings.json`）へ保存する。
-Workspace entry は local override を global の上へ重ね、effective な Modal mode を次に開く Overview / Closeup へ
-適用する。scope resolution と entry lifecycle の正本は [TUI の settings scope](03-tui.md#settings-scope-と-workspace-entry)
+Agent はインストール済み CLI に対応する `Claude` / `OpenAI` だけを表示し、新しい Agent pane の既定 profile としてそれぞれ `claude` / `codex` を選ぶ。どちらの CLI もない場合は灰色で無効化する。
+Issue と Memory は対応する MCP tool 群を on / off し、どちらも Global の初期値では on である。
+変更があるときだけ Save を有効にする。保存成功時は `saved` を表示して Welcome へ戻り、保存失敗時は draft を保って
+error を表示する。Theme と Modal mode は user data directory の `settings.json` から全体へ適用する。Agent / Issue / Memory は
+同じファイルから新規 workspace の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は
+`.usagi/local/settings.json`）へ登録時に一度コピーし、作成済み workspace へ後から反映しない。
+Overview の `config` は Home 上の overlay modal として Agent / Issue / Memory だけを表示し、scope 表示を置かない。
+settings resolution と entry lifecycle の正本は [TUI の settings scope](03-tui.md#settings-scope-と-workspace-entry)
 である。Esc で Welcome へ戻る（`usagi config` から直接開いた場合も Welcome が home）。合成ルートは対話ループの
 開始画面を Welcome か Config かで選び、どちらも同じループを回す。
 
@@ -103,7 +104,7 @@ Closeup action モーダルを前面に出す。
 Switch で session 行を選択しているとき、`x` は `session remove`、`Shift`+`x`（`X`）は
 `session remove -f` を実行する。root と `+ new session` 行では削除しない。
 
-`:` はどちらの mode からも Workspace scope の Overview モーダルを開く。文字入力・Backspace・
+`:` はどちらの mode からも Overview モーダルを開く。文字入力・Backspace・
 `←→` のキャレット移動と `↑↓` の候補選択ができ、Esc で開く前の mode、session、tab へ戻る。
 `p` は選択中 session の Pull Request モーダルを開き、root では空一覧を表示する。`v` は対象の
 preview、`d` は diff、`n` は scratchpad の Notes を長文 overlay として開く。`↑↓`（`j` / `k`）で
