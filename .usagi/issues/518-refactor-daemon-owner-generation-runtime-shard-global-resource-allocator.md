@@ -5,10 +5,10 @@ status: todo
 priority: high
 labels: [review, v2, daemon, runtime, terminal, generation, durability, recovery]
 dependson: [516]
-related: [209, 221, 255, 350, 459, 474, 492, 508, 514, 515, 526]
+related: [209, 221, 255, 350, 459, 474, 492, 508, 514, 515, 526, 528]
 parent: 507
 created_at: 2026-07-22T11:37:07.035271+00:00
-updated_at: 2026-07-22T12:00:52.426464+00:00
+updated_at: 2026-07-22T12:07:38.933057+00:00
 ---
 
 ## 問題・根拠
@@ -83,13 +83,16 @@ owner generation ごとの single-writer shard と、全 generation が共有す
 ## 依存関係
 
 ```text
-#514 / #515 -> #516 generation registry/admission
-                       |
-                       v
-        本 issue (owner shards / allocator / handoff)
-                       |
-                       v
-             #507 shipping lifecycle -> #508 client routing
+#514 / #515 / #528 -> #516 generation registry/admission
+                              |
+                              v
+               本 issue (owner shards / allocator / handoff)
+                              |
+                              v
+                  #508 client owner routing
+                              |
+                              v
+                  #507 shipping lifecycle / final E2E
 ```
 
 ## docs / gate

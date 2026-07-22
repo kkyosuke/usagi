@@ -51,9 +51,17 @@ payload を確保する。
 daemon generation、対応 protocol range、capability、build diagnostics を含む。daemon は generation /
 revision の共通範囲と必須 capability を検証し、成功時に `ServerHello` を返す。build identity は wire
 protocol の互換性判定には使わないが、client bootstrap は `ServerHello` の identity で同一 channel の
-daemon が現在 binary と同じ build かを確認する。mismatch 時の現行 shipping lifecycle は旧 daemon を stop して
-fresh daemon を start する cold replacement であり、旧 PTY を保持する active / draining rollover ではない。通常
-envelope は handshake の成功後だけ受理する。
+daemon が現在 binary と同じ build tuple かを確認する。現行 shipping client / server はどちらも
+`{ version: CARGO_PKG_VERSION, commit: "unknown", target: ARCH }` を送り、bootstrap は version / target が非空なら
+tuple の完全一致を same build とする。したがって同じ version / target の別 artifact は old daemon と同一と誤認され、
+build replacement を発火しない。production composition は全 runtime mode で `force_restart = false` を渡すため、#275 が
+定義した development 毎 bootstrap restart も未配線である。canonical artifact identity、全 channel の exact-artifact
+reuse、明示 force replacement、unknown 時の fail-safe policy は
+[#528](../.usagi/issues/528-fix-daemon-build-artifact-identity-safe-rollover-trigger.md) で追跡する。
+
+mismatch を検出できた場合の現行 shipping lifecycle は旧 daemon を stop して fresh daemon を start する cold
+replacement であり、旧 PTY を保持する active / draining rollover ではない。通常 envelope は handshake の成功後だけ
+受理する。
 
 ## envelope とエラー
 
@@ -308,7 +316,10 @@ accept 時は OS peer credential の UID が daemon UID と一致しなければ
 閉じる。client は active locator だけを解決でき、draining locator や generation directory 外を指す
 endpoint には接続しない。cross-process standby handoff と draining owner routing は未実装であり、前者は
 [#516](../.usagi/issues/516-refactor-daemon-cross-process-generation-registry-standby-handoff-authority.md)、後者は
-[#508](../.usagi/issues/508-fix-tui-ipc-draining-generation-inventory-terminalref-owner-routing.md) で追跡する。
+[#508](../.usagi/issues/508-fix-tui-ipc-draining-generation-inventory-terminalref-owner-routing.md) で追跡する。到達不能な
+draining resource を作る intermediate main を許さないため、shipping rollover は #508 の owner-generation routing
+capability と compatible registry revision を確認できるまで disabled とする。最終 enable / restart / product E2E は
+[#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md) が担当する。
 
 ## client の失敗処理
 
