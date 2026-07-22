@@ -67,7 +67,8 @@ use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
 use crate::usecase::application::terminal_selection::TerminalSelection;
 use crate::usecase::application::terminal_session::{
-    SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalSession, TerminalStreamPort,
+    SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
+    TerminalSession, TerminalStreamPort,
 };
 use crate::usecase::application::{Key, ScreenRunner, Terminal};
 use crate::usecase::overview::SessionCommand;
@@ -203,7 +204,7 @@ pub trait AgentCommandPort: Send {
         _subscription: u64,
         _input_seq: u64,
         _bytes: &[u8],
-    ) -> Result<(), TerminalError> {
+    ) -> Result<TerminalInputOutcome, TerminalError> {
         Err(TerminalError::Unavailable)
     }
 
@@ -323,7 +324,7 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
         subscription: u64,
         input_seq: u64,
         bytes: &[u8],
-    ) -> Result<(), TerminalError> {
+    ) -> Result<TerminalInputOutcome, TerminalError> {
         self.0
             .input_terminal(terminal, subscription, input_seq, bytes)
     }
@@ -1150,7 +1151,7 @@ impl WorkspaceUi {
         };
         match session.send_input(&mut AgentStreamPort(port), bytes) {
             Ok(()) => Ok(()),
-            Err(error) => Err(error.message().to_owned()),
+            Err(error) => Err(error.message()),
         }
     }
 
@@ -3523,17 +3524,17 @@ mod tests {
         FixedBackendFactory, Geometry, MetricsPort, MetricsPortFactory, NewStep,
         NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep, PaneLaunch,
         SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, Start, TerminalAttach,
-        TerminalChunk, TerminalError, UnavailableAgentCommandPort, UnavailableBackendPort,
-        UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
-        UnavailableExternalTerminalPort, UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
-        UnavailableSessionCommandPortFactory, WelcomeStep, WorkspaceConfigExit, WorkspaceLoader,
-        WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
-        begin_terminal_selection_on_click, close_exited_panes, controller_terminal_view,
-        copy_terminal_selection, drain_controller_host_actions, drain_session_completions,
-        forward_live_terminal_input, handle_terminal_pointer, intercept_live_terminal_control,
-        key_to_terminal_bytes, new_project_notice, play_startup_splash, poll_and_project_terminals,
-        render_controller_frame, render_home_snapshot, restore_open_panes, run as run_from_start,
-        run_with_settings,
+        TerminalChunk, TerminalError, TerminalInputOutcome, UnavailableAgentCommandPort,
+        UnavailableBackendPort, UnavailableBrowserOpener, UnavailableDecisionCommandPort,
+        UnavailableEnvironmentStore, UnavailableExternalTerminalPort, UnavailablePrSnapshotPort,
+        UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory, WelcomeStep,
+        WorkspaceConfigExit, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi,
+        WorkspaceView, app_event_from_key, begin_terminal_selection_on_click, close_exited_panes,
+        controller_terminal_view, copy_terminal_selection, drain_controller_host_actions,
+        drain_session_completions, forward_live_terminal_input, handle_terminal_pointer,
+        intercept_live_terminal_control, key_to_terminal_bytes, new_project_notice,
+        play_startup_splash, poll_and_project_terminals, render_controller_frame,
+        render_home_snapshot, restore_open_panes, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller,
         run_workspace_controller_with_backend_and_config,
@@ -5546,6 +5547,7 @@ mod tests {
         ) -> Result<TerminalAttach, TerminalError> {
             Ok(TerminalAttach {
                 subscription: self.subscription,
+                connection_epoch: 1,
                 output_offset: self.replay.len() as u64,
                 replay: self.replay.clone(),
                 exited: false,
@@ -5566,11 +5568,11 @@ mod tests {
             _subscription: u64,
             _input_seq: u64,
             bytes: &[u8],
-        ) -> Result<(), TerminalError> {
+        ) -> Result<TerminalInputOutcome, TerminalError> {
             if bytes == b"fail" {
                 Err(TerminalError::Unavailable)
             } else {
-                Ok(())
+                Ok(TerminalInputOutcome::Written)
             }
         }
 
@@ -5804,6 +5806,7 @@ mod tests {
         ) -> Result<TerminalAttach, TerminalError> {
             Ok(TerminalAttach {
                 subscription: 1,
+                connection_epoch: 1,
                 output_offset: 0,
                 replay: Vec::new(),
                 exited: false,
@@ -5822,12 +5825,12 @@ mod tests {
             _subscription: u64,
             _input_seq: u64,
             bytes: &[u8],
-        ) -> Result<(), TerminalError> {
+        ) -> Result<TerminalInputOutcome, TerminalError> {
             self.inputs
                 .lock()
                 .unwrap()
                 .push((terminal.clone(), bytes.to_vec()));
-            Ok(())
+            Ok(TerminalInputOutcome::Written)
         }
     }
 

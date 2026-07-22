@@ -23,6 +23,10 @@ use super::terminal_selection::{TerminalPoint, TerminalSelection};
 pub struct TerminalAttach {
     /// The connection-owned subscription used to fence later input.
     pub subscription: u64,
+    /// Client-local incarnation of the persistent transport. Reattach on the
+    /// same epoch preserves the daemon's per-client input sequence; a new
+    /// epoch starts a fresh ledger at zero.
+    pub connection_epoch: u64,
     /// The output offset the retained `replay` ends at.
     pub output_offset: u64,
     /// The retained output buffer, rebuilt into the screen on every attach.
@@ -37,6 +41,22 @@ pub struct TerminalChunk {
     pub start_offset: u64,
     pub end_offset: u64,
     pub data: Vec<u8>,
+}
+
+/// The daemon's final outcome for one consumed terminal input sequence.
+///
+/// Every variant advances the daemon ledger. Only [`Self::Written`] is a
+/// normal success; known failures stay attached so the next input can use the
+/// following sequence without an unnecessary reconnect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalInputOutcome {
+    /// Every byte was accepted by the PTY master.
+    Written,
+    /// No byte was accepted by the PTY master.
+    Failed,
+    /// A prefix was accepted before the writer failed. The command-level
+    /// effect is uncertain and must never be retried automatically.
+    Ambiguous { applied_prefix: usize },
 }
 
 /// A safe, client-visible terminal transport failure.  None of these authorize
@@ -54,6 +74,9 @@ pub enum TerminalError {
     Orphaned,
     /// The terminal process has exited; its final output is retained.
     Exited,
+    /// The input request may have reached the PTY, but its acknowledgement was
+    /// not received or could not be decoded. Blind replay is unsafe.
+    InputEffectUnknown,
 }
 
 /// The daemon boundary consumed by [`TerminalSession`].  Every call is fenced by
@@ -105,7 +128,7 @@ pub trait TerminalStreamPort {
         subscription: u64,
         input_seq: u64,
         bytes: &[u8],
-    ) -> Result<(), TerminalError>;
+    ) -> Result<TerminalInputOutcome, TerminalError>;
     /// Release only this subscription; it must not stop the daemon terminal.
     fn detach(&mut self, terminal: &TerminalRef, subscription: u64);
 }
@@ -131,38 +154,56 @@ pub enum SessionState {
 pub enum TerminalInputError {
     /// There is no live, connection-owned subscription to fence the input.
     NotLive(SessionState),
+    /// The daemon consumed the sequence and returned a known non-success
+    /// outcome. The live subscription remains usable for the next sequence.
+    Rejected(TerminalInputOutcome),
     /// A live input request reached the port but failed.
     Transport(TerminalError),
 }
 
 impl TerminalInputError {
-    /// Presentation-safe explanation that explicitly says the bytes were not delivered.
+    /// Presentation-safe explanation that distinguishes definite rejection
+    /// from a partial write or lost acknowledgement.
     #[must_use]
-    pub const fn message(self) -> &'static str {
+    pub fn message(self) -> String {
         match self {
             Self::NotLive(SessionState::Reconnecting) => {
-                "terminal is reconnecting; keystroke not delivered"
+                "terminal is reconnecting; keystroke not delivered".to_owned()
             }
             Self::NotLive(SessionState::Disconnected) => {
-                "terminal is disconnected; keystroke not delivered"
+                "terminal is disconnected; keystroke not delivered".to_owned()
             }
             Self::NotLive(SessionState::Orphaned) | Self::Transport(TerminalError::Orphaned) => {
-                "terminal ownership is unknown; keystroke not delivered"
+                "terminal ownership is unknown; keystroke not delivered".to_owned()
             }
             Self::NotLive(SessionState::Exited) | Self::Transport(TerminalError::Exited) => {
-                "terminal has exited; keystroke not delivered"
+                "terminal has exited; keystroke not delivered".to_owned()
             }
             Self::NotLive(SessionState::Live) => {
-                "terminal subscription is unavailable; keystroke not delivered"
+                "terminal subscription is unavailable; keystroke not delivered".to_owned()
+            }
+            Self::Rejected(TerminalInputOutcome::Failed) => {
+                "terminal input was not applied; retry manually".to_owned()
+            }
+            Self::Rejected(TerminalInputOutcome::Ambiguous { applied_prefix }) => {
+                format!(
+                    "terminal input is uncertain; {applied_prefix} bytes were applied before failure"
+                )
+            }
+            Self::Rejected(TerminalInputOutcome::Written) => {
+                "terminal returned an invalid input outcome".to_owned()
             }
             Self::Transport(TerminalError::ResyncRequired) => {
-                "terminal output is resynchronizing; keystroke not delivered"
+                "terminal output is resynchronizing; keystroke not delivered".to_owned()
             }
             Self::Transport(TerminalError::Unavailable) => {
-                "daemon unavailable; keystroke not delivered"
+                "daemon unavailable; keystroke not delivered".to_owned()
             }
             Self::Transport(TerminalError::Stale) => {
-                "terminal is no longer available; keystroke not delivered"
+                "terminal is no longer available; keystroke not delivered".to_owned()
+            }
+            Self::Transport(TerminalError::InputEffectUnknown) => {
+                "terminal input acknowledgement was lost; delivery is unknown".to_owned()
             }
         }
     }
@@ -170,6 +211,26 @@ impl TerminalInputError {
 
 const RETRY_INITIAL: Duration = Duration::from_millis(100);
 const RETRY_MAX: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InputUncertainty {
+    first: String,
+    latest: String,
+    count: u64,
+}
+
+impl InputUncertainty {
+    fn message(&self) -> String {
+        if self.count == 1 {
+            self.first.clone()
+        } else {
+            format!(
+                "{} terminal inputs have uncertain effects; first: {}; latest: {}",
+                self.count, self.first, self.latest
+            )
+        }
+    }
+}
 
 /// A polling view of one daemon-owned terminal and its rendered screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,8 +246,12 @@ pub struct TerminalSession {
     subscription: Option<u64>,
     cursor: u64,
     input_seq: u64,
+    connection_epoch: Option<u64>,
     state: SessionState,
+    current_error: Option<String>,
+    current_error_is_input: bool,
     error: Option<String>,
+    input_uncertainty: Option<InputUncertainty>,
     retry_attempt: u32,
     retry_at: Option<Instant>,
 }
@@ -204,8 +269,12 @@ impl TerminalSession {
             subscription: None,
             cursor: 0,
             input_seq: 0,
+            connection_epoch: None,
             state: SessionState::Disconnected,
+            current_error: None,
+            current_error_is_input: false,
             error: None,
+            input_uncertainty: None,
             retry_attempt: 0,
             retry_at: None,
         }
@@ -309,10 +378,10 @@ impl TerminalSession {
                 }
                 self.replace(&attach);
                 if let Some(error) = resize_error {
-                    self.error = Some(format!(
+                    self.set_current_error(Some(format!(
                         "terminal attached, but viewport synchronization failed: {}",
                         error_message(error)
-                    ));
+                    )));
                 }
             }
             Err(error) => self.fail_at(error, now),
@@ -355,27 +424,27 @@ impl TerminalSession {
                     self.synchronized_geometry = Some(geometry);
                     self.screen
                         .resize(geometry.rows as usize, geometry.cols as usize);
-                    self.error = None;
+                    self.set_current_error(None);
                 }
                 Err(error) => {
                     self.synchronized_geometry = None;
-                    self.error = Some(format!(
+                    self.set_current_error(Some(format!(
                         "terminal viewport synchronization failed: {}",
                         error_message(error)
-                    ));
+                    )));
                 }
             }
         } else if self.synchronized_geometry != Some(geometry) {
             match port.resize(&self.terminal, geometry) {
                 Ok(()) => {
                     self.synchronized_geometry = Some(geometry);
-                    self.error = None;
+                    self.set_current_error(None);
                 }
                 Err(error) => {
-                    self.error = Some(format!(
+                    self.set_current_error(Some(format!(
                         "terminal viewport synchronization failed: {}",
                         error_message(error)
-                    ));
+                    )));
                 }
             }
         }
@@ -392,16 +461,40 @@ impl TerminalSession {
         port: &mut P,
         bytes: &[u8],
     ) -> Result<(), TerminalInputError> {
+        self.send_input_at(port, bytes, Instant::now())
+    }
+
+    fn send_input_at<P: TerminalStreamPort>(
+        &mut self,
+        port: &mut P,
+        bytes: &[u8],
+        now: Instant,
+    ) -> Result<(), TerminalInputError> {
         let (SessionState::Live, Some(subscription)) = (self.state, self.subscription) else {
             return Err(TerminalInputError::NotLive(self.state));
         };
         match port.input(&self.terminal, subscription, self.input_seq, bytes) {
-            Ok(()) => {
+            Ok(outcome) => {
                 self.input_seq += 1;
-                Ok(())
+                match outcome {
+                    TerminalInputOutcome::Written => {
+                        self.clear_current_input_error();
+                        Ok(())
+                    }
+                    TerminalInputOutcome::Failed | TerminalInputOutcome::Ambiguous { .. } => {
+                        let error = TerminalInputError::Rejected(outcome);
+                        let message = error.message();
+                        if matches!(outcome, TerminalInputOutcome::Ambiguous { .. }) {
+                            self.latch_input_uncertainty(message);
+                        } else {
+                            self.set_current_input_error(message);
+                        }
+                        Err(error)
+                    }
+                }
             }
             Err(error) => {
-                self.fail_at(error, Instant::now());
+                self.fail_at(error, now);
                 Err(TerminalInputError::Transport(error))
             }
         }
@@ -415,7 +508,7 @@ impl TerminalSession {
         self.state = SessionState::Disconnected;
         self.retry_at = None;
         self.retry_attempt = 0;
-        self.error = Some("terminal detached".to_owned());
+        self.set_current_error(Some("terminal detached".to_owned()));
     }
 
     fn apply_at<P: TerminalStreamPort>(
@@ -443,8 +536,10 @@ impl TerminalSession {
         self.screen.advance(&attach.replay);
         self.subscription = Some(attach.subscription);
         self.cursor = attach.output_offset;
-        self.input_seq = 0;
-        self.error = None;
+        if self.connection_epoch != Some(attach.connection_epoch) {
+            self.input_seq = 0;
+        }
+        self.connection_epoch = Some(attach.connection_epoch);
         self.retry_attempt = 0;
         self.retry_at = None;
         self.state = if attach.exited {
@@ -452,16 +547,26 @@ impl TerminalSession {
         } else {
             SessionState::Live
         };
+        self.set_current_error(
+            attach
+                .exited
+                .then(|| error_message(TerminalError::Exited).to_owned()),
+        );
     }
 
     fn fail_at(&mut self, error: TerminalError, now: Instant) {
         let state = match error {
-            TerminalError::Unavailable => {
+            TerminalError::Unavailable | TerminalError::InputEffectUnknown => {
                 self.subscription = None;
                 self.state = SessionState::Reconnecting;
                 self.retry_at = Some(now + retry_delay(self.retry_attempt));
                 self.retry_attempt = self.retry_attempt.saturating_add(1);
-                self.error = Some(error_message(error).to_owned());
+                let message = error_message(error).to_owned();
+                if error == TerminalError::InputEffectUnknown {
+                    self.latch_input_uncertainty(message);
+                } else {
+                    self.set_current_error(Some(message));
+                }
                 return;
             }
             TerminalError::Orphaned => SessionState::Orphaned,
@@ -474,7 +579,59 @@ impl TerminalSession {
         self.retry_at = None;
         self.retry_attempt = 0;
         self.state = state;
-        self.error = Some(error_message(error).to_owned());
+        self.set_current_error(Some(error_message(error).to_owned()));
+    }
+
+    fn latch_input_uncertainty(&mut self, message: String) {
+        match &mut self.input_uncertainty {
+            Some(uncertainty) => {
+                uncertainty.latest = message;
+                uncertainty.count = uncertainty.count.saturating_add(1);
+            }
+            None => {
+                self.input_uncertainty = Some(InputUncertainty {
+                    first: message.clone(),
+                    latest: message,
+                    count: 1,
+                });
+            }
+        }
+        self.clear_current_input_error();
+    }
+
+    fn set_current_input_error(&mut self, error: String) {
+        self.current_error = Some(error);
+        self.current_error_is_input = true;
+        self.refresh_error();
+    }
+
+    fn set_current_error(&mut self, error: Option<String>) {
+        self.current_error = error;
+        self.current_error_is_input = false;
+        self.refresh_error();
+    }
+
+    fn clear_current_input_error(&mut self) {
+        if self.current_error_is_input {
+            self.current_error = None;
+            self.current_error_is_input = false;
+        }
+        self.refresh_error();
+    }
+
+    fn refresh_error(&mut self) {
+        let uncertainty = self
+            .input_uncertainty
+            .as_ref()
+            .map(InputUncertainty::message);
+        self.error = match (&self.current_error, uncertainty) {
+            (Some(current), Some(uncertainty)) if current != &uncertainty => Some(format!(
+                "{current}; prior terminal input uncertainty: {uncertainty}"
+            )),
+            (Some(current), _) => Some(current.clone()),
+            (None, Some(uncertainty)) => Some(uncertainty),
+            (None, None) => None,
+        };
     }
 }
 
@@ -492,6 +649,9 @@ fn error_message(error: TerminalError) -> &'static str {
         TerminalError::Stale => "terminal is no longer available",
         TerminalError::Orphaned => "terminal ownership is unknown; input is disabled",
         TerminalError::Exited => "terminal has exited",
+        TerminalError::InputEffectUnknown => {
+            "terminal input acknowledgement was lost; delivery is unknown"
+        }
     }
 }
 
@@ -526,6 +686,7 @@ mod tests {
         attach: Vec<Result<TerminalAttach, TerminalError>>,
         polls: Vec<Result<Vec<TerminalChunk>, TerminalError>>,
         input: Option<TerminalError>,
+        input_outcomes: Vec<TerminalInputOutcome>,
         inputs: Vec<(u64, u64, Vec<u8>)>,
         detached: Vec<u64>,
         resized: Vec<Geometry>,
@@ -557,12 +718,16 @@ mod tests {
             subscription: u64,
             input_seq: u64,
             bytes: &[u8],
-        ) -> Result<(), TerminalError> {
+        ) -> Result<TerminalInputOutcome, TerminalError> {
             if let Some(error) = self.input {
                 return Err(error);
             }
             self.inputs.push((subscription, input_seq, bytes.to_vec()));
-            Ok(())
+            if self.input_outcomes.is_empty() {
+                Ok(TerminalInputOutcome::Written)
+            } else {
+                Ok(self.input_outcomes.remove(0))
+            }
         }
         fn detach(&mut self, _: &TerminalRef, subscription: u64) {
             self.detached.push(subscription);
@@ -590,7 +755,7 @@ mod tests {
             _: u64,
             _: u64,
             _: &[u8],
-        ) -> Result<(), TerminalError> {
+        ) -> Result<TerminalInputOutcome, TerminalError> {
             Err(TerminalError::Unavailable)
         }
 
@@ -598,8 +763,19 @@ mod tests {
     }
 
     fn attach(subscription: u64, offset: u64, replay: &[u8], exited: bool) -> TerminalAttach {
+        attach_at(1, subscription, offset, replay, exited)
+    }
+
+    fn attach_at(
+        connection_epoch: u64,
+        subscription: u64,
+        offset: u64,
+        replay: &[u8],
+        exited: bool,
+    ) -> TerminalAttach {
         TerminalAttach {
             subscription,
+            connection_epoch,
             output_offset: offset,
             replay: replay.to_vec(),
             exited,
@@ -796,6 +972,127 @@ mod tests {
     }
 
     #[test]
+    fn known_input_outcomes_advance_sequence_without_losing_the_subscription() {
+        let mut port = FakePort {
+            attach: vec![Ok(attach(9, 0, b"", false))],
+            input_outcomes: vec![
+                TerminalInputOutcome::Failed,
+                TerminalInputOutcome::Ambiguous { applied_prefix: 2 },
+                TerminalInputOutcome::Written,
+            ],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+
+        assert_eq!(
+            session.send_input(&mut port, b"x"),
+            Err(TerminalInputError::Rejected(TerminalInputOutcome::Failed))
+        );
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(
+            session.error(),
+            Some("terminal input was not applied; retry manually")
+        );
+
+        assert_eq!(
+            session.send_input(&mut port, b"abc"),
+            Err(TerminalInputError::Rejected(
+                TerminalInputOutcome::Ambiguous { applied_prefix: 2 }
+            ))
+        );
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(
+            session.error(),
+            Some("terminal input is uncertain; 2 bytes were applied before failure")
+        );
+
+        assert_eq!(session.send_input(&mut port, b"z"), Ok(()));
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(
+            session.error(),
+            Some("terminal input is uncertain; 2 bytes were applied before failure")
+        );
+        assert_eq!(
+            port.inputs,
+            vec![
+                (9, 0, b"x".to_vec()),
+                (9, 1, b"abc".to_vec()),
+                (9, 2, b"z".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn same_connection_cursor_gap_reattach_preserves_the_next_input_sequence() {
+        let mut port = FakePort {
+            attach: vec![
+                Ok(attach_at(11, 1, 0, b"", false)),
+                Ok(attach_at(11, 2, 0, b"fresh", false)),
+            ],
+            polls: vec![Ok(vec![chunk(2, b"gap")])],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+        assert_eq!(session.send_input(&mut port, b"a"), Ok(()));
+
+        session.poll(&mut port);
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(session.send_input(&mut port, b"b"), Ok(()));
+        assert_eq!(
+            port.inputs,
+            vec![(1, 0, b"a".to_vec()), (2, 1, b"b".to_vec())]
+        );
+    }
+
+    #[test]
+    fn fresh_connection_epoch_resets_the_input_sequence() {
+        let mut port = FakePort {
+            attach: vec![
+                Ok(attach_at(11, 1, 0, b"", false)),
+                Ok(attach_at(12, 2, 0, b"", false)),
+            ],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+        assert_eq!(session.send_input(&mut port, b"a"), Ok(()));
+
+        session.connect(&mut port);
+        assert_eq!(session.send_input(&mut port, b"b"), Ok(()));
+        assert_eq!(
+            port.inputs,
+            vec![(1, 0, b"a".to_vec()), (2, 0, b"b".to_vec())]
+        );
+    }
+
+    #[test]
+    fn same_socket_decode_failure_reattach_preserves_the_input_sequence() {
+        let now = Instant::now();
+        let mut port = FakePort {
+            attach: vec![
+                Ok(attach_at(21, 1, 0, b"", false)),
+                Ok(attach_at(21, 2, 0, b"fresh", false)),
+            ],
+            polls: vec![Err(TerminalError::Unavailable)],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect_at(&mut port, now);
+        assert_eq!(session.send_input(&mut port, b"a"), Ok(()));
+
+        session.poll_at(&mut port, now);
+        session.poll_at(&mut port, now + RETRY_INITIAL);
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(session.send_input(&mut port, b"b"), Ok(()));
+        assert_eq!(
+            port.inputs,
+            vec![(1, 0, b"a".to_vec()), (2, 1, b"b".to_vec())]
+        );
+    }
+
+    #[test]
     fn input_failure_reports_safe_feedback() {
         let mut port = FakePort {
             attach: vec![Ok(attach(9, 0, b"", false))],
@@ -810,6 +1107,86 @@ mod tests {
         );
         assert_eq!(session.state(), SessionState::Disconnected);
         assert_eq!(session.error(), Some("terminal is no longer available"));
+    }
+
+    #[test]
+    fn unknown_input_effect_never_advances_sequence_or_replays_the_bytes() {
+        let mut port = FakePort {
+            attach: vec![Ok(attach(9, 0, b"", false))],
+            input: Some(TerminalError::InputEffectUnknown),
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+
+        assert_eq!(
+            session.send_input(&mut port, b"x"),
+            Err(TerminalInputError::Transport(
+                TerminalError::InputEffectUnknown
+            ))
+        );
+        assert_eq!(session.input_seq, 0);
+        assert_eq!(session.state(), SessionState::Reconnecting);
+        assert_eq!(
+            session.error(),
+            Some("terminal input acknowledgement was lost; delivery is unknown")
+        );
+        assert!(port.inputs.is_empty());
+        assert_eq!(
+            session.send_input(&mut port, b"y"),
+            Err(TerminalInputError::NotLive(SessionState::Reconnecting))
+        );
+        assert!(port.inputs.is_empty());
+    }
+
+    #[test]
+    fn unknown_input_warning_survives_recovery_and_composes_with_a_later_fatal_error() {
+        let mut clock = FakeClock(Instant::now());
+        let mut port = FakePort {
+            attach: vec![
+                Ok(attach_at(31, 1, 0, b"", false)),
+                Ok(attach_at(32, 2, 0, b"fresh", false)),
+            ],
+            input: Some(TerminalError::InputEffectUnknown),
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect_at(&mut port, clock.0);
+        assert_eq!(
+            session.send_input_at(&mut port, b"x", clock.0),
+            Err(TerminalInputError::Transport(
+                TerminalError::InputEffectUnknown
+            ))
+        );
+
+        port.input = None;
+        clock.advance(RETRY_INITIAL);
+        session.poll_at(&mut port, clock.0);
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(
+            session.error(),
+            Some("terminal input acknowledgement was lost; delivery is unknown")
+        );
+        port.input_outcomes
+            .push(TerminalInputOutcome::Ambiguous { applied_prefix: 1 });
+        assert_eq!(
+            session.send_input(&mut port, b"yz"),
+            Err(TerminalInputError::Rejected(
+                TerminalInputOutcome::Ambiguous { applied_prefix: 1 }
+            ))
+        );
+        let uncertainty = session.error().unwrap();
+        assert!(uncertainty.starts_with("2 terminal inputs have uncertain effects"));
+        assert!(uncertainty.contains("delivery is unknown"));
+        assert!(uncertainty.contains("1 bytes were applied"));
+
+        port.polls.push(Err(TerminalError::Orphaned));
+        session.poll_at(&mut port, clock.0);
+        let feedback = session.error().unwrap();
+        assert!(feedback.starts_with("terminal ownership is unknown"));
+        assert!(feedback.contains("prior terminal input uncertainty"));
+        assert!(feedback.contains("delivery is unknown"));
+        assert!(feedback.contains("2 terminal inputs have uncertain effects"));
     }
 
     #[test]
@@ -1005,7 +1382,7 @@ mod tests {
     }
 
     #[test]
-    fn every_input_failure_has_explicit_non_delivery_feedback() {
+    fn every_input_failure_has_explicit_effect_feedback() {
         let outcomes = [
             TerminalInputError::NotLive(SessionState::Live),
             TerminalInputError::NotLive(SessionState::Reconnecting),
@@ -1017,9 +1394,27 @@ mod tests {
             TerminalInputError::Transport(TerminalError::Stale),
             TerminalInputError::Transport(TerminalError::Orphaned),
             TerminalInputError::Transport(TerminalError::Exited),
+            TerminalInputError::Rejected(TerminalInputOutcome::Failed),
+            TerminalInputError::Rejected(TerminalInputOutcome::Ambiguous { applied_prefix: 1 }),
+            TerminalInputError::Transport(TerminalError::InputEffectUnknown),
         ];
         for outcome in outcomes {
-            assert!(outcome.message().contains("not delivered"));
+            assert!(!outcome.message().is_empty());
+        }
+        assert!(
+            TerminalInputError::Rejected(TerminalInputOutcome::Failed)
+                .message()
+                .contains("not applied")
+        );
+        for uncertain in [
+            TerminalInputError::Rejected(TerminalInputOutcome::Ambiguous { applied_prefix: 1 }),
+            TerminalInputError::Transport(TerminalError::InputEffectUnknown),
+        ] {
+            assert!(!uncertain.message().contains("not delivered"));
+            assert!(
+                uncertain.message().contains("uncertain")
+                    || uncertain.message().contains("unknown")
+            );
         }
     }
 
@@ -1073,8 +1468,8 @@ mod tests {
                 _: u64,
                 _: u64,
                 _: &[u8],
-            ) -> Result<(), TerminalError> {
-                self.available()
+            ) -> Result<TerminalInputOutcome, TerminalError> {
+                self.available().map(|()| TerminalInputOutcome::Written)
             }
 
             fn detach(&mut self, _: &TerminalRef, _: u64) {

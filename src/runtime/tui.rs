@@ -65,7 +65,7 @@ use usagi_tui::usecase::application::daemon_backend::{
 use usagi_tui::usecase::application::pane_runtime::Geometry;
 use usagi_tui::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
 use usagi_tui::usecase::application::terminal_session::{
-    TerminalAttach, TerminalChunk, TerminalError,
+    TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::overview;
@@ -729,11 +729,15 @@ impl ExternalTerminalPort for PlatformExternalTerminalPort {
 #[derive(Default)]
 struct DaemonAgentCommandPort {
     terminal: Option<IpcClient<std::os::unix::net::UnixStream>>,
+    terminal_epoch: u64,
 }
 
 impl DaemonAgentCommandPort {
     const fn new() -> Self {
-        Self { terminal: None }
+        Self {
+            terminal: None,
+            terminal_epoch: 0,
+        }
     }
 
     /// Returns the persistent terminal connection, opening it on first use.
@@ -746,6 +750,10 @@ impl DaemonAgentCommandPort {
                 crate::runtime::daemon::client(ClientPolicy::tui())
                     .map_err(|_| TerminalError::Unavailable)?,
             );
+            self.terminal_epoch = self
+                .terminal_epoch
+                .checked_add(1)
+                .expect("terminal connection epoch exhausted");
         }
         Ok(self
             .terminal
@@ -787,6 +795,64 @@ fn map_terminal_error(error: &usagi_core::usecase::client::ClientError) -> Termi
         ErrorCode::OwnershipUnknown => TerminalError::Orphaned,
         _ => TerminalError::Unavailable,
     }
+}
+
+const MAX_CACHED_INPUT_ACK_DEPTH: usize = 16;
+
+/// Decodes the terminal owner's sequence-consuming input acknowledgement.
+///
+/// The wire enum is deliberately validated here instead of being collapsed to
+/// a body-less success. Unknown variants, malformed partial-write counts and
+/// pathological cached nesting all have an unknown effect and therefore fail
+/// closed without authorizing a retry.
+fn decode_terminal_input_ack(
+    body: &serde_json::Value,
+    input_len: usize,
+) -> Result<TerminalInputOutcome, TerminalError> {
+    let object = body
+        .as_object()
+        .filter(|object| object.len() == 1)
+        .ok_or(TerminalError::InputEffectUnknown)?;
+    let ack = object.get("ack").ok_or(TerminalError::InputEffectUnknown)?;
+    decode_terminal_input_ack_value(ack, input_len, 0)
+}
+
+fn decode_terminal_input_ack_value(
+    ack: &serde_json::Value,
+    input_len: usize,
+    cached_depth: usize,
+) -> Result<TerminalInputOutcome, TerminalError> {
+    match ack.as_str() {
+        Some("Written") => return Ok(TerminalInputOutcome::Written),
+        Some("Failed") => return Ok(TerminalInputOutcome::Failed),
+        Some(_) => return Err(TerminalError::InputEffectUnknown),
+        None => {}
+    }
+
+    let variant = ack
+        .as_object()
+        .filter(|object| object.len() == 1)
+        .ok_or(TerminalError::InputEffectUnknown)?;
+    if let Some(ambiguous) = variant.get("Ambiguous") {
+        let fields = ambiguous
+            .as_object()
+            .filter(|object| object.len() == 1)
+            .ok_or(TerminalError::InputEffectUnknown)?;
+        let applied_prefix = fields
+            .get("applied_prefix")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|prefix| usize::try_from(prefix).ok())
+            .filter(|prefix| *prefix > 0 && *prefix <= input_len)
+            .ok_or(TerminalError::InputEffectUnknown)?;
+        return Ok(TerminalInputOutcome::Ambiguous { applied_prefix });
+    }
+    if let Some(cached) = variant.get("Cached") {
+        if cached_depth >= MAX_CACHED_INPUT_ACK_DEPTH {
+            return Err(TerminalError::InputEffectUnknown);
+        }
+        return decode_terminal_input_ack_value(cached, input_len, cached_depth + 1);
+    }
+    Err(TerminalError::InputEffectUnknown)
 }
 
 fn agent_inventory_request(workspace: WorkspaceId) -> DaemonRequest {
@@ -1074,6 +1140,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         let exited = !snapshot["exited"].is_null();
         Ok(TerminalAttach {
             subscription,
+            connection_epoch: self.terminal_epoch,
             output_offset,
             replay,
             exited,
@@ -1119,17 +1186,49 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         subscription: u64,
         input_seq: u64,
         bytes: &[u8],
-    ) -> Result<(), TerminalError> {
-        self.terminal_request(
-            TerminalAction::Input,
-            TerminalRequest::Input {
-                terminal: terminal.clone(),
-                subscription,
-                input_seq,
-                bytes: bytes.to_vec(),
-            },
-        )?;
-        Ok(())
+    ) -> Result<TerminalInputOutcome, TerminalError> {
+        let payload = serde_json::to_value(TerminalRequest::Input {
+            terminal: terminal.clone(),
+            subscription,
+            input_seq,
+            bytes: bytes.to_vec(),
+        })
+        .expect("terminal request is serializable");
+        let reply = {
+            // Failure to establish a connection happens before this request is
+            // written, so it remains a definite unavailable outcome.
+            let client = self.terminal_client()?;
+            client.request(DaemonRequest::Terminal {
+                action: TerminalAction::Input,
+                payload,
+            })
+        };
+        match reply {
+            Ok(DaemonReply::Ok(body)) => {
+                let outcome = decode_terminal_input_ack(&body, bytes.len());
+                if outcome.is_err() {
+                    self.terminal = None;
+                }
+                outcome
+            }
+            // `Accepted` is not a final input ACK. Likewise, once the request
+            // write was attempted, an EOF or transport error can equally mean
+            // "not sent", "partly sent" or "applied but ACK lost". Never label
+            // either path undelivered and never replay it blindly.
+            Ok(DaemonReply::Accepted { .. })
+            | Err(ClientError::Unavailable(_) | ClientError::Lifecycle(_)) => {
+                self.terminal = None;
+                Err(TerminalError::InputEffectUnknown)
+            }
+            Err(error @ ClientError::Protocol(_)) => {
+                self.terminal = None;
+                if error.side_effect() == usagi_core::infrastructure::ipc::SideEffect::None {
+                    Err(map_terminal_error(&error))
+                } else {
+                    Err(TerminalError::InputEffectUnknown)
+                }
+            }
+        }
     }
 
     fn detach_terminal(
@@ -2198,18 +2297,19 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        DaemonDecisionCommandPort, EnvironmentStorePort, LifecycleSnapshot, PersistentSettingsPort,
-        ProductionBackendFactory, RepoEnvironmentStore, Start, TerminalChunk, TerminalError,
-        agent_inventory_request, classify_terminal_input, created_session_hook,
-        daemon_error_reason, decode_terminal_poll, exact_agent_resume_request, lifecycle_snapshot,
-        load_screen_graph_data, load_workspace_state, map_terminal_error, passthrough_key,
-        probe_path, provider_resume_projection, session_snapshot_result, terminal_copy_key,
-        validate_workspace_directory,
+        DaemonAgentCommandPort, DaemonDecisionCommandPort, EnvironmentStorePort, Geometry,
+        LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore,
+        Start, TerminalChunk, TerminalError, TerminalInputOutcome, agent_inventory_request,
+        classify_terminal_input, created_session_hook, daemon_error_reason,
+        decode_terminal_input_ack, decode_terminal_poll, exact_agent_resume_request,
+        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
+        passthrough_key, probe_path, provider_resume_projection, session_snapshot_result,
+        terminal_copy_key, validate_workspace_directory,
     };
     use chrono::Utc;
     use serde_json::json;
     use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
-    use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
+    use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId};
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
     use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycle};
@@ -2246,6 +2346,367 @@ mod tests {
             control: true,
             ..Modifiers::default()
         }
+    }
+
+    #[cfg(unix)]
+    fn terminal_input_port(
+        replies: Vec<(
+            usagi_core::infrastructure::ipc::ResponseOutcome,
+            serde_json::Value,
+        )>,
+    ) -> (
+        DaemonAgentCommandPort,
+        std::thread::JoinHandle<Vec<serde_json::Value>>,
+    ) {
+        use std::os::unix::net::UnixStream;
+
+        use usagi_core::infrastructure::ipc::{
+            BuildIdentity, DaemonGeneration, Envelope, EnvelopeKind, read_json_frame,
+            write_json_frame,
+        };
+        use usagi_core::usecase::client::{ClientPolicy, IpcClient};
+        use usagi_daemon::presentation::ipc::{handshake, server_protocol};
+
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let protocol = server_protocol(
+            DaemonGeneration("input-ack-test".to_owned()),
+            "input-ack-connection".to_owned(),
+            BuildIdentity {
+                version: "test".to_owned(),
+                commit: "test".to_owned(),
+                target: "test".to_owned(),
+            },
+        );
+        let server = std::thread::spawn(move || {
+            let mut reader = server_stream.try_clone().unwrap();
+            let mut writer = server_stream;
+            let hello = handshake(&mut reader, &mut writer, &protocol)
+                .unwrap()
+                .unwrap();
+            let mut requests = Vec::with_capacity(replies.len());
+            for (outcome, body) in replies {
+                let request =
+                    read_json_frame::<Envelope>(&mut reader, hello.limits.max_frame_bytes as usize)
+                        .unwrap()
+                        .expect("scripted terminal input request");
+                let EnvelopeKind::Request {
+                    request_id,
+                    body: request_body,
+                    ..
+                } = request.kind
+                else {
+                    panic!("terminal client sent a non-request envelope");
+                };
+                requests.push(request_body);
+                write_json_frame(
+                    &mut writer,
+                    &Envelope {
+                        protocol: hello.protocol,
+                        daemon_generation: hello.daemon_generation.clone(),
+                        kind: EnvelopeKind::Response {
+                            request_id,
+                            outcome,
+                            body,
+                        },
+                    },
+                    hello.limits.max_frame_bytes as usize,
+                )
+                .unwrap();
+            }
+            requests
+        });
+        let client = IpcClient::connect(
+            client_stream,
+            "input-ack-client".to_owned(),
+            "input-ack-nonce".to_owned(),
+            ClientPolicy::tui(),
+        )
+        .unwrap();
+        (
+            DaemonAgentCommandPort {
+                terminal: Some(client),
+                terminal_epoch: 1,
+            },
+            server,
+        )
+    }
+
+    #[cfg(unix)]
+    fn input_terminal_ref() -> TerminalRef {
+        serde_json::from_value(json!({
+            "daemon_generation": "00000000-0000-4000-8000-000000000001",
+            "terminal_id": "00000000-0000-4000-8000-000000000002",
+            "workspace_id": "00000000-0000-4000-8000-000000000003",
+            "session_id": null,
+            "worktree_id": "00000000-0000-4000-8000-000000000004"
+        }))
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_terminal_input_decodes_every_known_ack_outcome() {
+        use usagi_core::infrastructure::ipc::ResponseOutcome;
+        use usagi_tui::presentation::AgentCommandPort;
+
+        let (mut port, server) = terminal_input_port(vec![
+            (ResponseOutcome::Ok, json!({ "ack": "Written" })),
+            (
+                ResponseOutcome::Ok,
+                json!({ "ack": { "Cached": { "Cached": "Written" } } }),
+            ),
+            (ResponseOutcome::Ok, json!({ "ack": "Failed" })),
+            (
+                ResponseOutcome::Ok,
+                json!({ "ack": { "Cached": "Failed" } }),
+            ),
+            (
+                ResponseOutcome::Ok,
+                json!({ "ack": { "Ambiguous": { "applied_prefix": 2 } } }),
+            ),
+            (
+                ResponseOutcome::Ok,
+                json!({ "ack": { "Cached": { "Ambiguous": { "applied_prefix": 3 } } } }),
+            ),
+        ]);
+        let terminal = input_terminal_ref();
+
+        assert_eq!(
+            port.input_terminal(&terminal, 7, 0, b"x"),
+            Ok(TerminalInputOutcome::Written)
+        );
+        assert_eq!(
+            port.input_terminal(&terminal, 7, 1, b"x"),
+            Ok(TerminalInputOutcome::Written)
+        );
+        assert_eq!(
+            port.input_terminal(&terminal, 7, 2, b"x"),
+            Ok(TerminalInputOutcome::Failed)
+        );
+        assert_eq!(
+            port.input_terminal(&terminal, 7, 3, b"x"),
+            Ok(TerminalInputOutcome::Failed)
+        );
+        assert_eq!(
+            port.input_terminal(&terminal, 7, 4, b"abc"),
+            Ok(TerminalInputOutcome::Ambiguous { applied_prefix: 2 })
+        );
+        assert_eq!(
+            port.input_terminal(&terminal, 7, 5, b"abc"),
+            Ok(TerminalInputOutcome::Ambiguous { applied_prefix: 3 })
+        );
+
+        drop(port);
+        server.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_terminal_input_rejects_accepted_as_a_non_final_ack() {
+        use usagi_core::infrastructure::ipc::ResponseOutcome;
+        use usagi_tui::presentation::AgentCommandPort;
+
+        let (mut port, server) = terminal_input_port(vec![(
+            ResponseOutcome::Accepted {
+                operation_id: usagi_core::infrastructure::ipc::OperationId(
+                    OperationId::new().to_string(),
+                ),
+                operation_revision: 1,
+            },
+            json!({ "ack": "Written" }),
+        )]);
+
+        assert_eq!(
+            port.input_terminal(&input_terminal_ref(), 7, 0, b"x"),
+            Err(TerminalError::InputEffectUnknown)
+        );
+        assert!(port.terminal.is_none());
+        drop(port);
+        server.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_terminal_input_protocol_side_effect_controls_unknown_feedback() {
+        use usagi_core::infrastructure::ipc::{
+            ErrorCode, ProtocolError, ResponseOutcome, SideEffect,
+        };
+        use usagi_tui::presentation::AgentCommandPort;
+
+        for (side_effect, expected) in [
+            (SideEffect::None, TerminalError::Unavailable),
+            (
+                SideEffect::PartialOrUnknown,
+                TerminalError::InputEffectUnknown,
+            ),
+            (SideEffect::Applied, TerminalError::InputEffectUnknown),
+            (
+                SideEffect::OperationAccepted,
+                TerminalError::InputEffectUnknown,
+            ),
+        ] {
+            let mut error = ProtocolError::new(ErrorCode::Unavailable, "scripted input failure");
+            error.side_effect = side_effect;
+            let (mut port, server) =
+                terminal_input_port(vec![(ResponseOutcome::Error(error), json!(null))]);
+
+            assert_eq!(
+                port.input_terminal(&input_terminal_ref(), 7, 0, b"x"),
+                Err(expected),
+                "side effect {side_effect:?}"
+            );
+            assert!(port.terminal.is_none());
+            drop(port);
+            server.join().unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_malformed_attach_on_same_socket_keeps_epoch_and_next_input_sequence() {
+        use usagi_core::infrastructure::ipc::ResponseOutcome;
+        use usagi_core::usecase::client::{DaemonRequest, TerminalAction, TerminalRequest};
+        use usagi_tui::presentation::AgentCommandPort;
+
+        let valid_attach = json!({
+            "subscription": 8,
+            "snapshot": {
+                "output_offset": 0,
+                "base_offset": 0,
+                "replay": [],
+                "exited": null
+            }
+        });
+        let (mut port, server) = terminal_input_port(vec![
+            (ResponseOutcome::Ok, json!({ "ack": "Written" })),
+            (ResponseOutcome::Ok, json!({ "snapshot": {} })),
+            (ResponseOutcome::Ok, valid_attach),
+            (ResponseOutcome::Ok, json!({ "ack": "Written" })),
+        ]);
+        let terminal = input_terminal_ref();
+
+        assert_eq!(
+            port.input_terminal(&terminal, 7, 0, b"a"),
+            Ok(TerminalInputOutcome::Written)
+        );
+        assert_eq!(
+            port.attach_terminal(&terminal, Geometry { cols: 20, rows: 3 }),
+            Err(TerminalError::Unavailable)
+        );
+        assert!(port.terminal.is_some());
+        let attach = port
+            .attach_terminal(&terminal, Geometry { cols: 20, rows: 3 })
+            .unwrap();
+        assert_eq!(attach.connection_epoch, 1);
+        assert_eq!(
+            port.input_terminal(&terminal, attach.subscription, 1, b"b"),
+            Ok(TerminalInputOutcome::Written)
+        );
+
+        drop(port);
+        let requests = server.join().unwrap();
+        let input_sequences = requests
+            .into_iter()
+            .filter_map(|body| serde_json::from_value::<DaemonRequest>(body).ok())
+            .filter_map(|request| match request {
+                DaemonRequest::Terminal {
+                    action: TerminalAction::Input,
+                    payload,
+                } => serde_json::from_value::<TerminalRequest>(payload).ok(),
+                _ => None,
+            })
+            .filter_map(|request| match request {
+                TerminalRequest::Input { input_seq, .. } => Some(input_seq),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(input_sequences, vec![0, 1]);
+    }
+
+    #[test]
+    fn terminal_input_ack_decoder_rejects_malformed_or_unsafe_outcomes() {
+        let invalid = [
+            json!(null),
+            json!({}),
+            json!({ "ack": "Unknown" }),
+            json!({ "ack": "Written", "extra": true }),
+            json!({ "ack": { "Ambiguous": { "applied_prefix": 0 } } }),
+            json!({ "ack": { "Ambiguous": { "applied_prefix": 4 } } }),
+            json!({ "ack": { "Ambiguous": { "applied_prefix": 1, "extra": true } } }),
+            json!({ "ack": { "Cached": { "Other": "Written" } } }),
+        ];
+        for body in invalid {
+            assert_eq!(
+                decode_terminal_input_ack(&body, 3),
+                Err(TerminalError::InputEffectUnknown)
+            );
+        }
+
+        let mut too_deep = json!("Written");
+        for _ in 0..=super::MAX_CACHED_INPUT_ACK_DEPTH {
+            too_deep = json!({ "Cached": too_deep });
+        }
+        assert_eq!(
+            decode_terminal_input_ack(&json!({ "ack": too_deep }), 1),
+            Err(TerminalError::InputEffectUnknown)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_terminal_input_reports_ack_loss_as_unknown_without_resend() {
+        use std::os::unix::net::UnixStream;
+
+        use usagi_core::infrastructure::ipc::{
+            BuildIdentity, DaemonGeneration, Envelope, read_json_frame,
+        };
+        use usagi_core::usecase::client::{ClientPolicy, IpcClient};
+        use usagi_daemon::presentation::ipc::{handshake, server_protocol};
+        use usagi_tui::presentation::AgentCommandPort;
+
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let protocol = server_protocol(
+            DaemonGeneration("input-ack-loss-test".to_owned()),
+            "input-ack-loss-connection".to_owned(),
+            BuildIdentity {
+                version: "test".to_owned(),
+                commit: "test".to_owned(),
+                target: "test".to_owned(),
+            },
+        );
+        let server = std::thread::spawn(move || {
+            let mut reader = server_stream.try_clone().unwrap();
+            let mut writer = server_stream;
+            let hello = handshake(&mut reader, &mut writer, &protocol)
+                .unwrap()
+                .unwrap();
+            let request =
+                read_json_frame::<Envelope>(&mut reader, hello.limits.max_frame_bytes as usize)
+                    .unwrap();
+            assert!(
+                request.is_some(),
+                "exactly one input request reaches the server"
+            );
+            // Close after consuming the request but before writing its ACK.
+        });
+        let client = IpcClient::connect(
+            client_stream,
+            "input-ack-loss-client".to_owned(),
+            "input-ack-loss-nonce".to_owned(),
+            ClientPolicy::tui(),
+        )
+        .unwrap();
+        let mut port = DaemonAgentCommandPort {
+            terminal: Some(client),
+            terminal_epoch: 1,
+        };
+
+        assert_eq!(
+            port.input_terminal(&input_terminal_ref(), 7, 0, b"x"),
+            Err(TerminalError::InputEffectUnknown)
+        );
+        assert!(port.terminal.is_none());
+        server.join().unwrap();
     }
 
     #[test]
