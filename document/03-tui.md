@@ -524,13 +524,15 @@ terminal pane の接続状態と footer feedback は `TerminalSession` の状態
 | 状態 | 入力 | poll / retry UX |
 |---|---|---|
 | `Live` | subscription と input sequence で送信 | output offset から継続取得する |
-| `Reconnecting` | typed failure として拒否し、未配送を footer に表示 | 100ms から始まり 2s を上限とする指数 backoff 後、同じ `TerminalRef` を attach して snapshot resync する |
+| `Reconnecting` | 新しい入力は typed failure として拒否する。直前の ACK を失った場合はその入力を未配送と断定せず effect unknown を表示する | 100ms から始まり 2s を上限とする指数 backoff 後、同じ `TerminalRef` を attach して snapshot resync する |
 | `Disconnected` | typed failure として拒否 | stale target または明示的 detach の終端で、自動 retry しない |
 | `Orphaned` | typed failure として拒否 | ownership unknown の終端で、自動 retry しない |
 | `Exited` | typed failure として拒否 | 最終画面を保持し、自動 retry しない |
 
-一時的な `unavailable` だけが `Reconnecting` へ遷移する。再 attach 成功時は backoff と input sequence を
-reset し、新しい connection-owned subscription を使う。tab close / detach は予約済み retry を取り消す。
+一時的な `unavailable` と input effect unknown が `Reconnecting` へ遷移する。再 attach 成功時は backoff をresetし、新しい
+connection-owned subscriptionを使う。input sequenceはclient-local connection epochが変わった場合だけ0へresetし、
+同じepoch上のcursor-gap/resync/detach→reattachではdaemon ledgerに合わせてnext sequenceを保持する。
+tab close / detach は予約済み retry を取り消す。
 retry 中に replacement terminal を spawn せず、stale / orphaned / exited を一時切断として再試行しない。
 
 primary screen から押し出された行は 10,000 行を上限とする local scrollback として保持し、right pane は live bottom を基準に
@@ -561,7 +563,18 @@ live terminal に focus がある間、leader が無い `Ctrl-C` / `Ctrl-Q` / `C
 raw bytes・Enter・Backspace・Tab・矢印など）は management ではなく PTY へ送られる。矢印は対応する CSI 列、Enter は `CR` に符号化する。tab 巡回や Closeup/Switch の遷移は
 `Ctrl-O` prefix（`Ctrl-O Ctrl-N` / `Ctrl-O Ctrl-P` / `Ctrl-O Ctrl-O`）だけが所有する。前面 modal や forced action modal がある間は
 その modal が入力を所有する。入力は subscription と単調増加する input sequence で fence し、同じ打鍵を二重送信しない。
-Live でない、subscription がない、または送信に失敗した入力は success と扱わず、未配送を safe feedback として footer に表示する。
+daemon の input ACK は `Written` だけを通常成功とする。`Failed` は 0 byte 適用を表示し、`Ambiguous` は
+`applied_prefix` byte 適用後の effect が不確定であることを表示する。`Cached` は内側の outcome へ正規化する。
+これら有効な ACK は非成功を含めて sequence を 1 つ進め、既存 subscription を保ったまま次の入力を送れる。
+
+Live でない、subscription がない、または definitive な送信前 failure は success と扱わず、未配送を safe feedback として
+footer に表示する。一方、request write 後に transport / ACK を失った入力は delivery が unknown であり、未配送と断定しない。
+その入力を自動 queue / replay せず `Reconnecting` へ移り、利用者が不確定な command を認識できる feedback を残す。
+未知の ACK variant、範囲外の `applied_prefix`、過剰に深い `Cached` も同じく fail closed とする。
+ACK lossと`Ambiguous`のmutation uncertaintyはtransport recoveryや後続`Written`では消さず、複数件をcount + first/latestで
+集約する。現行UIにはclear操作を置かず、session破棄または#519のoperation-ledger resolutionまでlatchする。後から
+stale/orphaned/exited/resize failureが起きた場合はcurrent terminal errorを先に表示し、prior input uncertaintyも同じfooter
+feedbackへ合成して隠さない。
 terminal は起動時点と resize 後の右ペイン実幅・高さで geometry を要求するため、shell の right prompt も pane 内に収まる。geometry が変わると TUI は PTY と decoded local screen を resize する。過去の cursor 移動列は新しい幅で再生せず、過去行を含む既存セルを clip して行数を増やさない。daemon 不通・stale・orphan は安全な
 feedback だけを表示し、local PTY を生成しない。
 

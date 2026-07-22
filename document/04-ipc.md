@@ -280,6 +280,23 @@ terminal input は daemon が PTY master に受理された byte 数を追跡し
 PTY write が `Interrupted` を返した場合、daemon はそれまでの `applied_prefix` を維持して残りを再試行する。
 wire 型は既存の `applied_prefix` を使うため protocol revision の変更を伴わない。
 
+TUI adapter は final `ResponseOutcome::Ok` の ACK body だけを検証し、`Written` だけを通常成功として投影する。
+Input response の `Accepted` はpendingであってfinal ACKではないため、bodyが見かけ上 `Written` でもeffect unknownとして拒否する。`Failed` / `Ambiguous` と
+それらを包む `Cached` も daemon が input sequence を消費した final outcome なので、client は sequence を進めるが
+subscription は切らない。`Ambiguous.applied_prefix` は `1..=input.length` だけを受理し、未知 variant、0 / 範囲外 prefix、
+過剰に深い `Cached` は effect unknown として fail closed にする。
+
+terminal Input の protocol error は `side_effect: none` の場合だけerror codeをdefinitive failureへ写せる。
+`partial_or_unknown` / `applied` / `operation_accepted` はcodeにかかわらずeffect unknownであり、「未配送」と表示せず
+connectionを捨て、blind replayしない。
+
+request の write を試みた後で EOF / transport failure になった場合、client は PTY effect の有無を証明できない。
+この ACK-loss 経路は「未配送」へ変換せず delivery unknown と表示し、同じ bytes を自動再送しない。現行の
+connection-local ledgerだけでは reconnect 後に final outcome を照会できないため、cross-connection replayは別契約として扱う。
+ACK lossと`Ambiguous`のuncertaintyはreattach成功や後続`Written`でclearせず、複数件をbounded count + first/latestで
+集約する。現行UIからclearせず、session破棄または#519のdurable outcome resolutionまでlatchする。後続の
+fatal/transport errorはprior uncertaintyを隠さず、current stateと合成して投影する。
+
 `inventory` は `WorkspaceId` / optional `SessionId`（None=root）/ `WorktreeId` の scope を送り、
 その scope に**完全一致**する daemon 所有 runtime を列挙する。daemon は generic terminal owner と
 Agent owner の両方に問い合わせて結果を merge するため、応答には**generic terminal と Agent terminal の
@@ -331,15 +348,19 @@ identity を保持する。generic Terminal Launch は現行 wire に producer `
 契約の対象外である。TUI は stream sequence、resource revision、terminal output offset を別々に保持し、gap や
 epoch の不一致では output を継ぎ足さず、snapshot resync を要求する。
 
-terminal の `unavailable` は connection-local subscription の喪失として扱う。TUI は 100ms から 2s 上限の
-指数 backoff で transport を開き直し、元の完全な `TerminalRef` に `attach` して atomic snapshot と新しい
-subscription を取得する。成功後は snapshot の `output_offset` から `resume` し、backoff と subscription-local
-input sequence を reset する。`stale_target`、`ownership_unknown`、exited は retry 対象ではなく、detach / tab
+terminal の `unavailable` は TerminalSession の connection-local subscription の喪失として扱う。TUI は
+100ms から 2s 上限の指数 backoff 後、元の完全な `TerminalRef` に `attach` して atomic snapshot と
+新しい subscription を取得する。transport EOF はclient connectionをdropして次回に開き直すが、
+response bodyのlocal decode failureは同じclient connectionとinput ledgerを保持する。成功後は snapshot の
+`output_offset` から `resume` し、backoff と subscription-local input sequence を、client-local connection epochが
+変わった場合だけresetする。同じconnectionでのsnapshot reattachは
+subscriptionが変わってもnext input sequenceを保持する。`stale_target`、`ownership_unknown`、exited は retry 対象ではなく、detach / tab
 close も pending retry を解除する。どの失敗経路も replacement launch を行わない。
 
 terminal input は Live な connection-owned subscription がある場合だけ送る。非 Live、subscription 不在、または
-request failure は typed failure であり、client は success として捨てず未配送 feedback を表示する。再接続まで
-入力を queue / replay しないため、遅延送信や二重送信は生じない。
+request を書く前の definitive failure は typed failure であり、client は success として捨てず未配送 feedback を表示する。
+request write 後の transport / ACK loss は effect unknown として区別し、未配送と断定しない。どちらも再接続まで入力を
+queue / replay せず、unknown inputをblind retryしない。
 
 MCP の dispatch request は `DispatchTool` action として送る。daemon が session upsert、agent/run/binding
 の解決、inbox の読み書きを行い、MCP は durable state を直接読んだり書いたりしない。完了・失敗は worker
