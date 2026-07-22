@@ -5,13 +5,15 @@
 //!
 //! 1. **single-instance guard** — acquire the [`InstanceLock`]; if another
 //!    daemon holds it, refuse rather than start a second one;
-//! 2. **register** — otherwise overwrite any stale record with this process's
-//!    pid in `daemon.json`;
-//! 3. **publish** — expose its endpoint only after the lock and record prove it
+//! 2. **prepare** — arrange shutdown delivery before any worker is spawned;
+//! 3. **register** — overwrite any stale record with this process's pid in
+//!    `daemon.json`;
+//! 4. **publish** — expose its endpoint only after the lock and record prove it
 //!    is the active daemon;
-//! 4. **run** — block until asked to shut down;
-//! 5. **deregister** — clear the record on the way out. The lock is released by
-//!    the OS when the process exits.
+//! 5. **run** — block until asked to shut down;
+//! 6. **retire** — stop and join endpoint admission, generation-conditionally
+//!    unlink the endpoint, then conditionally clear this exact lifecycle record.
+//!    The lock is released by the OS when the process exits.
 //!
 //! The lock is the authoritative guard: because it waits briefly for a departing
 //! holder, a `restart` hands off cleanly, and because the OS drops it on death it
@@ -46,12 +48,12 @@ pub trait DaemonRecordPort {
     ///
     /// Returns the underlying durable store error.
     fn save(&self, record: &DaemonRecord) -> io::Result<()>;
-    /// Clears the active daemon record.
+    /// Clears the active daemon record only if it still equals `expected`.
     ///
     /// # Errors
     ///
     /// Returns the underlying durable store error.
-    fn clear(&self) -> io::Result<()>;
+    fn clear_if(&self, expected: &DaemonRecord) -> io::Result<bool>;
 }
 
 impl<F: RecordFile> DaemonRecordPort for DaemonRecordStore<F> {
@@ -63,8 +65,8 @@ impl<F: RecordFile> DaemonRecordPort for DaemonRecordStore<F> {
         DaemonRecordStore::save(self, record)
     }
 
-    fn clear(&self) -> io::Result<()> {
-        DaemonRecordStore::clear(self)
+    fn clear_if(&self, expected: &DaemonRecord) -> io::Result<bool> {
+        DaemonRecordStore::clear_if(self, expected)
     }
 }
 
@@ -74,7 +76,8 @@ impl<F: RecordFile> DaemonRecordPort for DaemonRecordStore<F> {
 /// # Errors
 ///
 /// Returns the lock's acquire error, the store's load / save / clear error, the
-/// ready publication / shutdown signal error, or an `out` write error.
+/// shutdown preparation / wait error, the endpoint publish / quiesce / retire
+/// error, or an `out` write error.
 pub fn serve(
     out: &mut dyn Write,
     store: &dyn DaemonRecordPort,
@@ -95,22 +98,66 @@ pub fn serve(
         };
     }
 
+    // Prepare signal delivery before registration makes this process visible or
+    // endpoint publication spawns workers. A stop arriving after registration
+    // can therefore only take the owner cleanup path below.
+    shutdown.prepare()?;
+
     // We hold the lock. Overwrite any stale record and register this process.
-    store.save(&DaemonRecord::new(pid))?;
+    let record = DaemonRecord::new(pid);
+    store.save(&record)?;
     if let Err(error) = ready.publish() {
         // A failed endpoint was never usable, so leave no live-looking record
         // for a process that has not begun serving. Preserve the publish error:
         // a cleanup failure only leaves a stale record, which status/stop can
         // safely reclaim after this process exits.
-        let _ = store.clear();
+        let _ = store.clear_if(&record);
         return Err(error);
     }
-    writeln!(out, "{describe}: daemon serving (pid {pid})")?;
+    if let Err(error) = writeln!(out, "{describe}: daemon serving (pid {pid})") {
+        retire_and_clear_after_failure(ready, store, &record);
+        return Err(error);
+    }
 
-    shutdown.wait()?;
+    if let Err(error) = shutdown.wait() {
+        // Preserve the primary wait error while best-effort cleanup removes only
+        // this owner's metadata. A concurrently saved replacement survives.
+        retire_and_clear_after_failure(ready, store, &record);
+        return Err(error);
+    }
 
-    store.clear()?;
+    if let Err(error) = ready.quiesce() {
+        // `retire` is idempotent and may still complete cleanup when the first
+        // join attempt reported an error (or its worker unwound).
+        clear_after_retire(ready, store, &record);
+        return Err(error);
+    }
+    // Keep the exact record as a completion fence until the generation endpoint
+    // is gone. A stop waiter can treat record disappearance as proof that join
+    // and generation-fenced retirement succeeded, while a retirement failure
+    // remains fail-closed and diagnosable through the retained record.
+    ready.retire()?;
+    store.clear_if(&record)?;
     writeln!(out, "{describe}: daemon stopped (pid {pid})")
+}
+
+fn retire_and_clear_after_failure(
+    ready: &dyn DaemonReady,
+    store: &dyn DaemonRecordPort,
+    record: &DaemonRecord,
+) {
+    let _ = ready.quiesce();
+    clear_after_retire(ready, store, record);
+}
+
+fn clear_after_retire(
+    ready: &dyn DaemonReady,
+    store: &dyn DaemonRecordPort,
+    record: &DaemonRecord,
+) {
+    if ready.retire().is_ok() {
+        let _ = store.clear_if(record);
+    }
 }
 
 #[cfg(test)]
@@ -119,7 +166,7 @@ mod tests {
     use crate::test_support::{
         FailingShutdown, FakeLock, ImmediateShutdown, InMemoryRecordFile, NoopReady,
     };
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::io;
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::daemon::DaemonRecord;
@@ -140,11 +187,11 @@ mod tests {
                 Ok(())
             }
         }
-        fn remove(&self) -> io::Result<()> {
+        fn remove_if(&self, _: &str) -> io::Result<bool> {
             if self.remove {
                 Err(io::Error::other("remove"))
             } else {
-                Ok(())
+                Ok(false)
             }
         }
     }
@@ -195,12 +242,132 @@ mod tests {
             self.published.set(self.published.get() + 1);
             Ok(())
         }
+
+        fn quiesce(&self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn retire(&self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
-    struct FailingReady;
-    impl DaemonReady for FailingReady {
+    struct OrderedShutdown<'a> {
+        events: &'a RefCell<Vec<&'static str>>,
+        store: &'a DaemonRecordStore<InMemoryRecordFile>,
+    }
+    impl usagi_core::infrastructure::daemon::ShutdownSignal for OrderedShutdown<'_> {
+        fn prepare(&self) -> io::Result<()> {
+            assert_eq!(self.store.load().unwrap(), None);
+            self.events.borrow_mut().push("prepare");
+            Ok(())
+        }
+
+        fn wait(&self) -> io::Result<()> {
+            self.events.borrow_mut().push("wait");
+            Ok(())
+        }
+    }
+
+    struct OrderedReady<'a> {
+        events: &'a RefCell<Vec<&'static str>>,
+        store: &'a DaemonRecordStore<InMemoryRecordFile>,
+    }
+
+    struct ReplacingReady<'a> {
+        store: &'a DaemonRecordStore<InMemoryRecordFile>,
+        replacement: RefCell<Option<DaemonRecord>>,
+    }
+    impl DaemonReady for ReplacingReady<'_> {
         fn publish(&self) -> io::Result<()> {
-            Err(io::Error::other("publish failed"))
+            Ok(())
+        }
+
+        fn quiesce(&self) -> io::Result<()> {
+            let old = self.store.load()?.expect("serve registered its record");
+            let replacement = DaemonRecord {
+                pid: old.pid,
+                started_at: old.started_at + chrono::Duration::nanoseconds(1),
+            };
+            self.store.save(&replacement)?;
+            *self.replacement.borrow_mut() = Some(replacement);
+            Ok(())
+        }
+
+        fn retire(&self) -> io::Result<()> {
+            assert_eq!(self.store.load()?, *self.replacement.borrow());
+            Ok(())
+        }
+    }
+    impl DaemonReady for OrderedReady<'_> {
+        fn publish(&self) -> io::Result<()> {
+            assert!(self.store.load().unwrap().is_some());
+            self.events.borrow_mut().push("publish");
+            Ok(())
+        }
+
+        fn quiesce(&self) -> io::Result<()> {
+            assert!(self.store.load().unwrap().is_some());
+            self.events.borrow_mut().push("quiesce");
+            Ok(())
+        }
+
+        fn retire(&self) -> io::Result<()> {
+            assert!(self.store.load().unwrap().is_some());
+            self.events.borrow_mut().push("retire");
+            Ok(())
+        }
+    }
+
+    struct ConfigurableShutdown {
+        fail_prepare: bool,
+    }
+    impl usagi_core::infrastructure::daemon::ShutdownSignal for ConfigurableShutdown {
+        fn prepare(&self) -> io::Result<()> {
+            if self.fail_prepare {
+                Err(io::Error::other("prepare failed"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn wait(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct CleanupReady {
+        fail_publish: bool,
+        fail_quiesce: bool,
+        fail_retire: bool,
+        quiesces: Cell<u8>,
+        retires: Cell<u8>,
+    }
+    impl DaemonReady for CleanupReady {
+        fn publish(&self) -> io::Result<()> {
+            if self.fail_publish {
+                Err(io::Error::other("publish failed"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn quiesce(&self) -> io::Result<()> {
+            self.quiesces.set(self.quiesces.get() + 1);
+            if self.fail_quiesce {
+                Err(io::Error::other("quiesce failed"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn retire(&self) -> io::Result<()> {
+            self.retires.set(self.retires.get() + 1);
+            if self.fail_retire {
+                Err(io::Error::other("retire failed"))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -216,6 +383,103 @@ mod tests {
     }
 
     #[test]
+    fn prepares_before_publication_then_quiesces_and_retires_before_exit() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let events = RefCell::new(Vec::new());
+        let ready = OrderedReady {
+            events: &events,
+            store: &store,
+        };
+        let shutdown = OrderedShutdown {
+            events: &events,
+            store: &store,
+        };
+        serve(
+            &mut Vec::new(),
+            &store,
+            &ready,
+            &shutdown,
+            &FakeLock::Acquired,
+            2222,
+            &info(),
+        )
+        .unwrap();
+        assert_eq!(
+            events.into_inner(),
+            ["prepare", "publish", "wait", "quiesce", "retire"]
+        );
+    }
+
+    #[test]
+    fn preparation_failure_never_registers_or_publishes() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        assert!(
+            serve(
+                &mut Vec::new(),
+                &store,
+                &NoopReady,
+                &ConfigurableShutdown { fail_prepare: true },
+                &FakeLock::Acquired,
+                2222,
+                &info(),
+            )
+            .is_err()
+        );
+        assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[test]
+    fn cleanup_failures_are_reported_without_skipping_retirement() {
+        let quiesce_failure = CleanupReady {
+            fail_publish: false,
+            fail_quiesce: true,
+            fail_retire: false,
+            quiesces: Cell::new(0),
+            retires: Cell::new(0),
+        };
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        assert!(
+            serve(
+                &mut Vec::new(),
+                &store,
+                &quiesce_failure,
+                &ImmediateShutdown,
+                &FakeLock::Acquired,
+                2222,
+                &info(),
+            )
+            .is_err()
+        );
+        assert_eq!(quiesce_failure.quiesces.get(), 1);
+        assert_eq!(quiesce_failure.retires.get(), 1);
+        assert_eq!(store.load().unwrap(), None);
+
+        let retire_failure = CleanupReady {
+            fail_publish: false,
+            fail_quiesce: false,
+            fail_retire: true,
+            quiesces: Cell::new(0),
+            retires: Cell::new(0),
+        };
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        assert!(
+            serve(
+                &mut Vec::new(),
+                &store,
+                &retire_failure,
+                &ImmediateShutdown,
+                &FakeLock::Acquired,
+                2222,
+                &info(),
+            )
+            .is_err()
+        );
+        assert_eq!(retire_failure.quiesces.get(), 1);
+        assert_eq!(retire_failure.retires.get(), 1);
+        assert!(store.load().unwrap().is_some());
+    }
+
+    #[test]
     fn publishes_after_registration_and_never_when_the_lock_is_held() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         let ready = RecordingReady {
@@ -226,7 +490,9 @@ mod tests {
             &mut Vec::new(),
             &store,
             &ready,
-            &ImmediateShutdown,
+            &ConfigurableShutdown {
+                fail_prepare: false,
+            },
             &FakeLock::Acquired,
             2222,
             &info(),
@@ -253,13 +519,42 @@ mod tests {
     }
 
     #[test]
+    fn late_owner_cleanup_preserves_a_replacement_incarnation() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let ready = ReplacingReady {
+            store: &store,
+            replacement: RefCell::new(None),
+        };
+
+        serve(
+            &mut Vec::new(),
+            &store,
+            &ready,
+            &ImmediateShutdown,
+            &FakeLock::Acquired,
+            2222,
+            &info(),
+        )
+        .unwrap();
+
+        assert_eq!(store.load().unwrap(), ready.replacement.into_inner());
+    }
+
+    #[test]
     fn clears_the_record_when_endpoint_publication_fails() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let ready = CleanupReady {
+            fail_publish: true,
+            fail_quiesce: false,
+            fail_retire: false,
+            quiesces: Cell::new(0),
+            retires: Cell::new(0),
+        };
         assert!(
             serve(
                 &mut Vec::new(),
                 &store,
-                &FailingReady,
+                &ready,
                 &ImmediateShutdown,
                 &FakeLock::Acquired,
                 2222,
@@ -268,6 +563,8 @@ mod tests {
             .is_err()
         );
         assert_eq!(store.load().unwrap(), None);
+        assert_eq!(ready.quiesces.get(), 0);
+        assert_eq!(ready.retires.get(), 0);
     }
 
     #[test]
@@ -345,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn propagates_wait_error_and_keeps_the_record() {
+    fn wait_error_retires_then_clears_the_record() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         let mut buf = Vec::new();
         assert!(
@@ -360,8 +657,7 @@ mod tests {
             )
             .is_err()
         );
-        // Registered before the failing wait, so the record survives for status/stop.
-        assert_eq!(store.load().unwrap().map(|record| record.pid), Some(2222));
+        assert_eq!(store.load().unwrap(), None);
     }
 
     #[test]
@@ -394,7 +690,7 @@ mod tests {
                 .is_none()
         );
         usagi_core::infrastructure::daemon::RecordFile::write(&healthy, "record").unwrap();
-        usagi_core::infrastructure::daemon::RecordFile::remove(&healthy).unwrap();
+        usagi_core::infrastructure::daemon::RecordFile::remove_if(&healthy, "record").unwrap();
         io::Write::flush(&mut BrokenWriter).unwrap();
         for (file, mut output) in [
             (

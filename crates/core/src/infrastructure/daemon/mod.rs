@@ -3,7 +3,8 @@
 //!
 //! [`DaemonRecordStore`] owns the JSON (de)serialization of the daemon lifecycle
 //! record; where and how the bytes live is the [`RecordFile`] seam's concern.
-//! The real filesystem implementation — reading and writing
+//! The real filesystem implementation — reading, writing, and conditionally
+//! removing
 //! `<data-dir>/daemon/daemon.json` — is real IO and is bound at the synthesis
 //! root, so this layer stays pure and fully testable through an in-memory fake.
 //! Resolving `<data-dir>` into a concrete path is likewise a caller concern and
@@ -22,9 +23,12 @@ use crate::domain::daemon::DaemonRecord;
 ///
 /// The real filesystem implementation (reading/writing the JSON file) is real IO
 /// and is bound at the synthesis root; tests inject an in-memory fake. `read`
-/// yields `None` when the file does not exist, and `remove` succeeds even when
-/// it is already absent, so the store can treat "no daemon registered" as a
-/// normal state rather than an error.
+/// yields `None` when the file does not exist. [`write`](RecordFile::write) and
+/// [`remove_if`](RecordFile::remove_if) must be serialized by one stable lock:
+/// replacing `daemon.json` must never race a previous owner's conditional
+/// cleanup after that owner has inspected an older record. Durable adapters
+/// must also publish a complete replacement atomically rather than truncating
+/// the live record in place.
 pub trait RecordFile {
     /// Read the file's contents, or `None` when it does not exist.
     ///
@@ -36,11 +40,16 @@ pub trait RecordFile {
     /// # Errors
     /// Returns an error when the contents cannot be written.
     fn write(&self, contents: &str) -> io::Result<()>;
-    /// Remove the file, succeeding even when it does not exist.
+    /// Remove the file only when its contents still equal `expected`.
+    ///
+    /// The comparison and removal must be one transaction relative to every
+    /// [`write`](RecordFile::write) and other conditional removal. Returns
+    /// `true` only when this call removed the expected contents; an absent or
+    /// replaced file returns `false`.
     ///
     /// # Errors
-    /// Returns an error when an existing file cannot be removed.
-    fn remove(&self) -> io::Result<()>;
+    /// Returns an error when the file cannot be inspected or removed.
+    fn remove_if(&self, expected: &str) -> io::Result<bool>;
 }
 
 /// Probes whether a process is alive — the liveness half of classifying a daemon
@@ -68,13 +77,22 @@ pub trait Terminator {
     fn terminate(&self, pid: u32) -> io::Result<()>;
 }
 
-/// Blocks a running `serve` until the daemon is asked to shut down.
+/// Prepares for and then blocks a running `serve` until the daemon is asked to
+/// shut down.
 ///
 /// The real implementation waits for SIGINT / SIGTERM; it is real IO bound at
 /// the synthesis root, so the `serve` loop stays testable through a fake that
-/// returns immediately. Returning `Ok` means "shut down now"; the caller then
-/// clears its record and exits.
+/// returns immediately. Preparation happens before endpoint publication so
+/// shutdown delivery is installed before any worker starts. Returning `Ok` from
+/// [`wait`](ShutdownSignal::wait) means "shut down now"; the caller then
+/// quiesces and retires its endpoint before exiting.
 pub trait ShutdownSignal {
+    /// Prepare shutdown delivery before the daemon publishes or spawns workers.
+    ///
+    /// # Errors
+    /// Returns an error when shutdown delivery cannot be prepared safely.
+    fn prepare(&self) -> io::Result<()>;
+
     /// Block until the daemon should stop.
     ///
     /// # Errors
@@ -87,14 +105,31 @@ pub trait ShutdownSignal {
 ///
 /// [`crate::usecase::serve`] calls [`publish`](DaemonReady::publish) exactly
 /// once after acquiring the instance lock and saving its PID record, and never
-/// calls it when another daemon owns the lock. Implementations must therefore
-/// make repeated calls safe, but must not expose an endpoint before `publish`.
+/// calls it when another daemon owns the lock. On shutdown it calls
+/// [`quiesce`](DaemonReady::quiesce) before clearing the record, then
+/// [`retire`](DaemonReady::retire) while it still holds the instance lock.
+/// Implementations must make cleanup idempotent and must not expose an endpoint
+/// before `publish`.
 pub trait DaemonReady {
     /// Publish the endpoint for an already registered daemon.
     ///
     /// # Errors
     /// Returns an error when the endpoint cannot be made available.
     fn publish(&self) -> io::Result<()>;
+
+    /// Stop accepting new work and join the endpoint-serving worker without
+    /// removing the published generation locator yet.
+    ///
+    /// # Errors
+    /// Returns an error when the serving worker cannot be stopped and joined.
+    fn quiesce(&self) -> io::Result<()>;
+
+    /// Remove the quiesced endpoint if this owner still owns the published
+    /// generation. A stale owner must leave a replacement locator untouched.
+    ///
+    /// # Errors
+    /// Returns an error when the owned endpoint cannot be retired safely.
+    fn retire(&self) -> io::Result<()>;
 }
 
 /// Spawns a detached daemon process — the effecting half of `start`.
@@ -111,13 +146,14 @@ pub trait DaemonLauncher {
     fn launch(&self) -> io::Result<()>;
 }
 
-/// Pauses between registration polls while `start` waits for the freshly
-/// launched daemon to record itself.
+/// Pauses between daemon lifecycle polls: `start` waits for a freshly launched
+/// daemon to record itself, while `stop` waits for the signalled owner to retire
+/// its endpoint and clear its exact record.
 ///
 /// The real implementation sleeps a short interval; tests inject a no-op so the
 /// poll loop runs instantly.
 pub trait Sleeper {
-    /// Sleep for one poll interval.
+    /// Sleep for one lifecycle poll interval.
     fn sleep(&self);
 }
 
@@ -183,12 +219,22 @@ impl<F: RecordFile> DaemonRecordStore<F> {
         self.file.write(&json)
     }
 
-    /// Remove the persisted record on stop or stale reclaim; a no-op when absent.
+    /// Remove `expected` only if it is still the persisted daemon incarnation.
+    ///
+    /// Equality covers the full serialized [`DaemonRecord`] (`pid` and
+    /// `started_at`). A replacement record is therefore preserved even when an
+    /// older stop or owner cleanup resumes late.
     ///
     /// # Errors
-    /// Returns the [`RecordFile`] remove error.
-    pub fn clear(&self) -> io::Result<()> {
-        self.file.remove()
+    /// Returns the [`RecordFile`] conditional-remove error.
+    ///
+    /// # Panics
+    /// Panics only if serializing a `DaemonRecord` to JSON fails, which cannot
+    /// happen for its fields (a `u32` and a timestamp).
+    pub fn clear_if(&self, expected: &DaemonRecord) -> io::Result<bool> {
+        // Serializing a DaemonRecord (a u32 and a timestamp) cannot fail.
+        let json = serde_json::to_string(expected).expect("DaemonRecord serializes to JSON");
+        self.file.remove_if(&json)
     }
 }
 

@@ -28,9 +28,14 @@ impl RecordFile for InMemoryFile {
         Ok(())
     }
 
-    fn remove(&self) -> io::Result<()> {
-        *self.contents.borrow_mut() = None;
-        Ok(())
+    fn remove_if(&self, expected: &str) -> io::Result<bool> {
+        let mut contents = self.contents.borrow_mut();
+        if contents.as_deref() == Some(expected) {
+            *contents = None;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 
@@ -46,7 +51,7 @@ impl RecordFile for FailingFile {
         Err(io::Error::other("write failed"))
     }
 
-    fn remove(&self) -> io::Result<()> {
+    fn remove_if(&self, _expected: &str) -> io::Result<bool> {
         Err(io::Error::other("remove failed"))
     }
 }
@@ -75,11 +80,19 @@ fn save_overwrites_existing_record() {
 }
 
 #[test]
-fn clear_removes_persisted_record() {
+fn clear_if_removes_only_the_expected_record() {
     let store = DaemonRecordStore::new(InMemoryFile::default());
-    store.save(&DaemonRecord::new(4321)).unwrap();
-    store.clear().unwrap();
+    let old = DaemonRecord::new(4321);
+    let replacement = DaemonRecord {
+        pid: old.pid,
+        started_at: old.started_at + chrono::Duration::nanoseconds(1),
+    };
+    store.save(&replacement).unwrap();
+    assert!(!store.clear_if(&old).unwrap());
+    assert_eq!(store.load().unwrap(), Some(replacement.clone()));
+    assert!(store.clear_if(&replacement).unwrap());
     assert_eq!(store.load().unwrap(), None);
+    assert!(!store.clear_if(&replacement).unwrap());
 }
 
 #[test]
@@ -94,5 +107,5 @@ fn store_propagates_file_io_errors() {
     let store = DaemonRecordStore::new(FailingFile);
     assert!(store.load().is_err());
     assert!(store.save(&DaemonRecord::new(4321)).is_err());
-    assert!(store.clear().is_err());
+    assert!(store.clear_if(&DaemonRecord::new(4321)).is_err());
 }

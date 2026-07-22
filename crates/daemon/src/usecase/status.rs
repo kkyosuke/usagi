@@ -94,7 +94,8 @@ mod tests {
     fn reports_not_running_after_record_cleared() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         store.save(&DaemonRecord::new(4321)).unwrap();
-        store.clear().unwrap();
+        let record = store.load().unwrap().unwrap();
+        assert!(store.clear_if(&record).unwrap());
         assert_eq!(
             report(&store, &FixedProbe(true), &info()).unwrap(),
             "usagi v0.1.0: daemon not running"

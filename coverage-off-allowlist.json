@@ -354,12 +354,30 @@
     },
     {
       "path": "crates/daemon/src/infrastructure/unix_transport.rs",
+      "symbol": "fn:bind_with",
+      "occurrence": 1,
+      "reason": "real_io",
+      "owner": "daemon",
+      "expires": "2027-01-31",
+      "tests": "unix_transport_post_bind_rollback"
+    },
+    {
+      "path": "crates/daemon/src/infrastructure/unix_transport.rs",
       "symbol": "fn:accept",
       "occurrence": 1,
       "reason": "real_io",
       "owner": "daemon",
       "expires": "2027-01-31",
       "tests": "unix_transport_contract"
+    },
+    {
+      "path": "crates/daemon/src/infrastructure/unix_transport.rs",
+      "symbol": "fn:retire",
+      "occurrence": 1,
+      "reason": "real_io",
+      "owner": "daemon",
+      "expires": "2027-01-31",
+      "tests": "unix_transport_generation_retirement"
     },
     {
       "path": "crates/daemon/src/infrastructure/unix_transport.rs",
@@ -396,6 +414,24 @@
       "owner": "daemon",
       "expires": "2027-01-31",
       "tests": "unix_transport_contract"
+    },
+    {
+      "path": "crates/daemon/src/infrastructure/unix_transport.rs",
+      "symbol": "fn:lock_locator",
+      "occurrence": 1,
+      "reason": "real_io",
+      "owner": "daemon",
+      "expires": "2027-01-31",
+      "tests": "unix_transport_generation_retirement"
+    },
+    {
+      "path": "crates/daemon/src/infrastructure/unix_transport.rs",
+      "symbol": "fn:remove_file_if_present",
+      "occurrence": 1,
+      "reason": "real_io",
+      "owner": "daemon",
+      "expires": "2027-01-31",
+      "tests": "unix_transport_generation_retirement"
     },
     {
       "path": "crates/daemon/src/infrastructure/unix_transport.rs",

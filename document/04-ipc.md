@@ -284,6 +284,15 @@ Unix socket は daemon 専用 adapter が管理する。endpoint は private dat
 directory に作り、bind 成功後に current locator を atomic publish する。directory は `0700`、socket と
 locator は `0600` で、所有 UID・mode・symlink でないことを discovery と accept の両方で検証する。
 
+current locator の publish と retire は owner-only の `current.lock` で直列化する。listener owner は
+自分が publish した `(generation, endpoint)` と現在の locator が一致する場合だけ `current.json` を
+unlink し、自 generation 固有の socket だけを回収する。したがって stale generation の遅延 retire / Drop が
+replacement generation の locator または socket を削除することはない。planned generation end は accept loop の
+停止・join 後にこの retire を完了し、client discovery を `NotFound` へ戻す。
+locator publish は private temporary を fsync して atomic rename する。publish が commit 前に失敗した generation は、
+まだ owner object が構築されていなくても自 socket と返却エラーの temporary の rollback を試み、rollback failure も
+error として返す。process crash 後の stale endpoint / temporary recovery は #515 が扱う。
+
 accept 時は OS peer credential の UID が daemon UID と一致しなければ、protocol byte を読む前に接続を
 閉じる。client は active locator だけを解決でき、draining locator や generation directory 外を指す
 endpoint には接続しない。
