@@ -695,11 +695,15 @@ enum ConfigStep {
 fn play_config_save_wave(
     term: &mut dyn Terminal,
     form: &mut Config,
-    render: impl Fn(usize, usize, &Config) -> Vec<String>,
+    base: Option<&[String]>,
 ) -> io::Result<()> {
     for frame in 0..config::SAVE_WAVE_FRAMES {
         let (height, width) = term.size()?;
-        term.draw(&render(height, width, form))?;
+        let lines = match base {
+            Some(base) => config::render_over(height, width, base, form),
+            None => config::render(height, width, form),
+        };
+        term.draw(&lines)?;
         if frame + 1 < config::SAVE_WAVE_FRAMES {
             term.wait(config::SAVE_WAVE_TICK)?;
             form.advance_save_animation();
@@ -1322,9 +1326,7 @@ fn run_workspace_config(
             WorkspaceConfigStep::Stay => {}
             WorkspaceConfigStep::Back => return Ok(()),
             WorkspaceConfigStep::Save => {
-                play_config_save_wave(term, &mut form, |height, width, form| {
-                    config::render_over(height, width, base, form)
-                })?;
+                play_config_save_wave(term, &mut form, Some(base))?;
                 if form.commit_save(settings) {
                     let (height, width) = term.size()?;
                     term.draw(&config::render_over(height, width, base, &form))?;
@@ -3420,7 +3422,7 @@ pub fn run_screen_graph_with_backend(
                 ConfigStep::Quit => return Ok(Exit::Quit),
                 ConfigStep::Back => screen = Screen::Welcome,
                 ConfigStep::Save => {
-                    play_config_save_wave(term, &mut config_form, config::render)?;
+                    play_config_save_wave(term, &mut config_form, None)?;
                     if config_form.commit_save(settings) {
                         // Hold the `done` confirmation briefly, then return home
                         // with no key press. A failed write skips this and leaves

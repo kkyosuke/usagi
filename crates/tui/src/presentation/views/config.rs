@@ -713,10 +713,25 @@ mod tests {
             .collect::<Vec<_>>();
         let heading = plain.iter().find(|line| line.contains("Global")).unwrap();
         let theme = plain.iter().find(|line| line.contains("Theme")).unwrap();
-        let chevron_column = heading.find("Global").unwrap() + "Globa".len();
+        let heading_column = heading.find("Global").unwrap();
+        let chevron_column = heading_column + 1;
+        let changed_column = heading_column + 3;
+        let label_column = heading_column + 5;
+        let column_of = |line: &str, needle: &str| {
+            display_width(&line[..line.find(needle).expect("rendered field")])
+        };
 
-        assert_eq!(theme.find('›'), Some(chevron_column));
-        assert_eq!(display_width(&theme[..theme.find('<').unwrap()]), 43);
+        assert_eq!(column_of(theme, "›"), chevron_column);
+        assert_eq!(column_of(theme, "Theme"), label_column);
+        assert_eq!(column_of(theme, "<"), 43);
+
+        config.cycle_theme(true);
+        let dirty = render(24, 80, &config)
+            .iter()
+            .map(|line| strip_ansi(line))
+            .find(|line| line.contains("Theme"))
+            .unwrap();
+        assert_eq!(column_of(&dirty, "●"), changed_column);
 
         for _ in 0..5 {
             config.next_field();
@@ -729,8 +744,8 @@ mod tests {
             .iter()
             .find(|line| line.contains("[ Save ]"))
             .unwrap();
-        assert_eq!(save.find('›'), Some(chevron_column));
-        assert_eq!(display_width(&save[..save.find('[').unwrap()]), 38);
+        assert_eq!(column_of(save, "›"), chevron_column);
+        assert_eq!(column_of(save, "["), 38);
     }
 
     #[test]
