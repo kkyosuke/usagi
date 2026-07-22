@@ -577,9 +577,8 @@ mod tests {
                     Ok(())
                 }
             });
-            let error = match result {
-                Ok(_) => panic!("injected post-bind failure unexpectedly succeeded"),
-                Err(error) => error,
+            let Err(error) = result else {
+                panic!("injected post-bind failure unexpectedly succeeded");
             };
 
             assert!(error.to_string().contains("injected failure"));

@@ -91,9 +91,10 @@ lock を取得できない replacement は ready hook に到達しないため s
 snapshot と operation ID を使って再接続する。再送された create は durable operation journal で照合し、worktree
 effect を二重に実行しない。
 
-`serve` は endpoint 公開と worker spawn より前に SIGINT / SIGTERM handler と同期 wait を準備する。handler は
-process の signal mask を変更しないため、その後に起動する child process へ blocked signal を継承させない。planned stop では
-signal を受けた owner が shared shutdown fence を立て、次の順序を `daemon.lock` の保持中に完了する。endpoint の
+`serve` は endpoint 公開と worker spawn より前に SIGINT / SIGTERM handler と同期 wait を準備する。handler は signal
+受理時点で shared shutdown fence を立てるため、重い endpoint 初期化中に停止要求が届いても、その後に起動する accept loop は
+新規 request を受理しない。handler は process の signal mask を変更せず、その後に起動する child process へ blocked signal を
+継承させない。planned stop では signal を受けた owner が次の順序を `daemon.lock` の保持中に完了する。endpoint の
 generation fence と unlink 規則は [4. IPC#Unix transport](04-ipc.md#unix-transport) が正本である。
 
 ```text

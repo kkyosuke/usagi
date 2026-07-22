@@ -31,7 +31,7 @@ v2 の planned `usagi daemon stop` は記録 PID へ SIGTERM を送り `daemon.j
 ## 修正方針
 
 - daemon owner の lifecycle を `shutdown signal prepare → endpoint publish / worker spawn → wait → admission/accept loop stop → join → generation-fenced endpoint retire → exact daemon record clear → lock release` の順にする。
-- SIGINT / SIGTERM handler と同期 wait は worker spawn より前に登録する。process の signal mask は変更せず、その後起動する child process へ blocked signal を継承させない。
+- SIGINT / SIGTERM handler と同期 wait は worker spawn より前に登録する。handler は signal 受理時点で shared shutdown fence を立て、重い publish 初期化中に signal が届いても後続 accept loop が request を受理しないようにする。process の signal mask は変更せず、その後起動する child process へ blocked signal を継承させない。
 - accept loop は共有 shutdown を監視して有界に終了し、owner が join して listener ownership を回収する。`SecureUnixListener` の retire 成功後だけ exact daemon record を clear し、全 cleanup が終わるまで instance lock を手放さない。record を completion fence として最後まで残すため、retire failure は replacement を起動せず診断可能なまま fail closed になる。locator retire と record clear の短い間に client が `NotFound` を見ても、live record と instance lock が replacement を抑止する。
 - retire は自 generation の socket を回収し、`current.json` が同じ generation と endpoint をまだ指す場合だけ locator を unlink する。stale generation は replacement generation の locator / endpoint を削除してはならない。比較と unlink の競合を serialization し、TOCTOU で新 locator を消さない。
 - #341 の「locator 存在時の接続失敗・draining・不正 endpoint では別 daemon を勝手に起動しない」契約は弱めない。正常 planned stop が locator を安全に消すことで、次の client が `NotFound` 経路から一度だけ autostart できるようにする。
@@ -53,6 +53,7 @@ v2 の planned `usagi daemon stop` は記録 PID へ SIGTERM を送り `daemon.j
 - [ ] record save と conditional clear の比較・unlink は stable な同一 cross-process lock 下で不可分に実行する。
 - [ ] record save の途中失敗・crash は旧 record を malformed JSON にせず atomic replacement を保証し、返却された write / rename error の temporary を回収する。
 - [ ] endpoint bind 後に ordinary error を返す全経路は、公開前の temporary / generation socket を回収する。
+- [ ] endpoint 初期化中に shutdown signal を受けても、同期 wait 前から admission fence が立ち、新規 request を受理しない。
 
 ## 必須回帰テスト
 
@@ -62,6 +63,7 @@ v2 の planned `usagi daemon stop` は記録 PID へ SIGTERM を送り `daemon.j
 - serve lifecycle fakeで prepare / publish / wait / stop+join / retire / exact record clear の順序と cleanup failure、running stop の completion wait を検証する。
 - Barrier で old record load 後に replacement save を先行させる実 filesystem concurrency test、running/stale stop race、owner late clear を固定し、同じ pid でも異なる `started_at` を保持することを検証する。
 - atomic save の rename 前 failpoint で旧 record と `0600` mode が保持され、失敗 temporary が残らないことを検証する。
+- 隔離 subprocess で SIGTERM handler が同期 wait 前に shared admission fence を立てることを検証する。
 - 既存 bootstrap testの non-absence failure で start 回数 0 を維持する。
 
 ## docs / gate

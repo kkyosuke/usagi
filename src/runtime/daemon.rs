@@ -3748,6 +3748,7 @@ impl Drop for IpcReady<'_> {
 struct SignalShutdown {
     shutdown: Arc<AtomicBool>,
     signals: RefCell<Option<signal_hook::iterator::Signals>>,
+    flag_ids: RefCell<Vec<signal_hook::SigId>>,
 }
 
 impl SignalShutdown {
@@ -3755,6 +3756,15 @@ impl SignalShutdown {
         Self {
             shutdown,
             signals: RefCell::new(None),
+            flag_ids: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl Drop for SignalShutdown {
+    fn drop(&mut self) {
+        for id in self.flag_ids.get_mut().drain(..) {
+            signal_hook::low_level::unregister(id);
         }
     }
 }
@@ -3764,10 +3774,30 @@ impl ShutdownSignal for SignalShutdown {
     fn prepare(&self) -> std::io::Result<()> {
         let mut signals = self.signals.borrow_mut();
         if signals.is_none() {
-            *signals = Some(signal_hook::iterator::Signals::new([
-                libc::SIGINT,
-                libc::SIGTERM,
-            ])?);
+            let mut flag_ids = Vec::with_capacity(2);
+            for signal in [libc::SIGINT, libc::SIGTERM] {
+                match signal_hook::flag::register(signal, Arc::clone(&self.shutdown)) {
+                    Ok(id) => flag_ids.push(id),
+                    Err(error) => {
+                        for id in flag_ids {
+                            signal_hook::low_level::unregister(id);
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+            let prepared = match signal_hook::iterator::Signals::new([libc::SIGINT, libc::SIGTERM])
+            {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    for id in flag_ids {
+                        signal_hook::low_level::unregister(id);
+                    }
+                    return Err(error);
+                }
+            };
+            *self.flag_ids.borrow_mut() = flag_ids;
+            *signals = Some(prepared);
         }
         Ok(())
     }
@@ -3785,6 +3815,12 @@ impl ShutdownSignal for SignalShutdown {
         let signals = signals
             .as_mut()
             .ok_or_else(|| std::io::Error::other("daemon shutdown delivery was not prepared"))?;
+        // A signal may arrive after the flag handler is installed but before
+        // the blocking iterator is ready. In that case admission is already
+        // closed and there is no iterator event to consume.
+        if self.shutdown.load(Ordering::Acquire) {
+            return Ok(());
+        }
         signals
             .forever()
             .next()
@@ -4247,6 +4283,31 @@ mod tests {
         unsafe {
             libc::umask(previous_umask);
         }
+    }
+
+    #[test]
+    fn shutdown_signal_closes_admission_before_wait_consumes_it() {
+        const FIXTURE: &str = "USAGI_TEST_EARLY_DAEMON_SHUTDOWN_FLAG";
+        if std::env::var_os(FIXTURE).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "runtime::daemon::tests::shutdown_signal_closes_admission_before_wait_consumes_it",
+                    "--nocapture",
+                ])
+                .env(FIXTURE, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        let admission_closed = Arc::new(AtomicBool::new(false));
+        let shutdown = SignalShutdown::new(Arc::clone(&admission_closed));
+        shutdown.prepare().unwrap();
+        signal_hook::low_level::raise(libc::SIGTERM).unwrap();
+
+        assert!(admission_closed.load(Ordering::Acquire));
     }
 
     struct FixedRefreshClock {
