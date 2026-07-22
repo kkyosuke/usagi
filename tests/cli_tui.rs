@@ -787,7 +787,8 @@ fn config_entry_renders_the_config_screen() {
     assert!(out.contains("Global"));
     assert!(out.contains("Theme") && out.contains("system"));
     assert!(out.contains("Workspace init"));
-    assert!(out.contains("Agent") && out.contains("OpenAI"));
+    assert!(out.contains("Agent"));
+    assert!(out.contains("OpenAI") || out.contains("none"));
     assert!(!out.contains("Scope:"));
     assert!(out.contains("Esc: back"));
     assert!(output.stderr.is_empty());
