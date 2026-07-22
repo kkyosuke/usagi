@@ -6,10 +6,11 @@
 //! symlinks; permission bits are defence in depth, not authentication.
 
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,13 @@ use usagi_core::infrastructure::ipc::DaemonGeneration;
 const DIR_MODE: u32 = 0o700;
 const SOCKET_MODE: u32 = 0o600;
 const LOCATOR_LOCK: &str = "current.lock";
+const PRIVATE_FILE_FLAGS: i32 = libc::O_NOFOLLOW | libc::O_CLOEXEC;
+const LOCATOR_TEMP_PREFIX: &str = ".current.json.tmp.";
+
+/// Combined with the process ID, this makes every locator write use its own
+/// temp pathname. A stale pathname is skipped rather than reclaimed because it
+/// may belong to a still-running writer.
+static LOCATOR_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BindStage {
@@ -25,6 +33,52 @@ enum BindStage {
     RenameEndpoint,
     VerifyEndpoint,
     SetNonblocking,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocatorWriteStage {
+    Write,
+    Sync,
+    Rename,
+    ParentSync,
+}
+
+#[cfg(test)]
+struct LocatorWriteFailpoint {
+    target: PathBuf,
+    stage: LocatorWriteStage,
+}
+
+#[cfg(test)]
+thread_local! {
+    static LOCATOR_WRITE_FAILPOINT: std::cell::RefCell<Option<LocatorWriteFailpoint>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+fn fail_next_locator_write(target: &Path, stage: LocatorWriteStage) {
+    LOCATOR_WRITE_FAILPOINT.with(|failpoint| {
+        *failpoint.borrow_mut() = Some(LocatorWriteFailpoint {
+            target: target.to_path_buf(),
+            stage,
+        });
+    });
+}
+
+#[cfg(test)]
+fn take_locator_write_failpoint(target: &Path, stage: LocatorWriteStage) -> bool {
+    LOCATOR_WRITE_FAILPOINT.with(|failpoint| {
+        let matches = failpoint
+            .borrow()
+            .as_ref()
+            .is_some_and(|failpoint| failpoint.target == target && failpoint.stage == stage);
+        if matches {
+            failpoint.borrow_mut().take();
+        }
+        matches
+    })
 }
 
 /// The atomically-published endpoint a client is allowed to connect to.
@@ -236,8 +290,13 @@ pub fn connect_current(data_dir: &Path) -> io::Result<UnixStream> {
 #[coverage(off)]
 pub fn read_locator(daemon: &Path) -> io::Result<EndpointLocator> {
     let path = daemon.join("current.json");
-    verify_private(&path, SOCKET_MODE, false)?;
-    let bytes = fs::read(path)?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(PRIVATE_FILE_FLAGS | libc::O_NONBLOCK)
+        .open(path)?;
+    verify_open_private_file(&file, SOCKET_MODE)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
     serde_json::from_slice(&bytes)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
@@ -245,32 +304,82 @@ pub fn read_locator(daemon: &Path) -> io::Result<EndpointLocator> {
 #[coverage(off)]
 fn write_locator(daemon: &Path, locator: &EndpointLocator) -> io::Result<()> {
     let _lock = lock_locator(daemon)?;
-    let temporary = daemon.join(".current.json.tmp");
+    let target = daemon.join("current.json");
     let bytes = serde_json::to_vec(locator).expect("endpoint locator serializes");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(SOCKET_MODE)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(&temporary)?;
+    let (temporary, mut file) = loop {
+        let temporary = unique_locator_temp_path(daemon);
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(SOCKET_MODE)
+            .custom_flags(PRIVATE_FILE_FLAGS)
+            .open(&temporary)
+        {
+            Ok(file) => break (temporary, file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    };
+
+    // Once create_new succeeds this writer owns the pathname. Every error
+    // before rename removes only that pathname; a hard crash can leave it
+    // behind, but later writers use distinct names and therefore recover.
     let result = (|| {
         make_open_file_private(&file, SOCKET_MODE)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        drop(file);
-        let current = daemon.join("current.json");
-        fs::rename(&temporary, &current)?;
-        // The descriptor was fully validated and synced before this atomic
-        // rename. Do not introduce a fallible step after the commit boundary.
-        if let Ok(directory) = fs::File::open(daemon) {
-            let _ = directory.sync_all();
+
+        #[cfg(test)]
+        if take_locator_write_failpoint(&target, LocatorWriteStage::Write) {
+            file.write_all(&bytes[..bytes.len() / 2])?;
+            return Err(io::Error::other("injected locator write failure"));
         }
+        file.write_all(&bytes)?;
+
+        #[cfg(test)]
+        if take_locator_write_failpoint(&target, LocatorWriteStage::Sync) {
+            return Err(io::Error::other("injected locator sync failure"));
+        }
+        file.sync_all()?;
+
+        #[cfg(test)]
+        if take_locator_write_failpoint(&target, LocatorWriteStage::Rename) {
+            return Err(io::Error::other("injected locator rename failure"));
+        }
+        fs::rename(&temporary, &target)?;
+
+        // A successful rename is the commit point. Directory fsync improves
+        // power-loss durability where supported, but failure after commit must
+        // not report an ambiguous failed publication to the caller.
+        #[cfg(test)]
+        let parent_sync_result =
+            if take_locator_write_failpoint(&target, LocatorWriteStage::ParentSync) {
+                Err(io::Error::other("injected locator parent sync failure"))
+            } else {
+                fs::File::open(daemon).and_then(|parent| parent.sync_all())
+            };
+        #[cfg(not(test))]
+        let parent_sync_result = fs::File::open(daemon).and_then(|parent| parent.sync_all());
+        let _ = parent_sync_result;
         Ok(())
     })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+    if let Err(error) = result {
+        if let Err(cleanup) = remove_file_if_present(&temporary) {
+            return Err(io::Error::new(
+                cleanup.kind(),
+                format!("{error}; locator temp rollback failed: {cleanup}"),
+            ));
+        }
+        return Err(error);
     }
-    result
+    Ok(())
+}
+
+fn unique_locator_temp_path(daemon: &Path) -> PathBuf {
+    daemon.join(format!(
+        "{LOCATOR_TEMP_PREFIX}{}.{}",
+        std::process::id(),
+        LOCATOR_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 fn owns_endpoint(current: &EndpointLocator, owner: &EndpointLocator) -> bool {
@@ -285,7 +394,7 @@ fn lock_locator(daemon: &Path) -> io::Result<fs::File> {
         .write(true)
         .create_new(true)
         .mode(SOCKET_MODE)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .custom_flags(PRIVATE_FILE_FLAGS)
         .open(&path)
     {
         Ok(file) => (file, true),
@@ -295,7 +404,7 @@ fn lock_locator(daemon: &Path) -> io::Result<fs::File> {
                 OpenOptions::new()
                     .read(true)
                     .write(true)
-                    .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+                    .custom_flags(PRIVATE_FILE_FLAGS)
                     .open(&path)?,
                 false,
             )
@@ -473,7 +582,10 @@ fn effective_uid() -> u32 {
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStringExt;
+    use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
+
+    const UMASK_TEST_CHILD: &str = "USAGI_LOCATOR_UMASK_TEST_CHILD";
 
     fn generation() -> DaemonGeneration {
         DaemonGeneration(
@@ -481,6 +593,25 @@ mod tests {
                 .as_str()
                 .clone(),
         )
+    }
+
+    fn locator() -> EndpointLocator {
+        let generation = generation();
+        EndpointLocator {
+            endpoint: format!("generations/{}/sock", generation.0),
+            generation,
+            state: EndpointState::Active,
+        }
+    }
+
+    fn locator_temp_names(daemon: &Path) -> Vec<String> {
+        let mut names: Vec<_> = fs::read_dir(daemon)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(LOCATOR_TEMP_PREFIX))
+            .collect();
+        names.sort();
+        names
     }
 
     #[test]
@@ -553,7 +684,7 @@ mod tests {
 
         assert!(!socket.exists());
         assert!(!daemon.join("current.json").exists());
-        assert!(!daemon.join(".current.json.tmp").exists());
+        assert!(locator_temp_names(&daemon).is_empty());
     }
 
     #[test]
@@ -586,6 +717,169 @@ mod tests {
             assert!(!generation_dir.join("sock").exists());
             assert!(!temp.path().join("daemon/current.json").exists());
         }
+    }
+
+    #[test]
+    fn pre_existing_orphan_locator_temp_does_not_block_publication() {
+        let temp = TempDir::new_in("/tmp").unwrap();
+        let daemon = temp.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        let orphan = daemon.join(".current.json.tmp");
+        fs::write(&orphan, b"orphan").unwrap();
+
+        let listener = SecureUnixListener::bind(temp.path(), generation()).unwrap();
+
+        assert_eq!(read_locator(&daemon).unwrap(), *listener.locator());
+        assert_eq!(fs::read(orphan).unwrap(), b"orphan");
+        assert!(locator_temp_names(&daemon).is_empty());
+        let client = connect_current(temp.path()).unwrap();
+        let accepted = listener.accept().unwrap();
+        drop((client, accepted));
+    }
+
+    #[test]
+    fn locator_failures_preserve_old_publication_cleanup_temp_and_allow_retry() {
+        let temp = TempDir::new_in("/tmp").unwrap();
+        let daemon = temp.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        let target = daemon.join("current.json");
+        let mut current = locator();
+        write_locator(&daemon, &current).unwrap();
+
+        for stage in [
+            LocatorWriteStage::Write,
+            LocatorWriteStage::Sync,
+            LocatorWriteStage::Rename,
+        ] {
+            let old_bytes = fs::read(&target).unwrap();
+            let replacement = locator();
+            fail_next_locator_write(&target, stage);
+
+            let error = write_locator(&daemon, &replacement).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::Other, "stage: {stage:?}");
+            assert_eq!(fs::read(&target).unwrap(), old_bytes, "stage: {stage:?}");
+            assert_eq!(read_locator(&daemon).unwrap(), current, "stage: {stage:?}");
+            assert!(locator_temp_names(&daemon).is_empty(), "stage: {stage:?}");
+
+            write_locator(&daemon, &replacement).unwrap();
+            assert_eq!(read_locator(&daemon).unwrap(), replacement);
+            assert!(
+                locator_temp_names(&daemon).is_empty(),
+                "retry after: {stage:?}"
+            );
+            current = replacement;
+        }
+    }
+
+    #[test]
+    fn parent_sync_failure_is_best_effort_after_locator_commit() {
+        let temp = TempDir::new_in("/tmp").unwrap();
+        let daemon = temp.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        let target = daemon.join("current.json");
+        let locator = locator();
+        fail_next_locator_write(&target, LocatorWriteStage::ParentSync);
+
+        write_locator(&daemon, &locator).unwrap();
+
+        assert_eq!(read_locator(&daemon).unwrap(), locator);
+        assert!(locator_temp_names(&daemon).is_empty());
+    }
+
+    #[test]
+    fn restrictive_umask_still_publishes_an_exact_private_regular_locator() {
+        if std::env::var_os(UMASK_TEST_CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "infrastructure::unix_transport::tests::restrictive_umask_still_publishes_an_exact_private_regular_locator",
+                    "--nocapture",
+                ])
+                .env(UMASK_TEST_CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        let temp = TempDir::new_in("/tmp").unwrap();
+        // SAFETY: this exact-test child has no sibling tests or application
+        // threads, and the original process-global umask is restored below.
+        let original_umask = unsafe { libc::umask(0o777) };
+        let result = (|| {
+            let listener = SecureUnixListener::bind(temp.path(), generation())?;
+            let daemon = temp.path().join("daemon");
+            let path = daemon.join("current.json");
+            let metadata = fs::metadata(&path)?;
+            assert!(metadata.is_file());
+            assert_eq!(metadata.uid(), effective_uid());
+            assert_eq!(metadata.mode() & 0o777, SOCKET_MODE);
+            assert_eq!(read_locator(&daemon)?, *listener.locator());
+            assert!(locator_temp_names(&daemon).is_empty());
+            Ok::<_, io::Error>(())
+        })();
+        // SAFETY: restores the value returned by the paired umask call above.
+        unsafe { libc::umask(original_umask) };
+        result.unwrap();
+    }
+
+    #[test]
+    fn concurrent_locator_writers_publish_whole_json_without_temp_collisions() {
+        let temp = TempDir::new_in("/tmp").unwrap();
+        let daemon = temp.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        let first = locator();
+        let second = locator();
+        let barrier = Arc::new(Barrier::new(3));
+
+        std::thread::scope(|scope| {
+            let first_writer = {
+                let barrier = Arc::clone(&barrier);
+                let daemon = daemon.clone();
+                let first = first.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    write_locator(&daemon, &first)
+                })
+            };
+            let second_writer = {
+                let barrier = Arc::clone(&barrier);
+                let daemon = daemon.clone();
+                let second = second.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    write_locator(&daemon, &second)
+                })
+            };
+            barrier.wait();
+            first_writer.join().unwrap().unwrap();
+            second_writer.join().unwrap().unwrap();
+        });
+
+        let published = read_locator(&daemon).unwrap();
+        assert!(published == first || published == second);
+        assert!(locator_temp_names(&daemon).is_empty());
+    }
+
+    #[test]
+    fn read_locator_rejects_symlinks_and_non_regular_files() {
+        let temp = TempDir::new_in("/tmp").unwrap();
+        let daemon = temp.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        let path = daemon.join("current.json");
+        let target = daemon.join("target.json");
+        fs::write(&target, serde_json::to_vec(&locator()).unwrap()).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(SOCKET_MODE)).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(read_locator(&daemon).is_err());
+
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(SOCKET_MODE)).unwrap();
+        assert_eq!(
+            read_locator(&daemon).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 
     #[test]
