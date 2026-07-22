@@ -1,13 +1,13 @@
 ---
 number: 515
 title: fix(daemon): current locator の crash-safe atomic publish を復旧可能にする
-status: in-progress
+status: done
 priority: high
 labels: [review, v2, daemon, ipc, recovery, security, durability]
 dependson: []
 related: [216, 341, 507, 513]
 created_at: 2026-07-22T00:07:06.965391+00:00
-updated_at: 2026-07-22T00:09:36.755624+00:00
+updated_at: 2026-07-22T10:47:42.042420+00:00
 ---
 
 ## 問題・影響
@@ -24,9 +24,11 @@ v2 Unix transport の `write_locator` は固定 `.current.json.tmp` を `create_
 
 ## 重複・依存監査
 
-既存 issue store を `current.json` / `.current.json.tmp` / locator / stale recovery / Unix transport で検索し、本件を扱う open issue はなかった。open PR #1225（issue #513、最新 head `5f704131`）は planned stop 時の endpoint retire と `current.lock` による publish/retire 直列化を扱うが、issue 本文で panic/crash stale recovery を scope 外としている。最新差分にも固定 temp、failure cleanup、umask 問題は残るため非重複である。
+既存 issue store を `current.json` / `.current.json.tmp` / locator / stale recovery / Unix transport で検索し、本件を扱う open issue はなかった。監査時点の open PR #1225（issue #513、head `5f704131`）は planned stop 時の endpoint retire と `current.lock` による publish/retire 直列化を扱うが、issue 本文で panic/crash stale recovery を scope 外としている。同 head にも固定 temp、failure cleanup、umask 問題は残るため非重複である。
 
 本件は `origin/main` から独立して修正可能なので #513 を blocking dependency にはせず related とする。writer ordering / late stale generation の replacement fence は #513 の `current.lock` が正本であり、本件では古い generation socket や `current.json` を推測削除しない。#1225 rebase 時は corrected publish を lock の内側に置き、新規 `current.lock` にも同じ secure file create/verification primitive を適用できる構造にする。
+
+作業中に #1225 は main `62f2a65c` として merge された。rebase では generation-fenced retire と bind rollback を保持し、corrected publication を `current.lock` の内側へ統合した。fresh locator temp と既存 `current.lock` は共通の fd-based regular file / effective UID / exact mode / single-link 検証を使う。
 
 ## 修正方針
 
@@ -39,14 +41,14 @@ v2 Unix transport の `write_locator` は固定 `.current.json.tmp` を `create_
 
 ## 受入条件
 
-- [ ] pre-existing `.current.json.tmp` orphan があっても新 locator を publish できる。
-- [ ] write / sync / rename の各 injected failure で old `current.json` の bytes/locatorを保持し、当該 writer temp を残さない。
-- [ ] 各 failure 後の retry が成功し、成功時にも writer temp leak がない。
-- [ ] restrictive umask 下でも fresh temp と final `current.json` が symlink でない regular file、effective UID owner、exact `0600` になる。
-- [ ] temp open は `O_NOFOLLOW | O_CLOEXEC` を使い、fresh fd を chmod 後に検証する。
-- [ ] atomic rename 後の parent fsync failure は committed publication を failure と報告しない。
-- [ ] concurrent writer / late stale writer の契約を #513 と競合させず、古い generation socket/current を推測削除しない。
-- [ ] `document/04-ipc.md` を locator publish の SSoT として更新し、`document/05-daemon.md` は data-directory entry から参照する。
+- [x] pre-existing `.current.json.tmp` orphan があっても新 locator を publish できる。
+- [x] write / sync / rename の各 injected failure で old `current.json` の bytes/locatorを保持し、当該 writer temp を残さない。
+- [x] 各 failure 後の retry が成功し、成功時にも writer temp leak がない。
+- [x] restrictive umask 下でも fresh temp と final `current.json` が symlink でない regular file、effective UID owner、exact `0600` になる。
+- [x] temp open は `O_NOFOLLOW | O_CLOEXEC` を使い、fresh fd を chmod 後に検証する。
+- [x] atomic rename 後の parent fsync failure は committed publication を failure と報告しない。
+- [x] concurrent writer / late stale writer の契約を #513 と競合させず、古い generation socket/current を推測削除しない。
+- [x] `document/04-ipc.md` を locator publish の SSoT として更新し、`document/05-daemon.md` は data-directory entry から参照する。
 
 ## 必須回帰テスト・gate
 
