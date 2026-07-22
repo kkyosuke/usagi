@@ -491,8 +491,12 @@ shell command は durable record、IPC event、通常 log に保存しない。g
 呼ばない。
 
 attach / detach / replay / verified exit / reclaim は既存 `TerminalRegistry` と #251 の reservation contract を
-使う。disconnect は attachment だけを外して PTY を生存させる。spawn 応答の欠落、identity unknown、orphan
-は replacement spawn と slot release を block し、verified exit または `Gone` の reclaim だけが slot を解放する。
+使う。disconnect は attachment だけを外して PTY を生存させる。同じ durable record の identity unknown、orphan、
+ambiguous spawn は replacement spawn と slot release を block し、verified exit または `Gone` の reclaim だけが
+slot を解放する。一方、現行 generic Terminal Launch は producer `OperationId` を wire に持たず、daemon が request
+ごとに terminal / operation identity を新規発行する。spawn 後の response が失われて client が launch を再送すると
+別 record として二重 spawn し得るため、response-loss idempotency と cross-generation capacity は
+[#518](../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md) で追跡する。
 
 ### Agent orchestration の fence
 
