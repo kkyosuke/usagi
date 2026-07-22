@@ -156,6 +156,14 @@ issue store は git 追跡対象なので、`issue_create` / `issue_update` / `i
 コーディネータからの呼び出しは store を変更せず拒否する。memory store の書き込みはこの
 制約の対象外である。
 
+同じ issue number の source Markdown が複数ある場合、`issue_get` / `issue_to_prompt` /
+`issue_update` / `issue_delete` は衝突した exact path を含む execution error を返し、どの sibling も
+選択・変更・削除しない。同一 content の `issue_create` retry も曖昧な既存番号を返さず、
+`session_delegate_issue` は session を作らない。`issue_search` は修復対象を観測できるよう parse 可能な
+sibling を exact filename と `ambiguous: true` の別 row として返し、`ready` にはしない。parse 不能な
+sibling も衝突判定には含め、重複番号を参照する依存は `unmet_deps` に残す。番号 identity と明示 repair の正本は
+[2. アーキテクチャ](02-architecture.md#markdown-永続化の-commit-contract) を参照する。
+
 TUI の人間回答面は MCP caller credential を持たない。daemon は agent 用 `DispatchTool` と別の型付き IPC
 request として workspace-scoped な `get` / `list` / `resolve` / `cancel` だけを受け付け、`request` と
 `expire` は credential 付き agent 面に限定する。`resolve` は回答と delivery outbox を atomic に保存してから
