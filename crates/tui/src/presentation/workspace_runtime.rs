@@ -167,16 +167,18 @@ impl WorkspaceRuntime {
     }
 
     /// Apply one completed inventory projection. Only a result matching both
-    /// dispatch fences may restore saved ordering and selection. A late result
-    /// still appends missing exact refs, but cannot overwrite later UI intent.
+    /// dispatch fences may change the registry. A late result is rejected in
+    /// full so it cannot append a tab or overwrite later UI intent.
+    #[must_use]
     pub fn restore_snapshot(
         &mut self,
         dispatched_interaction: u64,
         dispatched_registry_revision: u64,
         targets: Vec<PaneRestoreTarget>,
-    ) {
-        let replace_order =
-            self.restore_fence() == (dispatched_interaction, dispatched_registry_revision);
+    ) -> bool {
+        if self.restore_fence() != (dispatched_interaction, dispatched_registry_revision) {
+            return false;
+        }
         for target in targets {
             let _ = reduce_registry(
                 &mut self.panes,
@@ -185,12 +187,13 @@ impl WorkspaceRuntime {
                     event: PaneEvent::RestoreBatch {
                         panes: target.panes,
                         selected: target.selected,
-                        replace_order,
+                        replace_order: true,
                     },
                 },
             );
         }
         self.sync_live_pane();
+        true
     }
 
     /// Translate a terminal [`Key`] into Home input and return the effects the
@@ -488,6 +491,14 @@ impl WorkspaceRuntime {
         effects
     }
 
+    /// Whether the completion for `operation` is still allowed to select its
+    /// pane. Callers use this preview when durable display intent must commit
+    /// before the pending tab is promoted into visible runtime state.
+    #[must_use]
+    pub fn pane_completion_will_focus(&self, operation: OperationId) -> bool {
+        self.pane_focus_at_request.get(&operation).copied() == Some(self.state.interaction_count())
+    }
+
     /// Promote a pending placeholder to a live tab once the daemon confirms the
     /// terminal identity.
     pub fn complete_pane(
@@ -592,6 +603,34 @@ impl WorkspaceRuntime {
         outcome
     }
 
+    /// Preview the live terminal selected after closing the current live tab.
+    /// `Some(None)` means the successor is generic-unaddressable here
+    /// (pending/ready) or the target becomes empty; outer `None` means no live
+    /// tab is currently selected.
+    #[must_use]
+    pub fn terminal_after_close(&self) -> Option<Option<TerminalRef>> {
+        let PaneSelection::Tab(TabSelection::Live(selected)) = self.panes.active_pane().selected()
+        else {
+            return None;
+        };
+        let tabs = self.panes.active_pane().tabs();
+        let index = tabs
+            .iter()
+            .position(|tab| matches!(tab, PaneTab::Live(live) if live.terminal.fences(selected)))?;
+        if tabs.len() == 1 {
+            return Some(None);
+        }
+        let successor = if index + 1 < tabs.len() {
+            &tabs[index + 1]
+        } else {
+            &tabs[index - 1]
+        };
+        Some(match successor {
+            PaneTab::Live(live) => Some(live.terminal.clone()),
+            PaneTab::Pending(_) | PaneTab::Ready(_) => None,
+        })
+    }
+
     /// Cycle the active pane's selected tab for an `Effect::SelectTab`. Only the
     /// tab owner (not the action modal) reacts, matching the reducer contract.
     pub fn select_tab(&mut self, direction: TabDirection) -> Vec<PaneRegistryEffect> {
@@ -603,12 +642,41 @@ impl WorkspaceRuntime {
         effects
     }
 
+    /// Preview the stable live-terminal selection produced by a tab cycle
+    /// without mutating the pane registry. The outer `None` means there is no
+    /// tab to select; the inner `None` is a pending/ready non-terminal tab.
+    #[must_use]
+    pub fn terminal_after_select(&self, direction: TabDirection) -> Option<Option<TerminalRef>> {
+        self.adjacent_tab(direction)
+            .map(|selection| match selection {
+                TabSelection::Live(terminal) => Some(terminal),
+                TabSelection::Pending(_) | TabSelection::Ready(_) => None,
+            })
+    }
+
     /// Move the selected tab in the active target while retaining its stable
     /// selection identity. The shell persists the resulting Agent order.
     pub fn reorder_tab(&mut self, direction: TabDirection) -> Vec<PaneRegistryEffect> {
         let effects = route_tab_command(&mut self.panes, PaneTabCommand::Reorder(direction));
         self.sync_live_pane();
         effects
+    }
+
+    /// Preview the active pane's live-terminal order after a move so durable
+    /// Agent intent can commit before the visible registry changes.
+    #[must_use]
+    pub fn terminal_order_after_reorder(&self, direction: TabDirection) -> Vec<TerminalRef> {
+        let mut panes = self.panes.clone();
+        let _ = route_tab_command(&mut panes, PaneTabCommand::Reorder(direction));
+        panes
+            .active_pane()
+            .tabs()
+            .iter()
+            .filter_map(|tab| match tab {
+                PaneTab::Live(pane) => Some(pane.terminal.clone()),
+                PaneTab::Pending(_) | PaneTab::Ready(_) => None,
+            })
+            .collect()
     }
 
     /// Mirror a controller [`Effect`]'s pane-visible intent into the registry
@@ -1315,7 +1383,7 @@ mod tests {
     }
 
     #[test]
-    fn delayed_restore_appends_inventory_without_overwriting_newer_interaction() {
+    fn delayed_restore_changes_nothing_after_newer_interaction() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let target = Target::Session(session);
@@ -1333,7 +1401,7 @@ mod tests {
         let _ = runtime.reorder_tab(TabDirection::Next);
         let newer_order = runtime.active_pane().tabs().to_vec();
 
-        runtime.restore_snapshot(
+        let accepted = runtime.restore_snapshot(
             dispatched_interaction,
             dispatched_revision,
             vec![PaneRestoreTarget {
@@ -1352,9 +1420,9 @@ mod tests {
             }],
         );
 
+        assert!(!accepted);
         assert_eq!(runtime.focused_terminal(), Some(first));
-        assert_eq!(&runtime.active_pane().tabs()[..2], newer_order.as_slice());
-        assert_eq!(runtime.active_pane().tabs().len(), 3);
+        assert_eq!(runtime.active_pane().tabs(), newer_order.as_slice());
     }
 
     #[test]

@@ -738,14 +738,17 @@ fn restore_batch(
         }
     }
     if replace_order {
+        let fallback_target = state.tabs.iter().find_map(|tab| match tab {
+            PaneTab::Pending(pending) => Some(pending.target),
+            PaneTab::Live(live) => Some(target_for_terminal(&live.terminal)),
+            PaneTab::Ready(ready) => Some(ready.target),
+        });
         let mut retained = std::mem::take(&mut state.tabs);
         let mut ordered = unique.into_iter().map(PaneTab::Live).collect::<Vec<_>>();
-        retained.retain(|tab| match tab {
-            PaneTab::Live(live) => !ordered.iter().any(
-                |candidate| matches!(candidate, PaneTab::Live(current) if current.terminal.fences(&live.terminal)),
-            ),
-            PaneTab::Pending(_) | PaneTab::Ready(_) => true,
-        });
+        // A coherent restore is authoritative for live membership. Preserve
+        // only local in-flight placeholders; live tabs absent from the fresh
+        // inventory (including cross-client dismissals and exits) are removed.
+        retained.retain(|tab| matches!(tab, PaneTab::Pending(_) | PaneTab::Ready(_)));
         ordered.extend(retained);
         state.tabs = ordered;
         if let Some(selected) = selected
@@ -755,6 +758,27 @@ fn restore_batch(
                 .any(|tab| matches!(tab, PaneTab::Live(live) if live.terminal.fences(&selected)))
         {
             state.selected = PaneSelection::Tab(TabSelection::Live(selected));
+        } else if !state
+            .tabs
+            .iter()
+            .any(|tab| selection_for(tab) == state.selected)
+        {
+            state.selected = state.tabs.first().map_or_else(
+                || {
+                    PaneSelection::Target(fallback_target.unwrap_or_else(
+                        || match &state.selected {
+                            PaneSelection::Target(target) => *target,
+                            PaneSelection::Tab(TabSelection::Live(terminal)) => {
+                                target_for_terminal(terminal)
+                            }
+                            PaneSelection::Tab(
+                                TabSelection::Pending(_) | TabSelection::Ready(_),
+                            ) => unreachable!("a tab selection without a target-scoped tab"),
+                        },
+                    ))
+                },
+                selection_for,
+            );
         }
     } else {
         for pane in unique {
@@ -1136,6 +1160,71 @@ mod tests {
         assert_eq!(state.selected(), &selection);
         assert_eq!(&state.tabs()[..2], order.as_slice());
         assert_eq!(state.tabs().len(), 3);
+    }
+
+    #[test]
+    fn authoritative_restore_removes_absent_live_tabs_but_preserves_pending_work() {
+        let target = target();
+        let stale = terminal(target);
+        let current = terminal(target);
+        let operation = OperationId::new();
+        let mut state = PaneState::new(PaneSelection::Target(target));
+        let _ = reduce(
+            &mut state,
+            PaneEvent::Restore(LivePane {
+                terminal: stale.clone(),
+                kind: PaneKind::Agent,
+            }),
+        );
+        let _ = reduce(
+            &mut state,
+            PaneEvent::Request {
+                operation,
+                target,
+                kind: PaneKind::Terminal,
+            },
+        );
+        let _ = reduce(
+            &mut state,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Live(stale))),
+        );
+
+        let _ = reduce(
+            &mut state,
+            PaneEvent::RestoreBatch {
+                panes: vec![LivePane {
+                    terminal: current.clone(),
+                    kind: PaneKind::Agent,
+                }],
+                selected: Some(current.clone()),
+                replace_order: true,
+            },
+        );
+        assert_eq!(state.tabs().len(), 2);
+        assert!(matches!(
+            &state.tabs()[0],
+            PaneTab::Live(live) if live.terminal.fences(&current)
+        ));
+        assert!(matches!(
+            &state.tabs()[1],
+            PaneTab::Pending(pending) if pending.operation == operation
+        ));
+
+        let _ = reduce(
+            &mut state,
+            PaneEvent::RestoreBatch {
+                panes: Vec::new(),
+                selected: None,
+                replace_order: true,
+            },
+        );
+        assert!(
+            matches!(state.tabs(), [PaneTab::Pending(pending)] if pending.operation == operation)
+        );
+        assert_eq!(
+            state.selected(),
+            &PaneSelection::Tab(TabSelection::Pending(operation))
+        );
     }
 
     #[test]

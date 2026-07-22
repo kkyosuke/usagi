@@ -2,8 +2,11 @@
 
 use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::{sync::mpsc, thread};
 
@@ -29,7 +32,6 @@ use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::git::{clone as git_clone, diff_status};
-use usagi_core::infrastructure::store::agent_tab_intent::AgentTabIntentStore;
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
@@ -50,11 +52,14 @@ use usagi_tui::presentation::views::pr_modal::PrModal;
 use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::GitDiff;
 use usagi_tui::presentation::{
-    self, AgentCommandPort, AgentPaneAdmission, AgentTabIntentPort, AgentTabIntentPortCommit,
-    BannerScreenRunner, ControllerBackendComposition, ControllerBackendFactory, ControllerHost,
-    DecisionCommandPort, DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort,
-    MetricsPort, SessionCommandPort, SessionCommandResult, Start, WorkspaceLoader,
-    WorkspaceSnapshot,
+    self, AgentCommandPort, AgentPaneAdmission, BannerScreenRunner, ControllerBackendComposition,
+    ControllerBackendFactory, ControllerHost, DecisionCommandPort, DesktopNotificationPort,
+    EnvironmentStorePort, Exit, ExternalTerminalPort, MetricsPort, RestoreConnectionPort,
+    SessionCommandPort, SessionCommandResult, Start, WorkspaceLoader, WorkspaceSnapshot,
+};
+use usagi_tui::usecase::application::agent_tab_intent::{
+    AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabIntentPort,
+    AgentTabIntentPortCommit,
 };
 use usagi_tui::usecase::application::controller::{
     BackendEvent, EnvironmentEntry, NewRequest, Notice, SafeError, SafeMessage, Target,
@@ -77,6 +82,7 @@ use usagi_tui::usecase::terminal_input::{
     Modifiers, RuntimeEvent,
 };
 
+use crate::runtime::agent_tab_intent::FileAgentTabIntentStore;
 use crate::runtime::clipboard::PlatformClipboard;
 use crate::tui_input::{CrosstermSource, EventPump, NoBackend};
 
@@ -573,11 +579,18 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             prs: DaemonPrSnapshotPort,
             browser: PlatformBrowserOpener,
         }));
+        let data_dir = usagi_core::infrastructure::paths::data_dir()
+            .expect("workspace launch already resolved the daemon data directory");
+        let (restore_connection, restore_publisher) =
+            DaemonRestoreConnectionPort::channel(data_dir);
         ControllerBackendComposition {
             backend,
             session_commands: Box::new(DaemonSessionCommandPort),
             agent_commands: Box::new(DaemonAgentCommandPort::new()),
-            restore_commands: Box::new(DaemonAgentCommandPort::new()),
+            restore_commands: Box::new(
+                DaemonAgentCommandPort::new().with_restore_connection(restore_publisher),
+            ),
+            restore_connection: Box::new(restore_connection),
             agent_tab_intents: Box::new(UserAgentTabIntentPort::new()),
             external_terminal: Box::new(PlatformExternalTerminalPort),
             metrics: Box::new(DaemonMetricsPort::new()),
@@ -730,53 +743,153 @@ impl ExternalTerminalPort for PlatformExternalTerminalPort {
     }
 }
 
+struct DaemonRestoreConnectionPort {
+    epochs: mpsc::Receiver<u64>,
+    cancelled: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct DaemonRestoreConnectionPublisher {
+    epochs: mpsc::SyncSender<u64>,
+    next_epoch: Arc<AtomicU64>,
+    cancelled: Arc<AtomicBool>,
+    data_dir: PathBuf,
+}
+
+impl DaemonRestoreConnectionPort {
+    fn channel(data_dir: PathBuf) -> (Self, DaemonRestoreConnectionPublisher) {
+        let (sender, epochs) = mpsc::sync_channel(1);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        (
+            Self {
+                epochs,
+                cancelled: Arc::clone(&cancelled),
+            },
+            DaemonRestoreConnectionPublisher {
+                epochs: sender,
+                next_epoch: Arc::new(AtomicU64::new(0)),
+                cancelled,
+                data_dir,
+            },
+        )
+    }
+}
+
+impl RestoreConnectionPort for DaemonRestoreConnectionPort {
+    fn take_reconnected_epoch(&mut self) -> Option<u64> {
+        self.epochs.try_iter().max()
+    }
+}
+
+impl Drop for DaemonRestoreConnectionPort {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+}
+
+impl DaemonRestoreConnectionPublisher {
+    fn watch(&self, stream: std::os::unix::net::UnixStream) -> Arc<AtomicBool> {
+        let connection_cancelled = Arc::new(AtomicBool::new(false));
+        let local_cancelled = Arc::clone(&connection_cancelled);
+        let publisher = self.clone();
+        thread::spawn(move || {
+            while !publisher.cancelled.load(Ordering::Acquire)
+                && !local_cancelled.load(Ordering::Acquire)
+                && !unix_stream_closed(&stream)
+            {
+                thread::sleep(Duration::from_millis(50));
+            }
+            if publisher.cancelled.load(Ordering::Acquire)
+                || local_cancelled.load(Ordering::Acquire)
+            {
+                return;
+            }
+            drop(stream);
+            while !publisher.cancelled.load(Ordering::Acquire)
+                && !local_cancelled.load(Ordering::Acquire)
+            {
+                if usagi_daemon::infrastructure::unix_transport::connect_current(
+                    &publisher.data_dir,
+                )
+                .is_ok()
+                {
+                    let epoch = publisher.next_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+                    match publisher.epochs.try_send(epoch) {
+                        Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+                        Err(mpsc::TrySendError::Disconnected(_)) => return,
+                    }
+                    return;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        });
+        connection_cancelled
+    }
+}
+
+fn unix_stream_closed(stream: &std::os::unix::net::UnixStream) -> bool {
+    let mut byte = 0_u8;
+    // SAFETY: `byte` is valid writable storage for one byte and `stream` owns
+    // a live descriptor for the duration of this non-consuming MSG_PEEK call.
+    let received = unsafe {
+        libc::recv(
+            stream.as_raw_fd(),
+            (&raw mut byte).cast(),
+            1,
+            libc::MSG_PEEK | libc::MSG_DONTWAIT,
+        )
+    };
+    if received == 0 {
+        return true;
+    }
+    if received > 0 {
+        return false;
+    }
+    let error = std::io::Error::last_os_error();
+    !matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+    )
+}
+
 #[derive(Default)]
 struct DaemonAgentCommandPort {
     terminal: Option<IpcClient<std::os::unix::net::UnixStream>>,
     terminal_epoch: u64,
+    restore_connection: Option<DaemonRestoreConnectionPublisher>,
+    terminal_watch_cancelled: Option<Arc<AtomicBool>>,
 }
 
 struct UserAgentTabIntentPort {
-    store: Option<AgentTabIntentStore>,
+    store: Option<FileAgentTabIntentStore>,
 }
 
 impl UserAgentTabIntentPort {
     fn new() -> Self {
         Self {
-            store: AgentTabIntentStore::open_default().ok(),
+            store: FileAgentTabIntentStore::open_default().ok(),
         }
     }
 }
 
 impl AgentTabIntentPort for UserAgentTabIntentPort {
-    fn load(
-        &mut self,
-        workspace: WorkspaceId,
-    ) -> Result<usagi_core::domain::agent_tab_intent::AgentTabIntent, String> {
+    fn load(&mut self, workspace: WorkspaceId) -> Result<AgentTabIntent, AgentTabIntentError> {
         self.store
-            .as_ref()
-            .ok_or_else(|| "Agent tab state is unavailable".to_owned())?
+            .as_mut()
+            .ok_or(AgentTabIntentError::Unavailable)?
             .load(workspace)
-            .map(|loaded| loaded.intent)
-            .map_err(|_| "Agent tab state could not be read".to_owned())
     }
 
     fn mutate(
         &mut self,
         workspace: WorkspaceId,
         expected_revision: u64,
-        mutation: usagi_core::domain::agent_tab_intent::AgentTabIntentMutation,
-    ) -> Result<AgentTabIntentPortCommit, String> {
+        mutation: AgentTabIntentMutation,
+    ) -> Result<AgentTabIntentPortCommit, AgentTabIntentError> {
         self.store
-            .as_ref()
-            .ok_or_else(|| "Agent tab state is unavailable".to_owned())?
+            .as_mut()
+            .ok_or(AgentTabIntentError::Unavailable)?
             .mutate(workspace, expected_revision, mutation)
-            .map(|commit| AgentTabIntentPortCommit {
-                intent: commit.intent,
-                projection: commit.projection,
-                cas_conflict: commit.cas_conflict,
-            })
-            .map_err(|_| "Agent tab state could not be saved".to_owned())
     }
 }
 
@@ -785,7 +898,14 @@ impl DaemonAgentCommandPort {
         Self {
             terminal: None,
             terminal_epoch: 0,
+            restore_connection: None,
+            terminal_watch_cancelled: None,
         }
+    }
+
+    fn with_restore_connection(mut self, publisher: DaemonRestoreConnectionPublisher) -> Self {
+        self.restore_connection = Some(publisher);
+        self
     }
 
     /// Returns the persistent terminal connection, opening it on first use.
@@ -794,10 +914,17 @@ impl DaemonAgentCommandPort {
         &mut self,
     ) -> Result<&mut IpcClient<std::os::unix::net::UnixStream>, TerminalError> {
         if self.terminal.is_none() {
-            self.terminal = Some(
-                crate::runtime::daemon::client(ClientPolicy::tui())
-                    .map_err(|_| TerminalError::Unavailable)?,
-            );
+            let client = crate::runtime::daemon::client(ClientPolicy::tui())
+                .map_err(|_| TerminalError::Unavailable)?;
+            if let Some(cancelled) = self.terminal_watch_cancelled.take() {
+                cancelled.store(true, Ordering::Release);
+            }
+            if let Some(publisher) = &self.restore_connection
+                && let Ok(stream) = client.transport().try_clone()
+            {
+                self.terminal_watch_cancelled = Some(publisher.watch(stream));
+            }
+            self.terminal = Some(client);
             self.terminal_epoch = self
                 .terminal_epoch
                 .checked_add(1)
@@ -826,10 +953,23 @@ impl DaemonAgentCommandPort {
         match reply {
             Ok(DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. }) => Ok(body),
             Err(error) => {
-                self.terminal = None;
+                self.reset_terminal();
                 Err(map_terminal_error(&error))
             }
         }
+    }
+
+    fn reset_terminal(&mut self) {
+        if let Some(cancelled) = self.terminal_watch_cancelled.take() {
+            cancelled.store(true, Ordering::Release);
+        }
+        self.terminal = None;
+    }
+}
+
+impl Drop for DaemonAgentCommandPort {
+    fn drop(&mut self) {
+        self.reset_terminal();
     }
 }
 
@@ -901,6 +1041,28 @@ fn decode_terminal_input_ack_value(
         return decode_terminal_input_ack_value(cached, input_len, cached_depth + 1);
     }
     Err(TerminalError::InputEffectUnknown)
+}
+
+fn decode_terminal_inventory(
+    body: &serde_json::Value,
+) -> Result<Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry>, TerminalError> {
+    body.get("terminals")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(TerminalError::Unavailable)?
+        .iter()
+        .map(|item| serde_json::from_value(item.clone()).map_err(|_| TerminalError::Unavailable))
+        .collect()
+}
+
+fn terminal_inventory_matches_scope(
+    entries: &[usagi_core::domain::terminal_launch::TerminalInventoryEntry],
+    scope: &TerminalLaunchScope,
+) -> bool {
+    entries.iter().all(|entry| {
+        entry.terminal.workspace_id == scope.workspace_id
+            && entry.terminal.session_id == scope.session_id
+            && entry.terminal.worktree_id == scope.worktree_id
+    })
 }
 
 fn agent_inventory_request(workspace: WorkspaceId) -> DaemonRequest {
@@ -1129,7 +1291,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         usagi_tui::usecase::application::terminal_session::TerminalError,
     > {
         use usagi_core::domain::session_lifecycle::SessionLifecycle;
-        use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalLaunchScope};
+        use usagi_core::domain::terminal_launch::TerminalLaunchScope;
         use usagi_tui::usecase::application::terminal_session::TerminalError;
 
         let lifecycle = request_lifecycle_snapshot().map_err(|_| TerminalError::Unavailable)?;
@@ -1156,17 +1318,15 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         for scope in scopes {
             let body = self.terminal_request(
                 TerminalAction::Inventory,
-                TerminalRequest::Inventory { scope },
+                TerminalRequest::Inventory {
+                    scope: scope.clone(),
+                },
             )?;
-            if let Some(list) = body.get("terminals").and_then(|value| value.as_array()) {
-                for item in list {
-                    if let Ok(entry) =
-                        serde_json::from_value::<TerminalInventoryEntry>(item.clone())
-                    {
-                        entries.push(entry);
-                    }
-                }
+            let scoped = decode_terminal_inventory(&body)?;
+            if !terminal_inventory_matches_scope(&scoped, &scope) {
+                return Err(TerminalError::Unavailable);
             }
+            entries.extend(scoped);
         }
         Ok(entries)
     }
@@ -1270,7 +1430,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             Ok(DaemonReply::Ok(body)) => {
                 let outcome = decode_terminal_input_ack(&body, bytes.len());
                 if outcome.is_err() {
-                    self.terminal = None;
+                    self.reset_terminal();
                 }
                 outcome
             }
@@ -1280,11 +1440,11 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             // either path undelivered and never replay it blindly.
             Ok(DaemonReply::Accepted { .. })
             | Err(ClientError::Unavailable(_) | ClientError::Lifecycle(_)) => {
-                self.terminal = None;
+                self.reset_terminal();
                 Err(TerminalError::InputEffectUnknown)
             }
             Err(error @ ClientError::Protocol(_)) => {
-                self.terminal = None;
+                self.reset_terminal();
                 if error.side_effect() == usagi_core::infrastructure::ipc::SideEffect::None {
                     Err(map_terminal_error(&error))
                 } else {
@@ -2369,18 +2529,21 @@ pub(crate) fn launch(
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use super::{
-        DaemonAgentCommandPort, DaemonDecisionCommandPort, EnvironmentStorePort, FsWorkspaceLoader,
-        Geometry, LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory,
-        RepoEnvironmentStore, Start, TerminalChunk, TerminalError, TerminalInputOutcome,
-        agent_inventory_request, classify_terminal_input, created_session_hook,
-        daemon_error_reason, decode_agent_admission, decode_terminal_input_ack,
+        DaemonAgentCommandPort, DaemonDecisionCommandPort, DaemonRestoreConnectionPort,
+        EnvironmentStorePort, FsWorkspaceLoader, Geometry, LifecycleSnapshot,
+        PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore, Start,
+        TerminalChunk, TerminalError, TerminalInputOutcome, agent_inventory_request,
+        classify_terminal_input, created_session_hook, daemon_error_reason,
+        decode_agent_admission, decode_terminal_input_ack, decode_terminal_inventory,
         decode_terminal_poll, exact_agent_resume_request, lifecycle_snapshot,
         load_screen_graph_data, load_workspace_state, map_terminal_error, passthrough_key,
         probe_path, provider_resume_projection, session_snapshot_result, terminal_copy_key,
-        validate_workspace_directory,
+        terminal_inventory_matches_scope, validate_workspace_directory,
     };
     use chrono::Utc;
     use serde_json::json;
@@ -2393,6 +2556,7 @@ mod tests {
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
     use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycle};
     use usagi_core::domain::settings::{LocalSettings, ModalSelectionMode, Settings, Theme};
+    use usagi_core::domain::terminal_launch::TerminalLaunchScope;
     use usagi_core::domain::workspace::Workspace;
     use usagi_core::domain::workspace_state::WorkspaceState;
     use usagi_core::infrastructure::paths::project_data_dir;
@@ -2403,7 +2567,8 @@ mod tests {
     use usagi_tui::presentation::views::workspace::ProjectedSession;
     use usagi_tui::presentation::workspace_runtime::WorkspaceRuntime;
     use usagi_tui::presentation::{
-        ControllerBackendFactory, ControllerHost, ControllerHostAction, WorkspaceSnapshot,
+        ControllerBackendFactory, ControllerHost, ControllerHostAction, RestoreConnectionPort,
+        WorkspaceSnapshot,
     };
     use usagi_tui::usecase::application::Key;
     use usagi_tui::usecase::application::controller::{
@@ -2505,6 +2670,8 @@ mod tests {
             DaemonAgentCommandPort {
                 terminal: Some(client),
                 terminal_epoch: 1,
+                restore_connection: None,
+                terminal_watch_cancelled: None,
             },
             server,
         )
@@ -2778,6 +2945,8 @@ mod tests {
         let mut port = DaemonAgentCommandPort {
             terminal: Some(client),
             terminal_epoch: 1,
+            restore_connection: None,
+            terminal_watch_cancelled: None,
         };
 
         assert_eq!(
@@ -2842,6 +3011,89 @@ mod tests {
         assert_eq!(decode_terminal_poll(&body), Err(TerminalError::Unavailable));
         let body = json!({ "output": [{"start_offset": 0, "data": b"abc".to_vec()}] });
         assert_eq!(decode_terminal_poll(&body), Err(TerminalError::Unavailable));
+    }
+
+    #[test]
+    fn terminal_inventory_decode_is_all_or_nothing() {
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: None,
+            worktree_id: WorktreeId::new(),
+        };
+        let entry = usagi_core::domain::terminal_launch::TerminalInventoryEntry {
+            terminal: terminal.clone(),
+            kind: usagi_core::domain::terminal_launch::TerminalKind::Terminal,
+            live: true,
+        };
+        assert_eq!(
+            decode_terminal_inventory(&json!({"terminals": [entry.clone()]})),
+            Ok(vec![entry.clone()])
+        );
+        assert_eq!(
+            decode_terminal_inventory(&json!({"terminals": [{"live": true}]})),
+            Err(TerminalError::Unavailable)
+        );
+        assert_eq!(
+            decode_terminal_inventory(&json!({})),
+            Err(TerminalError::Unavailable)
+        );
+        let scope = TerminalLaunchScope {
+            workspace_id: terminal.workspace_id,
+            session_id: terminal.session_id,
+            worktree_id: terminal.worktree_id,
+        };
+        assert!(terminal_inventory_matches_scope(&[entry.clone()], &scope));
+        let mut wrong_worktree = entry;
+        wrong_worktree.terminal.worktree_id = WorktreeId::new();
+        assert!(!terminal_inventory_matches_scope(&[wrong_worktree], &scope));
+    }
+
+    #[test]
+    fn passive_restore_socket_eof_emits_one_reconnect_epoch_and_drop_cancels_watchers() {
+        use usagi_daemon::infrastructure::unix_transport::{SecureUnixListener, connect_current};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let listener = SecureUnixListener::bind(
+            temporary.path(),
+            usagi_core::infrastructure::ipc::DaemonGeneration("restore-watch".to_owned()),
+        )
+        .unwrap();
+        let stream = connect_current(temporary.path()).unwrap();
+        let peer = loop {
+            match listener.accept() {
+                Ok(peer) => break peer,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("fixture listener failed: {error}"),
+            }
+        };
+        let (mut events, publisher) =
+            DaemonRestoreConnectionPort::channel(temporary.path().to_path_buf());
+        let _watch = publisher.watch(stream);
+        std::thread::sleep(Duration::from_millis(75));
+        assert_eq!(events.take_reconnected_epoch(), None);
+
+        drop(peer);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let epoch = loop {
+            if let Some(epoch) = events.take_reconnected_epoch() {
+                break epoch;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "passive EOF watcher did not publish reconnect"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(epoch, 1);
+        assert_eq!(events.take_reconnected_epoch(), None);
+
+        let cancelled = Arc::clone(&publisher.cancelled);
+        drop(events);
+        assert!(cancelled.load(Ordering::Acquire));
     }
 
     #[test]

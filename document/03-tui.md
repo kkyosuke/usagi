@@ -647,25 +647,29 @@ TUI 起動、workspace open、daemon reconnect から `ResumeAgent` を自動送
 利用者の `session resume <name>` 操作を必須とする。
 
 - **two-source reconciliation**: daemon の unified terminal / Agent inventory が liveness・PTY ownership の正本、
-  `<data-dir>/tui/agent-tabs/<workspace-id>/intent.json` の `AgentTabIntent` が Agent tab の表示順・target ごとの選択・
+  `<data-dir>/tui/workspaces/<workspace-id>/agent-tabs.json` の `AgentTabIntent` が Agent tab の表示順・target ごとの選択・
   conversation lineage dismissal の正本である。local state は workspace identity、完全な last-known `TerminalRef`、
   provider-neutral な `AgentContinuationRef` だけを持ち、provider ID、argv、environment、transcript、terminal output を
   保存しない。generic Terminal tab は従来どおり inventory だけから復元する。
 - **タイミング**: 初回 frame を paint した後、UI event loop と別の daemon connection で
-  [`terminal inventory`](04-ipc.md#generic-terminal-request) と `agent_inventory` を取得する。一時的な失敗は bounded backoff
-  で再試行し、初回 frame・キー入力・animation を待たせない。失敗時は last valid intent を空 snapshot で上書きせず、
-  local spawn もしない。
+  [`terminal inventory`](04-ipc.md#generic-terminal-request) / `agent_inventory` / `terminal inventory` の順に取得する。
+  前後の terminal snapshot が同一で、live Agent が両 inventory で一対一に対応する全量 observation だけを適用する。
+  transport・partial・不整合は controller 所有の capped exponential backoff で再試行し、初回 frame・キー入力・animation を
+  待たせない。失敗時は last valid intent を空 snapshot で上書きせず、generic tab だけを部分適用せず、local spawn もしない。
 - **投影**: saved Agent は完全な `TerminalRef` が両 inventory で trusted live と確認できたときだけ保存順で復元する。
   inventory にだけある live Agent は continuation / terminal fence の決定的順序で末尾へ追加し、duplicate snapshot は
   exact ref で 1 枚へ収束する。generic Terminal はその後ろへ決定的に追加する。saved ref が non-live でも同じ continuation
   が resumable なら slot intent は保持し、interrupted pane への投影は行わない。表示中 active target の selected foreground
   tab だけを attach / resync し、background target と選択外 tab は detached のまま保持する。
 - **遅延応答 fence**: restore dispatch 時の UI interaction count と pane-registry revision を結果に持たせる。双方が一致する
-  結果だけが保存順・保存選択を適用できる。遅延・順序外の結果は新しい exact ref の末尾追加だけを許し、後続の close・
-  reorder・selection を上書きせず focus を奪わない。復元は Home の selected / active target や Switch mode を変更しない。
+  結果だけが durable Observe と pane projection を適用できる。遅延・順序外の結果は全体を拒否し、専用 port が戻り次第、
+  fresh fence で一度だけ再観測する。後続の close・reorder・selection を上書きせず focus を奪わない。transport failure と
+  fence rejection が同時なら transport failure を優先して outage backoff を維持する。
 - **commit**: Agent tab の確定した order / selection / close / reopen は file lock 下の atomic read-modify-write で commit する。
-  revision CAS が競合した場合は最新 state を読み直して stable continuation key ごとに mutation を適用する。dismissal は
-  complete な durable Agent inventory が retention 削除を証明するか、利用者が明示 reopen するまで union で保持する。
+  revision CAS が競合した場合は最新 state を読み直して stable continuation key ごとに mutation を適用する。ただし stale
+  Observe は最新 exact ref を stale candidate へ置換せず fresh observation を要求し、stale Reopen / admission は新しい Dismiss を
+  解除しない。dismissal は利用者が明示 reopen するまで保持し、inventory absence を retention / GC の根拠にしない。保存失敗時は
+  close / reorder / selection / reopen の可視 UI を変えず、typed safe notice を表示する。
 
 誤復元・二重 tab を防ぐため、次を守る。
 
@@ -677,10 +681,11 @@ TUI 起動、workspace open、daemon reconnect から `ResumeAgent` を自動送
 | `live: false`（死んだ process / exited / orphan / identity_unknown） | attach 不可 | live tab を作らない。PTY master 復元不能は interrupted 契約に委ねる |
 | stale / recreated session | inventory 問い合わせ scope が現 lifecycle snapshot の available session に限られる | 旧 session の runtime は列挙されず復元されない |
 | scope mismatch（別 workspace / worktree / session） | daemon が scope 完全一致で filter | 列挙されない |
-| saved generation と current active が異なる | saved exact ref の trusted draining owner があれば live、双方の owner 欠落が確定すれば stale | generation だけで推測 attach / dismissal GC しない |
+| saved generation と current daemon が異なる | #506 の単一 endpoint inventory では owner を証明できない | attach しない。planned lifecycle は [#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md)、owner routing は [#508](../.usagi/issues/508-fix-tui-ipc-draining-generation-inventory-terminalref-owner-routing.md) の責務 |
 | duplicate entry | `fences` で既存復元 tab と一致 | dedup、二重 tab を作らない |
-| daemon 不通 / partial inventory | authoritative absence ではない | retry し、intent / dismissal を GC せず local PTY も作らない |
-| corrupt / future schema | current schema として読めない | state を無視して inventory-only へ縮退し、起動を失敗させない |
+| daemon 不通 / partial / cross-RPC 不整合 inventory | coherent な全量 observation ではない | 全 pane restore を適用せず retry し、intent / dismissal を GC せず local PTY も作らない |
+| corrupt schema | current schema として読めない | private peer へ quarantine し、空 intent から安全に再構築する |
+| future schema | current build より新しい | 元 bytes を保持して read-only にし、restore / mutation を適用せず typed notice を表示する |
 
 ## resume data compatibility
 
@@ -693,7 +698,7 @@ identity は daemon-issued `AgentContinuationRef` だけである。表示名、
 |---|---|---|
 | saved target が snapshot に無い | target identity が stale | selected / active を root に戻す |
 | saved `TerminalRef` が live inventory に無いが continuation history は残る | attach 不可 | slot / dismissal を保持し live tab は投影しない |
-| complete durable inventory から continuation が消えた | retention policy による削除が確定 | slot と dismissal を回収する |
+| inventory から continuation が消えた | absence は retention / GC の証明ではない | slot と dismissal を保持する。allocator / retention policy は別責務 |
 | terminal ID が同じでも daemon generation など fencing field が異なる | old / stale data | trusted owner が無ければ attach せず、名前や ID から置換しない |
 | attach / resync が ownership unknown または transport failure | 継続性を証明できない | safe feedback を表示し input を無効化する |
 

@@ -205,7 +205,6 @@ fn exact_resume_inventory_round_trips_only_public_resource_fences() {
     };
     let inventory = AgentInventory {
         workspace_id: workspace,
-        complete: true,
         runtimes: vec![AgentRuntimeInventoryItem {
             runtime: AgentRuntimeRef::new(runtime_id, terminal, Some(session)).unwrap(),
             continuation,

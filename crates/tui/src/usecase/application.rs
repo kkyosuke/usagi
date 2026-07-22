@@ -18,6 +18,8 @@ use usagi_core::domain::workspace_state::WorkspaceState;
 pub mod agent_launch;
 /// v2 controller effect と daemon-owned Agent pane runtime を結合する host。
 pub mod agent_runtime;
+/// Agent tab の表示 intent を daemon inventory と照合する純粋 reducer と永続化 port。
+pub mod agent_tab_intent;
 /// Home の application controller。端末や daemon wire 型に依存しない reducer と
 /// fake backend seam を提供する。
 pub mod controller;
