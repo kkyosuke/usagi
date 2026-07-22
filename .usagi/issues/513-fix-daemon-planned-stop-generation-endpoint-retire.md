@@ -1,13 +1,13 @@
 ---
 number: 513
 title: fix(daemon): planned stop で generation endpoint を安全に retire する
-status: in-progress
+status: done
 priority: high
 labels: [review, v2, daemon, lifecycle, ipc, safety]
 dependson: []
 related: [216, 341, 171, 209, 507, 515]
 created_at: 2026-07-21T21:37:42.453841+00:00
-updated_at: 2026-07-21T23:41:00+00:00
+updated_at: 2026-07-22T01:07:13+00:00
 ---
 
 ## 問題・影響
@@ -16,7 +16,7 @@ v2 の planned `usagi daemon stop` は記録 PID へ SIGTERM を送り `daemon.j
 
 ## 成立条件 / 実測
 
-最新 `origin/main e047610b`（指定基点 `edb20b5f` の直系。後続変更を含め planned stop の競合条件は同じ）から release binary を build し、隔離 `USAGI_HOME` と `USAGI_RUNTIME_MODE=production` で確認した。
+`origin/main e047610b`（指定基点 `edb20b5f` の直系）から release binary を build し、隔離 `USAGI_HOME` と `USAGI_RUNTIME_MODE=production` で再現した。修正は後続の `origin/main 5f46a8f4` へ conflict なしで rebase し、同じ lifecycle 回帰テストを再検証した。
 
 1. `usagi daemon start` で PID と active generation を取得する。
 2. `usagi daemon stop` 後、記録 PID の消滅を待つ。
@@ -49,11 +49,11 @@ v2 の planned `usagi daemon stop` は記録 PID へ SIGTERM を送り `daemon.j
 - [x] accept loop は shutdown を観測して終了し、daemon owner が join してから listener の generation-fenced retire / Drop を完了し、その成功後だけ exact record を clear する。
 - [x] shutdown signal handler / wait の準備が endpoint publish / worker spawn より前であることを usecase ordering test と実 process testで固定する。
 - [x] transport と daemon lifecycle の v2 正本 docs を実装へ整合する。
-- [ ] running/stale stop と owner cleanup が遅延しても、先に保存された replacement の完全な record を削除しない。
-- [ ] record save と conditional clear の比較・unlink は stable な同一 cross-process lock 下で不可分に実行する。
-- [ ] record save の途中失敗・crash は旧 record を malformed JSON にせず atomic replacement を保証し、返却された write / rename error では temporary rollback を試みて cleanup failure も報告する。
-- [ ] endpoint bind 後に ordinary error を返す全経路は、公開前の temporary / generation socket の rollback を試みて cleanup failure も報告する。
-- [ ] endpoint 初期化中に shutdown signal を受けても、同期 wait 前から admission fence が立ち、新規 request を受理しない。
+- [x] running/stale stop と owner cleanup が遅延しても、先に保存された replacement の完全な record を削除しない。
+- [x] record save と conditional clear の比較・unlink は stable な同一 cross-process lock 下で不可分に実行する。
+- [x] record save の途中失敗・crash は旧 record を malformed JSON にせず atomic replacement を保証し、返却された write / rename error では temporary rollback を試みて cleanup failure も報告する。
+- [x] endpoint bind 後に ordinary error を返す全経路は、公開前の temporary / generation socket の rollback を試みて cleanup failure も報告する。
+- [x] endpoint 初期化中に shutdown signal を受けても、同期 wait 前から admission fence が立ち、新規 request を受理しない。
 
 ## 必須回帰テスト
 
