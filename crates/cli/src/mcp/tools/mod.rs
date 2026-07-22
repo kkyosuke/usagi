@@ -41,7 +41,8 @@ fn descriptor(tool: Box<dyn Tool>) -> ToolDescriptor {
     use SessionAction as Session;
     use SupervisorToolAction as Supervisor;
     use ToolRoute::{
-        Dispatch as DispatchRoute, Session as SessionRoute, Store, Supervisor as SupervisorRoute,
+        AgentInventory, AgentResume, Dispatch as DispatchRoute, Session as SessionRoute, Store,
+        Supervisor as SupervisorRoute,
     };
 
     let (route, policy) = match tool.name() {
@@ -52,7 +53,8 @@ fn descriptor(tool: Box<dyn Tool>) -> ToolDescriptor {
         "session_complete" => (SessionRoute(Session::Complete), SessionCredential),
         "session_pr" => (SessionRoute(Session::Pr), Public),
         "session_remove" => (SessionRoute(Session::Remove), Public),
-        "session_resume" => (SessionRoute(Session::ResumeAgent), Public),
+        "session_resume" => (AgentResume, Public),
+        "agent_resume_inventory" => (AgentInventory, Public),
         "session_recover_legacy" => (SessionRoute(Session::RecoverLegacy), Public),
         "session_prompt" => (SessionRoute(Session::Prompt), Public),
         "session_note_get" => (SessionRoute(Session::NoteGet), SessionCredential),
@@ -138,7 +140,10 @@ pub fn validate_registry(descriptors: &[ToolDescriptor]) -> Result<(), RegistryE
         if !matches!(
             (descriptor.route(), descriptor.caller_policy()),
             (
-                ToolRoute::Store | ToolRoute::Session(_),
+                ToolRoute::Store
+                    | ToolRoute::Session(_)
+                    | ToolRoute::AgentInventory
+                    | ToolRoute::AgentResume,
                 CallerPolicy::Public
             ) | (ToolRoute::Session(_), CallerPolicy::SessionCredential)
                 | (ToolRoute::Dispatch(_), CallerPolicy::AgentCredential)
@@ -273,7 +278,7 @@ mod tests {
     #[test]
     fn every_tool_has_valid_metadata() {
         let reg = registry();
-        assert_eq!(reg.len(), 48); // issue 6 + memory 4 + session 32 + supervisor 6
+        assert_eq!(reg.len(), 49); // issue 6 + memory 4 + session 33 + supervisor 6
 
         let mut seen = std::collections::HashSet::new();
         for tool in &reg {
@@ -298,14 +303,14 @@ mod tests {
     fn each_category_contributes_its_tools() {
         assert_eq!(super::issue::tools().len(), 6);
         assert_eq!(super::memory::tools().len(), 4);
-        assert_eq!(super::session::tools().len(), 32);
+        assert_eq!(super::session::tools().len(), 33);
         assert_eq!(super::supervisor::tools().len(), 6);
     }
 
     #[test]
     fn every_advertised_tool_has_one_route_schema_validator_and_policy() {
         let registry = registry();
-        assert_eq!(registry.len(), 48);
+        assert_eq!(registry.len(), 49);
         validate_registry(&registry).unwrap();
         for descriptor in &registry {
             assert!(!descriptor.description().is_empty());
@@ -321,7 +326,10 @@ mod tests {
             assert!(matches!(
                 (descriptor.route(), descriptor.caller_policy()),
                 (
-                    ToolRoute::Store | ToolRoute::Session(_),
+                    ToolRoute::Store
+                        | ToolRoute::Session(_)
+                        | ToolRoute::AgentInventory
+                        | ToolRoute::AgentResume,
                     CallerPolicy::Public
                 ) | (ToolRoute::Session(_), CallerPolicy::SessionCredential)
                     | (ToolRoute::Dispatch(_), CallerPolicy::AgentCredential)

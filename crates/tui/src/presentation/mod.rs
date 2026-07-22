@@ -23,7 +23,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use chrono::{DateTime, Utc};
 use usagi_core::domain::AppInfo;
-use usagi_core::domain::agent::{AgentProfileId, ProviderResumeProjection};
+use usagi_core::domain::agent::{
+    AgentInventory, AgentProfileId, AgentResumeTarget, ProviderResumeProjection,
+};
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, UserDecisionId, WorkspaceId};
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
@@ -100,6 +102,31 @@ pub trait AgentCommandPort: Send {
         _operation_id: OperationId,
     ) -> Result<TerminalRef, String> {
         Err("Agent resume is unavailable.".to_owned())
+    }
+
+    /// Returns the daemon's safe exact-target inventory for root and managed
+    /// Agent histories in one workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns safe feedback when the daemon rejects the workspace inventory
+    /// request or returns an invalid projection.
+    fn resume_inventory(&mut self, _workspace: WorkspaceId) -> Result<AgentInventory, String> {
+        Err("Agent resume inventory is unavailable.".to_owned())
+    }
+
+    /// Resumes only the exact daemon-issued target selected by the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns safe feedback when the daemon rejects the exact target or does
+    /// not return a fully fenced replacement terminal.
+    fn resume_exact(
+        &mut self,
+        _target: AgentResumeTarget,
+        _operation_id: OperationId,
+    ) -> Result<TerminalRef, String> {
+        Err("Exact Agent resume is unavailable.".to_owned())
     }
 
     /// Open a daemon-owned login shell for a scope. `session` is absent for the
@@ -3668,14 +3695,6 @@ mod tests {
         }
         assert_eq!(actions.try_iter().count(), 8);
 
-        let mut default_resume = SuccessfulAgentPort(live_terminal_ref(workspace, session));
-        assert_eq!(
-            default_resume
-                .resume(workspace, session, OperationId::new())
-                .unwrap_err(),
-            "Agent resume is unavailable."
-        );
-
         for effect in [
             Effect::LoadNotes { target },
             Effect::SaveNotes {
@@ -3713,6 +3732,35 @@ mod tests {
             backend.dispatch(effect);
         }
         assert_eq!(backend.drain_events().len(), 10);
+    }
+
+    #[test]
+    fn default_agent_port_rejects_legacy_inventory_and_exact_resume() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut port = SuccessfulAgentPort(live_terminal_ref(workspace, session));
+        assert_eq!(
+            port.resume(workspace, session, OperationId::new())
+                .unwrap_err(),
+            "Agent resume is unavailable."
+        );
+        assert_eq!(
+            port.resume_inventory(workspace).unwrap_err(),
+            "Agent resume inventory is unavailable."
+        );
+        let target = usagi_core::domain::agent::AgentResumeTarget {
+            continuation: usagi_core::domain::id::AgentContinuationRef::new(),
+            source: usagi_core::domain::id::AgentResumeSourceId::new(),
+            workspace_id: workspace,
+            session_id: Some(session),
+            worktree_id: WorktreeId::new(),
+            runtime_id: usagi_core::domain::id::AgentRuntimeId::new(),
+            adapter_revision: 1,
+        };
+        assert_eq!(
+            port.resume_exact(target, OperationId::new()).unwrap_err(),
+            "Exact Agent resume is unavailable."
+        );
     }
 
     #[test]

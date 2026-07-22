@@ -94,7 +94,7 @@ pub fn dispatch(
         )
     } else {
         let outcome = kind
-            .filter(|kind| matches!(*kind, "session" | "agent" | "dispatch"))
+            .filter(|kind| matches!(*kind, "session" | "agent" | "resume_agent" | "dispatch"))
             .and_then(|_| body.get("operation_id"))
             .and_then(serde_json::Value::as_str)
             .map_or(ResponseOutcome::Ok, |operation_id| {

@@ -26,15 +26,17 @@ use serde_json::{Value, json};
 use usagi_core::{
     domain::{
         agent::{
-            AgentCapability, AgentProfileId, AgentStatus, CallerRef, DispatchBinding, DispatchRun,
+            AgentCapability, AgentInventory, AgentProfileId, AgentResumableInventoryItem,
+            AgentResumeRelation, AgentResumeTarget, AgentRuntimeInventoryItem,
+            AgentRuntimeInventoryState, AgentStatus, CallerRef, DispatchBinding, DispatchRun,
             InboxKind, InboxMessage, LaunchMode, LaunchRequest, LaunchScope, ModelSelector,
             ProviderCaptureProvenance, ProviderKind, ProviderResumePhase, ProviderResumeReason,
             ProviderResumeRef, ProviderResumeStatus, ProviderSessionId, RunStatus, WorkerRef,
         },
         id::{
-            AgentRuntimeId, AgentRuntimeRef, ClientId, CompletionFence, ConnectionId,
-            DaemonGeneration, OperationId, RequestId, SessionId, TerminalId, TerminalRef,
-            WorkspaceId, WorktreeId,
+            AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, ClientId, CompletionFence,
+            ConnectionId, DaemonGeneration, OperationId, RequestId, SessionId, TerminalId,
+            TerminalRef, WorkspaceId, WorktreeId,
         },
     },
     infrastructure::ipc::{ErrorCode, ProtocolError},
@@ -102,6 +104,11 @@ pub struct AgentAdmission {
     pub operation_id: String,
     pub revision: u64,
     pub terminal: TerminalRef,
+    /// Stable public lineage shared by the source and replacement. It is absent
+    /// only when replaying a legacy durable record which predates exact resume.
+    pub continuation: Option<AgentContinuationRef>,
+    /// Explicit relation for a resume replacement; ordinary launches omit it.
+    pub resume_relation: Option<AgentResumeRelation>,
     /// Present only after the daemon has observed and durably committed a
     /// successful process exit.  A replay therefore distinguishes an accepted
     /// running operation from its single final success without guessing a
@@ -567,17 +574,67 @@ impl AgentRuntime {
         outcome
     }
 
-    /// Starts a new daemon-owned runtime for the provider conversation retained
-    /// by an interrupted/exited runtime. This never reattaches the old PTY and
-    /// never falls back to provider-global "last" semantics.
-    pub fn resume(
+    /// Returns one deterministic, secret-free inventory for workspace-root and
+    /// managed-session Agent runtimes.
+    #[must_use]
+    pub fn inventory(&self, workspace: WorkspaceId) -> AgentInventory {
+        let mut records = self
+            .coordinator
+            .snapshot()
+            .records
+            .into_iter()
+            .filter(|record| record.runtime.terminal.workspace_id == workspace)
+            .collect::<Vec<_>>();
+        records.sort_by_key(|record| {
+            (
+                record.operation.operation_id.to_string(),
+                record.runtime.agent_runtime_id.as_str(),
+            )
+        });
+        let runtimes = records
+            .iter()
+            .filter_map(|record| {
+                record
+                    .continuation
+                    .map(|continuation| AgentRuntimeInventoryItem {
+                        runtime: record.runtime.clone(),
+                        continuation,
+                        state: runtime_inventory_state(record.state),
+                        resumed_from: record.resumed_from,
+                    })
+            })
+            .collect();
+        let resumable = records
+            .iter()
+            .filter(|record| is_resume_source_state(record.state))
+            .map(|record| {
+                let target = resume_target(record);
+                let (available, reason) = self.resume_source_availability(record, &records);
+                AgentResumableInventoryItem {
+                    runtime_id: record.runtime.agent_runtime_id,
+                    target,
+                    available,
+                    reason,
+                }
+            })
+            .collect();
+        AgentInventory {
+            workspace_id: workspace,
+            runtimes,
+            resumable,
+        }
+    }
+
+    /// Starts a new daemon-owned runtime for one exact interrupted source. This
+    /// never reattaches the old PTY and never falls back to provider-global
+    /// "last" semantics.
+    pub fn resume_exact(
         &mut self,
         operation_id: &str,
-        workspace: WorkspaceId,
-        session: SessionId,
+        target: &AgentResumeTarget,
         scope: &dyn SessionScopeResolver,
     ) -> Result<AgentAdmission, ProtocolError> {
-        let semantic_key = format!("resume:{workspace}:{session}");
+        let semantic_key = resume_semantic_key(target);
         if let Some(existing) = self.operations.get(operation_id) {
             if existing
                 .semantic_key
@@ -591,7 +648,7 @@ impl AgentRuntime {
             }
             return existing.outcome.clone();
         }
-        let outcome = self.admit_resume(operation_id, workspace, session, &semantic_key, scope);
+        let outcome = self.admit_resume_exact(operation_id, target, &semantic_key, scope);
         self.operations.insert(
             operation_id.to_owned(),
             AgentOperation {
@@ -627,6 +684,76 @@ impl AgentRuntime {
             ProviderKind::Codex,
             native_session_id,
         )
+    }
+
+    /// Compatibility path for the old session-scoped request. The daemon alone
+    /// resolves it, and only when exactly one eligible exact target exists.
+    pub fn resume_legacy(
+        &mut self,
+        operation_id: &str,
+        workspace: WorkspaceId,
+        session: Option<SessionId>,
+        scope: &dyn SessionScopeResolver,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        OperationId::parse(operation_id).map_err(|_| {
+            ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "agent resume operation id must be canonical",
+            )
+        })?;
+        let prefix = resume_scope_prefix(workspace, session);
+        if let Some(existing) = self.operations.get(operation_id) {
+            if existing
+                .semantic_key
+                .as_ref()
+                .is_some_and(|key| key.starts_with(&prefix))
+            {
+                return existing.outcome.clone();
+            }
+            return Err(ProtocolError::new(
+                ErrorCode::IdempotencyConflict,
+                "operation id was reused with a different agent resume",
+            ));
+        }
+        let records = self.coordinator.snapshot().records;
+        let targets = records
+            .iter()
+            .filter(|record| {
+                record.runtime.terminal.workspace_id == workspace
+                    && record.runtime.session_id == session
+                    && is_resume_source_state(record.state)
+            })
+            .filter(|record| self.resume_source_availability(record, &records).0)
+            .filter_map(resume_target)
+            .collect::<Vec<_>>();
+        let target = match targets.as_slice() {
+            [] => {
+                return Err(ProtocolError::new(
+                    ErrorCode::Unavailable,
+                    "legacy agent resume resolved no eligible exact target",
+                ));
+            }
+            [target] => target,
+            _ => {
+                return Err(ProtocolError::new(
+                    ErrorCode::RevisionConflict,
+                    "legacy agent resume is ambiguous; select an exact target",
+                ));
+            }
+        };
+        self.resume_exact(operation_id, target, scope)
+    }
+
+    /// Temporary Rust API compatibility for session-scoped callers. Wire
+    /// clients should migrate to [`Self::resume_exact`].
+    pub fn resume(
+        &mut self,
+        operation_id: &str,
+        workspace: WorkspaceId,
+        session: SessionId,
+        scope: &dyn SessionScopeResolver,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        self.resume_legacy(operation_id, workspace, Some(session), scope)
     }
 
     /// Accepts only a provider session ID delivered by a documented structured
@@ -665,59 +792,90 @@ impl AgentRuntime {
     /// Safe interrupted/resume projection for a managed session. Provider IDs
     /// are never returned; only availability and a stable reason cross IPC.
     #[must_use]
-    #[allow(clippy::missing_panics_doc)] // The preceding identity iterator proves the resumable record invariant.
     pub fn session_resume_status(&self, session: SessionId) -> (bool, ProviderResumeReason) {
         let records = self.coordinator.snapshot().records;
-        if records.iter().any(|record| {
-            record.runtime.session_id == Some(session) && holds_live_or_unknown_agent(record.state)
+        let mut resumable = Vec::new();
+        for record in &records {
+            if record.runtime.session_id != Some(session) {
+                continue;
+            }
+            if holds_live_or_unknown_agent(record.state) {
+                return (false, ProviderResumeReason::LiveOrOwnershipUnknown);
+            }
+            if is_resume_source_state(record.state) {
+                resumable.push(record);
+            }
+        }
+        if resumable.is_empty() {
+            return (false, ProviderResumeReason::ProviderMetadataUnavailable);
+        }
+        let mut available = 0;
+        let mut reason = ProviderResumeReason::ProviderMetadataUnavailable;
+        for record in resumable {
+            let (candidate_available, candidate_reason) =
+                self.resume_source_availability(record, &records);
+            available += usize::from(candidate_available);
+            if reason == ProviderResumeReason::ProviderMetadataUnavailable
+                && candidate_reason != ProviderResumeReason::ProviderMetadataUnavailable
+            {
+                reason = candidate_reason;
+            }
+        }
+        if available == 1 {
+            return (true, ProviderResumeReason::ExplicitResumeAvailable);
+        }
+        if available > 1 {
+            return (false, ProviderResumeReason::AmbiguousProviderMetadata);
+        }
+        (false, reason)
+    }
+
+    fn resume_source_availability(
+        &self,
+        record: &super::runtime::DurableRuntimeRecord,
+        records: &[super::runtime::DurableRuntimeRecord],
+    ) -> (bool, ProviderResumeReason) {
+        let (Some(continuation), Some(_source), Some(reference)) = (
+            record.continuation,
+            record.resume_source,
+            record.provider_resume.as_ref(),
+        ) else {
+            return (false, ProviderResumeReason::ProviderMetadataUnavailable);
+        };
+        if record.superseded_by.is_some() {
+            return (false, ProviderResumeReason::SourceAlreadySuperseded);
+        }
+        if records.iter().any(|candidate| {
+            candidate.runtime.agent_runtime_id != record.runtime.agent_runtime_id
+                && candidate.continuation == Some(continuation)
+                && holds_live_or_unknown_agent(candidate.state)
         }) {
             return (false, ProviderResumeReason::LiveOrOwnershipUnknown);
         }
-        let resumable = records
-            .iter()
-            .filter(|record| {
-                record.runtime.session_id == Some(session)
-                    && record.provider_resume.is_some()
-                    && is_resume_source_state(record.state)
-            })
-            .collect::<Vec<_>>();
-        let mut identities = resumable.iter().filter_map(|record| {
-            record.provider_resume.as_ref().map(|reference| {
-                (
-                    reference.provider,
-                    reference.native_session_id.clone(),
-                    reference.adapter_revision,
-                    reference.scope.clone(),
-                )
-            })
-        });
-        let Some(first) = identities.next() else {
-            return (false, ProviderResumeReason::ProviderMetadataUnavailable);
-        };
-        if !identities.all(|candidate| candidate == first) {
-            return (false, ProviderResumeReason::AmbiguousProviderMetadata);
-        }
-        let source = resumable
-            .first()
-            .expect("identity came from a resumable record");
-        let reference = source
-            .provider_resume
-            .as_ref()
-            .expect("resumable records retain provider metadata");
-        let profile_id = &source.launch.plan.profile_id;
-        let internally_compatible = resumable.iter().all(|record| {
-            record.launch.plan.profile_id == *profile_id
-                && record.launch.plan.profile_revision == reference.adapter_revision
-                && record.launch.request.scope == reference.scope
-                && record.runtime.terminal.workspace_id == reference.scope.workspace_id
-                && record.runtime.terminal.session_id == reference.scope.session_id
-                && record.runtime.terminal.worktree_id == reference.scope.worktree_id
-        });
-        let adapter_compatible = self.registry.profile(profile_id).is_ok_and(|profile| {
-            profile.revision == reference.adapter_revision
-                && profile.capabilities.contains(&AgentCapability::Resume)
-                && provider_matches_profile(reference.provider, profile_id)
-        });
+        let capture_compatible = matches!(
+            (reference.provider, reference.provenance),
+            (
+                ProviderKind::Claude,
+                ProviderCaptureProvenance::DaemonIssued
+            ) | (
+                ProviderKind::Codex,
+                ProviderCaptureProvenance::ProviderStructured
+            )
+        );
+        let internally_compatible = capture_compatible
+            && record.launch.plan.profile_revision == reference.adapter_revision
+            && record.launch.request.scope == reference.scope
+            && record.runtime.terminal.workspace_id == reference.scope.workspace_id
+            && record.runtime.terminal.session_id == reference.scope.session_id
+            && record.runtime.terminal.worktree_id == reference.scope.worktree_id;
+        let adapter_compatible = self
+            .registry
+            .profile(&record.launch.plan.profile_id)
+            .is_ok_and(|profile| {
+                profile.revision == reference.adapter_revision
+                    && profile.capabilities.contains(&AgentCapability::Resume)
+                    && provider_matches_profile(reference.provider, &record.launch.plan.profile_id)
+            });
         if internally_compatible && adapter_compatible {
             (true, ProviderResumeReason::ExplicitResumeAvailable)
         } else {
@@ -962,16 +1120,21 @@ impl AgentRuntime {
             operation_id: operation.to_string(),
             revision: 1,
             terminal,
+            continuation: self
+                .coordinator
+                .record_for(&authorization.runtime)
+                .ok()
+                .and_then(|record| record.continuation),
+            resume_relation: None,
             completed: false,
         })
     }
 
     #[allow(clippy::too_many_lines)] // Admission atomically fences launch, caller registration, and replay state.
-    fn admit_resume(
+    fn admit_resume_exact(
         &mut self,
         operation_id: &str,
-        workspace: WorkspaceId,
-        session: SessionId,
+        target: &AgentResumeTarget,
         semantic_key: &str,
         scope: &dyn SessionScopeResolver,
     ) -> Result<AgentAdmission, ProtocolError> {
@@ -997,84 +1160,83 @@ impl AgentRuntime {
                 "agent resume admission is incomplete and cannot be spawned again",
             ));
         }
-        let resolved = scope
-            .resolve_available_scope(workspace, Some(session))
-            .map_err(map_scope_error)?;
         let records = self.coordinator.snapshot().records;
-        if records.iter().any(|record| {
-            record.runtime.session_id == Some(session) && holds_live_or_unknown_agent(record.state)
-        }) {
+        let source = records
+            .iter()
+            .find(|record| record.runtime.agent_runtime_id == target.runtime_id)
+            .ok_or_else(|| {
+                ProtocolError::new(ErrorCode::StaleTarget, "agent resume target is stale")
+            })?;
+        if source.continuation != Some(target.continuation)
+            || source.resume_source != Some(target.source)
+            || source.runtime.terminal.workspace_id != target.workspace_id
+            || source.runtime.session_id != target.session_id
+            || source.runtime.terminal.session_id != target.session_id
+            || source.runtime.terminal.worktree_id != target.worktree_id
+            || source.launch.request.scope.workspace_id != target.workspace_id
+            || source.launch.request.scope.session_id != target.session_id
+            || source.launch.request.scope.worktree_id != target.worktree_id
+            || source.launch.plan.profile_revision != target.adapter_revision
+        {
             return Err(ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "target session already has a live or ownership-unknown agent",
+                ErrorCode::StaleTarget,
+                "agent resume target fences do not match durable state",
             ));
         }
-        let candidates = records
-            .iter()
-            .filter(|record| {
-                record.runtime.session_id == Some(session)
-                    && record.runtime.terminal.workspace_id == workspace
-                    && record.provider_resume.is_some()
-                    && is_resume_source_state(record.state)
-            })
-            .collect::<Vec<_>>();
-        let source = candidates.first().ok_or_else(|| {
-            ProtocolError::new(
-                ErrorCode::Unavailable,
-                "provider resume metadata is unavailable for this session",
-            )
-        })?;
+        if !is_resume_source_state(source.state) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "agent resume source is still live or is not interrupted",
+            ));
+        }
+        if let Some(replacement_id) = source.superseded_by {
+            let replacement = records
+                .iter()
+                .find(|record| record.runtime.agent_runtime_id == replacement_id)
+                .expect("validated resume source retains its replacement relation");
+            debug_assert_eq!(replacement.resumed_from, Some(target.source));
+            debug_assert_eq!(replacement.continuation, Some(target.continuation));
+            return durable_operation_outcome(replacement);
+        }
+        let (available, reason) = self.resume_source_availability(source, &records);
+        if !available {
+            let (code, message) = match reason {
+                ProviderResumeReason::LiveOrOwnershipUnknown => (
+                    ErrorCode::OwnershipUnknown,
+                    "agent resume replacement is live or ownership is unknown",
+                ),
+                _ => (ErrorCode::Unavailable, "agent resume source is unavailable"),
+            };
+            return Err(ProtocolError::new(code, message));
+        }
+        let resolved = scope
+            .resolve_available_scope(target.workspace_id, target.session_id)
+            .map_err(map_scope_error)?;
+        if resolved.worktree_id != target.worktree_id {
+            return Err(ProtocolError::new(
+                ErrorCode::StaleTarget,
+                "agent resume worktree incarnation is stale",
+            ));
+        }
         let reference = source
             .provider_resume
             .as_ref()
-            .expect("filtered provider resume metadata")
+            .expect("available exact source has provider resume metadata")
             .clone();
         let profile_id = source.launch.plan.profile_id.clone();
-        let same_identity = candidates.iter().all(|candidate| {
-            candidate.launch.plan.profile_id == profile_id
-                && candidate.launch.plan.profile_revision == reference.adapter_revision
-                && candidate.provider_resume.as_ref().is_some_and(|other| {
-                    other.provider == reference.provider
-                        && other.native_session_id == reference.native_session_id
-                        && other.adapter_revision == reference.adapter_revision
-                        && other.scope == reference.scope
-                })
-        });
-        if !same_identity
-            || !provider_matches_profile(reference.provider, &profile_id)
-            || reference.adapter_revision != source.launch.plan.profile_revision
-            || reference.scope.workspace_id != workspace
-            || reference.scope.session_id != Some(session)
-            || reference.scope.worktree_id != resolved.worktree_id
-        {
-            return Err(ProtocolError::new(
-                ErrorCode::OwnershipUnknown,
-                "provider resume metadata is ambiguous or stale",
-            ));
-        }
-        let profile = self.registry.profile(&profile_id).map_err(|_| {
-            ProtocolError::new(ErrorCode::Unavailable, "agent adapter is unavailable")
-        })?;
-        if profile.revision != reference.adapter_revision
-            || !profile.capabilities.contains(&AgentCapability::Resume)
-        {
-            return Err(ProtocolError::new(
-                ErrorCode::Unavailable,
-                "provider resume metadata is incompatible with the current adapter",
-            ));
-        }
         let terminal = TerminalRef {
             daemon_generation: self.active_generation()?,
             terminal_id: TerminalId::new(),
-            workspace_id: workspace,
-            session_id: Some(session),
+            workspace_id: target.workspace_id,
+            session_id: target.session_id,
             worktree_id: resolved.worktree_id,
         };
-        let runtime = AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), Some(session))
-            .expect("terminal and runtime session are constructed from the same resume");
+        let runtime =
+            AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), target.session_id)
+                .expect("terminal and runtime session are constructed from the same resume");
         let fence = CompletionFence {
-            workspace_id: workspace,
-            session_id: Some(session),
+            workspace_id: target.workspace_id,
+            session_id: target.session_id,
             operation_id: operation,
             owner_daemon_generation: self.active_generation()?,
             execution_attempt: 1,
@@ -1089,16 +1251,13 @@ impl AgentRuntime {
             provider_resume: Some(reference),
             initial_prompt: None,
             scope: LaunchScope {
-                workspace_id: workspace,
-                session_id: Some(session),
+                workspace_id: target.workspace_id,
+                session_id: target.session_id,
                 worktree_id: resolved.worktree_id,
             },
             required_capabilities: [AgentCapability::McpWiring].into_iter().collect(),
         };
-        let superseded = candidates
-            .iter()
-            .map(|candidate| candidate.runtime.clone())
-            .collect::<Vec<_>>();
+        let superseded = [source.runtime.clone()];
         let authorization = RuntimeAuthorization {
             runtime,
             operation: fence,
@@ -1108,7 +1267,7 @@ impl AgentRuntime {
         let mut worker = self
             .dispatch
             .upsert_agent_by_runtime_model(
-                Some(session),
+                target.session_id,
                 profile_id,
                 source.launch.request.model.clone().unwrap_or_else(|| {
                     ModelSelector::new("default").expect("literal model selector is canonical")
@@ -1175,6 +1334,12 @@ impl AgentRuntime {
             operation_id: operation_id.to_owned(),
             revision: 1,
             terminal,
+            continuation: Some(target.continuation),
+            resume_relation: Some(AgentResumeRelation {
+                source: target.source,
+                replacement_runtime: authorization.runtime.agent_runtime_id,
+                replacement_terminal: authorization.runtime.terminal.clone(),
+            }),
             completed: false,
         })
     }
@@ -1345,6 +1510,12 @@ impl AgentRuntime {
             operation_id: operation_id.to_owned(),
             revision: 1,
             terminal,
+            continuation: self
+                .coordinator
+                .record_for(&authorization.runtime)
+                .ok()
+                .and_then(|record| record.continuation),
+            resume_relation: None,
             completed: false,
         })
     }
@@ -1806,6 +1977,55 @@ fn semantic_key(intent: &AgentLaunchIntent) -> String {
     )
 }
 
+fn resume_scope_prefix(workspace: WorkspaceId, session: Option<SessionId>) -> String {
+    format!(
+        "resume:{workspace}:{}:",
+        session.map_or_else(|| "workspace-root".to_owned(), |session| session.as_str())
+    )
+}
+
+fn resume_semantic_key(target: &AgentResumeTarget) -> String {
+    format!(
+        "{}{}:{}:{}:{}:{}",
+        resume_scope_prefix(target.workspace_id, target.session_id),
+        target.worktree_id,
+        target.continuation,
+        target.source,
+        target.runtime_id,
+        target.adapter_revision,
+    )
+}
+
+fn resume_target(record: &super::runtime::DurableRuntimeRecord) -> Option<AgentResumeTarget> {
+    Some(AgentResumeTarget {
+        continuation: record.continuation?,
+        source: record.resume_source?,
+        workspace_id: record.runtime.terminal.workspace_id,
+        session_id: record.runtime.session_id,
+        worktree_id: record.runtime.terminal.worktree_id,
+        runtime_id: record.runtime.agent_runtime_id,
+        adapter_revision: record.launch.plan.profile_revision,
+    })
+}
+
+const fn runtime_inventory_state(
+    state: super::runtime::RuntimeState,
+) -> AgentRuntimeInventoryState {
+    match state {
+        super::runtime::RuntimeState::Reserved => AgentRuntimeInventoryState::Reserved,
+        super::runtime::RuntimeState::Running => AgentRuntimeInventoryState::Live,
+        super::runtime::RuntimeState::ReconcileRequired(
+            super::runtime::ReconcileState::IdentityUnknown,
+        ) => AgentRuntimeInventoryState::Interrupted,
+        super::runtime::RuntimeState::Exited => AgentRuntimeInventoryState::Exited,
+        super::runtime::RuntimeState::Reclaimed => AgentRuntimeInventoryState::Reclaimed,
+        super::runtime::RuntimeState::SpawnFailed
+        | super::runtime::RuntimeState::ReconcileRequired(_) => {
+            AgentRuntimeInventoryState::Unavailable
+        }
+    }
+}
+
 fn provider_matches_profile(provider: ProviderKind, profile: &AgentProfileId) -> bool {
     matches!(
         (provider, profile.as_str()),
@@ -1848,16 +2068,22 @@ fn durable_operation_outcome(
 ) -> Result<AgentAdmission, ProtocolError> {
     use super::runtime::DurableOperationOutcome;
     match record.outcome {
-        DurableOperationOutcome::Accepted => Ok(AgentAdmission {
-            operation_id: record.operation.operation_id.to_string(),
-            revision: 1,
-            terminal: record.runtime.terminal.clone(),
-            completed: false,
-        }),
+        DurableOperationOutcome::Accepted | DurableOperationOutcome::ResumeSucceeded => {
+            Ok(AgentAdmission {
+                operation_id: record.operation.operation_id.to_string(),
+                revision: 1,
+                terminal: record.runtime.terminal.clone(),
+                continuation: record.continuation,
+                resume_relation: durable_resume_relation(record),
+                completed: false,
+            })
+        }
         DurableOperationOutcome::Completed => Ok(AgentAdmission {
             operation_id: record.operation.operation_id.to_string(),
             revision: 1,
             terminal: record.runtime.terminal.clone(),
+            continuation: record.continuation,
+            resume_relation: durable_resume_relation(record),
             completed: true,
         }),
         DurableOperationOutcome::SpawnUnavailable => Err(ProtocolError::new(
@@ -1873,6 +2099,16 @@ fn durable_operation_outcome(
             "agent process ownership is unknown after daemon restart",
         )),
     }
+}
+
+fn durable_resume_relation(
+    record: &super::runtime::DurableRuntimeRecord,
+) -> Option<AgentResumeRelation> {
+    Some(AgentResumeRelation {
+        source: record.resumed_from?,
+        replacement_runtime: record.runtime.agent_runtime_id,
+        replacement_terminal: record.runtime.terminal.clone(),
+    })
 }
 
 fn terminal_geometry(
@@ -2264,6 +2500,36 @@ mod tests {
         )
     }
 
+    fn restart_runtime() -> AgentRuntime {
+        AgentRuntime::with_dispatch_and_locator(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty::default(),
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+            PathExecutableLocator,
+        )
+    }
+
+    fn hydrate_restart_runtime(snapshot: RuntimeStoreSnapshot) -> AgentRuntime {
+        AgentRuntime::hydrate_with_dispatch_and_locator(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty::default(),
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+            PathExecutableLocator,
+            snapshot,
+        )
+        .unwrap()
+    }
+
     fn runtime_with_fixture(locator: FixtureLocator) -> AgentRuntime {
         AgentRuntime::with_dispatch_and_locator(
             DaemonGeneration::new(),
@@ -2424,6 +2690,25 @@ mod tests {
         );
 
         runtime.exit(&first.terminal, 0).unwrap();
+        let target = runtime
+            .inventory(workspace)
+            .resumable
+            .into_iter()
+            .find_map(|item| item.target)
+            .unwrap();
+        let mut wrong_capture_policy = runtime.coordinator.snapshot().records[0].clone();
+        wrong_capture_policy
+            .provider_resume
+            .as_mut()
+            .unwrap()
+            .provenance = ProviderCaptureProvenance::DaemonIssued;
+        assert_eq!(
+            runtime.resume_source_availability(
+                &wrong_capture_policy,
+                std::slice::from_ref(&wrong_capture_policy),
+            ),
+            (false, ProviderResumeReason::IncompatibleProviderMetadata)
+        );
         assert_eq!(
             runtime
                 .capture_codex_session(
@@ -2436,11 +2721,33 @@ mod tests {
         );
         assert_eq!(
             runtime
-                .admit_resume(
+                .resume(
                     &initial_operation.to_string(),
                     workspace,
                     session,
-                    &format!("resume:{workspace}:{session}"),
+                    &FakeScope(Ok(resolved.clone())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::IdempotencyConflict
+        );
+        assert_eq!(
+            runtime
+                .resume_exact(
+                    "not-an-operation-id",
+                    &target,
+                    &FakeScope(Ok(resolved.clone())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            runtime
+                .admit_resume_exact(
+                    &initial_operation.to_string(),
+                    &target,
+                    &resume_semantic_key(&target),
                     &FakeScope(Ok(resolved.clone())),
                 )
                 .unwrap_err()
@@ -2465,6 +2772,8 @@ mod tests {
             .unwrap()
             .clone();
         ambiguous_record.runtime.agent_runtime_id = AgentRuntimeId::new();
+        ambiguous_record.continuation = Some(AgentContinuationRef::new());
+        ambiguous_record.resume_source = Some(usagi_core::domain::id::AgentResumeSourceId::new());
         let ambiguous_terminal_id = TerminalId::new();
         ambiguous_record.runtime.terminal.terminal_id = ambiguous_terminal_id;
         ambiguous_ownership.terminal.terminal_id = ambiguous_terminal_id;
@@ -2487,6 +2796,18 @@ mod tests {
         assert_eq!(
             runtime.session_resume_status(session),
             (false, ProviderResumeReason::AmbiguousProviderMetadata)
+        );
+        assert_eq!(
+            runtime
+                .resume(
+                    &OperationId::new().to_string(),
+                    workspace,
+                    session,
+                    &FakeScope(Ok(resolved.clone())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::RevisionConflict
         );
         runtime.coordinator = original_coordinator;
 
@@ -2534,20 +2855,6 @@ mod tests {
         );
         runtime.registry = original_registry;
 
-        pty_mut(&mut runtime).spawn = Some(SpawnFailure::Definite);
-        assert_eq!(
-            runtime
-                .resume(
-                    &OperationId::new().to_string(),
-                    workspace,
-                    session,
-                    &FakeScope(Ok(resolved.clone())),
-                )
-                .unwrap_err()
-                .code,
-            ErrorCode::Unavailable
-        );
-        pty_mut(&mut runtime).spawn = None;
         assert_eq!(
             runtime
                 .resume(
@@ -2570,55 +2877,80 @@ mod tests {
                 )
                 .unwrap_err()
                 .code,
-            ErrorCode::OwnershipUnknown
+            ErrorCode::StaleTarget
         );
         let operation = OperationId::new().to_string();
         let resumed = runtime
-            .resume(
-                &operation,
-                workspace,
-                session,
-                &FakeScope(Ok(resolved.clone())),
-            )
+            .resume_exact(&operation, &target, &FakeScope(Ok(resolved.clone())))
             .unwrap();
         assert_ne!(resumed.terminal, first.terminal);
+        assert_eq!(resumed.continuation, Some(target.continuation));
+        assert_eq!(
+            resumed.resume_relation.as_ref().unwrap().source,
+            target.source
+        );
         assert_eq!(
             runtime
-                .resume(
-                    &operation,
-                    workspace,
-                    session,
-                    &FakeScope(Ok(resolved.clone())),
-                )
+                .resume_exact(&operation, &target, &FakeScope(Ok(resolved.clone())))
                 .unwrap()
                 .terminal,
             resumed.terminal
         );
+        let mut conflicting = target.clone();
+        conflicting.runtime_id = AgentRuntimeId::new();
         assert_eq!(
             runtime
-                .resume(
-                    &operation,
-                    WorkspaceId::new(),
-                    session,
-                    &FakeScope(Ok(resolved.clone())),
-                )
+                .resume_exact(&operation, &conflicting, &FakeScope(Ok(resolved.clone())))
                 .unwrap_err()
                 .code,
             ErrorCode::IdempotencyConflict
         );
+        let double_click = runtime
+            .resume_exact(
+                &OperationId::new().to_string(),
+                &target,
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap();
+        assert_eq!(double_click.terminal, resumed.terminal);
+        assert_eq!(double_click.continuation, resumed.continuation);
+        assert_eq!(double_click.resume_relation, resumed.resume_relation);
+        let inventory = runtime.inventory(workspace);
+        assert_eq!(inventory.runtimes.len(), 2);
+        assert!(
+            inventory
+                .runtimes
+                .iter()
+                .all(|item| item.continuation == target.continuation)
+        );
+        assert_eq!(
+            inventory.resumable[0].reason,
+            ProviderResumeReason::SourceAlreadySuperseded
+        );
+        assert_eq!(runtime.coordinator.snapshot().records.len(), 2);
+
+        let mut live_replacement = runtime.coordinator.snapshot();
+        for record in &mut live_replacement.records {
+            if record.runtime.agent_runtime_id == target.runtime_id {
+                record.superseded_by = None;
+            }
+            if record.resumed_from == Some(target.source) {
+                record.resumed_from = None;
+            }
+        }
+        runtime.coordinator =
+            RuntimeCoordinator::hydrate(live_replacement, 16, 64 * 1024, 64).unwrap();
         assert_eq!(
             runtime
-                .resume(
+                .resume_exact(
                     &OperationId::new().to_string(),
-                    workspace,
-                    session,
+                    &target,
                     &FakeScope(Ok(resolved)),
                 )
                 .unwrap_err()
                 .code,
-            ErrorCode::InvalidArgument
+            ErrorCode::OwnershipUnknown
         );
-        assert_eq!(runtime.coordinator.snapshot().records.len(), 3);
     }
 
     #[test]
@@ -2655,6 +2987,448 @@ mod tests {
                 .code,
             ErrorCode::Unavailable
         );
+        let item = &runtime.inventory(workspace).resumable[0];
+        assert!(item.target.is_some());
+        assert!(!item.available);
+        assert_eq!(
+            item.reason,
+            ProviderResumeReason::ProviderMetadataUnavailable
+        );
+        assert_eq!(
+            runtime
+                .resume_exact(
+                    &OperationId::new().to_string(),
+                    item.target.as_ref().unwrap(),
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::Unavailable
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // The fixture fixes root/session and mixed-provider ordering in one inventory.
+    fn exact_inventory_separates_root_sessions_and_same_scope_histories() {
+        let mut registry = claude_registry();
+        let codex = CodexAdapter::new(FakeCodexProvisioner);
+        registry
+            .register(codex.profile().clone(), Box::new(codex))
+            .unwrap();
+        let mut runtime = AgentRuntime::with_dispatch_and_locator(
+            DaemonGeneration::new(),
+            registry,
+            Store::default(),
+            Journal::default(),
+            Pty::default(),
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+            PathExecutableLocator,
+        );
+        let workspace = WorkspaceId::new();
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        let root_scope = scope();
+        let ambiguous_scope = scope();
+        let captured_codex_scope = scope();
+
+        let root = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: None,
+                    profile: Some(AgentProfileId::new("claude").unwrap()),
+                },
+                &FakeScope(Ok(root_scope.clone())),
+            )
+            .unwrap();
+        runtime.exit(&root.terminal, 0).unwrap();
+
+        let first_a = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(session_a),
+                    profile: Some(AgentProfileId::new("claude").unwrap()),
+                },
+                &FakeScope(Ok(ambiguous_scope.clone())),
+            )
+            .unwrap();
+        runtime.exit(&first_a.terminal, 0).unwrap();
+        let second_a = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(session_a),
+                    profile: Some(AgentProfileId::new("claude").unwrap()),
+                },
+                &FakeScope(Ok(ambiguous_scope.clone())),
+            )
+            .unwrap();
+        runtime.exit(&second_a.terminal, 0).unwrap();
+
+        let codex_b = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(session_b),
+                    profile: Some(AgentProfileId::new("codex").unwrap()),
+                },
+                &FakeScope(Ok(captured_codex_scope)),
+            )
+            .unwrap();
+        let codex_b_runtime = runtime
+            .coordinator
+            .runtime_for_terminal(&codex_b.terminal)
+            .unwrap();
+        runtime
+            .capture_structured_provider_session(
+                &codex_b_runtime,
+                ProviderKind::Codex,
+                ProviderSessionId::new("inventory-codex-session").unwrap(),
+            )
+            .unwrap();
+        runtime.exit(&codex_b.terminal, 0).unwrap();
+
+        let codex_without_capture = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(session_a),
+                    profile: Some(AgentProfileId::new("codex").unwrap()),
+                },
+                &FakeScope(Ok(ambiguous_scope.clone())),
+            )
+            .unwrap();
+        runtime.exit(&codex_without_capture.terminal, 0).unwrap();
+
+        let inventory = runtime.inventory(workspace);
+        assert_eq!(inventory, runtime.inventory(workspace));
+        assert_eq!(inventory.runtimes.len(), 5);
+        assert_eq!(inventory.resumable.len(), 5);
+        assert_eq!(
+            inventory
+                .resumable
+                .iter()
+                .filter(|item| item.available)
+                .count(),
+            4
+        );
+        assert!(inventory.resumable.iter().any(|item| {
+            item.target
+                .as_ref()
+                .is_some_and(|target| target.session_id.is_none())
+        }));
+        assert_eq!(
+            inventory
+                .resumable
+                .iter()
+                .filter(|item| {
+                    item.target
+                        .as_ref()
+                        .is_some_and(|target| target.session_id == Some(session_a))
+                })
+                .count(),
+            3
+        );
+        let encoded = serde_json::to_string(&inventory).unwrap();
+        assert!(!encoded.contains("inventory-codex-session"));
+        assert_eq!(
+            runtime
+                .resume(
+                    &OperationId::new().to_string(),
+                    workspace,
+                    session_a,
+                    &FakeScope(Ok(ambiguous_scope.clone())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::RevisionConflict
+        );
+
+        let selected = inventory
+            .resumable
+            .iter()
+            .find_map(|item| {
+                item.target.as_ref().filter(|target| {
+                    target.runtime_id
+                        == runtime
+                            .coordinator
+                            .runtime_for_terminal(&first_a.terminal)
+                            .unwrap()
+                            .agent_runtime_id
+                })
+            })
+            .unwrap()
+            .clone();
+        let untouched_runtime = runtime
+            .coordinator
+            .runtime_for_terminal(&second_a.terminal)
+            .unwrap();
+        let resumed = runtime
+            .resume_exact(
+                &OperationId::new().to_string(),
+                &selected,
+                &FakeScope(Ok(ambiguous_scope)),
+            )
+            .unwrap();
+        assert_eq!(resumed.continuation, Some(selected.continuation));
+        assert!(
+            runtime
+                .coordinator
+                .record_for(&untouched_runtime)
+                .unwrap()
+                .superseded_by
+                .is_none()
+        );
+
+        let root_target = inventory
+            .resumable
+            .iter()
+            .filter(|item| item.available)
+            .find_map(|item| {
+                item.target
+                    .as_ref()
+                    .filter(|target| target.session_id.is_none())
+            })
+            .unwrap();
+        let root_resumed = runtime
+            .resume_exact(
+                &OperationId::new().to_string(),
+                root_target,
+                &FakeScope(Ok(root_scope)),
+            )
+            .unwrap();
+        assert!(root_resumed.terminal.session_id.is_none());
+    }
+
+    #[test]
+    fn exact_resume_rejects_every_public_fence_before_spawn() {
+        let mut runtime = runtime();
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let resolved = scope();
+        let launched = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(session),
+                    profile: Some(AgentProfileId::new("claude").unwrap()),
+                },
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap();
+        let live_runtime = runtime
+            .coordinator
+            .runtime_for_terminal(&launched.terminal)
+            .unwrap();
+        let live_target =
+            resume_target(runtime.coordinator.record_for(&live_runtime).unwrap()).unwrap();
+        assert_eq!(
+            runtime
+                .resume_exact(
+                    &OperationId::new().to_string(),
+                    &live_target,
+                    &FakeScope(Ok(resolved.clone())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        runtime.exit(&launched.terminal, 0).unwrap();
+        let target = runtime.inventory(workspace).resumable[0]
+            .target
+            .clone()
+            .unwrap();
+
+        let mut stale_targets = Vec::new();
+        let mut stale = target.clone();
+        stale.continuation = AgentContinuationRef::new();
+        stale_targets.push(stale);
+        let mut stale = target.clone();
+        stale.source = usagi_core::domain::id::AgentResumeSourceId::new();
+        stale_targets.push(stale);
+        let mut stale = target.clone();
+        stale.workspace_id = WorkspaceId::new();
+        stale_targets.push(stale);
+        let mut stale = target.clone();
+        stale.session_id = None;
+        stale_targets.push(stale);
+        let mut stale = target.clone();
+        stale.worktree_id = WorktreeId::new();
+        stale_targets.push(stale);
+        let mut stale = target.clone();
+        stale.runtime_id = AgentRuntimeId::new();
+        stale_targets.push(stale);
+        let mut stale = target.clone();
+        stale.adapter_revision += 1;
+        stale_targets.push(stale);
+        for stale in stale_targets {
+            assert_eq!(
+                runtime
+                    .resume_exact(
+                        &OperationId::new().to_string(),
+                        &stale,
+                        &FakeScope(Ok(resolved.clone())),
+                    )
+                    .unwrap_err()
+                    .code,
+                ErrorCode::StaleTarget
+            );
+        }
+        assert_eq!(
+            runtime
+                .resume_exact(
+                    &OperationId::new().to_string(),
+                    &target,
+                    &FakeScope(Err(ScopeResolveError::Unavailable)),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            runtime
+                .resume_exact(
+                    &OperationId::new().to_string(),
+                    &target,
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::StaleTarget
+        );
+        assert_eq!(runtime.coordinator.snapshot().records.len(), 1);
+    }
+
+    #[test]
+    fn exact_resume_spawn_failure_removes_only_its_ephemeral_credential() {
+        let mut runtime = runtime();
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let resolved = scope();
+        let launched = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(session),
+                    profile: Some(AgentProfileId::new("claude").unwrap()),
+                },
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap();
+        runtime.exit(&launched.terminal, 0).unwrap();
+        let target = runtime.inventory(workspace).resumable[0]
+            .target
+            .clone()
+            .unwrap();
+        let callers_before = runtime.mcp_callers.len();
+        pty_mut(&mut runtime).spawn = Some(SpawnFailure::Definite);
+        assert_eq!(
+            runtime
+                .resume_exact(
+                    &OperationId::new().to_string(),
+                    &target,
+                    &FakeScope(Ok(resolved)),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::Unavailable
+        );
+        assert_eq!(runtime.mcp_callers.len(), callers_before);
+    }
+
+    #[test]
+    fn runtime_inventory_states_and_live_fences_cover_every_durable_variant() {
+        use super::super::runtime::{ReconcileState, RuntimeState};
+
+        for (state, expected) in [
+            (RuntimeState::Reserved, AgentRuntimeInventoryState::Reserved),
+            (RuntimeState::Running, AgentRuntimeInventoryState::Live),
+            (
+                RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown),
+                AgentRuntimeInventoryState::Interrupted,
+            ),
+            (RuntimeState::Exited, AgentRuntimeInventoryState::Exited),
+            (
+                RuntimeState::Reclaimed,
+                AgentRuntimeInventoryState::Reclaimed,
+            ),
+            (
+                RuntimeState::SpawnFailed,
+                AgentRuntimeInventoryState::Unavailable,
+            ),
+            (
+                RuntimeState::ReconcileRequired(ReconcileState::OrphanRunning),
+                AgentRuntimeInventoryState::Unavailable,
+            ),
+        ] {
+            assert_eq!(runtime_inventory_state(state), expected);
+        }
+        for state in [
+            RuntimeState::Reserved,
+            RuntimeState::Running,
+            RuntimeState::ReconcileRequired(ReconcileState::OrphanRunning),
+            RuntimeState::ReconcileRequired(ReconcileState::SpawnAmbiguous),
+            RuntimeState::ReconcileRequired(ReconcileState::PersistAfterExit),
+        ] {
+            assert!(holds_live_or_unknown_agent(state));
+        }
+        assert!(!holds_live_or_unknown_agent(RuntimeState::Exited));
+        for state in [
+            RuntimeState::Exited,
+            RuntimeState::Reclaimed,
+            RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown),
+        ] {
+            assert!(is_resume_source_state(state));
+        }
+        assert!(!is_resume_source_state(RuntimeState::Running));
+    }
+
+    #[test]
+    fn schema_v3_runtime_without_public_lineage_loads_as_resume_unavailable() {
+        let mut runtime = runtime();
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let launched = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(session),
+                    profile: Some(AgentProfileId::new("claude").unwrap()),
+                },
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        runtime.exit(&launched.terminal, 0).unwrap();
+        let mut legacy = runtime.coordinator.snapshot();
+        legacy.schema_version = 3;
+        let mut partial_lineage = legacy.records[0].clone();
+        partial_lineage.continuation = Some(AgentContinuationRef::new());
+        partial_lineage.resume_source = None;
+        assert!(resume_target(&partial_lineage).is_none());
+        legacy.records[0].continuation = None;
+        legacy.records[0].resume_source = None;
+        runtime.coordinator = RuntimeCoordinator::hydrate(legacy, 16, 64 * 1024, 64).unwrap();
+
+        let inventory = runtime.inventory(workspace);
+        assert!(inventory.runtimes.is_empty());
+        assert_eq!(inventory.resumable.len(), 1);
+        assert!(inventory.resumable[0].target.is_none());
+        assert!(!inventory.resumable[0].available);
+        assert_eq!(
+            inventory.resumable[0].reason,
+            ProviderResumeReason::ProviderMetadataUnavailable
+        );
     }
 
     #[test]
@@ -2662,20 +3436,7 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let resolved = scope();
-        let make_runtime = || {
-            AgentRuntime::with_dispatch_and_locator(
-                DaemonGeneration::new(),
-                claude_registry(),
-                Store::default(),
-                Journal::default(),
-                Pty::default(),
-                AgentProfileId::new("claude").unwrap(),
-                Geometry { cols: 80, rows: 24 },
-                DispatchStore::new(tempfile::tempdir().unwrap().keep()),
-                PathExecutableLocator,
-            )
-        };
-        let mut first = make_runtime();
+        let mut first = restart_runtime();
         let initial = first
             .launch(
                 &OperationId::new().to_string(),
@@ -2691,37 +3452,37 @@ mod tests {
             .coordinator
             .runtime_for_terminal(&initial.terminal)
             .unwrap();
+        let continuation = initial.continuation.unwrap();
         let (reconciled, interrupted) = first
             .coordinator
             .snapshot()
             .reconcile_after_daemon_restart();
         assert_eq!(interrupted, 1);
 
-        let mut second = AgentRuntime::hydrate_with_dispatch_and_locator(
-            DaemonGeneration::new(),
-            claude_registry(),
-            Store::default(),
-            Journal::default(),
-            Pty::default(),
-            AgentProfileId::new("claude").unwrap(),
-            Geometry { cols: 80, rows: 24 },
-            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
-            PathExecutableLocator,
-            reconciled,
-        )
-        .unwrap();
+        let mut second = hydrate_restart_runtime(reconciled);
         assert_eq!(second.session_phase(session), "interrupted");
         assert_eq!(second.coordinator.occupied_slots(), 1);
 
+        let target = second.inventory(workspace).resumable[0]
+            .target
+            .clone()
+            .unwrap();
+        assert_eq!(target.continuation, continuation);
+        let resume_operation = OperationId::new().to_string();
         let resumed = second
             .resume(
-                &OperationId::new().to_string(),
+                &resume_operation,
                 workspace,
                 session,
-                &FakeScope(Ok(resolved)),
+                &FakeScope(Ok(resolved.clone())),
             )
             .unwrap();
         assert_ne!(resumed.terminal, initial.terminal);
+        assert_eq!(resumed.continuation, Some(continuation));
+        assert_eq!(
+            resumed.resume_relation.as_ref().unwrap().source,
+            target.source
+        );
         assert_eq!(second.coordinator.occupied_slots(), 1);
         let superseded = second.coordinator.record_for(&initial_runtime).unwrap();
         assert_eq!(
@@ -2736,10 +3497,43 @@ mod tests {
                 .last_known_status,
             ProviderResumeStatus::Exited
         );
+        assert_eq!(
+            superseded.superseded_by,
+            resumed
+                .resume_relation
+                .as_ref()
+                .map(|relation| relation.replacement_runtime)
+        );
 
-        second.exit(&resumed.terminal, 0).unwrap();
-        assert_eq!(second.coordinator.occupied_slots(), 0);
-        assert_eq!(second.session_phase(session), "ended");
+        let (reconciled_again, interrupted_again) = second
+            .coordinator
+            .snapshot()
+            .reconcile_after_daemon_restart();
+        assert_eq!(interrupted_again, 1);
+        let mut third = hydrate_restart_runtime(reconciled_again);
+        let replay = third
+            .resume(
+                &resume_operation,
+                workspace,
+                session,
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap();
+        assert_eq!(replay.terminal, resumed.terminal);
+        assert_eq!(replay.continuation, Some(continuation));
+        assert_eq!(replay.resume_relation, resumed.resume_relation);
+        let double_click = third
+            .resume_exact(
+                &OperationId::new().to_string(),
+                &target,
+                &FakeScope(Ok(resolved)),
+            )
+            .unwrap();
+        assert_eq!(double_click.terminal, resumed.terminal);
+        assert_eq!(double_click.resume_relation, resumed.resume_relation);
+        assert_eq!(third.coordinator.snapshot().records.len(), 2);
+
+        assert_eq!(third.session_phase(session), "interrupted");
     }
 
     #[test]

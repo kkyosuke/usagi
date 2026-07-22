@@ -11,6 +11,8 @@ use usagi_core::usecase::client::{DispatchToolAction, SessionAction, SupervisorT
 pub enum ToolRoute {
     Store,
     Session(SessionAction),
+    AgentInventory,
+    AgentResume,
     Dispatch(DispatchToolAction),
     Supervisor(SupervisorToolAction),
     Unavailable(&'static str),

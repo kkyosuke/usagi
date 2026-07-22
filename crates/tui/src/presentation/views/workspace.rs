@@ -1443,6 +1443,7 @@ fn resume_label(projection: ProviderResumeProjection) -> Option<&'static str> {
             ProviderResumeReason::LiveOrOwnershipUnknown => {
                 "interrupted · resume ownership unknown"
             }
+            ProviderResumeReason::SourceAlreadySuperseded => "interrupted · already resumed",
         }
     })
 }
@@ -1918,6 +1919,10 @@ mod tests {
             (
                 ProviderResumeReason::LiveOrOwnershipUnknown,
                 "interrupted · resume ownership unknown",
+            ),
+            (
+                ProviderResumeReason::SourceAlreadySuperseded,
+                "interrupted · already resumed",
             ),
             (
                 ProviderResumeReason::ExplicitResumeAvailable,

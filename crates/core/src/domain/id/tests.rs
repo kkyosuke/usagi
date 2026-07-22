@@ -1,8 +1,8 @@
 use super::{
-    AgentRuntimeId, AgentRuntimeRef, ClientId, CompletionFence, ConnectionId, DaemonGeneration,
-    IdParseError, LegacyIdentityError, OperationId, ProtocolVersion, ProtocolVersionError,
-    RequestId, ScopeError, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
-    migrate_identity,
+    AgentContinuationRef, AgentResumeSourceId, AgentRuntimeId, AgentRuntimeRef, ClientId,
+    CompletionFence, ConnectionId, DaemonGeneration, IdParseError, LegacyIdentityError,
+    OperationId, ProtocolVersion, ProtocolVersionError, RequestId, ScopeError, SessionId,
+    TerminalId, TerminalRef, WorkspaceId, WorktreeId, migrate_identity,
 };
 
 fn terminal(session_id: Option<SessionId>) -> TerminalRef {
@@ -23,6 +23,8 @@ fn resource_ids_round_trip_through_canonical_text_and_serde() {
         WorktreeId::new().as_str(),
         TerminalId::new().as_str(),
         AgentRuntimeId::new().as_str(),
+        AgentContinuationRef::new().as_str(),
+        AgentResumeSourceId::new().as_str(),
         ClientId::new().as_str(),
         ConnectionId::new().as_str(),
         RequestId::new().as_str(),

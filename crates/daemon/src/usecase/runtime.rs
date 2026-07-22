@@ -46,6 +46,20 @@ pub struct DurableRuntimeRecord {
     /// for which no documented structured capture channel was available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_resume: Option<ProviderResumeRef>,
+    /// Daemon-issued public lineage identity. Legacy records omit it and remain
+    /// visible but are never exact-resume targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<usagi_core::domain::id::AgentContinuationRef>,
+    /// Opaque public identity of this runtime as a future resume source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_source: Option<usagi_core::domain::id::AgentResumeSourceId>,
+    /// Source used to create this replacement runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_from: Option<usagi_core::domain::id::AgentResumeSourceId>,
+    /// Replacement which consumed this exact source. This fence prevents a
+    /// second operation from spawning the same provider conversation again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<usagi_core::domain::id::AgentRuntimeId>,
     /// Canonical caller intent used to reject operation-id reuse after restart.
     /// Legacy snapshots omit it and are therefore replayed only as a safe,
     /// non-spawnable failure.
@@ -72,13 +86,17 @@ pub enum CredentialProvenance {
 pub enum DurableOperationOutcome {
     #[default]
     Accepted,
+    /// A resume replacement was spawned and durably fenced. Its source relation
+    /// remains replayable even if a later daemon no longer owns the PTY.
+    ResumeSucceeded,
     Completed,
     SpawnUnavailable,
     ExitUnavailable,
     OwnershipUnknown,
 }
 
-const RUNTIME_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+const GENERATION_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+const RUNTIME_SNAPSHOT_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -123,7 +141,9 @@ impl RuntimeStoreSnapshot {
                 RuntimeState::Reserved | RuntimeState::Running | RuntimeState::ReconcileRequired(_)
             ) {
                 record.state = RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown);
-                record.outcome = DurableOperationOutcome::OwnershipUnknown;
+                if record.outcome != DurableOperationOutcome::ResumeSucceeded {
+                    record.outcome = DurableOperationOutcome::OwnershipUnknown;
+                }
                 if let Some(provider) = &mut record.provider_resume {
                     provider.last_known_status = ProviderResumeStatus::Interrupted;
                     provider.last_known_phase = Some(ProviderResumePhase::Interrupted);
@@ -161,7 +181,10 @@ impl RuntimeStoreSnapshot {
     }
 
     pub fn validate_schema(&self) -> Result<(), RuntimeSnapshotError> {
-        if matches!(self.schema_version, 1 | 2 | RUNTIME_SNAPSHOT_SCHEMA_VERSION) {
+        if matches!(
+            self.schema_version,
+            1 | 2 | 3 | RUNTIME_SNAPSHOT_SCHEMA_VERSION
+        ) {
             Ok(())
         } else {
             Err(RuntimeSnapshotError::UnknownSchema(self.schema_version))
@@ -172,7 +195,7 @@ impl RuntimeStoreSnapshot {
     /// allowed to normalize either half. Legacy v1/v2 input has no binding and
     /// follows the conservative migration above.
     pub fn validate_ownership(&self) -> Result<(), RuntimeSnapshotError> {
-        if self.schema_version < RUNTIME_SNAPSHOT_SCHEMA_VERSION {
+        if self.schema_version < GENERATION_SNAPSHOT_SCHEMA_VERSION {
             return Ok(());
         }
         GenerationCoordinator::restore(self.generation.clone(), DEFAULT_GENERATION_LIMIT)
@@ -197,6 +220,8 @@ pub enum RuntimeSnapshotError {
     UnknownSchema(u32),
     DuplicateRuntime,
     DuplicateOperation,
+    DuplicateResumeSource,
+    ResumeRelation,
     ScopeMismatch,
     DispatchReconcile,
     Generation,
@@ -537,7 +562,12 @@ impl RuntimeCoordinator {
         if self.records.contains_key(&key) {
             return Err(RuntimeError::RuntimeAlreadyExists);
         }
+        if superseded.len() > 1 {
+            return Err(RuntimeError::ProviderResumeMismatch);
+        }
         let mut superseded_keys = BTreeSet::new();
+        let mut continuation = None;
+        let mut resumed_from = None;
         for source in superseded {
             let record = self.record(source)?;
             if !matches!(
@@ -548,8 +578,19 @@ impl RuntimeCoordinator {
             ) {
                 return Err(RuntimeError::ProviderResumeMismatch);
             }
+            if record.superseded_by.is_some() {
+                return Err(RuntimeError::ProviderResumeMismatch);
+            }
+            continuation = record.continuation;
+            resumed_from = record.resume_source;
+            if continuation.is_none() || resumed_from.is_none() {
+                return Err(RuntimeError::ProviderResumeMismatch);
+            }
             superseded_keys.insert(source.agent_runtime_id.as_str());
         }
+        let continuation =
+            continuation.unwrap_or_else(usagi_core::domain::id::AgentContinuationRef::new);
+        let resume_source = usagi_core::domain::id::AgentResumeSourceId::new();
         let released_slots = superseded_keys
             .iter()
             .filter(|source| {
@@ -589,6 +630,7 @@ impl RuntimeCoordinator {
                 .records
                 .get_mut(&source)
                 .expect("validated resume source remains present");
+            record.superseded_by = Some(runtime.agent_runtime_id);
             if record.state == RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown) {
                 record.state = RuntimeState::Reclaimed;
                 if let Some(provider) = &mut record.provider_resume {
@@ -606,6 +648,10 @@ impl RuntimeCoordinator {
                 state: RuntimeState::Reserved,
                 process: None,
                 provider_resume,
+                continuation: Some(continuation),
+                resume_source: Some(resume_source),
+                resumed_from,
+                superseded_by: None,
                 semantic_key: Some(semantic_key),
                 outcome: DurableOperationOutcome::Accepted,
                 credential_provenance,
@@ -635,6 +681,9 @@ impl RuntimeCoordinator {
                 let record = self.records.get_mut(&key).expect("inserted");
                 record.process = Some(process);
                 record.state = RuntimeState::Running;
+                if record.resumed_from.is_some() {
+                    record.outcome = DurableOperationOutcome::ResumeSucceeded;
+                }
                 if self.persist(store).is_err() {
                     return Err(self.compensate_spawn(&runtime, store, spawner));
                 }
@@ -1075,6 +1124,7 @@ fn hydrated_records(
     snapshot.validate_schema()?;
     let mut records = BTreeMap::new();
     let mut operations = std::collections::BTreeSet::new();
+    let mut resume_sources = std::collections::BTreeSet::new();
     for record in snapshot.records {
         if record.runtime.terminal.session_id != record.runtime.session_id
             || record.runtime.session_id != record.operation.session_id
@@ -1086,11 +1136,45 @@ fn hydrated_records(
         if !operations.insert(record.operation.operation_id) {
             return Err(RuntimeSnapshotError::DuplicateOperation);
         }
+        if record
+            .resume_source
+            .is_some_and(|source| !resume_sources.insert(source))
+        {
+            return Err(RuntimeSnapshotError::DuplicateResumeSource);
+        }
         if records
             .insert(record.runtime.agent_runtime_id.as_str(), record)
             .is_some()
         {
             return Err(RuntimeSnapshotError::DuplicateRuntime);
+        }
+    }
+    for record in records.values() {
+        if let Some(source_id) = record.resumed_from {
+            let Some(source) = records
+                .values()
+                .find(|candidate| candidate.resume_source == Some(source_id))
+            else {
+                return Err(RuntimeSnapshotError::ResumeRelation);
+            };
+            if source.superseded_by != Some(record.runtime.agent_runtime_id)
+                || source.continuation != record.continuation
+            {
+                return Err(RuntimeSnapshotError::ResumeRelation);
+            }
+        }
+        if let Some(replacement_id) = record.superseded_by {
+            let Some(replacement) = records
+                .values()
+                .find(|candidate| candidate.runtime.agent_runtime_id == replacement_id)
+            else {
+                return Err(RuntimeSnapshotError::ResumeRelation);
+            };
+            if replacement.resumed_from != record.resume_source
+                || replacement.continuation != record.continuation
+            {
+                return Err(RuntimeSnapshotError::ResumeRelation);
+            }
         }
     }
     Ok(records)
@@ -1266,6 +1350,10 @@ mod tests {
                     state: RuntimeState::Running,
                     process: Some(process()),
                     provider_resume: None,
+                    continuation: None,
+                    resume_source: None,
+                    resumed_from: None,
+                    superseded_by: None,
                     semantic_key: Some("first".into()),
                     outcome: DurableOperationOutcome::Accepted,
                     credential_provenance: Some(CredentialProvenance::DaemonMintedEphemeral),
@@ -1277,6 +1365,10 @@ mod tests {
                     state: RuntimeState::Exited,
                     process: Some(process()),
                     provider_resume: None,
+                    continuation: None,
+                    resume_source: None,
+                    resumed_from: None,
+                    superseded_by: None,
                     semantic_key: Some("second".into()),
                     outcome: DurableOperationOutcome::Completed,
                     credential_provenance: Some(CredentialProvenance::DaemonMintedEphemeral),
@@ -1296,6 +1388,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One source fixture exercises every pre-reservation resume lineage fence.
     fn resume_rejects_a_live_superseded_runtime_before_reserving_a_replacement() {
         let request = request();
         let (source, source_fence) = refs(&request);
@@ -1316,6 +1409,64 @@ mod tests {
         assert_eq!(
             coordinator.resume_with_semantic(
                 &request,
+                replacement.clone(),
+                replacement_fence.clone(),
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver::default(),
+                &mut store,
+                &mut spawner,
+                None,
+                "resume".into(),
+                std::slice::from_ref(&source),
+            ),
+            Err(RuntimeError::ProviderResumeMismatch)
+        );
+        assert_eq!(coordinator.snapshot().records.len(), 1);
+        coordinator.exit(&source, 0, &mut store).unwrap();
+        assert_eq!(
+            coordinator.resume_with_semantic(
+                &request,
+                replacement.clone(),
+                replacement_fence.clone(),
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver::default(),
+                &mut store,
+                &mut spawner,
+                None,
+                "multiple-sources".into(),
+                &[source.clone(), source.clone()],
+            ),
+            Err(RuntimeError::ProviderResumeMismatch)
+        );
+        coordinator
+            .records
+            .get_mut(&source.agent_runtime_id.as_str())
+            .unwrap()
+            .superseded_by = Some(AgentRuntimeId::new());
+        assert_eq!(
+            coordinator.resume_with_semantic(
+                &request,
+                replacement.clone(),
+                replacement_fence.clone(),
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver::default(),
+                &mut store,
+                &mut spawner,
+                None,
+                "already-superseded".into(),
+                std::slice::from_ref(&source),
+            ),
+            Err(RuntimeError::ProviderResumeMismatch)
+        );
+        let source_record = coordinator
+            .records
+            .get_mut(&source.agent_runtime_id.as_str())
+            .unwrap();
+        source_record.superseded_by = None;
+        source_record.continuation = None;
+        assert_eq!(
+            coordinator.resume_with_semantic(
+                &request,
                 replacement,
                 replacement_fence,
                 Geometry { cols: 80, rows: 24 },
@@ -1323,12 +1474,11 @@ mod tests {
                 &mut store,
                 &mut spawner,
                 None,
-                "resume".into(),
+                "missing-lineage".into(),
                 &[source],
             ),
             Err(RuntimeError::ProviderResumeMismatch)
         );
-        assert_eq!(coordinator.snapshot().records.len(), 1);
     }
 
     #[test]
@@ -1432,6 +1582,10 @@ mod tests {
             state: RuntimeState::Exited,
             process: Some(process()),
             provider_resume: None,
+            continuation: None,
+            resume_source: None,
+            resumed_from: None,
+            superseded_by: None,
             semantic_key: Some("intent".into()),
             outcome: DurableOperationOutcome::Completed,
             credential_provenance: Some(CredentialProvenance::DaemonMintedEphemeral),
@@ -1486,6 +1640,87 @@ mod tests {
             })
             .unwrap_err(),
             RuntimeSnapshotError::DuplicateOperation
+        );
+
+        let continuation = usagi_core::domain::id::AgentContinuationRef::new();
+        let source_id = usagi_core::domain::id::AgentResumeSourceId::new();
+        let mut lineage_source = record.clone();
+        lineage_source.continuation = Some(continuation);
+        lineage_source.resume_source = Some(source_id);
+        let (replacement_runtime, replacement_operation) = refs(&request);
+        let mut replacement = DurableRuntimeRecord {
+            runtime: replacement_runtime,
+            operation: replacement_operation,
+            ..record.clone()
+        };
+        replacement.continuation = Some(continuation);
+        replacement.resume_source = Some(usagi_core::domain::id::AgentResumeSourceId::new());
+        replacement.resumed_from = Some(source_id);
+        lineage_source.superseded_by = Some(replacement.runtime.agent_runtime_id);
+        assert_eq!(
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![lineage_source.clone(), replacement.clone()],
+                generation: GenerationSnapshot::default(),
+            })
+            .unwrap()
+            .len(),
+            2
+        );
+        let mut missing_source_backref = lineage_source.clone();
+        missing_source_backref.superseded_by = None;
+        assert_eq!(
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![missing_source_backref, replacement.clone()],
+                generation: GenerationSnapshot::default(),
+            })
+            .unwrap_err(),
+            RuntimeSnapshotError::ResumeRelation
+        );
+        let mut unknown_replacement = lineage_source.clone();
+        unknown_replacement.superseded_by = Some(AgentRuntimeId::new());
+        assert_eq!(
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![unknown_replacement],
+                generation: GenerationSnapshot::default(),
+            })
+            .unwrap_err(),
+            RuntimeSnapshotError::ResumeRelation
+        );
+        let mut missing_replacement_backref = replacement.clone();
+        missing_replacement_backref.resumed_from = None;
+        assert_eq!(
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![lineage_source.clone(), missing_replacement_backref],
+                generation: GenerationSnapshot::default(),
+            })
+            .unwrap_err(),
+            RuntimeSnapshotError::ResumeRelation
+        );
+        let mut duplicate_source = replacement.clone();
+        duplicate_source.resume_source = Some(source_id);
+        assert_eq!(
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![lineage_source.clone(), duplicate_source],
+                generation: GenerationSnapshot::default(),
+            })
+            .unwrap_err(),
+            RuntimeSnapshotError::DuplicateResumeSource
+        );
+        let mut broken_relation = replacement;
+        broken_relation.resumed_from = Some(usagi_core::domain::id::AgentResumeSourceId::new());
+        assert_eq!(
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![broken_relation],
+                generation: GenerationSnapshot::default(),
+            })
+            .unwrap_err(),
+            RuntimeSnapshotError::ResumeRelation
         );
 
         let mut legacy = record;
@@ -1559,6 +1794,7 @@ mod tests {
         let launch = Resolver::default().resolve(&request).unwrap().snapshot;
         for outcome in [
             DurableOperationOutcome::Accepted,
+            DurableOperationOutcome::ResumeSucceeded,
             DurableOperationOutcome::Completed,
             DurableOperationOutcome::SpawnUnavailable,
             DurableOperationOutcome::ExitUnavailable,
@@ -1573,6 +1809,10 @@ mod tests {
                     state: RuntimeState::Exited,
                     process: Some(process()),
                     provider_resume: None,
+                    continuation: None,
+                    resume_source: None,
+                    resumed_from: None,
+                    superseded_by: None,
                     semantic_key: Some("intent".into()),
                     outcome,
                     credential_provenance: Some(CredentialProvenance::DaemonMintedEphemeral),
