@@ -84,10 +84,17 @@ fn wait_for_owner_cleanup<F: RecordFile, P: LivenessProbe, K: Sleeper>(
         match store.load()? {
             Some(current) if current == *expected => {
                 if !probe.is_alive(expected.pid) {
-                    return Err(io::Error::other(format!(
-                        "daemon {} exited before endpoint cleanup completed",
-                        expected.pid
-                    )));
+                    // The owner may retire, clear, and exit between our record
+                    // read and liveness probe. Recheck the completion fence so
+                    // a successful cleanup in that window is not reported as
+                    // an incomplete shutdown.
+                    return match store.load()? {
+                        Some(current) if current == *expected => Err(io::Error::other(format!(
+                            "daemon {} exited before endpoint cleanup completed",
+                            expected.pid
+                        ))),
+                        Some(_) | None => Ok(()),
+                    };
                 }
             }
             Some(_) | None => return Ok(()),
@@ -170,6 +177,25 @@ mod tests {
             let alive = self.calls.get() == 0;
             self.calls.set(self.calls.get() + 1);
             alive
+        }
+    }
+
+    struct CleanupWhileBecomingGoneProbe<'a> {
+        store: &'a DaemonRecordStore<InMemoryRecordFile>,
+        expected: &'a DaemonRecord,
+        calls: Cell<u8>,
+    }
+
+    impl LivenessProbe for CleanupWhileBecomingGoneProbe<'_> {
+        fn is_alive(&self, _pid: u32) -> bool {
+            let calls = self.calls.get();
+            self.calls.set(calls + 1);
+            if calls == 0 {
+                true
+            } else {
+                assert!(self.store.clear_if(self.expected).unwrap());
+                false
+            }
         }
     }
 
@@ -344,6 +370,32 @@ mod tests {
                 .contains("before endpoint cleanup completed")
         );
         assert_eq!(store.load().unwrap(), Some(record));
+    }
+
+    #[test]
+    fn owner_cleanup_between_record_and_liveness_checks_is_successful() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let record = DaemonRecord::new(4321);
+        store.save(&record).unwrap();
+        let probe = CleanupWhileBecomingGoneProbe {
+            store: &store,
+            expected: &record,
+            calls: Cell::new(0),
+        };
+
+        assert_eq!(
+            stop(
+                &store,
+                &probe,
+                &RecordingTerminator::default(),
+                &NoopSleeper,
+                &info(),
+            )
+            .unwrap(),
+            "usagi v0.1.0: daemon stopped (pid 4321)"
+        );
+        assert_eq!(probe.calls.get(), 2);
+        assert_eq!(store.load().unwrap(), None);
     }
 
     #[test]
