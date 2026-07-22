@@ -704,6 +704,36 @@ mod tests {
     }
 
     #[test]
+    fn global_chevrons_align_with_the_heading_without_moving_controls() {
+        let mut port = FakeSettingsPort::default();
+        let mut config = Config::load(&mut port);
+        let plain = render(24, 80, &config)
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>();
+        let heading = plain.iter().find(|line| line.contains("Global")).unwrap();
+        let theme = plain.iter().find(|line| line.contains("Theme")).unwrap();
+        let chevron_column = heading.find("Global").unwrap() + "Globa".len();
+
+        assert_eq!(theme.find('›'), Some(chevron_column));
+        assert_eq!(display_width(&theme[..theme.find('<').unwrap()]), 43);
+
+        for _ in 0..5 {
+            config.next_field();
+        }
+        let save_frame = render(24, 80, &config)
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>();
+        let save = save_frame
+            .iter()
+            .find(|line| line.contains("[ Save ]"))
+            .unwrap();
+        assert_eq!(save.find('›'), Some(chevron_column));
+        assert_eq!(display_width(&save[..save.find('[').unwrap()]), 38);
+    }
+
+    #[test]
     fn workspace_entry_starts_on_agent_and_hides_global_only_settings() {
         let mut port = FakeSettingsPort {
             global: Settings {

@@ -1,12 +1,17 @@
 //! A compact selectable value row shared by form-like views.
 
 use crate::presentation::theme::{Role, Style};
-use crate::presentation::widgets::modal;
+use crate::presentation::widgets::{display_width, modal};
 
 /// Fixed label column used by Config selects so their value controls align.
 const LABEL_WIDTH: usize = 13;
 /// Fixed value column so changing `dark` to `light` does not move a centred row.
 const VALUE_WIDTH: usize = 6;
+/// Shared visible width keeps every Config chevron on one vertical rail.
+const ROW_WIDTH: usize = 26;
+/// Preserve the existing centred position of the action button while its
+/// chevron moves onto the same rail as the select rows.
+const ACTION_BUTTON_OFFSET: usize = 11;
 
 /// Render a labelled select row. The selected value is bracketed so a static
 /// frame remains understandable without colour. Focus uses the accent colour,
@@ -28,7 +33,7 @@ pub fn render(label: &str, value: &str, focused: bool, changed: bool) -> String 
     };
     let label = style.paint(&format!("{label:<LABEL_WIDTH$}"));
     let control = style.paint(&format!("< {value:<VALUE_WIDTH$} >"));
-    format!("{marker} {changed_marker} {label}{control}")
+    format!("{marker}{changed_marker} {label}{control}")
 }
 
 /// Render an unavailable select value as a non-focusable, dimmed row.
@@ -48,12 +53,19 @@ pub fn action(label: &str, focused: bool, enabled: bool) -> String {
     } else {
         Style::new().dim()
     };
-    format!("{marker}   {}", style.paint(&format!("[ {label} ]")))
+    let mut row = format!(
+        "{marker}{}{}",
+        " ".repeat(ACTION_BUTTON_OFFSET - 1),
+        style.paint(&format!("[ {label} ]"))
+    );
+    row.push_str(&" ".repeat(ROW_WIDTH.saturating_sub(display_width(&row))));
+    row
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{action, disabled, render};
+    use super::{ROW_WIDTH, action, disabled, render};
+    use crate::presentation::widgets::display_width;
 
     #[test]
     fn select_and_action_expose_focus_change_and_enabled_state() {
@@ -64,6 +76,11 @@ mod tests {
         assert!(action("Save", true, true).contains("\u{1b}[1;32m[ Save ]"));
         assert!(action("Save", false, false).contains("[ Save ]"));
         assert!(disabled("Agent model", "none").contains("\u{1b}[2m"));
+        assert_eq!(
+            display_width(&render("Theme", "dark", true, false)),
+            ROW_WIDTH
+        );
+        assert_eq!(display_width(&action("Save", true, true)), ROW_WIDTH);
     }
 
     #[test]
