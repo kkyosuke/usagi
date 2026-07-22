@@ -3622,7 +3622,7 @@ fn open_private_lock(
         options.open(path)
     };
 
-    let (file, _created) = match open(true) {
+    let (file, created) = match open(true) {
         Ok(file) => (file, true),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => match open(false) {
             Ok(file) => (file, false),
@@ -3649,8 +3649,10 @@ fn open_private_lock(
         Err(error) => return Err(error),
     };
 
+    #[cfg(not(test))]
+    let _ = created;
     #[cfg(test)]
-    if _created && take_private_lock_create_failpoint(path) {
+    if created && take_private_lock_create_failpoint(path) {
         return Err(std::io::Error::other(format!(
             "injected {label} failure after create_new"
         )));
@@ -4402,7 +4404,7 @@ pub(crate) fn client(
 /// reused, and this path never signals a process. Future exact identity fields
 /// added by #514 remain part of the whole-record equality fence below.
 fn recover_stale_client_endpoint(data_dir: &Path) -> std::io::Result<bootstrap::StaleRecovery> {
-    recover_stale_client_endpoint_with(data_dir, |lock| lock.acquire(), || {})
+    recover_stale_client_endpoint_with(data_dir, InstanceLock::acquire, || {})
 }
 
 fn recover_stale_client_endpoint_with(
@@ -5384,11 +5386,9 @@ mod tests {
         store.save(&old).unwrap();
 
         assert_eq!(
-            recover_stale_client_endpoint_with(
-                data,
-                |lock| lock.acquire(),
-                || store.save(&replacement).unwrap(),
-            )
+            recover_stale_client_endpoint_with(data, InstanceLock::acquire, || {
+                store.save(&replacement).unwrap();
+            })
             .unwrap(),
             bootstrap::StaleRecovery::NotProven
         );

@@ -1384,7 +1384,12 @@ fn remove_unidentified_owned_socket_if_present(
     fs::remove_file(path)
 }
 
-#[allow(clippy::cast_sign_loss, clippy::unnecessary_cast)]
+// libc's stat field widths differ between supported Unix targets.
+#[allow(
+    clippy::cast_lossless,
+    clippy::cast_sign_loss,
+    clippy::unnecessary_cast
+)]
 fn socket_identity_from_stat(metadata: &libc::stat) -> SocketIdentity {
     SocketIdentity {
         // Unix device IDs are non-negative. libc exposes dev_t as signed on
@@ -1392,7 +1397,7 @@ fn socket_identity_from_stat(metadata: &libc::stat) -> SocketIdentity {
         dev: metadata.st_dev as u64,
         ino: metadata.st_ino,
         uid: metadata.st_uid,
-        nlink: u64::from(metadata.st_nlink),
+        nlink: metadata.st_nlink as u64,
     }
 }
 
@@ -1423,15 +1428,17 @@ fn socket_stat_at(directory: &fs::File, name: &str) -> io::Result<Option<libc::s
     }
 }
 
+// libc's mode_t width differs between supported Unix targets.
+#[allow(clippy::cast_lossless, clippy::unnecessary_cast)]
 fn verify_owned_socket_stat(
     metadata: &libc::stat,
     expected: Option<SocketIdentity>,
     exact_private_mode: bool,
 ) -> io::Result<()> {
-    let mode = u32::from(metadata.st_mode);
+    let mode = metadata.st_mode as u32;
     let permissions = mode & 0o7777;
     let identity = socket_identity_from_stat(metadata);
-    if mode & u32::from(libc::S_IFMT) != u32::from(libc::S_IFSOCK)
+    if mode & libc::S_IFMT as u32 != libc::S_IFSOCK as u32
         || identity.uid != effective_uid()
         || identity.nlink != 1
         || (exact_private_mode && permissions != SOCKET_MODE)
