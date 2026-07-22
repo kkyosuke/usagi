@@ -176,23 +176,6 @@ mod tests {
         DaemonRecordStore, LivenessProbe, RecordFile, Sleeper, Terminator,
     };
 
-    struct RecordOnlyCleanup;
-
-    impl StaleDaemonCleanup for RecordOnlyCleanup {
-        fn cleanup_if(
-            &self,
-            store: &dyn DaemonRecordPort,
-            expected: &DaemonRecord,
-        ) -> std::io::Result<StaleCleanup> {
-            match store.load()? {
-                Some(current) if current == *expected && store.clear_if(expected)? => {
-                    Ok(StaleCleanup::Cleared)
-                }
-                Some(_) | None => Ok(StaleCleanup::Superseded),
-            }
-        }
-    }
-
     struct FailOnceCleanup {
         calls: Cell<u8>,
     }
@@ -220,7 +203,7 @@ mod tests {
         sleeper: &K,
         info: &AppInfo,
     ) -> std::io::Result<String> {
-        stop_with_cleanup(store, probe, terminator, sleeper, &RecordOnlyCleanup, info)
+        stop_with_cleanup(store, probe, terminator, sleeper, &NoopReady, info)
     }
 
     fn replacement_of(record: &DaemonRecord) -> DaemonRecord {

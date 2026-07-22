@@ -1861,14 +1861,13 @@ fn verify_private_chain_anchor(
     verify_close_on_exec(&directory)?;
     #[cfg(test)]
     pause_private_chain_anchor_recheck(&canonical);
-    if !path_metadata.file_type().is_symlink() {
-        let canonical_metadata = fs::symlink_metadata(&canonical)?;
-        verify_same_inode(path_metadata, &metadata, "private directory chain anchor")?;
-        verify_same_inode(
-            &canonical_metadata,
-            &metadata,
-            "private directory chain anchor",
-        )?;
+    let canonical_metadata = fs::symlink_metadata(&canonical)?;
+    for observed in (!path_metadata.file_type().is_symlink())
+        .then_some(path_metadata)
+        .into_iter()
+        .chain(std::iter::once(&canonical_metadata))
+    {
+        verify_same_inode(observed, &metadata, "private directory chain anchor")?;
     }
     Ok((canonical, anchor))
 }

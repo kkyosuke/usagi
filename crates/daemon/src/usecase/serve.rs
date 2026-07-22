@@ -405,13 +405,17 @@ mod tests {
         }
     }
 
-    struct CountingRecoveryReady {
+    struct CountingRecoveryReady<'a> {
         recoveries: Cell<u8>,
         publishes: Cell<u8>,
+        replacement: Option<(&'a DaemonRecordStore<InMemoryRecordFile>, DaemonRecord)>,
     }
-    impl DaemonReady for CountingRecoveryReady {
+    impl DaemonReady for CountingRecoveryReady<'_> {
         fn recover_stale_endpoint(&self) -> io::Result<()> {
             self.recoveries.set(self.recoveries.get() + 1);
+            if let Some((store, replacement)) = &self.replacement {
+                store.save(replacement)?;
+            }
             Ok(())
         }
 
@@ -442,30 +446,6 @@ mod tests {
             } else {
                 Ok(())
             }
-        }
-
-        fn publish(&self) -> io::Result<()> {
-            self.publishes.set(self.publishes.get() + 1);
-            Ok(())
-        }
-
-        fn quiesce(&self) -> io::Result<()> {
-            Ok(())
-        }
-
-        fn retire(&self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    struct ReplacingDuringRecoveryReady<'a> {
-        store: &'a DaemonRecordStore<InMemoryRecordFile>,
-        replacement: DaemonRecord,
-        publishes: Cell<u8>,
-    }
-    impl DaemonReady for ReplacingDuringRecoveryReady<'_> {
-        fn recover_stale_endpoint(&self) -> io::Result<()> {
-            self.store.save(&self.replacement)
         }
 
         fn publish(&self) -> io::Result<()> {
@@ -568,10 +548,10 @@ mod tests {
         let replacement = DaemonRecord::new(3333);
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         store.save(&previous).unwrap();
-        let ready = ReplacingDuringRecoveryReady {
-            store: &store,
-            replacement: replacement.clone(),
+        let ready = CountingRecoveryReady {
+            recoveries: Cell::new(0),
             publishes: Cell::new(0),
+            replacement: Some((&store, replacement.clone())),
         };
 
         let error = serve(
@@ -587,6 +567,7 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
         assert_eq!(store.load().unwrap(), Some(replacement));
+        assert_eq!(ready.recoveries.get(), 1);
         assert_eq!(ready.publishes.get(), 0);
     }
 
@@ -598,6 +579,7 @@ mod tests {
         let ready = CountingRecoveryReady {
             recoveries: Cell::new(0),
             publishes: Cell::new(0),
+            replacement: None,
         };
 
         assert!(
@@ -623,6 +605,7 @@ mod tests {
         let ready = CountingRecoveryReady {
             recoveries: Cell::new(0),
             publishes: Cell::new(0),
+            replacement: None,
         };
 
         serve(

@@ -206,25 +206,28 @@ mod tests {
         }
     }
 
+    fn lifecycle_error() -> io::Result<()> {
+        Err(io::Error::other("lifecycle action failed"))
+    }
+
+    fn recovery_error() -> io::Result<StaleRecovery> {
+        Err(io::Error::other("private cleanup detail"))
+    }
+
     #[test]
     fn reuses_a_connectable_endpoint_without_starting() {
-        let starts = Cell::new(0);
         let expected = build("current");
         let stream = connect_or_start(
             || Ok(endpoint("connected", "current")),
-            || {
-                starts.set(starts.get() + 1);
-                Ok(())
-            },
-            || Ok(()),
-            || Ok(StaleRecovery::NotProven),
+            lifecycle_error,
+            lifecycle_error,
+            recovery_error,
             &expected,
             false,
             |stream| &stream.build,
         )
         .unwrap();
         assert_eq!(stream.name, "connected");
-        assert_eq!(starts.get(), 0);
     }
 
     #[test]
@@ -246,8 +249,8 @@ mod tests {
                 starts.set(starts.get() + 1);
                 Ok(())
             },
-            || Ok(()),
-            || Ok(StaleRecovery::NotProven),
+            lifecycle_error,
+            recovery_error,
             &expected,
             false,
             |stream| &stream.build,
@@ -265,10 +268,10 @@ mod tests {
             || Err::<Endpoint, _>(io::Error::from(io::ErrorKind::NotFound)),
             || {
                 starts.set(starts.get() + 1);
-                Err(io::Error::other("start failed"))
+                lifecycle_error()
             },
-            || Ok(()),
-            || Ok(StaleRecovery::NotProven),
+            lifecycle_error,
+            recovery_error,
             &expected,
             false,
             |stream| &stream.build,
@@ -280,16 +283,12 @@ mod tests {
 
     #[test]
     fn does_not_start_when_an_existing_endpoint_is_unhealthy() {
-        let starts = Cell::new(0);
         let recoveries = Cell::new(0);
         let expected = build("current");
         let error = connect_or_start(
             || Err::<Endpoint, _>(io::Error::from(io::ErrorKind::ConnectionRefused)),
-            || {
-                starts.set(starts.get() + 1);
-                Ok(())
-            },
-            || Ok(()),
+            lifecycle_error,
+            lifecycle_error,
             || {
                 recoveries.set(recoveries.get() + 1);
                 Ok(StaleRecovery::NotProven)
@@ -300,7 +299,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, BootstrapError::Connect(_)));
-        assert_eq!(starts.get(), 0);
         assert_eq!(recoveries.get(), 1);
     }
 
@@ -324,7 +322,7 @@ mod tests {
                 starts.set(starts.get() + 1);
                 Ok(())
             },
-            || Ok(()),
+            lifecycle_error,
             || {
                 recoveries.set(recoveries.get() + 1);
                 Ok(StaleRecovery::Recovered)
@@ -342,7 +340,6 @@ mod tests {
     #[test]
     fn active_owner_is_waited_for_without_starting_a_duplicate() {
         let connects = Cell::new(0);
-        let starts = Cell::new(0);
         let expected = build("current");
         let stream = connect_or_start(
             || {
@@ -354,11 +351,8 @@ mod tests {
                     Ok(endpoint("owner", "current"))
                 }
             },
-            || {
-                starts.set(starts.get() + 1);
-                Ok(())
-            },
-            || Ok(()),
+            lifecycle_error,
+            lifecycle_error,
             || Ok(StaleRecovery::OwnerActive),
             &expected,
             false,
@@ -366,42 +360,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(stream.name, "owner");
-        assert_eq!(starts.get(), 0);
     }
 
     #[test]
     fn unsafe_locator_failure_never_attempts_stale_recovery() {
-        let recoveries = Cell::new(0);
         let expected = build("current");
         let error = connect_or_start(
             || Err::<Endpoint, _>(io::Error::from(io::ErrorKind::PermissionDenied)),
-            || Ok(()),
-            || Ok(()),
-            || {
-                recoveries.set(recoveries.get() + 1);
-                Ok(StaleRecovery::Recovered)
-            },
+            lifecycle_error,
+            lifecycle_error,
+            recovery_error,
             &expected,
             false,
             |stream| &stream.build,
         )
         .unwrap_err();
         assert!(matches!(error, BootstrapError::Connect(_)));
-        assert_eq!(recoveries.get(), 0);
     }
 
     #[test]
     fn recovery_failure_does_not_start_or_hide_its_safe_classification() {
-        let starts = Cell::new(0);
         let expected = build("current");
         let error = connect_or_start(
             || Err::<Endpoint, _>(io::Error::from(io::ErrorKind::ConnectionRefused)),
-            || {
-                starts.set(starts.get() + 1);
-                Ok(())
-            },
-            || Ok(()),
-            || Err(io::Error::other("private cleanup detail")),
+            lifecycle_error,
+            lifecycle_error,
+            recovery_error,
             &expected,
             false,
             |stream| &stream.build,
@@ -409,7 +393,6 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, BootstrapError::Recovery(_)));
         assert_eq!(error.to_string(), "daemon endpoint could not be recovered");
-        assert_eq!(starts.get(), 0);
     }
 
     #[test]
@@ -427,8 +410,8 @@ mod tests {
                 }))
             },
             || Ok(()),
-            || Ok(()),
-            || Ok(StaleRecovery::NotProven),
+            lifecycle_error,
+            recovery_error,
             &expected,
             false,
             |stream| &stream.build,
@@ -451,12 +434,12 @@ mod tests {
                     if call == 0 { "old" } else { "current" },
                 ))
             },
-            || Ok(()),
+            lifecycle_error,
             || {
                 restarts.set(restarts.get() + 1);
                 Ok(())
             },
-            || Ok(StaleRecovery::NotProven),
+            recovery_error,
             &expected,
             false,
             |stream| &stream.build,
@@ -472,12 +455,12 @@ mod tests {
         let expected = build("current");
         let stream = connect_or_start(
             || Ok(endpoint("new", "current")),
-            || Ok(()),
+            lifecycle_error,
             || {
                 restarts.set(restarts.get() + 1);
                 Ok(())
             },
-            || Ok(StaleRecovery::NotProven),
+            recovery_error,
             &expected,
             true,
             |stream| &stream.build,
@@ -492,9 +475,9 @@ mod tests {
         let expected = build("current");
         let unknown = connect_or_start(
             || Ok(endpoint("unknown", "")),
-            || Ok(()),
-            || Ok(()),
-            || Ok(StaleRecovery::NotProven),
+            lifecycle_error,
+            lifecycle_error,
+            recovery_error,
             &expected,
             false,
             |stream| &stream.build,
@@ -513,9 +496,9 @@ mod tests {
                     },
                 })
             },
-            || Ok(()),
-            || Ok(()),
-            || Ok(StaleRecovery::NotProven),
+            lifecycle_error,
+            lifecycle_error,
+            recovery_error,
             &expected,
             false,
             |stream| &stream.build,
@@ -538,8 +521,8 @@ mod tests {
                 }
             },
             || Ok(()),
-            || Ok(()),
-            || Ok(StaleRecovery::NotProven),
+            lifecycle_error,
+            recovery_error,
             &expected,
             false,
             |stream| &stream.build,
@@ -552,9 +535,9 @@ mod tests {
 
         let mismatch = connect_or_start(
             || Ok(endpoint("old", "old")),
+            lifecycle_error,
             || Ok(()),
-            || Ok(()),
-            || Ok(StaleRecovery::NotProven),
+            recovery_error,
             &expected,
             false,
             |stream| &stream.build,
