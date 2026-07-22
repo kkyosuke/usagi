@@ -203,8 +203,8 @@ issue / memory store の永続化契約は本節を正本とする。source of t
 durable source migration は行わない。
 
 `index.json` の schema version は `2` で、sorted source file name（key identity）と source
-Markdown の全 byte を長さ区切りで SHA-256 に入力した `source_fingerprint` を保持する。list / search
-は current source set を同じ方法で fingerprint し、一致した index だけを採用する。このため rename、
+Markdown の全 byte を長さ区切りで SHA-256 に入力した `source_fingerprint` を保持する。list は
+current source set を同じ方法で fingerprint し、一致した index だけを採用する。このため rename、
 同数の delete+add、mtime を保存した変更、粗い timestamp、same-size edit でも stale cache を返さない。
 version が旧版・未知版、fingerprint が欠落・形式不正・未知 algorithm、または内容が不一致なら source
 を走査して index を一度 rebuild する。rebuild は source Markdown を変更しない。
@@ -227,7 +227,7 @@ durable .derived-dirty marker
 
 source commit 前の失敗は mutation 未適用の error である。source commit 後の derived refresh
 失敗は source mutation の成功を取り消さず、`MutationOutcome` の `RebuildNeeded` として表す。
-`.derived-dirty` は git 管理外の rebuild scheduling marker であり、次の get/list または store
+`.derived-dirty` は git 管理外の rebuild scheduling marker であり、次の get/list/search または store
 reopen 後の最初の read が store lock 下で source を走査し、derived file を自己修復する。修復が
 一時的に失敗しても marker を残し、source を直接読む操作は committed state を返す。
 
@@ -239,14 +239,19 @@ create の再送は、初期 status と request fields が一致する committed
 
 issue number は番号指定 CRUD の identity である。同じ番号 prefix の source Markdown が複数ある場合、
 point get / update / delete と同番号への write は、番号と衝突した全 exact path を辞書順で保持する typed
-`AmbiguousIssueNumber` error で fail-closed になる。検査は dirty marker、source write、source remove より
-前に行うため、全 sibling と derived state は不変のまま残る。番号だけを指定する通常 CRUD は正しい sibling を
-推測せず、自動 renumber や自動削除を repair として行わない。
+`AmbiguousIssueNumber` error で fail-closed になる。point read は store lock を取得してから一意性を判定し、
+選んだ exact path の read と必要な derived repair が終わるまで同じ lock を保持する。検査は dirty marker、
+source write、source remove、derived repair より前に行うため、ambiguity error 後は全 sibling と derived state が
+不変のまま残る。filename prefix と parse 可能な frontmatter の `number` が一致しない source も typed error とし、
+point operation はどちらを正しい identity とも推測しない。自動 renumber や自動削除は repair として行わない。
 
 list / search は source set の診断面でもあるため、同番号 sibling を collapse せず parse 可能な Markdown ごとの
 row として exact filename 付きで列挙し続ける。parse 不能な sibling も filename prefix により衝突数へ含めるので、
 残った parse 可能な search row は `ambiguous: true` と `ready: false` になり、重複番号を参照する依存もその番号を
-`unmet_deps` に残す。全文 query は番号集合でなく source ごとに照合する。重複を修復するときは ambiguity
+`unmet_deps` に残す。search は store lock 下の 1 回の directory enumeration から raw filename claim と
+parse 可能な exact-path source を同時に得て、query、ambiguity、done dependency、readiness の全判断に同じ
+snapshot を使う。snapshot 前には同じ lock のまま scheduled derived repair を試みるため、自己修復契約も保つ。
+全文 query は番号集合でなく source ごとに照合する。重複を修復するときは ambiguity
 error が示す exact path ごとに git 履歴と参照元を監査し、残す identity と新番号へ移す identity を明示的に
 決める。番号指定 delete は repair 手段に使わない。
 

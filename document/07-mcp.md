@@ -160,7 +160,9 @@ issue store は git 追跡対象なので、`issue_create` / `issue_update` / `i
 同じ issue number の source Markdown が複数ある場合、`issue_get` / `issue_to_prompt` /
 `issue_update` / `issue_delete` は衝突した exact path を含む execution error を返し、どの sibling も
 選択・変更・削除しない。同一 content の `issue_create` retry も曖昧な既存番号を返さず、
-`session_delegate_issue` は session を作らない。`issue_search` は修復対象を観測できるよう parse 可能な
+`session_delegate_issue` は typed ambiguity の番号と辞書順の exact path を safe execution error まで保持し、
+session registry、worktree、branch、dispatch queue、lifecycle state のいずれも作成・変更しない。
+`issue_search` は修復対象を観測できるよう parse 可能な
 sibling を exact filename と `ambiguous: true` の別 row として返し、`ready` にはしない。parse 不能な
 sibling も衝突判定には含め、重複番号を参照する依存は `unmet_deps` に残す。番号 identity と明示 repair の正本は
 [2. アーキテクチャ](02-architecture.md#markdown-永続化の-commit-contract) を参照する。

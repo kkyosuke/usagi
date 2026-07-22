@@ -7,7 +7,7 @@ labels: [review, v2, core, issue, persistence, safety]
 dependson: []
 related: [335, 471]
 created_at: 2026-07-21T21:29:10.408119+00:00
-updated_at: 2026-07-21T22:09:14.815897+00:00
+updated_at: 2026-07-22T00:11:36+00:00
 ---
 
 ## 問題・影響
@@ -23,11 +23,11 @@ v2 の `IssueStore` は、同じ番号を持つ `NNN-*.md` が複数ある場合
 
 ## 受入条件
 
-- [ ] 同番号 sibling が2件以上ある場合、get/update/delete は同じ deterministic な ambiguity error を返す。
-- [ ] ambiguity 判定は dirty marker、target write、remove より前に行われ、失敗後も全 sibling が byte-for-byte 不変である。
-- [ ] 通常の0件/1件 CRUD、title rename、derived refresh/repair の既存契約を維持する。
-- [ ] list/search と MCP adapter の挙動・説明が fail-closed 契約と整合する。
-- [ ] store/usecase/adapter の必要範囲をテストし、v2 docs を更新する。
+- [x] 同番号 sibling が2件以上ある場合、get/update/delete は同じ deterministic な ambiguity error を返す。
+- [x] ambiguity 判定は dirty marker、target write、remove より前に行われ、失敗後も全 sibling が byte-for-byte 不変である。
+- [x] 通常の0件/1件 CRUD、title rename、derived refresh/repair の既存契約を維持する。
+- [x] list/search と MCP adapter の挙動・説明が fail-closed 契約と整合する。
+- [x] store/usecase/adapter の必要範囲をテストし、v2 docs を更新する。
 
 ## 必須回帰テスト
 

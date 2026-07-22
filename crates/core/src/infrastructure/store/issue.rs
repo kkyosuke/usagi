@@ -33,7 +33,7 @@ const ALLOCATION_FILE_NAME: &str = "next";
 ///
 /// Exact paths are retained in deterministic order so callers can present a
 /// repair plan without guessing which sibling is authoritative.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AmbiguousIssueNumber {
     pub number: u32,
     pub files: Vec<PathBuf>,
@@ -55,6 +55,30 @@ impl fmt::Display for AmbiguousIssueNumber {
 }
 
 impl std::error::Error for AmbiguousIssueNumber {}
+
+/// A parseable Markdown source disagrees with the issue number claimed by its
+/// filename. Point operations refuse to reinterpret either number as the
+/// authoritative identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MismatchedIssueNumber {
+    pub filename_number: u32,
+    pub declared_number: u32,
+    pub file: PathBuf,
+}
+
+impl fmt::Display for MismatchedIssueNumber {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "issue source {} declares #{} but its filename claims #{}; refusing point operation",
+            self.file.display(),
+            self.declared_number,
+            self.filename_number
+        )
+    }
+}
+
+impl std::error::Error for MismatchedIssueNumber {}
 
 #[derive(Debug, Deserialize)]
 struct IndexFile {
@@ -135,6 +159,8 @@ pub struct IssueStore {
 pub(crate) struct IssueSource {
     pub issue: Issue,
     pub file: String,
+    pub path: PathBuf,
+    pub filename_number: Option<u32>,
 }
 
 impl IssueSource {
@@ -143,6 +169,15 @@ impl IssueSource {
         summary.file = self.file;
         summary
     }
+}
+
+/// One lock-protected view of every filename claim and every parseable source.
+/// Corrupt sources remain in `claims`, so they can block readiness even though
+/// they cannot produce a summary row.
+#[derive(Default)]
+pub(crate) struct IssueSourceSnapshot {
+    pub sources: Vec<IssueSource>,
+    pub claims: BTreeMap<u32, Vec<PathBuf>>,
 }
 
 impl IssueStore {
@@ -206,16 +241,6 @@ impl IssueStore {
         self.inner.entry_files()
     }
 
-    /// Numbers claimed by source filenames, retaining duplicates and corrupt
-    /// files so listing diagnostics use the same identity as point CRUD.
-    pub(crate) fn source_numbers(&self) -> Result<Vec<u32>> {
-        Ok(self
-            .issue_files()?
-            .iter()
-            .filter_map(|path| number_from_filename(path))
-            .collect())
-    }
-
     /// Parse source files leniently while retaining their exact filenames.
     ///
     /// # Errors
@@ -224,15 +249,65 @@ impl IssueStore {
     /// cannot be represented as UTF-8. Individual read and parse failures are
     /// logged and skipped.
     pub(crate) fn scan_sources_lenient(&self) -> Result<Vec<IssueSource>> {
+        Ok(self.snapshot_from_files(self.issue_files()?)?.sources)
+    }
+
+    /// Capture filename claims and parseable sources from one directory
+    /// enumeration while holding the issue store lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lock or directory cannot be read, or a source
+    /// filename cannot be represented as UTF-8.
+    pub(crate) fn source_snapshot(&self) -> Result<IssueSourceSnapshot> {
+        self.source_snapshot_with_hook(|| {})
+    }
+
+    fn source_snapshot_with_hook(&self, after_lock: impl FnOnce()) -> Result<IssueSourceSnapshot> {
+        if !self.source_dir_exists()? {
+            return Ok(IssueSourceSnapshot::default());
+        }
+        let lock = self.lock()?;
+        after_lock();
+        self.repair_derived_best_effort_locked(&lock);
+        self.source_snapshot_locked(&lock)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_snapshot_after_lock_for_test(
+        &self,
+        after_lock: impl FnOnce(),
+    ) -> Result<IssueSourceSnapshot> {
+        self.source_snapshot_with_hook(after_lock)
+    }
+
+    /// Capture a source snapshot while the caller already holds this store's
+    /// lock, avoiding nested acquisition in create retry validation.
+    pub(crate) fn source_snapshot_locked(&self, _lock: &StoreLock) -> Result<IssueSourceSnapshot> {
+        self.snapshot_from_files(self.issue_files()?)
+    }
+
+    fn snapshot_from_files(&self, mut files: Vec<PathBuf>) -> Result<IssueSourceSnapshot> {
+        files.sort();
+        let mut claims = BTreeMap::<u32, Vec<PathBuf>>::new();
         let mut sources = Vec::new();
-        for path in self.issue_files()? {
+        for path in files {
+            let filename_number = number_from_filename(&path);
+            if let Some(number) = filename_number {
+                claims.entry(number).or_default().push(path.clone());
+            }
             let file = path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .context(format!("source filename is not UTF-8: {}", path.display()))?
                 .to_owned();
             match self.inner.read_existing_path(&path) {
-                Ok(issue) => sources.push(IssueSource { issue, file }),
+                Ok(issue) => sources.push(IssueSource {
+                    issue,
+                    file,
+                    path,
+                    filename_number,
+                }),
                 Err(error) => ErrorLog::record(&format!(
                     "skipping unparseable issue file {}: {error:#}",
                     path.display()
@@ -243,9 +318,9 @@ impl IssueStore {
             left.issue
                 .number
                 .cmp(&right.issue.number)
-                .then_with(|| left.file.cmp(&right.file))
+                .then_with(|| left.path.cmp(&right.path))
         });
-        Ok(sources)
+        Ok(IssueSourceSnapshot { sources, claims })
     }
 
     /// The highest issue number currently stored, or 0 if there are none.
@@ -308,11 +383,14 @@ impl IssueStore {
     /// cannot be read or parsed, or when more than one source file claims
     /// `number`.
     pub fn read(&self, number: u32) -> Result<Option<Issue>> {
-        // Fail before a scheduled derived repair can rewrite index state. The
-        // second check in read_locked closes the race after repair as well.
-        self.unique_files_for(number)?;
-        self.repair_derived_best_effort();
-        self.read_locked(number)
+        if !self.source_dir_exists()? {
+            return Ok(None);
+        }
+        let lock = self.lock()?;
+        let path = self.unique_path_for(number)?;
+        self.repair_derived_best_effort_locked(&lock);
+        path.map(|path| self.read_numbered_path(number, &path))
+            .transpose()
     }
 
     /// Read source while the caller already holds the store lock.
@@ -322,10 +400,9 @@ impl IssueStore {
     /// Returns an error when the directory or source file cannot be read, or
     /// when more than one source file claims `number`.
     pub fn read_locked(&self, number: u32) -> Result<Option<Issue>> {
-        let Some(path) = self.unique_files_for(number)?.into_iter().next() else {
-            return Ok(None);
-        };
-        Ok(Some(self.inner.read_existing_path(&path)?))
+        self.unique_path_for(number)?
+            .map(|path| self.read_numbered_path(number, &path))
+            .transpose()
     }
 
     /// Write `issue` to disk and refresh the index, taking the store lock for the
@@ -352,6 +429,7 @@ impl IssueStore {
     /// scheduled. Ambiguity is detected before any source or derived mutation.
     pub fn write_locked(&self, _lock: &StoreLock, issue: &Issue) -> Result<MutationOutcome<()>> {
         let existing = self.unique_files_for(issue.number)?;
+        self.ensure_existing_number_matches(issue.number, &existing)?;
         let rebuild_required = self.inner.derived_is_dirty();
         self.inner.mark_derived_dirty()?;
         let target = self.inner.write_markdown(issue)?;
@@ -390,6 +468,7 @@ impl IssueStore {
     pub fn remove_with_outcome(&self, number: u32) -> Result<MutationOutcome<bool>> {
         let _lock = self.lock()?;
         let files = self.unique_files_for(number)?;
+        self.ensure_existing_number_matches(number, &files)?;
         if files.is_empty() {
             let repair = self.inner.repair_derived_locked();
             return Ok(self.inner.finish_committed(false, repair));
@@ -459,11 +538,22 @@ impl IssueStore {
         if !self.inner.derived_is_dirty() {
             return;
         }
-        let repair = self
-            .lock()
-            .and_then(|_lock| self.inner.repair_derived_locked());
+        let repair = self.lock().map(|lock| {
+            self.repair_derived_best_effort_locked(&lock);
+        });
         if let Err(error) = repair {
-            crate::infrastructure::error_log::ErrorLog::record(&format!(
+            ErrorLog::record(&format!(
+                "issue derived rebuild remains scheduled after read: {error:#}"
+            ));
+        }
+    }
+
+    fn repair_derived_best_effort_locked(&self, _lock: &StoreLock) {
+        if !self.inner.derived_is_dirty() {
+            return;
+        }
+        if let Err(error) = self.inner.repair_derived_locked() {
+            ErrorLog::record(&format!(
                 "issue derived rebuild remains scheduled after read: {error:#}"
             ));
         }
@@ -491,6 +581,45 @@ impl IssueStore {
             return Err(AmbiguousIssueNumber { number, files }.into());
         }
         Ok(files)
+    }
+
+    fn unique_path_for(&self, number: u32) -> Result<Option<PathBuf>> {
+        Ok(self.unique_files_for(number)?.into_iter().next())
+    }
+
+    fn source_dir_exists(&self) -> Result<bool> {
+        self.dir()
+            .try_exists()
+            .with_context(|| format!("failed to inspect {}", self.dir().display()))
+    }
+
+    fn read_numbered_path(&self, number: u32, path: &Path) -> Result<Issue> {
+        let issue = self.inner.read_existing_path(path)?;
+        if issue.number != number {
+            return Err(MismatchedIssueNumber {
+                filename_number: number,
+                declared_number: issue.number,
+                file: path.to_path_buf(),
+            }
+            .into());
+        }
+        Ok(issue)
+    }
+
+    fn ensure_existing_number_matches(&self, number: u32, files: &[PathBuf]) -> Result<()> {
+        for path in files {
+            if let Ok(issue) = self.inner.read_existing_path(path)
+                && issue.number != number
+            {
+                return Err(MismatchedIssueNumber {
+                    filename_number: number,
+                    declared_number: issue.number,
+                    file: path.clone(),
+                }
+                .into());
+            }
+        }
+        Ok(())
     }
 
     fn allocation_dir(&self) -> Result<PathBuf> {
@@ -569,6 +698,8 @@ mod tests {
     use crate::infrastructure::persistence::json_file::{AtomicWriteStage, fail_next_atomic_write};
     use crate::infrastructure::store::DerivedState;
     use chrono::{TimeZone, Utc};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     fn issue(number: u32, title: &str) -> Issue {
         let ts = Utc.with_ymd_and_hms(2026, 6, 14, 0, 0, 0).unwrap();
@@ -668,6 +799,62 @@ mod tests {
         assert_eq!(fs::read(&second).unwrap(), source_before[1]);
         assert_eq!(fs::read(store.index_path()).unwrap(), index_before);
         assert_eq!(fs::read(dirty).unwrap(), dirty_before);
+        assert!(!store.dir().join("007-replacement.md").exists());
+    }
+
+    #[test]
+    fn read_locks_before_ambiguity_check_and_leaves_scheduled_repair_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(7, "First")).unwrap();
+        let first = store.dir().join("007-first.md");
+        let second = store.dir().join("007-second.md");
+        let dirty = store.dir().join(".derived-dirty");
+        fs::write(&dirty, b"pre-existing rebuild request\n").unwrap();
+        let index_before = fs::read(store.index_path()).unwrap();
+        let dirty_before = fs::read(&dirty).unwrap();
+
+        let held = store.lock().unwrap();
+        let started = Arc::new(Barrier::new(2));
+        let reader = {
+            let root = tmp.path().to_path_buf();
+            let started = Arc::clone(&started);
+            thread::spawn(move || {
+                started.wait();
+                IssueStore::new(root).read(7).unwrap_err()
+            })
+        };
+        started.wait();
+        fs::write(&second, issue(7, "Second").to_markdown()).unwrap();
+        drop(held);
+
+        let error = reader.join().unwrap();
+        let ambiguity = error.downcast_ref::<AmbiguousIssueNumber>().unwrap();
+        assert_eq!(ambiguity.files, vec![first, second]);
+        assert_eq!(fs::read(store.index_path()).unwrap(), index_before);
+        assert_eq!(fs::read(dirty).unwrap(), dirty_before);
+    }
+
+    #[test]
+    fn parseable_filename_frontmatter_mismatch_fails_closed_for_point_operations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(7, "First")).unwrap();
+        let path = store.dir().join("007-first.md");
+        fs::write(&path, issue(8, "First").to_markdown()).unwrap();
+        let source_before = fs::read(&path).unwrap();
+
+        for error in [
+            store.read(7).unwrap_err(),
+            store.write(&issue(7, "Replacement")).unwrap_err(),
+            store.remove(7).unwrap_err(),
+        ] {
+            let mismatch = error.downcast_ref::<MismatchedIssueNumber>().unwrap();
+            assert_eq!(mismatch.filename_number, 7);
+            assert_eq!(mismatch.declared_number, 8);
+            assert_eq!(mismatch.file, path);
+        }
+        assert_eq!(fs::read(path).unwrap(), source_before);
         assert!(!store.dir().join("007-replacement.md").exists());
     }
 

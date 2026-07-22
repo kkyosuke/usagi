@@ -5,6 +5,7 @@
 mod support;
 
 use std::fs;
+use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -363,6 +364,43 @@ fn production_issue_point_tools_reject_duplicate_numbers_without_changing_siblin
             .join(format!("{number:03}-replacement.md"))
             .exists()
     );
+}
+
+#[test]
+fn production_delegate_issue_preserves_ambiguity_without_session_or_queue_side_effects() {
+    let mut mcp = McpHarness::start();
+    let issues_dir = mcp.workspace().join(".usagi/issues");
+    fs::create_dir_all(&issues_dir).unwrap();
+    let first = issues_dir.join("001-first.md");
+    let second = issues_dir.join("001-second.md");
+    let source = "---\nnumber: 1\ntitle: First\nstatus: todo\npriority: high\nlabels: []\ndependson: []\nrelated: []\ncreated_at: 2026-07-22T00:00:00+00:00\nupdated_at: 2026-07-22T00:00:00+00:00\n---\n\nbody\n";
+    fs::write(&first, source).unwrap();
+    fs::write(&second, source).unwrap();
+
+    let sessions_path = mcp.data_dir().join("daemon/sessions.json");
+    let dispatch_path = mcp.data_dir().join("daemon/dispatch.json");
+    let sessions_before = fs::read(&sessions_path).unwrap();
+    let dispatch_before = fs::read(&dispatch_path).ok();
+    let name = "ambiguous-must-not-exist";
+
+    let response = mcp.tool("session_delegate_issue", &json!({"number":1,"name":name}));
+
+    assert_eq!(response["error"]["code"], -32603);
+    let message = response["error"]["message"].as_str().unwrap();
+    assert!(message.contains("issue #1 is ambiguous"));
+    assert!(message.contains(first.to_str().unwrap()));
+    assert!(message.contains(second.to_str().unwrap()));
+    assert!(!mcp.workspace().join(".usagi/sessions").join(name).exists());
+    assert_eq!(fs::read(sessions_path).unwrap(), sessions_before);
+    assert_eq!(fs::read(dispatch_path).ok(), dispatch_before);
+
+    let branch = Command::new("git")
+        .args(["-C", mcp.workspace().to_str().unwrap(), "branch", "--list"])
+        .arg(format!("usagi/{name}"))
+        .output()
+        .unwrap();
+    assert!(branch.status.success());
+    assert!(branch.stdout.is_empty());
 }
 
 fn tool_text(response: &serde_json::Value) -> serde_json::Value {

@@ -26,6 +26,7 @@ use usagi_core::infrastructure::gitignore::migrate_usagi_ignore_rules;
 use usagi_core::infrastructure::ipc::ErrorCode;
 use usagi_core::infrastructure::paths::{SESSIONS_DIR, STATE_DIR, project_data_dir};
 use usagi_core::infrastructure::persistence::json_file;
+use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::usecase::client::SessionAction;
@@ -51,6 +52,7 @@ pub enum SessionRuntimeError {
     ScopeUnavailable,
     AgentFailure { code: ErrorCode, message: String },
     Delivery(String),
+    AmbiguousIssue(AmbiguousIssueNumber),
     Rejected,
     Storage,
 }
@@ -77,6 +79,7 @@ impl SessionRuntimeError {
             Self::DurableFailure(message)
             | Self::AgentFailure { message, .. }
             | Self::Delivery(message) => message.clone(),
+            Self::AmbiguousIssue(error) => error.to_string(),
             Self::UnknownSession => "session was not found".into(),
             Self::ScopeUnavailable => "session scope is not available".into(),
             Self::Rejected => {
@@ -1494,6 +1497,27 @@ mod tests {
                 .unwrap_err(),
             SessionRuntimeError::InvalidRequest
         );
+    }
+
+    #[test]
+    fn ambiguous_issue_error_preserves_number_and_sorted_exact_paths() {
+        let files = vec![
+            PathBuf::from("/repo/.usagi/issues/001-first.md"),
+            PathBuf::from("/repo/.usagi/issues/001-second.md"),
+        ];
+        let error = SessionRuntimeError::AmbiguousIssue(AmbiguousIssueNumber {
+            number: 1,
+            files: files.clone(),
+        });
+
+        assert_eq!(
+            error,
+            SessionRuntimeError::AmbiguousIssue(AmbiguousIssueNumber { number: 1, files })
+        );
+        let message = error.safe_message();
+        assert!(message.contains("issue #1 is ambiguous"));
+        assert!(message.contains("/repo/.usagi/issues/001-first.md"));
+        assert!(message.contains("/repo/.usagi/issues/001-second.md"));
     }
 
     #[test]

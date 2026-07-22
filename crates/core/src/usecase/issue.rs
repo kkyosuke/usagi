@@ -7,7 +7,7 @@
 //! this layer stays clock-free and fully testable; the concrete store and clock
 //! are bound by the caller.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::{Component, Path};
 
@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::domain::issue::{Issue, IssuePriority, IssueStatus, IssueSummary};
-use crate::infrastructure::store::issue::{IssueSource, IssueStore, number_from_filename};
+use crate::infrastructure::store::issue::{IssueSourceSnapshot, IssueStore};
 
 #[cfg(test)]
 thread_local! {
@@ -176,11 +176,12 @@ pub fn ensure_write_allowed(repo_root: &Path) -> Result<()> {
 pub fn create(store: &IssueStore, spec: NewIssue, now: DateTime<Utc>) -> Result<Issue> {
     let lock = store.lock()?;
     if let Some(matching) = store
-        .scan_sources_lenient()?
+        .source_snapshot_locked(&lock)?
+        .sources
         .into_iter()
         .find(|source| matches_new_issue_source(&source.issue, &spec))
     {
-        let source_number = number_from_filename(Path::new(&matching.file)).context(format!(
+        let source_number = matching.filename_number.context(format!(
             "matching issue source {} has no numeric filename prefix",
             matching.file
         ))?;
@@ -190,14 +191,6 @@ pub fn create(store: &IssueStore, spec: NewIssue, now: DateTime<Utc>) -> Result<
             "matching issue source {} disappeared while validating create retry",
             matching.file
         ))?;
-        if existing.number != source_number {
-            bail!(
-                "matching issue source {} declares #{} but its filename claims #{}; refusing create retry",
-                matching.file,
-                existing.number,
-                source_number
-            );
-        }
         if !matches_new_issue_source(&existing, &spec) {
             bail!(
                 "matching issue source {} changed while validating create retry",
@@ -262,56 +255,72 @@ pub fn list(store: &IssueStore) -> Result<Vec<IssueSummary>> {
 }
 
 /// Search issue titles and bodies, apply metadata filters, and annotate
-/// dependency readiness. An empty query lists every issue through the index.
+/// dependency readiness from one lock-protected Markdown source snapshot.
 ///
 /// # Errors
 ///
 /// Returns an error when the store cannot be scanned or indexed.
 pub fn search(store: &IssueStore, query: &str, filter: &IssueFilter) -> Result<Vec<ListedIssue>> {
-    let all = store.summaries()?;
-    let mut identity_counts = HashMap::<u32, usize>::new();
-    for number in store.source_numbers()? {
-        *identity_counts.entry(number).or_default() += 1;
-    }
-    let done: HashSet<u32> = all
+    Ok(search_snapshot(store.source_snapshot()?, query, filter))
+}
+
+fn search_snapshot(
+    snapshot: IssueSourceSnapshot,
+    query: &str,
+    filter: &IssueFilter,
+) -> Vec<ListedIssue> {
+    let mut unsafe_numbers: HashSet<u32> = snapshot
+        .claims
         .iter()
-        .filter(|summary| {
-            summary.status == IssueStatus::Done
-                && number_from_filename(Path::new(&summary.file)) == Some(summary.number)
-                && identity_counts.get(&summary.number) == Some(&1)
+        .filter(|(_, files)| files.len() > 1)
+        .map(|(number, _)| *number)
+        .collect();
+    for source in &snapshot.sources {
+        if source.filename_number != Some(source.issue.number) {
+            unsafe_numbers.insert(source.issue.number);
+            if let Some(filename_number) = source.filename_number {
+                unsafe_numbers.insert(filename_number);
+            }
+        }
+    }
+    let done: HashSet<u32> = snapshot
+        .sources
+        .iter()
+        .filter(|source| {
+            source.issue.status == IssueStatus::Done
+                && source.filename_number == Some(source.issue.number)
+                && !unsafe_numbers.contains(&source.issue.number)
         })
-        .map(|summary| summary.number)
+        .map(|source| source.issue.number)
         .collect();
     let needle = query.to_lowercase();
-    let candidates = if needle.is_empty() {
-        all
-    } else {
-        store
-            .scan_sources_lenient()?
-            .into_iter()
-            .filter(|source| {
-                source.issue.title.to_lowercase().contains(&needle)
-                    || source.issue.body.to_lowercase().contains(&needle)
-            })
-            .map(IssueSource::summary)
-            .collect()
-    };
-    Ok(candidates
+    snapshot
+        .sources
         .into_iter()
-        .map(|summary| ListedIssue {
-            ambiguous: number_from_filename(Path::new(&summary.file))
-                .and_then(|number| identity_counts.get(&number))
-                .is_some_and(|count| *count > 1),
-            unmet_deps: summary
-                .dependson
-                .iter()
-                .copied()
-                .filter(|number| !done.contains(number))
-                .collect(),
-            summary,
+        .filter(|source| {
+            needle.is_empty()
+                || source.issue.title.to_lowercase().contains(&needle)
+                || source.issue.body.to_lowercase().contains(&needle)
+        })
+        .map(|source| {
+            let ambiguous = unsafe_numbers.contains(&source.issue.number)
+                || source
+                    .filename_number
+                    .is_none_or(|number| unsafe_numbers.contains(&number));
+            let summary = source.summary();
+            ListedIssue {
+                ambiguous,
+                unmet_deps: summary
+                    .dependson
+                    .iter()
+                    .copied()
+                    .filter(|number| !done.contains(number))
+                    .collect(),
+                summary,
+            }
         })
         .filter(|issue| filter.matches(issue))
-        .collect())
+        .collect()
 }
 
 /// Render an issue as a self-contained implementation prompt.
@@ -445,7 +454,7 @@ pub fn delete(store: &IssueStore, number: u32) -> Result<bool> {
 mod tests {
     use super::{
         IssueFilter, IssuePatch, NewIssue, create, delete, ensure_write_allowed, get, list, search,
-        set_create_retry_validation_hook, to_prompt, update,
+        search_snapshot, set_create_retry_validation_hook, to_prompt, update,
     };
     use crate::domain::frontmatter::FrontmatterDoc;
     use crate::domain::issue::{IssuePriority, IssueStatus};
@@ -680,6 +689,32 @@ mod tests {
     }
 
     #[test]
+    fn missing_store_get_and_search_are_read_only() {
+        let (_tmp, store) = store();
+        assert!(!store.dir().exists());
+
+        assert!(get(&store, 1).unwrap().is_none());
+        assert!(
+            search(&store, "", &IssueFilter::default())
+                .unwrap()
+                .is_empty()
+        );
+
+        assert!(!store.dir().exists());
+    }
+
+    #[test]
+    fn invalid_store_path_is_not_treated_as_an_empty_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("not-a-directory");
+        fs::write(&root, b"file").unwrap();
+        let store = IssueStore::new(root);
+
+        assert!(get(&store, 1).is_err());
+        assert!(search(&store, "", &IssueFilter::default()).is_err());
+    }
+
+    #[test]
     fn list_returns_summaries_in_number_order() {
         let (_tmp, store) = store();
         create(&store, spec("first"), ts(20)).unwrap();
@@ -764,6 +799,16 @@ mod tests {
     fn duplicate_diagnostics_use_source_paths_and_count_unparseable_siblings() {
         let (_tmp, store) = store();
         let created = create(&store, spec("first"), ts(20)).unwrap();
+        update(
+            &store,
+            created.number,
+            IssuePatch {
+                status: Some(IssueStatus::Done),
+                ..Default::default()
+            },
+            ts(21),
+        )
+        .unwrap();
         let first = store.dir().join(created.file_name());
         let copied = store.dir().join("001-copied.md");
         fs::copy(&first, &copied).unwrap();
@@ -800,11 +845,87 @@ mod tests {
 
         fs::remove_file(&copied).unwrap();
         fs::write(&copied, "not an issue").unwrap();
+        let mut dependent = spec("dependent");
+        dependent.dependson = vec![1];
+        create(&store, dependent, ts(22)).unwrap();
         let rows = search(&store, "", &IssueFilter::default()).unwrap();
+        assert_eq!(rows.len(), 2);
+        let first = rows.iter().find(|row| row.summary.number == 1).unwrap();
+        assert_eq!(first.summary.file, "001-first.md");
+        assert!(first.ambiguous);
+        assert!(!first.is_ready());
+        let dependent = rows.iter().find(|row| row.summary.number == 2).unwrap();
+        assert_eq!(dependent.unmet_deps, vec![1]);
+        assert!(!dependent.is_ready());
+    }
+
+    #[test]
+    fn search_uses_one_locked_snapshot_during_concurrent_sibling_creation() {
+        let (tmp, store) = store();
+        let created = create(&store, spec("first"), ts(20)).unwrap();
+        let first = store.dir().join(created.file_name());
+        let second_source = fs::read(&first).unwrap();
+        let root = tmp.path().to_path_buf();
+        let snapshot_locked = Arc::new(Barrier::new(2));
+        let release_snapshot = Arc::new(Barrier::new(2));
+
+        let search_thread = {
+            let root = root.clone();
+            let snapshot_locked = Arc::clone(&snapshot_locked);
+            let release_snapshot = Arc::clone(&release_snapshot);
+            thread::spawn(move || {
+                let store = IssueStore::new(root);
+                let snapshot = store
+                    .source_snapshot_after_lock_for_test(|| {
+                        snapshot_locked.wait();
+                        release_snapshot.wait();
+                    })
+                    .unwrap();
+                search_snapshot(snapshot, "", &IssueFilter::default())
+            })
+        };
+        snapshot_locked.wait();
+
+        let writer_started = Arc::new(Barrier::new(2));
+        let writer = {
+            let root = root.clone();
+            let writer_started = Arc::clone(&writer_started);
+            thread::spawn(move || {
+                let store = IssueStore::new(root);
+                writer_started.wait();
+                let _lock = store.lock().unwrap();
+                fs::write(store.dir().join("001-second.md"), second_source).unwrap();
+            })
+        };
+        writer_started.wait();
+        release_snapshot.wait();
+
+        let before = search_thread.join().unwrap();
+        writer.join().unwrap();
+        assert_eq!(before.len(), 1);
+        assert!(!before[0].ambiguous);
+        assert!(before[0].is_ready());
+
+        let after = search(&store, "", &IssueFilter::default()).unwrap();
+        assert_eq!(after.len(), 2);
+        assert!(after.iter().all(|row| row.ambiguous));
+        assert!(after.iter().all(|row| !row.is_ready()));
+    }
+
+    #[test]
+    fn search_repairs_a_scheduled_derived_rebuild_before_reading_the_source_snapshot() {
+        let (_tmp, store) = store();
+        create(&store, spec("first"), ts(20)).unwrap();
+        fs::remove_file(store.index_path()).unwrap();
+        let dirty = store.dir().join(".derived-dirty");
+        fs::write(&dirty, b"rebuild from markdown\n").unwrap();
+
+        let rows = search(&store, "", &IssueFilter::default()).unwrap();
+
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].summary.file, "001-first.md");
-        assert!(rows[0].ambiguous);
-        assert!(!rows[0].is_ready());
+        assert_eq!(rows[0].summary.title, "first");
+        assert!(store.index_path().is_file());
+        assert!(!dirty.exists());
     }
 
     #[test]
