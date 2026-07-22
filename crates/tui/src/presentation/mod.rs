@@ -1278,21 +1278,22 @@ fn run_workspace_config(
     term: &mut dyn Terminal,
     settings: &mut dyn SettingsPort,
     available_models: AvailableAgentModels,
+    base: &[String],
 ) -> io::Result<WorkspaceConfigExit> {
     let mut form = Config::load_workspace_with_available_models(settings, available_models);
     loop {
         let (height, width) = term.size()?;
-        term.draw(&config::render(height, width, &form))?;
+        term.draw(&config::render_over(height, width, base, &form))?;
         match step_config(&mut form, term.read_key()?, settings) {
             ConfigStep::Stay => {}
             ConfigStep::Quit => return Ok(WorkspaceConfigExit::Quit),
             ConfigStep::Back => return Ok(WorkspaceConfigExit::Back),
             ConfigStep::Save => {
                 let (height, width) = term.size()?;
-                term.draw(&config::render(height, width, &form))?;
+                term.draw(&config::render_over(height, width, base, &form))?;
                 if form.commit_save(settings) {
                     let (height, width) = term.size()?;
-                    term.draw(&config::render(height, width, &form))?;
+                    term.draw(&config::render_over(height, width, base, &form))?;
                     term.wait(config::SAVED_DISPLAY)?;
                     form.reset_save();
                     return Ok(WorkspaceConfigExit::Back);
@@ -2771,7 +2772,7 @@ fn drive_workspace_controller(
             &sessions,
             metrics_projection.metrics(),
             metrics_projection.git_diffs(),
-            terminal_view,
+            terminal_view.clone(),
             ui.creating_session
                 .as_ref()
                 .map(|create| create.name.as_str()),
@@ -2841,7 +2842,22 @@ fn drive_workspace_controller(
                 } if *workspace == workspace_id && arguments.trim().is_empty()
             );
             if opens_workspace_config && let Some(context) = workspace_config.as_mut() {
-                match run_workspace_config(term, context.settings, context.available_models)? {
+                let base = render_controller_frame(
+                    height,
+                    width,
+                    &runtime,
+                    &workspace_name,
+                    &root_cwd,
+                    &sessions,
+                    metrics_projection.metrics(),
+                    metrics_projection.git_diffs(),
+                    terminal_view.clone(),
+                    ui.creating_session
+                        .as_ref()
+                        .map(|create| create.name.as_str()),
+                );
+                match run_workspace_config(term, context.settings, context.available_models, &base)?
+                {
                     WorkspaceConfigExit::Back => {
                         let effective = usagi_core::usecase::settings::read_for_workspace_entry(
                             context.settings,
@@ -3312,13 +3328,14 @@ pub fn run_screen_graph_with_backend(
                     let snapshot = loader.open(&path)?;
                     welcome.record_opened(&snapshot.workspace);
                     open.record_opened(&snapshot.workspace);
-                    let _ = open_snapshot_via_controller(
+                    let workspace_step = open_snapshot_via_controller(
                         term,
                         snapshot,
                         settings,
                         backend_factory,
                         available_models,
-                    )?;
+                    );
+                    workspace_step?;
                     return Ok(Exit::Quit);
                 }
             },
@@ -4665,11 +4682,10 @@ mod tests {
             Exit::Quit
         );
         assert_eq!(settings.selected, vec![PathBuf::from("/tmp/direct-config")]);
-        assert!(
-            term.frames
-                .iter()
-                .any(|frame| frame.join("\n").contains("Scope: Global   [Workspace]"))
-        );
+        assert!(term.frames.iter().any(|frame| {
+            let frame = frame.join("\n");
+            frame.contains("Scope: Workspace") && frame.contains("direct-config")
+        }));
     }
 
     #[test]
@@ -7020,10 +7036,10 @@ mod tests {
             .collect::<Vec<_>>();
         let config = frames
             .iter()
-            .position(|frame| {
-                frame.contains("Config") && frame.contains("Scope: Global   [Workspace]")
-            })
+            .position(|frame| frame.contains("Config") && frame.contains("Scope: Workspace"))
             .expect("workspace Config is rendered");
+        assert!(frames[config].contains("project"));
+        assert!(!frames[config].contains("Overview"));
         let returned_home = frames
             .iter()
             .enumerate()
@@ -7125,16 +7141,19 @@ mod tests {
 
     #[test]
     fn workspace_config_handles_back_quit_and_failed_save_without_leaving_drafts() {
+        let base = vec!["home".to_owned(); 24];
         let mut settings = RecordingSettingsPort::default();
         let mut back = FakeTerminal::with_keys(&[Key::Escape]);
         assert_eq!(
-            run_workspace_config(&mut back, &mut settings, AvailableAgentModels::all(),).unwrap(),
+            run_workspace_config(&mut back, &mut settings, AvailableAgentModels::all(), &base,)
+                .unwrap(),
             WorkspaceConfigExit::Back
         );
 
         let mut quit = FakeTerminal::with_keys(&[Key::Quit]);
         assert_eq!(
-            run_workspace_config(&mut quit, &mut settings, AvailableAgentModels::all(),).unwrap(),
+            run_workspace_config(&mut quit, &mut settings, AvailableAgentModels::all(), &base,)
+                .unwrap(),
             WorkspaceConfigExit::Quit
         );
 
@@ -7153,6 +7172,7 @@ mod tests {
                 &mut failed,
                 &mut failing_settings,
                 AvailableAgentModels::all(),
+                &base,
             )
             .unwrap(),
             WorkspaceConfigExit::Back

@@ -7,10 +7,13 @@ use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
 use crate::presentation::layouts::mascot_screen;
 use crate::presentation::theme::Style;
-use crate::presentation::widgets::select;
+use crate::presentation::widgets::{modal, select};
 
 const TITLE: &str = "Config";
 const FOOTER: &str = "Tab: scope  ↑↓: select  ←→: change  ●: unsaved  Enter: save  Esc: back";
+const MODAL_INNER_WIDTH: usize = 64;
+const MODAL_BODY_HEIGHT: usize = 12;
+const MODAL_FOOTER: &str = "Tab: scope  ↑↓: select  ←→: change  Enter: save  Esc: back";
 
 /// How long the `saved` confirmation stays on screen before the Config screen
 /// returns home on its own, with no key press. Short enough to feel immediate,
@@ -408,88 +411,97 @@ fn read_scope(port: &mut dyn SettingsPort, scope: SettingsScope) -> (Settings, O
 #[must_use]
 pub fn render(raw_height: usize, raw_width: usize, config: &Config) -> Vec<String> {
     mascot_screen::render(raw_height, raw_width, TITLE, FOOTER, |width| {
-        let scope = match config.scope() {
-            SettingsScope::Global => "Scope: [Global]   Workspace",
-            SettingsScope::Workspace => "Scope: Global   [Workspace]",
-        };
-        let mut lines = vec![
-            mascot_screen::centered_line(width, scope, Style::new()),
-            String::new(),
-            mascot_screen::centered_line(
-                width,
-                &select::render(
-                    "Theme",
-                    theme_name(config.settings().theme),
-                    config.field() == Field::Theme,
-                    config.settings().theme != config.current().saved.theme,
-                ),
-                Style::new(),
-            ),
-            mascot_screen::centered_line(
-                width,
-                &select::render(
-                    "Modal mode",
-                    modal_selection_mode_name(config.settings().modal_selection_mode),
-                    config.field() == Field::ModalSelectionMode,
-                    config.settings().modal_selection_mode
-                        != config.current().saved.modal_selection_mode,
-                ),
-                Style::new(),
-            ),
-            mascot_screen::centered_line(
-                width,
-                &if config.available_models.is_empty() {
-                    select::disabled("Agent model", "none")
-                } else {
-                    select::render(
-                        "Agent model",
-                        default_model_name(config.settings().default_model),
-                        config.field() == Field::DefaultModel,
-                        config.settings().default_model != config.current().saved.default_model,
-                    )
-                },
-                Style::new(),
-            ),
-            mascot_screen::centered_line(
-                width,
-                &select::render(
-                    "Issue",
-                    enabled_name(config.settings().issue_enabled),
-                    config.field() == Field::Issue,
-                    config.settings().issue_enabled != config.current().saved.issue_enabled,
-                ),
-                Style::new(),
-            ),
-            mascot_screen::centered_line(
-                width,
-                &select::render(
-                    "Memory",
-                    enabled_name(config.settings().memory_enabled),
-                    config.field() == Field::Memory,
-                    config.settings().memory_enabled != config.current().saved.memory_enabled,
-                ),
-                Style::new(),
-            ),
-            String::new(),
-            mascot_screen::centered_line(
-                width,
-                &select::action(
-                    config.save_label(),
-                    config.field() == Field::Save,
-                    config.is_dirty(),
-                ),
-                Style::new(),
-            ),
-        ];
-        if let Some(notice) = config.notice() {
-            lines.push(mascot_screen::centered_line(
-                width,
-                notice,
-                Style::new().dim(),
-            ));
-        }
-        lines
+        form_rows(config)
+            .into_iter()
+            .map(|line| mascot_screen::centered_line(width, &line, Style::new()))
+            .collect()
     })
+}
+
+/// Render Workspace Config as a modal over the live Home frame.
+#[must_use]
+pub fn render_over(
+    raw_height: usize,
+    raw_width: usize,
+    base: &[String],
+    config: &Config,
+) -> Vec<String> {
+    let mut lines = form_rows(config)
+        .into_iter()
+        .map(|line| {
+            if line.is_empty() {
+                line
+            } else {
+                modal::content_line(&line, MODAL_INNER_WIDTH)
+            }
+        })
+        .collect::<Vec<_>>();
+    lines.push(String::new());
+    lines.push(modal::footer(MODAL_FOOTER));
+    modal::render_body_over(
+        raw_height,
+        raw_width,
+        base,
+        TITLE,
+        MODAL_INNER_WIDTH,
+        MODAL_BODY_HEIGHT,
+        lines,
+    )
+}
+
+fn form_rows(config: &Config) -> Vec<String> {
+    let scope = match config.scope() {
+        SettingsScope::Global => "Scope: Global",
+        SettingsScope::Workspace => "Scope: Workspace",
+    };
+    let mut lines = vec![
+        scope.to_owned(),
+        String::new(),
+        select::render(
+            "Theme",
+            theme_name(config.settings().theme),
+            config.field() == Field::Theme,
+            config.settings().theme != config.current().saved.theme,
+        ),
+        select::render(
+            "Modal mode",
+            modal_selection_mode_name(config.settings().modal_selection_mode),
+            config.field() == Field::ModalSelectionMode,
+            config.settings().modal_selection_mode != config.current().saved.modal_selection_mode,
+        ),
+        if config.available_models.is_empty() {
+            select::disabled("Agent model", "none")
+        } else {
+            select::render(
+                "Agent model",
+                default_model_name(config.settings().default_model),
+                config.field() == Field::DefaultModel,
+                config.settings().default_model != config.current().saved.default_model,
+            )
+        },
+        select::render(
+            "Issue",
+            enabled_name(config.settings().issue_enabled),
+            config.field() == Field::Issue,
+            config.settings().issue_enabled != config.current().saved.issue_enabled,
+        ),
+        select::render(
+            "Memory",
+            enabled_name(config.settings().memory_enabled),
+            config.field() == Field::Memory,
+            config.settings().memory_enabled != config.current().saved.memory_enabled,
+        ),
+        String::new(),
+        select::action(
+            config.save_label(),
+            config.field() == Field::Save,
+            config.is_dirty(),
+        ),
+    ];
+    if let Some(notice) = config.notice() {
+        lines.push(Style::new().dim().paint(notice));
+    }
+    lines
 }
 
 fn theme_name(theme: Theme) -> &'static str {
@@ -520,7 +532,8 @@ fn enabled_name(enabled: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{AvailableAgentModels, Config, Field, render};
+    use super::{AvailableAgentModels, Config, Field, render, render_over};
+    use crate::presentation::widgets::{display_width, strip_ansi};
     use std::io;
     use usagi_core::domain::settings::{DefaultModel, ModalSelectionMode, Settings, Theme};
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
@@ -637,7 +650,7 @@ mod tests {
         let frame = render(24, 80, &config).join("\n");
 
         assert!(frame.contains("Config"));
-        assert!(frame.contains("Scope: [Global]"));
+        assert!(frame.contains("Scope: Global"));
         assert!(frame.contains("Theme") && frame.contains("system"));
         assert!(frame.contains("Modal mode") && frame.contains("action"));
         assert!(frame.contains("Agent model") && frame.contains("OpenAI"));
@@ -669,8 +682,32 @@ mod tests {
         assert!(
             render(24, 80, &config)
                 .join("\n")
-                .contains("Scope: Global   [Workspace]")
+                .contains("Scope: Workspace")
         );
+    }
+
+    #[test]
+    fn workspace_config_renders_over_the_home_frame() {
+        let mut port = FakeSettingsPort::default();
+        let config =
+            Config::load_workspace_with_available_models(&mut port, AvailableAgentModels::all());
+        let base = (0..24)
+            .map(|row| format!("home background {row}"))
+            .collect::<Vec<_>>();
+
+        let frame = render_over(24, 80, &base, &config);
+        let plain = frame
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>();
+        let joined = plain.join("\n");
+
+        assert_eq!(frame.len(), 24);
+        assert!(joined.contains("home background 0"));
+        assert!(joined.contains("Config"));
+        assert!(joined.contains("Scope: Workspace"));
+        assert!(joined.contains("Esc: back"));
+        assert!(plain.iter().all(|line| display_width(line) <= 80));
     }
 
     #[test]
@@ -692,7 +729,7 @@ mod tests {
         config.cycle_theme(true);
         let frame = render(24, 80, &config).join("\n");
 
-        assert!(frame.contains("Scope: Global   [Workspace]"));
+        assert!(frame.contains("Scope: Workspace"));
         assert!(frame.contains("Theme") && frame.contains("light"));
         assert!(frame.contains('●'));
     }
