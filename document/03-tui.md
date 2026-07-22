@@ -60,7 +60,8 @@ Home へ戻る。保存が失敗した場合は
 自動で戻らず Config に留まり、`Save failed: …` の notice を出す。draft は dirty のまま保たれるため、
 その場で確認・修正して再試行できる。
 保存の実行中は入力を読まず、保存中の再押下（連打）は無視されるため、保存が二重に走ることはない。`Esc` は
-呼び出し元へ戻り、`Ctrl+C` は終了する。
+呼び出し元へ戻る。Welcome または `usagi config` から開いた全画面 Config では `Ctrl+C` / `Ctrl+Q` で終了する。
+Workspace 上の overlay modal では両キーを消費して Config に留まり、背面の Home へ終了操作を伝播しない。
 
 フォーカス中で編集可能な 1 行入力は共通の block cursor を使う。挿入位置の Unicode scalar を
 入力値と同じ意味色の reverse-video で示し、空欄または行末では反転した空白 1 セルを示す。
@@ -216,8 +217,9 @@ Home controller の management input では、Switch の `Ctrl-A` は新規 sess
 待機していない `Ctrl-C` / `Ctrl-Q` / `Ctrl-D` は global shortcut として management transition に渡す。Closeup の `Ctrl-O o` は
 Switch へ戻り、Switch 中の `Ctrl-O` は単体では mode を変えない。Closeup action modal が前面にある間の `Esc` /
 `Ctrl-C` は、`Ctrl-O o` と同じく modal を閉じて Switch へ戻る（live pane の有無に依らない）。overlay を開いて
-いない Closeup の live pane 上の `Ctrl-C` が終了確認を開く契約はそのままで、他 overlay の `Ctrl-C` / `Esc`
-契約も変えない。
+いない Closeup の live pane 上の `Ctrl-C` が終了確認を開く契約はそのままである。前面 overlay は共通入力境界で
+`Ctrl-C` / `Ctrl-Q` を route より先に所有し、通常は overlay に留まる。例外は `Ctrl-C` で Switch へ戻る Closeup action
+modal と、`Ctrl-C` を acknowledge として閉じる session 作成エラーだけであり、いずれも TUI の終了には伝播しない。
 
 左 sidebar は、root・実 session・`+ new session` の左クリックで cursor だけを移し、active target や mode を
 変更しない。実 session は、同じ stable `SessionId` を 400ms 以内（境界を含む）にもう一度左クリックした場合だけ、

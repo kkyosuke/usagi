@@ -2399,29 +2399,20 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
 }
 
 fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Effect> {
-    // The Closeup action modal exits to Switch on Escape or Ctrl-C: it drops the
-    // overlay (and the forced-over-live flag) and returns Home to Switch, the
-    // same landing as `Ctrl-O Ctrl-O`. This is symmetric whether the modal is
-    // the base surface (no live pane) or forced over a live pane, so the action
-    // picker is never a dead-end. Ctrl-Q and every other overlay keep their
-    // existing swallow / Escape contracts (below).
-    if matches!(overlay, Overlay::Closeup) && matches!(key, AppKey::Escape | AppKey::CtrlC) {
+    if let Some(effects) = update_overlay_control_chord(state, overlay, &key) {
+        return effects;
+    }
+    if matches!(overlay, Overlay::Closeup) && matches!(key, AppKey::Escape) {
         state.closeup_action_forced = false;
         state.overlay = None;
         state.route = Route::Home(HomeMode::Switch);
         return Vec::new();
     }
-    // The create-failure dialog is a single-acknowledge surface: Enter, Escape,
-    // or Ctrl-C all dismiss it back to the Home background it was drawn over.
-    // Route is untouched, so it never conflicts with the surface the user was on.
     if matches!(overlay, Overlay::CreateSessionError)
-        && matches!(key, AppKey::Escape | AppKey::CtrlC | AppKey::Enter)
+        && matches!(key, AppKey::Escape | AppKey::Enter)
     {
         state.create_session_error = None;
         state.overlay = None;
-        return Vec::new();
-    }
-    if matches!(key, AppKey::CtrlC | AppKey::CtrlQ) {
         return Vec::new();
     }
     match overlay {
@@ -2473,6 +2464,40 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             Vec::new()
         }
         Overlay::Overview | Overlay::Closeup => update_management_key(state, key),
+    }
+}
+
+/// Resolve global quit chords at the frontmost-overlay boundary. Returning
+/// `Some` means the overlay consumed the key, so route-level detach handling can
+/// never observe it. New ordinary overlays inherit the fail-safe swallow branch;
+/// only the two explicit Ctrl-C close contracts mutate modal state.
+fn update_overlay_control_chord(
+    state: &mut AppState,
+    overlay: Overlay,
+    key: &AppKey,
+) -> Option<Vec<Effect>> {
+    match key {
+        AppKey::CtrlQ => Some(Vec::new()),
+        AppKey::CtrlC => {
+            match overlay {
+                // Closeup returns to Switch just like `Ctrl-O Ctrl-O`, whether
+                // it is the base surface or forced over a live pane.
+                Overlay::Closeup => {
+                    state.closeup_action_forced = false;
+                    state.overlay = None;
+                    state.route = Route::Home(HomeMode::Switch);
+                }
+                // The create-failure dialog treats Ctrl-C as acknowledgement;
+                // route remains untouched beneath the dismissed dialog.
+                Overlay::CreateSessionError => {
+                    state.create_session_error = None;
+                    state.overlay = None;
+                }
+                _ => {}
+            }
+            Some(Vec::new())
+        }
+        _ => None,
     }
 }
 
@@ -4253,18 +4278,38 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_modals_keep_ctrl_c_and_ctrl_q_inert() {
+    fn overlay_control_chords_follow_the_input_ownership_table() {
         let (workspace, _, _) = ids();
-        let mut state = AppState::home(workspace, Vec::new());
-        // The Overview palette (unlike the Closeup action modal) swallows both
-        // quit chords and only leaves on Escape.
-        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
-        let expected = state.overlay();
-        assert!(update(&mut state, AppEvent::Key(AppKey::CtrlC)).is_empty());
-        assert_eq!(state.overlay(), expected);
-        assert!(update(&mut state, AppEvent::Key(AppKey::CtrlQ)).is_empty());
-        assert_eq!(state.overlay(), expected);
-        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        // `true` means the overlay remains open after the chord. Every overlay
+        // owns both keys; only the documented Ctrl-C close contracts dismiss.
+        for (overlay, ctrl_c_stays_open, ctrl_q_stays_open) in [
+            (Overlay::Overview, true, true),
+            (Overlay::Closeup, false, true),
+            (Overlay::QuitConfirmation, true, true),
+            (Overlay::Notes, true, true),
+            (Overlay::Environment, true, true),
+            (Overlay::CreateSession, true, true),
+            (Overlay::Decisions, true, true),
+            (Overlay::Prs, true, true),
+            (Overlay::Preview, true, true),
+            (Overlay::CreateSessionError, false, true),
+        ] {
+            for (key, stays_open) in [
+                (AppKey::CtrlC, ctrl_c_stays_open),
+                (AppKey::CtrlQ, ctrl_q_stays_open),
+            ] {
+                let mut state = AppState::home(workspace, Vec::new());
+                state.overlay = Some(overlay);
+
+                assert!(update(&mut state, AppEvent::Key(key.clone())).is_empty());
+                assert_eq!(
+                    state.overlay(),
+                    stays_open.then_some(overlay),
+                    "{overlay:?} {key:?}"
+                );
+                assert_eq!(state.route(), Route::Home(HomeMode::Switch));
+            }
+        }
     }
 
     /// #355: the Closeup action modal is not an ordinary modal — Escape and

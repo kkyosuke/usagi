@@ -689,6 +689,15 @@ enum ConfigStep {
     Save,
 }
 
+/// Workspace Config is a Home-owned modal and therefore cannot request that the
+/// enclosing TUI exit. Quit chords are projected to [`Self::Stay`] at the modal
+/// input boundary.
+enum WorkspaceConfigStep {
+    Stay,
+    Back,
+    Save,
+}
+
 /// New 画面でキー `key` を処理した結果の遷移。
 enum NewStep {
     /// 同じ画面に留まる（フォーム編集を続ける）。
@@ -714,12 +723,6 @@ enum OpenStep {
 /// Workspace 画面のキー処理結果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkspaceStep {
-    Quit,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorkspaceConfigExit {
-    Back,
     Quit,
 }
 
@@ -1273,6 +1276,21 @@ fn step_config(config: &mut Config, key: Key, _settings: &mut dyn SettingsPort) 
     }
 }
 
+/// Workspace Config is an overlay owned by Home, so global quit chords must not
+/// escape to the enclosing workspace loop while it has input focus. The full
+/// screen Config keeps its existing quit contract through [`step_config`].
+fn step_workspace_config(
+    config: &mut Config,
+    key: Key,
+    settings: &mut dyn SettingsPort,
+) -> WorkspaceConfigStep {
+    match step_config(config, key, settings) {
+        ConfigStep::Stay | ConfigStep::Quit => WorkspaceConfigStep::Stay,
+        ConfigStep::Back => WorkspaceConfigStep::Back,
+        ConfigStep::Save => WorkspaceConfigStep::Save,
+    }
+}
+
 /// Run Config from an opened workspace. The form starts on Workspace scope and
 /// returns to the still-live Home runtime after Escape or a successful save.
 fn run_workspace_config(
@@ -1280,16 +1298,15 @@ fn run_workspace_config(
     settings: &mut dyn SettingsPort,
     available_models: AvailableAgentModels,
     base: &[String],
-) -> io::Result<WorkspaceConfigExit> {
+) -> io::Result<()> {
     let mut form = Config::load_workspace_with_available_models(settings, available_models);
     loop {
         let (height, width) = term.size()?;
         term.draw(&config::render_over(height, width, base, &form))?;
-        match step_config(&mut form, term.read_key()?, settings) {
-            ConfigStep::Stay => {}
-            ConfigStep::Quit => return Ok(WorkspaceConfigExit::Quit),
-            ConfigStep::Back => return Ok(WorkspaceConfigExit::Back),
-            ConfigStep::Save => {
+        match step_workspace_config(&mut form, term.read_key()?, settings) {
+            WorkspaceConfigStep::Stay => {}
+            WorkspaceConfigStep::Back => return Ok(()),
+            WorkspaceConfigStep::Save => {
                 let (height, width) = term.size()?;
                 term.draw(&config::render_over(height, width, base, &form))?;
                 if form.commit_save(settings) {
@@ -1297,7 +1314,7 @@ fn run_workspace_config(
                     term.draw(&config::render_over(height, width, base, &form))?;
                     term.wait(config::SAVED_DISPLAY)?;
                     form.reset_save();
-                    return Ok(WorkspaceConfigExit::Back);
+                    return Ok(());
                 }
             }
         }
@@ -2857,16 +2874,10 @@ fn drive_workspace_controller(
                         .as_ref()
                         .map(|create| create.name.as_str()),
                 );
-                match run_workspace_config(term, context.settings, context.available_models, &base)?
-                {
-                    WorkspaceConfigExit::Back => {
-                        let effective = usagi_core::usecase::settings::read_for_workspace_entry(
-                            context.settings,
-                        );
-                        runtime.set_modal_selection_mode(effective.modal_selection_mode);
-                    }
-                    WorkspaceConfigExit::Quit => return Ok(WorkspaceStep::Quit),
-                }
+                run_workspace_config(term, context.settings, context.available_models, &base)?;
+                let effective =
+                    usagi_core::usecase::settings::read_for_workspace_entry(context.settings);
+                runtime.set_modal_selection_mode(effective.modal_selection_mode);
                 continue;
             }
             if backend.dispatch(effect) == BackendFlow::Exit {
@@ -3528,8 +3539,8 @@ mod tests {
         UnavailableBackendPort, UnavailableBrowserOpener, UnavailableDecisionCommandPort,
         UnavailableEnvironmentStore, UnavailableExternalTerminalPort, UnavailablePrSnapshotPort,
         UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory, WelcomeStep,
-        WorkspaceConfigExit, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi,
-        WorkspaceView, app_event_from_key, begin_terminal_selection_on_click, close_exited_panes,
+        WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
+        app_event_from_key, begin_terminal_selection_on_click, close_exited_panes,
         controller_terminal_view, copy_terminal_selection, drain_controller_host_actions,
         drain_session_completions, forward_live_terminal_input, handle_terminal_pointer,
         intercept_live_terminal_control, key_to_terminal_bytes, new_project_notice,
@@ -4661,7 +4672,14 @@ mod tests {
     fn direct_controller_entry_binds_workspace_config_settings() {
         let mut keys = vec![Key::Char(':')];
         keys.extend("config".chars().map(Key::Char));
-        keys.extend([Key::Enter, Key::Quit]);
+        keys.extend([
+            Key::Enter,
+            Key::Quit,
+            Key::CtrlQ,
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
         let mut term = FakeTerminal::with_keys(&keys);
         let mut factory = FixedBackendFactory {
             sessions: Some(Box::new(UnavailableSessionCommandPort)),
@@ -7143,22 +7161,11 @@ mod tests {
     ];
 
     #[test]
-    fn workspace_config_handles_back_quit_and_failed_save_without_leaving_drafts() {
+    fn workspace_config_handles_back_and_failed_save_without_leaving_drafts() {
         let base = vec!["home".to_owned(); 24];
         let mut settings = RecordingSettingsPort::default();
         let mut back = FakeTerminal::with_keys(&[Key::Escape]);
-        assert_eq!(
-            run_workspace_config(&mut back, &mut settings, AvailableAgentModels::all(), &base,)
-                .unwrap(),
-            WorkspaceConfigExit::Back
-        );
-
-        let mut quit = FakeTerminal::with_keys(&[Key::Quit]);
-        assert_eq!(
-            run_workspace_config(&mut quit, &mut settings, AvailableAgentModels::all(), &base,)
-                .unwrap(),
-            WorkspaceConfigExit::Quit
-        );
+        run_workspace_config(&mut back, &mut settings, AvailableAgentModels::all(), &base).unwrap();
 
         let keys = CONFIG_SAVE_KEYS
             .iter()
@@ -7170,22 +7177,36 @@ mod tests {
             fail_save: true,
             ..RecordingSettingsPort::default()
         };
-        assert_eq!(
-            run_workspace_config(
-                &mut failed,
-                &mut failing_settings,
-                AvailableAgentModels::all(),
-                &base,
-            )
-            .unwrap(),
-            WorkspaceConfigExit::Back
-        );
+        run_workspace_config(
+            &mut failed,
+            &mut failing_settings,
+            AvailableAgentModels::all(),
+            &base,
+        )
+        .unwrap();
         assert!(failed.waits.is_empty());
         assert!(
             failed
                 .frames
                 .iter()
                 .any(|frame| frame.join("\n").contains("Save failed"))
+        );
+    }
+
+    #[test]
+    fn workspace_config_swallows_quit_keys_until_escape() {
+        let base = vec!["home".to_owned(); 24];
+        let mut settings = RecordingSettingsPort::default();
+        let mut term =
+            FakeTerminal::with_keys(&[Key::Quit, Key::CtrlQ, Key::Char('q'), Key::Escape]);
+
+        run_workspace_config(&mut term, &mut settings, AvailableAgentModels::all(), &base).unwrap();
+
+        assert_eq!(term.frames.len(), 4);
+        assert!(
+            term.frames
+                .iter()
+                .all(|frame| frame.join("\n").contains("Config"))
         );
     }
 
