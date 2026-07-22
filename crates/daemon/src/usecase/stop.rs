@@ -25,7 +25,12 @@ use usagi_core::infrastructure::daemon::{
 
 use crate::usecase::serve::DaemonRecordPort;
 
-const MAX_CLEANUP_POLLS: usize = 40;
+// `serve` registers its lifecycle record before the synchronous endpoint and
+// runtime initialization finishes. A stop delivered in that interval is
+// already latched, but cleanup cannot commit until initialization reaches the
+// shutdown-aware worker. Keep the wait bounded while allowing roughly five
+// seconds with the production 50 ms sleeper on a contended host.
+const MAX_CLEANUP_POLLS: usize = 100;
 
 /// Outcome of a lock-fenced stale daemon cleanup attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -262,6 +267,23 @@ mod tests {
         }
     }
 
+    struct DelayedOwnerCleanupSleeper<'a> {
+        store: &'a DaemonRecordStore<InMemoryRecordFile>,
+        expected: &'a DaemonRecord,
+        calls: Cell<usize>,
+        clear_after: usize,
+    }
+
+    impl Sleeper for DelayedOwnerCleanupSleeper<'_> {
+        fn sleep(&self) {
+            let calls = self.calls.get() + 1;
+            self.calls.set(calls);
+            if calls == self.clear_after {
+                assert!(self.store.clear_if(self.expected).unwrap());
+            }
+        }
+    }
+
     struct AliveThenGoneProbe {
         calls: Cell<u8>,
     }
@@ -358,6 +380,35 @@ mod tests {
             "usagi v0.1.0: daemon stopped (pid 4321)"
         );
         assert_eq!(terminator.terminated(), vec![4321]);
+        assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[test]
+    fn running_stop_allows_latched_startup_shutdown_to_finish_within_its_bounded_window() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let record = DaemonRecord::new(4321);
+        store.save(&record).unwrap();
+        // This exceeds the former ~2 s / 40-poll budget and models a signal
+        // arriving after record registration but during synchronous startup.
+        let cleanup = DelayedOwnerCleanupSleeper {
+            store: &store,
+            expected: &record,
+            calls: Cell::new(0),
+            clear_after: 60,
+        };
+
+        assert_eq!(
+            stop(
+                &store,
+                &FixedProbe(true),
+                &RecordingTerminator::default(),
+                &cleanup,
+                &info(),
+            )
+            .unwrap(),
+            "usagi v0.1.0: daemon stopped (pid 4321)"
+        );
+        assert_eq!(cleanup.calls.get(), 60);
         assert_eq!(store.load().unwrap(), None);
     }
 
