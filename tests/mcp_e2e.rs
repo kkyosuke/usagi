@@ -38,6 +38,27 @@ fn production_tools_list_fixes_the_49_tool_schema_contract() {
 }
 
 #[test]
+fn production_settings_do_not_pass_disabled_tool_families_to_mcp() {
+    let mut mcp = McpHarness::start_with_tool_availability(false, false);
+    let tools = mcp.tools();
+    let names = tools
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(names.len(), 38);
+    assert!(names.iter().all(|name| !name.starts_with("issue_")));
+    assert!(names.iter().all(|name| !name.starts_with("memory_")));
+    assert!(!names.contains(&"session_delegate_issue"));
+    assert!(names.contains(&"session_list"));
+
+    for name in ["issue_search", "memory_search", "session_delegate_issue"] {
+        let response = mcp.tool(name, &json!({}));
+        assert_eq!(response["error"]["code"], -32601);
+    }
+}
+
+#[test]
 fn production_session_create_reaches_daemon_and_durable_lifecycle() {
     let mut mcp = McpHarness::start();
     let response = mcp.tool("session_create", &json!({"name":"mcp-e2e-session"}));

@@ -32,16 +32,6 @@ impl ToolAvailability {
     pub const fn new(issue: bool, memory: bool) -> Self {
         Self { issue, memory }
     }
-
-    fn allows(self, name: &str) -> bool {
-        if name.starts_with("issue_") || name == "session_delegate_issue" {
-            self.issue
-        } else if name.starts_with("memory_") {
-            self.memory
-        } else {
-            true
-        }
-    }
 }
 
 impl Default for ToolAvailability {
@@ -73,15 +63,20 @@ pub fn registry() -> Vec<ToolDescriptor> {
 /// Panics before the MCP serve loop starts when descriptor validation fails.
 #[must_use]
 pub fn registry_with_availability(availability: ToolAvailability) -> Vec<ToolDescriptor> {
-    let mut tools = issue::tools();
-    tools.extend(memory::tools());
-    tools.extend(session::tools());
+    let mut tools = Vec::new();
+    if availability.issue {
+        tools.extend(issue::tools());
+    }
+    if availability.memory {
+        tools.extend(memory::tools());
+    }
+    tools.extend(
+        session::tools()
+            .into_iter()
+            .filter(|tool| availability.issue || tool.name() != "session_delegate_issue"),
+    );
     tools.extend(supervisor::tools());
-    let descriptors = tools
-        .into_iter()
-        .filter(|tool| availability.allows(tool.name()))
-        .map(descriptor)
-        .collect::<Vec<_>>();
+    let descriptors = tools.into_iter().map(descriptor).collect::<Vec<_>>();
     validate_registry(&descriptors).expect("invalid MCP tool descriptor registry");
     descriptors
 }
