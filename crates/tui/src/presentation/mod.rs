@@ -4641,7 +4641,10 @@ mod tests {
 
     #[test]
     fn direct_controller_entry_binds_workspace_config_settings() {
-        let mut term = FakeTerminal::with_keys(&[Key::CtrlQ, Key::Char('y')]);
+        let mut keys = vec![Key::Char(':')];
+        keys.extend("config".chars().map(Key::Char));
+        keys.extend([Key::Enter, Key::Quit]);
+        let mut term = FakeTerminal::with_keys(&keys);
         let mut factory = FixedBackendFactory {
             sessions: Some(Box::new(UnavailableSessionCommandPort)),
             agent: Some(Box::new(UnavailableAgentCommandPort)),
@@ -4662,6 +4665,11 @@ mod tests {
             Exit::Quit
         );
         assert_eq!(settings.selected, vec![PathBuf::from("/tmp/direct-config")]);
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("Scope: Global   [Workspace]"))
+        );
     }
 
     #[test]
