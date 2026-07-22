@@ -11,10 +11,13 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use usagi_core::domain::settings::{DefaultModel, LocalSettings, Settings};
 use usagi_core::infrastructure::ipc::{
     BuildIdentity, DaemonGeneration, Envelope, EnvelopeKind, ErrorCode, OperationId, ProtocolError,
     ResponseOutcome, read_json_frame, write_json_frame,
 };
+use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
+use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_daemon::infrastructure::unix_transport::{
     EndpointLocator, EndpointState, SecureUnixListener, connect_current, read_locator,
 };
@@ -781,8 +784,11 @@ fn config_entry_renders_the_config_screen() {
     assert!(output.status.success());
     let out = stdout(&output);
     assert!(out.contains("Config"));
-    assert!(out.contains("Scope: Global"));
+    assert!(out.contains("Global"));
     assert!(out.contains("Theme") && out.contains("system"));
+    assert!(out.contains("Workspace init"));
+    assert!(out.contains("Agent") && out.contains("OpenAI"));
+    assert!(!out.contains("Scope:"));
     assert!(out.contains("Esc: back"));
     assert!(output.stderr.is_empty());
     let status = Command::new(env!("CARGO_BIN_EXE_usagi"))
@@ -819,6 +825,27 @@ fn open_registers_and_renders_an_explicit_or_current_workspace() {
     assert!(out.contains("explicit-workspace"));
     assert!(out.contains("main"));
     assert!(!out.contains("workspace TUI ("));
+    assert_eq!(
+        WorkspaceSettingsStore::new(&explicit).load().unwrap(),
+        LocalSettings::from(&Settings::default())
+    );
+
+    // Agent / Issue / Memory are copied only when the workspace is first
+    // registered. Later changes to Global workspace defaults do not rewrite it.
+    Storage::new(channel_data_dir(home.path()))
+        .save_settings(&Settings {
+            default_model: DefaultModel::Claude,
+            issue_enabled: false,
+            memory_enabled: false,
+            ..Settings::default()
+        })
+        .unwrap();
+    let reopened = run_with_home(&[OsStr::new("open"), explicit.as_os_str()], home.path());
+    assert!(reopened.status.success());
+    assert_eq!(
+        WorkspaceSettingsStore::new(&explicit).load().unwrap(),
+        LocalSettings::from(&Settings::default())
+    );
 
     // 非 tty でも open は registry へ登録し、続く hop の Recent に現れる。
     let registry =

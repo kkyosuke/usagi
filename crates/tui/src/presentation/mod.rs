@@ -1246,10 +1246,6 @@ fn welcome_action(action: MenuAction) -> WelcomeStep {
 #[allow(clippy::needless_pass_by_value)]
 fn step_config(config: &mut Config, key: Key, _settings: &mut dyn SettingsPort) -> ConfigStep {
     match key {
-        Key::Tab => {
-            config.toggle_scope();
-            ConfigStep::Stay
-        }
         Key::Up | Key::Char('k') => {
             config.previous_field();
             ConfigStep::Stay
@@ -1291,8 +1287,8 @@ fn step_workspace_config(
     }
 }
 
-/// Run Config from an opened workspace. The form starts on Workspace scope and
-/// returns to the still-live Home runtime after Escape or a successful save.
+/// Run Config from an opened workspace. The form contains only workspace-owned
+/// settings and returns to the still-live Home runtime after Escape or save.
 fn run_workspace_config(
     term: &mut dyn Terminal,
     settings: &mut dyn SettingsPort,
@@ -4703,7 +4699,10 @@ mod tests {
         assert_eq!(settings.selected, vec![PathBuf::from("/tmp/direct-config")]);
         assert!(term.frames.iter().any(|frame| {
             let frame = frame.join("\n");
-            frame.contains("Scope: Workspace") && frame.contains("direct-config")
+            frame.contains("Config")
+                && frame.contains("Agent")
+                && !frame.contains("Scope:")
+                && frame.contains("direct-config")
         }));
     }
 
@@ -7017,8 +7016,6 @@ mod tests {
         keys.extend([
             Key::Enter,
             Key::Down,
-            Key::Down,
-            Key::Down,
             Key::Right,
             Key::Down,
             Key::Down,
@@ -7057,7 +7054,9 @@ mod tests {
             .collect::<Vec<_>>();
         let config = frames
             .iter()
-            .position(|frame| frame.contains("Config") && frame.contains("Scope: Workspace"))
+            .position(|frame| {
+                frame.contains("Config") && frame.contains("Agent") && !frame.contains("Scope:")
+            })
             .expect("workspace Config is rendered");
         assert!(frames[config].contains("project"));
         assert!(!frames[config].contains("Overview"));
@@ -7148,7 +7147,7 @@ mod tests {
         }
     }
 
-    // Focus the dirty Save row from Config: cycle the theme, then step down to
+    // Focus the dirty Save row from Global Config: cycle the theme, then step down to
     // Save (Theme → Modal mode → Agent model → Issue → Memory → Save).
     const CONFIG_SAVE_KEYS: [Key; 7] = [
         Key::Right,
@@ -7160,6 +7159,11 @@ mod tests {
         Key::Enter,
     ];
 
+    // Workspace Config starts on Agent and contains only Agent → Issue →
+    // Memory → Save.
+    const WORKSPACE_CONFIG_SAVE_KEYS: [Key; 5] =
+        [Key::Right, Key::Down, Key::Down, Key::Down, Key::Enter];
+
     #[test]
     fn workspace_config_handles_back_and_failed_save_without_leaving_drafts() {
         let base = vec!["home".to_owned(); 24];
@@ -7167,7 +7171,7 @@ mod tests {
         let mut back = FakeTerminal::with_keys(&[Key::Escape]);
         run_workspace_config(&mut back, &mut settings, AvailableAgentModels::all(), &base).unwrap();
 
-        let keys = CONFIG_SAVE_KEYS
+        let keys = WORKSPACE_CONFIG_SAVE_KEYS
             .iter()
             .cloned()
             .chain(std::iter::once(Key::Escape))
