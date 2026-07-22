@@ -2136,17 +2136,16 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
     let mut loader = FsWorkspaceLoader::open_default()?;
     let snapshot = loader.open(path)?;
     let mut settings = PersistentSettingsPort::open()?;
-    settings.select_workspace(&snapshot.workspace.path)?;
-    let effective_settings = usagi_core::usecase::settings::read_for_workspace_entry(&mut settings);
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         let mut backend_factory = ProductionBackendFactory;
         run_with_metrics_hook(|| {
             run_in_terminal(|terminal| {
-                presentation::run_workspace_controller_with_backend_and_settings(
+                presentation::run_workspace_controller_with_backend_and_config(
                     terminal,
                     snapshot,
                     &mut backend_factory,
-                    &effective_settings,
+                    &mut settings,
+                    available_agent_models(),
                 )
             })
         })?;

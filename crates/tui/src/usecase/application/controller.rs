@@ -2934,6 +2934,19 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
         return Vec::new();
     }
     match overview::interpret(input) {
+        Ok(overview::Command::Config { arguments }) => {
+            if arguments.trim().is_empty() {
+                state.overlay = None;
+                state.notice = None;
+                vec![Effect::WorkspaceCommand {
+                    workspace: state.workspace,
+                    command: overview::Command::Config { arguments },
+                }]
+            } else {
+                state.notice = Some(Notice::new("config takes no arguments (usage: config)"));
+                Vec::new()
+            }
+        }
         Ok(overview::Command::Env { arguments }) => {
             if arguments.trim().is_empty() {
                 open_environment(state)
@@ -5497,6 +5510,42 @@ mod tests {
         assert!(effects.is_empty());
         assert_eq!(state.overlay(), Some(Overlay::Overview));
         assert!(state.environment_editor().is_none());
+    }
+
+    #[test]
+    fn overview_config_targets_the_workspace_and_rejects_extra_arguments() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+
+        assert_eq!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("config".to_owned())),
+            ),
+            vec![Effect::WorkspaceCommand {
+                workspace,
+                command: overview::Command::Config {
+                    arguments: String::new(),
+                },
+            }]
+        );
+        assert_eq!(state.overlay(), None);
+
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("config extra".to_owned())),
+            )
+            .is_empty()
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+        assert_eq!(
+            state.notice().map(|notice| notice.message.as_str()),
+            Some("config takes no arguments (usage: config)")
+        );
     }
 
     fn pending_decision(workspace: WorkspaceId) -> UserDecision {

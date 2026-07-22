@@ -716,6 +716,17 @@ enum WorkspaceStep {
     Quit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceConfigExit {
+    Back,
+    Quit,
+}
+
+struct WorkspaceConfigContext<'a> {
+    settings: &'a mut dyn SettingsPort,
+    available_models: AvailableAgentModels,
+}
+
 /// Overview の session command を daemon 所有の lifecycle runner へ渡す境界。
 ///
 /// TUI は session store や git worktree を直接操作しない。実行時の合成ルートが
@@ -1258,6 +1269,37 @@ fn step_config(config: &mut Config, key: Key, _settings: &mut dyn SettingsPort) 
         Key::Escape => ConfigStep::Back,
         Key::Quit | Key::CtrlQ => ConfigStep::Quit,
         _ => ConfigStep::Stay,
+    }
+}
+
+/// Run Config from an opened workspace. The form starts on Workspace scope and
+/// returns to the still-live Home runtime after Escape or a successful save.
+fn run_workspace_config(
+    term: &mut dyn Terminal,
+    settings: &mut dyn SettingsPort,
+    available_models: AvailableAgentModels,
+    base: &[String],
+) -> io::Result<WorkspaceConfigExit> {
+    let mut form = Config::load_workspace_with_available_models(settings, available_models);
+    loop {
+        let (height, width) = term.size()?;
+        term.draw(&config::render_over(height, width, base, &form))?;
+        match step_config(&mut form, term.read_key()?, settings) {
+            ConfigStep::Stay => {}
+            ConfigStep::Quit => return Ok(WorkspaceConfigExit::Quit),
+            ConfigStep::Back => return Ok(WorkspaceConfigExit::Back),
+            ConfigStep::Save => {
+                let (height, width) = term.size()?;
+                term.draw(&config::render_over(height, width, base, &form))?;
+                if form.commit_save(settings) {
+                    let (height, width) = term.size()?;
+                    term.draw(&config::render_over(height, width, base, &form))?;
+                    term.wait(config::SAVED_DISPLAY)?;
+                    form.reset_save();
+                    return Ok(WorkspaceConfigExit::Back);
+                }
+            }
+        }
     }
 }
 
@@ -2649,6 +2691,7 @@ fn drive_workspace_controller(
     snapshot: WorkspaceSnapshot,
     backend_factory: &mut dyn ControllerBackendFactory,
     modal_selection_mode: usagi_core::domain::settings::ModalSelectionMode,
+    mut workspace_config: Option<WorkspaceConfigContext<'_>>,
 ) -> io::Result<WorkspaceStep> {
     let workspace_id = snapshot.workspace_id;
     let session_ids = snapshot.session_ids.clone();
@@ -2729,7 +2772,7 @@ fn drive_workspace_controller(
             &sessions,
             metrics_projection.metrics(),
             metrics_projection.git_diffs(),
-            terminal_view,
+            terminal_view.clone(),
             ui.creating_session
                 .as_ref()
                 .map(|create| create.name.as_str()),
@@ -2791,6 +2834,40 @@ fn drive_workspace_controller(
             runtime.handle_key(key)
         };
         for effect in effects {
+            let opens_workspace_config = matches!(
+                &effect,
+                Effect::WorkspaceCommand {
+                    workspace,
+                    command: crate::usecase::overview::Command::Config { arguments },
+                } if *workspace == workspace_id && arguments.trim().is_empty()
+            );
+            if opens_workspace_config && let Some(context) = workspace_config.as_mut() {
+                let base = render_controller_frame(
+                    height,
+                    width,
+                    &runtime,
+                    &workspace_name,
+                    &root_cwd,
+                    &sessions,
+                    metrics_projection.metrics(),
+                    metrics_projection.git_diffs(),
+                    terminal_view.clone(),
+                    ui.creating_session
+                        .as_ref()
+                        .map(|create| create.name.as_str()),
+                );
+                match run_workspace_config(term, context.settings, context.available_models, &base)?
+                {
+                    WorkspaceConfigExit::Back => {
+                        let effective = usagi_core::usecase::settings::read_for_workspace_entry(
+                            context.settings,
+                        );
+                        runtime.set_modal_selection_mode(effective.modal_selection_mode);
+                    }
+                    WorkspaceConfigExit::Quit => return Ok(WorkspaceStep::Quit),
+                }
+                continue;
+            }
             if backend.dispatch(effect) == BackendFlow::Exit {
                 return Ok(WorkspaceStep::Quit);
             }
@@ -2814,6 +2891,7 @@ pub fn run_workspace_controller_with_backend(
         snapshot,
         backend_factory,
         usagi_core::domain::settings::ModalSelectionMode::Action,
+        None,
     )
     .map(|_| Exit::Quit)
 }
@@ -2835,6 +2913,35 @@ pub fn run_workspace_controller_with_backend_and_settings(
         snapshot,
         backend_factory,
         settings.modal_selection_mode,
+        None,
+    )
+    .map(|_| Exit::Quit)
+}
+
+/// Run a direct workspace entry with a writable settings port for Overview's
+/// workspace-local `config` command.
+///
+/// # Errors
+///
+/// Returns workspace binding or terminal IO failures.
+pub fn run_workspace_controller_with_backend_and_config(
+    term: &mut dyn Terminal,
+    snapshot: WorkspaceSnapshot,
+    backend_factory: &mut dyn ControllerBackendFactory,
+    settings: &mut dyn SettingsPort,
+    available_models: AvailableAgentModels,
+) -> io::Result<Exit> {
+    settings.select_workspace(&snapshot.workspace.path)?;
+    let effective = usagi_core::usecase::settings::read_for_workspace_entry(settings);
+    drive_workspace_controller(
+        term,
+        snapshot,
+        backend_factory,
+        effective.modal_selection_mode,
+        Some(WorkspaceConfigContext {
+            settings,
+            available_models,
+        }),
     )
     .map(|_| Exit::Quit)
 }
@@ -3073,6 +3180,7 @@ fn open_snapshot_via_controller(
     snapshot: WorkspaceSnapshot,
     settings: &mut dyn SettingsPort,
     backend_factory: &mut dyn ControllerBackendFactory,
+    available_models: AvailableAgentModels,
 ) -> io::Result<WorkspaceStep> {
     settings.select_workspace(&snapshot.workspace.path)?;
     let effective = usagi_core::usecase::settings::read_for_workspace_entry(settings);
@@ -3081,6 +3189,10 @@ fn open_snapshot_via_controller(
         snapshot,
         backend_factory,
         effective.modal_selection_mode,
+        Some(WorkspaceConfigContext {
+            settings,
+            available_models,
+        }),
     )
 }
 
@@ -3216,8 +3328,14 @@ pub fn run_screen_graph_with_backend(
                     let snapshot = loader.open(&path)?;
                     welcome.record_opened(&snapshot.workspace);
                     open.record_opened(&snapshot.workspace);
-                    let _ =
-                        open_snapshot_via_controller(term, snapshot, settings, backend_factory)?;
+                    let workspace_step = open_snapshot_via_controller(
+                        term,
+                        snapshot,
+                        settings,
+                        backend_factory,
+                        available_models,
+                    );
+                    workspace_step?;
                     return Ok(Exit::Quit);
                 }
             },
@@ -3229,8 +3347,14 @@ pub fn run_screen_graph_with_backend(
                     let snapshot = loader.open(&path)?;
                     welcome.record_opened(&snapshot.workspace);
                     open.record_opened(&snapshot.workspace);
-                    return open_snapshot_via_controller(term, snapshot, settings, backend_factory)
-                        .map(|_| Exit::Quit);
+                    return open_snapshot_via_controller(
+                        term,
+                        snapshot,
+                        settings,
+                        backend_factory,
+                        available_models,
+                    )
+                    .map(|_| Exit::Quit);
                 }
                 OpenStep::ConfirmCleanup => {
                     let removed = loader.cleanup_missing(&open.workspaces())?;
@@ -3255,6 +3379,7 @@ pub fn run_screen_graph_with_backend(
                             snapshot,
                             settings,
                             backend_factory,
+                            available_models,
                         )
                         .map(|_| Exit::Quit);
                     }
@@ -3401,8 +3526,8 @@ mod tests {
         TerminalChunk, TerminalError, UnavailableAgentCommandPort, UnavailableBackendPort,
         UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
         UnavailableExternalTerminalPort, UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
-        UnavailableSessionCommandPortFactory, WelcomeStep, WorkspaceLoader, WorkspaceRuntime,
-        WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
+        UnavailableSessionCommandPortFactory, WelcomeStep, WorkspaceConfigExit, WorkspaceLoader,
+        WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
         begin_terminal_selection_on_click, close_exited_panes, controller_terminal_view,
         copy_terminal_selection, drain_controller_host_actions, drain_session_completions,
         forward_live_terminal_input, handle_terminal_pointer, intercept_live_terminal_control,
@@ -3410,9 +3535,11 @@ mod tests {
         render_controller_frame, render_home_snapshot, restore_open_panes, run as run_from_start,
         run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
-        run_workspace_controller, run_workspace_controller_with_backend_and_settings,
-        safe_session_error, session_worktree_names, sidebar_pointer_event, step_config, step_new,
-        step_open, terminal_geometry, tick_session_refresh, welcome_action, write_banner,
+        run_workspace_config, run_workspace_controller,
+        run_workspace_controller_with_backend_and_config,
+        run_workspace_controller_with_backend_and_settings, safe_session_error,
+        session_worktree_names, sidebar_pointer_event, step_config, step_new, step_open,
+        terminal_geometry, tick_session_refresh, welcome_action, write_banner,
     };
     use crate::presentation::live_terminal::LiveTerminalControls;
     use crate::presentation::views::config::AvailableAgentModels;
@@ -4526,6 +4653,38 @@ mod tests {
         assert!(term.frames.iter().any(|frame| {
             let frame = frame.join("\n");
             frame.contains("Overview") && frame.contains("Enter: run   Esc: close")
+        }));
+    }
+
+    #[test]
+    fn direct_controller_entry_binds_workspace_config_settings() {
+        let mut keys = vec![Key::Char(':')];
+        keys.extend("config".chars().map(Key::Char));
+        keys.extend([Key::Enter, Key::Quit]);
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut factory = FixedBackendFactory {
+            sessions: Some(Box::new(UnavailableSessionCommandPort)),
+            agent: Some(Box::new(UnavailableAgentCommandPort)),
+            metrics: Some(Box::new(NoMetrics)),
+            browser: Some(Box::new(UnavailableBrowserOpener)),
+        };
+        let mut settings = WorkspaceBindingSettingsPort::default();
+
+        assert_eq!(
+            run_workspace_controller_with_backend_and_config(
+                &mut term,
+                snapshot("direct-config"),
+                &mut factory,
+                &mut settings,
+                AvailableAgentModels::all(),
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(settings.selected, vec![PathBuf::from("/tmp/direct-config")]);
+        assert!(term.frames.iter().any(|frame| {
+            let frame = frame.join("\n");
+            frame.contains("Scope: Workspace") && frame.contains("direct-config")
         }));
     }
 
@@ -6801,6 +6960,7 @@ mod tests {
     #[derive(Default)]
     struct WorkspaceBindingSettingsPort {
         selected: Vec<PathBuf>,
+        saves: Vec<(SettingsScope, Settings)>,
     }
 
     impl SettingsPort for WorkspaceBindingSettingsPort {
@@ -6821,11 +6981,75 @@ mod tests {
 
         fn save(
             &mut self,
-            _scope: usagi_core::usecase::settings::SettingsScope,
-            _settings: &usagi_core::domain::settings::Settings,
+            scope: usagi_core::usecase::settings::SettingsScope,
+            settings: &usagi_core::domain::settings::Settings,
         ) -> io::Result<()> {
+            self.saves.push((scope, settings.clone()));
             Ok(())
         }
+    }
+
+    #[test]
+    fn overview_config_saves_the_current_workspace_and_returns_to_home() {
+        let mut keys = vec![Key::Char('o'), Key::Enter, Key::Char(':')];
+        keys.extend("config".chars().map(Key::Char));
+        keys.extend([
+            Key::Enter,
+            Key::Down,
+            Key::Down,
+            Key::Down,
+            Key::Right,
+            Key::Down,
+            Key::Down,
+            Key::Enter,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut loader = FakeLoader::default();
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut sessions = UnavailableSessionCommandPortFactory;
+
+        assert_eq!(
+            run_with_settings(
+                &mut term,
+                vec![ws("project")],
+                Vec::new(),
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut settings,
+                &mut sessions,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        assert_eq!(settings.selected, vec![PathBuf::from("/tmp/project")]);
+        assert_eq!(settings.saves.len(), 1);
+        assert_eq!(settings.saves[0].0, SettingsScope::Workspace);
+        assert!(!settings.saves[0].1.issue_enabled);
+        let frames = term
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .collect::<Vec<_>>();
+        let config = frames
+            .iter()
+            .position(|frame| frame.contains("Config") && frame.contains("Scope: Workspace"))
+            .expect("workspace Config is rendered");
+        assert!(frames[config].contains("project"));
+        assert!(!frames[config].contains("Overview"));
+        let returned_home = frames
+            .iter()
+            .enumerate()
+            .skip(config + 1)
+            .any(|(_, frame)| frame.contains("project"));
+        assert!(returned_home);
+        assert_eq!(
+            term.waits,
+            vec![crate::presentation::views::config::SAVED_DISPLAY]
+        );
     }
 
     #[test]
@@ -6914,6 +7138,53 @@ mod tests {
         Key::Down,
         Key::Enter,
     ];
+
+    #[test]
+    fn workspace_config_handles_back_quit_and_failed_save_without_leaving_drafts() {
+        let base = vec!["home".to_owned(); 24];
+        let mut settings = RecordingSettingsPort::default();
+        let mut back = FakeTerminal::with_keys(&[Key::Escape]);
+        assert_eq!(
+            run_workspace_config(&mut back, &mut settings, AvailableAgentModels::all(), &base,)
+                .unwrap(),
+            WorkspaceConfigExit::Back
+        );
+
+        let mut quit = FakeTerminal::with_keys(&[Key::Quit]);
+        assert_eq!(
+            run_workspace_config(&mut quit, &mut settings, AvailableAgentModels::all(), &base,)
+                .unwrap(),
+            WorkspaceConfigExit::Quit
+        );
+
+        let keys = CONFIG_SAVE_KEYS
+            .iter()
+            .cloned()
+            .chain(std::iter::once(Key::Escape))
+            .collect::<Vec<_>>();
+        let mut failed = FakeTerminal::with_keys(&keys);
+        let mut failing_settings = RecordingSettingsPort {
+            fail_save: true,
+            ..RecordingSettingsPort::default()
+        };
+        assert_eq!(
+            run_workspace_config(
+                &mut failed,
+                &mut failing_settings,
+                AvailableAgentModels::all(),
+                &base,
+            )
+            .unwrap(),
+            WorkspaceConfigExit::Back
+        );
+        assert!(failed.waits.is_empty());
+        assert!(
+            failed
+                .frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("Save failed"))
+        );
+    }
 
     #[test]
     fn config_save_shows_loading_then_saved_then_returns_home_on_its_own() {

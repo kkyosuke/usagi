@@ -403,7 +403,7 @@ mod tests {
         );
 
         let neither = registry_with_availability(ToolAvailability::new(false, false));
-        assert_eq!(neither.len(), 37);
+        assert_eq!(neither.len(), 38);
         assert!(neither.iter().any(|tool| tool.name() == "session_dispatch"));
     }
 

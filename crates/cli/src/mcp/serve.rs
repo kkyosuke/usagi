@@ -603,7 +603,7 @@ fn resources_read(id: Value, params: Option<&Value>) -> Value {
 mod tests {
     use super::{
         SUPPORTED_PROTOCOL_VERSION, ServerCapabilities, ServerState, handle_line,
-        handle_line_with_client, serve, serve_with_client_and_features,
+        handle_line_with_client, serve, serve_with_client, serve_with_client_and_features,
         serve_with_client_and_snapshot,
     };
     use crate::mcp::runtime_model::{
@@ -811,7 +811,7 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .collect::<Vec<_>>();
-        assert_eq!(names.len(), 37);
+        assert_eq!(names.len(), 38);
         assert!(names.iter().all(|name| !name.starts_with("issue_")));
         assert!(names.iter().all(|name| !name.starts_with("memory_")));
         assert!(!names.contains(&"session_delegate_issue"));
