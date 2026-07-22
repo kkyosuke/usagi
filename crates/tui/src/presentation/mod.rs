@@ -683,10 +683,29 @@ enum ConfigStep {
     Quit,
     /// welcome へ戻る。
     Back,
-    /// A save has begun (loading). The screen graph draws the `saving…` frame,
-    /// writes, then on success holds the `saved` frame before returning home; a
+    /// A save has begun (loading). The screen graph animates the Save button,
+    /// writes, then on success holds the `done` frame before returning home; a
     /// failed write stays on Config with an error for retry.
     Save,
+}
+
+/// Draw one complete highlight sweep across the pending Save button. Settings
+/// writes are normally too quick for an intermediate state to be perceptible,
+/// so the short, fixed sweep makes the transition visible before persistence.
+fn play_config_save_wave(
+    term: &mut dyn Terminal,
+    form: &mut Config,
+    render: impl Fn(usize, usize, &Config) -> Vec<String>,
+) -> io::Result<()> {
+    for frame in 0..config::SAVE_WAVE_FRAMES {
+        let (height, width) = term.size()?;
+        term.draw(&render(height, width, form))?;
+        if frame + 1 < config::SAVE_WAVE_FRAMES {
+            term.wait(config::SAVE_WAVE_TICK)?;
+            form.advance_save_animation();
+        }
+    }
+    Ok(())
 }
 
 /// Workspace Config is a Home-owned modal and therefore cannot request that the
@@ -1303,12 +1322,13 @@ fn run_workspace_config(
             WorkspaceConfigStep::Stay => {}
             WorkspaceConfigStep::Back => return Ok(()),
             WorkspaceConfigStep::Save => {
-                let (height, width) = term.size()?;
-                term.draw(&config::render_over(height, width, base, &form))?;
+                play_config_save_wave(term, &mut form, |height, width, form| {
+                    config::render_over(height, width, base, form)
+                })?;
                 if form.commit_save(settings) {
                     let (height, width) = term.size()?;
                     term.draw(&config::render_over(height, width, base, &form))?;
-                    term.wait(config::SAVED_DISPLAY)?;
+                    term.wait(config::DONE_DISPLAY)?;
                     form.reset_save();
                     return Ok(());
                 }
@@ -3400,17 +3420,14 @@ pub fn run_screen_graph_with_backend(
                 ConfigStep::Quit => return Ok(Exit::Quit),
                 ConfigStep::Back => screen = Screen::Welcome,
                 ConfigStep::Save => {
-                    // Draw the loading frame (button reads `saving…`) before the
-                    // blocking write so the save is visible.
-                    let (height, width) = term.size()?;
-                    term.draw(&config::render(height, width, &config_form))?;
+                    play_config_save_wave(term, &mut config_form, config::render)?;
                     if config_form.commit_save(settings) {
-                        // Hold the `saved` confirmation briefly, then return home
+                        // Hold the `done` confirmation briefly, then return home
                         // with no key press. A failed write skips this and leaves
                         // Config on screen with the error for retry.
                         let (height, width) = term.size()?;
                         term.draw(&config::render(height, width, &config_form))?;
-                        term.wait(config::SAVED_DISPLAY)?;
+                        term.wait(config::DONE_DISPLAY)?;
                         config_form.reset_save();
                         screen = Screen::Welcome;
                     }
@@ -3554,6 +3571,7 @@ mod tests {
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::open::Open;
     use crate::presentation::views::welcome::MenuAction;
+    use crate::presentation::widgets::strip_ansi;
     use crate::usecase::application::controller::{
         AppEvent, AppKey, BackendEvent, Effect, EnvironmentEntry, NewRequest, PendingToken,
         SessionCreateIntent, TabDirection, Target,
@@ -7060,16 +7078,16 @@ mod tests {
             .expect("workspace Config is rendered");
         assert!(frames[config].contains("project"));
         assert!(!frames[config].contains("Overview"));
+        let done = frames
+            .iter()
+            .position(|frame| frame.contains("Config") && frame.contains("[ done ]"))
+            .expect("workspace Config shows done before closing");
         let returned_home = frames
             .iter()
-            .enumerate()
-            .skip(config + 1)
-            .any(|(_, frame)| frame.contains("project"));
-        assert!(returned_home);
-        assert_eq!(
-            term.waits,
-            vec![crate::presentation::views::config::SAVED_DISPLAY]
-        );
+            .skip(done + 1)
+            .any(|frame| frame.contains("project") && !frame.contains("Config"));
+        assert!(config < done && returned_home);
+        assert_eq!(term.waits, config_save_waits(true));
     }
 
     #[test]
@@ -7164,6 +7182,17 @@ mod tests {
     const WORKSPACE_CONFIG_SAVE_KEYS: [Key; 5] =
         [Key::Right, Key::Down, Key::Down, Key::Down, Key::Enter];
 
+    fn config_save_waits(done: bool) -> Vec<std::time::Duration> {
+        let mut waits = vec![
+            crate::presentation::views::config::SAVE_WAVE_TICK;
+            crate::presentation::views::config::SAVE_WAVE_FRAMES - 1
+        ];
+        if done {
+            waits.push(crate::presentation::views::config::DONE_DISPLAY);
+        }
+        waits
+    }
+
     #[test]
     fn workspace_config_handles_back_and_failed_save_without_leaving_drafts() {
         let base = vec!["home".to_owned(); 24];
@@ -7188,7 +7217,7 @@ mod tests {
             &base,
         )
         .unwrap();
-        assert!(failed.waits.is_empty());
+        assert_eq!(failed.waits, config_save_waits(false));
         assert!(
             failed
                 .frames
@@ -7215,7 +7244,7 @@ mod tests {
     }
 
     #[test]
-    fn config_save_shows_loading_then_saved_then_returns_home_on_its_own() {
+    fn config_save_waves_then_shows_done_and_returns_home_on_its_own() {
         let keys: Vec<Key> = CONFIG_SAVE_KEYS
             .iter()
             .cloned()
@@ -7241,30 +7270,33 @@ mod tests {
             Exit::Quit
         );
 
-        // Exactly one write, and exactly one confirmation dwell — the screen
-        // returned home on the timer, with no extra key press.
+        // Exactly one write, one complete wave, and one confirmation dwell —
+        // the screen returned home on the timer, with no extra key press.
         assert_eq!(settings.saves, 1);
-        assert_eq!(
-            term.waits,
-            vec![crate::presentation::views::config::SAVED_DISPLAY]
-        );
+        assert_eq!(term.waits, config_save_waits(true));
 
-        // Frames appear in order: the `saving…` loading frame, then the `saved`
-        // confirmation, then the Welcome `Menu` reached without a key press.
+        // Frames appear in order: an animated Save caption, then `done`, then
+        // the Welcome `Menu` reached without a key press.
         let joined: Vec<String> = term.frames.iter().map(|frame| frame.join("\n")).collect();
-        let saving = joined
+        let done = joined
             .iter()
-            .position(|frame| frame.contains("saving…"))
-            .expect("a loading frame is drawn");
-        let saved = joined
-            .iter()
-            .position(|frame| frame.contains("[ saved ]"))
-            .expect("a saved confirmation frame is drawn");
+            .position(|frame| frame.contains("[ done ]"))
+            .expect("a done confirmation frame is drawn");
+        let wave = &term.frames[done - crate::presentation::views::config::SAVE_WAVE_FRAMES..done];
+        assert!(wave.iter().all(|frame| {
+            frame
+                .iter()
+                .map(|line| strip_ansi(line))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .contains("[ Save ]")
+        }));
+        assert!(wave.windows(2).all(|frames| frames[0] != frames[1]));
         let menu = joined
             .iter()
             .rposition(|frame| frame.contains("Menu"))
             .expect("the Welcome menu is drawn after returning home");
-        assert!(saving < saved && saved < menu);
+        assert!(done < menu);
     }
 
     #[test]
@@ -7297,15 +7329,16 @@ mod tests {
             Exit::Quit
         );
 
-        // A failed write neither dwells nor auto-returns.
+        // A failed write still animates while pending, but neither dwells on
+        // `done` nor auto-returns.
         assert_eq!(settings.saves, 0);
-        assert!(term.waits.is_empty());
+        assert_eq!(term.waits, config_save_waits(false));
 
         let joined: Vec<String> = term.frames.iter().map(|frame| frame.join("\n")).collect();
-        // The error is surfaced on the Config screen and no `saved` confirmation
+        // The error is surfaced on the Config screen and no `done` confirmation
         // is ever shown.
         assert!(joined.iter().any(|frame| frame.contains("Save failed")));
-        assert!(joined.iter().all(|frame| !frame.contains("[ saved ]")));
+        assert!(joined.iter().all(|frame| !frame.contains("[ done ]")));
     }
 
     #[test]

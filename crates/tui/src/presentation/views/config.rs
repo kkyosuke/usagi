@@ -7,24 +7,30 @@ use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
 use crate::presentation::layouts::mascot_screen;
 use crate::presentation::theme::Style;
-use crate::presentation::widgets::{modal, select};
+use crate::presentation::widgets::{self, modal, select};
 
 const TITLE: &str = "Config";
 const FOOTER: &str = "↑↓: select  ←→: change  ●: unsaved  Enter: save  Esc: back";
 const MODAL_INNER_WIDTH: usize = 64;
 const MODAL_BODY_HEIGHT: usize = 9;
 const MODAL_FOOTER: &str = "↑↓: select  ←→: change  Enter: save  Esc: back";
+const SECTION_HEADING_WIDTH: usize = 35;
 
-/// How long the `saved` confirmation stays on screen before the Config screen
+/// Time between frames while the Save button's highlight wave is moving.
+pub const SAVE_WAVE_TICK: Duration = Duration::from_millis(60);
+/// A full sweep across the four-letter Save caption, including its fade-out.
+pub const SAVE_WAVE_FRAMES: usize = 6;
+
+/// How long the `done` confirmation stays on screen before the Config screen
 /// returns home on its own, with no key press. Short enough to feel immediate,
 /// long enough to read — a peer of the other screen-timing constants
 /// (`splash::ANIM_TICK`, `SIDEBAR_DOUBLE_CLICK`). This constant is the single
 /// source of truth for the Config save confirmation dwell.
-pub const SAVED_DISPLAY: Duration = Duration::from_millis(600);
+pub const DONE_DISPLAY: Duration = Duration::from_millis(600);
 
 /// The Save action's lifecycle across a single save. The screen graph draws the
-/// `Saving` frame before the blocking write and holds the `Saved` frame for
-/// [`SAVED_DISPLAY`] before returning home; a failed write drops back to `Idle`.
+/// `Saving` wave before the blocking write and holds the `Done` frame for
+/// [`DONE_DISPLAY`] before returning home; a failed write drops back to `Idle`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum SavePhase {
     /// No save in flight; the button reads `Save`.
@@ -33,7 +39,7 @@ enum SavePhase {
     /// A save has begun and the blocking write is about to run (loading).
     Saving,
     /// The write succeeded; the confirmation is on screen until the dwell ends.
-    Saved,
+    Done,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -120,6 +126,7 @@ pub struct Config {
     available_models: AvailableAgentModels,
     notice: Option<String>,
     save_phase: SavePhase,
+    save_animation_frame: usize,
 }
 
 impl Config {
@@ -164,6 +171,7 @@ impl Config {
             available_models,
             notice: error,
             save_phase: SavePhase::Idle,
+            save_animation_frame: 0,
         }
     }
 
@@ -333,12 +341,19 @@ impl Config {
             return false;
         }
         self.save_phase = SavePhase::Saving;
+        self.save_animation_frame = 0;
         self.notice = None;
         true
     }
 
+    /// Advance the highlight wave drawn across the Save button while its write
+    /// is pending. The screen graph calls this between animation frames.
+    pub fn advance_save_animation(&mut self) {
+        self.save_animation_frame = self.save_animation_frame.wrapping_add(1);
+    }
+
     /// Persist the selected scope's dirty draft. On success it records the saved
-    /// value, enters the `Saved` phase, and returns true; on failure it drops
+    /// value, enters the `Done` phase, and returns true; on failure it drops
     /// back to `Idle`, keeps the draft dirty, and surfaces a safe error so the
     /// user can retry. Returns false without touching the port when not dirty.
     pub fn commit_save(&mut self, port: &mut dyn SettingsPort) -> bool {
@@ -351,8 +366,8 @@ impl Config {
         match port.save(scope, &draft) {
             Ok(()) => {
                 self.current_mut().saved = draft;
-                self.save_phase = SavePhase::Saved;
-                self.notice = Some("saved".to_string());
+                self.save_phase = SavePhase::Done;
+                self.notice = None;
                 true
             }
             Err(error) => {
@@ -367,15 +382,15 @@ impl Config {
     /// so a later visit to Config starts from a clean Save row.
     pub fn reset_save(&mut self) {
         self.save_phase = SavePhase::Idle;
+        self.save_animation_frame = 0;
         self.notice = None;
     }
 
     /// The Save button's current label, driven by the save phase.
     fn save_label(&self) -> &'static str {
         match self.save_phase {
-            SavePhase::Idle => "Save",
-            SavePhase::Saving => "saving…",
-            SavePhase::Saved => "saved",
+            SavePhase::Idle | SavePhase::Saving => "Save",
+            SavePhase::Done => "done",
         }
     }
 
@@ -414,16 +429,14 @@ pub fn render_over(
     base: &[String],
     config: &Config,
 ) -> Vec<String> {
-    let mut lines = form_rows(config)
-        .into_iter()
-        .map(|line| {
-            if line.is_empty() {
-                line
-            } else {
-                modal::content_line(&line, MODAL_INNER_WIDTH)
-            }
-        })
-        .collect::<Vec<_>>();
+    let mut lines = vec![String::new()];
+    lines.extend(form_rows(config).into_iter().map(|line| {
+        if line.is_empty() {
+            line
+        } else {
+            modal::content_line(&line, MODAL_INNER_WIDTH)
+        }
+    }));
     lines.push(String::new());
     lines.push(modal::footer(MODAL_FOOTER));
     modal::render_body_over(
@@ -443,15 +456,25 @@ fn form_rows(config: &Config) -> Vec<String> {
         SettingsScope::Workspace => workspace_rows(config),
     };
     lines.push(String::new());
-    lines.push(select::action(
-        config.save_label(),
-        config.field() == Field::Save,
-        config.is_dirty(),
-    ));
+    lines.push(save_action(config));
     if let Some(notice) = config.notice() {
         lines.push(Style::new().dim().paint(notice));
     }
     lines
+}
+
+fn save_action(config: &Config) -> String {
+    if config.save_phase == SavePhase::Saving {
+        let marker = modal::selection_marker(config.field() == Field::Save);
+        let caption = widgets::shimmer_text("Save", config.save_animation_frame);
+        format!("{marker}   [ {caption} ]")
+    } else {
+        select::action(
+            config.save_label(),
+            config.field() == Field::Save,
+            config.is_dirty() || config.save_phase == SavePhase::Done,
+        )
+    }
 }
 
 fn global_rows(config: &Config) -> Vec<String> {
@@ -508,9 +531,10 @@ fn workspace_setting_rows(config: &Config) -> Vec<String> {
 }
 
 fn section_heading(label: &str) -> String {
+    let rule_width = SECTION_HEADING_WIDTH - label.len() - 1;
     Style::new()
         .dim()
-        .paint(&format!("{label} {}", "─".repeat(20)))
+        .paint(&format!("{label} {}", "─".repeat(rule_width)))
 }
 
 fn theme_name(theme: Theme) -> &'static str {
@@ -652,7 +676,11 @@ mod tests {
     fn global_render_groups_application_settings_and_workspace_defaults() {
         let mut port = FakeSettingsPort::default();
         let config = Config::load(&mut port);
-        let frame = render(24, 80, &config).join("\n");
+        let plain = render(24, 80, &config)
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>();
+        let frame = plain.join("\n");
 
         assert!(frame.contains("Config"));
         assert!(frame.contains("Global"));
@@ -666,6 +694,13 @@ mod tests {
         assert!(!frame.contains("Tab: scope"));
         assert!(frame.contains("[ Save ]"));
         assert!(frame.contains("Esc: back"));
+
+        let global = plain.iter().find(|line| line.contains("Global")).unwrap();
+        let workspace = plain
+            .iter()
+            .find(|line| line.contains("Workspace init"))
+            .unwrap();
+        assert_eq!(global.find("Global"), workspace.find("Workspace init"));
     }
 
     #[test]
@@ -759,6 +794,19 @@ mod tests {
         assert!(!joined.contains("Theme"));
         assert!(joined.contains("Esc: back"));
         assert!(plain.iter().all(|line| display_width(line) <= 80));
+
+        let top = plain
+            .iter()
+            .position(|line| line.contains("Config"))
+            .unwrap();
+        let first_body = &plain[top + 1];
+        let left_border = first_body.find('│').unwrap();
+        let right_border = first_body.rfind('│').unwrap();
+        assert!(
+            first_body[left_border + '│'.len_utf8()..right_border]
+                .trim()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -813,9 +861,9 @@ mod tests {
         assert!(config.can_save());
         assert!(config.begin_save());
         assert!(config.commit_save(&mut port));
-        assert_eq!(config.notice(), Some("saved"));
+        assert_eq!(config.notice(), None);
         assert!(!config.is_dirty());
-        assert!(render(24, 80, &config).join("\n").contains("[ saved ]"));
+        assert!(render(24, 80, &config).join("\n").contains("[ done ]"));
     }
 
     #[test]
@@ -963,7 +1011,7 @@ mod tests {
     }
 
     #[test]
-    fn save_moves_from_loading_to_saved_and_labels_each_phase() {
+    fn save_moves_from_an_animated_wave_to_done() {
         let mut port = FakeSettingsPort::default();
         let mut config = dirty_on_save_row(&mut port);
         assert!(render(24, 80, &config).join("\n").contains("[ Save ]"));
@@ -972,13 +1020,21 @@ mod tests {
         assert!(config.begin_save());
         assert!(config.is_dirty());
         assert_eq!(config.notice(), None);
-        assert!(render(24, 80, &config).join("\n").contains("[ saving… ]"));
+        let first_wave = render(24, 80, &config);
+        let first_plain = first_wave
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(first_plain.contains("[ Save ]"));
+        config.advance_save_animation();
+        assert_ne!(first_wave, render(24, 80, &config));
 
-        // commit_save persists, settles to Saved, and stops being dirty.
+        // commit_save persists, settles to Done, and stops being dirty.
         assert!(config.commit_save(&mut port));
-        assert_eq!(config.notice(), Some("saved"));
+        assert_eq!(config.notice(), None);
         assert!(!config.is_dirty());
-        assert!(render(24, 80, &config).join("\n").contains("[ saved ]"));
+        assert!(render(24, 80, &config).join("\n").contains("[ done ]"));
         assert_eq!(port.global.theme, Theme::Dark);
     }
 
@@ -1026,7 +1082,7 @@ mod tests {
         assert!(config.begin_save());
         assert!(config.commit_save(&mut port));
         assert!(!config.is_dirty());
-        assert!(render(24, 80, &config).join("\n").contains("[ saved ]"));
+        assert!(render(24, 80, &config).join("\n").contains("[ done ]"));
     }
 
     #[test]
@@ -1035,7 +1091,7 @@ mod tests {
         let mut config = dirty_on_save_row(&mut port);
         assert!(config.begin_save());
         assert!(config.commit_save(&mut port));
-        assert_eq!(config.notice(), Some("saved"));
+        assert_eq!(config.notice(), None);
 
         config.reset_save();
         assert_eq!(config.notice(), None);
