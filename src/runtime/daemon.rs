@@ -3589,10 +3589,17 @@ impl FsRecordFile {
             self.sync_parent_best_effort();
             Ok(())
         })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temporary);
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => match std::fs::remove_file(&temporary) {
+                Ok(()) => Err(error),
+                Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => Err(error),
+                Err(cleanup) => Err(std::io::Error::new(
+                    cleanup.kind(),
+                    format!("{error}; daemon record temporary rollback failed: {cleanup}"),
+                )),
+            },
         }
-        result
     }
 
     fn read_unlocked(&self) -> std::io::Result<Option<String>> {

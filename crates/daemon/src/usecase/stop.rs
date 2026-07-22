@@ -14,9 +14,6 @@
 //! The store's file seam, the probe, and the terminator are injected, so this
 //! stays pure and fully testable; the synthesis root binds the real filesystem,
 //! process probe, and signal.
-//!
-//! A graceful stop marker for a long-running `serve` loop is a later concern;
-//! with no daemon loop yet, terminating the recorded pid is the effective stop.
 
 use std::io;
 

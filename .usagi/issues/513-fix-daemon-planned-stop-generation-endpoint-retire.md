@@ -37,8 +37,8 @@ v2 の planned `usagi daemon stop` は記録 PID へ SIGTERM を送り `daemon.j
 - #341 の「locator 存在時の接続失敗・draining・不正 endpoint では別 daemon を勝手に起動しない」契約は弱めない。正常 planned stop が locator を安全に消すことで、次の client が `NotFound` 経路から一度だけ autostart できるようにする。
 - cleanup error は黙って成功扱いせず、record / ownership を安全側に残して診断可能にする。panic や crash の stale endpoint recovery は本 issue の planned stop と混同しない。
 - running stop は SIGTERM 後に record を先行 clear せず、owner が endpoint retire 後に exact record を変更・消去するまで bounded poll する。owner が record を残したまま消滅または timeout した場合は cleanup failure として record を保持する。最初から stale だった record と serve cleanup は保持した完全な `(pid, started_at)` だけを conditional clear する。実 filesystem adapter は `daemon.json` の read/save/conditional clear を stable な `record.lock` の同一 cross-process transaction で直列化し、比較と unlink を分離しない。raw PID の process identity 問題は #514 の範囲とし、本 issue へ混ぜない。
-- record save は live `daemon.json` を truncate せず、private unique temporary の write / fsync / owner 検証後に同一 directory で atomic rename し、parent directory を best-effort fsync する。write / rename failure では旧 record を保持して temporary を回収し、conditional unlink も parent fsync を試行する。rename / unlink 後の非対応 directory fsync は commit 済み操作を曖昧な error にしない。
-- endpoint publish が ordinary error を返す場合は、owner object 構築前でも自 generation socket と作成済み temporary を rollback する。process crash 後の stale endpoint / temporary recovery は #515 の範囲とする。
+- record save は live `daemon.json` を truncate せず、private unique temporary の write / fsync / owner 検証後に同一 directory で atomic rename し、parent directory を best-effort fsync する。write / rename error を返す経路では旧 record を保持して temporary unlink を試み、その cleanup failure も error として返す。hard crash では unique temporary が残り得るが、後続 save は別名を使う。conditional unlink も parent fsync を試行し、rename / unlink 後の非対応 directory fsync は commit 済み操作を曖昧な error にしない。
+- endpoint publish が ordinary error を返す場合は、owner object 構築前でも自 generation socket と作成済み temporary の rollback を試み、rollback failure も error として返す。process crash 後の stale endpoint / temporary recovery は #515 の範囲とする。
 
 ## 受入条件
 
@@ -51,8 +51,8 @@ v2 の planned `usagi daemon stop` は記録 PID へ SIGTERM を送り `daemon.j
 - [x] transport と daemon lifecycle の v2 正本 docs を実装へ整合する。
 - [ ] running/stale stop と owner cleanup が遅延しても、先に保存された replacement の完全な record を削除しない。
 - [ ] record save と conditional clear の比較・unlink は stable な同一 cross-process lock 下で不可分に実行する。
-- [ ] record save の途中失敗・crash は旧 record を malformed JSON にせず atomic replacement を保証し、返却された write / rename error の temporary を回収する。
-- [ ] endpoint bind 後に ordinary error を返す全経路は、公開前の temporary / generation socket を回収する。
+- [ ] record save の途中失敗・crash は旧 record を malformed JSON にせず atomic replacement を保証し、返却された write / rename error では temporary rollback を試みて cleanup failure も報告する。
+- [ ] endpoint bind 後に ordinary error を返す全経路は、公開前の temporary / generation socket の rollback を試みて cleanup failure も報告する。
 - [ ] endpoint 初期化中に shutdown signal を受けても、同期 wait 前から admission fence が立ち、新規 request を受理しない。
 
 ## 必須回帰テスト
