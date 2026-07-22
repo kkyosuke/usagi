@@ -354,6 +354,15 @@
     },
     {
       "path": "crates/daemon/src/infrastructure/unix_transport.rs",
+      "symbol": "fn:bind_with",
+      "occurrence": 1,
+      "reason": "real_io",
+      "owner": "daemon",
+      "expires": "2027-01-31",
+      "tests": "unix_transport_post_bind_rollback"
+    },
+    {
+      "path": "crates/daemon/src/infrastructure/unix_transport.rs",
       "symbol": "fn:accept",
       "occurrence": 1,
       "reason": "real_io",
