@@ -8,7 +8,7 @@ dependson: [514, 515]
 related: [209, 221, 492, 507]
 parent: 507
 created_at: 2026-07-22T11:30:17.999672+00:00
-updated_at: 2026-07-22T11:41:38.542224+00:00
+updated_at: 2026-07-22T11:55:45.397247+00:00
 ---
 
 ## 問題・根拠
@@ -29,7 +29,7 @@ cross-process の generation registry と admission fence を、#507 の shippin
 1. durable registry に generation ID、role（`standby | active | draining | retired`）、endpoint、process identity、operation ID、revision を保持し、schema/version と CAS で更新する。
 2. single active、不正な role transition、stale revision、未知 schema/corrupt record を fail-closed にする。
 3. 新 generation は private endpoint を bind し、side-effect-free な standby readiness を完了するまで `current` authority を変更しない。standby readiness は runtime store の破壊的 reconcile/save、supervisor tick、decision/PR worker 起動、spawn その他の mutation を行わない。owner shard の read-only hydrate と activation は #518 の契約を使う。
-4. readiness 完了後、registry の active transition と locator 公開を crash-safe な一つの handoff protocol として commit する。失敗時は旧 active を維持し、standby を回収可能にする。
+4. readiness 完了後、別 durable object である generation registry の CAS と current locator publish を、durable phase と operation ID を持つ multi-phase handoff protocol で整合させる。採用した write order の registry commit 前後、locator publish 前後に process が SIGKILL されても、再起動 recovery は phase と両 object を照合し、exactly one active / current へ roll-forward / repair または effect zero で fail closed に収束させる。逆順を採用する phase がある場合も同じ write 境界を定義する。一度 client から観測可能になった commit を rollback して旧 authority を復活させず、ambiguous partial phase を operation ID で同じ outcome へ収束させる。
 5. rollover operation を durable/idempotent にし、concurrent restart、ACK loss、再試行、generation 上限を一つの結果へ収束させる。
 6. IPC request ごとに最新 role/revision と resource owner を検証する。connection の確立済みという事実を authority としない。
 7. `active` だけが control operation と新規 spawn を受理する。`draining` は自 generation が所有する terminal の attach/input/resize/resync/exit/kill と必要な read/inventory だけを受理し、他 generation・新規作成・control mutation は effect zero で拒否する。`standby/retired` は mutation を受理しない。
@@ -52,7 +52,8 @@ cross-process の generation registry と admission fence を、#507 の shippin
 
 - [ ] durable registry は全 role transition と single-active invariant を CAS で検証し、stale writer、未知 schema、corrupt record を effect zero で拒否する。
 - [ ] standby endpoint の bind/readiness は active locator を変更せず、runtime store reconcile/save、worker/tick、spawn/control mutation を一度も行わない。active commit 完了後だけ新 endpoint が current になる。
-- [ ] hydrate、bind、readiness、registry commit、locator publish の各 fault injection で old active が利用可能なままになり、二重 active・半端な current を残さない。
+- [ ] hydrate、bind、readiness と authority commit 前の fault では old active を維持する。一度 new authority の commit が client から観測可能になった後は old active へ rollback せず、new authority への roll-forward / repair または安全な fail-closed に収束する。
+- [ ] registry CAS と current locator publish の各 write 前後で process を SIGKILL して再起動しても、durable phase / operation ID と両 object の照合により exactly one active / current へ収束し、二重 active・stale current・半端な authority を残さない。protocol が逆順 write を採る場合も、その各 write 境界で同じ invariant を満たす。ambiguous partial phase は推測 rollback せず、同じ operation の roll-forward / repair または effect zero の fail-closed として扱う。
 - [ ] concurrent/repeated rollover と ACK loss は同一 operation/result へ収束し、generation 上限を越えて process を増やさない。
 - [ ] handoff 前から開いている旧 connection は role 変更後に control/spawn effect を発生できない。
 - [ ] draining endpoint への direct connection は exact owner resource の terminal operation だけ成功し、他 owner/resource は拒否される。
@@ -66,7 +67,7 @@ cross-process の generation registry と admission fence を、#507 の shippin
 - registry state machine/CAS/operation idempotency の deterministic unit test
 - 2 server process・別 Unix socket を使う active/standby/draining integration test
 - 既存 persistent connection からの late spawn/control rejection
-- bind/readiness/registry write/locator publish/ACK loss の fault injection
+- bind/readiness failure と ACK loss に加え、registry CAS 前後 / current locator publish 前後で process を SIGKILLして fresh process から recovery する crash matrix。protocol が逆順 write を採る phase も各境界を網羅し、exactly one active / current、observable commit の非 rollback、operation ID による partial phase の roll-forward / repair / fail-closed を検証する。
 - concurrent restart、stale revision、unknown schema、corrupt/truncated record、generation limit
 - handoff 中の admission lease close / drain barrier、effect 中 handoff、commit 中 handoff
 - supervisor / decision / PR refresh 等internal producerのepoch close / join
