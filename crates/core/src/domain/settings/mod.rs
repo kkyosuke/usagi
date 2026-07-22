@@ -67,7 +67,7 @@ impl DefaultModel {
 /// A missing field (and the whole file) falls back to [`Default`], and each enum
 /// field degrades an unrecognised token to its default, so an older or
 /// hand-edited `settings.json` still loads.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// The UI color theme.
@@ -76,6 +76,22 @@ pub struct Settings {
     pub modal_selection_mode: ModalSelectionMode,
     /// The provider used for Agent panes when no profile is selected explicitly.
     pub default_model: DefaultModel,
+    /// Whether issue-backed MCP tools are available to agents.
+    pub issue_enabled: bool,
+    /// Whether durable-memory MCP tools are available to agents.
+    pub memory_enabled: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            theme: Theme::default(),
+            modal_selection_mode: ModalSelectionMode::default(),
+            default_model: DefaultModel::default(),
+            issue_enabled: true,
+            memory_enabled: true,
+        }
+    }
 }
 
 impl Settings {
@@ -90,6 +106,12 @@ impl Settings {
         }
         if let Some(model) = local.default_model {
             self.default_model = model;
+        }
+        if let Some(enabled) = local.issue_enabled {
+            self.issue_enabled = enabled;
+        }
+        if let Some(enabled) = local.memory_enabled {
+            self.memory_enabled = enabled;
         }
         self
     }
@@ -110,6 +132,8 @@ pub struct LocalSettings {
     pub modal_selection_mode: Option<ModalSelectionMode>,
     #[serde(deserialize_with = "deserialize_local_default_model")]
     pub default_model: Option<DefaultModel>,
+    pub issue_enabled: Option<bool>,
+    pub memory_enabled: Option<bool>,
 }
 
 impl From<&Settings> for LocalSettings {
@@ -118,6 +142,8 @@ impl From<&Settings> for LocalSettings {
             theme: Some(settings.theme),
             modal_selection_mode: Some(settings.modal_selection_mode),
             default_model: Some(settings.default_model),
+            issue_enabled: Some(settings.issue_enabled),
+            memory_enabled: Some(settings.memory_enabled),
         }
     }
 }

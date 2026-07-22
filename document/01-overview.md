@@ -79,9 +79,10 @@ Welcome の **New** を選ぶと新規 workspace 作成フォーム（New 画面
 留まる。
 
 Welcome の **Config**、または `usagi config` を選ぶと設定画面（Config 画面）へ進む。Tab で global /
-workspace scope を切り替え、`↑↓` で Theme / Modal mode / Agent model / Save を選ぶ。Theme と Modal mode は `←→` で編集し、
+workspace scope を切り替え、`↑↓` で Theme / Modal mode / Agent model / Issue / Memory / Save を選ぶ。Theme と Modal mode は `←→` で編集し、
 Modal mode は Overview / Closeup で action を選択する **Action** と command を入力する **Prompt** を切り替える。
 Agent model はインストール済み CLI に対応する `Claude` / `OpenAI` だけを表示し、新しい Agent pane の既定 profile としてそれぞれ `claude` / `codex` を選ぶ。どちらの CLI もない場合は灰色で無効化する。
+Issue と Memory は対応する MCP tool 群を on / off し、どちらも Global の既定値では on である。
 scope ごとに独立した draft と dirty state を持ち、変更があるときだけ Save を有効にする。保存成功時は `saved` を表示して
 Welcome へ戻り、保存失敗時は draft を保って error を表示する。Global は user data directory の `settings.json`、
 Workspace は対象 repository の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は `.usagi/local/settings.json`）へ保存する。
