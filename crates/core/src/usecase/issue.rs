@@ -457,11 +457,17 @@ mod tests {
         search_snapshot, set_create_retry_validation_hook, to_prompt, update,
     };
     use crate::domain::frontmatter::FrontmatterDoc;
-    use crate::domain::issue::{IssuePriority, IssueStatus};
+    use crate::domain::issue::{Issue, IssuePriority, IssueStatus};
     use crate::infrastructure::persistence::json_file::{AtomicWriteStage, fail_next_atomic_write};
-    use crate::infrastructure::store::issue::{AmbiguousIssueNumber, IssueStore};
+    use crate::infrastructure::persistence::store_lock::StoreLock;
+    use crate::infrastructure::store::issue::{
+        AmbiguousIssueNumber, IssueStore, MismatchedIssueNumber, SourceSnapshotLockPhase,
+    };
     use chrono::{DateTime, TimeZone, Utc};
+    use fs2::FileExt;
     use std::fs;
+    use std::path::Path;
+    use std::process::Command;
     use std::sync::{Arc, Barrier};
     use std::thread;
 
@@ -484,6 +490,80 @@ mod tests {
         }
     }
 
+    fn persisted_issue(number: u32, title: &str) -> Issue {
+        Issue {
+            number,
+            title: title.to_string(),
+            status: IssueStatus::Todo,
+            priority: IssuePriority::Medium,
+            labels: vec![],
+            dependson: vec![],
+            related: vec![],
+            parent: None,
+            milestone: None,
+            created_at: ts(20),
+            updated_at: ts(20),
+            body: "body".to_string(),
+        }
+    }
+
+    fn assert_mismatched_crud_has_no_effect(
+        store: &IssueStore,
+        number: u32,
+        mismatch_file: &Path,
+        filename_number: Option<u32>,
+        source_paths: &[&Path],
+    ) {
+        let source_before: Vec<_> = source_paths
+            .iter()
+            .map(|path| fs::read(path).unwrap())
+            .collect();
+        let index_before = fs::read(store.index_path()).unwrap();
+        let dirty = store.dir().join(".derived-dirty");
+        let dirty_before = fs::read(&dirty).unwrap();
+
+        let errors = [
+            get(store, number).unwrap_err(),
+            update(
+                store,
+                number,
+                IssuePatch {
+                    status: Some(IssueStatus::Done),
+                    ..Default::default()
+                },
+                ts(21),
+            )
+            .unwrap_err(),
+            delete(store, number).unwrap_err(),
+        ];
+        for error in errors {
+            let mismatch = error.downcast_ref::<MismatchedIssueNumber>().unwrap();
+            assert_eq!(mismatch.filename_number, filename_number);
+            assert_eq!(mismatch.declared_number, 8);
+            assert_eq!(mismatch.file, mismatch_file);
+        }
+
+        for (path, before) in source_paths.iter().zip(source_before) {
+            assert_eq!(fs::read(path).unwrap(), before);
+        }
+        assert_eq!(fs::read(store.index_path()).unwrap(), index_before);
+        assert_eq!(fs::read(dirty).unwrap(), dirty_before);
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn create_allocates_sequential_numbers_and_defaults_to_todo() {
         let (_tmp, store) = store();
@@ -503,18 +583,90 @@ mod tests {
         unsafe {
             std::env::set_var(crate::infrastructure::paths::DATA_DIR_ENV, logs.path());
         }
-        let (_tmp, store) = store();
+        let (tmp, store) = store();
         fail_next_atomic_write(&store.index_path(), AtomicWriteStage::Rename);
 
         let first = create(&store, spec("same request"), ts(20)).unwrap();
+        let authority = tmp.path().join(".usagi/issue-numbers");
+        let sequence_before = fs::read(authority.join("sequence.json")).unwrap();
+        let markers_before = fs::read_dir(authority.join("reservations"))
+            .unwrap()
+            .count();
         let retry = create(&store, spec("same request"), ts(21)).unwrap();
 
         assert_eq!(retry.number, first.number);
         assert_eq!(retry.created_at, first.created_at);
         assert_eq!(store.scan().unwrap().len(), 1);
+        assert_eq!(
+            fs::read(authority.join("sequence.json")).unwrap(),
+            sequence_before
+        );
+        assert_eq!(
+            fs::read_dir(authority.join("reservations"))
+                .unwrap()
+                .count(),
+            markers_before
+        );
 
         unsafe {
             std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
+        }
+    }
+
+    #[test]
+    fn source_write_failure_consumes_the_reservation_before_retrying() {
+        let (tmp, store) = store();
+        let failed_source = store.dir().join("001-source-failure.md");
+        fail_next_atomic_write(&failed_source, AtomicWriteStage::Rename);
+
+        assert!(create(&store, spec("source failure"), ts(20)).is_err());
+        assert!(!failed_source.exists());
+        let authority = tmp.path().join(".usagi/issue-numbers");
+        assert!(authority.join("reservations/0000000001.reserved").is_file());
+        assert!(
+            fs::read_to_string(authority.join("sequence.json"))
+                .unwrap()
+                .contains("\"last_reserved\": 1")
+        );
+
+        let retry = create(&store, spec("source failure"), ts(21)).unwrap();
+        assert_eq!(retry.number, 2);
+        assert!(authority.join("reservations/0000000002.reserved").is_file());
+    }
+
+    #[test]
+    fn corrupt_allocator_state_prevents_create_without_writing_a_source_or_new_reservation() {
+        for corrupt_marker in [false, true] {
+            let (tmp, store) = store();
+            let authority = tmp.path().join(".usagi/issue-numbers");
+            fs::create_dir_all(&authority).unwrap();
+            let corrupt_path = if corrupt_marker {
+                let reservations = authority.join("reservations");
+                fs::create_dir(&reservations).unwrap();
+                reservations.join("0000000007.reserved")
+            } else {
+                authority.join("sequence.json")
+            };
+            fs::write(&corrupt_path, b"corrupt authority state\n").unwrap();
+            let corrupt_before = fs::read(&corrupt_path).unwrap();
+
+            assert!(create(&store, spec("must not be written"), ts(20)).is_err());
+
+            assert_eq!(fs::read(&corrupt_path).unwrap(), corrupt_before);
+            assert!(store.scan().unwrap().is_empty());
+            assert!(!store.dir().join("001-must-not-be-written.md").exists());
+            assert!(!authority.join("legacy-v2-migrated").exists());
+            if corrupt_marker {
+                assert!(!authority.join("sequence.json").exists());
+                assert_eq!(
+                    fs::read_dir(authority.join("reservations"))
+                        .unwrap()
+                        .count(),
+                    1
+                );
+            } else {
+                assert!(!authority.join("reservations").exists());
+            }
         }
     }
 
@@ -647,22 +799,72 @@ mod tests {
     }
 
     #[test]
-    fn create_reserves_distinct_numbers_for_concurrent_sibling_worktrees() {
+    fn create_reserves_distinct_numbers_for_concurrent_real_git_sibling_worktrees() {
         let tmp = tempfile::tempdir().unwrap();
-        let common_git_dir = tmp.path().join("common.git");
-        let first_root = tmp.path().join("first");
-        let second_root = tmp.path().join("second");
-        for (name, root) in [("first", &first_root), ("second", &second_root)] {
-            let private_git_dir = common_git_dir.join("worktrees").join(name);
-            fs::create_dir_all(&private_git_dir).unwrap();
-            fs::create_dir_all(root).unwrap();
-            fs::write(
-                root.join(".git"),
-                format!("gitdir: {}\n", private_git_dir.display()),
-            )
-            .unwrap();
-            fs::write(private_git_dir.join("commondir"), "../..\n").unwrap();
-        }
+        let root = tmp.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.email", "test@example.com"]);
+        git(&root, &["config", "user.name", "Test"]);
+        fs::write(root.join("README.md"), "workspace\n").unwrap();
+        git(&root, &["add", "README.md"]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+
+        let sessions = root.join(".usagi/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let first_root = sessions.join("first");
+        let second_root = sessions.join("second");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "test-first",
+                first_root.to_str().unwrap(),
+            ],
+        );
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "test-second",
+                second_root.to_str().unwrap(),
+            ],
+        );
+
+        let seeded = Issue {
+            number: 515,
+            title: "unmerged sibling".to_string(),
+            status: IssueStatus::Todo,
+            priority: IssuePriority::High,
+            labels: vec![],
+            dependson: vec![],
+            related: vec![],
+            parent: None,
+            milestone: None,
+            created_at: ts(19),
+            updated_at: ts(19),
+            body: "already reserved outside main".to_string(),
+        };
+        IssueStore::new(&first_root).write(&seeded).unwrap();
+
+        // Production v1 has already reserved the unmerged source number in the
+        // Git-common authority. That shared floor is the safe side of the
+        // first old-v2 sentinel handshake.
+        let authority = root.join(".git/usagi/issue-numbers");
+        let reservations = authority.join("reservations");
+        fs::create_dir_all(&reservations).unwrap();
+        fs::write(
+            authority.join("sequence.json"),
+            b"{\"version\":1,\"last_reserved\":515}\n",
+        )
+        .unwrap();
+        fs::write(reservations.join("0000000515.reserved"), b"515\n").unwrap();
 
         let start = Arc::new(Barrier::new(2));
         let create_in = |root: std::path::PathBuf, title: &'static str| {
@@ -677,7 +879,18 @@ mod tests {
         let second = create_in(second_root, "second");
         let mut numbers = [first.join().unwrap(), second.join().unwrap()];
         numbers.sort_unstable();
-        assert_eq!(numbers, [1, 2]);
+        assert_eq!(numbers, [516, 517]);
+        assert!(
+            fs::read_to_string(authority.join("sequence.json"))
+                .unwrap()
+                .contains("\"last_reserved\": 517")
+        );
+        assert_eq!(
+            fs::read_dir(authority.join("reservations"))
+                .unwrap()
+                .count(),
+            3
+        );
     }
 
     #[test]
@@ -710,6 +923,27 @@ mod tests {
         fs::write(&root, b"file").unwrap();
         let store = IssueStore::new(root);
 
+        assert!(get(&store, 1).is_err());
+        assert!(search(&store, "", &IssueFilter::default()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_store_or_ancestor_is_not_treated_as_an_empty_get_or_search() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join(".usagi")).unwrap();
+        symlink("missing-issues", tmp.path().join(".usagi/issues")).unwrap();
+        let store = IssueStore::new(tmp.path());
+        assert!(get(&store, 1).is_err());
+        assert!(search(&store, "", &IssueFilter::default()).is_err());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("session");
+        fs::create_dir(&root).unwrap();
+        symlink("missing-state", root.join(".usagi")).unwrap();
+        let store = IssueStore::new(root);
         assert!(get(&store, 1).is_err());
         assert!(search(&store, "", &IssueFilter::default()).is_err());
     }
@@ -796,6 +1030,38 @@ mod tests {
     }
 
     #[test]
+    fn filename_and_declared_number_mismatches_fence_get_update_delete_from_both_sides() {
+        for with_canonical_eight in [false, true] {
+            let (_tmp, store) = store();
+            store.write(&persisted_issue(7, "Moved")).unwrap();
+            if with_canonical_eight {
+                store.write(&persisted_issue(8, "Canonical")).unwrap();
+            }
+            let moved = store.dir().join("007-moved.md");
+            fs::write(&moved, persisted_issue(8, "Moved").to_markdown()).unwrap();
+            let canonical = store.dir().join("008-canonical.md");
+            let dirty = store.dir().join(".derived-dirty");
+            fs::write(&dirty, b"pre-existing rebuild request\n").unwrap();
+            let paths: Vec<&Path> = if with_canonical_eight {
+                vec![moved.as_path(), canonical.as_path()]
+            } else {
+                vec![moved.as_path()]
+            };
+
+            assert_mismatched_crud_has_no_effect(&store, 7, &moved, Some(7), &paths);
+            assert_mismatched_crud_has_no_effect(&store, 8, &moved, Some(7), &paths);
+        }
+
+        let (_tmp, store) = store();
+        store.write(&persisted_issue(8, "Moved")).unwrap();
+        let manual = store.dir().join("manual.md");
+        fs::rename(store.dir().join("008-moved.md"), &manual).unwrap();
+        let dirty = store.dir().join(".derived-dirty");
+        fs::write(&dirty, b"pre-existing rebuild request\n").unwrap();
+        assert_mismatched_crud_has_no_effect(&store, 8, &manual, None, &[manual.as_path()]);
+    }
+
+    #[test]
     fn duplicate_diagnostics_use_source_paths_and_count_unparseable_siblings() {
         let (_tmp, store) = store();
         let created = create(&store, spec("first"), ts(20)).unwrap();
@@ -830,6 +1096,10 @@ mod tests {
             ]
         );
 
+        let mut dependent = spec("dependent");
+        dependent.dependson = vec![1];
+        create(&store, dependent, ts(22)).unwrap();
+
         let mismatched = fs::read_to_string(&first)
             .unwrap()
             .replacen("number: 1", "number: 2", 1);
@@ -845,9 +1115,6 @@ mod tests {
 
         fs::remove_file(&copied).unwrap();
         fs::write(&copied, "not an issue").unwrap();
-        let mut dependent = spec("dependent");
-        dependent.dependson = vec![1];
-        create(&store, dependent, ts(22)).unwrap();
         let rows = search(&store, "", &IssueFilter::default()).unwrap();
         assert_eq!(rows.len(), 2);
         let first = rows.iter().find(|row| row.summary.number == 1).unwrap();
@@ -860,52 +1127,51 @@ mod tests {
     }
 
     #[test]
-    fn search_uses_one_locked_snapshot_during_concurrent_sibling_creation() {
-        let (tmp, store) = store();
+    fn search_holds_one_lock_while_capturing_the_source_snapshot() {
+        let (_tmp, store) = store();
         let created = create(&store, spec("first"), ts(20)).unwrap();
         let first = store.dir().join(created.file_name());
         let second_source = fs::read(&first).unwrap();
-        let root = tmp.path().to_path_buf();
-        let snapshot_locked = Arc::new(Barrier::new(2));
-        let release_snapshot = Arc::new(Barrier::new(2));
-
-        let search_thread = {
-            let root = root.clone();
-            let snapshot_locked = Arc::clone(&snapshot_locked);
-            let release_snapshot = Arc::clone(&release_snapshot);
-            thread::spawn(move || {
-                let store = IssueStore::new(root);
-                let snapshot = store
-                    .source_snapshot_after_lock_for_test(|| {
-                        snapshot_locked.wait();
-                        release_snapshot.wait();
-                    })
-                    .unwrap();
-                search_snapshot(snapshot, "", &IssueFilter::default())
+        let lock_path = Arc::new(StoreLock::path(store.dir()));
+        let mut observed = Vec::new();
+        let snapshot = store
+            .source_snapshot_after_lock_for_test(|phase| {
+                observed.push(phase);
+                let lock_path = Arc::clone(&lock_path);
+                let competing_writer_acquired = thread::spawn(move || {
+                    let file = fs::File::options()
+                        .read(true)
+                        .write(true)
+                        .open(lock_path.as_ref())
+                        .unwrap();
+                    file.try_lock_exclusive().is_ok()
+                })
+                .join()
+                .unwrap();
+                assert!(
+                    !competing_writer_acquired,
+                    "cooperative writer acquired the store lock during {phase:?}"
+                );
             })
-        };
-        snapshot_locked.wait();
+            .unwrap();
+        let before = search_snapshot(snapshot, "", &IssueFilter::default());
 
-        let writer_started = Arc::new(Barrier::new(2));
-        let writer = {
-            let root = root.clone();
-            let writer_started = Arc::clone(&writer_started);
-            thread::spawn(move || {
-                let store = IssueStore::new(root);
-                writer_started.wait();
-                let _lock = store.lock().unwrap();
-                fs::write(store.dir().join("001-second.md"), second_source).unwrap();
-            })
-        };
-        writer_started.wait();
-        release_snapshot.wait();
-
-        let before = search_thread.join().unwrap();
-        writer.join().unwrap();
+        assert_eq!(
+            observed,
+            [
+                SourceSnapshotLockPhase::LockAcquired,
+                SourceSnapshotLockPhase::DerivedRepaired,
+                SourceSnapshotLockPhase::SnapshotCaptured,
+            ]
+        );
         assert_eq!(before.len(), 1);
         assert!(!before[0].ambiguous);
         assert!(before[0].is_ready());
 
+        {
+            let _lock = store.lock().unwrap();
+            fs::write(store.dir().join("001-second.md"), second_source).unwrap();
+        }
         let after = search(&store, "", &IssueFilter::default()).unwrap();
         assert_eq!(after.len(), 2);
         assert!(after.iter().all(|row| row.ambiguous));

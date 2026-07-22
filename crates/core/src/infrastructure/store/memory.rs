@@ -47,7 +47,6 @@ struct MemoryEntry;
 impl MarkdownEntry for MemoryEntry {
     type Entry = Memory;
     type Summary = MemorySummary;
-    type Key = String;
     type IndexFile = IndexFile;
     type IndexFileRef<'a> = IndexFileRef<'a>;
 
@@ -67,12 +66,6 @@ impl MarkdownEntry for MemoryEntry {
 
     fn file_name(entry: &Memory) -> Result<String> {
         memory_file_name(&entry.name)
-    }
-
-    fn key_from_path(path: &Path) -> Option<String> {
-        path.file_stem()
-            .and_then(|stem| stem.to_str())
-            .map(ToOwned::to_owned)
     }
 
     fn summary(entry: &Memory) -> MemorySummary {
@@ -275,7 +268,7 @@ impl MemoryStore {
         let refresh = if rebuild_required {
             self.inner.rebuild_derived().map(|_| ())
         } else {
-            self.inner.reindex_after_remove(&name.to_string())
+            self.inner.reindex_after_remove()
         };
         Ok(self.inner.finish_committed(true, refresh))
     }
@@ -754,14 +747,6 @@ mod tests {
         fs::write(store.dir().join("README.txt"), "ignore me").unwrap();
 
         assert_eq!(store.scan().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn memory_entry_key_from_path_uses_the_file_stem() {
-        assert_eq!(
-            MemoryEntry::key_from_path(Path::new("/repo/.usagi/memory/one.md")),
-            Some("one".to_string())
-        );
     }
 
     #[test]

@@ -237,6 +237,150 @@ create の再送は、初期 status と request fields が一致する committed
 重複していれば既存番号を任意に返さず ambiguity error になる。したがって derived failure や応答
 消失の後に同じ mutation を再送しても、別番号の issue や二重削除を作らない。
 
+issue number の採番 authority も本節を正本とする。Git repository では v1 / v2 が共有する
+`<git-common-dir>/usagi/issue-numbers/`、非 Git workspace では
+`<workspace>/.usagi/issue-numbers/` にだけ authoritative state を置く。
+
+```text
+<git-common-dir>/usagi/issue-numbers/
+├── .lock
+├── sequence.json                         # normal: { "version": 1, "last_reserved": N }
+│                                         # blocker: last_reserved = u32::MAX,
+│                                         #          migration_floor = F
+├── legacy-v2-migrated                    # Git migration commit: canonical body "N\n"
+└── reservations/
+    └── 0000000516.reserved               # body: "516\n"
+
+<git-common-dir>/usagi-issue-sequence/
+├── .lock                                 # pre-fix v2 と共有する migration lock
+└── next                                  # active: "N\n"
+                                          # fenced: "migrated-to-usagi-issue-numbers:N\n"
+
+<observed-issue-store>/usagi-issue-sequence/
+├── .lock                                 # nested/non-Git の pre-fix store-local lock
+└── next                                  # common legacy と同じ active / fenced format
+```
+
+raw cwd が repository 内の深い path でも、最寄り ancestor の `.git` まで遡って worktree boundary を決める。
+authority は v1 と同じく、`GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` / `GIT_OBJECT_DIRECTORY` /
+`GIT_COMMON_DIR` / `GIT_PREFIX` / `GIT_NAMESPACE` を除去した
+`git -C <worktree-root> rev-parse --path-format=absolute --git-common-dir` の成功結果だけを canonical existing
+directory として採用する。valid separate-git-dir / submodule で `commondir` が無い場合は Git が返す git dir
+自体を使う。empty / non-repository `.git`、stale / dangling gitfile・`commondir`、non-UTF-8 / empty output、
+その他の read error は local fallback directory を作らず fail-closed になる。
+
+non-Gitで予約した後に`git init`するとauthority path自体が変わる。Git resolverはcaller / current
+worktree / 登録済み全worktree rootの`<root>/.usagi/issue-numbers` が1つでもmaterialize済みなら、
+abandoned journalを無視してGit-common authorityを作らずfail-closedにする。このtopology変更は異なるlock間で
+atomicに切り替えられないため、cached non-Git allocatorを停止し、全fallback sequence / journal / source floorを
+offlineでGit authorityへreconcileしてから旧fallbackを取り除く。absence checkだけはcached processをfenceしないので、
+quiescenceは必須の外部gateである。Git→non-Gitへのclassification変更も同じoffline reconciliationなしで行わない。
+
+lock 順序は new authority `.lock`、canonical parent identityでdedupした後の辞書順の列挙済み旧 v2 `.lock` の順で固定する。raw pathのsymlink aliasは同じ順序に正規化する。全 lock を保持したまま、
+`sequence.json`、`legacy-v2-migrated`、全 reservation marker、旧 `next`、workspace root と
+`.usagi/sessions/<name>/`、および登録済み全Git worktreeでtracked / untracked / ignoredとしてmaterialize済みの
+arbitrary nested issue storeにある全sourceのfilename prefix / parse可能なfrontmatter宣言の最大値を最初に検証する。activeな旧`next`は
+plain `u32` として high-water へ fold する。observed path のうち sentinel で封鎖されていない authority が2つ以上なら、
+相互に独立した旧 writer を atomic に止められないため、authoritative file を書く前に停止する。
+
+```text
+fresh Normal sequence + sole unfenced legacy:
+  v1-visible floor A == durable floor F:
+    legacy next = sentinel(F)（atomic; 旧 v2 を最初に停止）
+  sole live legacy floor B == durable floor F:
+    sequence blocker(F)（atomic; 旧 v1 を一時停止）
+  A < F and B < F:
+    fail-closed（1 writeで安全にbridgeできない）
+no unfenced legacy:
+  sequence blocker(F)
+pre-existing blocker + unfenced legacy:
+  legacy next = sentinel(F)（旧 v1 は既に停止済み）
+
+  → sequence blocker(F) を保証
+  → all observed legacy next = "migrated-to-usagi-issue-numbers:N\n"
+  → reservation marker
+  → legacy-v2-migrated = "N\n"（Git のみ）
+  → normal sequence.json
+  → source Markdown
+```
+
+ここで `A` は全旧v1 callerが共有して見えるNormal sequence / reservation journalの最大、`B` はsole unfenced legacy
+floor、`F` はこれらに全worktree source / blocker recovery floor / optional migration watermark / 全fenced legacy floorも加えたdurable最大、
+`N = F + 1` である。異なる2 authority を1回でatomic updateできないため、fresh migrationの最初の成功writeは、もう片側に
+全durable floorが見える場合にだけlive allocatorを1つへ減らす。sentinelは旧v2を恒久的にfenceし、blockerはnormal sequenceを
+最後に戻すまで旧v1を一時停止する。両live sideがfenced watermarkより低ければ、どちらを先に止めても他方が番号を再利用するため、
+write前にoffline reconciliationを要求する。source visibilityはcallerのworkspace rootによって異なるため、first-write判定で
+`A`へ加えない。
+
+blocker は `{ "version": 1, "last_reserved": 4294967295, "migration_floor": F }` を1回の atomic write で公開する。
+旧 v1 は追加 field を無視するが `u32::MAX` の checked increment で停止し、fixed v2 は `F` から本来の high-water を
+回復する。`migration_floor` が無い `last_reserved = u32::MAX` は最終番号を正常予約した exhausted state である。
+blocker 以外で `migration_floor` が存在する、または floor 自体が `u32::MAX` の JSON は破損として拒否する。
+
+旧 writer が先に列挙済み旧 lock を保持していれば、その writer が更新した最新 `u32` を fixed allocator が fold する。
+fixed allocator を待っていた旧 v2 writer は sentinel を plain `u32` として parse できず fail-closed になる。non-exhaustedなnormal sequence
+は全 sentinel / reservation / Git marker より後、かつ最後に公開するため、正常終了後は旧 v1も同じ authority の次番号へ
+進める。Git の sentinel と `legacy-v2-migrated` は migration watermark であり通常採番の live high-water ではない。
+通常予約では sequence / journal だけが進み、両 watermark は相互に一致した古い値のままでよい。後発 legacy path を
+再移行するときだけ全 observed fence / marker を更新する。非 Git は migration marker を公開・更新しない。interrupted
+development buildが残した既存markerだけをcanonical検証してrecovery floorへfoldし、legacy列挙を抑止する用途には使わない。
+
+crash recovery は次の境界で固定する。atomic write の Write / Rename failure は old / new の完全な片方だけを露出する。
+
+| 最後に durable になった境界 | crash 後に進める旧 allocator | retry |
+| --- | --- | --- |
+| first sentinel / blocker が未commit | 変更前の旧state（fixed予約なし） | 元のfloorからfirst writeを再試行 |
+| sentinel-first(F), blockerなし | v1 のみ | v1のsequence / journal進捗をfold |
+| blockerのみ | 高水位を持つsole unfenced legacy v2（存在時）のみ | その`next`の進捗をfold |
+| blocker after sentinel-first, sentinel(N)なし | なし | blocker floorからF+1を予約 |
+| first / partial / all sentinel(N) | なし | Nを消費し、retryはN+1へ進む |
+| reservation marker | なし | journal を fold して次番号へ進む |
+| Git migration marker | なし | blocker / journal / marker を fold |
+| normal sequence, source 未作成 | v1 のみ（旧 v2 は fenced） | 予約済み gap を再利用しない |
+| exhausted safe-first sentinel(MAX) | v1のみ（MAXで停止） | normal sequence(MAX)をrecovery tagとして公開 |
+| exhausted safe-first sequence(MAX) | legacyはMAXで既に停止 | 全sentinel(MAX)へ収束 |
+| exhausted normal(MAX) + partial sentinel / old Git marker | なし | 残りsentinel → marker(MAX) → final normal(MAX) |
+| exhausted Git marker(MAX), final sequence failure | なし | blocker / journal / marker MAXをfoldしnormal(MAX)へ収束 |
+
+sequence は strict な schema / version / blocker semantics、sentinel、migration marker、reservation marker は canonical な
+filename/body を検証する。active legacy numeric だけは pre-fix parser と同じ trimmed `u32` を受理する。invalid state、read
+failure、および non-exhausted normal sequence 下の Git marker / shared sentinel mismatch は新しい write より前に fail-closed になる。
+marker 未作成の sentinel-first 境界、または blocker 下で crash が残した valid sentinel / reservation / marker floor の差だけは
+最大値を fold して回復する。`Normal(u32::MAX)`は旧v1の停止をdurableに証明するterminal recovery tagなので、
+その下でのshared sentinel(MAX) / 旧Git markerの差だけもpartial exhausted migrationとして回復する。
+
+source high-waterはfilename prefixだけでなく、parse可能なfrontmatterの`number`も含む。
+`007-*.md`が`number: 800`を宣言する場合も、prefixの無いsourceが`number: 900`を宣言する場合も、
+宣言側を再採番しない。allocation時のsource read / parse failureは宣言high-waterを証明できないため
+lenient listingのようにskipせずfail-closedにする。
+
+durable floorが`u32::MAX`の場合も、safe first-write条件を満たすならallocation errorを即時返してnumericな旧`next`を残さない。
+旧v1がMAXのsequence / journal / blockerを見る場合はsentinel(MAX)を先に公開し、sole legacyがMAXを持つ場合は
+normal sequence(MAX)を先に公開する。旧v2が既にsentinelで停止している場合もsequence(MAX)を先に公開できる。
+どちらのlive側もMAXを見ないsource-only exhaustionはwrite前に停止する。safeなfirst write後は
+normal sequence(MAX)をrecovery tagとして直ちに公開し、全sentinel(MAX) → Git marker(MAX) →
+final normal sequence(MAX)と収束する。reservationやsourceを追加せずexhaustion errorを返す。
+
+Git は common legacy を常時、normalized worktree より深い caller の current store-local path を `next` 未作成でも列挙する。
+その他の Git root / workspace / direct-session path は legacy directory が存在するとき列挙し、さらに登録済み全 Git
+worktree の tracked / untracked / ignored file から materialize 済みの nested legacy `next` を pathspec で毎回発見する。
+同じauthority lock下のdiscovery phaseでnested issue Markdownを発見し、そのstore-local legacy pathも`next`未作成の段階からlock / fence
+対象へ加える。registered worktree root自身は旧v2も`.git`経由でcommon legacyを使うためstore-local pathを追加しない。
+非 Git は workspace root / current と存在する全 direct-session root を `next` 未作成でも列挙する。`Active` と `Missing` は
+ともに未封鎖で、列挙済み authority のうち2件以上なら blocker 前に停止する。dangling sessions / issue store / authority pathも
+「missing」と推測せず、session symlinkも暗黙に追わずfail-closedになる。非 Git は global completion marker を公開しないため、後発 direct session を
+既存 marker で隠さない。
+
+ただし、Gitでまだ legacy fileを作っていない arbitrary nested cwd、非Gitのroot/current/direct-session外の
+arbitrary nested cwd、および列挙snapshot後に初めてmaterializeするpathは有限に封鎖できない。sentinel markerだけで
+その未知 process の将来 write を防げるとは主張しない。最初の fixed reservation 前に全
+pre-fix process の cwd / legacy path を inventory し、列挙対象へ materializeして fenceするか停止して再起動を禁止することが
+safe rollout の外部 compatibility gate である。複数の未封鎖 file が見つかった場合は、全 pre-fix writer を停止し、最大
+floor を失わず1つの authorityへオフラインで整理するまで allocationを再開しない。
+並行回帰では、HEAD直前のraw-cwd resolver / filename floor / plain-u32 increment / StoreLockと同じロジックを
+別processで実行するold-v2 compatibility emulatorを用いる。これはhistorical binaryそのものとは呼ばず、
+旧側先行予約のfoldとfixed側先行sentinel parse failureを実OS process / file lockで固定する互換fixtureである。
+
 issue number は番号指定 CRUD の identity である。同じ番号 prefix の source Markdown が複数ある場合、
 point get / update / delete と同番号への write は、番号と衝突した全 exact path を辞書順で保持する typed
 `AmbiguousIssueNumber` error で fail-closed になる。point read は store lock を取得してから一意性を判定し、

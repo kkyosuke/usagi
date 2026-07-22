@@ -8,10 +8,10 @@
 //! Markdown files are meant to be committed and shared; `index.json` is a local
 //! rebuildable cache, so it is never relied upon for correctness — only speed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -19,15 +19,15 @@ use serde::{Deserialize, Serialize};
 use crate::domain::frontmatter::FrontmatterDoc;
 use crate::domain::issue::{Issue, IssueSummary};
 use crate::infrastructure::error_log::ErrorLog;
-use crate::infrastructure::paths::STATE_DIR;
-use crate::infrastructure::persistence::json_file::write_text_atomic;
+use crate::infrastructure::paths::{SESSIONS_DIR, STATE_DIR};
 use crate::infrastructure::persistence::markdown_store::{MarkdownEntry, MarkdownStore};
 use crate::infrastructure::persistence::store_lock::StoreLock;
 use crate::infrastructure::store::MutationOutcome;
+use crate::infrastructure::store::issue_number_sequence::{
+    ExistingIssueFloors, IssueNumberSequence,
+};
 
 const ISSUES_DIR_NAME: &str = "issues";
-const ALLOCATION_DIR_NAME: &str = "usagi-issue-sequence";
-const ALLOCATION_FILE_NAME: &str = "next";
 
 /// More than one Markdown source file claims the same issue number.
 ///
@@ -61,20 +61,28 @@ impl std::error::Error for AmbiguousIssueNumber {}
 /// authoritative identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MismatchedIssueNumber {
-    pub filename_number: u32,
+    pub filename_number: Option<u32>,
     pub declared_number: u32,
     pub file: PathBuf,
 }
 
 impl fmt::Display for MismatchedIssueNumber {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "issue source {} declares #{} but its filename claims #{}; refusing point operation",
-            self.file.display(),
-            self.declared_number,
-            self.filename_number
-        )
+        match self.filename_number {
+            Some(filename_number) => write!(
+                formatter,
+                "issue source {} declares #{} but its filename claims #{}; refusing point operation",
+                self.file.display(),
+                self.declared_number,
+                filename_number
+            ),
+            None => write!(
+                formatter,
+                "issue source {} declares #{} but its filename has no numeric issue claim; refusing point operation",
+                self.file.display(),
+                self.declared_number
+            ),
+        }
     }
 }
 
@@ -99,7 +107,6 @@ struct IssueEntry;
 impl MarkdownEntry for IssueEntry {
     type Entry = Issue;
     type Summary = IssueSummary;
-    type Key = u32;
     type IndexFile = IndexFile;
     type IndexFileRef<'a> = IndexFileRef<'a>;
 
@@ -119,10 +126,6 @@ impl MarkdownEntry for IssueEntry {
 
     fn file_name(entry: &Issue) -> Result<String> {
         Ok(entry.file_name())
-    }
-
-    fn key_from_path(path: &Path) -> Option<u32> {
-        number_from_filename(path)
     }
 
     fn summary(entry: &Issue) -> IssueSummary {
@@ -178,6 +181,14 @@ impl IssueSource {
 pub(crate) struct IssueSourceSnapshot {
     pub sources: Vec<IssueSource>,
     pub claims: BTreeMap<u32, Vec<PathBuf>>,
+}
+
+/// Checkpoints that must retain one store lock while a search snapshot is built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceSnapshotLockPhase {
+    LockAcquired,
+    DerivedRepaired,
+    SnapshotCaptured,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,25 +278,31 @@ impl IssueStore {
     /// Returns an error when the lock or directory cannot be read, or a source
     /// filename cannot be represented as UTF-8.
     pub(crate) fn source_snapshot(&self) -> Result<IssueSourceSnapshot> {
-        self.source_snapshot_with_hook(|| {})
+        self.source_snapshot_observing_lock(|_| {})
     }
 
-    fn source_snapshot_with_hook(&self, after_lock: impl FnOnce()) -> Result<IssueSourceSnapshot> {
+    fn source_snapshot_observing_lock(
+        &self,
+        mut observe: impl FnMut(SourceSnapshotLockPhase),
+    ) -> Result<IssueSourceSnapshot> {
         if !self.source_dir_exists()? {
             return Ok(IssueSourceSnapshot::default());
         }
         let lock = self.lock()?;
-        after_lock();
+        observe(SourceSnapshotLockPhase::LockAcquired);
         self.repair_derived_best_effort_locked(&lock);
-        self.source_snapshot_locked(&lock)
+        observe(SourceSnapshotLockPhase::DerivedRepaired);
+        let snapshot = self.source_snapshot_locked(&lock)?;
+        observe(SourceSnapshotLockPhase::SnapshotCaptured);
+        Ok(snapshot)
     }
 
     #[cfg(test)]
     pub(crate) fn source_snapshot_after_lock_for_test(
         &self,
-        after_lock: impl FnOnce(),
+        observe: impl FnMut(SourceSnapshotLockPhase),
     ) -> Result<IssueSourceSnapshot> {
-        self.source_snapshot_with_hook(after_lock)
+        self.source_snapshot_observing_lock(observe)
     }
 
     /// Capture a source snapshot while the caller already holds this store's
@@ -344,42 +361,49 @@ impl IssueStore {
             .unwrap_or(0))
     }
 
-    /// Reserve the next issue number across every worktree of this repository.
+    /// Highest identity claim in either a filename or parseable frontmatter.
+    ///
+    /// Allocation cannot rely on filename prefixes alone: a prefixless source,
+    /// or `007-*.md` declaring `number: 800`, already fences the declared side
+    /// from point CRUD and must also prevent #800 from being handed out again.
+    /// Unlike lenient listing, allocation fails on an unreadable/unparseable
+    /// source because its declared high-water cannot be proven.
+    fn max_claimed_number(&self) -> Result<u32> {
+        let mut maximum = 0;
+        for path in self.issue_files()? {
+            maximum = maximum.max(number_from_filename(&path).unwrap_or(0));
+            maximum = maximum.max(self.inner.read_existing_path(&path)?.number);
+        }
+        Ok(maximum)
+    }
+
+    /// Reserve the next issue number across every worktree of this workspace.
     ///
     /// A worktree has its own checked-out `.usagi/issues` directory, so its
     /// local maximum alone cannot safely allocate a number while another
-    /// worktree is creating an issue. The git common directory is shared by
-    /// every worktree; a locked sequence there makes each reservation unique.
-    /// The local maximum is folded in to migrate repositories that predate the
-    /// sequence file or received an issue markdown file manually.
+    /// worktree is creating an issue. The v1-compatible authority below Git's
+    /// common directory serializes every reservation. Its high-water sequence,
+    /// durable journal, retired v2 sequence, and every workspace source maximum
+    /// are folded without ever reusing a gap.
     ///
     /// # Errors
     ///
     /// Returns an error when the allocation lock or sequence cannot be read or
     /// written.
     pub fn reserve_next_number(&self) -> Result<u32> {
-        let allocation_dir = self.allocation_dir()?;
-        let _lock = StoreLock::acquire(&allocation_dir)?;
-        let sequence_path = allocation_dir.join(ALLOCATION_FILE_NAME);
-        let reserved = match fs::read_to_string(&sequence_path) {
-            Ok(text) => text.trim().parse::<u32>().context(format!(
-                "invalid issue sequence in {}",
-                sequence_path.display()
-            ))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
-            Err(error) => {
-                return Err(error).context(format!(
-                    "failed to read issue sequence {}",
-                    sequence_path.display()
-                ));
-            }
-        };
-        let next = reserved
-            .max(self.max_number()?)
-            .checked_add(1)
-            .context("cannot allocate another issue number because the u32 range is exhausted")?;
-        write_text_atomic(&sequence_path, &format!("{next}\n"))?;
-        Ok(next)
+        let initial_workspace_root = workspace_root(&self.repo_root);
+        let sequence =
+            IssueNumberSequence::new(&self.repo_root, &initial_workspace_root, self.dir())?;
+        let worktree_root = sequence.worktree_root().to_path_buf();
+        let workspace_root = workspace_root(&worktree_root);
+        sequence.reserve_with_floors(|| {
+            self.existing_issue_floors(
+                &workspace_root,
+                &worktree_root,
+                &sequence.registered_worktrees()?,
+                &sequence.materialized_git_issue_roots()?,
+            )
+        })
     }
 
     /// Read a single issue by number, or `None` if it does not exist.
@@ -402,7 +426,7 @@ impl IssueStore {
             return Ok(None);
         }
         let lock = self.lock()?;
-        let path = self.unique_path_for(number)?;
+        let path = self.point_path_for(number)?;
         observe(ReadLockPhase::UniqueChecked);
         self.repair_derived_best_effort_locked(&lock);
         observe(ReadLockPhase::DerivedRepaired);
@@ -420,7 +444,7 @@ impl IssueStore {
     /// Returns an error when the directory or source file cannot be read, or
     /// when more than one source file claims `number`.
     pub fn read_locked(&self, number: u32) -> Result<Option<Issue>> {
-        self.unique_path_for(number)?
+        self.point_path_for(number)?
             .map(|path| self.read_numbered_path(number, &path))
             .transpose()
     }
@@ -448,8 +472,7 @@ impl IssueStore {
     /// written, the stale name cannot be removed, or the dirty marker cannot be
     /// scheduled. Ambiguity is detected before any source or derived mutation.
     pub fn write_locked(&self, _lock: &StoreLock, issue: &Issue) -> Result<MutationOutcome<()>> {
-        let existing = self.unique_files_for(issue.number)?;
-        self.ensure_existing_number_matches(issue.number, &existing)?;
+        let existing: Vec<_> = self.point_path_for(issue.number)?.into_iter().collect();
         let rebuild_required = self.inner.derived_is_dirty();
         self.inner.mark_derived_dirty()?;
         let target = self.inner.write_markdown(issue)?;
@@ -487,8 +510,7 @@ impl IssueStore {
     /// more than one source file claims `number`.
     pub fn remove_with_outcome(&self, number: u32) -> Result<MutationOutcome<bool>> {
         let _lock = self.lock()?;
-        let files = self.unique_files_for(number)?;
-        self.ensure_existing_number_matches(number, &files)?;
+        let files: Vec<_> = self.point_path_for(number)?.into_iter().collect();
         if files.is_empty() {
             let repair = self.inner.repair_derived_locked();
             return Ok(self.inner.finish_committed(false, repair));
@@ -501,7 +523,7 @@ impl IssueStore {
         let refresh = if rebuild_required {
             self.inner.rebuild_derived().map(|_| ())
         } else {
-            self.inner.reindex_after_remove(&number)
+            self.inner.reindex_after_remove()
         };
         Ok(self.inner.finish_committed(true, refresh))
     }
@@ -585,39 +607,73 @@ impl IssueStore {
         self.inner.write_index(summaries)
     }
 
-    /// Every file that backs `number` (normally zero or one).
-    fn files_for(&self, number: u32) -> Result<Vec<PathBuf>> {
-        self.inner.files_for_key(&number)
-    }
-
-    /// Return the zero or one source file that can safely represent `number`.
+    /// Resolve the only source that can safely represent `number`.
     ///
-    /// Sorting before reporting an ambiguity makes the typed error independent
-    /// of filesystem directory iteration order.
-    fn unique_files_for(&self, number: u32) -> Result<Vec<PathBuf>> {
-        let mut files = self.files_for(number)?;
+    /// One directory enumeration supplies both filename claims and parseable
+    /// frontmatter claims. A mismatch fences point operations from either side:
+    /// `007-moved.md` declaring `number: 8` blocks both #7 and #8, including
+    /// when a separate canonical `008-*.md` exists. Read/parse errors for the
+    /// requested filename claim propagate before any source or derived mutation.
+    fn point_path_for(&self, number: u32) -> Result<Option<PathBuf>> {
+        let mut files = self.issue_files()?;
         files.sort();
-        if files.len() > 1 {
-            return Err(AmbiguousIssueNumber { number, files }.into());
+        let filename_claims: Vec<_> = files
+            .iter()
+            .filter(|path| number_from_filename(path) == Some(number))
+            .cloned()
+            .collect();
+        if filename_claims.len() > 1 {
+            return Err(AmbiguousIssueNumber {
+                number,
+                files: filename_claims,
+            }
+            .into());
         }
-        Ok(files)
-    }
 
-    fn unique_path_for(&self, number: u32) -> Result<Option<PathBuf>> {
-        Ok(self.unique_files_for(number)?.into_iter().next())
+        let direct = filename_claims.into_iter().next();
+        if let Some(path) = &direct {
+            let issue = self.inner.read_existing_path(path)?;
+            if issue.number != number {
+                return Err(MismatchedIssueNumber {
+                    filename_number: Some(number),
+                    declared_number: issue.number,
+                    file: path.clone(),
+                }
+                .into());
+            }
+        }
+
+        for path in files {
+            if direct.as_ref() == Some(&path) {
+                continue;
+            }
+            // An unrelated corrupt source has no trustworthy declared claim and
+            // therefore cannot be associated with this requested number. A
+            // parseable source does participate from its declared-number side.
+            match self.inner.read_existing_path(&path) {
+                Ok(issue) if issue.number == number => {
+                    return Err(MismatchedIssueNumber {
+                        filename_number: number_from_filename(&path),
+                        declared_number: issue.number,
+                        file: path,
+                    }
+                    .into());
+                }
+                Ok(_) | Err(_) => {}
+            }
+        }
+        Ok(direct)
     }
 
     fn source_dir_exists(&self) -> Result<bool> {
-        self.dir()
-            .try_exists()
-            .with_context(|| format!("failed to inspect {}", self.dir().display()))
+        self.inner.source_dir_exists()
     }
 
     fn read_numbered_path(&self, number: u32, path: &Path) -> Result<Issue> {
         let issue = self.inner.read_existing_path(path)?;
         if issue.number != number {
             return Err(MismatchedIssueNumber {
-                filename_number: number,
+                filename_number: Some(number),
                 declared_number: issue.number,
                 file: path.to_path_buf(),
             }
@@ -626,75 +682,89 @@ impl IssueStore {
         Ok(issue)
     }
 
-    fn ensure_existing_number_matches(&self, number: u32, files: &[PathBuf]) -> Result<()> {
-        for path in files {
-            if let Ok(issue) = self.inner.read_existing_path(path)
-                && issue.number != number
-            {
-                return Err(MismatchedIssueNumber {
-                    filename_number: number,
-                    declared_number: issue.number,
-                    file: path.clone(),
-                }
-                .into());
-            }
-        }
-        Ok(())
-    }
-
-    fn allocation_dir(&self) -> Result<PathBuf> {
-        let dot_git = self.repo_root.join(".git");
-        if dot_git.is_dir() {
-            return Ok(dot_git.join(ALLOCATION_DIR_NAME));
-        }
-        if !dot_git.exists() {
-            // Unit tests and repositories not yet initialized by git still
-            // serialize local writers. A shared git directory is unavailable
-            // in this case, so no cross-worktree guarantee is possible.
-            return Ok(self.dir().join(ALLOCATION_DIR_NAME));
-        }
-
-        let git_dir = git_dir_from_dot_git(&dot_git)?;
-        let common_dir_file = git_dir.join("commondir");
-        let common_dir = match fs::read_to_string(&common_dir_file) {
-            Ok(text) => {
-                let path = Path::new(text.trim());
-                if path.is_absolute() {
-                    path.to_path_buf()
-                } else {
-                    git_dir.join(path)
+    /// Highest filename claims seen by fixed v2.
+    ///
+    /// No source maximum is marked v1-visible: two old-v1 callers sharing the
+    /// Git-common authority can derive different workspace roots (for example,
+    /// an external linked worktree). Only their shared sequence and journal are
+    /// universal. Fixed v2 also discovers tracked, untracked, and ignored
+    /// arbitrary nested issue stores across every registered worktree. This
+    /// deliberately does not acquire sibling store locks: doing so under the
+    /// authority lock would introduce a cross-worktree deadlock.
+    fn existing_issue_floors(
+        &self,
+        workspace_root: &Path,
+        worktree_root: &Path,
+        registered_worktrees: &[PathBuf],
+        materialized_issue_roots: &[PathBuf],
+    ) -> Result<ExistingIssueFloors> {
+        let mut v1_roots = BTreeSet::from([workspace_root.to_path_buf()]);
+        let sessions = workspace_root.join(STATE_DIR).join(SESSIONS_DIR);
+        match fs::read_dir(&sessions) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.with_context(|| {
+                        format!("failed to read a session entry in {}", sessions.display())
+                    })?;
+                    let file_type = entry.file_type().with_context(|| {
+                        format!("failed to inspect session entry {}", entry.path().display())
+                    })?;
+                    anyhow::ensure!(
+                        !file_type.is_symlink(),
+                        "session entry is a symlink and cannot be safely enumerated: {}",
+                        entry.path().display()
+                    );
+                    if file_type.is_dir() {
+                        v1_roots.insert(entry.path());
+                    }
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => git_dir,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match fs::symlink_metadata(&sessions) {
+                    Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {}
+                    Ok(_) | Err(_) => {
+                        return Err(error).with_context(|| {
+                            format!("failed to read sessions {}", sessions.display())
+                        });
+                    }
+                }
+            }
             Err(error) => {
-                return Err(error).context(format!(
-                    "failed to read git common directory {}",
-                    common_dir_file.display()
-                ));
+                return Err(error)
+                    .with_context(|| format!("failed to read sessions {}", sessions.display()));
             }
-        };
-        Ok(common_dir.join(ALLOCATION_DIR_NAME))
+        }
+
+        let mut all_roots = v1_roots.clone();
+        all_roots.insert(worktree_root.to_path_buf());
+        all_roots.insert(self.repo_root.clone());
+        all_roots.extend(registered_worktrees.iter().cloned());
+        all_roots.extend(materialized_issue_roots.iter().cloned());
+
+        let mut all = 0;
+        for root in all_roots {
+            let maximum = Self::new(&root).max_claimed_number()?;
+            all = all.max(maximum);
+        }
+        Ok(ExistingIssueFloors { all, v1_visible: 0 })
     }
 }
 
-/// Resolve a worktree's `.git` file to its private git directory.
-fn git_dir_from_dot_git(dot_git: &Path) -> Result<PathBuf> {
-    let text = fs::read_to_string(dot_git).context(format!(
-        "failed to read git directory file {}",
-        dot_git.display()
-    ))?;
-    let path = text
-        .strip_prefix("gitdir: ")
-        .or_else(|| text.strip_prefix("gitdir:\t"))
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .context(format!("invalid git directory file {}", dot_git.display()))?;
-    let path = Path::new(path);
-    Ok(if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        dot_git.with_file_name(path)
-    })
+/// Resolve the workspace root from a conventional session worktree path.
+fn workspace_root(start: &Path) -> PathBuf {
+    let mut prefix = PathBuf::new();
+    let mut components = start.components().peekable();
+    while let Some(component) = components.next() {
+        if matches!(component, Component::Normal(name) if name == STATE_DIR)
+            && components.peek().is_some_and(
+                |next| matches!(*next, Component::Normal(name) if name == SESSIONS_DIR),
+            )
+        {
+            return prefix;
+        }
+        prefix.push(component.as_os_str());
+    }
+    start.to_path_buf()
 }
 
 /// Whether `path` is an issue markdown file.
@@ -719,6 +789,9 @@ mod tests {
     use crate::infrastructure::store::DerivedState;
     use chrono::{TimeZone, Utc};
     use fs2::FileExt;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
     use std::sync::Arc;
     use std::thread;
 
@@ -738,6 +811,20 @@ mod tests {
             updated_at: ts,
             body: format!("Body for {title}."),
         }
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     /// Pin a file's modification time so freshness tests are independent of the
@@ -906,12 +993,150 @@ mod tests {
             store.remove(7).unwrap_err(),
         ] {
             let mismatch = error.downcast_ref::<MismatchedIssueNumber>().unwrap();
-            assert_eq!(mismatch.filename_number, 7);
+            assert_eq!(mismatch.filename_number, Some(7));
             assert_eq!(mismatch.declared_number, 8);
             assert_eq!(mismatch.file, path);
         }
         assert_eq!(fs::read(path).unwrap(), source_before);
         assert!(!store.dir().join("007-replacement.md").exists());
+    }
+
+    #[test]
+    fn unparseable_filename_claim_blocks_write_and_remove_without_any_effect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(7, "Original")).unwrap();
+        let source = store.dir().join("007-original.md");
+        fs::write(&source, b"not valid issue markdown\n").unwrap();
+        let dirty = store.dir().join(".derived-dirty");
+        fs::write(&dirty, b"pre-existing rebuild request\n").unwrap();
+        let source_before = fs::read(&source).unwrap();
+        let index_before = fs::read(store.index_path()).unwrap();
+        let dirty_before = fs::read(&dirty).unwrap();
+
+        for error in [
+            store.write(&issue(7, "Replacement")).unwrap_err(),
+            store.remove(7).unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("failed to parse"));
+            assert!(error.to_string().contains(source.to_str().unwrap()));
+            assert!(
+                error
+                    .root_cause()
+                    .downcast_ref::<crate::domain::issue::ParseIssueError>()
+                    .is_some()
+            );
+        }
+
+        assert_eq!(fs::read(&source).unwrap(), source_before);
+        assert_eq!(fs::read(store.index_path()).unwrap(), index_before);
+        assert_eq!(fs::read(&dirty).unwrap(), dirty_before);
+        assert!(!store.dir().join("007-replacement.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_filename_claim_blocks_write_and_remove_without_any_effect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(7, "Original")).unwrap();
+        let source = store.dir().join("007-original.md");
+        let source_before = fs::read(&source).unwrap();
+        let original_permissions = fs::metadata(&source).unwrap().permissions();
+        let dirty = store.dir().join(".derived-dirty");
+        fs::write(&dirty, b"pre-existing rebuild request\n").unwrap();
+        let index_before = fs::read(store.index_path()).unwrap();
+        let dirty_before = fs::read(&dirty).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o000)).unwrap();
+
+        for error in [
+            store.write(&issue(7, "Replacement")).unwrap_err(),
+            store.remove(7).unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("failed to read"));
+            assert!(error.to_string().contains(source.to_str().unwrap()));
+            assert_eq!(
+                error
+                    .root_cause()
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+        }
+
+        fs::set_permissions(&source, original_permissions).unwrap();
+        assert_eq!(fs::read(&source).unwrap(), source_before);
+        assert_eq!(fs::read(store.index_path()).unwrap(), index_before);
+        assert_eq!(fs::read(&dirty).unwrap(), dirty_before);
+        assert!(!store.dir().join("007-replacement.md").exists());
+    }
+
+    #[test]
+    fn filename_and_declared_claims_fence_both_numbers_without_any_effect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(7, "Moved")).unwrap();
+        store.write(&issue(8, "Canonical")).unwrap();
+        let moved = store.dir().join("007-moved.md");
+        let canonical = store.dir().join("008-canonical.md");
+        fs::write(&moved, issue(8, "Moved").to_markdown()).unwrap();
+        let dirty = store.dir().join(".derived-dirty");
+        fs::write(&dirty, b"pre-existing rebuild request\n").unwrap();
+        let sources_before = [fs::read(&moved).unwrap(), fs::read(&canonical).unwrap()];
+        let index_before = fs::read(store.index_path()).unwrap();
+        let dirty_before = fs::read(&dirty).unwrap();
+
+        for error in [
+            store.read(7).unwrap_err(),
+            store.write(&issue(7, "Replacement seven")).unwrap_err(),
+            store.remove(7).unwrap_err(),
+            store.read(8).unwrap_err(),
+            store.write(&issue(8, "Replacement eight")).unwrap_err(),
+            store.remove(8).unwrap_err(),
+        ] {
+            let mismatch = error.downcast_ref::<MismatchedIssueNumber>().unwrap();
+            assert_eq!(mismatch.filename_number, Some(7));
+            assert_eq!(mismatch.declared_number, 8);
+            assert_eq!(mismatch.file, moved);
+        }
+
+        assert_eq!(fs::read(&moved).unwrap(), sources_before[0]);
+        assert_eq!(fs::read(&canonical).unwrap(), sources_before[1]);
+        assert_eq!(fs::read(store.index_path()).unwrap(), index_before);
+        assert_eq!(fs::read(&dirty).unwrap(), dirty_before);
+        assert!(!store.dir().join("007-replacement-seven.md").exists());
+        assert!(!store.dir().join("008-replacement-eight.md").exists());
+    }
+
+    #[test]
+    fn prefixless_declared_claim_fences_its_number_without_any_effect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(8, "Moved")).unwrap();
+        let manual = store.dir().join("manual.md");
+        fs::rename(store.dir().join("008-moved.md"), &manual).unwrap();
+        let dirty = store.dir().join(".derived-dirty");
+        fs::write(&dirty, b"pre-existing rebuild request\n").unwrap();
+        let source_before = fs::read(&manual).unwrap();
+        let index_before = fs::read(store.index_path()).unwrap();
+        let dirty_before = fs::read(&dirty).unwrap();
+
+        for error in [
+            store.read(8).unwrap_err(),
+            store.write(&issue(8, "Replacement")).unwrap_err(),
+            store.remove(8).unwrap_err(),
+        ] {
+            let mismatch = error.downcast_ref::<MismatchedIssueNumber>().unwrap();
+            assert_eq!(mismatch.filename_number, None);
+            assert_eq!(mismatch.declared_number, 8);
+            assert_eq!(mismatch.file, manual);
+        }
+
+        assert_eq!(fs::read(&manual).unwrap(), source_before);
+        assert_eq!(fs::read(store.index_path()).unwrap(), index_before);
+        assert_eq!(fs::read(&dirty).unwrap(), dirty_before);
+        assert!(!store.dir().join("008-replacement.md").exists());
     }
 
     #[test]
@@ -962,12 +1187,20 @@ mod tests {
 
         assert!(!tmp.path().join(".usagi/issues/001-old-title.md").exists());
         assert!(tmp.path().join(".usagi/issues/001-new-title.md").is_file());
-        assert_eq!(store.files_for(1).unwrap().len(), 1);
+        assert_eq!(
+            store
+                .issue_files()
+                .unwrap()
+                .iter()
+                .filter(|path| number_from_filename(path) == Some(1))
+                .count(),
+            1
+        );
         assert_eq!(store.read(1).unwrap().unwrap().title, "New title");
     }
 
     #[test]
-    fn files_for_matches_any_numeric_prefix_not_just_zero_padded() {
+    fn point_read_matches_any_numeric_prefix_not_just_zero_padded() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
         store.write(&issue(1, "First")).unwrap();
@@ -975,7 +1208,15 @@ mod tests {
         let dir = store.dir().to_path_buf();
         fs::rename(dir.join("001-first.md"), dir.join("1-first.md")).unwrap();
 
-        assert_eq!(store.files_for(1).unwrap().len(), 1);
+        assert_eq!(
+            store
+                .issue_files()
+                .unwrap()
+                .iter()
+                .filter(|path| number_from_filename(path) == Some(1))
+                .count(),
+            1
+        );
         assert_eq!(store.read(1).unwrap().unwrap().title, "First");
     }
 
@@ -1260,7 +1501,15 @@ mod tests {
 
         assert!(!store.dir().join("001-old-title.md").exists());
         assert!(store.dir().join("001-new-title.md").is_file());
-        assert_eq!(store.files_for(1).unwrap().len(), 1);
+        assert_eq!(
+            store
+                .issue_files()
+                .unwrap()
+                .iter()
+                .filter(|path| number_from_filename(path) == Some(1))
+                .count(),
+            1
+        );
         assert_eq!(store.read(1).unwrap().unwrap().title, "New title");
         let index = fs::read_to_string(store.index_path()).unwrap();
         assert!(index.contains("\"title\": \"New title\""));
@@ -1460,21 +1709,500 @@ mod tests {
     }
 
     #[test]
-    fn reserve_next_number_reports_invalid_or_unreadable_sequence() {
+    fn reserve_next_number_folds_every_workspace_source_maximum() {
         let tmp = tempfile::tempdir().unwrap();
+        let sessions = tmp.path().join(".usagi/sessions");
+        let current_root = sessions.join("current");
+        let sibling_root = sessions.join("sibling");
+        let current = IssueStore::new(&current_root);
+        let sibling = IssueStore::new(&sibling_root);
+        fs::create_dir_all(sibling.dir()).unwrap();
+        fs::write(
+            sibling.dir().join("515-unmerged.md"),
+            issue(515, "Unmerged").to_markdown(),
+        )
+        .unwrap();
+        for root in [tmp.path(), current_root.as_path(), sibling_root.as_path()] {
+            let legacy = root.join(".usagi/issues/usagi-issue-sequence").join("next");
+            fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+            fs::write(&legacy, "migrated-to-usagi-issue-numbers:515\n").unwrap();
+        }
+
+        assert_eq!(current.reserve_next_number().unwrap(), 516);
+        assert!(
+            tmp.path()
+                .join(".usagi/issue-numbers/reservations/0000000516.reserved")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn reserve_next_number_folds_filename_and_declared_source_claims() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git(root, &["init", "-q"]);
+
+        let store = IssueStore::new(root);
+        fs::create_dir_all(store.dir()).unwrap();
+        let mismatched = store.dir().join("007-declares-800.md");
+        let prefixless = store.dir().join("declared-only.md");
+        fs::write(
+            &mismatched,
+            issue(800, "Declared eight hundred").to_markdown(),
+        )
+        .unwrap();
+        fs::write(
+            &prefixless,
+            issue(900, "Declared nine hundred").to_markdown(),
+        )
+        .unwrap();
+        let mismatched_before = fs::read(&mismatched).unwrap();
+        let prefixless_before = fs::read(&prefixless).unwrap();
+
+        let authority = root.join(".git/usagi/issue-numbers");
+        fs::create_dir_all(&authority).unwrap();
+        fs::write(
+            authority.join("sequence.json"),
+            b"{\"version\":1,\"last_reserved\":500}\n",
+        )
+        .unwrap();
+        fs::write(authority.join("legacy-v2-migrated"), b"500\n").unwrap();
+        let legacy = root.join(".git/usagi-issue-sequence/next");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, b"migrated-to-usagi-issue-numbers:500\n").unwrap();
+
+        assert_eq!(store.reserve_next_number().unwrap(), 901);
+        assert_eq!(fs::read(&mismatched).unwrap(), mismatched_before);
+        assert_eq!(fs::read(&prefixless).unwrap(), prefixless_before);
+        assert_eq!(
+            fs::read_to_string(authority.join("reservations/0000000901.reserved")).unwrap(),
+            "901\n"
+        );
+        let sequence: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(authority.join("sequence.json")).unwrap())
+                .unwrap();
+        assert_eq!(sequence["last_reserved"], 901);
+        assert_eq!(
+            fs::read_to_string(&legacy).unwrap(),
+            "migrated-to-usagi-issue-numbers:500\n"
+        );
+        assert_eq!(
+            fs::read_to_string(authority.join("legacy-v2-migrated")).unwrap(),
+            "500\n"
+        );
+    }
+
+    #[test]
+    fn reserve_next_number_rejects_an_unparseable_source_without_any_effect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git(root, &["init", "-q"]);
+
+        let store = IssueStore::new(root);
+        fs::create_dir_all(store.dir()).unwrap();
+        let source = store.dir().join("declared-floor-is-opaque.md");
+        fs::write(&source, b"not issue frontmatter\n").unwrap();
+        let index = store.index_path();
+        fs::write(&index, b"pre-existing derived bytes\n").unwrap();
+        let dirty = store.dir().join(".derived-dirty");
+        fs::write(&dirty, b"pre-existing rebuild request\n").unwrap();
+
+        let authority = root.join(".git/usagi/issue-numbers");
+        let reservations = authority.join("reservations");
+        fs::create_dir_all(&reservations).unwrap();
+        let sequence = authority.join("sequence.json");
+        let reservation = reservations.join("0000000500.reserved");
+        let migration = authority.join("legacy-v2-migrated");
+        fs::write(&sequence, b"{\"version\":1,\"last_reserved\":500}\n").unwrap();
+        fs::write(&reservation, b"500\n").unwrap();
+        fs::write(&migration, b"500\n").unwrap();
+        let legacy = root.join(".git/usagi-issue-sequence/next");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, b"migrated-to-usagi-issue-numbers:500\n").unwrap();
+
+        let preserved = [
+            fs::read(&source).unwrap(),
+            fs::read(&index).unwrap(),
+            fs::read(&dirty).unwrap(),
+            fs::read(&sequence).unwrap(),
+            fs::read(&reservation).unwrap(),
+            fs::read(&migration).unwrap(),
+            fs::read(&legacy).unwrap(),
+        ];
+        assert!(store.reserve_next_number().is_err());
+        assert_eq!(fs::read(&source).unwrap(), preserved[0]);
+        assert_eq!(fs::read(&index).unwrap(), preserved[1]);
+        assert_eq!(fs::read(&dirty).unwrap(), preserved[2]);
+        assert_eq!(fs::read(&sequence).unwrap(), preserved[3]);
+        assert_eq!(fs::read(&reservation).unwrap(), preserved[4]);
+        assert_eq!(fs::read(&migration).unwrap(), preserved[5]);
+        assert_eq!(fs::read(&legacy).unwrap(), preserved[6]);
+        assert!(!reservations.join("0000000501.reserved").exists());
+    }
+
+    #[test]
+    fn nested_main_and_linked_worktree_calls_share_authority_and_root_source_maximum() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.email", "test@example.com"]);
+        git(&root, &["config", "user.name", "Test"]);
+        fs::write(root.join("README.md"), "workspace\n").unwrap();
+        git(&root, &["add", "README.md"]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+
+        let root_store = IssueStore::new(&root);
+        root_store
+            .write(&issue(515, "Existing root source"))
+            .unwrap();
+        let nested_main = root.join("crates/core");
+        fs::create_dir_all(&nested_main).unwrap();
+
+        let sessions = root.join(".usagi/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let linked = sessions.join("linked");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "test-linked",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let nested_linked = linked.join("crates/core");
+        fs::create_dir_all(&nested_linked).unwrap();
+
+        let authority = root.join(".git/usagi/issue-numbers");
+        fs::create_dir_all(&authority).unwrap();
+        fs::write(
+            authority.join("sequence.json"),
+            b"{\"version\":1,\"last_reserved\":515}\n",
+        )
+        .unwrap();
+        fs::write(authority.join("legacy-v2-migrated"), b"515\n").unwrap();
+        let common_legacy = root.join(".git/usagi-issue-sequence/next");
+        let nested_main_legacy = nested_main.join(".usagi/issues/usagi-issue-sequence/next");
+        for legacy in [&common_legacy, &nested_main_legacy] {
+            fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+            fs::write(legacy, b"migrated-to-usagi-issue-numbers:515\n").unwrap();
+        }
+
+        assert_eq!(
+            IssueStore::new(&nested_main).reserve_next_number().unwrap(),
+            516
+        );
+        assert_eq!(
+            IssueStore::new(&nested_linked)
+                .reserve_next_number()
+                .unwrap(),
+            517
+        );
+        assert!(authority.join("reservations/0000000516.reserved").is_file());
+        assert!(authority.join("reservations/0000000517.reserved").is_file());
+        assert!(!nested_main.join(".usagi/issue-numbers").exists());
+        assert!(!nested_linked.join(".usagi/issue-numbers").exists());
+
+        let external = tmp.path().join("external-linked");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "test-external-source-floor",
+                external.to_str().unwrap(),
+            ],
+        );
+        let external_store = IssueStore::new(&external);
+        fs::create_dir_all(external_store.dir()).unwrap();
+        fs::write(
+            external_store.dir().join("800-manual.md"),
+            issue(800, "External source floor").to_markdown(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            IssueStore::new(&nested_main).reserve_next_number().unwrap(),
+            801
+        );
+        assert!(authority.join("reservations/0000000801.reserved").is_file());
+    }
+
+    #[test]
+    fn source_only_floor_is_not_assumed_visible_to_every_old_v1_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.email", "test@example.com"]);
+        git(&root, &["config", "user.name", "Test"]);
+        fs::write(root.join("README.md"), "workspace\n").unwrap();
+        git(&root, &["add", "README.md"]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+
+        let external = tmp.path().join("external-linked");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "test-stale-v1-source-visibility",
+                external.to_str().unwrap(),
+            ],
+        );
+        let store = IssueStore::new(&root);
+        let nested_store = IssueStore::new(root.join("tools/nested"));
+        fs::create_dir_all(nested_store.dir()).unwrap();
+        let source = nested_store.dir().join("800-nested-only.md");
+        fs::write(&source, issue(800, "Nested-only floor").to_markdown()).unwrap();
+
+        let authority = root.join(".git/usagi/issue-numbers");
+        fs::create_dir_all(&authority).unwrap();
+        let sequence = authority.join("sequence.json");
+        fs::write(&sequence, r#"{"version":1,"last_reserved":500}"#).unwrap();
+        let common_legacy = root.join(".git/usagi-issue-sequence/next");
+        fs::create_dir_all(common_legacy.parent().unwrap()).unwrap();
+        fs::write(&common_legacy, "migrated-to-usagi-issue-numbers:500\n").unwrap();
+        fs::write(authority.join("legacy-v2-migrated"), "500\n").unwrap();
+        let nested_legacy = nested_store.dir().join("usagi-issue-sequence/next");
+        fs::create_dir_all(nested_legacy.parent().unwrap()).unwrap();
+        fs::write(&nested_legacy, "600\n").unwrap();
+        fs::write(root.join(".git/info/exclude"), "tools/nested/.usagi/\n").unwrap();
+        let source_before = fs::read(&source).unwrap();
+        let sequence_before = fs::read(&sequence).unwrap();
+        let common_before = fs::read(&common_legacy).unwrap();
+        let nested_before = fs::read(&nested_legacy).unwrap();
+
+        let error = store.reserve_next_number().unwrap_err();
+        assert!(error.to_string().contains("neither live legacy v2 nor v1"));
+        assert_eq!(fs::read(&source).unwrap(), source_before);
+        assert_eq!(fs::read(&sequence).unwrap(), sequence_before);
+        assert_eq!(fs::read(&common_legacy).unwrap(), common_before);
+        assert_eq!(fs::read(&nested_legacy).unwrap(), nested_before);
+        assert!(!authority.join("reservations").exists());
+        assert!(!external.join(".usagi").exists());
+
+        fs::write(&nested_legacy, "800\n").unwrap();
+        assert_eq!(store.reserve_next_number().unwrap(), 801);
+        assert_eq!(fs::read(&source).unwrap(), source_before);
+        assert!(authority.join("reservations/0000000801.reserved").is_file());
+    }
+
+    #[test]
+    fn nested_source_floor_fences_its_missing_legacy_authority_in_production_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git(root, &["init", "-q"]);
+
+        let nested_store = IssueStore::new(root.join("tools/nested"));
+        fs::create_dir_all(nested_store.dir()).unwrap();
+        let source = nested_store.dir().join("800-known.md");
+        fs::write(&source, issue(800, "Known nested source").to_markdown()).unwrap();
+        let source_before = fs::read(&source).unwrap();
+
+        let authority = root.join(".git/usagi/issue-numbers");
+        fs::create_dir_all(&authority).unwrap();
+        fs::write(
+            authority.join("sequence.json"),
+            r#"{"version":1,"last_reserved":800}"#,
+        )
+        .unwrap();
+        fs::write(authority.join("legacy-v2-migrated"), "800\n").unwrap();
+        let shared_legacy = root.join(".git/usagi-issue-sequence/next");
+        fs::create_dir_all(shared_legacy.parent().unwrap()).unwrap();
+        fs::write(&shared_legacy, "migrated-to-usagi-issue-numbers:800\n").unwrap();
+        let nested_legacy = nested_store.dir().join("usagi-issue-sequence/next");
+        assert!(!nested_legacy.exists());
+
+        assert_eq!(IssueStore::new(root).reserve_next_number().unwrap(), 801);
+        assert_eq!(fs::read(&source).unwrap(), source_before);
+        assert_eq!(
+            fs::read_to_string(&nested_legacy).unwrap(),
+            "migrated-to-usagi-issue-numbers:801\n"
+        );
+        assert!(authority.join("reservations/0000000801.reserved").is_file());
+    }
+
+    #[test]
+    fn stale_gitfile_targets_fail_without_creating_split_authority_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join(".git"), "gitdir: missing-private\n").unwrap();
         let store = IssueStore::new(tmp.path());
-        assert_eq!(store.reserve_next_number().unwrap(), 1);
 
-        let sequence = store
-            .dir()
-            .join(ALLOCATION_DIR_NAME)
-            .join(ALLOCATION_FILE_NAME);
-        fs::write(&sequence, "not a number\n").unwrap();
         assert!(store.reserve_next_number().is_err());
+        assert!(!tmp.path().join("missing-private").exists());
+        assert!(!tmp.path().join(".usagi").exists());
 
-        fs::remove_file(&sequence).unwrap();
-        fs::create_dir(&sequence).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let private = tmp.path().join("private");
+        fs::create_dir(&private).unwrap();
+        fs::write(tmp.path().join(".git"), "gitdir: private\n").unwrap();
+        fs::write(private.join("commondir"), "../missing-common\n").unwrap();
+        let store = IssueStore::new(tmp.path());
+
         assert!(store.reserve_next_number().is_err());
+        assert!(!tmp.path().join("missing-common").exists());
+        assert!(!private.join("usagi").exists());
+        assert!(!tmp.path().join(".usagi").exists());
+    }
+
+    #[test]
+    fn unreadable_workspace_session_listing_fails_before_reservation() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join(".usagi")).unwrap();
+        fs::write(tmp.path().join(".usagi/sessions"), "not a directory").unwrap();
+        let store = IssueStore::new(tmp.path());
+
+        assert!(store.reserve_next_number().is_err());
+        assert!(
+            !tmp.path()
+                .join(".usagi/issue-numbers/reservations")
+                .exists()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_session_entry_fails_source_floor_discovery_without_effect() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let real_session = root.join("real-session");
+        let real_store = IssueStore::new(&real_session);
+        fs::create_dir_all(real_store.dir()).unwrap();
+        let source = real_store.dir().join("800-real.md");
+        fs::write(&source, issue(800, "Real session source").to_markdown()).unwrap();
+        let legacy = real_store.dir().join("usagi-issue-sequence/next");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, b"800\n").unwrap();
+        let sessions = root.join(".usagi/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let session_entry = sessions.join("linked");
+        symlink(&real_session, &session_entry).unwrap();
+
+        let authority = root.join(".usagi/issue-numbers");
+        let sequence = authority.join("sequence.json");
+        let reservation = authority.join("reservations/0000000500.reserved");
+        fs::create_dir_all(reservation.parent().unwrap()).unwrap();
+        fs::write(&sequence, b"{\"version\":1,\"last_reserved\":500}\n").unwrap();
+        fs::write(&reservation, b"500\n").unwrap();
+        let sequence_before = fs::read(&sequence).unwrap();
+        let reservation_before = fs::read(&reservation).unwrap();
+        let source_before = fs::read(&source).unwrap();
+        let legacy_before = fs::read(&legacy).unwrap();
+
+        let store = IssueStore::new(root);
+        let Err(error) = store.existing_issue_floors(root, root, &[], &[]) else {
+            panic!("symlinked session entry was accepted");
+        };
+        assert!(error.to_string().contains("session entry is a symlink"));
+        assert_eq!(fs::read(&sequence).unwrap(), sequence_before);
+        assert_eq!(fs::read(&reservation).unwrap(), reservation_before);
+        assert_eq!(fs::read(&source).unwrap(), source_before);
+        assert_eq!(fs::read(&legacy).unwrap(), legacy_before);
+        assert!(
+            fs::symlink_metadata(&session_entry)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!authority.join("legacy-v2-migrated").exists());
+        assert!(!authority.join("reservations/0000000501.reserved").exists());
+        assert!(!store.dir().exists());
+    }
+
+    fn assert_no_local_issue_reservation(root: &Path) {
+        assert!(!root.join(".usagi/issue-numbers/sequence.json").exists());
+        assert!(!root.join(".usagi/issue-numbers/reservations").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_session_or_issue_store_fails_without_a_reservation() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join(".usagi")).unwrap();
+        let sessions = tmp.path().join(".usagi/sessions");
+        symlink("missing-sessions", &sessions).unwrap();
+        let store = IssueStore::new(tmp.path());
+
+        assert!(store.reserve_next_number().is_err());
+        assert_eq!(
+            fs::read_link(&sessions).unwrap(),
+            PathBuf::from("missing-sessions")
+        );
+        assert_no_local_issue_reservation(tmp.path());
+        assert!(!store.dir().exists());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let session = tmp.path().join(".usagi/sessions/sibling");
+        fs::create_dir_all(session.join(".usagi")).unwrap();
+        let issues = session.join(".usagi/issues");
+        symlink("missing-issues", &issues).unwrap();
+        let store = IssueStore::new(tmp.path());
+
+        assert!(store.reserve_next_number().is_err());
+        assert_eq!(
+            fs::read_link(&issues).unwrap(),
+            PathBuf::from("missing-issues")
+        );
+        assert_no_local_issue_reservation(tmp.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join(".usagi")).unwrap();
+        let issues = tmp.path().join(".usagi/issues");
+        symlink("missing-issues", &issues).unwrap();
+        let dangling_store = IssueStore::new(tmp.path());
+        assert!(dangling_store.max_number().is_err());
+        assert!(dangling_store.read(1).is_err());
+        assert!(dangling_store.source_snapshot().is_err());
+        assert_eq!(
+            fs::read_link(&issues).unwrap(),
+            PathBuf::from("missing-issues")
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let session = tmp.path().join(".usagi/sessions/sibling");
+        fs::create_dir_all(&session).unwrap();
+        let state = session.join(".usagi");
+        symlink("missing-state", &state).unwrap();
+        let dangling_store = IssueStore::new(&session);
+        assert!(dangling_store.max_number().is_err());
+        assert!(dangling_store.read(1).is_err());
+        assert!(dangling_store.source_snapshot().is_err());
+        assert_eq!(
+            fs::read_link(&state).unwrap(),
+            PathBuf::from("missing-state")
+        );
+
+        let root_store = IssueStore::new(tmp.path());
+        assert!(root_store.reserve_next_number().is_err());
+        assert_eq!(
+            fs::read_link(&state).unwrap(),
+            PathBuf::from("missing-state")
+        );
+        assert_no_local_issue_reservation(tmp.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions = tmp.path().join(".usagi/sessions");
+        let actual = tmp.path().join("actual-session");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::create_dir(&actual).unwrap();
+        let linked = sessions.join("linked");
+        symlink(&actual, &linked).unwrap();
+        let store = IssueStore::new(tmp.path());
+        assert!(store.reserve_next_number().is_err());
+        assert_eq!(fs::read_link(&linked).unwrap(), actual);
+        assert_no_local_issue_reservation(tmp.path());
     }
 
     #[test]
@@ -1665,84 +2393,6 @@ mod tests {
         unsafe {
             std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
         }
-    }
-
-    #[test]
-    fn allocation_directory_resolves_git_and_worktree_layouts() {
-        let repository = tempfile::tempdir().unwrap();
-        let store = IssueStore::new(repository.path());
-        fs::create_dir(repository.path().join(".git")).unwrap();
-        assert_eq!(
-            store.allocation_dir().unwrap(),
-            repository.path().join(".git").join(ALLOCATION_DIR_NAME)
-        );
-
-        fs::remove_dir(repository.path().join(".git")).unwrap();
-        let private_git = repository.path().join("private-git");
-        fs::create_dir(&private_git).unwrap();
-        fs::write(repository.path().join(".git"), "gitdir: private-git\n").unwrap();
-        assert_eq!(
-            store.allocation_dir().unwrap(),
-            private_git.join(ALLOCATION_DIR_NAME)
-        );
-
-        let common = repository.path().join("common-git");
-        fs::create_dir(&common).unwrap();
-        fs::write(
-            private_git.join("commondir"),
-            common.to_string_lossy().as_bytes(),
-        )
-        .unwrap();
-        assert_eq!(
-            store.allocation_dir().unwrap(),
-            common.join(ALLOCATION_DIR_NAME)
-        );
-
-        fs::write(private_git.join("commondir"), "../relative-common\n").unwrap();
-        assert_eq!(
-            store.allocation_dir().unwrap(),
-            private_git
-                .join("../relative-common")
-                .join(ALLOCATION_DIR_NAME)
-        );
-    }
-
-    #[test]
-    fn malformed_git_indirection_and_common_directory_io_are_errors() {
-        let repository = tempfile::tempdir().unwrap();
-        let store = IssueStore::new(repository.path());
-        fs::write(repository.path().join(".git"), "not a gitdir\n").unwrap();
-        assert!(
-            store
-                .allocation_dir()
-                .unwrap_err()
-                .to_string()
-                .contains("invalid git directory file")
-        );
-        fs::write(repository.path().join(".git"), "gitdir: \n").unwrap();
-        assert!(git_dir_from_dot_git(&repository.path().join(".git")).is_err());
-
-        let private_git = repository.path().join("private-git");
-        fs::create_dir(&private_git).unwrap();
-        fs::write(
-            repository.path().join(".git"),
-            format!("gitdir:\t{}\n", private_git.display()),
-        )
-        .unwrap();
-        fs::create_dir(private_git.join("commondir")).unwrap();
-        assert!(
-            store
-                .allocation_dir()
-                .unwrap_err()
-                .to_string()
-                .contains("failed to read git common directory")
-        );
-        assert!(
-            git_dir_from_dot_git(&repository.path().join("missing-dot-git"))
-                .unwrap_err()
-                .to_string()
-                .contains("failed to read git directory file")
-        );
     }
 
     #[test]

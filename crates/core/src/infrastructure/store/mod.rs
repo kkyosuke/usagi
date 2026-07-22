@@ -37,6 +37,7 @@ impl<T> MutationOutcome<T> {
 pub mod agent_tab_intent;
 pub mod dispatch;
 pub mod issue;
+pub(crate) mod issue_number_sequence;
 pub mod lifecycle;
 pub mod memory;
 pub mod pr_inventory;
