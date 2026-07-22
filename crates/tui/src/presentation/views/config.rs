@@ -704,6 +704,14 @@ mod tests {
             Config::load_workspace_with_available_models(&mut port, AvailableAgentModels::all());
         config.previous_field();
         assert_eq!(config.field(), Field::Save);
+        config.previous_field();
+        assert_eq!(config.field(), Field::Memory);
+        config.previous_field();
+        assert_eq!(config.field(), Field::Issue);
+        config.next_field();
+        assert_eq!(config.field(), Field::Memory);
+        config.next_field();
+        assert_eq!(config.field(), Field::Save);
         config.next_field();
         assert_eq!(config.field(), Field::DefaultModel);
 
@@ -887,6 +895,12 @@ mod tests {
         assert_eq!(open_ai_only.settings().default_model, DefaultModel::OpenAi);
         open_ai_only.cycle_default_model();
         assert_eq!(open_ai_only.settings().default_model, DefaultModel::OpenAi);
+
+        port.global.default_model = DefaultModel::Claude;
+        let claude_saved =
+            Config::load_with_available_models(&mut port, AvailableAgentModels::new(true, false));
+        assert_eq!(claude_saved.settings().default_model, DefaultModel::Claude);
+        assert!(!claude_saved.is_dirty());
     }
 
     #[test]
