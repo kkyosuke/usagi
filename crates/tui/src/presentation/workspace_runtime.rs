@@ -128,6 +128,12 @@ impl WorkspaceRuntime {
         &self.panes
     }
 
+    /// Apply a newly saved workspace setting to future Overview / Closeup
+    /// palettes without rebuilding the workspace runtime or its live panes.
+    pub fn set_modal_selection_mode(&mut self, mode: ModalSelectionMode) {
+        self.modal_selection_mode = mode;
+    }
+
     /// Translate a terminal [`Key`] into Home input and return the effects the
     /// shell must dispatch. Passthrough/pointer keys yield no effects; the shell
     /// gates live passthrough via [`WorkspaceRuntime::wants_live_input`] before

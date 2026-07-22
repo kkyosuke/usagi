@@ -166,6 +166,20 @@ impl Config {
         }
     }
 
+    /// Read both settings scopes and open the editor on the current workspace.
+    ///
+    /// Overview uses this entry point so `config` targets the workspace that owns
+    /// the command palette instead of initially presenting the global defaults.
+    #[must_use]
+    pub fn load_workspace_with_available_models(
+        port: &mut dyn SettingsPort,
+        available_models: AvailableAgentModels,
+    ) -> Self {
+        let mut config = Self::load_with_available_models(port, available_models);
+        config.scope = SettingsScope::Workspace;
+        config
+    }
+
     /// Returns the selected persistence scope.
     #[must_use]
     pub fn scope(&self) -> SettingsScope {
@@ -631,6 +645,32 @@ mod tests {
         assert!(frame.contains("Memory") && frame.contains("on"));
         assert!(frame.contains("[ Save ]"));
         assert!(frame.contains("Esc: back"));
+    }
+
+    #[test]
+    fn workspace_entry_starts_on_the_selected_workspace_scope() {
+        let mut port = FakeSettingsPort {
+            global: Settings {
+                issue_enabled: true,
+                ..Settings::default()
+            },
+            workspace: Settings {
+                issue_enabled: false,
+                ..Settings::default()
+            },
+            ..FakeSettingsPort::default()
+        };
+
+        let config =
+            Config::load_workspace_with_available_models(&mut port, AvailableAgentModels::all());
+
+        assert_eq!(config.scope(), SettingsScope::Workspace);
+        assert!(!config.settings().issue_enabled);
+        assert!(
+            render(24, 80, &config)
+                .join("\n")
+                .contains("Scope: Global   [Workspace]")
+        );
     }
 
     #[test]
