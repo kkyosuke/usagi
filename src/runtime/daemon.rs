@@ -4214,6 +4214,8 @@ mod tests {
 
     #[test]
     fn lifecycle_private_files_override_a_restrictive_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
         const FIXTURE: &str = "USAGI_TEST_RESTRICTIVE_DAEMON_UMASK";
         if std::env::var_os(FIXTURE).is_none() {
             let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -4228,8 +4230,6 @@ mod tests {
             assert!(status.success());
             return;
         }
-
-        use std::os::unix::fs::PermissionsExt;
 
         // This branch runs in its own test subprocess, so changing the process
         // umask cannot perturb parallel tests or unrelated persistence stores.
