@@ -8,7 +8,7 @@ dependson: [516]
 related: [209, 221, 255, 350, 459, 474, 492, 508, 514, 515, 526]
 parent: 507
 created_at: 2026-07-22T11:37:07.035271+00:00
-updated_at: 2026-07-22T11:58:58.512537+00:00
+updated_at: 2026-07-22T12:00:52.426464+00:00
 ---
 
 ## 問題・根拠
@@ -37,7 +37,7 @@ owner generation ごとの single-writer shard と、全 generation が共有す
 7. standbyはowner shardをread-onlyでhydrateし、#516のreadiness中にreconcile/save、worker/tick、spawnを行わない。handoff commit後にだけ自 shardをactive writerとして開き、sealed hydrate revisionとglobal allocator revisionを再検証してadmissionを開始する。
 8. old generation の collection eligibility は、自 shardの live resource 0、in-flight terminal command 0、未 ACK outbox 0、global capacity claim 0 をすべて検証して決める。registry role/endpointの最終回収は #516 / 親 #507 が行う。
 9. legacy `agents.json` / `terminals.json` は完全な `TerminalRef.daemon_generation` と検証可能な child identityが一致する recordだけを owner shardへ移す。ambiguous、unknown/corrupt schema、固定/欠損 identityは ownership unknownとして fail closedにし、推測 spawn・kill・capacity releaseを行わない。旧activeがreal-child-identityとsharded-store capabilityをadvertiseする場合だけplanned rolloverを許可し、非対応versionからのbuild replacementはseamless継続を偽らずrefuseまたは明示cold transitionを要求する。
-10. global allocator の completed claim と Agent / generic launch operation outcome / final ledger に、count、serialized byte、age の hard limit と documented minimum idempotency window を持つ bounded retention / expiry / GC を実装する。window 内は同じ `OperationId` と semantic digestへ exact outcomeをreplayする。GCは durable final、exact-once capacity release revision、outbox/consumer ACK、live/in-flight/ambiguous dependency 0 を確認したrecordだけを crash-safeにcompactする。exact recordのexpiry後は UUIDv7 `OperationId` timestampとdurable expiry watermarkを使い、同じ/古いIDをunknownな新規launchとして再予約・spawnせずtyped `operation_expired`へ収束させる。minimum windowを破らず安全にGCできないままcount/byte hard capへ達した場合は、既存recordをevictせず新規Agent/generic launchをtyped backpressureでeffect zeroに拒否する。このallocator/operation-ledger contractは#526へ委譲しない。
+10. global allocator の completed claim と Agent / generic launch operation outcome / final ledger に、count、serialized byte、age の hard limit と documented minimum idempotency window / expiry horizon を持つ bounded retention / expiry / GC を実装する。minimum window 内は同じ `OperationId` と semantic digestへ full exact outcomeをreplayする。window 経過後に full outcomeを削除するときは、`OperationId`、semantic digest、expiry class/cutoffを持つ compact non-reusable tombstoneへatomicに置換し、expiry horizon中の再送をtyped `operation_expired`としてeffect zeroにする。exact tombstoneをGCできるのは、serverが受理済みhistoryから進めるdurable monotonic UUIDv7 expiry watermarkにより、そのID以下を永久にfresh admissionしない場合だけとする。evicted / too-old ID、retained tombstone、watermark以下のIDはunknownな新規launchとして再予約・capacity claim・spawnせずtyped `operation_expired`へ収束する。incoming future timestampだけでwatermarkを進めない。GC対象はdurable finalとexact-once capacity release revisionがcommit済みで、全outbox/consumer ACKとdependency 0を確認したcompleted recordだけとする。live claim、owner reservation、unacked outbox、in-flight / ambiguous recordはageやhard capに達してもGC対象外である。minimum window / expiry horizonを破らず安全にGCできないままcount/byte hard capへ達した場合は、既存recordをevictせず新規Agent/generic launchをtyped backpressureでeffect zeroに拒否する。このallocator/operation-ledger contractは#526へ委譲しない。
 
 ## 非対象
 
@@ -61,9 +61,9 @@ owner generation ごとの single-writer shard と、全 generation が共有す
 - [ ] PR inventory、supervisorその他のdraining writerを含む全shared stateにsingle-writerまたはgeneration fenceがあり、G1 eventとG2 refresh/tickのlost updateがない。
 - [ ] stale/wrong-generation event、別ownerのterminal command、corrupt shard/global ledgerはfail closedで、別resourceや新active snapshotを変更しない。
 - [ ] old generationはresource、in-flight command、outbox、capacity claimがすべて0になる前にcollectableにならない。
-- [ ] completed allocator claim と Agent / generic launch outcome ledger は configured count / serialized byte / age limit 内に収まり、minimum idempotency window 内の同一 operation は restart / handoff 後も exact final を replayする。
-- [ ] expiry 済み `OperationId` は durable watermark により typed `operation_expired` となり、unknown/new launch として reservation、capacity claim、spawn を再実行しない。GC と同時の retry / ACK lossでも replay safetyを保つ。
-- [ ] final commit、capacity release、expiry marker/watermark、record compaction の各 crash pointでcapacityは一度だけ解放され、live/in-flight/ambiguous claimやwindow内finalはevictされない。安全なGC候補なしでhard capへ達した場合は新規launchをtyped backpressureでeffect zeroに拒否する。
+- [ ] completed allocator claim と Agent / generic launch outcome ledger は configured count / serialized byte / age limit 内に収まり、minimum idempotency window 内の同一 operation は restart / handoff 後も full exact final を replayする。
+- [ ] full outcome eviction は compact non-reusable tombstoneへのatomic replacementを経由する。expiry horizon後にexact tombstoneを削除してもdurable watermark以下のevicted / too-old `OperationId` はtyped `operation_expired`となり、fresh admission、reservation、capacity claim、spawnを再実行しない。GC と同時の retry / ACK lossでも replay safetyを保つ。
+- [ ] final commit、capacity release、full-outcome → tombstone、expiry watermark、tombstone compaction の各 crash pointでcapacityは一度だけ解放される。live claim、owner reservation、unacked outbox、in-flight / ambiguous record、window内finalはGCされず、安全なGC候補なしでhard capへ達した場合は新規launchをtyped backpressureでeffect zeroに拒否する。
 - [ ] legacy migrationはAgent/generic Terminalを同じowner-generation contractへ移し、証明不能recordをlive扱いしない。capability未対応のold activeはplanned rolloverを開始せず、安全なrefusalまたは明示cold transitionになる。
 
 ## 必須テスト
@@ -76,8 +76,8 @@ owner generation ごとの single-writer shard と、全 generation が共有す
 - standby read-only hydrateとactivation revision seal、PR inventory / supervisorを含むshared-writer inventoryのG1/G2 barrier interleaving
 - capability対応old activeのrollover許可と非対応old activeのsafe refusal / explicit cold transition
 - shard schema corruption、partial migration、unknown generation、generation collection barrier
-- 小さい count / byte / age limit と fake clock を使い、repeated Agent / generic launch、minimum window直前/直後、restart/handoff、same-ID retryが exact replayまたはtyped `operation_expired`へ収束し、store sizeがboundedになるretention/expiry test
-- final commit → capacity release → expiry watermark → compaction の各境界でcrash/restartするmatrixと、live/in-flight/ambiguous recordだけでhard capを満たす場合にevictionせずtyped backpressureとなるadmission test
+- 小さい count / byte / age limit と fake clock を使い、repeated Agent / generic launch、minimum window直前/直後、full outcome → compact tombstone → expiry watermarkの各phase、restart/handoffを進めてもstore sizeがboundedになるretention/expiry test。full outcome eviction後とexact tombstone compaction後にold `OperationId`を再送し、typed `operation_expired`、effect zero、spawn count不変を検証する
+- final commit → capacity release → full-outcome/tombstone置換 → expiry watermark → tombstone compaction の各境界でcrash/restartするmatrix。live claim / owner reservation / unacked outbox / in-flight / ambiguous recordだけでhard capを満たす場合もGC/evictionせず、typed backpressureでfresh admissionを拒否することを検証する
 - 2 daemon process・実PTY childを使い、old exitとnew spawnを同時に発生させるintegration test
 
 ## 依存関係
