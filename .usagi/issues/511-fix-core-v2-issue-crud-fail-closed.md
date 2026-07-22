@@ -7,12 +7,14 @@ labels: [review, v2, core, issue, persistence, safety]
 dependson: []
 related: [335, 471]
 created_at: 2026-07-21T21:29:10.408119+00:00
-updated_at: 2026-07-22T00:11:36+00:00
+updated_at: 2026-07-22T11:01:33+00:00
 ---
 
 ## 問題・影響
 
 v2 の `IssueStore` は、同じ番号を持つ `NNN-*.md` が複数ある場合でも point CRUD の identity を一意に検証しない。`read_locked` は directory iteration 順の先頭を返し、`write_locked` は選ばれなかった sibling を stale filename として削除し、`remove_with_outcome` は同番号の全 sibling を削除する。現行 backlog には #323 と #390 の番号衝突が実在するため、任意読取と不可逆な誤更新・誤削除が現実に起こり得る。
+
+初回修正 #1226 のマージ後も、point read の一意性判定より先に derived repair が走り得る lock 範囲、search が3回の source snapshot を混在させる競合、`session_delegate_issue` が typed ambiguity を失う error mapping、missing store の read が lock directory を作る副作用が残った。本 follow-up は #1226 マージ後の main を基点に、この4点を同じ受入条件の未達として完了させる。
 
 ## 対象責務
 

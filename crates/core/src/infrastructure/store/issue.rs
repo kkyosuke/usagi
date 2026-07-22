@@ -180,6 +180,13 @@ pub(crate) struct IssueSourceSnapshot {
     pub claims: BTreeMap<u32, Vec<PathBuf>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadLockPhase {
+    UniqueChecked,
+    DerivedRepaired,
+    ExactRead,
+}
+
 impl IssueStore {
     /// Open the issue store for the repository at `repo_root`.
     #[must_use]
@@ -383,14 +390,27 @@ impl IssueStore {
     /// cannot be read or parsed, or when more than one source file claims
     /// `number`.
     pub fn read(&self, number: u32) -> Result<Option<Issue>> {
+        self.read_observing_lock(number, |_| {})
+    }
+
+    fn read_observing_lock(
+        &self,
+        number: u32,
+        mut observe: impl FnMut(ReadLockPhase),
+    ) -> Result<Option<Issue>> {
         if !self.source_dir_exists()? {
             return Ok(None);
         }
         let lock = self.lock()?;
         let path = self.unique_path_for(number)?;
+        observe(ReadLockPhase::UniqueChecked);
         self.repair_derived_best_effort_locked(&lock);
-        path.map(|path| self.read_numbered_path(number, &path))
-            .transpose()
+        observe(ReadLockPhase::DerivedRepaired);
+        let issue = path
+            .map(|path| self.read_numbered_path(number, &path))
+            .transpose()?;
+        observe(ReadLockPhase::ExactRead);
+        Ok(issue)
     }
 
     /// Read source while the caller already holds the store lock.
@@ -698,7 +718,8 @@ mod tests {
     use crate::infrastructure::persistence::json_file::{AtomicWriteStage, fail_next_atomic_write};
     use crate::infrastructure::store::DerivedState;
     use chrono::{TimeZone, Utc};
-    use std::sync::{Arc, Barrier};
+    use fs2::FileExt;
+    use std::sync::Arc;
     use std::thread;
 
     fn issue(number: u32, title: &str) -> Issue {
@@ -803,36 +824,71 @@ mod tests {
     }
 
     #[test]
-    fn read_locks_before_ambiguity_check_and_leaves_scheduled_repair_unchanged() {
+    fn read_holds_one_lock_across_unique_check_repair_and_exact_parse() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
         store.write(&issue(7, "First")).unwrap();
-        let first = store.dir().join("007-first.md");
-        let second = store.dir().join("007-second.md");
         let dirty = store.dir().join(".derived-dirty");
         fs::write(&dirty, b"pre-existing rebuild request\n").unwrap();
-        let index_before = fs::read(store.index_path()).unwrap();
-        let dirty_before = fs::read(&dirty).unwrap();
+        let lock_path = Arc::new(StoreLock::path(store.dir()));
+        let mut observed = Vec::new();
 
-        let held = store.lock().unwrap();
-        let started = Arc::new(Barrier::new(2));
-        let reader = {
-            let root = tmp.path().to_path_buf();
-            let started = Arc::clone(&started);
-            thread::spawn(move || {
-                started.wait();
-                IssueStore::new(root).read(7).unwrap_err()
+        let read = store
+            .read_observing_lock(7, |phase| {
+                observed.push(phase);
+                let lock_path = Arc::clone(&lock_path);
+                let competing_writer_acquired = thread::spawn(move || {
+                    let file = fs::File::options()
+                        .read(true)
+                        .write(true)
+                        .open(lock_path.as_ref())
+                        .unwrap();
+                    file.try_lock_exclusive().is_ok()
+                })
+                .join()
+                .unwrap();
+                assert!(
+                    !competing_writer_acquired,
+                    "cooperative writer acquired the store lock during {phase:?}"
+                );
             })
-        };
-        started.wait();
-        fs::write(&second, issue(7, "Second").to_markdown()).unwrap();
-        drop(held);
+            .unwrap()
+            .unwrap();
 
-        let error = reader.join().unwrap();
-        let ambiguity = error.downcast_ref::<AmbiguousIssueNumber>().unwrap();
-        assert_eq!(ambiguity.files, vec![first, second]);
-        assert_eq!(fs::read(store.index_path()).unwrap(), index_before);
-        assert_eq!(fs::read(dirty).unwrap(), dirty_before);
+        assert_eq!(read, issue(7, "First"));
+        assert_eq!(
+            observed,
+            [
+                ReadLockPhase::UniqueChecked,
+                ReadLockPhase::DerivedRepaired,
+                ReadLockPhase::ExactRead,
+            ]
+        );
+        assert!(!dirty.exists());
+        let competing_writer = StoreLock::acquire(store.dir()).unwrap();
+        drop(competing_writer);
+    }
+
+    #[test]
+    fn summaries_fall_back_to_sources_when_scheduled_repair_cannot_lock() {
+        let _guard = crate::test_support::process_env_guard();
+        let logs = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var(crate::infrastructure::paths::DATA_DIR_ENV, logs.path());
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        fs::create_dir_all(store.dir()).unwrap();
+        let dirty = store.dir().join(".derived-dirty");
+        fs::write(&dirty, b"pre-existing rebuild request\n").unwrap();
+        fs::create_dir(store.dir().join(".lock")).unwrap();
+
+        assert!(store.summaries().unwrap().is_empty());
+        assert!(dirty.exists());
+
+        unsafe {
+            std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
+        }
     }
 
     #[test]
