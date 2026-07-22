@@ -577,9 +577,9 @@ mod tests {
                     Ok(())
                 }
             });
-            let Err(error) = result else {
-                panic!("injected post-bind failure unexpectedly succeeded");
-            };
+            let error = result
+                .err()
+                .expect("injected post-bind failure unexpectedly succeeded");
 
             assert!(error.to_string().contains("injected failure"));
             assert!(!generation_dir.join(".sock.bind").exists());
