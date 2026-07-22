@@ -2,16 +2,15 @@
 //! fresh one.
 //!
 //! It composes the two existing control-plane usecases: [`stop`](crate::usecase::stop)
-//! brings down a running daemon (terminate + clear) or reclaims a stale record,
-//! then [`launch_and_confirm`](crate::usecase::start::launch_and_confirm) spawns
+//! asks a running daemon to stop and waits for its endpoint retirement / exact
+//! record clear (or reclaims an initially stale record), then
+//! [`launch_and_confirm`](crate::usecase::start::launch_and_confirm) spawns
 //! a detached `serve` and waits for it to register. The store, probe, terminator,
 //! launcher, and sleeper are injected, so this stays pure and fully testable.
 //!
-//! Note: the lock-free skeleton has a narrow race — a just-stopped daemon clears
-//! its record on the way out, which could in principle land after the new daemon
-//! registers. In practice the old process exits before the newly spawned one
-//! finishes starting. Closing this fully is the job of the single-instance lock
-//! that the daemon proposal defers to a later step.
+//! Record cleanup is incarnation-conditional, so a delayed stop or old owner
+//! cannot remove the freshly registered restart record even when the OS reuses
+//! the same pid.
 
 use std::io;
 
@@ -36,9 +35,10 @@ pub fn restart<F: RecordFile, P: LivenessProbe, T: Terminator, L: DaemonLauncher
     sleeper: &K,
     info: &AppInfo,
 ) -> io::Result<String> {
-    // Bring down whatever is there (running → terminate + clear, stale → clear,
-    // absent → nothing); its report line is not surfaced by restart.
-    stop::stop(store, probe, terminator, info)?;
+    // Bring down whatever is there (running → signal + owner cleanup wait,
+    // stale → exact-record clear, absent → nothing); its report line is not
+    // surfaced by restart.
+    stop::stop(store, probe, terminator, sleeper, info)?;
     let pid = start::launch_and_confirm(store, probe, launcher, sleeper)?;
     Ok(format!("{}: daemon restarted (pid {pid})", info.describe()))
 }
@@ -51,7 +51,18 @@ mod tests {
     };
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::daemon::DaemonRecord;
-    use usagi_core::infrastructure::daemon::DaemonRecordStore;
+    use usagi_core::infrastructure::daemon::{DaemonRecordStore, Sleeper};
+
+    struct OwnerCleanupSleeper<'a> {
+        store: &'a DaemonRecordStore<InMemoryRecordFile>,
+        expected: &'a DaemonRecord,
+    }
+
+    impl Sleeper for OwnerCleanupSleeper<'_> {
+        fn sleep(&self) {
+            assert!(self.store.clear_if(self.expected).unwrap());
+        }
+    }
 
     fn info() -> AppInfo {
         AppInfo {
@@ -63,16 +74,21 @@ mod tests {
     #[test]
     fn stops_the_running_daemon_then_starts_a_fresh_one() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
-        store.save(&DaemonRecord::new(1111)).unwrap();
+        let old = DaemonRecord::new(1111);
+        store.save(&old).unwrap();
         let terminator = RecordingTerminator::default();
         let launcher = TestLauncher::registering(&store, 5555);
+        let sleeper = OwnerCleanupSleeper {
+            store: &store,
+            expected: &old,
+        };
         assert_eq!(
             restart(
                 &store,
                 &FixedProbe(true),
                 &terminator,
                 &launcher,
-                &NoopSleeper,
+                &sleeper,
                 &info()
             )
             .unwrap(),

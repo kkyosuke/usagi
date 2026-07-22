@@ -35,9 +35,14 @@ impl RecordFile for InMemoryRecordFile {
         Ok(())
     }
 
-    fn remove(&self) -> io::Result<()> {
-        *self.contents.borrow_mut() = None;
-        Ok(())
+    fn remove_if(&self, expected: &str) -> io::Result<bool> {
+        let mut contents = self.contents.borrow_mut();
+        if contents.as_deref() == Some(expected) {
+            *contents = None;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 

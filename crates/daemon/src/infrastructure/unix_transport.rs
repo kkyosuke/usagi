@@ -19,6 +19,14 @@ const DIR_MODE: u32 = 0o700;
 const SOCKET_MODE: u32 = 0o600;
 const LOCATOR_LOCK: &str = "current.lock";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindStage {
+    SetTemporaryPermissions,
+    RenameEndpoint,
+    VerifyEndpoint,
+    SetNonblocking,
+}
+
 /// The atomically-published endpoint a client is allowed to connect to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointLocator {
@@ -54,6 +62,15 @@ impl SecureUnixListener {
     /// a filesystem/socket failure.
     #[coverage(off)]
     pub fn bind(data_dir: &Path, generation: DaemonGeneration) -> io::Result<Self> {
+        Self::bind_with(data_dir, generation, |_| Ok(()))
+    }
+
+    #[coverage(off)]
+    fn bind_with(
+        data_dir: &Path,
+        generation: DaemonGeneration,
+        mut before: impl FnMut(BindStage) -> io::Result<()>,
+    ) -> io::Result<Self> {
         let daemon = data_dir.join("daemon");
         ensure_private_dir(&daemon)?;
         let generations = daemon.join("generations");
@@ -74,17 +91,42 @@ impl SecureUnixListener {
                 "temporary endpoint exists",
             ));
         }
-        let listener = UnixListener::bind(&temporary)?;
-        fs::set_permissions(&temporary, fs::Permissions::from_mode(SOCKET_MODE))?;
-        fs::rename(&temporary, &socket)?;
-        verify_private(&socket, SOCKET_MODE, false)?;
-        let locator = EndpointLocator {
-            generation,
-            endpoint: relative_endpoint(&daemon, &socket)?,
-            state: EndpointState::Active,
+        let result = (|| {
+            let listener = UnixListener::bind(&temporary)?;
+            before(BindStage::SetTemporaryPermissions)?;
+            fs::set_permissions(&temporary, fs::Permissions::from_mode(SOCKET_MODE))?;
+            before(BindStage::RenameEndpoint)?;
+            fs::rename(&temporary, &socket)?;
+            before(BindStage::VerifyEndpoint)?;
+            verify_private(&socket, SOCKET_MODE, false)?;
+            let locator = EndpointLocator {
+                generation,
+                endpoint: relative_endpoint(&daemon, &socket)?,
+                state: EndpointState::Active,
+            };
+            before(BindStage::SetNonblocking)?;
+            listener.set_nonblocking(true)?;
+            write_locator(&daemon, &locator)?;
+            Ok((listener, locator))
+        })();
+        let (listener, locator) = match result {
+            Ok(published) => published,
+            Err(error) => {
+                // `Self` does not exist yet, so its Drop cannot retire files
+                // created before locator publication. Cover every ordinary
+                // error after bind, whether the endpoint is still temporary or
+                // has already been renamed to its generation path.
+                let temporary_cleanup = remove_file_if_present(&temporary);
+                let socket_cleanup = remove_file_if_present(&socket);
+                if let Err(cleanup) = temporary_cleanup.and(socket_cleanup) {
+                    return Err(io::Error::new(
+                        cleanup.kind(),
+                        format!("{error}; endpoint rollback failed: {cleanup}"),
+                    ));
+                }
+                return Err(error);
+            }
         };
-        listener.set_nonblocking(true)?;
-        write_locator(&daemon, &locator)?;
         Ok(Self {
             listener,
             locator,
@@ -209,10 +251,26 @@ fn write_locator(daemon: &Path, locator: &EndpointLocator) -> io::Result<()> {
         .write(true)
         .create_new(true)
         .mode(SOCKET_MODE)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
         .open(&temporary)?;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
-    fs::rename(temporary, daemon.join("current.json"))
+    let result = (|| {
+        make_open_file_private(&file, SOCKET_MODE)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
+        let current = daemon.join("current.json");
+        fs::rename(&temporary, &current)?;
+        // The descriptor was fully validated and synced before this atomic
+        // rename. Do not introduce a fallible step after the commit boundary.
+        if let Ok(directory) = fs::File::open(daemon) {
+            let _ = directory.sync_all();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn owns_endpoint(current: &EndpointLocator, owner: &EndpointLocator) -> bool {
@@ -222,23 +280,63 @@ fn owns_endpoint(current: &EndpointLocator, owner: &EndpointLocator) -> bool {
 #[coverage(off)]
 fn lock_locator(daemon: &Path) -> io::Result<fs::File> {
     let path = daemon.join(LOCATOR_LOCK);
-    let file = match OpenOptions::new()
+    let (file, created) = match OpenOptions::new()
         .read(true)
         .write(true)
         .create_new(true)
         .mode(SOCKET_MODE)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
         .open(&path)
     {
-        Ok(file) => file,
+        Ok(file) => (file, true),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             verify_private(&path, SOCKET_MODE, false)?;
-            OpenOptions::new().read(true).write(true).open(&path)?
+            (
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+                    .open(&path)?,
+                false,
+            )
         }
         Err(error) => return Err(error),
     };
+    if created {
+        make_open_file_private(&file, SOCKET_MODE)?;
+    } else {
+        verify_open_private_file(&file, SOCKET_MODE)?;
+    }
     verify_private(&path, SOCKET_MODE, false)?;
     FileExt::lock_exclusive(&file)?;
     Ok(file)
+}
+
+fn make_open_file_private(file: &fs::File, mode: u32) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.uid() != effective_uid() || metadata.nlink() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "unsafe daemon endpoint file ownership or type",
+        ));
+    }
+    file.set_permissions(fs::Permissions::from_mode(mode))?;
+    verify_open_private_file(file, mode)
+}
+
+fn verify_open_private_file(file: &fs::File, mode: u32) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != effective_uid()
+        || metadata.mode() & 0o777 != mode
+        || metadata.nlink() != 1
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "unsafe daemon endpoint file ownership or mode",
+        ));
+    }
+    Ok(())
 }
 
 #[coverage(off)]
@@ -441,6 +539,57 @@ mod tests {
     }
 
     #[test]
+    fn publication_failure_removes_its_unpublished_generation_endpoint() {
+        let temp = TempDir::new_in("/tmp").unwrap();
+        let daemon = temp.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        let lock = daemon.join(LOCATOR_LOCK);
+        fs::write(&lock, []).unwrap();
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
+        let generation = generation();
+        let socket = daemon.join("generations").join(&generation.0).join("sock");
+
+        assert!(SecureUnixListener::bind(temp.path(), generation).is_err());
+
+        assert!(!socket.exists());
+        assert!(!daemon.join("current.json").exists());
+        assert!(!daemon.join(".current.json.tmp").exists());
+    }
+
+    #[test]
+    fn every_post_bind_failure_rolls_back_temporary_and_renamed_endpoints() {
+        for failure in [
+            BindStage::SetTemporaryPermissions,
+            BindStage::RenameEndpoint,
+            BindStage::VerifyEndpoint,
+            BindStage::SetNonblocking,
+        ] {
+            let temp = TempDir::new_in("/tmp").unwrap();
+            let generation = generation();
+            let generation_dir = temp.path().join("daemon/generations").join(&generation.0);
+
+            let result = SecureUnixListener::bind_with(temp.path(), generation, |stage| {
+                if stage == failure {
+                    Err(io::Error::other(format!(
+                        "injected failure before {stage:?}"
+                    )))
+                } else {
+                    Ok(())
+                }
+            });
+            let error = match result {
+                Ok(_) => panic!("injected post-bind failure unexpectedly succeeded"),
+                Err(error) => error,
+            };
+
+            assert!(error.to_string().contains("injected failure"));
+            assert!(!generation_dir.join(".sock.bind").exists());
+            assert!(!generation_dir.join("sock").exists());
+            assert!(!temp.path().join("daemon/current.json").exists());
+        }
+    }
+
+    #[test]
     fn rejects_symlinked_daemon_directory_and_unsafe_locator() {
         let temp = TempDir::new_in("/tmp").unwrap();
         let target = temp.path().join("target");
@@ -480,6 +629,10 @@ mod tests {
         assert_eq!(
             ensure_private_dir(&file).unwrap_err().kind(),
             io::ErrorKind::PermissionDenied
+        );
+        assert!(verify_open_private_file(&fs::File::open(&file).unwrap(), SOCKET_MODE).is_err());
+        assert!(
+            make_open_file_private(&fs::File::open(clean.path()).unwrap(), SOCKET_MODE).is_err()
         );
         let invalid = PathBuf::from(std::ffi::OsString::from_vec(b"bad\0path".to_vec()));
         assert_eq!(

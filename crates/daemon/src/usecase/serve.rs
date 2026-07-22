@@ -11,9 +11,9 @@
 //! 4. **publish** — expose its endpoint only after the lock and record prove it
 //!    is the active daemon;
 //! 5. **run** — block until asked to shut down;
-//! 6. **retire** — stop and join endpoint admission, clear the lifecycle record,
-//!    then generation-conditionally unlink the endpoint. The lock is released by
-//!    the OS when the process exits.
+//! 6. **retire** — stop and join endpoint admission, generation-conditionally
+//!    unlink the endpoint, then conditionally clear this exact lifecycle record.
+//!    The lock is released by the OS when the process exits.
 //!
 //! The lock is the authoritative guard: because it waits briefly for a departing
 //! holder, a `restart` hands off cleanly, and because the OS drops it on death it
@@ -48,12 +48,12 @@ pub trait DaemonRecordPort {
     ///
     /// Returns the underlying durable store error.
     fn save(&self, record: &DaemonRecord) -> io::Result<()>;
-    /// Clears the active daemon record.
+    /// Clears the active daemon record only if it still equals `expected`.
     ///
     /// # Errors
     ///
     /// Returns the underlying durable store error.
-    fn clear(&self) -> io::Result<()>;
+    fn clear_if(&self, expected: &DaemonRecord) -> io::Result<bool>;
 }
 
 impl<F: RecordFile> DaemonRecordPort for DaemonRecordStore<F> {
@@ -65,8 +65,8 @@ impl<F: RecordFile> DaemonRecordPort for DaemonRecordStore<F> {
         DaemonRecordStore::save(self, record)
     }
 
-    fn clear(&self) -> io::Result<()> {
-        DaemonRecordStore::clear(self)
+    fn clear_if(&self, expected: &DaemonRecord) -> io::Result<bool> {
+        DaemonRecordStore::clear_if(self, expected)
     }
 }
 
@@ -104,48 +104,60 @@ pub fn serve(
     shutdown.prepare()?;
 
     // We hold the lock. Overwrite any stale record and register this process.
-    store.save(&DaemonRecord::new(pid))?;
+    let record = DaemonRecord::new(pid);
+    store.save(&record)?;
     if let Err(error) = ready.publish() {
         // A failed endpoint was never usable, so leave no live-looking record
         // for a process that has not begun serving. Preserve the publish error:
         // a cleanup failure only leaves a stale record, which status/stop can
         // safely reclaim after this process exits.
-        let _ = store.clear();
+        let _ = store.clear_if(&record);
         return Err(error);
     }
     if let Err(error) = writeln!(out, "{describe}: daemon serving (pid {pid})") {
-        retire_after_failure(ready);
-        let _ = store.clear();
+        retire_and_clear_after_failure(ready, store, &record);
         return Err(error);
     }
 
     if let Err(error) = shutdown.wait() {
-        // The record deliberately survives an abnormal wait failure so status /
-        // stop can report and reclaim it after this process exits. The endpoint,
-        // however, must never outlive its owner.
-        retire_after_failure(ready);
+        // Preserve the primary wait error while best-effort cleanup removes only
+        // this owner's metadata. A concurrently saved replacement survives.
+        retire_and_clear_after_failure(ready, store, &record);
         return Err(error);
     }
 
     if let Err(error) = ready.quiesce() {
         // `retire` is idempotent and may still complete cleanup when the first
         // join attempt reported an error (or its worker unwound).
-        let _ = ready.retire();
+        clear_after_retire(ready, store, &record);
         return Err(error);
     }
-    // Once admission is joined, remove discovery metadata in the order clients
-    // need for a clean handoff: the old PID record disappears before the locator
-    // becomes NotFound, while the instance lock still excludes a replacement.
-    let clear = store.clear();
-    let retire = ready.retire();
-    clear?;
-    retire?;
+    // Keep the exact record as a completion fence until the generation endpoint
+    // is gone. A stop waiter can treat record disappearance as proof that join
+    // and generation-fenced retirement succeeded, while a retirement failure
+    // remains fail-closed and diagnosable through the retained record.
+    ready.retire()?;
+    store.clear_if(&record)?;
     writeln!(out, "{describe}: daemon stopped (pid {pid})")
 }
 
-fn retire_after_failure(ready: &dyn DaemonReady) {
+fn retire_and_clear_after_failure(
+    ready: &dyn DaemonReady,
+    store: &dyn DaemonRecordPort,
+    record: &DaemonRecord,
+) {
     let _ = ready.quiesce();
-    let _ = ready.retire();
+    clear_after_retire(ready, store, record);
+}
+
+fn clear_after_retire(
+    ready: &dyn DaemonReady,
+    store: &dyn DaemonRecordPort,
+    record: &DaemonRecord,
+) {
+    if ready.retire().is_ok() {
+        let _ = store.clear_if(record);
+    }
 }
 
 #[cfg(test)]
@@ -175,11 +187,11 @@ mod tests {
                 Ok(())
             }
         }
-        fn remove(&self) -> io::Result<()> {
+        fn remove_if(&self, _: &str) -> io::Result<bool> {
             if self.remove {
                 Err(io::Error::other("remove"))
             } else {
-                Ok(())
+                Ok(false)
             }
         }
     }
@@ -261,6 +273,32 @@ mod tests {
         events: &'a RefCell<Vec<&'static str>>,
         store: &'a DaemonRecordStore<InMemoryRecordFile>,
     }
+
+    struct ReplacingReady<'a> {
+        store: &'a DaemonRecordStore<InMemoryRecordFile>,
+        replacement: RefCell<Option<DaemonRecord>>,
+    }
+    impl DaemonReady for ReplacingReady<'_> {
+        fn publish(&self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn quiesce(&self) -> io::Result<()> {
+            let old = self.store.load()?.expect("serve registered its record");
+            let replacement = DaemonRecord {
+                pid: old.pid,
+                started_at: old.started_at + chrono::Duration::nanoseconds(1),
+            };
+            self.store.save(&replacement)?;
+            *self.replacement.borrow_mut() = Some(replacement);
+            Ok(())
+        }
+
+        fn retire(&self) -> io::Result<()> {
+            assert_eq!(self.store.load()?, *self.replacement.borrow());
+            Ok(())
+        }
+    }
     impl DaemonReady for OrderedReady<'_> {
         fn publish(&self) -> io::Result<()> {
             assert!(self.store.load().unwrap().is_some());
@@ -275,7 +313,7 @@ mod tests {
         }
 
         fn retire(&self) -> io::Result<()> {
-            assert_eq!(self.store.load().unwrap(), None);
+            assert!(self.store.load().unwrap().is_some());
             self.events.borrow_mut().push("retire");
             Ok(())
         }
@@ -414,7 +452,7 @@ mod tests {
         );
         assert_eq!(quiesce_failure.quiesces.get(), 1);
         assert_eq!(quiesce_failure.retires.get(), 1);
-        assert!(store.load().unwrap().is_some());
+        assert_eq!(store.load().unwrap(), None);
 
         let retire_failure = CleanupReady {
             fail_publish: false,
@@ -438,7 +476,7 @@ mod tests {
         );
         assert_eq!(retire_failure.quiesces.get(), 1);
         assert_eq!(retire_failure.retires.get(), 1);
-        assert_eq!(store.load().unwrap(), None);
+        assert!(store.load().unwrap().is_some());
     }
 
     #[test]
@@ -478,6 +516,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(refused_ready.published.get(), 0);
+    }
+
+    #[test]
+    fn late_owner_cleanup_preserves_a_replacement_incarnation() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let ready = ReplacingReady {
+            store: &store,
+            replacement: RefCell::new(None),
+        };
+
+        serve(
+            &mut Vec::new(),
+            &store,
+            &ready,
+            &ImmediateShutdown,
+            &FakeLock::Acquired,
+            2222,
+            &info(),
+        )
+        .unwrap();
+
+        assert_eq!(store.load().unwrap(), ready.replacement.into_inner());
     }
 
     #[test]
@@ -582,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn propagates_wait_error_and_keeps_the_record() {
+    fn wait_error_retires_then_clears_the_record() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         let mut buf = Vec::new();
         assert!(
@@ -597,8 +657,7 @@ mod tests {
             )
             .is_err()
         );
-        // Registered before the failing wait, so the record survives for status/stop.
-        assert_eq!(store.load().unwrap().map(|record| record.pid), Some(2222));
+        assert_eq!(store.load().unwrap(), None);
     }
 
     #[test]
@@ -631,7 +690,7 @@ mod tests {
                 .is_none()
         );
         usagi_core::infrastructure::daemon::RecordFile::write(&healthy, "record").unwrap();
-        usagi_core::infrastructure::daemon::RecordFile::remove(&healthy).unwrap();
+        usagi_core::infrastructure::daemon::RecordFile::remove_if(&healthy, "record").unwrap();
         io::Write::flush(&mut BrokenWriter).unwrap();
         for (file, mut output) in [
             (

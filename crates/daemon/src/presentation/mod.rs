@@ -39,7 +39,7 @@ pub enum DaemonCommand {
 /// 自プロセス pid）を束ねて構築し、テストは fake を差し込む。[`run`] にまとめて渡すことで、
 /// verb ごとに必要な seam が増えても entry point の引数を平らに保つ。
 pub struct DaemonEnv<'a, F, P, T, R, S, L, K, M> {
-    /// `daemon.json` の read/write/clear。
+    /// `daemon.json` の read/write/incarnation-conditional clear。
     pub store: &'a DaemonRecordStore<F>,
     /// pid の生存判定。
     pub probe: &'a P,
@@ -51,7 +51,7 @@ pub struct DaemonEnv<'a, F, P, T, R, S, L, K, M> {
     pub shutdown: &'a S,
     /// `start` が detached `serve` を spawn するための起動器。
     pub launcher: &'a L,
-    /// `start` が登録確認ポーリングの間に待つための sleeper。
+    /// `start` の登録確認と `stop` の owner cleanup 確認で待つ sleeper。
     pub sleeper: &'a K,
     /// `serve` の単一インスタンスロック（多重起動を防ぐ権威）。
     pub lock: &'a M,
@@ -107,7 +107,8 @@ pub fn run<
             writeln!(out, "{line}")
         }
         DaemonCommand::Stop => {
-            let line = usecase::stop::stop(env.store, env.probe, env.terminator, info)?;
+            let line =
+                usecase::stop::stop(env.store, env.probe, env.terminator, env.sleeper, info)?;
             writeln!(out, "{line}")
         }
         DaemonCommand::Restart => {
@@ -227,13 +228,6 @@ mod tests {
             run_line(DaemonCommand::Stop, &store),
             "usagi v0.1.0: daemon not running\n"
         );
-        // With a live record, stop terminates it and clears the record.
-        store.save(&DaemonRecord::new(4321)).unwrap();
-        assert_eq!(
-            run_line(DaemonCommand::Stop, &store),
-            "usagi v0.1.0: daemon stopped (pid 4321)\n"
-        );
-        assert_eq!(store.load().unwrap(), None);
     }
 
     #[test]

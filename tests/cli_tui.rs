@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -108,33 +108,47 @@ fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
 
 struct ProductionDaemonCleanup {
     home: PathBuf,
+    owned: Child,
 }
 
 impl ProductionDaemonCleanup {
-    fn new(home: &Path) -> Self {
+    fn spawn(home: &Path) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_usagi"));
+        command
+            .args([OsStr::new("daemon"), OsStr::new("serve")])
+            .env("USAGI_HOME", home)
+            .env("USAGI_RUNTIME_MODE", "production")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let owned = command
+            .spawn()
+            .expect("production daemon serve を起動できる");
         Self {
             home: home.to_path_buf(),
+            owned,
         }
+    }
+
+    fn pid(&self) -> u32 {
+        self.owned.id()
+    }
+
+    fn wait_for_exit(&mut self, timeout: Duration) -> bool {
+        wait_until(timeout, || {
+            self.owned.try_wait().is_ok_and(|status| status.is_some())
+        })
     }
 }
 
 impl Drop for ProductionDaemonCleanup {
     fn drop(&mut self) {
-        let Some(pid) = daemon_pid(&self.home) else {
-            return;
-        };
-        let locator = read_locator(&self.home.join("daemon")).ok();
         let _ = run_in_production(&[OsStr::new("daemon"), OsStr::new("stop")], &self.home);
-        if !wait_until(Duration::from_secs(2), || !process_alive(pid))
-            && daemon_pid(&self.home) == Some(pid)
-            && read_locator(&self.home.join("daemon")).ok() == locator
-            && let Ok(pid) = libc::pid_t::try_from(pid)
-        {
-            // SAFETY: the isolated home still publishes the same daemon record
-            // and generation that this guard observed immediately before stop.
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
-            }
+        if !self.wait_for_exit(Duration::from_secs(2)) {
+            // `Child` identifies the exact process this fixture spawned, so a
+            // hard cleanup cannot target a recycled raw PID or a replacement.
+            let _ = self.owned.kill();
+            let _ = self.owned.wait();
         }
     }
 }
@@ -355,11 +369,9 @@ fn planned_stop_retires_generation_endpoint_and_allows_safe_autostart() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let home = short_home();
-    let _cleanup = ProductionDaemonCleanup::new(home.path());
+    let mut cleanup = ProductionDaemonCleanup::spawn(home.path());
     let daemon_dir = home.path().join("daemon");
 
-    let start = run_in_production(&[OsStr::new("daemon"), OsStr::new("start")], home.path());
-    assert!(start.status.success(), "{}", stderr(&start));
     assert!(
         wait_until(Duration::from_secs(5), || {
             daemon_dir.join("daemon.json").is_file() && daemon_dir.join("current.json").is_file()
@@ -367,16 +379,37 @@ fn planned_stop_retires_generation_endpoint_and_allows_safe_autostart() {
         "daemon did not publish its production endpoint"
     );
     let old_pid = daemon_pid(home.path()).expect("started daemon records its pid");
+    assert_eq!(old_pid, cleanup.pid());
     let old_locator = read_locator(&daemon_dir).expect("started daemon publishes a locator");
     let old_socket = daemon_dir.join(&old_locator.endpoint);
     assert!(old_socket.exists());
+    for private_file in [
+        "daemon.json",
+        "daemon.lock",
+        "record.lock",
+        "current.json",
+        "current.lock",
+    ] {
+        assert_eq!(
+            std::fs::metadata(daemon_dir.join(private_file))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "{private_file} is not private"
+        );
+    }
 
     let stop = run_in_production(&[OsStr::new("daemon"), OsStr::new("stop")], home.path());
     assert!(stop.status.success(), "{}", stderr(&stop));
     assert!(
+        cleanup.wait_for_exit(Duration::from_secs(5)),
+        "planned stop did not exit its owned daemon process"
+    );
+    assert!(
         wait_until(Duration::from_secs(5), || {
-            !process_alive(old_pid)
-                && !daemon_dir.join("daemon.json").exists()
+            !daemon_dir.join("daemon.json").exists()
                 && !daemon_dir.join("current.json").exists()
                 && !old_socket.exists()
         }),
@@ -396,7 +429,11 @@ fn planned_stop_retires_generation_endpoint_and_allows_safe_autostart() {
         home.path(),
     );
     assert_eq!(client.status.code(), Some(1));
-    assert!(stderr(&client).contains("session was not found"));
+    assert!(
+        stderr(&client).contains("session was not found"),
+        "{}",
+        stderr(&client)
+    );
     assert!(!stderr(&client).contains("daemon endpoint is unavailable"));
     assert!(
         wait_until(Duration::from_secs(5), || {
@@ -405,8 +442,20 @@ fn planned_stop_retires_generation_endpoint_and_allows_safe_autostart() {
         "NotFound bootstrap did not start a replacement daemon"
     );
     let replacement = read_locator(&daemon_dir).expect("replacement publishes a locator");
+    let replacement_pid = daemon_pid(home.path()).expect("replacement records its pid");
     assert_ne!(replacement.generation, old_locator.generation);
     assert!(!old_socket.exists());
+
+    let stop = run_in_production(&[OsStr::new("daemon"), OsStr::new("stop")], home.path());
+    assert!(stop.status.success(), "{}", stderr(&stop));
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            !process_alive(replacement_pid)
+                && !daemon_dir.join("daemon.json").exists()
+                && !daemon_dir.join("current.json").exists()
+        }),
+        "replacement daemon did not stop cleanly"
+    );
 }
 
 #[test]

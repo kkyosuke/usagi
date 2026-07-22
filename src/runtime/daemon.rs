@@ -3437,26 +3437,221 @@ struct FsRecordFile {
     path: PathBuf,
 }
 
+static DAEMON_RECORD_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_RECORD_WRITE_BEFORE_RENAME: RefCell<Option<PathBuf>> = const {
+        RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+fn fail_record_write_before_rename(path: &Path) {
+    FAIL_RECORD_WRITE_BEFORE_RENAME.with(|failpoint| {
+        *failpoint.borrow_mut() = Some(path.to_path_buf());
+    });
+}
+
+#[cfg(test)]
+fn take_record_write_failpoint(path: &Path) -> bool {
+    FAIL_RECORD_WRITE_BEFORE_RENAME.with(|failpoint| {
+        if failpoint.borrow().as_deref() == Some(path) {
+            failpoint.borrow_mut().take();
+            true
+        } else {
+            false
+        }
+    })
+}
+
+impl FsRecordFile {
+    fn transaction<T>(&self, operation: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+        let parent = self.path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "daemon record path has no parent",
+            )
+        })?;
+        ensure_private_dir(parent)?;
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(parent.join("record.lock"))?;
+        let metadata = lock.metadata()?;
+        if !metadata.is_file()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.nlink() != 1
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "daemon record lock is not a private owner file",
+            ));
+        }
+        lock.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        if lock.metadata()?.mode() & 0o777 != 0o600 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "daemon record lock mode could not be made private",
+            ));
+        }
+        FileExt::lock_exclusive(&lock)?;
+        operation()
+    }
+
+    fn parent(&self) -> std::io::Result<&Path> {
+        self.path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "daemon record path has no parent",
+            )
+        })
+    }
+
+    fn sync_parent_best_effort(&self) {
+        if let Ok(parent) = self.parent()
+            && let Ok(directory) = std::fs::File::open(parent)
+        {
+            let _ = directory.sync_all();
+        }
+    }
+
+    fn unique_temporary_path(&self) -> PathBuf {
+        let mut temporary = self.path.as_os_str().to_owned();
+        temporary.push(format!(
+            ".tmp.{}.{}",
+            std::process::id(),
+            DAEMON_RECORD_TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        PathBuf::from(temporary)
+    }
+
+    fn create_private_temporary(&self) -> std::io::Result<(PathBuf, std::fs::File)> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        loop {
+            let temporary = self.unique_temporary_path();
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+                .open(&temporary)
+            {
+                Ok(file) => return Ok((temporary, file)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn write_unlocked(&self, contents: &str) -> std::io::Result<()> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let (temporary, mut file) = self.create_private_temporary()?;
+        let result = (|| {
+            let metadata = file.metadata()?;
+            if !metadata.is_file()
+                || metadata.uid() != unsafe { libc::geteuid() }
+                || metadata.nlink() != 1
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "daemon record temporary is not a private owner file",
+                ));
+            }
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            if file.metadata()?.mode() & 0o777 != 0o600 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "daemon record temporary mode could not be made private",
+                ));
+            }
+            file.write_all(contents.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            #[cfg(test)]
+            if take_record_write_failpoint(&self.path) {
+                return Err(std::io::Error::other(
+                    "injected daemon record failure before rename",
+                ));
+            }
+            std::fs::rename(&temporary, &self.path)?;
+            // The rename has committed at this point. Directory fsync is not
+            // supported on every filesystem, so do not turn a successful
+            // replacement into an ambiguous error after the commit boundary.
+            self.sync_parent_best_effort();
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    fn read_unlocked(&self) -> std::io::Result<Option<String>> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+        let mut file = match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&self.path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.nlink() != 1
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "daemon record is not a private owner file",
+            ));
+        }
+        if metadata.mode() & 0o777 != 0o600 {
+            // Older usagi versions created daemon.json with the process umask.
+            // Tighten an otherwise trusted owner file in place so upgrades keep
+            // working while every subsequent read observes the 0600 invariant.
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)?;
+        Ok(Some(contents))
+    }
+}
+
 impl RecordFile for FsRecordFile {
     fn read(&self) -> std::io::Result<Option<String>> {
-        match std::fs::read_to_string(&self.path) {
-            Ok(contents) => Ok(Some(contents)),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err),
-        }
+        self.transaction(|| self.read_unlocked())
     }
+
     fn write(&self, contents: &str) -> std::io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&self.path, contents)
+        self.transaction(|| self.write_unlocked(contents))
     }
-    fn remove(&self) -> std::io::Result<()> {
-        match std::fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err),
-        }
+
+    fn remove_if(&self, expected: &str) -> std::io::Result<bool> {
+        self.transaction(|| match self.read_unlocked()? {
+            Some(current) if current == expected => match std::fs::remove_file(&self.path) {
+                Ok(()) => {
+                    // As with rename, unlink has already committed. Keep the
+                    // API outcome unambiguous when directory fsync is unsupported.
+                    self.sync_parent_best_effort();
+                    Ok(true)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(error),
+            },
+            Some(_) | None => Ok(false),
+        })
     }
 }
 
@@ -3636,17 +3831,38 @@ struct FileInstanceLock {
 }
 impl InstanceLock for FileInstanceLock {
     fn acquire(&self) -> std::io::Result<bool> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
         const TIMEOUT: Duration = Duration::from_secs(2);
         const POLL: Duration = Duration::from_millis(20);
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
+            ensure_private_dir(parent)?;
         }
-        let file = std::fs::File::options()
+        let file = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
             .open(&self.path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.nlink() != 1
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "daemon instance lock is not a private owner file",
+            ));
+        }
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        if file.metadata()?.mode() & 0o777 != 0o600 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "daemon instance lock mode could not be made private",
+            ));
+        }
         let deadline = Instant::now() + TIMEOUT;
         loop {
             match FileExt::try_lock_exclusive(&file) {
@@ -3899,6 +4115,139 @@ mod tests {
     use usagi_daemon::usecase::terminal_ipc::{
         ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
     };
+
+    #[test]
+    fn delayed_record_clear_cannot_remove_a_concurrent_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("daemon").join("daemon.json");
+        let old_store = DaemonRecordStore::new(FsRecordFile { path: path.clone() });
+        let old = usagi_core::domain::daemon::DaemonRecord::new(4242);
+        let replacement = usagi_core::domain::daemon::DaemonRecord {
+            pid: old.pid,
+            started_at: old.started_at + chrono::Duration::nanoseconds(1),
+        };
+        old_store.save(&old).unwrap();
+        let delayed_expected = old_store.load().unwrap().unwrap();
+
+        let saved = Arc::new(std::sync::Barrier::new(2));
+        let saved_by_replacement = Arc::clone(&saved);
+        let replacement_for_thread = replacement.clone();
+        let replacement_thread = std::thread::spawn(move || {
+            let store = DaemonRecordStore::new(FsRecordFile { path });
+            store.save(&replacement_for_thread).unwrap();
+            saved_by_replacement.wait();
+        });
+        saved.wait();
+
+        assert!(!old_store.clear_if(&delayed_expected).unwrap());
+        assert_eq!(old_store.load().unwrap(), Some(replacement));
+        replacement_thread.join().unwrap();
+    }
+
+    #[test]
+    fn failed_atomic_record_save_preserves_old_record_and_removes_temporary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let daemon = directory.path().join("daemon");
+        let path = daemon.join("daemon.json");
+        let store = DaemonRecordStore::new(FsRecordFile { path: path.clone() });
+        let old = usagi_core::domain::daemon::DaemonRecord::new(4242);
+        let replacement = usagi_core::domain::daemon::DaemonRecord::new(4343);
+        store.save(&old).unwrap();
+
+        fail_record_write_before_rename(&path);
+        assert!(store.save(&replacement).is_err());
+
+        assert_eq!(store.load().unwrap(), Some(old));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            std::fs::read_dir(&daemon).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("daemon.json.tmp.")
+            }),
+            "failed save left a daemon record temporary behind"
+        );
+    }
+
+    #[test]
+    fn lifecycle_private_files_override_a_restrictive_umask() {
+        const FIXTURE: &str = "USAGI_TEST_RESTRICTIVE_DAEMON_UMASK";
+        if std::env::var_os(FIXTURE).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "runtime::daemon::tests::lifecycle_private_files_override_a_restrictive_umask",
+                    "--nocapture",
+                ])
+                .env(FIXTURE, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        use std::os::unix::fs::PermissionsExt;
+
+        // This branch runs in its own test subprocess, so changing the process
+        // umask cannot perturb parallel tests or unrelated persistence stores.
+        let directory = tempfile::Builder::new()
+            .prefix("umask-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let previous_umask = unsafe { libc::umask(0o777) };
+        let data = directory.path().join("data");
+        ensure_private_dir(&data).unwrap();
+        let daemon = data.join("daemon");
+        let path = daemon.join("daemon.json");
+        let store = DaemonRecordStore::new(FsRecordFile { path });
+        store
+            .save(&usagi_core::domain::daemon::DaemonRecord::new(4242))
+            .unwrap();
+
+        let instance = FileInstanceLock {
+            path: daemon.join("daemon.lock"),
+            held: RefCell::new(None),
+        };
+        assert!(instance.acquire().unwrap());
+        let listener = SecureUnixListener::bind(
+            &data,
+            usagi_core::infrastructure::ipc::DaemonGeneration(
+                usagi_core::domain::id::DaemonGeneration::new()
+                    .as_str()
+                    .clone(),
+            ),
+        )
+        .unwrap();
+
+        for private_file in [
+            "daemon.json",
+            "daemon.lock",
+            "record.lock",
+            "current.json",
+            "current.lock",
+        ] {
+            assert_eq!(
+                std::fs::metadata(daemon.join(private_file))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600,
+                "{private_file} did not override umask 0777"
+            );
+        }
+        drop((listener, instance));
+        unsafe {
+            libc::umask(previous_umask);
+        }
+    }
 
     struct FixedRefreshClock {
         calls: Arc<AtomicUsize>,
