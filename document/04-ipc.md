@@ -348,10 +348,12 @@ identity を保持する。generic Terminal Launch は現行 wire に producer `
 契約の対象外である。TUI は stream sequence、resource revision、terminal output offset を別々に保持し、gap や
 epoch の不一致では output を継ぎ足さず、snapshot resync を要求する。
 
-terminal の `unavailable` は connection-local subscription の喪失として扱う。TUI は 100ms から 2s 上限の
-指数 backoff で transport を開き直し、元の完全な `TerminalRef` に `attach` して atomic snapshot と新しい
-subscription を取得する。成功後は snapshot の `output_offset` から `resume` し、backoff と subscription-local
-input sequence を、client-local connection epochが変わった場合だけresetする。同じconnectionでのsnapshot reattachは
+terminal の `unavailable` は TerminalSession の connection-local subscription の喪失として扱う。TUI は
+100ms から 2s 上限の指数 backoff 後、元の完全な `TerminalRef` に `attach` して atomic snapshot と
+新しい subscription を取得する。transport EOF はclient connectionをdropして次回に開き直すが、
+response bodyのlocal decode failureは同じclient connectionとinput ledgerを保持する。成功後は snapshot の
+`output_offset` から `resume` し、backoff と subscription-local input sequence を、client-local connection epochが
+変わった場合だけresetする。同じconnectionでのsnapshot reattachは
 subscriptionが変わってもnext input sequenceを保持する。`stale_target`、`ownership_unknown`、exited は retry 対象ではなく、detach / tab
 close も pending retry を解除する。どの失敗経路も replacement launch を行わない。
 

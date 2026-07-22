@@ -1394,6 +1394,7 @@ mod tests {
             TerminalInputError::Transport(TerminalError::Stale),
             TerminalInputError::Transport(TerminalError::Orphaned),
             TerminalInputError::Transport(TerminalError::Exited),
+            TerminalInputError::Rejected(TerminalInputOutcome::Written),
             TerminalInputError::Rejected(TerminalInputOutcome::Failed),
             TerminalInputError::Rejected(TerminalInputOutcome::Ambiguous { applied_prefix: 1 }),
             TerminalInputError::Transport(TerminalError::InputEffectUnknown),
@@ -1405,6 +1406,10 @@ mod tests {
             TerminalInputError::Rejected(TerminalInputOutcome::Failed)
                 .message()
                 .contains("not applied")
+        );
+        assert_eq!(
+            TerminalInputError::Rejected(TerminalInputOutcome::Written).message(),
+            "terminal returned an invalid input outcome"
         );
         for uncertain in [
             TerminalInputError::Rejected(TerminalInputOutcome::Ambiguous { applied_prefix: 1 }),

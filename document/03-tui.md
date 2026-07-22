@@ -529,7 +529,7 @@ terminal pane の接続状態と footer feedback は `TerminalSession` の状態
 | `Orphaned` | typed failure として拒否 | ownership unknown の終端で、自動 retry しない |
 | `Exited` | typed failure として拒否 | 最終画面を保持し、自動 retry しない |
 
-一時的な `unavailable` だけが `Reconnecting` へ遷移する。再 attach 成功時は backoff をresetし、新しい
+一時的な `unavailable` と input effect unknown が `Reconnecting` へ遷移する。再 attach 成功時は backoff をresetし、新しい
 connection-owned subscriptionを使う。input sequenceはclient-local connection epochが変わった場合だけ0へresetし、
 同じepoch上のcursor-gap/resync/detach→reattachではdaemon ledgerに合わせてnext sequenceを保持する。
 tab close / detach は予約済み retry を取り消す。
