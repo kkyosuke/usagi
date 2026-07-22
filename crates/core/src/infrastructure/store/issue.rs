@@ -623,9 +623,24 @@ impl IssueStore {
             .cloned()
             .collect();
         if filename_claims.len() > 1 {
+            let mut all_claims = filename_claims;
+            for path in &files {
+                if number_from_filename(path) == Some(number) {
+                    continue;
+                }
+                if self
+                    .inner
+                    .read_existing_path(path)
+                    .is_ok_and(|issue| issue.number == number)
+                {
+                    all_claims.push(path.clone());
+                }
+            }
+            all_claims.sort();
+            all_claims.dedup();
             return Err(AmbiguousIssueNumber {
                 number,
-                files: filename_claims,
+                files: all_claims,
             }
             .into());
         }
@@ -813,6 +828,43 @@ mod tests {
         }
     }
 
+    fn assert_duplicate_diagnostic_includes_declared_claim(declared_file: &str) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(8, "Canonical A")).unwrap();
+        let canonical_a = store.dir().join("008-canonical-a.md");
+        let canonical_b = store.dir().join("008-canonical-b.md");
+        let declared = store.dir().join(declared_file);
+        fs::write(&canonical_b, issue(8, "Canonical B").to_markdown()).unwrap();
+        fs::write(&declared, issue(8, "Declared").to_markdown()).unwrap();
+        let dirty = store.dir().join(".derived-dirty");
+        fs::write(&dirty, b"pre-existing rebuild request\n").unwrap();
+        let mut expected = vec![canonical_a.clone(), canonical_b.clone(), declared.clone()];
+        expected.sort();
+        let source_before: Vec<_> = expected
+            .iter()
+            .map(|path| fs::read(path).unwrap())
+            .collect();
+        let index_before = fs::read(store.index_path()).unwrap();
+        let dirty_before = fs::read(&dirty).unwrap();
+
+        for error in [
+            store.read(8).unwrap_err(),
+            store.write(&issue(8, "Replacement")).unwrap_err(),
+            store.remove(8).unwrap_err(),
+        ] {
+            let ambiguity = error.downcast_ref::<AmbiguousIssueNumber>().unwrap();
+            assert_eq!(ambiguity.number, 8);
+            assert_eq!(ambiguity.files, expected);
+        }
+        for (path, bytes) in expected.iter().zip(source_before) {
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
+        assert_eq!(fs::read(store.index_path()).unwrap(), index_before);
+        assert_eq!(fs::read(dirty).unwrap(), dirty_before);
+        assert!(!store.dir().join("008-replacement.md").exists());
+    }
+
     fn git(repo: &Path, args: &[&str]) {
         let output = Command::new("git")
             .arg("-C")
@@ -908,6 +960,12 @@ mod tests {
         assert_eq!(fs::read(store.index_path()).unwrap(), index_before);
         assert_eq!(fs::read(dirty).unwrap(), dirty_before);
         assert!(!store.dir().join("007-replacement.md").exists());
+    }
+
+    #[test]
+    fn duplicate_diagnostics_include_mismatched_and_prefixless_declared_claims() {
+        assert_duplicate_diagnostic_includes_declared_claim("007-moved.md");
+        assert_duplicate_diagnostic_includes_declared_claim("manual.md");
     }
 
     #[test]
