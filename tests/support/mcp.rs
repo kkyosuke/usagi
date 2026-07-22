@@ -15,8 +15,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use usagi_core::domain::agent::AgentProfileId;
 use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
+use usagi_core::domain::{agent::AgentProfileId, settings::Settings};
+use usagi_core::infrastructure::paths::channel_data_dir;
+use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
     AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest, IpcClient,
     SessionAction,
@@ -42,15 +44,20 @@ struct McpProcess {
 impl McpHarness {
     #[must_use]
     pub fn start() -> Self {
-        Self::start_at(None)
+        Self::start_at(None, None)
     }
 
     #[must_use]
     pub fn start_in_session(name: &str) -> Self {
-        Self::start_at(Some(name))
+        Self::start_at(Some(name), None)
     }
 
-    fn start_at(session: Option<&str>) -> Self {
+    #[must_use]
+    pub fn start_with_tool_availability(issue: bool, memory: bool) -> Self {
+        Self::start_at(None, Some((issue, memory)))
+    }
+
+    fn start_at(session: Option<&str>, tool_availability: Option<(bool, bool)>) -> Self {
         let workspace = short_dir("usagi-mcp-workspace-");
         git(workspace.path(), &["init", "-q"]);
         git(
@@ -63,6 +70,15 @@ impl McpHarness {
         git(workspace.path(), &["commit", "-qm", "fixture"]);
 
         let home = short_dir("usagi-mcp-home-");
+        if let Some((issue_enabled, memory_enabled)) = tool_availability {
+            Storage::new(channel_data_dir(home.path()))
+                .save_settings(&Settings {
+                    issue_enabled,
+                    memory_enabled,
+                    ..Settings::default()
+                })
+                .unwrap();
+        }
         let fixture_bin = home.path().join("fixture-bin");
         let fixture_log = home.path().join("fixture-agent.log");
         fs::create_dir(&fixture_bin).unwrap();

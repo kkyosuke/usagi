@@ -104,8 +104,9 @@ validator、execution route、caller policy の正本である。Issue / Memory 
 
 MCP server は起動時に Global と Workspace の `issue_enabled` / `memory_enabled` を解決し、server lifetime 中は
 同じ availability snapshot を使う。`issue_enabled = false` では `issue_*` と `session_delegate_issue`、
-`memory_enabled = false` では `memory_*` を descriptor registry から除外する。除外された tool は `tools/list` に
+`memory_enabled = false` では `memory_*` の adapter を descriptor registry に登録しない。無効な tool は `tools/list` に
 現れず、名前を直接 `tools/call` しても `Method not found` となり、store / daemon の effect を起こさない。
+session / agent など無効化対象ではない MCP tool は引き続き公開する。
 設定変更を反映するには MCP client の再接続または server の再起動が必要である。設定の保存先と継承規則は
 [TUI の settings scope](03-tui.md#settings-scope-と-workspace-entry)を正本とする。Global または Workspace の
 設定が読み取れない場合は、既定の有効値へ黙って戻さず MCP serve loop の開始前に失敗する。
