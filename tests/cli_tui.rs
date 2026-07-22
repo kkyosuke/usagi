@@ -36,6 +36,52 @@ fn short_home() -> tempfile::TempDir {
         .expect("short daemon data directory")
 }
 
+fn git(repo: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn linked_issue_session(name: &str) -> (tempfile::TempDir, PathBuf) {
+    let workspace = tempfile::tempdir().unwrap();
+    git(workspace.path(), &["init", "-q"]);
+    git(
+        workspace.path(),
+        &["config", "user.email", "cli-e2e@example.test"],
+    );
+    git(workspace.path(), &["config", "user.name", "CLI E2E"]);
+    std::fs::write(workspace.path().join("README.md"), "fixture\n").unwrap();
+    git(workspace.path(), &["add", "README.md"]);
+    git(workspace.path(), &["commit", "-qm", "fixture"]);
+    let sessions = workspace.path().join(".usagi/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let session = sessions.join(name);
+    git(
+        workspace.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            &format!("test/{name}"),
+            session.to_str().unwrap(),
+        ],
+    );
+    (workspace, session)
+}
+
 fn channel_data_dir(home: &Path) -> PathBuf {
     usagi_core::infrastructure::paths::channel_data_dir(home)
 }
@@ -640,9 +686,7 @@ fn mcp_store_tools_round_trip_through_stdio_and_durable_files() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let home = short_home();
-    let workspace = tempfile::tempdir().unwrap();
-    let session = workspace.path().join(".usagi/sessions/e2e");
-    std::fs::create_dir_all(&session).unwrap();
+    let (_workspace, session) = linked_issue_session("e2e");
     let requests = concat!(
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_create\",\"arguments\":{\"title\":\"MCP durable issue\",\"priority\":\"high\",\"labels\":[\"mcp\"],\"body\":\"round trip\"}}}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_get\",\"arguments\":{\"number\":1}}}\n",
@@ -677,9 +721,7 @@ fn mcp_store_tools_cover_prompt_update_search_and_delete_lifecycles() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let home = short_home();
-    let workspace = tempfile::tempdir().unwrap();
-    let session = workspace.path().join(".usagi/sessions/lifecycle");
-    std::fs::create_dir_all(&session).unwrap();
+    let (workspace, session) = linked_issue_session("lifecycle");
     let requests = concat!(
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_create\",\"arguments\":{\"title\":\"Lifecycle\"}}}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_to_prompt\",\"arguments\":{\"number\":1}}}\n",
