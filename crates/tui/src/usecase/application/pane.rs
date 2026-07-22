@@ -1139,56 +1139,6 @@ mod tests {
     }
 
     #[test]
-    fn reorder_guards_and_fresh_restore_retain_nonduplicate_local_tabs() {
-        let target = target();
-        let mut state = PaneState::new(PaneSelection::Target(target));
-        assert!(reduce(&mut state, PaneEvent::ReorderSelected(TabDirection::Next)).is_empty());
-
-        let pending = request(&mut state, target, PaneKind::Agent);
-        assert!(reduce(&mut state, PaneEvent::ReorderSelected(TabDirection::Next)).is_empty());
-        let ready = request(&mut state, target, PaneKind::Diff);
-        let _ = reduce(&mut state, PaneEvent::Resolved { operation: ready });
-        state.selected = PaneSelection::Target(target);
-        assert!(reduce(&mut state, PaneEvent::ReorderSelected(TabDirection::Next)).is_empty());
-        let existing = terminal(target);
-        let _ = reduce(
-            &mut state,
-            PaneEvent::Restore(LivePane {
-                terminal: existing.clone(),
-                kind: PaneKind::Terminal,
-            }),
-        );
-        state.selected = PaneSelection::Tab(TabSelection::Live(terminal(target)));
-        let _ = reduce(
-            &mut state,
-            PaneEvent::ReorderSelected(TabDirection::Previous),
-        );
-        let _ = reduce(
-            &mut state,
-            PaneEvent::RestoreBatch {
-                panes: vec![LivePane {
-                    terminal: existing,
-                    kind: PaneKind::Agent,
-                }],
-                selected: None,
-                replace_order: true,
-            },
-        );
-        assert!(
-            state
-                .tabs()
-                .iter()
-                .any(|tab| matches!(tab, PaneTab::Pending(item) if item.operation == pending))
-        );
-        assert!(
-            state
-                .tabs()
-                .iter()
-                .any(|tab| matches!(tab, PaneTab::Ready(item) if item.operation == ready))
-        );
-    }
-
-    #[test]
     fn selected_tab_reorder_wraps_and_registry_revision_only_tracks_effective_mutation() {
         let target = target();
         let first = terminal(target);

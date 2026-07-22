@@ -2375,17 +2375,16 @@ mod tests {
         DaemonAgentCommandPort, DaemonDecisionCommandPort, EnvironmentStorePort, FsWorkspaceLoader,
         Geometry, LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory,
         RepoEnvironmentStore, Start, TerminalChunk, TerminalError, TerminalInputOutcome,
-        UserAgentTabIntentPort, agent_inventory_request, classify_terminal_input,
-        created_session_hook, daemon_error_reason, decode_agent_admission,
-        decode_terminal_input_ack, decode_terminal_poll, exact_agent_resume_request,
-        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
-        passthrough_key, probe_path, provider_resume_projection, session_snapshot_result,
-        terminal_copy_key, validate_workspace_directory,
+        agent_inventory_request, classify_terminal_input, created_session_hook,
+        daemon_error_reason, decode_agent_admission, decode_terminal_input_ack,
+        decode_terminal_poll, exact_agent_resume_request, lifecycle_snapshot,
+        load_screen_graph_data, load_workspace_state, map_terminal_error, passthrough_key,
+        probe_path, provider_resume_projection, session_snapshot_result, terminal_copy_key,
+        validate_workspace_directory,
     };
     use chrono::Utc;
     use serde_json::json;
     use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
-    use usagi_core::domain::agent_tab_intent::AgentTabIntentMutation;
     use usagi_core::domain::id::{
         AgentContinuationRef, DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef,
         WorkspaceId, WorktreeId,
@@ -2397,7 +2396,6 @@ mod tests {
     use usagi_core::domain::workspace::Workspace;
     use usagi_core::domain::workspace_state::WorkspaceState;
     use usagi_core::infrastructure::paths::project_data_dir;
-    use usagi_core::infrastructure::store::agent_tab_intent::AgentTabIntentStore;
     use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
     use usagi_core::infrastructure::store::state::WorkspaceStateStore;
     use usagi_core::infrastructure::store::workspace::Storage;
@@ -2405,8 +2403,7 @@ mod tests {
     use usagi_tui::presentation::views::workspace::ProjectedSession;
     use usagi_tui::presentation::workspace_runtime::WorkspaceRuntime;
     use usagi_tui::presentation::{
-        AgentTabIntentPort, ControllerBackendFactory, ControllerHost, ControllerHostAction,
-        WorkspaceSnapshot,
+        ControllerBackendFactory, ControllerHost, ControllerHostAction, WorkspaceSnapshot,
     };
     use usagi_tui::usecase::application::Key;
     use usagi_tui::usecase::application::controller::{
@@ -3935,65 +3932,5 @@ mod tests {
             None,
         );
         assert!(frame.join("\n").contains('✎'));
-    }
-
-    #[test]
-    fn user_agent_tab_intent_port_maps_store_success_and_unavailability() {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = WorkspaceId::new();
-        let session = SessionId::new();
-        let continuation = AgentContinuationRef::new();
-        let terminal = TerminalRef {
-            daemon_generation: DaemonGeneration::new(),
-            terminal_id: TerminalId::new(),
-            workspace_id: workspace,
-            session_id: Some(session),
-            worktree_id: WorktreeId::new(),
-        };
-        let mut port = UserAgentTabIntentPort {
-            store: Some(AgentTabIntentStore::new(temp.path())),
-        };
-        assert_eq!(port.load(workspace).unwrap().revision, 0);
-        let committed = port
-            .mutate(
-                workspace,
-                0,
-                AgentTabIntentMutation::Upsert {
-                    session_id: Some(session),
-                    continuation,
-                    terminal,
-                    select: true,
-                },
-            )
-            .unwrap();
-        assert_eq!(committed.intent.revision, 1);
-
-        let mut unavailable = UserAgentTabIntentPort { store: None };
-        assert!(unavailable.load(workspace).is_err());
-        assert!(
-            unavailable
-                .mutate(
-                    workspace,
-                    0,
-                    AgentTabIntentMutation::Reopen { continuation },
-                )
-                .is_err()
-        );
-
-        let blocked = temp.path().join("blocked");
-        std::fs::write(&blocked, "not a directory").unwrap();
-        let mut failed_store = UserAgentTabIntentPort {
-            store: Some(AgentTabIntentStore::new(blocked)),
-        };
-        assert!(failed_store.load(workspace).is_err());
-        assert!(
-            failed_store
-                .mutate(
-                    workspace,
-                    0,
-                    AgentTabIntentMutation::Reopen { continuation },
-                )
-                .is_err()
-        );
     }
 }

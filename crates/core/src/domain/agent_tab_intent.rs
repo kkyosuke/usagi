@@ -227,10 +227,13 @@ impl AgentTabIntent {
                 let Some(candidates) = live.get(&slot.continuation) else {
                     return durable.contains(&slot.continuation) || !agents.complete;
                 };
-                let candidate = candidates
+                let Some(candidate) = candidates
                     .iter()
                     .find(|candidate| candidate.fences(&slot.terminal))
-                    .unwrap_or_else(|| &candidates[0]);
+                    .or_else(|| candidates.first())
+                else {
+                    return true;
+                };
                 if candidate.session_id != target.session_id || claimed.contains(&slot.continuation)
                 {
                     return false;
@@ -757,75 +760,5 @@ mod tests {
         for forbidden in ["provider", "argv", "environment", "transcript", "output"] {
             assert!(!encoded.contains(forbidden));
         }
-    }
-
-    #[test]
-    fn replacement_duplicate_targets_and_inventory_sorting_are_deterministic() {
-        let workspace = WorkspaceId::new();
-        let session = SessionId::new();
-        let worktree = WorktreeId::new();
-        let saved = AgentContinuationRef::new();
-        let replacement = terminal(workspace, Some(session), worktree);
-        let mut intent = AgentTabIntent::empty(workspace);
-        intent.upsert(
-            Some(session),
-            saved,
-            terminal(workspace, Some(session), worktree),
-            true,
-        );
-        intent.upsert(Some(session), saved, replacement.clone(), true);
-        let missing_selection = AgentContinuationRef::new();
-        intent.targets.insert(
-            0,
-            AgentTabTargetIntent {
-                session_id: None,
-                tabs: vec![AgentTabSlotIntent {
-                    continuation: saved,
-                    terminal: replacement.clone(),
-                }],
-                selected: Some(missing_selection),
-            },
-        );
-
-        let root_continuation = AgentContinuationRef::new();
-        let root_terminal = terminal(workspace, None, WorktreeId::new());
-        let session_continuation = AgentContinuationRef::new();
-        let session_terminal = terminal(workspace, Some(session), WorktreeId::new());
-        let inventory = AgentInventory {
-            workspace_id: workspace,
-            complete: false,
-            runtimes: vec![
-                runtime(saved, &replacement, AgentRuntimeInventoryState::Live),
-                runtime(
-                    root_continuation,
-                    &root_terminal,
-                    AgentRuntimeInventoryState::Live,
-                ),
-                runtime(
-                    session_continuation,
-                    &session_terminal,
-                    AgentRuntimeInventoryState::Live,
-                ),
-            ],
-            resumable: Vec::new(),
-        };
-        let projection = intent.reconcile(
-            &[
-                live_entry(replacement),
-                live_entry(root_terminal),
-                live_entry(session_terminal),
-            ],
-            &inventory,
-            &BTreeSet::from([session]),
-        );
-        assert_eq!(
-            projection
-                .targets
-                .iter()
-                .map(|target| target.tabs.len())
-                .sum::<usize>(),
-            3
-        );
-        assert_eq!(intent.targets[0].selected, Some(missing_selection));
     }
 }

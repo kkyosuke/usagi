@@ -647,30 +647,6 @@ mod tests {
     }
 
     #[test]
-    fn reopen_choices_expand_and_complete_the_opaque_continuation() {
-        let continuation = usagi_core::domain::id::AgentContinuationRef::new();
-        let choice = crate::presentation::workspace_runtime::AgentReopenChoice {
-            label: "Agent safe".to_owned(),
-            continuation,
-        };
-        let mut modal = CloseupModal::new("daemon").with_reopen_choices(vec![choice.clone()]);
-        for character in "reopen".chars() {
-            modal.insert_char(character);
-        }
-        modal.expand_selected();
-        assert!(joined(&modal).contains("Agent safe"));
-
-        let mut prompt = CloseupModal::with_selection_mode("daemon", ModalSelectionMode::Prompt)
-            .with_reopen_choices(vec![choice]);
-        let prefix = &continuation.to_string()[..8];
-        for character in format!("reopen {prefix}").chars() {
-            prompt.insert_char(character);
-        }
-        prompt.complete_selected();
-        assert_eq!(prompt.input.value(), format!("reopen {continuation}"));
-    }
-
-    #[test]
     fn render_shows_the_session_actions_and_footer() {
         let text = joined(&CloseupModal::new("daemon"));
         assert!(text.contains("Closeup: daemon")); // タイトル

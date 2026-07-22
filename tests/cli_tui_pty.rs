@@ -15,10 +15,10 @@ use std::time::{Duration, Instant};
 use usagi_core::domain::agent::AgentProfileId;
 use usagi_core::domain::agent_tab_intent::{AgentTabIntent, AgentTabIntentMutation};
 use usagi_core::domain::id::{OperationId, TerminalRef, WorkspaceId};
-use usagi_core::domain::settings::{ModalSelectionMode, Settings};
+use usagi_core::domain::settings::{LocalSettings, ModalSelectionMode};
 use usagi_core::infrastructure::paths::channel_data_dir;
 use usagi_core::infrastructure::store::agent_tab_intent::AgentTabIntentStore;
-use usagi_core::infrastructure::store::workspace::Storage;
+use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::usecase::client::{
     AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest, IpcClient,
 };
@@ -474,12 +474,12 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     git(&workspace, &["add", "README.md"]);
     git(&workspace, &["commit", "-qm", "fixture"]);
 
-    let settings = Storage::new(channel_data_dir(home.path()));
+    let settings = WorkspaceSettingsStore::new(&workspace);
     let guard = settings.lock().unwrap();
     settings
-        .save_settings(&Settings {
-            modal_selection_mode: ModalSelectionMode::Prompt,
-            ..Settings::default()
+        .save(&LocalSettings {
+            modal_selection_mode: Some(ModalSelectionMode::Prompt),
+            ..LocalSettings::default()
         })
         .unwrap();
     drop(guard);

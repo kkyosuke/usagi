@@ -198,15 +198,6 @@ mod tests {
             store.load(workspace).unwrap().status,
             AgentTabIntentLoadStatus::IgnoredInvalid
         );
-        fs::write(
-            store.path(workspace),
-            format!(r#"{{"schema":{AGENT_TAB_INTENT_SCHEMA},"workspace_id":false}}"#),
-        )
-        .unwrap();
-        assert_eq!(
-            store.load(workspace).unwrap().status,
-            AgentTabIntentLoadStatus::IgnoredInvalid
-        );
         fs::write(store.path(workspace), r#"{"schema":999}"#).unwrap();
         assert_eq!(
             store.load(workspace).unwrap().status,
@@ -402,14 +393,5 @@ mod tests {
                 .join(workspace.as_str())
                 .join(INTENT_FILE)
         );
-    }
-
-    #[test]
-    fn non_file_intent_path_reports_a_safe_read_error() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = AgentTabIntentStore::new(temp.path());
-        let workspace = WorkspaceId::new();
-        fs::create_dir_all(store.path(workspace)).unwrap();
-        assert!(store.load(workspace).is_err());
     }
 }

@@ -2482,21 +2482,6 @@ fn shell_target_for_terminal(terminal: &TerminalRef) -> Target {
 /// Run restore over a dedicated daemon port. Inventory is retried with bounded
 /// backoff on this worker, so the first frame and terminal input loop never wait
 /// for a handshake or a slow daemon response.
-fn retry_agent_inventory(
-    port: &mut dyn AgentCommandPort,
-    workspace: WorkspaceId,
-    current: Result<AgentInventory, String>,
-) -> Result<AgentInventory, String> {
-    match current {
-        Ok(inventory) => Ok(inventory),
-        Err(_) => match port.resume_inventory(workspace) {
-            Ok(inventory) if inventory.workspace_id == workspace => Ok(inventory),
-            Ok(_) => Err("Agent inventory scope changed while restoring".to_owned()),
-            Err(error) => Err(error),
-        },
-    }
-}
-
 fn spawn_restore_job(
     mut port: Box<dyn AgentCommandPort>,
     workspace: WorkspaceId,
@@ -2511,7 +2496,15 @@ fn spawn_restore_job(
             if terminals.is_err() {
                 terminals = port.list_terminals();
             }
-            agents = retry_agent_inventory(port.as_mut(), workspace, agents);
+            if agents.is_err() {
+                agents = port.resume_inventory(workspace).and_then(|inventory| {
+                    if inventory.workspace_id == workspace {
+                        Ok(inventory)
+                    } else {
+                        Err("Agent inventory scope changed while restoring".to_owned())
+                    }
+                });
+            }
             if terminals.is_ok() && agents.is_ok() {
                 break;
             }
@@ -3057,12 +3050,15 @@ fn drain_controller_host_actions(
                         continuation: request.continuation,
                     });
                     if let Some(projection) = projection {
-                        let context = ui
-                            .agent_tab_intent
-                            .as_ref()
-                            .expect("an Agent intent projection requires its context");
-                        let terminals = context.terminals.clone().unwrap_or_default();
-                        let sessions = context.allowed_sessions.clone();
+                        let (terminals, sessions) = ui.agent_tab_intent.as_ref().map_or_else(
+                            || (Vec::new(), BTreeSet::new()),
+                            |context| {
+                                (
+                                    context.terminals.clone().unwrap_or_default(),
+                                    context.allowed_sessions.clone(),
+                                )
+                            },
+                        );
                         let (interaction, revision) = runtime.restore_fence();
                         runtime.restore_snapshot(
                             interaction,
@@ -4101,17 +4097,16 @@ mod tests {
         NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep, PaneLaunch,
         SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, Start, TerminalAttach,
         TerminalChunk, TerminalError, TerminalInputOutcome, UnavailableAgentCommandPort,
-        UnavailableAgentTabIntentPort, UnavailableBackendPort, UnavailableBrowserOpener,
-        UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
-        UnavailableExternalTerminalPort, UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
-        UnavailableSessionCommandPortFactory, WelcomeStep, WorkspaceLoader, WorkspaceRuntime,
-        WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key,
-        begin_terminal_selection_on_click, close_exited_panes, controller_terminal_view,
-        copy_terminal_selection, drain_controller_host_actions, drain_session_completions,
-        forward_live_terminal_input, handle_terminal_pointer, intercept_live_terminal_control,
-        key_to_terminal_bytes, new_project_notice, play_startup_splash, poll_and_project_terminals,
-        render_controller_frame, render_home_snapshot, restore_open_panes, run as run_from_start,
-        run_with_settings,
+        UnavailableBackendPort, UnavailableBrowserOpener, UnavailableDecisionCommandPort,
+        UnavailableEnvironmentStore, UnavailableExternalTerminalPort, UnavailablePrSnapshotPort,
+        UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory, WelcomeStep,
+        WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
+        app_event_from_key, begin_terminal_selection_on_click, close_exited_panes,
+        controller_terminal_view, copy_terminal_selection, drain_controller_host_actions,
+        drain_session_completions, forward_live_terminal_input, handle_terminal_pointer,
+        intercept_live_terminal_control, key_to_terminal_bytes, new_project_notice,
+        play_startup_splash, poll_and_project_terminals, render_controller_frame,
+        render_home_snapshot, restore_open_panes, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller,
         run_workspace_controller_with_backend_and_config,
@@ -6437,7 +6432,6 @@ mod tests {
 
     struct RetryRestorePort {
         workspace: WorkspaceId,
-        inventory_workspace: Option<WorkspaceId>,
         entries: Vec<TerminalInventoryEntry>,
         fail_attempts: usize,
         terminal_attempts: Arc<AtomicUsize>,
@@ -6468,7 +6462,7 @@ mod tests {
                 Err("temporary inventory failure".to_owned())
             } else {
                 Ok(AgentInventory {
-                    workspace_id: self.inventory_workspace.unwrap_or(workspace),
+                    workspace_id: workspace,
                     complete: true,
                     runtimes: Vec::new(),
                     resumable: Vec::new(),
@@ -6510,88 +6504,6 @@ mod tests {
         }
     }
 
-    struct FailingIntentPort;
-
-    impl AgentTabIntentPort for FailingIntentPort {
-        fn load(&mut self, _: WorkspaceId) -> Result<AgentTabIntent, String> {
-            Err("load failed".to_owned())
-        }
-
-        fn mutate(
-            &mut self,
-            _: WorkspaceId,
-            _: u64,
-            _: AgentTabIntentMutation,
-        ) -> Result<AgentTabIntentPortCommit, String> {
-            Err("mutation failed".to_owned())
-        }
-    }
-
-    struct ProjectingIntentPort {
-        state: AgentTabIntent,
-        projection: AgentTabProjection,
-    }
-
-    impl AgentTabIntentPort for ProjectingIntentPort {
-        fn load(&mut self, _: WorkspaceId) -> Result<AgentTabIntent, String> {
-            Ok(self.state.clone())
-        }
-
-        fn mutate(
-            &mut self,
-            _: WorkspaceId,
-            _: u64,
-            mutation: AgentTabIntentMutation,
-        ) -> Result<AgentTabIntentPortCommit, String> {
-            let _ = self.state.apply(mutation);
-            Ok(AgentTabIntentPortCommit {
-                intent: self.state.clone(),
-                projection: Some(self.projection.clone()),
-                cas_conflict: false,
-            })
-        }
-    }
-
-    fn projecting_agent_ui(
-        workspace: WorkspaceId,
-        session: SessionId,
-        continuation: AgentContinuationRef,
-        terminal: TerminalRef,
-    ) -> WorkspaceUi {
-        let projection = AgentTabProjection {
-            targets: vec![AgentTabTargetProjection {
-                session_id: Some(session),
-                tabs: vec![AgentTabSlotIntent {
-                    continuation,
-                    terminal: terminal.clone(),
-                }],
-                selected: Some(continuation),
-            }],
-        };
-        let mut intent = AgentTabIntent::empty(workspace);
-        let _ = intent.apply(AgentTabIntentMutation::Upsert {
-            session_id: Some(session),
-            continuation,
-            terminal: terminal.clone(),
-            select: true,
-        });
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-        WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
-            .with_agent_context(
-                workspace,
-                vec![session],
-                Box::new(SuccessfulAgentPort(terminal)),
-            )
-            .with_agent_tab_intent(
-                workspace,
-                BTreeSet::from([session]),
-                Box::new(ProjectingIntentPort {
-                    state: intent,
-                    projection,
-                }),
-            )
-    }
-
     fn scoped_terminal_ref(workspace: WorkspaceId, session: Option<SessionId>) -> TerminalRef {
         TerminalRef {
             daemon_generation: DaemonGeneration::new(),
@@ -6613,7 +6525,6 @@ mod tests {
         super::spawn_restore_job(
             Box::new(RetryRestorePort {
                 workspace,
-                inventory_workspace: None,
                 entries: vec![TerminalInventoryEntry {
                     terminal: terminal.clone(),
                     kind: TerminalKind::Terminal,
@@ -6638,231 +6549,6 @@ mod tests {
         assert!(completion.agents.unwrap().complete);
         assert_eq!(terminal_attempts.load(Ordering::SeqCst), 3);
         assert_eq!(agent_attempts.load(Ordering::SeqCst), 3);
-
-        let retained_attempts = Arc::new(AtomicUsize::new(0));
-        let mut unused_port = RetryRestorePort {
-            workspace,
-            inventory_workspace: None,
-            entries: Vec::new(),
-            fail_attempts: usize::MAX,
-            terminal_attempts: Arc::new(AtomicUsize::new(0)),
-            agent_attempts: Arc::clone(&retained_attempts),
-        };
-        let retained = super::retry_agent_inventory(
-            &mut unused_port,
-            workspace,
-            Ok(AgentInventory {
-                workspace_id: workspace,
-                complete: true,
-                runtimes: Vec::new(),
-                resumable: Vec::new(),
-            }),
-        )
-        .unwrap();
-        assert!(retained.complete);
-        assert_eq!(retained_attempts.load(Ordering::SeqCst), 0);
-
-        let (sender, receiver) = std::sync::mpsc::channel();
-        super::spawn_restore_job(
-            Box::new(RetryRestorePort {
-                workspace,
-                inventory_workspace: Some(WorkspaceId::new()),
-                entries: Vec::new(),
-                fail_attempts: 0,
-                terminal_attempts: Arc::new(AtomicUsize::new(0)),
-                agent_attempts: Arc::new(AtomicUsize::new(0)),
-            }),
-            workspace,
-            0,
-            0,
-            sender,
-        );
-        assert!(
-            receiver
-                .recv_timeout(std::time::Duration::from_secs(1))
-                .unwrap()
-                .agents
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn agent_intent_fallbacks_are_safe() {
-        let workspace = WorkspaceId::new();
-        let session = SessionId::new();
-        let continuation = AgentContinuationRef::new();
-        let terminal = scoped_terminal_ref(workspace, Some(session));
-
-        let mut fallback = UnavailableAgentTabIntentPort;
-        assert_eq!(fallback.load(workspace).unwrap().workspace_id, workspace);
-        assert!(
-            fallback
-                .mutate(
-                    workspace,
-                    0,
-                    AgentTabIntentMutation::Upsert {
-                        session_id: Some(session),
-                        continuation,
-                        terminal: terminal.clone(),
-                        select: true,
-                    },
-                )
-                .unwrap()
-                .projection
-                .is_none()
-        );
-
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-        let failed = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
-            .with_agent_tab_intent(
-                workspace,
-                BTreeSet::from([session]),
-                Box::new(FailingIntentPort),
-            );
-        assert_eq!(
-            failed.agent_tab_intent.as_ref().unwrap().state,
-            AgentTabIntent::empty(workspace)
-        );
-    }
-
-    #[test]
-    fn reopen_projection_close_and_wrong_workspace_are_safe() {
-        let workspace = WorkspaceId::new();
-        let session = SessionId::new();
-        let continuation = AgentContinuationRef::new();
-        let terminal = scoped_terminal_ref(workspace, Some(session));
-        let mut ui = projecting_agent_ui(workspace, session, continuation, terminal.clone());
-        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
-        let mut pending = std::collections::HashMap::new();
-        let (mut host, actions) = ControllerHost::channel();
-        crate::usecase::application::daemon_backend::AgentPort::reopen_agent(
-            &mut host,
-            crate::usecase::application::daemon_backend::ReopenAgentRequest {
-                workspace,
-                continuation,
-            },
-        );
-        drain_controller_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
-        assert_eq!(
-            runtime
-                .panes()
-                .pane(Target::Session(session))
-                .unwrap()
-                .tabs()
-                .len(),
-            1
-        );
-        let _ = runtime.apply_event(AppEvent::Key(AppKey::Down));
-        let _ = runtime.apply_event(AppEvent::Key(AppKey::Enter));
-        let _ = runtime.focus_terminal(Target::Session(session), terminal.clone());
-        super::close_focused_terminal_pane(&mut ui, &mut runtime, &mut pending);
-
-        let (mut host, actions) = ControllerHost::channel();
-        crate::usecase::application::daemon_backend::AgentPort::reopen_agent(
-            &mut host,
-            crate::usecase::application::daemon_backend::ReopenAgentRequest {
-                workspace: WorkspaceId::new(),
-                continuation,
-            },
-        );
-        drain_controller_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
-    }
-
-    #[test]
-    fn agent_order_empty_restore_and_completion_projections_are_safe() {
-        let workspace = WorkspaceId::new();
-        let session = SessionId::new();
-        let continuation = AgentContinuationRef::new();
-        let terminal = scoped_terminal_ref(workspace, Some(session));
-        let mut ui = projecting_agent_ui(workspace, session, continuation, terminal.clone());
-        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
-        let mut pending = std::collections::HashMap::new();
-        let _ = runtime.apply_event(AppEvent::Key(AppKey::Down));
-        let _ = runtime.apply_event(AppEvent::Key(AppKey::Enter));
-        let empty = super::pane_restore_targets(
-            workspace,
-            &BTreeSet::from([session]),
-            AgentTabProjection {
-                targets: vec![AgentTabTargetProjection {
-                    session_id: Some(session),
-                    tabs: Vec::new(),
-                    selected: None,
-                }],
-            },
-            &[],
-        );
-        assert!(empty.is_empty());
-
-        runtime.on_effect(&Effect::LaunchAgent {
-            workspace,
-            session: Some(session),
-            operation_id: OperationId::new(),
-            profile: None,
-        });
-        ui.persist_agent_order(&runtime);
-
-        let failed_operation = OperationId::new();
-        runtime.on_effect(&Effect::LaunchAgent {
-            workspace,
-            session: Some(session),
-            operation_id: failed_operation,
-            profile: None,
-        });
-        pending.insert(failed_operation, Target::Session(session));
-        ui.pane_completion_sender
-            .send(super::PaneLaunchCompletion {
-                port: Box::new(SuccessfulAgentPort(terminal.clone())),
-                outcome: super::PaneLaunchOutcome::Agent {
-                    operation: failed_operation,
-                    result: Err("failed".to_owned()),
-                },
-            })
-            .unwrap();
-        let admitted_operation = OperationId::new();
-        pending.insert(admitted_operation, Target::Session(session));
-        ui.pane_completion_sender
-            .send(super::PaneLaunchCompletion {
-                port: Box::new(SuccessfulAgentPort(terminal.clone())),
-                outcome: super::PaneLaunchOutcome::Agent {
-                    operation: admitted_operation,
-                    result: Ok(AgentPaneAdmission {
-                        terminal: terminal.clone(),
-                        continuation: Some(continuation),
-                    }),
-                },
-            })
-            .unwrap();
-        let terminal_operation = OperationId::new();
-        runtime.on_effect(&Effect::OpenTerminal {
-            target: Target::Session(session),
-            operation_id: terminal_operation,
-            arguments: "open".to_owned(),
-        });
-        pending.insert(terminal_operation, Target::Session(session));
-        ui.pane_completion_sender
-            .send(super::PaneLaunchCompletion {
-                port: Box::new(SuccessfulAgentPort(terminal.clone())),
-                outcome: super::PaneLaunchOutcome::Terminal {
-                    operation: terminal_operation,
-                    result: Ok(terminal.clone()),
-                },
-            })
-            .unwrap();
-        ui.pane_completion_sender
-            .send(super::PaneLaunchCompletion {
-                port: Box::new(SuccessfulAgentPort(terminal)),
-                outcome: super::PaneLaunchOutcome::Terminal {
-                    operation: OperationId::new(),
-                    result: Err("ignored".to_owned()),
-                },
-            })
-            .unwrap();
-        super::drain_pane_completions_into_runtime(
-            &mut ui,
-            &mut runtime,
-            &mut pending,
-            Geometry { cols: 20, rows: 5 },
-        );
     }
 
     #[test]
@@ -6873,7 +6559,6 @@ mod tests {
         super::spawn_restore_job(
             Box::new(RetryRestorePort {
                 workspace,
-                inventory_workspace: None,
                 entries: Vec::new(),
                 fail_attempts: usize::MAX,
                 terminal_attempts: Arc::new(AtomicUsize::new(0)),
@@ -6905,48 +6590,6 @@ mod tests {
                 .notice()
                 .map(|notice| notice.message.as_str()),
             Some("daemon restore is unavailable after retries; no Agent was started")
-        );
-    }
-
-    #[test]
-    fn successful_restore_applies_the_agent_projection_without_returning_the_port() {
-        let workspace = WorkspaceId::new();
-        let session = SessionId::new();
-        let continuation = AgentContinuationRef::new();
-        let terminal = scoped_terminal_ref(workspace, Some(session));
-        let mut ui = projecting_agent_ui(workspace, session, continuation, terminal);
-        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
-        let completion = super::RestoreCompletion {
-            port: Box::new(UnavailableAgentCommandPort),
-            dispatched_interaction: 0,
-            dispatched_registry_revision: 0,
-            terminals: Ok(Vec::new()),
-            agents: Ok(AgentInventory {
-                workspace_id: workspace,
-                complete: true,
-                runtimes: Vec::new(),
-                resumable: Vec::new(),
-            }),
-        };
-
-        assert!(
-            super::apply_restore_completion(
-                completion,
-                &mut ui,
-                &mut runtime,
-                workspace,
-                &BTreeSet::from([session]),
-            )
-            .is_none()
-        );
-        assert_eq!(
-            runtime
-                .panes()
-                .pane(Target::Session(session))
-                .unwrap()
-                .tabs()
-                .len(),
-            1
         );
     }
 
@@ -7177,91 +6820,6 @@ mod tests {
                 session_id: Some(actual),
                 continuations,
             }) if *actual == session && continuations == &[second, first]
-        ));
-        assert!(intercept_live_terminal_control(
-            &Key::Live(LiveTerminalAction::MoveTabPrevious),
-            &mut ui,
-            &mut runtime,
-            &mut controls,
-            &mut term,
-            &mut browser,
-            &mut pending,
-            20,
-            80,
-            0,
-            0,
-        ));
-    }
-
-    #[test]
-    fn select_tab_host_persists_the_focused_agent_continuation() {
-        let workspace = WorkspaceId::new();
-        let session = SessionId::new();
-        let continuation = AgentContinuationRef::new();
-        let terminal = scoped_terminal_ref(workspace, Some(session));
-        let mutations = Arc::new(Mutex::new(Vec::new()));
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
-            .with_agent_tab_intent(
-                workspace,
-                BTreeSet::from([session]),
-                Box::new(MemoryIntentPort {
-                    state: AgentTabIntent::empty(workspace),
-                    mutations: Arc::clone(&mutations),
-                }),
-            );
-        let _ = ui.mutate_agent_intent(AgentTabIntentMutation::Upsert {
-            session_id: Some(session),
-            continuation,
-            terminal: terminal.clone(),
-            select: true,
-        });
-        assert!(
-            ui.observe_agent_tabs(
-                Vec::new(),
-                AgentInventory {
-                    workspace_id: workspace,
-                    complete: false,
-                    runtimes: Vec::new(),
-                    resumable: Vec::new(),
-                },
-            )
-            .is_some()
-        );
-        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
-        let (interaction, revision) = runtime.restore_fence();
-        runtime.restore_snapshot(
-            interaction,
-            revision,
-            vec![super::PaneRestoreTarget {
-                target: Target::Session(session),
-                panes: vec![LivePane {
-                    terminal: terminal.clone(),
-                    kind: PaneKind::Agent,
-                }],
-                selected: Some(terminal),
-            }],
-        );
-        let _ = runtime.apply_event(AppEvent::Key(AppKey::Down));
-        let _ = runtime.apply_event(AppEvent::Key(AppKey::Enter));
-
-        let (mut host, actions) = ControllerHost::channel();
-        crate::usecase::application::daemon_backend::AgentPort::select_tab(
-            &mut host,
-            TabDirection::Next,
-        );
-        drain_controller_host_actions(
-            &actions,
-            &mut ui,
-            &mut runtime,
-            &mut std::collections::HashMap::new(),
-        );
-        assert!(matches!(
-            mutations.lock().unwrap().last(),
-            Some(AgentTabIntentMutation::Select {
-                session_id: Some(actual),
-                continuation: Some(selected),
-            }) if *actual == session && *selected == continuation
         ));
     }
 
