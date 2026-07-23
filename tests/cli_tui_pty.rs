@@ -23,7 +23,9 @@ use usagi_core::usecase::client::{
     AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest, IpcClient,
     SessionAction,
 };
-use usagi_daemon::infrastructure::unix_transport::{connect_current, read_locator};
+use usagi_daemon::infrastructure::unix_transport::{
+    connect_current, ensure_private_dir_all, read_locator,
+};
 use usagi_tui::usecase::application::agent_tab_intent::AgentTabIntent;
 use usagi_tui::usecase::application::terminal_screen::TerminalScreen;
 
@@ -57,7 +59,9 @@ fn open_pty() -> io::Result<(File, File)> {
 }
 
 fn write_prompt_settings(home: &Path) {
-    let storage = Storage::new(channel_data_dir(home));
+    let data_dir = channel_data_dir(home);
+    ensure_private_dir_all(&data_dir).unwrap();
+    let storage = Storage::new(data_dir);
     let _guard = storage.lock().unwrap();
     storage
         .save_settings(&Settings {

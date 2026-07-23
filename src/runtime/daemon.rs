@@ -4260,6 +4260,19 @@ pub(crate) fn run(
     }
 }
 
+/// Resolve and securely initialize the selected per-user data directory before
+/// any global store can become its first writer.
+///
+/// Config intentionally runs without starting the daemon, so its settings
+/// adapter cannot rely on bootstrap lock acquisition to establish the private
+/// directory invariant first.
+pub(crate) fn prepare_private_data_dir() -> std::io::Result<PathBuf> {
+    let data_dir =
+        paths::data_dir().map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+    ensure_private_dir_all(&data_dir)?;
+    Ok(data_dir)
+}
+
 /// Install one process-wide panic hook for the daemon. A daemon owns several
 /// worker threads, so a boundary around its main thread alone cannot observe a
 /// panic in an IPC, PTY, or observer worker. The hook records every thread's
@@ -4293,18 +4306,8 @@ fn run_inner(
     command: CliDaemonCommand,
     info: &AppInfo,
 ) -> std::io::Result<()> {
-    let daemon_dir = paths::data_dir()
-        .map_err(|err| std::io::Error::other(format!("{err:#}")))?
-        .join("daemon");
-    let data_dir = daemon_dir
-        .parent()
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "daemon data path has no parent",
-            )
-        })?
-        .to_path_buf();
+    let data_dir = prepare_private_data_dir()?;
+    let daemon_dir = data_dir.join("daemon");
     let command = match command {
         CliDaemonCommand::InstallService => {
             let path = launchd::install(&std::env::current_exe()?, &data_dir)?;
@@ -4330,10 +4333,6 @@ fn run_inner(
         CliDaemonCommand::Stop => PresentationDaemonCommand::Stop,
         CliDaemonCommand::Restart => PresentationDaemonCommand::Restart,
     };
-    // Create every selected data-directory component with the same private
-    // invariant. This removes create_dir_all's mkdir→chmod crash window before
-    // the daemon-level locks become reachable.
-    ensure_private_dir_all(&data_dir)?;
     ensure_private_dir(&daemon_dir)?;
     let store = DaemonRecordStore::new(FsRecordFile {
         path: daemon_dir.join("daemon.json"),

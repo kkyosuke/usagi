@@ -1826,7 +1826,7 @@ impl PersistentSettingsPort {
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=global_modal_mode_survives_a_new_tui_settings_port
     fn open() -> std::io::Result<Self> {
         Ok(Self {
-            storage: Storage::open_default().map_err(io_error)?,
+            storage: Storage::new(crate::runtime::daemon::prepare_private_data_dir()?),
             workspace: None,
         })
     }

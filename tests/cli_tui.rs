@@ -4,6 +4,7 @@ use std::ffi::OsStr;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
@@ -969,6 +970,50 @@ fn config_entry_renders_the_config_screen() {
         .expect("usagi daemon status を起動できる");
     assert!(status.status.success());
     assert!(stdout(&status).contains("daemon not running"));
+    stop_daemon(home.path());
+}
+
+#[test]
+fn config_first_boot_with_restrictive_umask_preserves_ordinary_daemon_bootstrap() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let mut config = Command::new(env!("CARGO_BIN_EXE_usagi"));
+    config
+        .arg("config")
+        .env("USAGI_HOME", home.path())
+        .stdin(Stdio::null());
+    // SAFETY: the child has not started any threads; only its inherited umask
+    // is changed before exec to exercise the first-use creation boundary.
+    unsafe {
+        config.pre_exec(|| {
+            libc::umask(0o777);
+            Ok(())
+        });
+    }
+    let configured = config.output().expect("config first boot starts");
+    assert!(configured.status.success(), "{}", stderr(&configured));
+    assert_eq!(
+        std::fs::metadata(channel_data_dir(home.path()))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+
+    let ordinary = run_with_home(
+        &[
+            OsStr::new("session"),
+            OsStr::new("remove"),
+            OsStr::new("missing"),
+        ],
+        home.path(),
+    );
+    assert_eq!(ordinary.status.code(), Some(1));
+    assert!(stderr(&ordinary).contains("session was not found"));
+    assert_daemon_running(home.path());
     stop_daemon(home.path());
 }
 
