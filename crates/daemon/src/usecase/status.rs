@@ -11,7 +11,9 @@ use std::io;
 
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::daemon::{DaemonState, classify};
-use usagi_core::infrastructure::daemon::{DaemonRecordStore, LivenessProbe, RecordFile};
+use usagi_core::infrastructure::daemon::LivenessProbe;
+
+use crate::usecase::serve::DaemonRecordPort;
 
 /// Build the `status` report line: load the record, probe whether its process is
 /// alive, and classify the two into running / stale / not-running.
@@ -24,9 +26,9 @@ use usagi_core::infrastructure::daemon::{DaemonRecordStore, LivenessProbe, Recor
 ///
 /// Never in practice: the `Alive` arm unwraps the record, and `classify` reports
 /// `Alive` only when a record is present.
-pub fn report<F: RecordFile, P: LivenessProbe>(
-    store: &DaemonRecordStore<F>,
-    probe: &P,
+pub fn report(
+    store: &dyn DaemonRecordPort,
+    probe: &dyn LivenessProbe,
     info: &AppInfo,
 ) -> io::Result<String> {
     let record = store.load()?;

@@ -19,9 +19,9 @@ use std::io;
 
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::daemon::{DaemonState, classify};
-use usagi_core::infrastructure::daemon::{
-    DaemonLauncher, DaemonRecordStore, LivenessProbe, RecordFile, Sleeper,
-};
+use usagi_core::infrastructure::daemon::{DaemonLauncher, LivenessProbe, Sleeper};
+
+use crate::usecase::serve::DaemonRecordPort;
 
 /// How many times to poll for the launched daemon's record before giving up.
 /// At the synthesis root's ~50ms sleep this is a ~2s window.
@@ -38,11 +38,11 @@ pub(crate) const MAX_POLLS: usize = 40;
 ///
 /// Never in practice: the guard unwraps the record only after `classify`
 /// reports `Alive`, which happens only when a record is present.
-pub fn start<F: RecordFile, P: LivenessProbe, L: DaemonLauncher, K: Sleeper>(
-    store: &DaemonRecordStore<F>,
-    probe: &P,
-    launcher: &L,
-    sleeper: &K,
+pub fn start(
+    store: &dyn DaemonRecordPort,
+    probe: &dyn LivenessProbe,
+    launcher: &dyn DaemonLauncher,
+    sleeper: &dyn Sleeper,
     info: &AppInfo,
 ) -> io::Result<String> {
     let existing = store.load()?;
@@ -82,11 +82,11 @@ pub fn start<F: RecordFile, P: LivenessProbe, L: DaemonLauncher, K: Sleeper>(
 ///
 /// Returns the launcher's spawn error, the store's load error, or a timeout
 /// error when the launched daemon does not register within [`MAX_POLLS`] polls.
-pub(crate) fn launch_and_confirm<F: RecordFile, P: LivenessProbe, L: DaemonLauncher, K: Sleeper>(
-    store: &DaemonRecordStore<F>,
-    probe: &P,
-    launcher: &L,
-    sleeper: &K,
+pub(crate) fn launch_and_confirm(
+    store: &dyn DaemonRecordPort,
+    probe: &dyn LivenessProbe,
+    launcher: &dyn DaemonLauncher,
+    sleeper: &dyn Sleeper,
 ) -> io::Result<u32> {
     launcher.launch()?;
 
