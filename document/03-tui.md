@@ -249,12 +249,14 @@ identity は保持しない。
 | `Ctrl-O` `Ctrl-A` | OpenCloseupModal | Switch では選択 target の Closeup action を開く。Closeup では tab があっても action modal を前面に出す |
 | `Ctrl-O` `Ctrl-N` | NextTab | 次の tab を選ぶ |
 | `Ctrl-O` `Ctrl-P` | PreviousTab | 前の tab を選ぶ |
+| `Ctrl-O` `]` | MoveTabNext | 選択 tab を次の表示 slot へ移動し、Agent 順序を commit する |
+| `Ctrl-O` `[` | MoveTabPrevious | 選択 tab を前の表示 slot へ移動し、Agent 順序を commit する |
 | macOS: Command+C / Linux: Ctrl+Shift+C / Windows: Ctrl+C | Copy selected output | 保持中の terminal 出力選択を OS clipboard へ再コピーする |
 | `Ctrl-O` `x` / `Ctrl-O` `Ctrl-X` | CloseTab | 選択中の tab を閉じる（live なら subscription を detach、pending なら起動待ちを取消） |
 | `Ctrl-O` `u` / `↑` | ScrollUp | 右ペインの scrollback を 1 行古い方向へ |
 | `Ctrl-O` `d` / `↓` | ScrollDown | 右ペインの scrollback を 1 行 live bottom 方向へ |
 
-follow-up の `x` / `Ctrl-X` / `u` / `d` / `↑` / `↓` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
+follow-up の `x` / `Ctrl-X` / `[` / `]` / `u` / `d` / `↑` / `↓` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
 leader は 1 秒で失効し、未知の follow-up、key release、raw byte を含む次の入力を 1 件だけ握って捨て、その時点で必ず reset する。
 auto-repeat は press と同じ follow-up として 1 件だけ解決する。ちょうど 1 秒の timeout 境界では leader は失効済みであり、単一 raw
 control byte と semantic control event は同じ global shortcut に解決する。
@@ -501,10 +503,14 @@ session 作成と同じ interaction gate であり、受付時の interaction co
 （読んでいる画面から focus を奪わない）。diff は terminal identity を持たない
 document tab として完了し、安全な document 本文を tab の content area に描画する。session の `terminal` は daemon が stable session / worktree scope を解決して起動する
 `login-shell` であり、TUI はローカル PTY を生成しない。session が利用可能でない、または daemon が応答しない場合は
-pending tab を安全な feedback に置き換える。`←` / `→`（または `h` / `l`）と `Ctrl-O Ctrl-N` / `Ctrl-O Ctrl-P` は tab を巡回し、`Ctrl-O x` / `Ctrl-O Ctrl-X` は
-選択 tab を閉じる。close 後は次の tab（末尾なら直前）を stable identity で選択し、最後の tab を閉じたときだけ
+pending tab を安全な feedback に置き換える。`←` / `→`（または `h` / `l`）と `Ctrl-O Ctrl-N` / `Ctrl-O Ctrl-P` は tab を巡回し、`Ctrl-O [` / `Ctrl-O ]` は
+選択 tab を前後へ並べ替え、`Ctrl-O x` / `Ctrl-O Ctrl-X` は選択 tab を閉じる。close 後は次の tab（末尾なら直前）を stable identity で選択し、最後の tab を閉じたときだけ
 target selection と Closeup action の空状態へ戻る。close は client-side selection を外すだけであり、daemon-owned
-terminal を停止しない。live tab の close は subscription を detach し、pending tab の close は起動待ちの launch を取り消す。
+terminal を停止しない。live Agent tab の close は subscription を detach して conversation lineage の dismissal を
+永続化し、同じ lineage の replacement / interrupted record を `reopen` の明示操作まで隠す。`reopen` picker は
+`AgentContinuationRef` から作る safe label だけを表示し、選択 lineage の dismissal だけを解除する。reopen 自体は
+Agent launch、provider resume、runtime kill を行わない。pending tab の close は daemon へ未送信の client-owned launch
+だけを取り消し、送信済み operation を推測して再送・cancel しない。
 
 shell は毎フレーム全 attached terminal を poll し、daemon が exit を報告した terminal の tab を自動で閉じて
 subscription を detach する。最後の live tab が exit すると `has_live_pane` が落ちて Closeup の action 空状態へ戻る。
@@ -640,37 +646,55 @@ sidebar の第 2 行に `interrupted · resume available` または ID を含ま
 TUI 起動、workspace open、daemon reconnect から `ResumeAgent` を自動送信せず、
 利用者の `session resume <name>` 操作を必須とする。
 
-- **タイミング**: 初回 frame を paint した後に一度だけ、daemon の [`terminal inventory`](04-ipc.md#generic-terminal-request)
-  を root と各 available session の scope について引く。初回 frame は inventory 応答を待たずに描画する。
-- **投影**: `live` な各エントリを、その `kind` に応じて Agent tab または Terminal tab として、`session_id`（None=root）
-  から導く target に投影し、完全な `TerminalRef` で fenced に attach する。target ごとの最初の復元 tab を pane 内で
-  選択するため、その target の Closeup に入ると出力表示と通常入力配送を直ちに再開できる。復元は Home の selected / active
-  target や Switch mode を変更しない。
-- **source of truth は daemon の inventory** であり、TUI-local に pane 一覧を永続化しない。これにより別 client が
-  起動した pane や、以前の TUI が保存しなかった runtime も一貫して復元できる。TUI-local resume state は表示・選択の
-  復元候補に留める（下記 [resume data compatibility](#resume-data-compatibility)）。
+- **two-source reconciliation**: daemon の unified terminal / Agent inventory が liveness・PTY ownership の正本、
+  `<data-dir>/tui/agent-tabs/<workspace-id>/intent.json` の `AgentTabIntent` が Agent tab の表示順・target ごとの選択・
+  conversation lineage dismissal の正本である。local state は workspace identity、完全な last-known `TerminalRef`、
+  provider-neutral な `AgentContinuationRef` だけを持ち、provider ID、argv、environment、transcript、terminal output を
+  保存しない。generic Terminal tab は従来どおり inventory だけから復元する。
+- **タイミング**: 初回 frame を paint した後、UI event loop と別の daemon connection で
+  [`terminal inventory`](04-ipc.md#generic-terminal-request) と `agent_inventory` を取得する。一時的な失敗は bounded backoff
+  で再試行し、初回 frame・キー入力・animation を待たせない。失敗時は last valid intent を空 snapshot で上書きせず、
+  local spawn もしない。
+- **投影**: saved Agent は完全な `TerminalRef` が両 inventory で trusted live と確認できたときだけ保存順で復元する。
+  inventory にだけある live Agent は continuation / terminal fence の決定的順序で末尾へ追加し、duplicate snapshot は
+  exact ref で 1 枚へ収束する。generic Terminal はその後ろへ決定的に追加する。saved ref が non-live でも同じ continuation
+  が resumable なら slot intent は保持し、interrupted pane への投影は行わない。表示中 active target の selected foreground
+  tab だけを attach / resync し、background target と選択外 tab は detached のまま保持する。
+- **遅延応答 fence**: restore dispatch 時の UI interaction count と pane-registry revision を結果に持たせる。双方が一致する
+  結果だけが保存順・保存選択を適用できる。遅延・順序外の結果は新しい exact ref の末尾追加だけを許し、後続の close・
+  reorder・selection を上書きせず focus を奪わない。復元は Home の selected / active target や Switch mode を変更しない。
+- **commit**: Agent tab の確定した order / selection / close / reopen は file lock 下の atomic read-modify-write で commit する。
+  revision CAS が競合した場合は最新 state を読み直して stable continuation key ごとに mutation を適用する。dismissal は
+  complete な durable Agent inventory が retention 削除を証明するか、利用者が明示 reopen するまで union で保持する。
 
 誤復元・二重 tab を防ぐため、次を守る。
 
 | 入力 | 判定 | 動作 |
 |---|---|---|
-| `live: false`（死んだ process / exited / orphan / identity_unknown） | attach 不可 | tab を作らない。PTY master 復元不能は session 単位の interrupted 契約に委ねる |
+| dismissed lineage が durable inventory に残る | live / interrupted / resume unavailable | tab を出さず runtime / provider conversation は停止・削除しない |
+| saved exact ref が trusted live | unified terminal と Agent inventory の双方に完全一致 | 保存 slot へ live tab を 1 枚投影する |
+| saved ref は non-live、同じ continuation は resumable | durable history は存在 | slot intent を保持し、interrupted tab は自動投影・resume しない |
+| `live: false`（死んだ process / exited / orphan / identity_unknown） | attach 不可 | live tab を作らない。PTY master 復元不能は interrupted 契約に委ねる |
 | stale / recreated session | inventory 問い合わせ scope が現 lifecycle snapshot の available session に限られる | 旧 session の runtime は列挙されず復元されない |
 | scope mismatch（別 workspace / worktree / session） | daemon が scope 完全一致で filter | 列挙されない |
-| daemon generation 不一致 | `TerminalRef::fences` 不一致 | attach しない |
+| saved generation と current active が異なる | saved exact ref の trusted draining owner があれば live、双方の owner 欠落が確定すれば stale | generation だけで推測 attach / dismissal GC しない |
 | duplicate entry | `fences` で既存復元 tab と一致 | dedup、二重 tab を作らない |
-| daemon 不通 / inventory 失敗 | 取得失敗 | 何も復元せず local PTY も作らない |
+| daemon 不通 / partial inventory | authoritative absence ではない | retry し、intent / dismissal を GC せず local PTY も作らない |
+| corrupt / future schema | current schema として読めない | state を無視して inventory-only へ縮退し、起動を失敗させない |
 
 ## resume data compatibility
 
-TUI-local resume state が持てる terminal identity は完全な `TerminalRef` だけである。表示名、path、
-単独の terminal ID から terminal を探し直したり、新しい terminal を spawn したりしない。
+旧 state の欠落は空の `AgentTabIntent` として読む。schema は versioned で、旧値から continuation や terminal を
+推測する migration は行わない。TUI-local resume state が持てる terminal identity は完全な `TerminalRef`、Agent lineage
+identity は daemon-issued `AgentContinuationRef` だけである。表示名、path、provider ID、単独の terminal ID から terminal
+を探し直したり、新しい terminal を spawn したりしない。
 
 | 復元時の入力 | 判定 | fallback |
 |---|---|---|
 | saved target が snapshot に無い | target identity が stale | selected / active を root に戻す |
-| saved `TerminalRef` が inventory に無い、または exited | attach 不可 | tab を除去し Closeup へ縮退する |
-| terminal ID が同じでも daemon generation など fencing field が異なる | old / stale data | tab を除去し attach しない |
+| saved `TerminalRef` が live inventory に無いが continuation history は残る | attach 不可 | slot / dismissal を保持し live tab は投影しない |
+| complete durable inventory から continuation が消えた | retention policy による削除が確定 | slot と dismissal を回収する |
+| terminal ID が同じでも daemon generation など fencing field が異なる | old / stale data | trusted owner が無ければ attach せず、名前や ID から置換しない |
 | attach / resync が ownership unknown または transport failure | 継続性を証明できない | safe feedback を表示し input を無効化する |
 
 この migration は旧値を推測変換しない fail-closed policy である。TUI-local data は表示・選択の

@@ -34,6 +34,7 @@ impl<T> MutationOutcome<T> {
     }
 }
 
+pub mod agent_tab_intent;
 pub mod dispatch;
 pub mod issue;
 pub mod lifecycle;

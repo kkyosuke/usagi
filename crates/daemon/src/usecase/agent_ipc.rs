@@ -620,6 +620,7 @@ impl AgentRuntime {
             .collect();
         AgentInventory {
             workspace_id: workspace,
+            complete: true,
             runtimes,
             resumable,
         }

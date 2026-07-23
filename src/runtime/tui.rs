@@ -29,6 +29,7 @@ use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::git::{clone as git_clone, diff_status};
+use usagi_core::infrastructure::store::agent_tab_intent::AgentTabIntentStore;
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
@@ -49,10 +50,11 @@ use usagi_tui::presentation::views::pr_modal::PrModal;
 use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::GitDiff;
 use usagi_tui::presentation::{
-    self, AgentCommandPort, BannerScreenRunner, ControllerBackendComposition,
-    ControllerBackendFactory, ControllerHost, DecisionCommandPort, DesktopNotificationPort,
-    EnvironmentStorePort, Exit, ExternalTerminalPort, MetricsPort, SessionCommandPort,
-    SessionCommandResult, Start, WorkspaceLoader, WorkspaceSnapshot,
+    self, AgentCommandPort, AgentPaneAdmission, AgentTabIntentPort, AgentTabIntentPortCommit,
+    BannerScreenRunner, ControllerBackendComposition, ControllerBackendFactory, ControllerHost,
+    DecisionCommandPort, DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort,
+    MetricsPort, SessionCommandPort, SessionCommandResult, Start, WorkspaceLoader,
+    WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::controller::{
     BackendEvent, EnvironmentEntry, NewRequest, Notice, SafeError, SafeMessage, Target,
@@ -575,6 +577,8 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             backend,
             session_commands: Box::new(DaemonSessionCommandPort),
             agent_commands: Box::new(DaemonAgentCommandPort::new()),
+            restore_commands: Box::new(DaemonAgentCommandPort::new()),
+            agent_tab_intents: Box::new(UserAgentTabIntentPort::new()),
             external_terminal: Box::new(PlatformExternalTerminalPort),
             metrics: Box::new(DaemonMetricsPort::new()),
             browser: Box::new(PlatformBrowserOpener),
@@ -732,6 +736,50 @@ struct DaemonAgentCommandPort {
     terminal_epoch: u64,
 }
 
+struct UserAgentTabIntentPort {
+    store: Option<AgentTabIntentStore>,
+}
+
+impl UserAgentTabIntentPort {
+    fn new() -> Self {
+        Self {
+            store: AgentTabIntentStore::open_default().ok(),
+        }
+    }
+}
+
+impl AgentTabIntentPort for UserAgentTabIntentPort {
+    fn load(
+        &mut self,
+        workspace: WorkspaceId,
+    ) -> Result<usagi_core::domain::agent_tab_intent::AgentTabIntent, String> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| "Agent tab state is unavailable".to_owned())?
+            .load(workspace)
+            .map(|loaded| loaded.intent)
+            .map_err(|_| "Agent tab state could not be read".to_owned())
+    }
+
+    fn mutate(
+        &mut self,
+        workspace: WorkspaceId,
+        expected_revision: u64,
+        mutation: usagi_core::domain::agent_tab_intent::AgentTabIntentMutation,
+    ) -> Result<AgentTabIntentPortCommit, String> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| "Agent tab state is unavailable".to_owned())?
+            .mutate(workspace, expected_revision, mutation)
+            .map(|commit| AgentTabIntentPortCommit {
+                intent: commit.intent,
+                projection: commit.projection,
+                cas_conflict: commit.cas_conflict,
+            })
+            .map_err(|_| "Agent tab state could not be saved".to_owned())
+    }
+}
+
 impl DaemonAgentCommandPort {
     const fn new() -> Self {
         Self {
@@ -869,6 +917,31 @@ fn exact_agent_resume_request(
     }
 }
 
+fn decode_agent_admission(
+    body: &serde_json::Value,
+    operation: &str,
+) -> Result<AgentPaneAdmission, String> {
+    let terminal = body
+        .get("terminal")
+        .cloned()
+        .ok_or_else(|| format!("{operation} returned no terminal"))
+        .and_then(|terminal| {
+            serde_json::from_value(terminal)
+                .map_err(|_| format!("{operation} returned an invalid terminal"))
+        })?;
+    let continuation = body
+        .get("continuation")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| format!("{operation} returned an invalid continuation"))?;
+    Ok(AgentPaneAdmission {
+        terminal,
+        continuation,
+    })
+}
+
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=daemon_terminal_decode_and_reconnect_contract
 impl AgentCommandPort for DaemonAgentCommandPort {
     fn launch(
@@ -876,7 +949,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         workspace: WorkspaceId,
         session: Option<usagi_core::domain::id::SessionId>,
         profile: Option<usagi_core::domain::agent::AgentProfileId>,
-    ) -> Result<usagi_core::domain::id::TerminalRef, String> {
+    ) -> Result<AgentPaneAdmission, String> {
         let mut client =
             crate::runtime::daemon::client(usagi_core::usecase::client::ClientPolicy::tui())
                 .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
@@ -892,14 +965,9 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             })
             .map_err(|_| "daemon request failed; reconnect to continue".to_owned())?
         {
-            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => body
-                .get("terminal")
-                .cloned()
-                .ok_or_else(|| "agent launch was not accepted".to_owned())
-                .and_then(|terminal| {
-                    serde_json::from_value(terminal)
-                        .map_err(|_| "agent launch returned an invalid terminal".to_owned())
-                }),
+            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => {
+                decode_agent_admission(&body, "agent launch")
+            }
         }
     }
 
@@ -909,7 +977,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         _workspace: WorkspaceId,
         session: usagi_core::domain::id::SessionId,
         operation_id: usagi_core::domain::id::OperationId,
-    ) -> Result<usagi_core::domain::id::TerminalRef, String> {
+    ) -> Result<AgentPaneAdmission, String> {
         let mut client =
             crate::runtime::daemon::client(usagi_core::usecase::client::ClientPolicy::tui())
                 .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
@@ -921,14 +989,9 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             })
             .map_err(|_| "provider resume failed; inspect session status".to_owned())?
         {
-            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => body
-                .get("terminal")
-                .cloned()
-                .ok_or_else(|| "provider resume returned no terminal".to_owned())
-                .and_then(|terminal| {
-                    serde_json::from_value(terminal)
-                        .map_err(|_| "provider resume returned an invalid terminal".to_owned())
-                }),
+            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => {
+                decode_agent_admission(&body, "provider resume")
+            }
         }
     }
 
@@ -2312,17 +2375,21 @@ mod tests {
         DaemonAgentCommandPort, DaemonDecisionCommandPort, EnvironmentStorePort, FsWorkspaceLoader,
         Geometry, LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory,
         RepoEnvironmentStore, Start, TerminalChunk, TerminalError, TerminalInputOutcome,
-        agent_inventory_request, classify_terminal_input, created_session_hook,
-        daemon_error_reason, decode_terminal_input_ack, decode_terminal_poll,
-        exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
-        load_workspace_state, map_terminal_error, passthrough_key, probe_path,
-        provider_resume_projection, session_snapshot_result, terminal_copy_key,
-        validate_workspace_directory,
+        UserAgentTabIntentPort, agent_inventory_request, classify_terminal_input,
+        created_session_hook, daemon_error_reason, decode_agent_admission,
+        decode_terminal_input_ack, decode_terminal_poll, exact_agent_resume_request,
+        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
+        passthrough_key, probe_path, provider_resume_projection, session_snapshot_result,
+        terminal_copy_key, validate_workspace_directory,
     };
     use chrono::Utc;
     use serde_json::json;
     use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
-    use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId};
+    use usagi_core::domain::agent_tab_intent::AgentTabIntentMutation;
+    use usagi_core::domain::id::{
+        AgentContinuationRef, DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef,
+        WorkspaceId, WorktreeId,
+    };
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
     use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycle};
@@ -2330,6 +2397,7 @@ mod tests {
     use usagi_core::domain::workspace::Workspace;
     use usagi_core::domain::workspace_state::WorkspaceState;
     use usagi_core::infrastructure::paths::project_data_dir;
+    use usagi_core::infrastructure::store::agent_tab_intent::AgentTabIntentStore;
     use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
     use usagi_core::infrastructure::store::state::WorkspaceStateStore;
     use usagi_core::infrastructure::store::workspace::Storage;
@@ -2337,7 +2405,8 @@ mod tests {
     use usagi_tui::presentation::views::workspace::ProjectedSession;
     use usagi_tui::presentation::workspace_runtime::WorkspaceRuntime;
     use usagi_tui::presentation::{
-        ControllerBackendFactory, ControllerHost, ControllerHostAction, WorkspaceSnapshot,
+        AgentTabIntentPort, ControllerBackendFactory, ControllerHost, ControllerHostAction,
+        WorkspaceSnapshot,
     };
     use usagi_tui::usecase::application::Key;
     use usagi_tui::usecase::application::controller::{
@@ -2776,6 +2845,52 @@ mod tests {
         assert_eq!(decode_terminal_poll(&body), Err(TerminalError::Unavailable));
         let body = json!({ "output": [{"start_offset": 0, "data": b"abc".to_vec()}] });
         assert_eq!(decode_terminal_poll(&body), Err(TerminalError::Unavailable));
+    }
+
+    #[test]
+    fn agent_admission_decodes_only_fenced_terminal_and_opaque_continuation() {
+        let workspace = WorkspaceId::new();
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: None,
+            worktree_id: WorktreeId::new(),
+        };
+        let continuation = AgentContinuationRef::new();
+        let admission = decode_agent_admission(
+            &json!({"terminal": terminal, "continuation": continuation}),
+            "agent launch",
+        )
+        .unwrap();
+        assert_eq!(admission.terminal, terminal);
+        assert_eq!(admission.continuation, Some(continuation));
+        assert_eq!(
+            decode_agent_admission(&json!({"terminal": terminal}), "legacy launch")
+                .unwrap()
+                .continuation,
+            None
+        );
+        assert_eq!(
+            decode_agent_admission(&json!({}), "agent launch").unwrap_err(),
+            "agent launch returned no terminal"
+        );
+        assert_eq!(
+            decode_agent_admission(
+                &json!({"terminal": "bad", "continuation": continuation}),
+                "agent launch",
+            )
+            .unwrap_err(),
+            "agent launch returned an invalid terminal"
+        );
+        assert_eq!(
+            decode_agent_admission(
+                &json!({"terminal": terminal, "continuation": "provider-native-id"}),
+                "agent launch",
+            )
+            .unwrap_err(),
+            "agent launch returned an invalid continuation"
+        );
     }
 
     #[test]
@@ -3820,5 +3935,65 @@ mod tests {
             None,
         );
         assert!(frame.join("\n").contains('✎'));
+    }
+
+    #[test]
+    fn user_agent_tab_intent_port_maps_store_success_and_unavailability() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let continuation = AgentContinuationRef::new();
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: Some(session),
+            worktree_id: WorktreeId::new(),
+        };
+        let mut port = UserAgentTabIntentPort {
+            store: Some(AgentTabIntentStore::new(temp.path())),
+        };
+        assert_eq!(port.load(workspace).unwrap().revision, 0);
+        let committed = port
+            .mutate(
+                workspace,
+                0,
+                AgentTabIntentMutation::Upsert {
+                    session_id: Some(session),
+                    continuation,
+                    terminal,
+                    select: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(committed.intent.revision, 1);
+
+        let mut unavailable = UserAgentTabIntentPort { store: None };
+        assert!(unavailable.load(workspace).is_err());
+        assert!(
+            unavailable
+                .mutate(
+                    workspace,
+                    0,
+                    AgentTabIntentMutation::Reopen { continuation },
+                )
+                .is_err()
+        );
+
+        let blocked = temp.path().join("blocked");
+        std::fs::write(&blocked, "not a directory").unwrap();
+        let mut failed_store = UserAgentTabIntentPort {
+            store: Some(AgentTabIntentStore::new(blocked)),
+        };
+        assert!(failed_store.load(workspace).is_err());
+        assert!(
+            failed_store
+                .mutate(
+                    workspace,
+                    0,
+                    AgentTabIntentMutation::Reopen { continuation },
+                )
+                .is_err()
+        );
     }
 }

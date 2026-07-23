@@ -409,6 +409,11 @@ pub struct AgentRuntimeInventoryItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentInventory {
     pub workspace_id: WorkspaceId,
+    /// Whether this is a complete projection of retained durable history.
+    /// Older/partial producers decode as `false`, so absence cannot collect a
+    /// TUI dismissal unless the daemon explicitly proves completeness.
+    #[serde(default)]
+    pub complete: bool,
     pub runtimes: Vec<AgentRuntimeInventoryItem>,
     pub resumable: Vec<AgentResumableInventoryItem>,
 }

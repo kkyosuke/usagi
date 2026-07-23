@@ -6,7 +6,7 @@
 
 use usagi_core::domain::id::{OperationId, TerminalRef};
 
-use super::controller::Target;
+use super::controller::{TabDirection, Target};
 
 /// Closeup tab が表示する terminal 種別。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +137,7 @@ impl PaneState {
 pub struct PaneRegistry {
     active: Target,
     entries: Vec<PaneRegistryEntry>,
+    revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +176,8 @@ pub enum PaneTabCommand {
     Select(TabSelection),
     /// selected tab を client-side から外す。
     Close,
+    /// Move the selected stable tab within this target's display order.
+    Reorder(TabDirection),
     /// terminal input を runtime へ渡す。
     Passthrough,
 }
@@ -195,6 +198,7 @@ impl PaneRegistry {
         Self {
             active,
             entries: vec![PaneRegistryEntry::empty(active)],
+            revision: 0,
         }
     }
 
@@ -202,6 +206,14 @@ impl PaneRegistry {
     #[must_use]
     pub const fn active(&self) -> Target {
         self.active
+    }
+
+    /// Monotonic fence for every effective registry mutation. Restore jobs
+    /// capture it at dispatch so a delayed snapshot cannot reorder or refocus a
+    /// registry the user has changed meanwhile.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// `target` 固有の pane state。未訪問 target は空 state として投影する。
@@ -276,7 +288,9 @@ pub fn reduce_registry(
     registry: &mut PaneRegistry,
     event: PaneRegistryEvent,
 ) -> Vec<PaneRegistryEffect> {
-    match event {
+    let before_active = registry.active;
+    let before_entries = registry.entries.clone();
+    let effects = match event {
         PaneRegistryEvent::SelectTarget(target) => {
             registry.active = target;
             registry.entry_mut(target);
@@ -310,7 +324,11 @@ pub fn reduce_registry(
                 .map(|effect| PaneRegistryEffect::Pane { target, effect })
                 .collect()
         }
+    };
+    if registry.active != before_active || registry.entries != before_entries {
+        registry.revision = registry.revision.saturating_add(1);
     }
+    effects
 }
 
 /// Route a tab command only when the active target's tab owns input.
@@ -338,6 +356,13 @@ pub fn route_tab_command(
                 event: PaneEvent::CloseSelected,
             },
         ),
+        PaneTabCommand::Reorder(direction) => reduce_registry(
+            registry,
+            PaneRegistryEvent::Pane {
+                target,
+                event: PaneEvent::ReorderSelected(direction),
+            },
+        ),
         PaneTabCommand::Passthrough => vec![PaneRegistryEffect::Passthrough { target }],
     }
 }
@@ -349,12 +374,16 @@ fn event_belongs_to_target(event: &PaneEvent, target: Target) -> bool {
         | PaneEvent::Succeeded { .. }
         | PaneEvent::Resolved { .. }
         | PaneEvent::Failed { .. }
+        | PaneEvent::ReorderSelected(_)
         | PaneEvent::CloseSelected => true,
         PaneEvent::Request {
             target: requested, ..
         } => *requested == target,
         PaneEvent::Exited(terminal) => target_for_terminal(terminal) == target,
         PaneEvent::Restore(pane) => target_for_terminal(&pane.terminal) == target,
+        PaneEvent::RestoreBatch { panes, .. } => panes
+            .iter()
+            .all(|pane| target_for_terminal(&pane.terminal) == target),
     }
 }
 
@@ -398,6 +427,16 @@ pub enum PaneEvent {
     Exited(TerminalRef),
     /// 保存済み terminal を再接続候補として復元する。
     Restore(LivePane),
+    /// Atomically merge one target's reconciled live inventory. When
+    /// `replace_order` is false, delayed results only append missing exact refs
+    /// and preserve the user's newer selection/order.
+    RestoreBatch {
+        panes: Vec<LivePane>,
+        selected: Option<TerminalRef>,
+        replace_order: bool,
+    },
+    /// Move the selected stable tab without changing its selection identity.
+    ReorderSelected(TabDirection),
     /// Close the selected pane tab. Selecting a target without a tab is a no-op.
     CloseSelected,
 }
@@ -439,8 +478,36 @@ pub fn reduce(state: &mut PaneState, event: PaneEvent) -> Vec<PaneEffect> {
         PaneEvent::Failed { operation, message } => fail(state, operation, message),
         PaneEvent::Exited(terminal) => exit(state, &terminal),
         PaneEvent::Restore(pane) => restore(state, pane),
+        PaneEvent::RestoreBatch {
+            panes,
+            selected,
+            replace_order,
+        } => restore_batch(state, panes, selected, replace_order),
+        PaneEvent::ReorderSelected(direction) => reorder_selected(state, direction),
         PaneEvent::CloseSelected => close_selected(state),
     }
+}
+
+fn reorder_selected(state: &mut PaneState, direction: TabDirection) -> Vec<PaneEffect> {
+    if state.tabs.len() < 2 {
+        return Vec::new();
+    }
+    let PaneSelection::Tab(selected) = &state.selected else {
+        return Vec::new();
+    };
+    let Some(index) = state
+        .tabs
+        .iter()
+        .position(|tab| selection_for(tab) == PaneSelection::Tab(selected.clone()))
+    else {
+        return Vec::new();
+    };
+    let destination = match direction {
+        TabDirection::Next => (index + 1) % state.tabs.len(),
+        TabDirection::Previous => (index + state.tabs.len() - 1) % state.tabs.len(),
+    };
+    state.tabs.swap(index, destination);
+    Vec::new()
 }
 
 fn close_selected(state: &mut PaneState) -> Vec<PaneEffect> {
@@ -653,6 +720,48 @@ fn restore(state: &mut PaneState, pane: LivePane) -> Vec<PaneEffect> {
         .then_some(PaneEffect::Attach(terminal))
         .into_iter()
         .collect()
+}
+
+fn restore_batch(
+    state: &mut PaneState,
+    panes: Vec<LivePane>,
+    selected: Option<TerminalRef>,
+    replace_order: bool,
+) -> Vec<PaneEffect> {
+    let mut unique = Vec::new();
+    for pane in panes {
+        if !unique
+            .iter()
+            .any(|current: &LivePane| current.terminal.fences(&pane.terminal))
+        {
+            unique.push(pane);
+        }
+    }
+    if replace_order {
+        let mut retained = std::mem::take(&mut state.tabs);
+        let mut ordered = unique.into_iter().map(PaneTab::Live).collect::<Vec<_>>();
+        retained.retain(|tab| match tab {
+            PaneTab::Live(live) => !ordered.iter().any(
+                |candidate| matches!(candidate, PaneTab::Live(current) if current.terminal.fences(&live.terminal)),
+            ),
+            PaneTab::Pending(_) | PaneTab::Ready(_) => true,
+        });
+        ordered.extend(retained);
+        state.tabs = ordered;
+        if let Some(selected) = selected
+            && state
+                .tabs
+                .iter()
+                .any(|tab| matches!(tab, PaneTab::Live(live) if live.terminal.fences(&selected)))
+        {
+            state.selected = PaneSelection::Tab(TabSelection::Live(selected));
+        }
+    } else {
+        for pane in unique {
+            let _ = restore(state, pane);
+        }
+    }
+    Vec::new()
 }
 
 fn selection_for(tab: &PaneTab) -> PaneSelection {
@@ -964,6 +1073,160 @@ mod tests {
         assert!(state.tabs().iter().any(|tab| {
             matches!(tab, PaneTab::Pending(pending) if pending.operation == operation)
         }));
+    }
+
+    #[test]
+    fn restore_batch_deduplicates_and_late_replay_preserves_newer_order_and_selection() {
+        let target = target();
+        let first = terminal(target);
+        let second = terminal(target);
+        let discovered = terminal(target);
+        let mut state = PaneState::new(PaneSelection::Target(target));
+        let panes = vec![
+            LivePane {
+                terminal: second.clone(),
+                kind: PaneKind::Agent,
+            },
+            LivePane {
+                terminal: first.clone(),
+                kind: PaneKind::Agent,
+            },
+            LivePane {
+                terminal: first.clone(),
+                kind: PaneKind::Agent,
+            },
+        ];
+        let _ = reduce(
+            &mut state,
+            PaneEvent::RestoreBatch {
+                panes,
+                selected: Some(first.clone()),
+                replace_order: true,
+            },
+        );
+        assert_eq!(state.tabs().len(), 2);
+        assert_eq!(
+            state.selected(),
+            &PaneSelection::Tab(TabSelection::Live(first))
+        );
+
+        let _ = reduce(
+            &mut state,
+            PaneEvent::ReorderSelected(TabDirection::Previous),
+        );
+        let selection = state.selected().clone();
+        let order = state.tabs().to_vec();
+        let _ = reduce(
+            &mut state,
+            PaneEvent::RestoreBatch {
+                panes: vec![
+                    LivePane {
+                        terminal: second,
+                        kind: PaneKind::Agent,
+                    },
+                    LivePane {
+                        terminal: discovered,
+                        kind: PaneKind::Agent,
+                    },
+                ],
+                selected: None,
+                replace_order: false,
+            },
+        );
+        assert_eq!(state.selected(), &selection);
+        assert_eq!(&state.tabs()[..2], order.as_slice());
+        assert_eq!(state.tabs().len(), 3);
+    }
+
+    #[test]
+    fn reorder_guards_and_fresh_restore_retain_nonduplicate_local_tabs() {
+        let target = target();
+        let mut state = PaneState::new(PaneSelection::Target(target));
+        assert!(reduce(&mut state, PaneEvent::ReorderSelected(TabDirection::Next)).is_empty());
+
+        let pending = request(&mut state, target, PaneKind::Agent);
+        assert!(reduce(&mut state, PaneEvent::ReorderSelected(TabDirection::Next)).is_empty());
+        let ready = request(&mut state, target, PaneKind::Diff);
+        let _ = reduce(&mut state, PaneEvent::Resolved { operation: ready });
+        state.selected = PaneSelection::Target(target);
+        assert!(reduce(&mut state, PaneEvent::ReorderSelected(TabDirection::Next)).is_empty());
+        let existing = terminal(target);
+        let _ = reduce(
+            &mut state,
+            PaneEvent::Restore(LivePane {
+                terminal: existing.clone(),
+                kind: PaneKind::Terminal,
+            }),
+        );
+        state.selected = PaneSelection::Tab(TabSelection::Live(terminal(target)));
+        let _ = reduce(
+            &mut state,
+            PaneEvent::ReorderSelected(TabDirection::Previous),
+        );
+        let _ = reduce(
+            &mut state,
+            PaneEvent::RestoreBatch {
+                panes: vec![LivePane {
+                    terminal: existing,
+                    kind: PaneKind::Agent,
+                }],
+                selected: None,
+                replace_order: true,
+            },
+        );
+        assert!(
+            state
+                .tabs()
+                .iter()
+                .any(|tab| matches!(tab, PaneTab::Pending(item) if item.operation == pending))
+        );
+        assert!(
+            state
+                .tabs()
+                .iter()
+                .any(|tab| matches!(tab, PaneTab::Ready(item) if item.operation == ready))
+        );
+    }
+
+    #[test]
+    fn selected_tab_reorder_wraps_and_registry_revision_only_tracks_effective_mutation() {
+        let target = target();
+        let first = terminal(target);
+        let second = terminal(target);
+        let mut registry = PaneRegistry::new(target);
+        let initial_revision = registry.revision();
+        let _ = route_tab_command(&mut registry, PaneTabCommand::Reorder(TabDirection::Next));
+        assert_eq!(registry.revision(), initial_revision);
+        for terminal in [first.clone(), second.clone()] {
+            let _ = reduce_registry(
+                &mut registry,
+                PaneRegistryEvent::Pane {
+                    target,
+                    event: PaneEvent::Restore(LivePane {
+                        terminal,
+                        kind: PaneKind::Agent,
+                    }),
+                },
+            );
+        }
+        let _ = reduce_registry(
+            &mut registry,
+            PaneRegistryEvent::Pane {
+                target,
+                event: PaneEvent::Select(PaneSelection::Tab(TabSelection::Live(first.clone()))),
+            },
+        );
+        let before = registry.revision();
+        let _ = route_tab_command(
+            &mut registry,
+            PaneTabCommand::Reorder(TabDirection::Previous),
+        );
+        assert_eq!(registry.revision(), before + 1);
+        assert!(matches!(
+            registry.active_pane().tabs(),
+            [PaneTab::Live(left), PaneTab::Live(right)]
+                if left.terminal == second && right.terminal == first
+        ));
     }
 
     #[test]

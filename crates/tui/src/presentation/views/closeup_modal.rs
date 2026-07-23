@@ -10,6 +10,7 @@
 
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::{TextInput, modal};
+use crate::presentation::workspace_runtime::AgentReopenChoice;
 use crate::usecase::closeup;
 use usagi_core::domain::settings::ModalSelectionMode;
 
@@ -26,6 +27,7 @@ pub struct CloseupModal {
     input: TextInput,
     expanded: bool,
     selected_subcommand: usize,
+    reopen_choices: Vec<AgentReopenChoice>,
 }
 
 impl CloseupModal {
@@ -48,7 +50,18 @@ impl CloseupModal {
             input: TextInput::default(),
             expanded: false,
             selected_subcommand: 0,
+            reopen_choices: Vec::new(),
         }
+    }
+
+    /// Supply the secret-free continuation choices for `Reopen closed Agent`.
+    #[must_use]
+    pub fn with_reopen_choices(mut self, choices: Vec<AgentReopenChoice>) -> Self {
+        self.reopen_choices = choices;
+        self.selected_subcommand = self
+            .selected_subcommand
+            .min(self.subcommands().len().saturating_sub(1));
+        self
     }
 
     /// 対象セッション名。
@@ -95,11 +108,12 @@ impl CloseupModal {
     #[must_use]
     pub fn submission(&self) -> String {
         match self.selection_mode {
-            ModalSelectionMode::Action if self.expanded => format!(
-                "{} {}",
-                self.selected_action().name,
-                self.subcommands()[self.selected_subcommand]
-            ),
+            ModalSelectionMode::Action if self.expanded => self
+                .subcommands()
+                .get(self.selected_subcommand)
+                .map_or_else(String::new, |subcommand| {
+                    format!("{} {}", self.selected_action().name, subcommand.value)
+                }),
             ModalSelectionMode::Action => self
                 .matches()
                 .get(self.selected)
@@ -236,11 +250,25 @@ impl CloseupModal {
         std::mem::take(&mut self.expanded)
     }
 
-    fn subcommands(&self) -> &'static [&'static str] {
-        match self.selected_action().name {
-            "close" => &["--force"],
-            "terminal" => &["open", "new"],
-            _ => &[],
+    fn subcommands(&self) -> Vec<ModalSubcommand> {
+        let Some(action) = self.matches().get(self.selected).copied() else {
+            return Vec::new();
+        };
+        match action.name {
+            "close" => vec![ModalSubcommand::plain("--force")],
+            "reopen" => self
+                .reopen_choices
+                .iter()
+                .map(|choice| ModalSubcommand {
+                    label: format!("{}  {}", choice.label, choice.continuation),
+                    value: choice.continuation.to_string(),
+                })
+                .collect(),
+            "terminal" => vec![
+                ModalSubcommand::plain("open"),
+                ModalSubcommand::plain("new"),
+            ],
+            _ => Vec::new(),
         }
     }
 
@@ -256,13 +284,18 @@ impl CloseupModal {
             return None;
         }
         let candidates = match command {
-            "close" => &["--force"][..],
-            "terminal" => &["open", "new"][..],
+            "close" => vec!["--force".to_owned()],
+            "reopen" => self
+                .reopen_choices
+                .iter()
+                .map(|choice| choice.continuation.to_string())
+                .collect(),
+            "terminal" => vec!["open".to_owned(), "new".to_owned()],
             _ => return None,
         };
         let mut matches = candidates
             .iter()
-            .copied()
+            .map(String::as_str)
             .filter(|candidate| candidate.starts_with(prefix));
         let candidate = matches.next()?;
         matches
@@ -276,6 +309,21 @@ impl CloseupModal {
             .into_iter()
             .filter(|action| action.name.starts_with(self.input.value()))
             .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModalSubcommand {
+    label: String,
+    value: String,
+}
+
+impl ModalSubcommand {
+    fn plain(value: &str) -> Self {
+        Self {
+            label: value.to_owned(),
+            value: value.to_owned(),
+        }
     }
 }
 
@@ -315,14 +363,13 @@ fn body(state: &CloseupModal) -> Vec<String> {
             state.input.cursor(),
             state.input.selection(),
         ),
-        String::new(),
     ];
     for (i, action) in state.matches().iter().enumerate() {
         lines.push(action_row(*action, i == state.selected, INNER_WIDTH));
         if state.expanded && i == state.selected {
             for (sub_index, subcommand) in state.subcommands().iter().enumerate() {
                 lines.push(modal::subcommand_row(
-                    subcommand,
+                    &subcommand.label,
                     sub_index == state.selected_subcommand,
                 ));
             }
@@ -426,7 +473,7 @@ mod tests {
         let modal = CloseupModal::new("tui");
         assert_eq!(modal.session(), "tui");
         assert_eq!(modal.selected(), 0);
-        assert_eq!(modal.actions().len(), 4);
+        assert_eq!(modal.actions().len(), 5);
         assert_eq!(modal.selected_action().name, "agent");
         // derive された Clone / Debug も触れる。
         assert!(format!("{:?}", modal.clone()).contains("tui"));
@@ -439,7 +486,7 @@ mod tests {
     fn selection_wraps_both_ways() {
         let mut modal = CloseupModal::new("s");
         modal.select_prev(); // wrap to last (terminal)
-        assert_eq!(modal.selected(), 3);
+        assert_eq!(modal.selected(), 4);
         assert_eq!(modal.selected_action().name, "terminal");
         modal.select_next(); // wrap to 0
         assert_eq!(modal.selected(), 0);
@@ -479,8 +526,9 @@ mod tests {
         modal.select_prev();
         assert!(modal.collapse());
         assert!(!modal.collapse());
-        modal.select_next();
-        modal.select_next(); // terminal
+        while modal.selected_action().name != "terminal" {
+            modal.select_next();
+        }
         modal.expand_selected();
         modal.select_next(); // second terminal subcommand
         assert!(joined(&modal).contains("      open"));
@@ -579,6 +627,47 @@ mod tests {
             assert_eq!(modal.input.cursor(), cursor);
             assert_eq!(modal.selected, selected);
         }
+    }
+
+    #[test]
+    fn async_reopen_choices_are_safe_while_the_prompt_matches_no_command() {
+        let continuation = usagi_core::domain::id::AgentContinuationRef::new();
+        let mut modal = CloseupModal::new("daemon");
+        for character in "no-match".chars() {
+            modal.insert_char(character);
+        }
+        let modal = modal.with_reopen_choices(vec![
+            crate::presentation::workspace_runtime::AgentReopenChoice {
+                label: "Agent safe".to_owned(),
+                continuation,
+            },
+        ]);
+        assert_eq!(modal.submission(), String::new());
+        assert!(joined(&modal).contains("no-match"));
+    }
+
+    #[test]
+    fn reopen_choices_expand_and_complete_the_opaque_continuation() {
+        let continuation = usagi_core::domain::id::AgentContinuationRef::new();
+        let choice = crate::presentation::workspace_runtime::AgentReopenChoice {
+            label: "Agent safe".to_owned(),
+            continuation,
+        };
+        let mut modal = CloseupModal::new("daemon").with_reopen_choices(vec![choice.clone()]);
+        for character in "reopen".chars() {
+            modal.insert_char(character);
+        }
+        modal.expand_selected();
+        assert!(joined(&modal).contains("Agent safe"));
+
+        let mut prompt = CloseupModal::with_selection_mode("daemon", ModalSelectionMode::Prompt)
+            .with_reopen_choices(vec![choice]);
+        let prefix = &continuation.to_string()[..8];
+        for character in format!("reopen {prefix}").chars() {
+            prompt.insert_char(character);
+        }
+        prompt.complete_selected();
+        assert_eq!(prompt.input.value(), format!("reopen {continuation}"));
     }
 
     #[test]

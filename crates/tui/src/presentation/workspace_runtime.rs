@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use usagi_core::domain::id::AgentContinuationRef;
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef};
 use usagi_core::domain::settings::ModalSelectionMode;
 use usagi_core::usecase::client::DaemonMetrics;
@@ -30,9 +31,9 @@ use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, Effect, HomeMode, Overlay, Route, TabDirection, Target, update,
 };
 use crate::usecase::application::pane::{
-    PaneEvent, PaneInputOwner, PaneKind, PaneRegistry, PaneRegistryEffect, PaneRegistryEvent,
-    PaneSelection, PaneState, PaneTab, PaneTabCommand, TabSelection, reduce_registry,
-    route_tab_command,
+    LivePane, PaneEvent, PaneInputOwner, PaneKind, PaneRegistry, PaneRegistryEffect,
+    PaneRegistryEvent, PaneSelection, PaneState, PaneTab, PaneTabCommand, TabSelection,
+    reduce_registry, route_tab_command,
 };
 
 use super::app_event_from_key;
@@ -46,6 +47,21 @@ pub struct CloseOutcome {
     pub detach: Option<TerminalRef>,
     /// The pending launch the shell must cancel before it reaches the daemon.
     pub cancel: Option<OperationId>,
+}
+
+/// One safe choice shown by `Reopen closed Agent`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentReopenChoice {
+    pub label: String,
+    pub continuation: AgentContinuationRef,
+}
+
+/// One target's ordered live panes from a completed restore job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneRestoreTarget {
+    pub target: Target,
+    pub panes: Vec<LivePane>,
+    pub selected: Option<TerminalRef>,
 }
 
 /// Home runtime backed by the controller reducer and pane registry.
@@ -66,6 +82,7 @@ pub struct WorkspaceRuntime {
     /// ([`AppState::interaction_count`]/[`PendingOperation::interaction_at_accept`]).
     /// The entry is dropped when the launch completes, fails, or is cancelled.
     pane_focus_at_request: BTreeMap<OperationId, u64>,
+    reopen_choices: Vec<AgentReopenChoice>,
 }
 
 impl WorkspaceRuntime {
@@ -94,6 +111,7 @@ impl WorkspaceRuntime {
             closeup_modal: None,
             modal_selection_mode,
             pane_focus_at_request: BTreeMap::new(),
+            reopen_choices: Vec::new(),
         }
     }
 
@@ -132,6 +150,47 @@ impl WorkspaceRuntime {
     /// palettes without rebuilding the workspace runtime or its live panes.
     pub fn set_modal_selection_mode(&mut self, mode: ModalSelectionMode) {
         self.modal_selection_mode = mode;
+    }
+
+    /// Capture both fences carried by an off-thread restore dispatch.
+    #[must_use]
+    pub const fn restore_fence(&self) -> (u64, u64) {
+        (self.state.interaction_count(), self.panes.revision())
+    }
+
+    /// Replace the secret-free list used by the Closeup reopen picker.
+    pub fn set_reopen_choices(&mut self, choices: Vec<AgentReopenChoice>) {
+        self.reopen_choices = choices;
+        if let Some(modal) = self.closeup_modal.take() {
+            self.closeup_modal = Some(modal.with_reopen_choices(self.reopen_choices.clone()));
+        }
+    }
+
+    /// Apply one completed inventory projection. Only a result matching both
+    /// dispatch fences may restore saved ordering and selection. A late result
+    /// still appends missing exact refs, but cannot overwrite later UI intent.
+    pub fn restore_snapshot(
+        &mut self,
+        dispatched_interaction: u64,
+        dispatched_registry_revision: u64,
+        targets: Vec<PaneRestoreTarget>,
+    ) {
+        let replace_order =
+            self.restore_fence() == (dispatched_interaction, dispatched_registry_revision);
+        for target in targets {
+            let _ = reduce_registry(
+                &mut self.panes,
+                PaneRegistryEvent::Pane {
+                    target: target.target,
+                    event: PaneEvent::RestoreBatch {
+                        panes: target.panes,
+                        selected: target.selected,
+                        replace_order,
+                    },
+                },
+            );
+        }
+        self.sync_live_pane();
     }
 
     /// Translate a terminal [`Key`] into Home input and return the effects the
@@ -348,6 +407,7 @@ impl WorkspaceRuntime {
         if self.state.overlay() == Some(Overlay::Closeup) {
             self.closeup_modal.get_or_insert_with(|| {
                 CloseupModal::with_selection_mode(String::new(), self.modal_selection_mode)
+                    .with_reopen_choices(self.reopen_choices.clone())
             });
         } else {
             self.closeup_modal = None;
@@ -543,6 +603,14 @@ impl WorkspaceRuntime {
         effects
     }
 
+    /// Move the selected tab in the active target while retaining its stable
+    /// selection identity. The shell persists the resulting Agent order.
+    pub fn reorder_tab(&mut self, direction: TabDirection) -> Vec<PaneRegistryEffect> {
+        let effects = route_tab_command(&mut self.panes, PaneTabCommand::Reorder(direction));
+        self.sync_live_pane();
+        effects
+    }
+
     /// Mirror a controller [`Effect`]'s pane-visible intent into the registry
     /// before the shell executes the effect against daemon IO. `SelectTab`
     /// cycles the active tab; `OpenTerminal`/`LaunchAgent` record a pending
@@ -666,7 +734,8 @@ fn tab_selection(tab: &PaneTab) -> TabSelection {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseOutcome, PaneEvent, PaneKind, PaneTab, TabSelection, WorkspaceRuntime, tab_selection,
+        CloseOutcome, PaneEvent, PaneKind, PaneRestoreTarget, PaneTab, TabSelection,
+        WorkspaceRuntime, tab_selection,
     };
     use crate::usecase::application::Key;
     use crate::usecase::application::controller::{
@@ -703,6 +772,11 @@ mod tests {
             runtime.closeup_modal().unwrap().selection_mode(),
             ModalSelectionMode::Prompt
         );
+        runtime.set_reopen_choices(vec![super::AgentReopenChoice {
+            label: "Agent safe".to_owned(),
+            continuation: usagi_core::domain::id::AgentContinuationRef::new(),
+        }]);
+        assert!(runtime.closeup_modal().is_some());
     }
 
     fn terminal_ref(workspace: WorkspaceId, session: SessionId) -> TerminalRef {
@@ -1208,6 +1282,79 @@ mod tests {
             runtime.active_pane().selected(),
             &PaneSelection::Tab(TabSelection::Live(second))
         );
+    }
+
+    #[test]
+    fn reorder_tab_moves_the_selected_stable_identity_without_refocusing() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut runtime = closeup_on(workspace, session);
+        let first = terminal_ref(workspace, session);
+        let second = terminal_ref(workspace, session);
+        for terminal in [first.clone(), second.clone()] {
+            let operation = OperationId::new();
+            let _ = runtime.request_pane(target, operation, PaneKind::Agent);
+            let _ = runtime.complete_pane(target, operation, terminal);
+        }
+        let _ = runtime.focus_terminal(target, first.clone());
+
+        let _ = runtime.reorder_tab(TabDirection::Next);
+        assert_eq!(runtime.focused_terminal(), Some(first.clone()));
+        assert!(matches!(
+            runtime.active_pane().tabs(),
+            [PaneTab::Live(left), PaneTab::Live(right)]
+                if left.terminal == second && right.terminal == first
+        ));
+        let _ = runtime.reorder_tab(TabDirection::Previous);
+        assert!(matches!(
+            runtime.active_pane().tabs(),
+            [PaneTab::Live(left), PaneTab::Live(right)]
+                if left.terminal == first && right.terminal == second
+        ));
+    }
+
+    #[test]
+    fn delayed_restore_appends_inventory_without_overwriting_newer_interaction() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let first = terminal_ref(workspace, session);
+        let second = terminal_ref(workspace, session);
+        let discovered = terminal_ref(workspace, session);
+        let mut runtime = closeup_on(workspace, session);
+        let (dispatched_interaction, dispatched_revision) = runtime.restore_fence();
+        for terminal in [first.clone(), second.clone()] {
+            let operation = OperationId::new();
+            let _ = runtime.request_pane(target, operation, PaneKind::Agent);
+            let _ = runtime.complete_pane(target, operation, terminal);
+        }
+        let _ = runtime.focus_terminal(target, first.clone());
+        let _ = runtime.reorder_tab(TabDirection::Next);
+        let newer_order = runtime.active_pane().tabs().to_vec();
+
+        runtime.restore_snapshot(
+            dispatched_interaction,
+            dispatched_revision,
+            vec![PaneRestoreTarget {
+                target,
+                panes: vec![
+                    LivePane {
+                        terminal: first.clone(),
+                        kind: PaneKind::Agent,
+                    },
+                    LivePane {
+                        terminal: discovered.clone(),
+                        kind: PaneKind::Agent,
+                    },
+                ],
+                selected: Some(discovered),
+            }],
+        );
+
+        assert_eq!(runtime.focused_terminal(), Some(first));
+        assert_eq!(&runtime.active_pane().tabs()[..2], newer_order.as_slice());
+        assert_eq!(runtime.active_pane().tabs().len(), 3);
     }
 
     #[test]
