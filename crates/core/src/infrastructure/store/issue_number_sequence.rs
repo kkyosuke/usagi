@@ -4537,12 +4537,17 @@ mod tests {
             .spawn()
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(15);
-        while !resolved.exists() {
+        let mut completed_one_poll = false;
+        loop {
             assert!(
                 Instant::now() < deadline,
                 "queued old-v2 compatibility emulator did not resolve its local authority"
             );
             thread::sleep(Duration::from_millis(10));
+            if completed_one_poll && resolved.exists() {
+                break;
+            }
+            completed_one_poll = true;
         }
         assert!(child.try_wait().unwrap().is_none());
         assert!(!result.exists());

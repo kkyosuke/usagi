@@ -4007,6 +4007,21 @@ fn process_start_identity(_pid: u32) -> std::io::Result<String> {
 }
 
 #[cfg(target_os = "linux")]
+/// Owns a `pidfd` returned by `pidfd_open` and closes it exactly once on drop.
+struct PidFd(libc::c_int);
+
+#[cfg(target_os = "linux")]
+impl Drop for PidFd {
+    fn drop(&mut self) {
+        // SAFETY: this object exclusively owns the fd returned by pidfd_open and
+        // drops it exactly once.
+        unsafe {
+            libc::close(self.0);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn signal_exact_process(record: &DaemonRecord, signal: libc::c_int) -> std::io::Result<()> {
     let expected = record
         .process_start_identity
@@ -4024,16 +4039,6 @@ fn signal_exact_process(record: &DaemonRecord, signal: libc::c_int) -> std::io::
     let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
     if pidfd < 0 {
         return Err(std::io::Error::last_os_error());
-    }
-    struct PidFd(libc::c_int);
-    impl Drop for PidFd {
-        fn drop(&mut self) {
-            // SAFETY: this object exclusively owns the fd returned by
-            // pidfd_open and drops it exactly once.
-            unsafe {
-                libc::close(self.0);
-            }
-        }
     }
     let pidfd = PidFd(
         libc::c_int::try_from(pidfd).map_err(|_| std::io::Error::other("pidfd out of range"))?,

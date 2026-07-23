@@ -428,7 +428,7 @@ fn daemon_stop_clears_a_stale_production_record() {
     std::fs::create_dir(&daemon_dir).unwrap();
     std::fs::set_permissions(&daemon_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     let record_path = daemon_dir.join("daemon.json");
-    let record = usagi_core::domain::daemon::DaemonRecord::new(u32::MAX);
+    let record = usagi_core::domain::daemon::DaemonRecord::identified(2_000_000_000, "test:absent");
     std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
     std::fs::set_permissions(&record_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
