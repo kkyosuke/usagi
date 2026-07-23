@@ -41,6 +41,27 @@ fn short_home() -> tempfile::TempDir {
     home
 }
 
+fn precreate_restrictive_umask_coverage_profile(command: &mut Command) {
+    let Some(inherited_profile) = std::env::var_os("LLVM_PROFILE_FILE") else {
+        return;
+    };
+    let profile_directory = Path::new(&inherited_profile)
+        .parent()
+        .expect("coverage profile path has a parent");
+    let profile = tempfile::Builder::new()
+        .prefix("usagi-restrictive-umask-")
+        .suffix(".profraw")
+        .tempfile_in(profile_directory)
+        .expect("pre-create restrictive-umask coverage profile");
+    let (file, path) = profile
+        .keep()
+        .expect("retain restrictive-umask coverage profile");
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .expect("make restrictive-umask coverage profile readable");
+    drop(file);
+    command.env("LLVM_PROFILE_FILE", path);
+}
+
 fn git(repo: &Path, args: &[&str]) {
     let output = Command::new("git")
         .arg("-C")
@@ -984,6 +1005,10 @@ fn config_first_boot_with_restrictive_umask_preserves_ordinary_daemon_bootstrap(
         .arg("config")
         .env("USAGI_HOME", home.path())
         .stdin(Stdio::null());
+    // The coverage runtime creates its raw profile lazily. Pre-create this
+    // child's unique profile before applying umask 0777 so llvm-profdata can
+    // still read and merge the completed measurement.
+    precreate_restrictive_umask_coverage_profile(&mut config);
     // SAFETY: the child has not started any threads; only its inherited umask
     // is changed before exec to exercise the first-use creation boundary.
     unsafe {

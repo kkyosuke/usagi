@@ -5062,9 +5062,12 @@ mod tests {
         assert!(acquire_bootstrap_lock(&data).is_err());
         assert_eq!(std::fs::metadata(&lock).unwrap().mode() & 0o777, 0o666);
 
-        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o4600)).unwrap();
+        // Use the sticky bit for the exact-mode boundary: Darwin strips set-id
+        // bits when this test is built with coverage instrumentation.
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o1600)).unwrap();
+        assert_eq!(std::fs::metadata(&lock).unwrap().mode() & 0o7777, 0o1600);
         assert!(acquire_bootstrap_lock(&data).is_err());
-        assert_eq!(std::fs::metadata(&lock).unwrap().mode() & 0o7777, 0o4600);
+        assert_eq!(std::fs::metadata(&lock).unwrap().mode() & 0o7777, 0o1600);
 
         // origin/main created bootstrap.lock without an explicit mode, so the
         // exact historical 0644 owner file is a one-time migration exception.
