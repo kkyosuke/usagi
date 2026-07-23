@@ -13,11 +13,11 @@
 //! A missing file means no daemon has registered: [`DaemonRecordStore::load`]
 //! returns `None` rather than erroring, which is what the daemon (guarding
 //! single-instance startup) and clients (locating a daemon to connect to) act on
-//! together with the record's liveness.
+//! together with the record's exact process-owner observation.
 
 use std::io;
 
-use crate::domain::daemon::DaemonRecord;
+use crate::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 
 /// The file seam the store reads and writes through.
 ///
@@ -52,29 +52,46 @@ pub trait RecordFile {
     fn remove_if(&self, expected: &str) -> io::Result<bool>;
 }
 
-/// Probes whether a process is alive — the liveness half of classifying a daemon
-/// record.
+/// Reads the OS process-start identity used to fence daemon ownership.
+///
+/// Production binds this to the platform process table. The returned token is
+/// opaque to domain/usecase code: it is persisted and later compared for exact
+/// equality. Implementations must not derive it from wall-clock registration
+/// time or PID alone.
+pub trait ProcessIdentitySource {
+    /// Read the process-start identity for `pid`.
+    ///
+    /// # Errors
+    /// Returns an error when the process does not exist, identity cannot be
+    /// observed, or the platform cannot provide a safe identity.
+    fn process_start_identity(&self, pid: u32) -> io::Result<String>;
+}
+
+/// Observes whether a daemon record still names the exact OS process that
+/// registered it.
 ///
 /// Pairs with [`classify`](crate::domain::daemon::classify): the store supplies
-/// the record and this probe supplies the `alive` flag. The real implementation
-/// (signal 0 on Unix) is real IO bound at the synthesis root; tests inject a
-/// fake so the surrounding logic stays pure.
+/// the record and this probe supplies an exact/gone/mismatch/unknown outcome.
+/// The real implementation reads an OS process-start identity and never treats
+/// PID liveness alone as ownership authority; tests inject a fake so the
+/// surrounding logic stays pure.
 pub trait LivenessProbe {
-    /// Whether the process with `pid` is currently alive.
-    fn is_alive(&self, pid: u32) -> bool;
+    /// Observe the exact process recorded as daemon owner.
+    fn observe(&self, record: &DaemonRecord) -> DaemonProcessObservation;
 }
 
 /// Requests a process to terminate — the effecting half of `stop`.
 ///
-/// The real implementation (SIGTERM on Unix) is real IO bound at the synthesis
-/// root; tests inject a fake. Only the recorded daemon pid is ever passed, after
-/// [`classify`](crate::domain::daemon::classify) has confirmed it is alive.
+/// The real implementation re-observes the recorded OS process-start identity
+/// immediately before SIGTERM and refuses an unknown or mismatched owner. Tests
+/// inject a fake.
 pub trait Terminator {
-    /// Ask the process `pid` to terminate.
+    /// Ask the exact process represented by `record` to terminate.
     ///
     /// # Errors
-    /// Returns an error when the termination request cannot be delivered.
-    fn terminate(&self, pid: u32) -> io::Result<()>;
+    /// Returns an error when ownership cannot be revalidated or the termination
+    /// request cannot be delivered.
+    fn terminate(&self, record: &DaemonRecord) -> io::Result<()>;
 }
 
 /// Prepares for and then blocks a running `serve` until the daemon is asked to
@@ -179,7 +196,7 @@ pub trait Sleeper {
 /// lock file and holds it for the process's lifetime; it is real IO bound at the
 /// synthesis root. Because the OS releases an `flock` when the holding process
 /// dies, this guards against multiple daemons even across crashes — something the
-/// record + liveness check cannot do race-free.
+/// record + process observation cannot do race-free.
 ///
 /// [`acquire`](InstanceLock::acquire) waits briefly for a departing holder before
 /// giving up, so a `restart` hands the lock from the exiting daemon to the new
@@ -227,27 +244,28 @@ impl<F: RecordFile> DaemonRecordStore<F> {
     ///
     /// # Panics
     /// Panics only if serializing a `DaemonRecord` to JSON fails, which cannot
-    /// happen for its fields (a `u32` and a timestamp).
+    /// happen for its scalar fields.
     pub fn save(&self, record: &DaemonRecord) -> io::Result<()> {
-        // Serializing a DaemonRecord (a u32 and a timestamp) cannot fail.
+        // Serializing a DaemonRecord's scalar fields cannot fail.
         let json = serde_json::to_string(record).expect("DaemonRecord serializes to JSON");
         self.file.write(&json)
     }
 
     /// Remove `expected` only if it is still the persisted daemon incarnation.
     ///
-    /// Equality covers the full serialized [`DaemonRecord`] (`pid` and
-    /// `started_at`). A replacement record is therefore preserved even when an
-    /// older stop or owner cleanup resumes late.
+    /// Equality covers the full serialized [`DaemonRecord`] (PID, OS
+    /// process-start identity, and registration timestamp). A replacement
+    /// record is therefore preserved even when an older stop or owner cleanup
+    /// resumes late.
     ///
     /// # Errors
     /// Returns the [`RecordFile`] conditional-remove error.
     ///
     /// # Panics
     /// Panics only if serializing a `DaemonRecord` to JSON fails, which cannot
-    /// happen for its fields (a `u32` and a timestamp).
+    /// happen for its scalar fields.
     pub fn clear_if(&self, expected: &DaemonRecord) -> io::Result<bool> {
-        // Serializing a DaemonRecord (a u32 and a timestamp) cannot fail.
+        // Serializing a DaemonRecord's scalar fields cannot fail.
         let json = serde_json::to_string(expected).expect("DaemonRecord serializes to JSON");
         self.file.remove_if(&json)
     }

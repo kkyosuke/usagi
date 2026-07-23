@@ -1,7 +1,7 @@
 //! The `usagi daemon status` usecase: report the daemon's lifecycle state.
 //!
-//! Composes the daemon record store (loading `daemon.json`), the liveness probe
-//! (is the recorded pid alive?), and the domain
+//! Composes the daemon record store (loading `daemon.json`), the process identity probe
+//! (does the recorded PID still have the exact process-start identity?), and the domain
 //! [`classify`](usagi_core::domain::daemon::classify) decision into a single
 //! human-readable line. Both the store's file seam and the probe are injected,
 //! so this stays pure and fully testable; the synthesis root binds the real
@@ -30,11 +30,12 @@ pub fn report<F: RecordFile, P: LivenessProbe>(
     info: &AppInfo,
 ) -> io::Result<String> {
     let record = store.load()?;
-    let alive = record
-        .as_ref()
-        .is_some_and(|record| probe.is_alive(record.pid));
+    let observation = record.as_ref().map_or(
+        usagi_core::domain::daemon::DaemonProcessObservation::Unknown,
+        |record| probe.observe(record),
+    );
     let describe = info.describe();
-    Ok(match classify(record.as_ref(), alive) {
+    Ok(match classify(record.as_ref(), observation) {
         DaemonState::Alive => {
             let pid = record
                 .expect("classify reports Alive only for a present record")
@@ -42,6 +43,9 @@ pub fn report<F: RecordFile, P: LivenessProbe>(
             format!("{describe}: daemon running (pid {pid})")
         }
         DaemonState::Stale => format!("{describe}: daemon not running (stale record, reclaimable)"),
+        DaemonState::Unverified => {
+            format!("{describe}: daemon state unverified (record retained)")
+        }
         DaemonState::Absent => format!("{describe}: daemon not running"),
     })
 }
@@ -88,6 +92,29 @@ mod tests {
             report(&store, &FixedProbe(false), &info()).unwrap(),
             "usagi v0.1.0: daemon not running (stale record, reclaimable)"
         );
+    }
+
+    struct UnknownProbe;
+
+    impl usagi_core::infrastructure::daemon::LivenessProbe for UnknownProbe {
+        fn observe(
+            &self,
+            _record: &DaemonRecord,
+        ) -> usagi_core::domain::daemon::DaemonProcessObservation {
+            usagi_core::domain::daemon::DaemonProcessObservation::Unknown
+        }
+    }
+
+    #[test]
+    fn reports_unverified_and_retains_record_when_identity_is_unknown() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let record = DaemonRecord::new(4321);
+        store.save(&record).unwrap();
+        assert_eq!(
+            report(&store, &UnknownProbe, &info()).unwrap(),
+            "usagi v0.1.0: daemon state unverified (record retained)"
+        );
+        assert_eq!(store.load().unwrap(), Some(record));
     }
 
     #[test]

@@ -46,18 +46,27 @@ pub fn start<F: RecordFile, P: LivenessProbe, L: DaemonLauncher, K: Sleeper>(
     info: &AppInfo,
 ) -> io::Result<String> {
     let existing = store.load()?;
-    let alive = existing
-        .as_ref()
-        .is_some_and(|record| probe.is_alive(record.pid));
+    let observation = existing.as_ref().map_or(
+        usagi_core::domain::daemon::DaemonProcessObservation::Unknown,
+        |record| probe.observe(record),
+    );
     let describe = info.describe();
 
-    if matches!(classify(existing.as_ref(), alive), DaemonState::Alive) {
-        let running = existing
-            .expect("classify reports Alive only for a present record")
-            .pid;
-        return Ok(format!(
-            "{describe}: daemon already running (pid {running})"
-        ));
+    match classify(existing.as_ref(), observation) {
+        DaemonState::Alive => {
+            let running = existing
+                .expect("classify reports Alive only for a present record")
+                .pid;
+            return Ok(format!(
+                "{describe}: daemon already running (pid {running})"
+            ));
+        }
+        DaemonState::Unverified => {
+            return Err(io::Error::other(
+                "daemon owner identity is unverified; refusing to start a replacement",
+            ));
+        }
+        DaemonState::Stale | DaemonState::Absent => {}
     }
 
     let pid = launch_and_confirm(store, probe, launcher, sleeper)?;
@@ -83,7 +92,7 @@ pub(crate) fn launch_and_confirm<F: RecordFile, P: LivenessProbe, L: DaemonLaunc
 
     for _ in 0..MAX_POLLS {
         if let Some(record) = store.load()?
-            && probe.is_alive(record.pid)
+            && probe.observe(&record) == usagi_core::domain::daemon::DaemonProcessObservation::Exact
         {
             return Ok(record.pid);
         }
@@ -142,6 +151,28 @@ mod tests {
         // An idle launcher spawns nothing, so no record ever appears.
         let launcher = TestLauncher::idle(&store);
         assert!(start(&store, &FixedProbe(true), &launcher, &NoopSleeper, &info()).is_err());
+    }
+
+    struct UnknownProbe;
+
+    impl usagi_core::infrastructure::daemon::LivenessProbe for UnknownProbe {
+        fn observe(
+            &self,
+            _record: &DaemonRecord,
+        ) -> usagi_core::domain::daemon::DaemonProcessObservation {
+            usagi_core::domain::daemon::DaemonProcessObservation::Unknown
+        }
+    }
+
+    #[test]
+    fn refuses_to_replace_an_unverified_record() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let existing = DaemonRecord::new(1111);
+        store.save(&existing).unwrap();
+        let launcher = TestLauncher::registering(&store, 5555);
+        let error = start(&store, &UnknownProbe, &launcher, &NoopSleeper, &info()).unwrap_err();
+        assert!(error.to_string().contains("identity is unverified"));
+        assert_eq!(store.load().unwrap(), Some(existing));
     }
 
     #[test]

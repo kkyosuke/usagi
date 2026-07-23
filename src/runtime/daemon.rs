@@ -19,10 +19,11 @@ use serde::Deserialize;
 use usagi_cli::cli::DaemonCommand as CliDaemonCommand;
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::{AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName};
+use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId, WorktreeId};
 use usagi_core::infrastructure::daemon::{
-    DaemonLauncher, DaemonReady, DaemonRecordStore, InstanceLock, LivenessProbe, RecordFile,
-    ShutdownSignal, Sleeper, Terminator,
+    DaemonLauncher, DaemonReady, DaemonRecordStore, InstanceLock, LivenessProbe,
+    ProcessIdentitySource, RecordFile, ShutdownSignal, Sleeper, Terminator,
 };
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::ipc::BuildIdentity;
@@ -3904,40 +3905,201 @@ impl RecordFile for FsRecordFile {
     }
 }
 
-struct KillProbe;
-impl LivenessProbe for KillProbe {
-    #[cfg(unix)]
-    fn is_alive(&self, pid: u32) -> bool {
-        libc::pid_t::try_from(pid).is_ok_and(|pid| unsafe { libc::kill(pid, 0) } == 0)
+struct ExactProcessControl;
+
+impl ProcessIdentitySource for ExactProcessControl {
+    fn process_start_identity(&self, pid: u32) -> std::io::Result<String> {
+        process_start_identity(pid)
     }
-    #[cfg(not(unix))]
-    fn is_alive(&self, _pid: u32) -> bool {
-        false
+}
+
+impl LivenessProbe for ExactProcessControl {
+    fn observe(&self, record: &DaemonRecord) -> DaemonProcessObservation {
+        let Some(expected) = record
+            .process_start_identity
+            .as_deref()
+            .filter(|identity| !identity.is_empty())
+        else {
+            return DaemonProcessObservation::Unknown;
+        };
+        match process_start_identity(record.pid) {
+            Ok(actual) if actual == expected => DaemonProcessObservation::Exact,
+            Ok(_) => DaemonProcessObservation::IdentityMismatch,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                DaemonProcessObservation::Gone
+            }
+            Err(_) => DaemonProcessObservation::Unknown,
+        }
     }
 }
 
 struct SigtermTerminator;
 impl Terminator for SigtermTerminator {
-    #[cfg(unix)]
-    fn terminate(&self, pid: u32) -> std::io::Result<()> {
-        let pid =
-            libc::pid_t::try_from(pid).map_err(|_| std::io::Error::other("pid out of range"))?;
-        if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
-            Ok(())
-        } else {
-            Err(std::io::Error::last_os_error())
-        }
-    }
-    #[cfg(not(unix))]
-    fn terminate(&self, _pid: u32) -> std::io::Result<()> {
-        Err(std::io::Error::other(
-            "terminating a daemon is only supported on Unix",
-        ))
+    fn terminate(&self, record: &DaemonRecord) -> std::io::Result<()> {
+        signal_exact_process(record, libc::SIGTERM)
     }
 }
 
+#[cfg(target_os = "linux")]
+fn process_start_identity(pid: u32) -> std::io::Result<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let close = stat.rfind(')').ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid /proc stat")
+    })?;
+    let start_time = stat[close + 1..]
+        .split_whitespace()
+        .nth(19)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "missing process start time",
+            )
+        })?;
+    start_time
+        .parse::<u64>()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(format!("linux:{start_time}"))
+}
+
+#[cfg(target_os = "macos")]
+fn process_start_identity(pid: u32) -> std::io::Result<String> {
+    let pid = libc::pid_t::try_from(pid).map_err(|_| std::io::Error::other("pid out of range"))?;
+    // SAFETY: `info` is initialized and the buffer pointer/length describe the
+    // exact `proc_bsdinfo` allocation for the duration of `proc_pidinfo`.
+    let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>();
+    let size_arg = libc::c_int::try_from(size)
+        .map_err(|_| std::io::Error::other("proc_bsdinfo size out of range"))?;
+    // SAFETY: see the initialized buffer argument above.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&raw mut info).cast(),
+            size_arg,
+        )
+    };
+    if read == size_arg {
+        Ok(format!(
+            "macos:{}:{}",
+            info.pbi_start_tvsec, info.pbi_start_tvusec
+        ))
+    } else {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "process does not exist",
+            ))
+        } else {
+            Err(error)
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_start_identity(_pid: u32) -> std::io::Result<String> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "process-start identity is unavailable on this platform",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn signal_exact_process(record: &DaemonRecord, signal: libc::c_int) -> std::io::Result<()> {
+    let expected = record
+        .process_start_identity
+        .as_deref()
+        .filter(|identity| !identity.is_empty())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "daemon process identity is unknown",
+            )
+        })?;
+    let pid =
+        libc::pid_t::try_from(record.pid).map_err(|_| std::io::Error::other("pid out of range"))?;
+    // SAFETY: pidfd_open has no pointer arguments and returns an owned fd.
+    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    if pidfd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    struct PidFd(libc::c_int);
+    impl Drop for PidFd {
+        fn drop(&mut self) {
+            // SAFETY: this object exclusively owns the fd returned by
+            // pidfd_open and drops it exactly once.
+            unsafe {
+                libc::close(self.0);
+            }
+        }
+    }
+    let pidfd = PidFd(
+        libc::c_int::try_from(pidfd).map_err(|_| std::io::Error::other("pidfd out of range"))?,
+    );
+    if process_start_identity(record.pid)?.as_str() != expected {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "daemon process identity mismatch",
+        ));
+    }
+    // SAFETY: `pidfd` references the identity-verified process and null siginfo
+    // plus zero flags are the documented pidfd_send_signal form.
+    if unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            pidfd.0,
+            signal,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        )
+    } == 0
+    {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn signal_exact_process(record: &DaemonRecord, signal: libc::c_int) -> std::io::Result<()> {
+    let expected = record
+        .process_start_identity
+        .as_deref()
+        .filter(|identity| !identity.is_empty())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "daemon process identity is unknown",
+            )
+        })?;
+    if process_start_identity(record.pid)?.as_str() != expected {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "daemon process identity mismatch",
+        ));
+    }
+    let pid =
+        libc::pid_t::try_from(record.pid).map_err(|_| std::io::Error::other("pid out of range"))?;
+    // SAFETY: identity was re-read immediately above and `pid` is in range.
+    if unsafe { libc::kill(pid, signal) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn signal_exact_process(_record: &DaemonRecord, _signal: libc::c_int) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "terminating a daemon is unsupported on this platform",
+    ))
+}
+
 /// Root-bound IPC publication seam. `serve` invokes it only after the daemon
-/// owns the singleton lock and has persisted its PID record. The guard makes a
+/// owns the singleton lock and has persisted its exact process-owner record. The guard makes a
 /// future duplicate invocation a no-op instead of binding a second endpoint.
 struct IpcReady<'a> {
     data_dir: &'a Path,
@@ -4357,7 +4519,7 @@ fn run_inner(
     let shutdown = SignalShutdown::new(Arc::clone(&ready.shutdown));
     let env = DaemonEnv {
         store: &store,
-        probe: &KillProbe,
+        probe: &ExactProcessControl,
         terminator: &SigtermTerminator,
         ready: &ready,
         shutdown: &shutdown,
@@ -4639,6 +4801,61 @@ mod tests {
         }
     }
 
+    /// A [`ProcessIdentitySource`] that returns a fixed identity for any pid, so
+    /// `serve` tests can register a record without observing a real OS process.
+    struct FixedIdentitySource(&'static str);
+
+    impl ProcessIdentitySource for FixedIdentitySource {
+        fn process_start_identity(&self, _pid: u32) -> std::io::Result<String> {
+            Ok(self.0.to_string())
+        }
+    }
+
+    #[test]
+    fn daemon_process_identity_observation_fences_pid_reuse_and_legacy_records() {
+        let pid = std::process::id();
+        let identity = ExactProcessControl.process_start_identity(pid).unwrap();
+        assert!(!identity.is_empty());
+        let exact = DaemonRecord::identified(pid, identity.clone());
+        assert_eq!(
+            ExactProcessControl.observe(&exact),
+            DaemonProcessObservation::Exact
+        );
+
+        let mismatch = DaemonRecord::identified(pid, format!("{identity}-other"));
+        assert_eq!(
+            ExactProcessControl.observe(&mismatch),
+            DaemonProcessObservation::IdentityMismatch
+        );
+        assert_eq!(
+            ExactProcessControl.observe(&DaemonRecord::new(pid)),
+            DaemonProcessObservation::Unknown
+        );
+        let absent = DaemonRecord::identified(2_000_000_000, "not-present");
+        assert_eq!(
+            ExactProcessControl.observe(&absent),
+            DaemonProcessObservation::Gone
+        );
+    }
+
+    #[test]
+    fn daemon_shutdown_signals_only_the_exact_child_incarnation() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let identity = ExactProcessControl
+            .process_start_identity(child.id())
+            .unwrap();
+        let exact = DaemonRecord::identified(child.id(), identity.clone());
+        let mismatch = DaemonRecord::identified(child.id(), format!("{identity}-reused"));
+
+        let error = SigtermTerminator.terminate(&mismatch).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(child.try_wait().unwrap().is_none());
+
+        SigtermTerminator.terminate(&exact).unwrap();
+        let status = child.wait().unwrap();
+        assert!(!status.success());
+    }
+
     #[test]
     fn delayed_record_clear_cannot_remove_a_concurrent_replacement() {
         let directory = tempfile::tempdir().unwrap();
@@ -4647,6 +4864,7 @@ mod tests {
         let old = usagi_core::domain::daemon::DaemonRecord::new(4242);
         let replacement = usagi_core::domain::daemon::DaemonRecord {
             pid: old.pid,
+            process_start_identity: old.process_start_identity.clone(),
             started_at: old.started_at + chrono::Duration::nanoseconds(1),
         };
         old_store.save(&old).unwrap();
@@ -5257,7 +5475,11 @@ mod tests {
         assert_eq!(store.load().unwrap(), None);
         assert!(!socket.exists());
         assert!(!daemon.join("current.json").exists());
-        assert!(KillProbe.is_alive(std::process::id()));
+        assert!(
+            ExactProcessControl
+                .process_start_identity(std::process::id())
+                .is_ok()
+        );
 
         // SAFETY: recovery removed only filesystem artifacts; dropping closes
         // the still-owned listener fd and its cleanup is idempotent.
@@ -5312,7 +5534,11 @@ mod tests {
         );
         assert_eq!(store.load().unwrap(), None);
         assert!(!current.exists());
-        assert!(KillProbe.is_alive(std::process::id()));
+        assert!(
+            ExactProcessControl
+                .process_start_identity(std::process::id())
+                .is_ok()
+        );
 
         // SAFETY: recovery removed only filesystem artifacts; dropping closes
         // the still-owned listener fd and its cleanup is idempotent.
@@ -5395,6 +5621,7 @@ mod tests {
         let old = usagi_core::domain::daemon::DaemonRecord::new(4242);
         let replacement = usagi_core::domain::daemon::DaemonRecord {
             pid: old.pid,
+            process_start_identity: old.process_start_identity.clone(),
             started_at: old.started_at + chrono::Duration::nanoseconds(1),
         };
         store.save(&old).unwrap();
@@ -5524,6 +5751,7 @@ mod tests {
                     &recovery,
                     &ImmediateTestShutdown,
                     &lock,
+                    &FixedIdentitySource("test:7777"),
                     7777,
                     &info,
                 )
@@ -5552,6 +5780,7 @@ mod tests {
                 &recovery,
                 &ImmediateTestShutdown,
                 &lock,
+                &FixedIdentitySource("test:7777"),
                 7777,
                 &info,
             )
@@ -5582,6 +5811,7 @@ mod tests {
         let old = usagi_core::domain::daemon::DaemonRecord::new(4242);
         let replacement = usagi_core::domain::daemon::DaemonRecord {
             pid: old.pid,
+            process_start_identity: old.process_start_identity.clone(),
             started_at: old.started_at + chrono::Duration::nanoseconds(1),
         };
         store.save(&replacement).unwrap();
@@ -5609,12 +5839,13 @@ mod tests {
         let store = DaemonRecordStore::new(FsRecordFile {
             path: daemon.join("daemon.json"),
         });
-        let record = usagi_core::domain::daemon::DaemonRecord::new(u32::MAX);
+        let record =
+            usagi_core::domain::daemon::DaemonRecord::identified(2_000_000_000, "test:absent");
         store.save(&record).unwrap();
 
         let error = usagi_daemon::usecase::stop::stop(
             &store,
-            &KillProbe,
+            &ExactProcessControl,
             &SigtermTerminator,
             &RealSleeper,
             &SupersededCleanup,

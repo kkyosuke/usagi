@@ -2,7 +2,7 @@
 //! record.
 //!
 //! Mirrors [`status`](crate::usecase::status), but acts on the state instead of
-//! only reporting it. It loads the record, classifies it with the liveness
+//! only reporting it. It loads the record, classifies it with the process identity
 //! probe, and then:
 //!
 //! - **running**: asks the process to terminate, then waits until the owner has
@@ -97,17 +97,18 @@ pub fn stop<F: RecordFile, P: LivenessProbe, T: Terminator, K: Sleeper>(
     info: &AppInfo,
 ) -> io::Result<String> {
     let record = store.load()?;
-    let alive = record
-        .as_ref()
-        .is_some_and(|record| probe.is_alive(record.pid));
+    let observation = record.as_ref().map_or(
+        usagi_core::domain::daemon::DaemonProcessObservation::Unknown,
+        |record| probe.observe(record),
+    );
     let describe = info.describe();
-    match classify(record.as_ref(), alive) {
+    match classify(record.as_ref(), observation) {
         DaemonState::Alive => {
             let record = record
                 .as_ref()
                 .expect("classify reports Alive only for a present record");
             let pid = record.pid;
-            terminator.terminate(pid)?;
+            terminator.terminate(record)?;
             wait_for_owner_cleanup(store, probe, sleeper, record)?;
             Ok(format!("{describe}: daemon stopped (pid {pid})"))
         }
@@ -124,6 +125,9 @@ pub fn stop<F: RecordFile, P: LivenessProbe, T: Terminator, K: Sleeper>(
                 Err(error) => Err(error),
             }
         }
+        DaemonState::Unverified => Err(io::Error::other(
+            "daemon owner identity is unverified; refusing to signal or reclaim the record",
+        )),
         DaemonState::Absent => Ok(format!("{describe}: daemon not running")),
     }
 }
@@ -137,9 +141,11 @@ fn wait_for_owner_cleanup(
     for poll in 0..=MAX_CLEANUP_POLLS {
         match store.load_record()? {
             Some(current) if current == *expected => {
-                if !probe.is_alive(expected.pid) {
+                if probe.observe(expected)
+                    != usagi_core::domain::daemon::DaemonProcessObservation::Exact
+                {
                     // The owner may retire, clear, and exit between our record
-                    // read and liveness probe. Recheck the completion fence so
+                    // read and process observation. Recheck the completion fence so
                     // a successful cleanup in that window is not reported as
                     // an incomplete shutdown.
                     return match store.load_record()? {
@@ -226,6 +232,7 @@ mod tests {
     fn replacement_of(record: &DaemonRecord) -> DaemonRecord {
         DaemonRecord {
             pid: record.pid,
+            process_start_identity: record.process_start_identity.clone(),
             started_at: record.started_at + chrono::Duration::nanoseconds(1),
         }
     }
@@ -236,9 +243,12 @@ mod tests {
     }
 
     impl LivenessProbe for ReplacingProbe<'_> {
-        fn is_alive(&self, _pid: u32) -> bool {
+        fn observe(
+            &self,
+            _record: &DaemonRecord,
+        ) -> usagi_core::domain::daemon::DaemonProcessObservation {
             self.store.save(&self.replacement).unwrap();
-            false
+            usagi_core::domain::daemon::DaemonProcessObservation::Gone
         }
     }
 
@@ -248,7 +258,7 @@ mod tests {
     }
 
     impl Terminator for ReplacingTerminator<'_> {
-        fn terminate(&self, _pid: u32) -> std::io::Result<()> {
+        fn terminate(&self, _record: &DaemonRecord) -> std::io::Result<()> {
             self.store.save(&self.replacement)
         }
     }
@@ -289,10 +299,17 @@ mod tests {
     }
 
     impl LivenessProbe for AliveThenGoneProbe {
-        fn is_alive(&self, _pid: u32) -> bool {
+        fn observe(
+            &self,
+            _record: &DaemonRecord,
+        ) -> usagi_core::domain::daemon::DaemonProcessObservation {
             let alive = self.calls.get() == 0;
             self.calls.set(self.calls.get() + 1);
-            alive
+            if alive {
+                usagi_core::domain::daemon::DaemonProcessObservation::Exact
+            } else {
+                usagi_core::domain::daemon::DaemonProcessObservation::Gone
+            }
         }
     }
 
@@ -303,15 +320,29 @@ mod tests {
     }
 
     impl LivenessProbe for CleanupWhileBecomingGoneProbe<'_> {
-        fn is_alive(&self, _pid: u32) -> bool {
+        fn observe(
+            &self,
+            _record: &DaemonRecord,
+        ) -> usagi_core::domain::daemon::DaemonProcessObservation {
             let calls = self.calls.get();
             self.calls.set(calls + 1);
             if calls == 0 {
-                true
+                usagi_core::domain::daemon::DaemonProcessObservation::Exact
             } else {
                 assert!(self.store.clear_if(self.expected).unwrap());
-                false
+                usagi_core::domain::daemon::DaemonProcessObservation::Gone
             }
+        }
+    }
+
+    struct UnknownProbe;
+
+    impl LivenessProbe for UnknownProbe {
+        fn observe(
+            &self,
+            _record: &DaemonRecord,
+        ) -> usagi_core::domain::daemon::DaemonProcessObservation {
+            usagi_core::domain::daemon::DaemonProcessObservation::Unknown
         }
     }
 
@@ -474,6 +505,18 @@ mod tests {
         assert!(cleanup.saw_expected.get());
         assert!(cleanup.cleared.get());
         assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[test]
+    fn unverified_owner_is_neither_signalled_nor_reclaimed() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let record = DaemonRecord::new(4321);
+        store.save(&record).unwrap();
+        let terminator = RecordingTerminator::default();
+        let error = stop(&store, &UnknownProbe, &terminator, &NoopSleeper, &info()).unwrap_err();
+        assert!(error.to_string().contains("identity is unverified"));
+        assert!(terminator.terminated().is_empty());
+        assert_eq!(store.load().unwrap(), Some(record));
     }
 
     #[test]
@@ -643,7 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn owner_cleanup_between_record_and_liveness_checks_is_successful() {
+    fn owner_cleanup_between_record_and_process_observation_is_successful() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         let record = DaemonRecord::new(4321);
         store.save(&record).unwrap();

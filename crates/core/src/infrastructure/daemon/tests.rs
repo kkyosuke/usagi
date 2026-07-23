@@ -85,6 +85,7 @@ fn clear_if_removes_only_the_expected_record() {
     let old = DaemonRecord::new(4321);
     let replacement = DaemonRecord {
         pid: old.pid,
+        process_start_identity: old.process_start_identity.clone(),
         started_at: old.started_at + chrono::Duration::nanoseconds(1),
     };
     store.save(&replacement).unwrap();

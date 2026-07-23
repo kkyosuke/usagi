@@ -32,7 +32,7 @@ use std::io::{self, Write};
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::daemon::DaemonRecord;
 use usagi_core::infrastructure::daemon::{
-    DaemonReady, DaemonRecordStore, InstanceLock, RecordFile, ShutdownSignal,
+    DaemonReady, DaemonRecordStore, InstanceLock, ProcessIdentitySource, RecordFile, ShutdownSignal,
 };
 
 /// Type-erased durable record port used by the production composition and
@@ -80,12 +80,17 @@ impl<F: RecordFile> DaemonRecordPort for DaemonRecordStore<F> {
 /// Returns the lock's acquire error, the store's load / save / clear error, the
 /// shutdown preparation / wait error, the endpoint publish / quiesce / retire
 /// error, or an `out` write error.
+// The daemon serve entry binds one seam per real-IO concern (record store,
+// endpoint readiness, shutdown, single-instance lock, process identity) plus its
+// own pid and app info; grouping them would only hide the composition wiring.
+#[allow(clippy::too_many_arguments)]
 pub fn serve(
     out: &mut dyn Write,
     store: &dyn DaemonRecordPort,
     ready: &dyn DaemonReady,
     shutdown: &dyn ShutdownSignal,
     lock: &dyn InstanceLock,
+    identity: &dyn ProcessIdentitySource,
     pid: u32,
     info: &AppInfo,
 ) -> io::Result<()> {
@@ -120,8 +125,17 @@ pub fn serve(
     }
 
     // Recovery has proved that no inactive endpoint remains and the snapshot is
-    // still current. Register this process before publishing its new endpoint.
-    let record = DaemonRecord::new(pid);
+    // still current. Register this process before publishing its new endpoint,
+    // stamping the OS-observed process-start identity so later owner
+    // observation can fence PID reuse.
+    let process_start_identity = identity.process_start_identity(pid)?;
+    if process_start_identity.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "process-start identity must not be empty",
+        ));
+    }
+    let record = DaemonRecord::identified(pid, process_start_identity);
     store.save(&record)?;
     if let Err(error) = ready.publish() {
         // Binding may already have published a locator before a later startup
@@ -180,13 +194,15 @@ fn clear_after_retire(
 mod tests {
     use super::serve;
     use crate::test_support::{
-        FailingShutdown, FakeLock, ImmediateShutdown, InMemoryRecordFile, NoopReady,
+        FailingShutdown, FakeLock, FixedProbe, ImmediateShutdown, InMemoryRecordFile, NoopReady,
     };
     use std::cell::{Cell, RefCell};
     use std::io;
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::daemon::DaemonRecord;
-    use usagi_core::infrastructure::daemon::{DaemonReady, DaemonRecordStore};
+    use usagi_core::infrastructure::daemon::{
+        DaemonReady, DaemonRecordStore, ProcessIdentitySource,
+    };
 
     struct FailingRecordFile {
         write: bool,
@@ -238,6 +254,7 @@ mod tests {
             &NoopReady,
             &ImmediateShutdown,
             &FakeLock::Acquired,
+            &FixedProbe(true),
             pid,
             &info(),
         )
@@ -255,10 +272,9 @@ mod tests {
         }
 
         fn publish(&self) -> io::Result<()> {
-            assert_eq!(
-                self.store.load().unwrap().map(|record| record.pid),
-                Some(2222)
-            );
+            let record = self.store.load().unwrap().unwrap();
+            assert_eq!(record.pid, 2222);
+            assert_eq!(record.process_start_identity.as_deref(), Some("test:2222"));
             self.published.set(self.published.get() + 1);
             Ok(())
         }
@@ -311,6 +327,7 @@ mod tests {
             let old = self.store.load()?.expect("serve registered its record");
             let replacement = DaemonRecord {
                 pid: old.pid,
+                process_start_identity: old.process_start_identity.clone(),
                 started_at: old.started_at + chrono::Duration::nanoseconds(1),
             };
             self.store.save(&replacement)?;
@@ -351,6 +368,14 @@ mod tests {
 
     struct ConfigurableShutdown {
         fail_prepare: bool,
+    }
+
+    struct FixedIdentity(Result<&'static str, &'static str>);
+
+    impl ProcessIdentitySource for FixedIdentity {
+        fn process_start_identity(&self, _pid: u32) -> io::Result<String> {
+            self.0.map(str::to_owned).map_err(io::Error::other)
+        }
     }
     impl usagi_core::infrastructure::daemon::ShutdownSignal for ConfigurableShutdown {
         fn prepare(&self) -> io::Result<()> {
@@ -491,6 +516,7 @@ mod tests {
             &ready,
             &shutdown,
             &FakeLock::Acquired,
+            &FixedProbe(true),
             2222,
             &info(),
         )
@@ -518,6 +544,7 @@ mod tests {
                 &ready,
                 &ImmediateShutdown,
                 &FakeLock::Acquired,
+                &FixedProbe(true),
                 2222,
                 &info(),
             )
@@ -533,6 +560,7 @@ mod tests {
             &ready,
             &ImmediateShutdown,
             &FakeLock::Acquired,
+            &FixedProbe(true),
             2222,
             &info(),
         )
@@ -560,6 +588,7 @@ mod tests {
             &ready,
             &ImmediateShutdown,
             &FakeLock::Acquired,
+            &FixedProbe(true),
             2222,
             &info(),
         )
@@ -589,6 +618,7 @@ mod tests {
                 &ready,
                 &ImmediateShutdown,
                 &FakeLock::Acquired,
+                &FixedProbe(true),
                 2222,
                 &info(),
             )
@@ -614,6 +644,7 @@ mod tests {
             &ready,
             &ImmediateShutdown,
             &FakeLock::Acquired,
+            &FixedProbe(true),
             2222,
             &info(),
         )
@@ -634,11 +665,57 @@ mod tests {
                 &NoopReady,
                 &ConfigurableShutdown { fail_prepare: true },
                 &FakeLock::Acquired,
+                &FixedProbe(true),
                 2222,
                 &info(),
             )
             .is_err()
         );
+        assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[test]
+    fn identity_observation_failure_never_registers_or_publishes() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let ready = CleanupReady {
+            fail_publish: false,
+            fail_quiesce: false,
+            fail_retire: false,
+            quiesces: Cell::new(0),
+            retires: Cell::new(0),
+        };
+        let error = serve(
+            &mut Vec::new(),
+            &store,
+            &ready,
+            &ImmediateShutdown,
+            &FakeLock::Acquired,
+            &FixedIdentity(Err("identity unavailable")),
+            2222,
+            &info(),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "identity unavailable");
+        assert_eq!(store.load().unwrap(), None);
+        assert_eq!(ready.quiesces.get(), 0);
+        assert_eq!(ready.retires.get(), 0);
+    }
+
+    #[test]
+    fn empty_identity_never_registers_or_publishes() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let error = serve(
+            &mut Vec::new(),
+            &store,
+            &NoopReady,
+            &ImmediateShutdown,
+            &FakeLock::Acquired,
+            &FixedIdentity(Ok("")),
+            2222,
+            &info(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(store.load().unwrap(), None);
     }
 
@@ -659,6 +736,7 @@ mod tests {
                 &quiesce_failure,
                 &ImmediateShutdown,
                 &FakeLock::Acquired,
+                &FixedProbe(true),
                 2222,
                 &info(),
             )
@@ -683,6 +761,7 @@ mod tests {
                 &retire_failure,
                 &ImmediateShutdown,
                 &FakeLock::Acquired,
+                &FixedProbe(true),
                 2222,
                 &info(),
             )
@@ -708,6 +787,7 @@ mod tests {
                 fail_prepare: false,
             },
             &FakeLock::Acquired,
+            &FixedProbe(true),
             2222,
             &info(),
         )
@@ -725,6 +805,7 @@ mod tests {
             &refused_ready,
             &ImmediateShutdown,
             &FakeLock::Held,
+            &FixedProbe(true),
             2222,
             &info(),
         )
@@ -746,6 +827,7 @@ mod tests {
             &ready,
             &ImmediateShutdown,
             &FakeLock::Acquired,
+            &FixedProbe(true),
             2222,
             &info(),
         )
@@ -771,6 +853,7 @@ mod tests {
                 &ready,
                 &ImmediateShutdown,
                 &FakeLock::Acquired,
+                &FixedProbe(true),
                 2222,
                 &info(),
             )
@@ -799,6 +882,7 @@ mod tests {
                 &ready,
                 &ImmediateShutdown,
                 &FakeLock::Acquired,
+                &FixedProbe(true),
                 2222,
                 &info(),
             )
@@ -832,6 +916,7 @@ mod tests {
             &NoopReady,
             &ImmediateShutdown,
             &FakeLock::Held,
+            &FixedProbe(true),
             2222,
             &info(),
         )
@@ -854,6 +939,7 @@ mod tests {
             &NoopReady,
             &ImmediateShutdown,
             &FakeLock::Held,
+            &FixedProbe(true),
             2222,
             &info(),
         )
@@ -875,6 +961,7 @@ mod tests {
                 &NoopReady,
                 &ImmediateShutdown,
                 &FakeLock::Failing,
+                &FixedProbe(true),
                 2222,
                 &info()
             )
@@ -893,6 +980,7 @@ mod tests {
                 &NoopReady,
                 &FailingShutdown,
                 &FakeLock::Acquired,
+                &FixedProbe(true),
                 2222,
                 &info()
             )
@@ -912,6 +1000,7 @@ mod tests {
                 &NoopReady,
                 &ImmediateShutdown,
                 &FakeLock::Held,
+                &FixedProbe(true),
                 2222,
                 &info()
             )
@@ -956,6 +1045,7 @@ mod tests {
                     &NoopReady,
                     &ImmediateShutdown,
                     &FakeLock::Acquired,
+                    &FixedProbe(true),
                     2222,
                     &info(),
                 )
@@ -969,6 +1059,7 @@ mod tests {
                 &NoopReady,
                 &ImmediateShutdown,
                 &FakeLock::Acquired,
+                &FixedProbe(true),
                 2222,
                 &info(),
             )
