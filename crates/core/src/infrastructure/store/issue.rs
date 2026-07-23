@@ -713,37 +713,12 @@ impl IssueStore {
         registered_worktrees: &[PathBuf],
         materialized_issue_roots: &[PathBuf],
     ) -> Result<ExistingIssueFloors> {
-        let mut v1_roots = BTreeSet::from([workspace_root.to_path_buf()]);
-        let sessions = workspace_root.join(STATE_DIR).join(SESSIONS_DIR);
-        match fs::read_dir(&sessions) {
-            Ok(entries) => {
-                for entry in entries {
-                    let entry = context_session_entry(entry, &sessions)?;
-                    let entry_path = entry.path();
-                    let file_type = context_session_file_type(&entry_path, entry.file_type())?;
-                    anyhow::ensure!(
-                        !file_type.is_symlink(),
-                        "session entry is a symlink and cannot be safely enumerated: {}",
-                        entry_path.display()
-                    );
-                    if file_type.is_dir() {
-                        v1_roots.insert(entry_path);
-                    }
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                match fs::symlink_metadata(&sessions) {
-                    Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {}
-                    Ok(_) | Err(_) => {
-                        return Err(error)
-                            .context(format!("failed to read sessions {}", sessions.display()));
-                    }
-                }
-            }
-            Err(error) => {
-                return Err(error)
-                    .context(format!("failed to read sessions {}", sessions.display()));
-            }
+        let mut session_parents = BTreeSet::from([workspace_root.to_path_buf()]);
+        session_parents.extend(registered_worktrees.iter().cloned());
+        let mut v1_roots = BTreeSet::new();
+        for root in session_parents {
+            v1_roots.insert(root.clone());
+            insert_session_roots(&mut v1_roots, &root)?;
         }
 
         let mut all_roots = v1_roots.clone();
@@ -759,6 +734,40 @@ impl IssueStore {
         }
         Ok(ExistingIssueFloors { all, v1_visible: 0 })
     }
+}
+
+fn insert_session_roots(roots: &mut BTreeSet<PathBuf>, workspace_root: &Path) -> Result<()> {
+    let sessions = workspace_root.join(STATE_DIR).join(SESSIONS_DIR);
+    match fs::read_dir(&sessions) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = context_session_entry(entry, &sessions)?;
+                let entry_path = entry.path();
+                let file_type = context_session_file_type(&entry_path, entry.file_type())?;
+                anyhow::ensure!(
+                    !file_type.is_symlink(),
+                    "session entry is a symlink and cannot be safely enumerated: {}",
+                    entry_path.display()
+                );
+                if file_type.is_dir() {
+                    roots.insert(entry_path);
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match fs::symlink_metadata(&sessions) {
+                Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(_) | Err(_) => {
+                    return Err(error)
+                        .context(format!("failed to read sessions {}", sessions.display()));
+                }
+            }
+        }
+        Err(error) => {
+            return Err(error).context(format!("failed to read sessions {}", sessions.display()));
+        }
+    }
+    Ok(())
 }
 
 fn context_session_entry(
@@ -1501,6 +1510,13 @@ mod tests {
                 .to_string()
                 .contains("failed to read")
         );
+        assert_eq!(
+            store.read(1).unwrap_err().to_string(),
+            format!(
+                "markdown source path is not a directory: {}",
+                store.dir().display()
+            )
+        );
     }
 
     #[test]
@@ -2022,6 +2038,148 @@ mod tests {
             801
         );
         assert!(authority.join("reservations/0000000801.reserved").is_file());
+    }
+
+    #[test]
+    fn external_linked_caller_fences_main_direct_session_with_missing_legacy_sequence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.email", "test@example.com"]);
+        git(&root, &["config", "user.name", "Test"]);
+        fs::write(root.join("README.md"), "workspace\n").unwrap();
+        git(&root, &["add", "README.md"]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+
+        let external = tmp.path().join("external-linked");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "test-external-direct-session",
+                external.to_str().unwrap(),
+            ],
+        );
+        let registered = root.join(".usagi/sessions/registered");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "test-registered-direct-session",
+                registered.to_str().unwrap(),
+            ],
+        );
+        let direct_session = root.join(".usagi/sessions/plain");
+        let direct_store = IssueStore::new(&direct_session);
+        fs::create_dir_all(direct_store.dir()).unwrap();
+        let local_legacy = direct_store.dir().join("usagi-issue-sequence").join("next");
+        let registered_legacy = registered.join(".usagi/issues/usagi-issue-sequence/next");
+        assert!(!local_legacy.exists());
+        assert!(!registered_legacy.exists());
+
+        let authority = root.join(".git/usagi/issue-numbers");
+        let reservations = authority.join("reservations");
+        fs::create_dir_all(&reservations).unwrap();
+        fs::write(
+            authority.join("sequence.json"),
+            b"{\"version\":1,\"last_reserved\":515}\n",
+        )
+        .unwrap();
+        fs::write(authority.join("legacy-v2-migrated"), b"515\n").unwrap();
+        fs::write(reservations.join("0000000515.reserved"), b"515\n").unwrap();
+        let common_legacy = root.join(".git/usagi-issue-sequence/next");
+        fs::create_dir_all(common_legacy.parent().unwrap()).unwrap();
+        fs::write(&common_legacy, b"migrated-to-usagi-issue-numbers:515\n").unwrap();
+
+        assert_eq!(
+            IssueStore::new(&external).reserve_next_number().unwrap(),
+            516
+        );
+        assert_eq!(
+            fs::read_to_string(&local_legacy).unwrap(),
+            "migrated-to-usagi-issue-numbers:516\n"
+        );
+        assert!(!registered_legacy.exists());
+        assert!(reservations.join("0000000516.reserved").is_file());
+        assert!(!external.join(".usagi").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_linked_caller_rejects_main_session_symlink_without_effect() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.email", "test@example.com"]);
+        git(&root, &["config", "user.name", "Test"]);
+        fs::write(root.join("README.md"), "workspace\n").unwrap();
+        git(&root, &["add", "README.md"]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+
+        let external = tmp.path().join("external-linked");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "test-external-session-symlink",
+                external.to_str().unwrap(),
+            ],
+        );
+        let sessions = root.join(".usagi/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let real_session = tmp.path().join("real-session");
+        fs::create_dir(&real_session).unwrap();
+        let session_link = sessions.join("hidden");
+        symlink(&real_session, &session_link).unwrap();
+
+        let authority = root.join(".git/usagi/issue-numbers");
+        let reservations = authority.join("reservations");
+        fs::create_dir_all(&reservations).unwrap();
+        let sequence = authority.join("sequence.json");
+        let migration = authority.join("legacy-v2-migrated");
+        let reservation = reservations.join("0000000515.reserved");
+        fs::write(&sequence, b"{\"version\":1,\"last_reserved\":515}\n").unwrap();
+        fs::write(&migration, b"515\n").unwrap();
+        fs::write(&reservation, b"515\n").unwrap();
+        let common_legacy = root.join(".git/usagi-issue-sequence/next");
+        fs::create_dir_all(common_legacy.parent().unwrap()).unwrap();
+        fs::write(&common_legacy, b"migrated-to-usagi-issue-numbers:515\n").unwrap();
+        let preserved = [
+            fs::read(&sequence).unwrap(),
+            fs::read(&migration).unwrap(),
+            fs::read(&reservation).unwrap(),
+            fs::read(&common_legacy).unwrap(),
+        ];
+
+        let error = IssueStore::new(&external)
+            .reserve_next_number()
+            .unwrap_err();
+        assert!(error.to_string().contains("session entry is a symlink"));
+        assert_eq!(fs::read(&sequence).unwrap(), preserved[0]);
+        assert_eq!(fs::read(&migration).unwrap(), preserved[1]);
+        assert_eq!(fs::read(&reservation).unwrap(), preserved[2]);
+        assert_eq!(fs::read(&common_legacy).unwrap(), preserved[3]);
+        assert!(
+            fs::symlink_metadata(&session_link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!reservations.join("0000000516.reserved").exists());
+        assert!(!external.join(".usagi").exists());
     }
 
     #[test]

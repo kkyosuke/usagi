@@ -146,16 +146,16 @@ fn client(data_dir: &Path) -> IpcClient<std::os::unix::net::UnixStream> {
         // `connect_current` creates a missing endpoint directory for general
         // callers. This fixture starts the daemon concurrently, so wait for
         // the owner to create and privatise it instead of racing that setup.
-        if daemon_dir.exists() {
-            if let Ok(stream) = connect_current(data_dir) {
-                return IpcClient::connect(
-                    stream,
-                    "agent-ipc-e2e".into(),
-                    OperationId::new().to_string(),
-                    ClientPolicy::cli(),
-                )
-                .expect("Unix IPC handshake succeeds");
-            }
+        if daemon_dir.exists()
+            && let Ok(stream) = connect_current(data_dir)
+        {
+            return IpcClient::connect(
+                stream,
+                "agent-ipc-e2e".into(),
+                OperationId::new().to_string(),
+                ClientPolicy::cli(),
+            )
+            .expect("Unix IPC handshake succeeds");
         }
         assert!(
             Instant::now() < deadline,

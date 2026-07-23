@@ -410,6 +410,12 @@ fn path_is_genuinely_missing(path: &Path) -> Result<bool> {
     Ok(false)
 }
 
+fn valid_fingerprint(fingerprint: &str) -> bool {
+    fingerprint.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
 #[cfg(test)]
 mod path_tests {
     use super::*;
@@ -435,10 +441,4 @@ mod path_tests {
         fs::set_permissions(&unreadable, original).unwrap();
         assert!(error.to_string().contains("failed to inspect ancestor"));
     }
-}
-
-fn valid_fingerprint(fingerprint: &str) -> bool {
-    fingerprint.strip_prefix("sha256:").is_some_and(|digest| {
-        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-    })
 }

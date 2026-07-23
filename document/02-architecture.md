@@ -278,7 +278,7 @@ quiescenceは必須の外部gateである。Git→non-Gitへのclassification変
 
 lock 順序は new authority `.lock`、canonical parent identityでdedupした後の辞書順の列挙済み旧 v2 `.lock` の順で固定する。raw pathのsymlink aliasは同じ順序に正規化する。全 lock を保持したまま、
 `sequence.json`、`legacy-v2-migrated`、全 reservation marker、旧 `next`、workspace root と
-`.usagi/sessions/<name>/`、および登録済み全Git worktreeでtracked / untracked / ignoredとしてmaterialize済みの
+登録済み全Git worktree root、それぞれの`.usagi/sessions/<name>/`、および登録済み全Git worktreeでtracked / untracked / ignoredとしてmaterialize済みの
 arbitrary nested issue storeにある全sourceのfilename prefix / parse可能なfrontmatter宣言の最大値を最初に検証する。activeな旧`next`は
 plain `u32` として high-water へ fold する。observed path のうち sentinel で封鎖されていない authority が2つ以上なら、
 相互に独立した旧 writer を atomic に止められないため、authoritative file を書く前に停止する。
@@ -362,10 +362,16 @@ normal sequence(MAX)をrecovery tagとして直ちに公開し、全sentinel(MAX
 final normal sequence(MAX)と収束する。reservationやsourceを追加せずexhaustion errorを返す。
 
 Git は common legacy を常時、normalized worktree より深い caller の current store-local path を `next` 未作成でも列挙する。
-その他の Git root / workspace / direct-session path は legacy directory が存在するとき列挙し、さらに登録済み全 Git
-worktree の tracked / untracked / ignored file から materialize 済みの nested legacy `next` を pathspec で毎回発見する。
+normalized workspace と登録済み全 Git worktree の各 `.usagi/sessions/` を毎回走査し、通常の direct-session child は
+store-local `next` が未作成でも legacy authority として導出して lock / fence する。child 自身が登録済み worktree なら旧 v2 も
+Git-common authority を使うため、明示的に materialize 済みの local legacy だけを fold し、missing local authority は作らない。
+未登録 child が独立した `.git` を持つ場合、または sessions tree / session entry が symlink の場合は authoritative write 前に
+fail-closed になる。child 側から起動した場合も、conventional workspace と Git common directory が一致し、caller worktree が
+その workspace に登録済みであることを authority 解決前に検証する。さらに登録済み全 Git worktree の tracked / untracked / ignored file から materialize 済みの nested legacy
+`next` を pathspec で毎回発見する。
 同じauthority lock下のdiscovery phaseでnested issue Markdownを発見し、そのstore-local legacy pathも`next`未作成の段階からlock / fence
-対象へ加える。registered worktree root自身は旧v2も`.git`経由でcommon legacyを使うためstore-local pathを追加しない。
+対象へ加える。source high-water も normalized workspace と登録済み全 worktree の root / direct-session child、および
+materialize 済み nested source という同じ親集合から走査する。registered worktree root自身は旧v2も`.git`経由でcommon legacyを使うためstore-local pathを追加しない。
 非 Git は workspace root / current と存在する全 direct-session root を `next` 未作成でも列挙する。`Active` と `Missing` は
 ともに未封鎖で、列挙済み authority のうち2件以上なら blocker 前に停止する。dangling sessions / issue store / authority pathも
 「missing」と推測せず、session symlinkも暗黙に追わずfail-closedになる。非 Git は global completion marker を公開しないため、後発 direct session を

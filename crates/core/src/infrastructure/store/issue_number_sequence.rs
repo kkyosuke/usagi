@@ -149,6 +149,7 @@ impl IssueNumberSequence {
         issue_store_dir: &Path,
     ) -> Result<Self> {
         if let Some(repository) = git_repository(repo_root)? {
+            validate_conventional_workspace_repository(&repository, workspace_root)?;
             let normalized_repo_root = normalize_path_identity(repo_root)?;
             let mut fallback_roots = vec![
                 workspace_root.to_path_buf(),
@@ -248,18 +249,18 @@ impl IssueNumberSequence {
     /// authoritative write. Every legacy path is then fenced and the
     /// reservation is committed before the normal v1 sequence is restored.
     #[cfg(test)]
-    pub(crate) fn reserve<F>(&self, mut max_existing: F) -> Result<u32>
+    pub(crate) fn reserve<F>(&self, max_existing: F) -> Result<u32>
     where
         F: FnMut() -> Result<u32>,
     {
-        self.reserve_observing(|| max_existing(), || {})
+        self.reserve_observing(max_existing, || {})
     }
 
-    pub(crate) fn reserve_with_floors<F>(&self, mut existing_floors: F) -> Result<u32>
+    pub(crate) fn reserve_with_floors<F>(&self, existing_floors: F) -> Result<u32>
     where
         F: FnMut() -> Result<ExistingIssueFloors>,
     {
-        self.reserve_observing_floors(|| existing_floors(), || {})
+        self.reserve_observing_floors(existing_floors, || {})
     }
 
     #[cfg(test)]
@@ -664,8 +665,7 @@ impl IssueNumberSequence {
                     &mut paths,
                     &workspace_root.join(STATE_DIR).join("issues"),
                 )?;
-                push_session_legacies(&mut paths, workspace_root)?;
-                push_distinct_worktree_session_legacies(&mut paths, workspace_root, worktree_root)?;
+                push_git_session_legacies(&mut paths, worktree_root, workspace_root)?;
                 push_materialized_git_legacies_in_all_worktrees(&mut paths, worktree_root)?;
                 push_source_derived_git_legacies(&mut paths, worktree_root)?;
                 paths
@@ -716,21 +716,16 @@ fn reservation_name(number: u32) -> String {
 fn ensure_authority_absent(path: &Path) -> Result<()> {
     let path_display = path.display().to_string();
     match fs::symlink_metadata(path) {
-        Ok(_) => bail!(
-            "alternate non-Git issue-number authority still exists at {}",
-            path_display
-        ),
+        Ok(_) => bail!("alternate non-Git issue-number authority still exists at {path_display}"),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             ensure!(
                 path_is_missing(path)?,
-                "alternate non-Git issue-number authority is dangling or unreadable at {}",
-                path_display
+                "alternate non-Git issue-number authority is dangling or unreadable at {path_display}"
             );
             Ok(())
         }
         Err(error) => Err(error).context(format!(
-            "failed to inspect alternate issue-number authority {}",
-            path_display
+            "failed to inspect alternate issue-number authority {path_display}"
         )),
     }
 }
@@ -753,22 +748,19 @@ fn push_existing_store_legacy(paths: &mut Vec<PathBuf>, store: &Path) -> Result<
         Ok(metadata) => {
             ensure!(
                 metadata.is_dir(),
-                "legacy issue authority is not a directory: {}",
-                dir_display
+                "legacy issue authority is not a directory: {dir_display}"
             );
             paths.push(sequence);
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             ensure!(
                 path_is_missing(dir)?,
-                "legacy issue authority is an unreadable or dangling path: {}",
-                dir_display
+                "legacy issue authority is an unreadable or dangling path: {dir_display}"
             );
         }
         Err(error) => {
             return Err(error).context(format!(
-                "failed to inspect legacy issue authority {}",
-                dir_display
+                "failed to inspect legacy issue authority {dir_display}"
             ));
         }
     }
@@ -857,49 +849,98 @@ fn normalize_path_identity(path: &Path) -> Result<PathBuf> {
     }
 }
 
-fn push_session_legacies(paths: &mut Vec<PathBuf>, workspace_root: &Path) -> Result<()> {
-    push_session_legacies_if(paths, workspace_root, true)
+fn push_git_session_legacies(
+    paths: &mut Vec<PathBuf>,
+    repository: &Path,
+    workspace_root: &Path,
+) -> Result<()> {
+    let registered = git_worktree_roots(repository)?;
+    let registered_identities = registered
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut parents = registered.clone();
+    parents.push(normalize_path_identity(workspace_root)?);
+    parents.sort();
+    parents.dedup();
+    for parent in parents {
+        for session in direct_session_roots(&parent)? {
+            let store = session.join(STATE_DIR).join("issues");
+            if registered_identities.contains(&normalize_path_identity(&session)?) {
+                // A registered worktree root made old v2 follow its `.git`
+                // file to the shared legacy authority. Still fold an explicitly
+                // materialized local authority, but do not invent a missing one.
+                push_existing_store_legacy(paths, &store)?;
+            } else {
+                ensure_no_independent_git_authority(&session)?;
+                // An ordinary direct session has no `.git`, so pre-fix v2 used
+                // this store-local authority even before its first `next` write.
+                push_store_legacy(paths, &store);
+            }
+        }
+    }
+    Ok(())
 }
 
-fn push_distinct_worktree_session_legacies(
-    paths: &mut Vec<PathBuf>,
-    workspace_root: &Path,
-    worktree_root: &Path,
-) -> Result<()> {
-    if workspace_root == worktree_root {
-        return Ok(());
+fn ensure_no_independent_git_authority(session: &Path) -> Result<()> {
+    let dot_git = session.join(".git");
+    match fs::symlink_metadata(&dot_git) {
+        Ok(_) => bail!(
+            "unregistered direct session has an independent Git authority: {}",
+            session.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            ensure!(
+                path_is_missing(&dot_git)?,
+                "unregistered direct session has an unreadable or dangling Git authority: {}",
+                session.display()
+            );
+            Ok(())
+        }
+        Err(error) => Err(error).context(format!(
+            "failed to inspect direct session Git authority {}",
+            dot_git.display()
+        )),
     }
-    push_session_legacies(paths, worktree_root)
 }
 
 fn push_all_session_legacies(paths: &mut Vec<PathBuf>, workspace_root: &Path) -> Result<()> {
-    push_session_legacies_if(paths, workspace_root, false)
+    for session in direct_session_roots(workspace_root)? {
+        push_store_legacy(paths, &session.join(STATE_DIR).join("issues"));
+    }
+    Ok(())
 }
 
-fn push_session_legacies_if(
-    paths: &mut Vec<PathBuf>,
-    workspace_root: &Path,
-    existing_only: bool,
-) -> Result<()> {
+fn direct_session_roots(workspace_root: &Path) -> Result<Vec<PathBuf>> {
     let sessions = workspace_root.join(STATE_DIR).join(SESSIONS_DIR);
-    let entries = match fs::read_dir(&sessions) {
-        Ok(entries) => entries,
+    let metadata = match fs::symlink_metadata(&sessions) {
+        Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             if path_is_missing(&sessions)? {
-                return Ok(());
+                return Ok(Vec::new());
             }
             return Err(error).context(format!(
-                "failed to read legacy sessions {}",
+                "failed to inspect legacy sessions {}",
                 sessions.display()
             ));
         }
         Err(error) => {
             return Err(error).context(format!(
-                "failed to read legacy sessions {}",
+                "failed to inspect legacy sessions {}",
                 sessions.display()
             ));
         }
     };
+    ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "legacy sessions path is not a real directory: {}",
+        sessions.display()
+    );
+    let entries = fs::read_dir(&sessions).context(format!(
+        "failed to read legacy sessions {}",
+        sessions.display()
+    ))?;
+    let mut roots = Vec::new();
     for entry in entries {
         let entry_error = format!(
             "failed to read a legacy session entry in {}",
@@ -912,19 +953,13 @@ fn push_session_legacies_if(
         let file_type = entry.file_type().context(file_type_error)?;
         ensure!(
             !file_type.is_symlink(),
-            "legacy session entry is a symlink and cannot be safely enumerated: {}",
-            entry_display
+            "legacy session entry is a symlink and cannot be safely enumerated: {entry_display}"
         );
         if file_type.is_dir() {
-            let store = entry_path.join(STATE_DIR).join("issues");
-            if existing_only {
-                push_existing_store_legacy(paths, &store)?;
-            } else {
-                push_store_legacy(paths, &store);
-            }
+            roots.push(entry_path);
         }
     }
-    Ok(())
+    Ok(roots)
 }
 
 /// Discover materialized store-local legacy files below a real Git worktree
@@ -948,32 +983,27 @@ fn push_materialized_git_legacies(paths: &mut Vec<PathBuf>, worktree: &Path) -> 
         }
         command.arg("--").args(PATHSPECS);
         let command_error = format!(
-            "failed to discover materialized legacy issue authorities in {}",
-            worktree_display
+            "failed to discover materialized legacy issue authorities in {worktree_display}"
         );
         let output = command.output().context(command_error)?;
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         ensure!(
             output.status.success(),
-            "failed to discover materialized legacy issue authorities in {}: {}",
-            worktree_display,
-            stderr
+            "failed to discover materialized legacy issue authorities in {worktree_display}: {stderr}"
         );
         for raw in output.stdout.split(|byte| *byte == 0) {
             if raw.is_empty() {
                 continue;
             }
             let path_error = format!(
-                "legacy issue authority path reported by Git is not UTF-8 in {}",
-                worktree_display
+                "legacy issue authority path reported by Git is not UTF-8 in {worktree_display}"
             );
             let relative = std::str::from_utf8(raw).context(path_error)?;
             let relative = Path::new(relative);
             let relative_display = relative.display().to_string();
             ensure!(
                 !relative.is_absolute(),
-                "Git reported an absolute legacy issue authority path: {}",
-                relative_display
+                "Git reported an absolute legacy issue authority path: {relative_display}"
             );
             let expected = Path::new(".usagi/issues/usagi-issue-sequence/next");
             if !relative.ends_with(expected) {
@@ -985,8 +1015,7 @@ fn push_materialized_git_legacies(paths: &mut Vec<PathBuf>, worktree: &Path) -> 
                 let collapsed_display = collapsed.display().to_string();
                 ensure!(
                     collapsed.is_dir(),
-                    "Git reported an unexpected legacy authority candidate: {}",
-                    collapsed_display
+                    "Git reported an unexpected legacy authority candidate: {collapsed_display}"
                 );
                 continue;
             }
@@ -1008,33 +1037,26 @@ fn push_materialized_git_issue_roots(roots: &mut Vec<PathBuf>, worktree: &Path) 
             command.args(["--cached", "--exclude-standard"]);
         }
         command.arg("--").args(PATHSPECS);
-        let command_error = format!(
-            "failed to discover materialized issue sources in {}",
-            worktree_display
-        );
+        let command_error =
+            format!("failed to discover materialized issue sources in {worktree_display}");
         let output = command.output().context(command_error)?;
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         ensure!(
             output.status.success(),
-            "failed to discover materialized issue sources in {}: {}",
-            worktree_display,
-            stderr
+            "failed to discover materialized issue sources in {worktree_display}: {stderr}"
         );
         for raw in output.stdout.split(|byte| *byte == 0) {
             if raw.is_empty() {
                 continue;
             }
-            let path_error = format!(
-                "issue source path reported by Git is not UTF-8 in {}",
-                worktree_display
-            );
+            let path_error =
+                format!("issue source path reported by Git is not UTF-8 in {worktree_display}");
             let relative = std::str::from_utf8(raw).context(path_error)?;
             let relative = Path::new(relative);
             let relative_display = relative.display().to_string();
             ensure!(
                 !relative.is_absolute(),
-                "Git reported an absolute issue source path: {}",
-                relative_display
+                "Git reported an absolute issue source path: {relative_display}"
             );
             let state = relative
                 .parent()
@@ -1051,8 +1073,7 @@ fn push_materialized_git_issue_roots(roots: &mut Vec<PathBuf>, worktree: &Path) 
                 let collapsed_display = collapsed.display().to_string();
                 ensure!(
                     collapsed.is_dir(),
-                    "Git reported an unexpected issue source candidate: {}",
-                    collapsed_display
+                    "Git reported an unexpected issue source candidate: {collapsed_display}"
                 );
                 continue;
             }
@@ -1133,19 +1154,15 @@ fn git_worktree_roots(repository: &Path) -> Result<Vec<PathBuf>> {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     ensure!(
         output.status.success(),
-        "failed to enumerate Git worktrees from {}: {}",
-        repository_display,
-        stderr
+        "failed to enumerate Git worktrees from {repository_display}: {stderr}"
     );
     let mut worktrees = vec![known];
     for raw in output.stdout.split(|byte| *byte == 0) {
         let Some(raw) = raw.strip_prefix(b"worktree ") else {
             continue;
         };
-        let path_error = format!(
-            "Git worktree path is not UTF-8 while enumerating {}",
-            repository_display
-        );
+        let path_error =
+            format!("Git worktree path is not UTF-8 while enumerating {repository_display}");
         let path = std::str::from_utf8(raw).context(path_error)?;
         ensure!(!path.is_empty(), "Git reported an empty worktree path");
         let candidate = fs::canonicalize(path)
@@ -1164,6 +1181,37 @@ fn git_worktree_roots(repository: &Path) -> Result<Vec<PathBuf>> {
     Ok(worktrees)
 }
 
+fn validate_conventional_workspace_repository(
+    caller: &GitRepository,
+    workspace_root: &Path,
+) -> Result<()> {
+    let workspace_identity = normalize_path_identity(workspace_root)?;
+    if workspace_identity == caller.worktree_root {
+        return Ok(());
+    }
+
+    let workspace = git_repository(workspace_root)?.with_context(|| {
+        format!(
+            "conventional workspace {} does not resolve to a Git repository",
+            workspace_root.display()
+        )
+    })?;
+    ensure!(
+        workspace.common_dir == caller.common_dir,
+        "caller Git repository {} has a different common directory from conventional workspace {}",
+        caller.worktree_root.display(),
+        workspace_root.display()
+    );
+    let registered = git_worktree_roots(&workspace.worktree_root)?;
+    ensure!(
+        registered.contains(&caller.worktree_root),
+        "caller Git worktree is not registered in conventional workspace {}: {}",
+        workspace_root.display(),
+        caller.worktree_root.display()
+    );
+    Ok(())
+}
+
 fn validate_registered_worktree(candidate: &Path, expected_common: &Path) -> Result<()> {
     let candidate_display = candidate.display().to_string();
     let validation_error = format!("failed to validate registered worktree {candidate_display}");
@@ -1173,8 +1221,7 @@ fn validate_registered_worktree(candidate: &Path, expected_common: &Path) -> Res
         .context(validation_error)?;
     ensure!(
         validation.status.success() && String::from_utf8_lossy(&validation.stdout).trim() == "true",
-        "registered Git worktree is invalid: {}",
-        candidate_display
+        "registered Git worktree is invalid: {candidate_display}"
     );
     let common_error =
         format!("failed to resolve common dir for registered worktree {candidate_display}");
@@ -1184,8 +1231,7 @@ fn validate_registered_worktree(candidate: &Path, expected_common: &Path) -> Res
         .context(common_error)?;
     ensure!(
         common.status.success(),
-        "failed to resolve common dir for registered worktree {}",
-        candidate_display
+        "failed to resolve common dir for registered worktree {candidate_display}"
     );
     let common = std::str::from_utf8(&common.stdout)
         .context("registered worktree common directory is not UTF-8")?
@@ -1199,8 +1245,7 @@ fn validate_registered_worktree(candidate: &Path, expected_common: &Path) -> Res
     let common = fs::canonicalize(common).context(canonical_error)?;
     ensure!(
         common == expected_common,
-        "registered worktree belongs to a different Git common directory: {}",
-        candidate_display
+        "registered worktree belongs to a different Git common directory: {candidate_display}"
     );
     Ok(())
 }
@@ -1255,8 +1300,7 @@ fn git_repository(start: &Path) -> Result<Option<GitRepository>> {
     let metadata = fs::metadata(&dot_git).context(metadata_error)?;
     ensure!(
         metadata.is_dir() || metadata.is_file(),
-        "invalid git directory path {}",
-        dot_git_display
+        "invalid git directory path {dot_git_display}"
     );
     let worktree_root_display = worktree_root.display().to_string();
     let root_error = format!("failed to canonicalize Git worktree root {worktree_root_display}");
@@ -1272,16 +1316,13 @@ fn git_repository(start: &Path) -> Result<Option<GitRepository>> {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     ensure!(
         output.status.success(),
-        "invalid Git repository {}: {}",
-        worktree_root_display,
-        stderr
+        "invalid Git repository {worktree_root_display}: {stderr}"
     );
     let reported = String::from_utf8(output.stdout).context("git common directory is not UTF-8")?;
     let reported = Path::new(reported.trim());
     ensure!(
         !reported.as_os_str().is_empty(),
-        "Git reported an empty common directory for {}",
-        worktree_root_display
+        "Git reported an empty common directory for {worktree_root_display}"
     );
     let reported_display = reported.display().to_string();
     let common_error = format!("failed to canonicalize git common directory {reported_display}");
@@ -1289,8 +1330,7 @@ fn git_repository(start: &Path) -> Result<Option<GitRepository>> {
     let common_dir_display = common_dir.display().to_string();
     ensure!(
         common_dir.is_dir(),
-        "git common directory is not a directory: {}",
-        common_dir_display
+        "git common directory is not a directory: {common_dir_display}"
     );
     Ok(Some(GitRepository {
         worktree_root,
@@ -1412,7 +1452,7 @@ mod tests {
             .output()
             .unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "git {args:?} failed: {}", stderr);
+        assert!(output.status.success(), "git {args:?} failed: {stderr}");
     }
 
     fn wait_for_emulator_release(ready_env: &str, release_env: &str, timeout_message: &str) {
@@ -2225,10 +2265,6 @@ mod tests {
         assert!(authority.shared_legacy_sequence().is_none());
         assert!(authority.registered_worktrees().unwrap().is_empty());
         assert!(authority.materialized_git_issue_roots().unwrap().is_empty());
-        let mut same_root_paths = Vec::new();
-        push_distinct_worktree_session_legacies(&mut same_root_paths, tmp.path(), tmp.path())
-            .unwrap();
-        assert!(same_root_paths.is_empty());
         assert!(
             paths
                 .iter()
@@ -2240,6 +2276,91 @@ mod tests {
         fs::create_dir_all(sessions.parent().unwrap()).unwrap();
         fs::write(&sessions, b"not a directory\n").unwrap();
         assert!(push_all_session_legacies(&mut Vec::new(), unreadable_root.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_discovery_io_errors_are_propagated_without_materialization() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        fn assert_permission_denied(error: &anyhow::Error) {
+            assert_eq!(
+                error
+                    .root_cause()
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+        }
+
+        let dangling_git_tmp = tempfile::tempdir().unwrap();
+        let dangling_ancestor = dangling_git_tmp.path().join("dangling");
+        symlink("missing-session-parent", &dangling_ancestor).unwrap();
+        let dangling_git_session = dangling_ancestor.join("plain");
+        let error = ensure_no_independent_git_authority(&dangling_git_session).unwrap_err();
+        assert!(error.to_string().contains("dangling Git authority"));
+        assert_eq!(
+            fs::read_link(&dangling_ancestor).unwrap(),
+            PathBuf::from("missing-session-parent")
+        );
+
+        let unreadable_git_tmp = tempfile::tempdir().unwrap();
+        let unreadable_git_session = unreadable_git_tmp.path().join("plain");
+        fs::create_dir(&unreadable_git_session).unwrap();
+        let original = fs::metadata(&unreadable_git_session).unwrap().permissions();
+        fs::set_permissions(&unreadable_git_session, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = ensure_no_independent_git_authority(&unreadable_git_session);
+        fs::set_permissions(&unreadable_git_session, original).unwrap();
+        let error = result.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("failed to inspect direct session Git authority")
+        );
+        assert_permission_denied(&error);
+
+        let dangling_sessions_tmp = tempfile::tempdir().unwrap();
+        let dangling_sessions_root = dangling_sessions_tmp.path().join("workspace");
+        symlink("missing-workspace", &dangling_sessions_root).unwrap();
+        let error = direct_session_roots(&dangling_sessions_root).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("failed to inspect legacy sessions")
+        );
+        assert_eq!(
+            fs::read_link(&dangling_sessions_root).unwrap(),
+            PathBuf::from("missing-workspace")
+        );
+
+        let unreadable_parent_tmp = tempfile::tempdir().unwrap();
+        let unreadable_parent_root = unreadable_parent_tmp.path();
+        let state = unreadable_parent_root.join(STATE_DIR);
+        fs::create_dir(&state).unwrap();
+        let original = fs::metadata(&state).unwrap().permissions();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = direct_session_roots(unreadable_parent_root);
+        fs::set_permissions(&state, original).unwrap();
+        let error = result.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("failed to inspect legacy sessions")
+        );
+        assert_permission_denied(&error);
+
+        let unreadable_sessions_tmp = tempfile::tempdir().unwrap();
+        let unreadable_sessions_root = unreadable_sessions_tmp.path();
+        let sessions = unreadable_sessions_root.join(STATE_DIR).join(SESSIONS_DIR);
+        fs::create_dir_all(&sessions).unwrap();
+        let original = fs::metadata(&sessions).unwrap().permissions();
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = direct_session_roots(unreadable_sessions_root);
+        fs::set_permissions(&sessions, original).unwrap();
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("failed to read legacy sessions"));
+        assert_permission_denied(&error);
     }
 
     #[cfg(unix)]
@@ -3372,6 +3493,132 @@ mod tests {
     }
 
     #[test]
+    fn registered_session_worktree_nested_caller_uses_the_workspace_authority() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.email", "test@example.com"]);
+        git(&root, &["config", "user.name", "Test"]);
+        fs::write(root.join("README.md"), "workspace\n").unwrap();
+        git(&root, &["add", "README.md"]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+
+        let authority = sequence(&root);
+        assert_eq!(authority.reserve(|| Ok(514)).unwrap(), 515);
+        let linked = root.join(".usagi/sessions/registered");
+        fs::create_dir_all(linked.parent().unwrap()).unwrap();
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "test-registered-session-caller",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let nested = linked.join("crates/core");
+        fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(
+            crate::infrastructure::store::issue::IssueStore::new(&nested)
+                .reserve_next_number()
+                .unwrap(),
+            516
+        );
+        let caller =
+            IssueNumberSequence::new(&nested, &root, &nested.join(".usagi/issues")).unwrap();
+        assert_eq!(caller.dir(), authority.dir());
+        assert_eq!(caller.read_sequence().unwrap(), SequenceState::Normal(516));
+        assert!(
+            caller
+                .reservations_dir()
+                .join(reservation_name(516))
+                .is_file()
+        );
+        assert!(!linked.join(".git/usagi").exists());
+        assert!(!nested.join(".usagi/issue-numbers").exists());
+    }
+
+    #[test]
+    fn independent_repo_below_conventional_sessions_is_rejected_without_mutation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-q"]);
+        let authority = sequence(&root);
+        seed_sequence(&authority, 515);
+        seed_reservation(&authority, 515);
+        let sequence_before = fs::read(authority.sequence_path()).unwrap();
+        let reservation = authority.reservations_dir().join(reservation_name(515));
+        let reservation_before = fs::read(&reservation).unwrap();
+
+        let rogue = root.join(".usagi/sessions/rogue");
+        let nested = rogue.join("crates/core");
+        fs::create_dir_all(&nested).unwrap();
+        git(&rogue, &["init", "-q"]);
+        let error = crate::infrastructure::store::issue::IssueStore::new(&nested)
+            .reserve_next_number()
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("different common directory from conventional workspace")
+        );
+        assert_eq!(
+            fs::read(authority.sequence_path()).unwrap(),
+            sequence_before
+        );
+        assert_eq!(fs::read(&reservation).unwrap(), reservation_before);
+        assert_eq!(
+            fs::read_dir(authority.reservations_dir()).unwrap().count(),
+            1
+        );
+        assert!(!authority.legacy_v2_migration_path().exists());
+        assert!(!rogue.join(".git/usagi").exists());
+        assert!(!rogue.join(".git/usagi-issue-sequence").exists());
+        assert!(!nested.join(".usagi").exists());
+    }
+
+    #[test]
+    fn conventional_workspace_validation_rejects_missing_git_and_unregistered_caller() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        let non_git = tmp.path().join("non-git");
+        let unregistered = tmp.path().join("unregistered");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&non_git).unwrap();
+        fs::create_dir(&unregistered).unwrap();
+        git(&root, &["init", "-q"]);
+        let caller = git_repository(&root).unwrap().unwrap();
+
+        let error = validate_conventional_workspace_repository(&caller, &non_git).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not resolve to a Git repository")
+        );
+
+        let unregistered_caller = GitRepository {
+            worktree_root: fs::canonicalize(&unregistered).unwrap(),
+            common_dir: caller.common_dir.clone(),
+        };
+        let error =
+            validate_conventional_workspace_repository(&unregistered_caller, &root).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("caller Git worktree is not registered")
+        );
+        assert!(!root.join(".git/usagi").exists());
+        assert!(!non_git.join(".usagi").exists());
+        assert!(!unregistered.join(".usagi").exists());
+    }
+
+    #[test]
     fn git_transition_rejects_an_existing_non_git_authority_without_reusing_its_journal() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
@@ -3514,7 +3761,7 @@ mod tests {
             .output()
             .unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "resolver child failed: {}", stderr);
+        assert!(output.status.success(), "resolver child failed: {stderr}");
         assert_eq!(
             fs::read_to_string(result).unwrap(),
             fs::canonicalize(root.join(".git"))
@@ -3537,7 +3784,7 @@ mod tests {
             .output()
             .unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "git init failed: {}", stderr);
+        assert!(output.status.success(), "git init failed: {stderr}");
         assert!(!git_dir.join("commondir").exists());
         let nested = worktree.join("crates/core");
         fs::create_dir_all(&nested).unwrap();
@@ -3757,8 +4004,7 @@ mod tests {
                     normalize_path_identity(candidate.parent().unwrap())
                         .is_ok_and(|parent| parent.join(candidate.file_name().unwrap()) == expected)
                 }),
-                "missing {} from {discovered:?}",
-                path_display
+                "missing {path_display} from {discovered:?}"
             );
         }
         assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 516);
@@ -3797,6 +4043,107 @@ mod tests {
             .unwrap();
         assert!(!output.status.success());
         assert_eq!(fs::read(&local).unwrap(), before);
+    }
+
+    #[test]
+    fn external_caller_fences_empty_direct_session_before_old_v2_can_allocate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.email", "test@example.com"]);
+        git(&root, &["config", "user.name", "Test"]);
+        fs::write(root.join("README.md"), b"workspace\n").unwrap();
+        git(&root, &["add", "README.md"]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+
+        let external = tmp.path().join("external-linked");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "test-external-empty-session",
+                external.to_str().unwrap(),
+            ],
+        );
+        let authority = sequence(&root);
+        assert_eq!(authority.reserve(|| Ok(514)).unwrap(), 515);
+
+        let direct_session = root.join(".usagi/sessions/plain");
+        let direct_store = direct_session.join(STATE_DIR).join("issues");
+        fs::create_dir_all(&direct_store).unwrap();
+        let local = legacy_sequence_for_store(&direct_store);
+        assert!(!local.exists());
+        let external_authority = IssueNumberSequence::new(
+            &external,
+            &external,
+            &external.join(STATE_DIR).join("issues"),
+        )
+        .unwrap();
+
+        assert_eq!(external_authority.reserve(|| Ok(0)).unwrap(), 516);
+        assert_eq!(fs::read_to_string(&local).unwrap(), legacy_sentinel(516));
+        let reservation = external_authority
+            .reservations_dir()
+            .join(reservation_name(516));
+        let preserved = [
+            fs::read(&local).unwrap(),
+            fs::read(external_authority.sequence_path()).unwrap(),
+            fs::read(external_authority.legacy_v2_migration_path()).unwrap(),
+            fs::read(&reservation).unwrap(),
+        ];
+        let result = tmp.path().join("old-v2-result.json");
+
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "old_v2_compatibility_emulator_process_helper",
+                "--nocapture",
+            ])
+            .current_dir(&direct_session)
+            .env(OLD_V2_EMULATOR_RESULT_ENV, &result)
+            .output()
+            .unwrap();
+
+        assert!(!output.status.success());
+        assert!(!result.exists());
+        assert_eq!(fs::read(&local).unwrap(), preserved[0]);
+        assert_eq!(
+            fs::read(external_authority.sequence_path()).unwrap(),
+            preserved[1]
+        );
+        assert_eq!(
+            fs::read(external_authority.legacy_v2_migration_path()).unwrap(),
+            preserved[2]
+        );
+        assert_eq!(fs::read(&reservation).unwrap(), preserved[3]);
+
+        let rogue = root.join(".usagi/sessions/rogue");
+        fs::create_dir_all(rogue.join(".git")).unwrap();
+        let error = external_authority.reserve(|| Ok(0)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unregistered direct session has an independent Git authority")
+        );
+        assert_eq!(fs::read(&local).unwrap(), preserved[0]);
+        assert_eq!(
+            fs::read(external_authority.sequence_path()).unwrap(),
+            preserved[1]
+        );
+        assert_eq!(
+            fs::read(external_authority.legacy_v2_migration_path()).unwrap(),
+            preserved[2]
+        );
+        assert_eq!(fs::read(&reservation).unwrap(), preserved[3]);
+        assert!(
+            !external_authority
+                .reservations_dir()
+                .join(reservation_name(517))
+                .exists()
+        );
     }
 
     #[test]
@@ -3957,7 +4304,7 @@ mod tests {
             .output()
             .unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "old v1 failed: {}", stderr);
+        assert!(output.status.success(), "old v1 failed: {stderr}");
         assert_eq!(fs::read_to_string(result).unwrap(), "517\n");
         assert_eq!(fs::read(&legacy).unwrap(), fence);
         assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 518);

@@ -79,15 +79,7 @@ impl McpHarness {
         git(workspace.path(), &["commit", "-qm", "fixture"]);
 
         let home = short_dir("usagi-mcp-home-");
-        if let Some((issue_enabled, memory_enabled)) = tool_availability {
-            Storage::new(channel_data_dir(home.path()))
-                .save_settings(&Settings {
-                    issue_enabled,
-                    memory_enabled,
-                    ..Settings::default()
-                })
-                .unwrap();
-        }
+        configure_tool_availability(home.path(), tool_availability);
         let fixture_bin = home.path().join("fixture-bin");
         let fixture_log = home.path().join("fixture-agent.log");
         fs::create_dir(&fixture_bin).unwrap();
@@ -364,6 +356,18 @@ impl McpHarness {
             assert!(Instant::now() < deadline, "daemon socket was not published");
             thread::sleep(Duration::from_millis(20));
         }
+    }
+}
+
+fn configure_tool_availability(home: &Path, availability: Option<(bool, bool)>) {
+    if let Some((issue_enabled, memory_enabled)) = availability {
+        Storage::new(channel_data_dir(home))
+            .save_settings(&Settings {
+                issue_enabled,
+                memory_enabled,
+                ..Settings::default()
+            })
+            .unwrap();
     }
 }
 
