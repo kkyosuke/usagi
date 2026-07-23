@@ -4545,6 +4545,18 @@ mod tests {
         )
     }
 
+    struct SupersededCleanup;
+
+    impl usagi_daemon::usecase::stop::StaleDaemonCleanup for SupersededCleanup {
+        fn cleanup_if(
+            &self,
+            _store: &dyn usagi_daemon::usecase::serve::DaemonRecordPort,
+            _expected: &usagi_core::domain::daemon::DaemonRecord,
+        ) -> std::io::Result<StaleCleanup> {
+            Ok(StaleCleanup::Superseded)
+        }
+    }
+
     fn replace_private_lock_after_flock(path: &Path) -> std::thread::JoinHandle<()> {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -5586,6 +5598,30 @@ mod tests {
         let client = usagi_daemon::infrastructure::unix_transport::connect_current(data).unwrap();
         let accepted = replacement_listener.accept().unwrap();
         drop((client, accepted, old_listener, replacement_listener));
+    }
+
+    #[test]
+    fn production_stop_preserves_a_superseded_stale_record() {
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let daemon = directory.path().join("daemon");
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: daemon.join("daemon.json"),
+        });
+        let record = usagi_core::domain::daemon::DaemonRecord::new(u32::MAX);
+        store.save(&record).unwrap();
+
+        let error = usagi_daemon::usecase::stop::stop(
+            &store,
+            &KillProbe,
+            &SigtermTerminator,
+            &RealSleeper,
+            &SupersededCleanup,
+            &daemon_test_info(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(store.load().unwrap(), Some(record));
     }
 
     #[test]

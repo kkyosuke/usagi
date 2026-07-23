@@ -84,6 +84,10 @@ impl<F: RecordFile> RecordLoader for DaemonRecordStore<F> {
 ///
 /// Never in practice: the `Alive` arm unwraps the record, and `classify` reports
 /// `Alive` only when a record is present.
+// Unit tests cover every state and error, and the root composition test covers
+// `Superseded` with the exact production record/probe/terminator/sleeper types.
+// LLVM still counts each generic production/test instantiation independently.
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=production_stop_preserves_a_superseded_stale_record
 pub fn stop<F: RecordFile, P: LivenessProbe, T: Terminator, K: Sleeper>(
     store: &DaemonRecordStore<F>,
     probe: &P,
