@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use usagi_core::domain::id::{DaemonGeneration, SessionId, TerminalRef, WorktreeId};
+use usagi_core::infrastructure::ipc::{BuildIdentity, build_artifact_decision};
 
 /// The maximum number of simultaneously retained daemon generations.
 pub const DEFAULT_GENERATION_LIMIT: usize = 2;
@@ -31,6 +32,16 @@ pub struct GenerationRecord {
     pub generation: DaemonGeneration,
     pub endpoint: String,
     pub role: GenerationRole,
+    /// Exact artifact expected at this generation's endpoint. Legacy/process-
+    /// local records may leave it unknown, but a cross-process standby handoff
+    /// must provide and later verify a known identity before activation.
+    #[serde(default)]
+    pub expected_build: BuildIdentity,
+    /// Set only after post-readiness `ServerHello` exactly matches
+    /// `expected_build`. Legacy/process-local records with unknown build do not
+    /// require this flag; cross-process standby records do.
+    #[serde(default)]
+    pub build_verified: bool,
 }
 
 /// The current locator and all retained generation records.  Persist this as
@@ -97,6 +108,8 @@ pub enum GenerationError {
     TerminalOwnedElsewhere,
     TerminalUnavailable,
     ReplacementBlocked,
+    BuildIdentityUnknown,
+    BuildMismatch,
 }
 
 /// Pure coordinator state.  The caller persists [`GenerationSnapshot`] with a
@@ -215,7 +228,58 @@ impl GenerationCoordinator {
             generation,
             endpoint,
             role: GenerationRole::Standby,
+            expected_build: BuildIdentity::default(),
+            build_verified: false,
         })
+    }
+
+    /// Registers a private standby for an exact expected executable artifact.
+    /// Unknown identity is refused before it can consume a generation slot.
+    pub fn register_standby_for_build(
+        &mut self,
+        generation: DaemonGeneration,
+        endpoint: String,
+        expected_build: BuildIdentity,
+    ) -> Result<(), GenerationError> {
+        if !expected_build.is_known() {
+            return Err(GenerationError::BuildIdentityUnknown);
+        }
+        self.register_record(GenerationRecord {
+            generation,
+            endpoint,
+            role: GenerationRole::Standby,
+            expected_build,
+            build_verified: false,
+        })
+    }
+
+    /// Verifies post-readiness identity against the immutable artifact expected
+    /// when the standby was admitted. This is effect-free: mismatch leaves the
+    /// existing active generation unchanged and the candidate in standby.
+    pub fn verify_standby_build(
+        &mut self,
+        generation: DaemonGeneration,
+        actual_build: &BuildIdentity,
+    ) -> Result<(), GenerationError> {
+        let record = self
+            .records
+            .get_mut(&generation.as_str())
+            .ok_or(GenerationError::UnknownGeneration)?;
+        if record.role != GenerationRole::Standby {
+            return Err(GenerationError::NotStandby);
+        }
+        if !record.expected_build.is_known() || !actual_build.is_known() {
+            return Err(GenerationError::BuildIdentityUnknown);
+        }
+        if matches!(
+            build_artifact_decision(actual_build, &record.expected_build, false),
+            usagi_core::infrastructure::ipc::BuildArtifactDecision::Reuse
+        ) {
+            record.build_verified = true;
+            Ok(())
+        } else {
+            Err(GenerationError::BuildMismatch)
+        }
     }
 
     fn register_record(&mut self, record: GenerationRecord) -> Result<(), GenerationError> {
@@ -262,6 +326,13 @@ impl GenerationCoordinator {
         }
         if self.role(next) != Some(GenerationRole::Standby) {
             return Err(GenerationError::NotStandby);
+        }
+        if self
+            .records
+            .get(&next.as_str())
+            .is_some_and(|record| record.expected_build.is_known() && !record.build_verified)
+        {
+            return Err(GenerationError::BuildMismatch);
         }
         self.set_role(active, GenerationRole::Active, GenerationRole::Draining)
             .expect("active generation was checked before rollover");
@@ -505,6 +576,68 @@ mod tests {
             start_identity: "start-7".into(),
             process_group: 7,
         }
+    }
+    fn build(artifact: &str) -> BuildIdentity {
+        let source = match artifact {
+            "next" => "a",
+            "different" => "b",
+            _ => "c",
+        }
+        .repeat(64);
+        usagi_core::infrastructure::ipc::build_identity(
+            "2.6.0",
+            "fixture",
+            "test-target",
+            "debug",
+            &source,
+        )
+    }
+
+    #[test]
+    fn standby_expected_artifact_is_verified_before_handoff_without_effects() {
+        let (mut registry, active) = coordinator();
+        let standby = generation();
+        registry
+            .register_standby_for_build(standby, "private.sock".into(), build("next"))
+            .unwrap();
+        assert_eq!(
+            registry.rollover(active, standby, false),
+            Err(GenerationError::BuildMismatch)
+        );
+        assert_eq!(
+            registry.verify_standby_build(standby, &build("different")),
+            Err(GenerationError::BuildMismatch)
+        );
+        let mut unknown = build("next");
+        unknown.artifact.clear();
+        assert_eq!(
+            registry.verify_standby_build(standby, &unknown),
+            Err(GenerationError::BuildIdentityUnknown)
+        );
+        assert_eq!(
+            registry.verify_standby_build(standby, &build("next")),
+            Ok(())
+        );
+        assert_eq!(registry.current(), Some(active));
+        let snapshot = registry.snapshot();
+        let record = snapshot
+            .records
+            .iter()
+            .find(|record| record.generation == standby)
+            .unwrap();
+        assert_eq!(record.role, GenerationRole::Standby);
+        assert!(record.build_verified);
+        assert_eq!(
+            registry.register_standby_for_build(generation(), "bad.sock".into(), unknown),
+            Err(GenerationError::BuildIdentityUnknown)
+        );
+        assert!(build("other").is_known());
+
+        let active_record = registry.current().unwrap();
+        assert_eq!(
+            registry.verify_standby_build(active_record, &build("next")),
+            Err(GenerationError::NotStandby)
+        );
     }
 
     #[test]

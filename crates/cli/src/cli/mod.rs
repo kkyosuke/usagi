@@ -50,6 +50,9 @@ pub enum RunOutcome {
     LaunchTui(TuiRequest),
     /// daemon control plane の起動を依頼する。
     LaunchDaemon(DaemonCommand),
+    /// Ask for an effect-free, coalesced build-artifact replacement trigger.
+    /// The running daemon is not stopped by this ordinary client request.
+    RequestDaemonReplacement,
     /// stdio MCP server の起動を依頼する。
     LaunchMcp,
     /// Codex `SessionStart` hook の structured payload を daemon へ渡す。
@@ -173,6 +176,8 @@ pub enum DaemonCommand {
     Stop,
     /// daemon を再起動する
     Restart,
+    /// 現在 daemon の artifact を明示的に入れ替える trigger を要求する
+    Replace,
     /// macOS `LaunchAgent` を install する
     InstallService,
     /// macOS `LaunchAgent` を uninstall する
@@ -256,7 +261,11 @@ struct DaemonEntry {
 
 impl Run for DaemonEntry {
     fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
-        Ok(RunOutcome::LaunchDaemon(self.command))
+        Ok(if self.command == DaemonCommand::Replace {
+            RunOutcome::RequestDaemonReplacement
+        } else {
+            RunOutcome::LaunchDaemon(self.command)
+        })
     }
 }
 
@@ -484,6 +493,19 @@ mod tests {
             assert!(out.is_empty());
             assert!(err.is_empty());
         }
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let outcome = run(
+            argv(&["usagi", "daemon", "replace"]),
+            "9.9.9",
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert_eq!(outcome, RunOutcome::RequestDaemonReplacement);
+        assert!(out.is_empty());
+        assert!(err.is_empty());
 
         let mut out = Vec::new();
         let mut err = Vec::new();

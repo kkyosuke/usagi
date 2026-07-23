@@ -27,6 +27,16 @@ use usagi_core::usecase::client::{
 };
 use usagi_daemon::infrastructure::unix_transport::connect_current;
 
+fn shipping_build_identity() -> usagi_core::infrastructure::ipc::BuildIdentity {
+    usagi_core::infrastructure::ipc::build_identity(
+        env!("CARGO_PKG_VERSION"),
+        env!("USAGI_BUILD_COMMIT"),
+        env!("USAGI_BUILD_TARGET"),
+        env!("USAGI_BUILD_PROFILE"),
+        env!("USAGI_BUILD_SOURCE_ID"),
+    )
+}
+
 // The daemon is an instrumented child when cargo-llvm-cov runs this suite.
 // Starting it can take longer than the normal test-runner budget on a loaded
 // CI worker, even though it is healthy. Keep the readiness deadline above
@@ -154,6 +164,7 @@ fn client(data_dir: &Path) -> IpcClient<std::os::unix::net::UnixStream> {
                 "agent-ipc-e2e".into(),
                 OperationId::new().to_string(),
                 ClientPolicy::cli(),
+                shipping_build_identity(),
             )
             .expect("Unix IPC handshake succeeds");
         }

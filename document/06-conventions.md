@@ -45,7 +45,7 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 | `serde` | エンティティ・インデックスの JSON (de)serialize derive | 本依存 |
 | `uuid` | v2 resource incarnation の typed ID（UUIDv4）と durable operation ID（UUIDv7） | 本依存 |
 | `serde_json` | `index.json` / `workspaces.json` / `daemon.json` の (de)serialize、`usagi-cli` の MCP サーバの stdio JSON-RPC、`usagi-daemon` の IPC メッセージの wire JSON | 本依存 |
-| `sha2` | issue / memory Markdown source set の deterministic fingerprint | 本依存 |
+| `sha2` | issue / memory Markdown source set の deterministic fingerprint、build artifact / rollover operation identity | 本依存・build 依存 |
 | `anyhow` | infrastructure（永続化ストア）と MCP store adapter のエラー伝播 | 本依存 |
 | `fs2` | ストア、daemon current locator、合成ルートの daemon 単一インスタンスの cross-process ロック（`flock` 相当） | 本依存 |
 | `dirs` | 既定データディレクトリ（`~/.usagi`）の解決 | 本依存 |
@@ -63,6 +63,8 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 `infrastructure/`（永続化）が使い、`serde_json` は加えて `usagi-cli` の MCP サーバ（stdio
 JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う。`unicode-width` は
 `usagi-tui`、`clap` / `clap_complete` は `usagi-cli` が使う。
+`sha2` は合成ルートの `build.rs` が source / build configuration identity、IPC contract が rollover operation ID を
+作るためにも使う。
 `chrono` / `anyhow` は `usagi-cli` の MCP store adapter が実時計の束縛と core usecase の
 エラー変換にも使う。`fs2` は `usagi-daemon` の current locator publish / retire も直列化する。
 `crossterm`（実端末 IO）・`libc`（daemon の pid 生存判定）・`signal-hook`（daemon shutdown signal）・`fs2`（daemon 単一インスタンス

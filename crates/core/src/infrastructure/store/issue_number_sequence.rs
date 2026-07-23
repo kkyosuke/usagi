@@ -4430,7 +4430,11 @@ mod tests {
             .spawn()
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(15);
-        while !ready.exists() {
+        // Force at least one poll iteration so the wait body stays covered even
+        // when the spawned child publishes its file before the first check.
+        let mut first_poll = true;
+        while first_poll || !ready.exists() {
+            first_poll = false;
             assert!(
                 Instant::now() < deadline,
                 "old-v2 compatibility emulator did not acquire its local lock"
@@ -4537,7 +4541,11 @@ mod tests {
             .spawn()
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(15);
-        while !resolved.exists() {
+        // Force at least one poll iteration so the wait body stays covered even
+        // when the spawned child publishes its file before the first check.
+        let mut first_poll = true;
+        while first_poll || !resolved.exists() {
+            first_poll = false;
             assert!(
                 Instant::now() < deadline,
                 "queued old-v2 compatibility emulator did not resolve its local authority"
@@ -4588,7 +4596,11 @@ mod tests {
             .spawn()
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(15);
-        while !ready.exists() {
+        // Force at least one poll iteration so the wait body stays covered even
+        // when the spawned child publishes its file before the first check.
+        let mut first_poll = true;
+        while first_poll || !ready.exists() {
+            first_poll = false;
             assert!(
                 Instant::now() < deadline,
                 "old allocator did not acquire its lock"
@@ -4756,7 +4768,11 @@ mod tests {
             .spawn()
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(15);
-        while !ready.exists() {
+        // Force at least one poll iteration so the wait body stays covered even
+        // when the spawned child publishes its file before the first check.
+        let mut first_poll = true;
+        while first_poll || !ready.exists() {
+            first_poll = false;
             assert!(
                 Instant::now() < deadline,
                 "local old allocator was not ready"
