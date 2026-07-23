@@ -5,10 +5,10 @@ status: todo
 priority: high
 labels: [review, v2, tui, agent, recovery]
 dependson: [504, 506, 509]
-related: [388, 503]
+related: [388, 503, 526]
 parent: 505
 created_at: 2026-07-21T21:20:53.225285+00:00
-updated_at: 2026-07-21T21:32:04.597722+00:00
+updated_at: 2026-07-23T00:09:07.139578+00:00
 ---
 
 ## 問題・影響
@@ -26,7 +26,7 @@ root / managed session の両方で、選択 tab に対する明示 `Resume` act
 3. accepted / replayed final の source → replacement relation、同じ `AgentContinuationRef`、新しい exact `TerminalRef` が全て一致した場合だけ同じ tab を live に置換する。
 4. 成功 tab が foreground の場合だけ attach / resync する。failure は interrupted tab を残し、provider ID を含まない safe reason と retry 可否を表示する。
 
-TUI start、workspace open、inventory refresh、daemon reconnect / restart から resume を自動発火しない。tab close は #506 の continuation-scoped dismissal と整合し、provider conversation や runtime record を削除しない。dismissed lineage は interrupted / resume-unavailable history に残っていても再表示せず、durable record の retention deletion または利用者の明示 reopen 時だけ dismissal を GC する。live runtime が同時に発見された場合は continuation + exact replacement relation で一枚へ収束し、名前や provider 種別だけで merge しない。
+TUI start、workspace open、inventory refresh、daemon reconnect / restart から resume を自動発火しない。tab close は #506 の continuation-scoped dismissal と整合し、provider conversation や runtime record を削除しない。dismissed lineage は interrupted / resume-unavailable history に残っていても再表示せず、inventory absence では解除しない。#510 では利用者の明示 reopen だけが dismissal を解除し、authoritative retention / GC と表示 intent の将来連携は #526 が所有する。live runtime が同時に発見された場合は continuation + exact replacement relation で一枚へ収束し、名前や provider 種別だけで merge しない。
 
 ## 受入条件
 

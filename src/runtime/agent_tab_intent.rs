@@ -72,7 +72,7 @@ impl FileAgentTabIntentStore {
         operation(&self.state_path(workspace))
     }
 
-    fn read_unlocked(&self, path: &Path, workspace: WorkspaceId) -> io::Result<AgentTabIntentLoad> {
+    fn read_unlocked(path: &Path, workspace: WorkspaceId) -> io::Result<AgentTabIntentLoad> {
         let Some(contents) = read_private_file(path)? else {
             return Ok(AgentTabIntentLoad::Missing);
         };
@@ -108,10 +108,10 @@ impl FileAgentTabIntentStore {
 
     #[cfg(test)]
     fn load_status(&self, workspace: WorkspaceId) -> io::Result<AgentTabIntentLoad> {
-        self.with_lock(workspace, |path| self.read_unlocked(path, workspace))
+        self.with_lock(workspace, |path| Self::read_unlocked(path, workspace))
     }
 
-    fn write_unlocked(&self, path: &Path, intent: &AgentTabIntent) -> io::Result<()> {
+    fn write_unlocked(path: &Path, intent: &AgentTabIntent) -> io::Result<()> {
         // Validate any extant path before rename so a symlink/hardlink attack is
         // rejected rather than silently replaced.
         let _ = read_private_file(path)?;
@@ -152,7 +152,7 @@ impl FileAgentTabIntentStore {
 
 impl AgentTabIntentPort for FileAgentTabIntentStore {
     fn load(&mut self, workspace: WorkspaceId) -> Result<AgentTabIntent, AgentTabIntentError> {
-        self.with_lock(workspace, |path| self.read_unlocked(path, workspace))
+        self.with_lock(workspace, |path| Self::read_unlocked(path, workspace))
             .map_err(|_| AgentTabIntentError::Unavailable)
             .and_then(|loaded| match loaded {
                 AgentTabIntentLoad::Loaded(intent) => Ok(intent),
@@ -163,6 +163,7 @@ impl AgentTabIntentPort for FileAgentTabIntentStore {
             })
     }
 
+    #[allow(clippy::too_many_lines)] // Keep the CAS decision and atomic publish in one lock scope.
     fn mutate(
         &mut self,
         workspace: WorkspaceId,
@@ -170,7 +171,7 @@ impl AgentTabIntentPort for FileAgentTabIntentStore {
         mutation: AgentTabIntentMutation,
     ) -> Result<AgentTabIntentPortCommit, AgentTabIntentError> {
         self.with_lock(workspace, |path| {
-            let mut current = match self.read_unlocked(path, workspace)? {
+            let mut current = match Self::read_unlocked(path, workspace)? {
                 AgentTabIntentLoad::Loaded(intent) => intent,
                 AgentTabIntentLoad::Missing | AgentTabIntentLoad::Corrupt => {
                     AgentTabIntent::empty(workspace)
@@ -308,7 +309,7 @@ impl AgentTabIntentPort for FileAgentTabIntentStore {
                         "invalid Agent tab intent mutation",
                     )
                 })?;
-                self.write_unlocked(path, &current)?;
+                Self::write_unlocked(path, &current)?;
             }
             Ok(AgentTabIntentPortCommit {
                 intent: current,
@@ -731,6 +732,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Stale and fresh observations share one exact-ref fixture.
     fn stale_observe_projects_without_replacing_newer_durable_terminal_ref() {
         let (_root, mut store, workspace) = fixture();
         let old = observation(workspace);
@@ -784,7 +786,7 @@ mod tests {
                         }],
                         resumable: Vec::new(),
                     },
-                    allowed_sessions: Default::default(),
+                    allowed_sessions: std::collections::BTreeSet::default(),
                 },
             )
             .unwrap();
@@ -829,7 +831,7 @@ mod tests {
                         }],
                         resumable: Vec::new(),
                     },
-                    allowed_sessions: Default::default(),
+                    allowed_sessions: std::collections::BTreeSet::default(),
                 },
             )
             .unwrap();

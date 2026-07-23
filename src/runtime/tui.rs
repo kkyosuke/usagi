@@ -1300,14 +1300,14 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         // session's worktree — and the daemon re-validates them. Sessions the
         // snapshot does not list as available are skipped, so a stale or
         // recreated session's old runtime is never rediscovered.
-        let mut scopes = vec![TerminalLaunchScope {
+        let mut launch_scopes = vec![TerminalLaunchScope {
             workspace_id: lifecycle.workspace_id,
             session_id: None,
             worktree_id: lifecycle.root_worktree_id,
         }];
         for managed in &lifecycle.sessions {
             if managed.lifecycle == SessionLifecycle::Available {
-                scopes.push(TerminalLaunchScope {
+                launch_scopes.push(TerminalLaunchScope {
                     workspace_id: lifecycle.workspace_id,
                     session_id: Some(managed.session_id),
                     worktree_id: managed.worktree_id,
@@ -1315,18 +1315,18 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             }
         }
         let mut entries = Vec::new();
-        for scope in scopes {
+        for scope in launch_scopes {
             let body = self.terminal_request(
                 TerminalAction::Inventory,
                 TerminalRequest::Inventory {
                     scope: scope.clone(),
                 },
             )?;
-            let scoped = decode_terminal_inventory(&body)?;
-            if !terminal_inventory_matches_scope(&scoped, &scope) {
+            let scope_entries = decode_terminal_inventory(&body)?;
+            if !terminal_inventory_matches_scope(&scope_entries, &scope) {
                 return Err(TerminalError::Unavailable);
             }
-            entries.extend(scoped);
+            entries.extend(scope_entries);
         }
         Ok(entries)
     }
@@ -2538,11 +2538,11 @@ mod tests {
         EnvironmentStorePort, FsWorkspaceLoader, Geometry, LifecycleSnapshot,
         PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore, Start,
         TerminalChunk, TerminalError, TerminalInputOutcome, agent_inventory_request,
-        classify_terminal_input, created_session_hook, daemon_error_reason,
-        decode_agent_admission, decode_terminal_input_ack, decode_terminal_inventory,
-        decode_terminal_poll, exact_agent_resume_request, lifecycle_snapshot,
-        load_screen_graph_data, load_workspace_state, map_terminal_error, passthrough_key,
-        probe_path, provider_resume_projection, session_snapshot_result, terminal_copy_key,
+        classify_terminal_input, created_session_hook, daemon_error_reason, decode_agent_admission,
+        decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
+        exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
+        load_workspace_state, map_terminal_error, passthrough_key, probe_path,
+        provider_resume_projection, session_snapshot_result, terminal_copy_key,
         terminal_inventory_matches_scope, validate_workspace_directory,
     };
     use chrono::Utc;
@@ -3044,7 +3044,10 @@ mod tests {
             session_id: terminal.session_id,
             worktree_id: terminal.worktree_id,
         };
-        assert!(terminal_inventory_matches_scope(&[entry.clone()], &scope));
+        assert!(terminal_inventory_matches_scope(
+            std::slice::from_ref(&entry),
+            &scope
+        ));
         let mut wrong_worktree = entry;
         wrong_worktree.terminal.worktree_id = WorktreeId::new();
         assert!(!terminal_inventory_matches_scope(&[wrong_worktree], &scope));

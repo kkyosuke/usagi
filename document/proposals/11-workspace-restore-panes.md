@@ -77,6 +77,10 @@ open workspace
                           ├─ inventory-only live runtime ─► 決定的に末尾へ append
                           ├─ selected foreground ─► attach/resync
                           └─ background / unselected ─► detached のまま保持
+        │
+        └─ 成功後も専用 port を保持
+              passive socket EOF + current endpoint available
+                    └─ monotonic/coalesced epoch ─► fresh observation 1 回
 ```
 
 ### daemon: unified scope inventory（#386）
@@ -97,7 +101,10 @@ open workspace
 - versioned `AgentTabIntent` は workspace ID、root / managed-session target、完全な last-known `TerminalRef`、
   `AgentContinuationRef`、tab 順序・選択・dismissal だけを atomic file に保存する。provider ID、argv、environment、
   transcript、terminal output は含めない。file lock と revision CAS で複数 client の stable-key mutation を直列化し、
-  close intent は明示 reopen まで union する。inventory absence は allocator / retention / GC authority ではない。
+  close intent は明示 reopen まで union する。inventory absence は allocator / retention / GC authority ではない。成功した
+  lifecycle snapshot から session が消えた場合だけ、その target / slots と所有 dismissal を同一 commit で除去する。allowed
+  session 内の inventory 欠落では dormant intent を保持する。available session 集合の変更は coalesced observation を1件要求し、
+  outage backoff を短絡せず、旧集合の in-flight result は session-set fence で拒否する。
 - `PaneEvent::RestoreBatch` は target ごとの saved Agent 順を先に、inventory-only Agent と generic Terminal を後ろへ
   決定的に投影する。exact `TerminalRef` で dedup し、同じ continuation の replacement incarnation は同じ slot へ収束する。
   resumable だが non-live の slot は intent に保持し、provider resume や replacement spawn は開始しない。
@@ -108,16 +115,24 @@ open workspace
   Observe と pane projection を適用できる。遅延結果は全体を拒否し、専用 port で fresh fence の observation を一度だけ
   即時再送する。inventory transport / partial / cross-RPC 不整合は controller の capped backoff で再試行し、last valid
   intent を空 snapshot で上書きしない。
+- coherent inventory 後の Agent intent `Observe` 保存が失敗した場合は typed notice を表示し、既存 Agent / pending / generic の
+  order / selection を保持して inventory-only Agent を投影しない。generic inventory の新規 ref だけを fenced append / exact-dedup
+  し、次の保存成功 observation まで destructive な全量 projection を延期する。
+- 成功した restore は dedicated port を controller に戻して保持する。passive socket EOF 後に current endpoint が接続可能に
+  なったときだけ monotonic / coalesced connection epoch を発行し、同じ port で observation を一度再送する。frame tick は
+  inventory RPC の trigger ではない。durable Reopen も過去の inventory cache を投影せず、この fresh observation 経路を使う。
 
 ## 誤復元・二重 tab を防ぐ不変条件
 
 | リスク | 判定 | 動作 |
 |---|---|---|
 | 死んだ process / non-live item | `live == false` | tab を作らない |
-| stale / recreated session | `session_id` が現 lifecycle snapshot に無い | scope mismatch として skip |
+| authoritative に削除された session | `session_id` が成功した lifecycle snapshot に無い | target / slots と所有 dismissal を同一 commit で除去する |
+| allowed session 内の inventory 欠落 | session は lifecycle snapshot に残る | dormant slot / dismissal を保持する |
 | scope mismatch | 別 workspace / 別 worktree / 別 session | skip・attach しない |
 | saved / current generation 不一致 | #506 の current endpoint では owner を証明できない | attach しない。planned lifecycle は [#507](../../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md)、owner routing は [#508](../../.usagi/issues/508-fix-tui-ipc-draining-generation-inventory-terminalref-owner-routing.md) |
-| duplicate snapshot / 重複 item | `TerminalRef::fences` が既存 tab に一致 | dedup、二重 tab を作らない |
+| exact-equal terminal row の重複 | `TerminalRef` / kind / live がすべて同じ | normalize して 1 row にする |
+| conflicting terminal row / duplicate live continuation / Agent↔terminal 非全単射 | 同じ fenced ref の kind / live が競合する、または live 対応が一意でない | observation 全体を拒否して retry |
 | dismissed continuation の replacement / interrupted record | durable lineage が一致 | 明示 reopen まで tab を抑止し、runtime は停止しない |
 | partial / failed / cross-RPC 不整合 inventory | coherent な全量 observation ではない | restore 全体を適用せず、slot / dismissal を GC せず retry |
 | delayed restore response | interaction / registry revision が進んだ | 全体を拒否して fresh fence で単発再観測し、order / selection / close を上書きしない |
@@ -136,7 +151,7 @@ open workspace
 | session が open 前に削除・再作成 | 旧 `session_id` の item は現 snapshot に無く skip。新 session は自身の scope で復元 |
 | daemon restart（Agent 生存）| #506 の current locator だけでは旧 owner endpoint を解決できないため再 attach しない。planned lifecycle / routing は #507 / #508 |
 | daemon crash / macOS 再起動 | runtime は identity_unknown。live tab を作らず、session は #350 interrupted として sidebar に残り明示 Resume 待ち |
-| inventory 取得が遅い / タイムアウト | 初回 frame とキー入力はブロックされない（#193）。全 pane restore を部分適用せず safe feedback / backoff |
+| inventory request が slow / hung | off-thread worker 内に隔離するため初回 frame・入力・quit を同期的に待たせない。全 pane restore を部分適用せず safe feedback / backoff。実 request deadline は [#521](../../.usagi/issues/521-fix-ipc-clientpolicy-request-deadline-reconnect-budget.md) |
 | 2 つ目の client が同じ workspace を open | lock + CAS merge で intent を更新し、両 client とも選択 foreground だけ subscription を張る（detach は当該 connection のみ） |
 
 ## 実装分割
@@ -148,6 +163,9 @@ open workspace
 | #388 | tui | workspace open 時に scope inventory を pane tab へ投影する（#386 に依存） |
 | #506 | tui + composition root | Agent display intent、CAS/atomic store、coherent async restore、foreground-only attach、normal quit / SIGKILL reopen |
 | #507 / #508 | daemon + tui/ipc | planned active/draining lifecycle と generation-owner endpoint routing。#506 の current-endpoint restore には含めない |
+| [#521](../../.usagi/issues/521-fix-ipc-clientpolicy-request-deadline-reconnect-budget.md) | core/ipc + tui | `ClientPolicy` request deadline / reconnect budget。#506 は restore job の off-thread 隔離だけを所有する |
+| [#526](../../.usagi/issues/526-fix-daemon-terminal-agent-tombstone-retention-aggregate-bound-gc.md) | daemon | terminal / Agent history の aggregate allocator・retention・GC。inventory absence を削除根拠にしない |
+| [#527](../../.usagi/issues/527-perf-tui-terminal-polling-ui-loop-foreground-cadence.md) | tui | steady foreground poll を UI loop から分離する scheduler。#506 は background detach と foreground-only attach を所有する |
 
 ## test strategy
 

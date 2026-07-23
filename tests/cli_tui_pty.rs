@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 
 use usagi_core::domain::agent::AgentProfileId;
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId};
-use usagi_core::domain::settings::{LocalSettings, ModalSelectionMode};
+use usagi_core::domain::settings::{ModalSelectionMode, Settings};
 use usagi_core::infrastructure::paths::channel_data_dir;
-use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
+use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
     AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest, IpcClient,
     SessionAction,
@@ -54,6 +54,17 @@ fn open_pty() -> io::Result<(File, File)> {
     // SAFETY: `openpty` succeeded and transferred two distinct, valid descriptors to this caller.
     let pair = unsafe { (File::from_raw_fd(master_fd), File::from_raw_fd(slave_fd)) };
     Ok(pair)
+}
+
+fn write_prompt_settings(home: &Path) {
+    let storage = Storage::new(channel_data_dir(home));
+    let _guard = storage.lock().unwrap();
+    storage
+        .save_settings(&Settings {
+            modal_selection_mode: ModalSelectionMode::Prompt,
+            ..Settings::default()
+        })
+        .unwrap();
 }
 
 fn terminal_attributes(terminal: &File) -> io::Result<libc::termios> {
@@ -161,16 +172,16 @@ impl DaemonStopGuard {
     }
 }
 
-fn process_is_alive(pid: i32) -> bool {
+fn daemon_process_is_alive(pid: i32) -> bool {
     // SAFETY: signal 0 does not alter the target process and is used only to
     // probe the PID read from this test's unique temporary USAGI_HOME.
-    unsafe { libc::kill(pid, 0) == 0 }
-    || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    (unsafe { libc::kill(pid, 0) == 0 })
+        || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 fn wait_for_process_exit(pid: i32, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
-    while process_is_alive(pid) {
+    while daemon_process_is_alive(pid) {
         if Instant::now() >= deadline {
             return false;
         }
@@ -809,15 +820,7 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
     git(&workspace, &["add", "README.md"]);
     git(&workspace, &["commit", "-qm", "fixture"]);
 
-    let settings = WorkspaceSettingsStore::new(&workspace);
-    let guard = settings.lock().unwrap();
-    settings
-        .save(&LocalSettings {
-            modal_selection_mode: Some(ModalSelectionMode::Prompt),
-            ..LocalSettings::default()
-        })
-        .unwrap();
-    drop(guard);
+    write_prompt_settings(home.path());
 
     let fixture = tempfile::tempdir().unwrap();
     let shell = fixture.path().join("fixture-shell");
@@ -954,15 +957,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     git(&workspace, &["add", "README.md"]);
     git(&workspace, &["commit", "-qm", "fixture"]);
 
-    let settings = WorkspaceSettingsStore::new(&workspace);
-    let guard = settings.lock().unwrap();
-    settings
-        .save(&LocalSettings {
-            modal_selection_mode: Some(ModalSelectionMode::Prompt),
-            ..LocalSettings::default()
-        })
-        .unwrap();
-    drop(guard);
+    write_prompt_settings(home.path());
 
     let fixtures = tempfile::tempdir().unwrap();
     let bin = fixtures.path().join("bin");
@@ -1228,7 +1223,10 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     );
     assert_eq!(
         target_state(&reopened_intent, Some(session_id)),
-        (vec![session_claude], Some(session_claude))
+        // Reopen clears only the dismissal. The close-time empty/generic
+        // selection remains durable instead of manufacturing a background
+        // Agent selection that could steal focus on another target.
+        (vec![session_claude], None)
     );
     let reopened_refs = reopened_intent
         .targets
@@ -1310,7 +1308,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     );
     assert_eq!(
         target_state(&final_intent, Some(session_id)),
-        (vec![session_claude], Some(session_claude))
+        (vec![session_claude], None)
     );
     let final_refs = final_intent
         .targets

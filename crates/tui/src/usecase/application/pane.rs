@@ -738,10 +738,10 @@ fn restore_batch(
         }
     }
     if replace_order {
-        let fallback_target = state.tabs.iter().find_map(|tab| match tab {
-            PaneTab::Pending(pending) => Some(pending.target),
-            PaneTab::Live(live) => Some(target_for_terminal(&live.terminal)),
-            PaneTab::Ready(ready) => Some(ready.target),
+        let fallback_target = state.tabs.first().map(|tab| match tab {
+            PaneTab::Pending(pending) => pending.target,
+            PaneTab::Live(live) => target_for_terminal(&live.terminal),
+            PaneTab::Ready(ready) => ready.target,
         });
         let mut retained = std::mem::take(&mut state.tabs);
         let mut ordered = unique.into_iter().map(PaneTab::Live).collect::<Vec<_>>();
@@ -781,8 +781,18 @@ fn restore_batch(
             );
         }
     } else {
+        let was_empty = state.tabs.is_empty();
         for pane in unique {
             let _ = restore(state, pane);
+        }
+        if was_empty
+            && let Some(selected) = selected
+            && state
+                .tabs
+                .iter()
+                .any(|tab| matches!(tab, PaneTab::Live(live) if live.terminal.fences(&selected)))
+        {
+            state.selected = PaneSelection::Tab(TabSelection::Live(selected));
         }
     }
     Vec::new()
@@ -1165,14 +1175,14 @@ mod tests {
     #[test]
     fn authoritative_restore_removes_absent_live_tabs_but_preserves_pending_work() {
         let target = target();
-        let stale = terminal(target);
+        let stale_terminal = terminal(target);
         let current = terminal(target);
         let operation = OperationId::new();
         let mut state = PaneState::new(PaneSelection::Target(target));
         let _ = reduce(
             &mut state,
             PaneEvent::Restore(LivePane {
-                terminal: stale.clone(),
+                terminal: stale_terminal.clone(),
                 kind: PaneKind::Agent,
             }),
         );
@@ -1186,7 +1196,7 @@ mod tests {
         );
         let _ = reduce(
             &mut state,
-            PaneEvent::Select(PaneSelection::Tab(TabSelection::Live(stale))),
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Live(stale_terminal))),
         );
 
         let _ = reduce(

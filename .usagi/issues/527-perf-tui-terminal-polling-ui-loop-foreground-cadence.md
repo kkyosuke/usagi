@@ -7,16 +7,16 @@ labels: [review, v2, tui, terminal, ipc, performance, scheduler]
 dependson: [506, 521, 523, 525]
 related: [197, 216, 344, 385, 388, 508, 521, 523]
 created_at: 2026-07-22T11:44:32.841588+00:00
-updated_at: 2026-07-22T11:57:16.703243+00:00
+updated_at: 2026-07-23T00:09:07.139578+00:00
 ---
 
 ## 問題・影響
 
-shipping controllerは16ms tick/redrawごとに `WorkspaceUi.terminals` の全entryへ同期 `Resume` RPCを直列実行する。N paneでidle時にも最大約62.5×N request/秒となり、選択外/background terminalまで同cadenceでpollする。1 background requestが遅延/hangするとrender、focused input、modal、quitが `read_key` 前で停止し、pane数に比例してframe latencyとdaemon loadが増える。
+#506以前のshipping controllerは16ms tick/redrawごとに `WorkspaceUi.terminals` の全entryへ同期 `Resume` RPCを直列実行し、N paneで最大約62.5×N request/秒となっていた。#506は選択外/background terminalをdetachし、同期poll対象をselected foregroundの高々1本へ縮小したため、このN倍増幅は解消済みである。ただし、その1本の `Resume` は依然UI loop上でframeごとに同期実行される。foreground requestが遅延/hangするとrender、input、modal、quitが `read_key` 前で停止し、idle時にも最大約62.5 request/秒のdaemon loadを生む。
 
 ## 既存issueとの境界・前提
 
-#344は同期client制約の下でloop tickごとのpollを導入し、#385はbackground exit検知のため全terminal sweepを接続した。本件はpane数増加後に顕在化したsteady-state corrective optimizationであり、双方向IO/exit orderingを維持する。#197はdaemon内部の旧idle polling/session store rereadを削減するissueで、v2 TUI clientのall-pane同期loopは対象外。
+#344は同期client制約の下でloop tickごとのpollを導入し、#385はbackground exit検知のため全terminal sweepを接続した。#506がbackground detachを導入してall-pane sweepを除去した後も残るforeground同期loopを、本件はsteady-state corrective optimizationとして扱い、双方向IO/exit orderingを維持する。#197はdaemon内部の旧idle polling/session store rereadを削減するissueで、v2 TUI clientのforeground同期loopは対象外。
 
 本issueは#506の全background tab detached intent、#521の実効request deadline/reconnect budget、#523のshared connection epoch/subscription再確立、#525のTUI不在/非attached terminalへ到達可能なfinal tombstone projectionを前提として消費し、これらを重複実装しない。#508のgeneration routingも尊重する。restore persistence/reconciliationは変更しない。
 

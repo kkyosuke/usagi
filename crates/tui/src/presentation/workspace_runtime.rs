@@ -176,6 +176,41 @@ impl WorkspaceRuntime {
         dispatched_registry_revision: u64,
         targets: Vec<PaneRestoreTarget>,
     ) -> bool {
+        self.apply_restore_snapshot(
+            dispatched_interaction,
+            dispatched_registry_revision,
+            targets,
+            true,
+        )
+    }
+
+    /// Append inventory panes under the same interaction/revision fence while
+    /// preserving every existing tab, order, and selection. This conservative
+    /// path is used only when Agent intent persistence failed: generic panes
+    /// remain available without treating uncommitted Agent inventory as UI
+    /// intent or destructively applying a partial projection.
+    #[must_use]
+    pub fn append_restore_snapshot(
+        &mut self,
+        dispatched_interaction: u64,
+        dispatched_registry_revision: u64,
+        targets: Vec<PaneRestoreTarget>,
+    ) -> bool {
+        self.apply_restore_snapshot(
+            dispatched_interaction,
+            dispatched_registry_revision,
+            targets,
+            false,
+        )
+    }
+
+    fn apply_restore_snapshot(
+        &mut self,
+        dispatched_interaction: u64,
+        dispatched_registry_revision: u64,
+        targets: Vec<PaneRestoreTarget>,
+        replace_order: bool,
+    ) -> bool {
         if self.restore_fence() != (dispatched_interaction, dispatched_registry_revision) {
             return false;
         }
@@ -187,7 +222,7 @@ impl WorkspaceRuntime {
                     event: PaneEvent::RestoreBatch {
                         panes: target.panes,
                         selected: target.selected,
-                        replace_order: true,
+                        replace_order,
                     },
                 },
             );
