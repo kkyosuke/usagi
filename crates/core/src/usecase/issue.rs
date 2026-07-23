@@ -557,11 +557,8 @@ mod tests {
             .args(args)
             .output()
             .unwrap();
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "git {args:?} failed: {stderr}");
     }
 
     #[test]

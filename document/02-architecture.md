@@ -380,6 +380,11 @@ floor を失わず1つの authorityへオフラインで整理するまで alloc
 並行回帰では、HEAD直前のraw-cwd resolver / filename floor / plain-u32 increment / StoreLockと同じロジックを
 別processで実行するold-v2 compatibility emulatorを用いる。これはhistorical binaryそのものとは呼ばず、
 旧側先行予約のfoldとfixed側先行sentinel parse failureを実OS process / file lockで固定する互換fixtureである。
+release acceptanceではこれと分けて、pre-fix commit `677405d31267e9205b76a26fe8b31098b6086852`からbuildした
+実`usagi 2.6.0` MCPを同一processのまま維持するrollout試験も行う。旧MCP create、fixed MCP createによるfold / fence、
+同じ旧MCP processの再createという順で、最後がsentinelのplain-`u32` parse errorになり、source / derived / authority
+artifactがbyte-for-byte不変であることを確認する。この実binary試験はrelease時の証拠であり、CIで常時動かす
+deterministicなlock / crash境界の保証は上記emulator回帰が担う。
 
 issue number は番号指定 CRUD の identity である。同じ番号 prefix の source Markdown が複数ある場合、
 point get / update / delete と同番号への write は、番号と衝突した全 exact path を辞書順で保持する typed

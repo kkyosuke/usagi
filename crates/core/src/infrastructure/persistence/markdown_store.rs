@@ -249,16 +249,8 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     /// committed source mutation. Derived errors are logged and retained as a
     /// dirty marker; they never masquerade as an unapplied source error.
     pub(crate) fn finish_committed<T>(&self, value: T, refresh: Result<()>) -> MutationOutcome<T> {
-        match refresh.and_then(|()| self.clear_derived_dirty()) {
-            Ok(()) => MutationOutcome::new(value, DerivedState::Fresh),
-            Err(error) => {
-                ErrorLog::record(&format!(
-                    "{} source committed but derived refresh failed; rebuild remains scheduled: {error:#}",
-                    E::NAME
-                ));
-                MutationOutcome::new(value, DerivedState::RebuildNeeded)
-            }
-        }
+        let refresh = refresh.and_then(|()| self.clear_derived_dirty());
+        MutationOutcome::new(value, committed_derived_state(E::NAME, refresh))
     }
 
     /// Repair a previously scheduled rebuild while the caller holds the store
@@ -385,6 +377,20 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     }
 }
 
+/// Keep the success/error branch outside the generic store implementation so
+/// every entry/value instantiation uses the same behavior and coverage.
+fn committed_derived_state(entry_name: &str, refresh: Result<()>) -> DerivedState {
+    match refresh {
+        Ok(()) => DerivedState::Fresh,
+        Err(error) => {
+            ErrorLog::record(&format!(
+                "{entry_name} source committed but derived refresh failed; rebuild remains scheduled: {error:#}"
+            ));
+            DerivedState::RebuildNeeded
+        }
+    }
+}
+
 /// Return true only when a missing path reaches an existing real-directory
 /// ancestor. Encountering a symlink or non-directory first is ambiguous (most
 /// importantly, a dangling symlink) and must not be treated as an empty store.
@@ -402,6 +408,33 @@ fn path_is_genuinely_missing(path: &Path) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn relative_path_without_an_existing_ancestor_is_not_genuinely_missing() {
+        assert!(!path_is_genuinely_missing(Path::new("")).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_ancestor_is_not_treated_as_a_missing_store() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let unreadable = tmp.path().join("unreadable");
+        fs::create_dir(&unreadable).unwrap();
+        let original = fs::metadata(&unreadable).unwrap().permissions();
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let error = path_is_genuinely_missing(&unreadable.join("store/index.json")).unwrap_err();
+
+        fs::set_permissions(&unreadable, original).unwrap();
+        assert!(error.to_string().contains("failed to inspect ancestor"));
+    }
 }
 
 fn valid_fingerprint(fingerprint: &str) -> bool {

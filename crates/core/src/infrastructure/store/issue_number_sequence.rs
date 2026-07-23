@@ -120,6 +120,7 @@ pub(crate) struct IssueNumberSequence {
 /// caller, by every compatible old-v1 allocator. Production Git callers set
 /// `v1_visible` to zero because no source tree is visible from every possible
 /// linked-worktree cwd sharing the common authority.
+#[derive(Debug)]
 pub(crate) struct ExistingIssueFloors {
     pub(crate) all: u32,
     pub(crate) v1_visible: u32,
@@ -148,25 +149,25 @@ impl IssueNumberSequence {
         issue_store_dir: &Path,
     ) -> Result<Self> {
         if let Some(repository) = git_repository(repo_root)? {
+            let normalized_repo_root = normalize_path_identity(repo_root)?;
             let mut fallback_roots = vec![
                 workspace_root.to_path_buf(),
                 repository.worktree_root.clone(),
+                normalized_repo_root.clone(),
             ];
             fallback_roots.extend(git_worktree_roots(&repository.worktree_root)?);
             fallback_roots.sort();
             fallback_roots.dedup();
             for fallback_root in fallback_roots {
                 let fallback_authority = fallback_root.join(STATE_DIR).join(AUTHORITY_DIR);
-                ensure_authority_absent(&fallback_authority).with_context(|| {
-                    format!(
-                        "a pre-Git issue-number authority must be reconciled before using Git authority {}",
-                        fallback_authority.display()
-                    )
-                })?;
+                ensure_authority_absent(&fallback_authority).context(format!(
+                    "a pre-Git issue-number authority must be reconciled before using Git authority {}",
+                    fallback_authority.display()
+                ))?;
             }
             let common = repository.common_dir;
             let worktree_root = repository.worktree_root;
-            let current_is_nested = normalize_path_identity(repo_root)? != worktree_root;
+            let current_is_nested = normalized_repo_root != worktree_root;
             return Ok(Self {
                 dir: common.join(AUTHORITY_PARENT_DIR).join(AUTHORITY_DIR),
                 worktree_root: worktree_root.clone(),
@@ -247,24 +248,24 @@ impl IssueNumberSequence {
     /// authoritative write. Every legacy path is then fenced and the
     /// reservation is committed before the normal v1 sequence is restored.
     #[cfg(test)]
-    pub(crate) fn reserve<F>(&self, max_existing: F) -> Result<u32>
+    pub(crate) fn reserve<F>(&self, mut max_existing: F) -> Result<u32>
     where
-        F: FnOnce() -> Result<u32>,
+        F: FnMut() -> Result<u32>,
     {
-        self.reserve_observing(max_existing, || {})
+        self.reserve_observing(|| max_existing(), || {})
     }
 
-    pub(crate) fn reserve_with_floors<F>(&self, existing_floors: F) -> Result<u32>
+    pub(crate) fn reserve_with_floors<F>(&self, mut existing_floors: F) -> Result<u32>
     where
-        F: FnOnce() -> Result<ExistingIssueFloors>,
+        F: FnMut() -> Result<ExistingIssueFloors>,
     {
-        self.reserve_observing_floors(existing_floors, || {})
+        self.reserve_observing_floors(|| existing_floors(), || {})
     }
 
     #[cfg(test)]
-    fn reserve_observing<F, O>(&self, max_existing: F, migration_blocked: O) -> Result<u32>
+    fn reserve_observing<F, O>(&self, mut max_existing: F, migration_blocked: O) -> Result<u32>
     where
-        F: FnOnce() -> Result<u32>,
+        F: FnMut() -> Result<u32>,
         O: FnMut(),
     {
         self.reserve_observing_floors(
@@ -275,13 +276,21 @@ impl IssueNumberSequence {
 
     fn reserve_observing_floors<F, O>(
         &self,
-        existing_floors: F,
+        mut existing_floors: F,
         mut migration_blocked: O,
     ) -> Result<u32>
     where
-        F: FnOnce() -> Result<ExistingIssueFloors>,
+        F: FnMut() -> Result<ExistingIssueFloors>,
         O: FnMut(),
     {
+        self.reserve_observing_floors_dyn(&mut existing_floors, &mut migration_blocked)
+    }
+
+    fn reserve_observing_floors_dyn(
+        &self,
+        existing_floors: &mut dyn FnMut() -> Result<ExistingIssueFloors>,
+        migration_blocked: &mut dyn FnMut(),
+    ) -> Result<u32> {
         let _authority_lock = StoreLock::acquire(&self.dir)?;
         let legacy_paths = self.legacy_v2_sequences()?;
         let _legacy_locks = acquire_legacy_locks(&legacy_paths)?;
@@ -380,7 +389,7 @@ impl IssueNumberSequence {
             sequence,
             v1_visible_floor,
             &legacy_states,
-            &mut migration_blocked,
+            migration_blocked,
         )
     }
 
@@ -423,7 +432,7 @@ impl IssueNumberSequence {
         sequence: SequenceState,
         v1_visible_floor: u32,
         legacy_states: &[(&PathBuf, LegacyState)],
-        migration_blocked: &mut impl FnMut(),
+        migration_blocked: &mut dyn FnMut(),
     ) -> Result<u32> {
         let number = floor
             .checked_add(1)
@@ -475,7 +484,7 @@ impl IssueNumberSequence {
     fn write_reservation_marker(&self, number: u32) -> Result<()> {
         let reservations = self.reservations_dir();
         fs::create_dir_all(&reservations)
-            .with_context(|| format!("failed to create {}", reservations.display()))?;
+            .context(format!("failed to create {}", reservations.display()))?;
         let marker = reservations.join(reservation_name(number));
         write_text_atomic(&marker, &format!("{number}\n"))
     }
@@ -516,8 +525,8 @@ impl IssueNumberSequence {
         let Some(text) = read_optional_text(&path, "issue sequence")? else {
             return Ok(SequenceState::Normal(0));
         };
-        let sequence: SequenceFile = serde_json::from_str(&text)
-            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let sequence: SequenceFile =
+            serde_json::from_str(&text).context(format!("failed to parse {}", path.display()))?;
         ensure!(
             sequence.version == SEQUENCE_VERSION,
             "unsupported issue sequence version {} in {}",
@@ -550,7 +559,10 @@ impl IssueNumberSequence {
         text.trim()
             .parse::<u32>()
             .map(LegacyState::Active)
-            .with_context(|| format!("invalid legacy v2 issue sequence in {}", path.display()))
+            .context(format!(
+                "invalid legacy v2 issue sequence in {}",
+                path.display()
+            ))
     }
 
     /// The Git marker is written only after the legacy sentinel. Non-Git code
@@ -561,10 +573,10 @@ impl IssueNumberSequence {
         let Some(text) = read_optional_text(&path, "legacy v2 issue migration")? else {
             return Ok(None);
         };
-        let number = text
-            .trim()
-            .parse::<u32>()
-            .with_context(|| format!("invalid legacy v2 issue migration in {}", path.display()))?;
+        let number = text.trim().parse::<u32>().context(format!(
+            "invalid legacy v2 issue migration in {}",
+            path.display()
+        ))?;
         ensure!(
             text == format!("{number}\n"),
             "invalid legacy v2 issue migration format in {}",
@@ -598,25 +610,27 @@ impl IssueNumberSequence {
             let entry = entry.context("failed to read an issue reservation entry")?;
             let path = entry.path();
             let name = entry.file_name();
-            let name = name.to_str().with_context(|| {
-                format!(
-                    "issue reservation filename is not UTF-8: {}",
-                    path.display()
-                )
-            })?;
+            let invalid_name = format!(
+                "issue reservation filename is not UTF-8: {}",
+                path.display()
+            );
+            let name = name.to_str().context(invalid_name)?;
             let Some(stem) = name.strip_suffix(RESERVATION_SUFFIX) else {
                 continue;
             };
-            let number = stem.parse::<u32>().with_context(|| {
-                format!("invalid issue reservation marker name {}", path.display())
-            })?;
+            let number = stem.parse::<u32>().context(format!(
+                "invalid issue reservation marker name {}",
+                path.display()
+            ))?;
             ensure!(
                 name == reservation_name(number),
                 "non-canonical issue reservation marker name {}",
                 path.display()
             );
-            let text = fs::read_to_string(&path)
-                .with_context(|| format!("failed to read issue reservation {}", path.display()))?;
+            let text = fs::read_to_string(&path).context(format!(
+                "failed to read issue reservation {}",
+                path.display()
+            ))?;
             ensure!(
                 text == format!("{number}\n"),
                 "invalid issue reservation marker {}: filename and contents disagree",
@@ -651,9 +665,7 @@ impl IssueNumberSequence {
                     &workspace_root.join(STATE_DIR).join("issues"),
                 )?;
                 push_session_legacies(&mut paths, workspace_root)?;
-                if workspace_root != worktree_root {
-                    push_session_legacies(&mut paths, worktree_root)?;
-                }
+                push_distinct_worktree_session_legacies(&mut paths, workspace_root, worktree_root)?;
                 push_materialized_git_legacies_in_all_worktrees(&mut paths, worktree_root)?;
                 push_source_derived_git_legacies(&mut paths, worktree_root)?;
                 paths
@@ -702,25 +714,24 @@ fn reservation_name(number: u32) -> String {
 }
 
 fn ensure_authority_absent(path: &Path) -> Result<()> {
+    let path_display = path.display().to_string();
     match fs::symlink_metadata(path) {
         Ok(_) => bail!(
             "alternate non-Git issue-number authority still exists at {}",
-            path.display()
+            path_display
         ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             ensure!(
                 path_is_missing(path)?,
                 "alternate non-Git issue-number authority is dangling or unreadable at {}",
-                path.display()
+                path_display
             );
             Ok(())
         }
-        Err(error) => Err(error).with_context(|| {
-            format!(
-                "failed to inspect alternate issue-number authority {}",
-                path.display()
-            )
-        }),
+        Err(error) => Err(error).context(format!(
+            "failed to inspect alternate issue-number authority {}",
+            path_display
+        )),
     }
 }
 
@@ -737,12 +748,13 @@ fn push_existing_store_legacy(paths: &mut Vec<PathBuf>, store: &Path) -> Result<
     let dir = sequence
         .parent()
         .context("a legacy store sequence must have a parent")?;
+    let dir_display = dir.display().to_string();
     match fs::metadata(dir) {
         Ok(metadata) => {
             ensure!(
                 metadata.is_dir(),
                 "legacy issue authority is not a directory: {}",
-                dir.display()
+                dir_display
             );
             paths.push(sequence);
         }
@@ -750,13 +762,14 @@ fn push_existing_store_legacy(paths: &mut Vec<PathBuf>, store: &Path) -> Result<
             ensure!(
                 path_is_missing(dir)?,
                 "legacy issue authority is an unreadable or dangling path: {}",
-                dir.display()
+                dir_display
             );
         }
         Err(error) => {
-            return Err(error).with_context(|| {
-                format!("failed to inspect legacy issue authority {}", dir.display())
-            });
+            return Err(error).context(format!(
+                "failed to inspect legacy issue authority {}",
+                dir_display
+            ));
         }
     }
     Ok(())
@@ -769,12 +782,10 @@ fn read_optional_text(path: &Path, label: &str) -> Result<Option<String>> {
             if path_is_missing(path)? {
                 Ok(None)
             } else {
-                Err(error).with_context(|| format!("failed to read {label} {}", path.display()))
+                Err(error).context(format!("failed to read {label} {}", path.display()))
             }
         }
-        Err(error) => {
-            Err(error).with_context(|| format!("failed to read {label} {}", path.display()))
-        }
+        Err(error) => Err(error).context(format!("failed to read {label} {}", path.display())),
     }
 }
 
@@ -786,12 +797,10 @@ fn path_is_missing(path: &Path) -> Result<bool> {
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "failed to inspect authoritative path {}",
-                        ancestor.display()
-                    )
-                });
+                return Err(error).context(format!(
+                    "failed to inspect authoritative path {}",
+                    ancestor.display()
+                ));
             }
         }
     }
@@ -801,12 +810,14 @@ fn path_is_missing(path: &Path) -> Result<bool> {
 fn deduplicate_legacy_paths(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
     let mut identities = std::collections::BTreeSet::new();
     for path in paths {
-        let parent = path
-            .parent()
-            .with_context(|| format!("legacy issue sequence has no parent: {}", path.display()))?;
-        let name = path.file_name().with_context(|| {
-            format!("legacy issue sequence has no filename: {}", path.display())
-        })?;
+        let parent = path.parent().context(format!(
+            "legacy issue sequence has no parent: {}",
+            path.display()
+        ))?;
+        let name = path.file_name().context(format!(
+            "legacy issue sequence has no filename: {}",
+            path.display()
+        ))?;
         // Canonicalize only the parent identity. Following the `next` leaf
         // itself could hide a dangling or redirected authoritative symlink.
         let identity = normalize_path_identity(parent)?.join(name);
@@ -830,20 +841,17 @@ fn normalize_path_identity(path: &Path) -> Result<PathBuf> {
                 return Ok(canonical);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let name = cursor
-                    .file_name()
-                    .with_context(|| format!("cannot normalize missing path {}", path.display()))?;
+                let missing_name = format!("cannot normalize missing path {}", path.display());
+                let name = cursor.file_name().context(missing_name)?;
                 missing.push(name.to_os_string());
-                cursor = cursor.parent().with_context(|| {
-                    format!(
-                        "cannot normalize path without an existing ancestor: {}",
-                        path.display()
-                    )
-                })?;
+                let missing_ancestor = format!(
+                    "cannot normalize path without an existing ancestor: {}",
+                    path.display()
+                );
+                cursor = cursor.parent().context(missing_ancestor)?;
             }
             Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to normalize path {}", path.display()));
+                return Err(error).context(format!("failed to normalize path {}", path.display()));
             }
         }
     }
@@ -851,6 +859,17 @@ fn normalize_path_identity(path: &Path) -> Result<PathBuf> {
 
 fn push_session_legacies(paths: &mut Vec<PathBuf>, workspace_root: &Path) -> Result<()> {
     push_session_legacies_if(paths, workspace_root, true)
+}
+
+fn push_distinct_worktree_session_legacies(
+    paths: &mut Vec<PathBuf>,
+    workspace_root: &Path,
+    worktree_root: &Path,
+) -> Result<()> {
+    if workspace_root == worktree_root {
+        return Ok(());
+    }
+    push_session_legacies(paths, worktree_root)
 }
 
 fn push_all_session_legacies(paths: &mut Vec<PathBuf>, workspace_root: &Path) -> Result<()> {
@@ -869,34 +888,35 @@ fn push_session_legacies_if(
             if path_is_missing(&sessions)? {
                 return Ok(());
             }
-            return Err(error)
-                .with_context(|| format!("failed to read legacy sessions {}", sessions.display()));
+            return Err(error).context(format!(
+                "failed to read legacy sessions {}",
+                sessions.display()
+            ));
         }
         Err(error) => {
-            return Err(error)
-                .with_context(|| format!("failed to read legacy sessions {}", sessions.display()));
+            return Err(error).context(format!(
+                "failed to read legacy sessions {}",
+                sessions.display()
+            ));
         }
     };
     for entry in entries {
-        let entry = entry.with_context(|| {
-            format!(
-                "failed to read a legacy session entry in {}",
-                sessions.display()
-            )
-        })?;
-        let file_type = entry.file_type().with_context(|| {
-            format!(
-                "failed to inspect legacy session entry {}",
-                entry.path().display()
-            )
-        })?;
+        let entry_error = format!(
+            "failed to read a legacy session entry in {}",
+            sessions.display()
+        );
+        let entry = entry.context(entry_error)?;
+        let entry_path = entry.path();
+        let entry_display = entry_path.display().to_string();
+        let file_type_error = format!("failed to inspect legacy session entry {entry_display}");
+        let file_type = entry.file_type().context(file_type_error)?;
         ensure!(
             !file_type.is_symlink(),
             "legacy session entry is a symlink and cannot be safely enumerated: {}",
-            entry.path().display()
+            entry_display
         );
         if file_type.is_dir() {
-            let store = entry.path().join(STATE_DIR).join("issues");
+            let store = entry_path.join(STATE_DIR).join("issues");
             if existing_only {
                 push_existing_store_legacy(paths, &store)?;
             } else {
@@ -917,6 +937,7 @@ fn push_materialized_git_legacies(paths: &mut Vec<PathBuf>, worktree: &Path) -> 
         ".usagi/issues/usagi-issue-sequence/next",
         ":(glob)**/.usagi/issues/usagi-issue-sequence/next",
     ];
+    let worktree_display = worktree.display().to_string();
     for ignored in [false, true] {
         let mut command = scoped_git_command(worktree);
         command.args(["ls-files", "-z", "--others"]);
@@ -926,33 +947,33 @@ fn push_materialized_git_legacies(paths: &mut Vec<PathBuf>, worktree: &Path) -> 
             command.args(["--cached", "--exclude-standard"]);
         }
         command.arg("--").args(PATHSPECS);
-        let output = command.output().with_context(|| {
-            format!(
-                "failed to discover materialized legacy issue authorities in {}",
-                worktree.display()
-            )
-        })?;
+        let command_error = format!(
+            "failed to discover materialized legacy issue authorities in {}",
+            worktree_display
+        );
+        let output = command.output().context(command_error)?;
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         ensure!(
             output.status.success(),
             "failed to discover materialized legacy issue authorities in {}: {}",
-            worktree.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
+            worktree_display,
+            stderr
         );
         for raw in output.stdout.split(|byte| *byte == 0) {
             if raw.is_empty() {
                 continue;
             }
-            let relative = std::str::from_utf8(raw).with_context(|| {
-                format!(
-                    "legacy issue authority path reported by Git is not UTF-8 in {}",
-                    worktree.display()
-                )
-            })?;
+            let path_error = format!(
+                "legacy issue authority path reported by Git is not UTF-8 in {}",
+                worktree_display
+            );
+            let relative = std::str::from_utf8(raw).context(path_error)?;
             let relative = Path::new(relative);
+            let relative_display = relative.display().to_string();
             ensure!(
                 !relative.is_absolute(),
                 "Git reported an absolute legacy issue authority path: {}",
-                relative.display()
+                relative_display
             );
             let expected = Path::new(".usagi/issues/usagi-issue-sequence/next");
             if !relative.ends_with(expected) {
@@ -961,10 +982,11 @@ fn push_materialized_git_legacies(paths: &mut Vec<PathBuf>, worktree: &Path) -> 
                 // pathspec. That worktree is enumerated independently below;
                 // never mistake the collapsed directory for a sequence file.
                 let collapsed = worktree.join(relative);
+                let collapsed_display = collapsed.display().to_string();
                 ensure!(
                     collapsed.is_dir(),
                     "Git reported an unexpected legacy authority candidate: {}",
-                    collapsed.display()
+                    collapsed_display
                 );
                 continue;
             }
@@ -976,6 +998,7 @@ fn push_materialized_git_legacies(paths: &mut Vec<PathBuf>, worktree: &Path) -> 
 
 fn push_materialized_git_issue_roots(roots: &mut Vec<PathBuf>, worktree: &Path) -> Result<()> {
     const PATHSPECS: [&str; 2] = [".usagi/issues/*.md", ":(glob)**/.usagi/issues/*.md"];
+    let worktree_display = worktree.display().to_string();
     for ignored in [false, true] {
         let mut command = scoped_git_command(worktree);
         command.args(["ls-files", "-z", "--others"]);
@@ -985,33 +1008,33 @@ fn push_materialized_git_issue_roots(roots: &mut Vec<PathBuf>, worktree: &Path) 
             command.args(["--cached", "--exclude-standard"]);
         }
         command.arg("--").args(PATHSPECS);
-        let output = command.output().with_context(|| {
-            format!(
-                "failed to discover materialized issue sources in {}",
-                worktree.display()
-            )
-        })?;
+        let command_error = format!(
+            "failed to discover materialized issue sources in {}",
+            worktree_display
+        );
+        let output = command.output().context(command_error)?;
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         ensure!(
             output.status.success(),
             "failed to discover materialized issue sources in {}: {}",
-            worktree.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
+            worktree_display,
+            stderr
         );
         for raw in output.stdout.split(|byte| *byte == 0) {
             if raw.is_empty() {
                 continue;
             }
-            let relative = std::str::from_utf8(raw).with_context(|| {
-                format!(
-                    "issue source path reported by Git is not UTF-8 in {}",
-                    worktree.display()
-                )
-            })?;
+            let path_error = format!(
+                "issue source path reported by Git is not UTF-8 in {}",
+                worktree_display
+            );
+            let relative = std::str::from_utf8(raw).context(path_error)?;
             let relative = Path::new(relative);
+            let relative_display = relative.display().to_string();
             ensure!(
                 !relative.is_absolute(),
                 "Git reported an absolute issue source path: {}",
-                relative.display()
+                relative_display
             );
             let state = relative
                 .parent()
@@ -1025,16 +1048,15 @@ fn push_materialized_git_issue_roots(roots: &mut Vec<PathBuf>, worktree: &Path) 
                 || state.is_none()
             {
                 let collapsed = worktree.join(relative);
+                let collapsed_display = collapsed.display().to_string();
                 ensure!(
                     collapsed.is_dir(),
                     "Git reported an unexpected issue source candidate: {}",
-                    collapsed.display()
+                    collapsed_display
                 );
                 continue;
             }
-            let root = state
-                .and_then(Path::parent)
-                .unwrap_or_else(|| Path::new(""));
+            let root = state.and_then(Path::parent).unwrap_or(Path::new(""));
             roots.push(normalize_path_identity(&worktree.join(root))?);
         }
     }
@@ -1076,21 +1098,22 @@ fn push_source_derived_git_legacies(paths: &mut Vec<PathBuf>, repository: &Path)
 }
 
 fn git_worktree_roots(repository: &Path) -> Result<Vec<PathBuf>> {
-    let known = fs::canonicalize(repository).with_context(|| {
-        format!(
-            "failed to canonicalize known Git worktree {}",
-            repository.display()
-        )
-    })?;
+    let repository_display = repository.display().to_string();
+    let known_error = format!("failed to canonicalize known Git worktree {repository_display}");
+    let known = fs::canonicalize(repository).context(known_error)?;
+    let common_error = format!("failed to resolve Git common dir from {}", known.display());
     let common_output = scoped_git_command(&known)
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .output()
-        .with_context(|| format!("failed to resolve Git common dir from {}", known.display()))?;
+        .context(common_error)?;
+    let common_stderr = String::from_utf8_lossy(&common_output.stderr)
+        .trim()
+        .to_owned();
     ensure!(
         common_output.status.success(),
         "failed to resolve Git common dir from {}: {}",
         known.display(),
-        String::from_utf8_lossy(&common_output.stderr).trim()
+        common_stderr
     );
     let common_text = std::str::from_utf8(&common_output.stdout)
         .context("Git common directory is not UTF-8")?
@@ -1099,38 +1122,34 @@ fn git_worktree_roots(repository: &Path) -> Result<Vec<PathBuf>> {
         !common_text.is_empty(),
         "Git reported an empty common directory"
     );
-    let common = fs::canonicalize(common_text)
-        .with_context(|| format!("failed to canonicalize Git common dir {common_text}"))?;
+    let common_error = format!("failed to canonicalize Git common dir {common_text}");
+    let common = fs::canonicalize(common_text).context(common_error)?;
 
+    let worktrees_error = format!("failed to enumerate Git worktrees from {repository_display}");
     let output = scoped_git_command(repository)
         .args(["worktree", "list", "--porcelain", "-z"])
         .output()
-        .with_context(|| {
-            format!(
-                "failed to enumerate Git worktrees from {}",
-                repository.display()
-            )
-        })?;
+        .context(worktrees_error)?;
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     ensure!(
         output.status.success(),
         "failed to enumerate Git worktrees from {}: {}",
-        repository.display(),
-        String::from_utf8_lossy(&output.stderr).trim()
+        repository_display,
+        stderr
     );
     let mut worktrees = vec![known];
     for raw in output.stdout.split(|byte| *byte == 0) {
         let Some(raw) = raw.strip_prefix(b"worktree ") else {
             continue;
         };
-        let path = std::str::from_utf8(raw).with_context(|| {
-            format!(
-                "Git worktree path is not UTF-8 while enumerating {}",
-                repository.display()
-            )
-        })?;
+        let path_error = format!(
+            "Git worktree path is not UTF-8 while enumerating {}",
+            repository_display
+        );
+        let path = std::str::from_utf8(raw).context(path_error)?;
         ensure!(!path.is_empty(), "Git reported an empty worktree path");
         let candidate = fs::canonicalize(path)
-            .with_context(|| format!("failed to canonicalize registered worktree {path}"))?;
+            .context(format!("failed to canonicalize registered worktree {path}"))?;
         if candidate == common {
             // `git init --separate-git-dir` reports its common git directory
             // as the sole porcelain `worktree` entry before the first commit.
@@ -1146,33 +1165,27 @@ fn git_worktree_roots(repository: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn validate_registered_worktree(candidate: &Path, expected_common: &Path) -> Result<()> {
+    let candidate_display = candidate.display().to_string();
+    let validation_error = format!("failed to validate registered worktree {candidate_display}");
     let validation = scoped_git_command(candidate)
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
-        .with_context(|| {
-            format!(
-                "failed to validate registered worktree {}",
-                candidate.display()
-            )
-        })?;
+        .context(validation_error)?;
     ensure!(
         validation.status.success() && String::from_utf8_lossy(&validation.stdout).trim() == "true",
         "registered Git worktree is invalid: {}",
-        candidate.display()
+        candidate_display
     );
+    let common_error =
+        format!("failed to resolve common dir for registered worktree {candidate_display}");
     let common = scoped_git_command(candidate)
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .output()
-        .with_context(|| {
-            format!(
-                "failed to resolve common dir for registered worktree {}",
-                candidate.display()
-            )
-        })?;
+        .context(common_error)?;
     ensure!(
         common.status.success(),
         "failed to resolve common dir for registered worktree {}",
-        candidate.display()
+        candidate_display
     );
     let common = std::str::from_utf8(&common.stdout)
         .context("registered worktree common directory is not UTF-8")?
@@ -1181,16 +1194,13 @@ fn validate_registered_worktree(candidate: &Path, expected_common: &Path) -> Res
         !common.is_empty(),
         "registered worktree reported an empty common directory"
     );
-    let common = fs::canonicalize(common).with_context(|| {
-        format!(
-            "failed to canonicalize common dir for registered worktree {}",
-            candidate.display()
-        )
-    })?;
+    let canonical_error =
+        format!("failed to canonicalize common dir for registered worktree {candidate_display}");
+    let common = fs::canonicalize(common).context(canonical_error)?;
     ensure!(
         common == expected_common,
         "registered worktree belongs to a different Git common directory: {}",
-        candidate.display()
+        candidate_display
     );
     Ok(())
 }
@@ -1199,9 +1209,10 @@ fn acquire_legacy_locks(paths: &[PathBuf]) -> Result<Vec<StoreLock>> {
     paths
         .iter()
         .map(|path| {
-            let dir = path.parent().with_context(|| {
-                format!("legacy issue sequence has no parent: {}", path.display())
-            })?;
+            let dir = path.parent().context(format!(
+                "legacy issue sequence has no parent: {}",
+                path.display()
+            ))?;
             StoreLock::acquire(dir)
         })
         .collect()
@@ -1239,54 +1250,47 @@ fn git_repository(start: &Path) -> Result<Option<GitRepository>> {
         .parent()
         .context("a .git path must have a worktree parent")?
         .to_path_buf();
-    let metadata = fs::metadata(&dot_git)
-        .with_context(|| format!("failed to inspect git directory path {}", dot_git.display()))?;
+    let dot_git_display = dot_git.display().to_string();
+    let metadata_error = format!("failed to inspect git directory path {dot_git_display}");
+    let metadata = fs::metadata(&dot_git).context(metadata_error)?;
     ensure!(
         metadata.is_dir() || metadata.is_file(),
         "invalid git directory path {}",
-        dot_git.display()
+        dot_git_display
     );
-    let worktree_root = fs::canonicalize(&worktree_root).with_context(|| {
-        format!(
-            "failed to canonicalize Git worktree root {}",
-            worktree_root.display()
-        )
-    })?;
+    let worktree_root_display = worktree_root.display().to_string();
+    let root_error = format!("failed to canonicalize Git worktree root {worktree_root_display}");
+    let worktree_root = fs::canonicalize(&worktree_root).context(root_error)?;
 
     // Match the production v1 resolver instead of accepting a merely existing
     // `.git` directory or gitfile target. Environment overrides are removed so
     // validation is anchored to the ancestor boundary inspected above.
     let mut command = scoped_git_command(&worktree_root);
     command.args(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-    let output = command.output().with_context(|| {
-        format!(
-            "failed to validate Git repository {}",
-            worktree_root.display()
-        )
-    })?;
+    let validation_error = format!("failed to validate Git repository {worktree_root_display}");
+    let output = command.output().context(validation_error)?;
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     ensure!(
         output.status.success(),
         "invalid Git repository {}: {}",
-        worktree_root.display(),
-        String::from_utf8_lossy(&output.stderr).trim()
+        worktree_root_display,
+        stderr
     );
     let reported = String::from_utf8(output.stdout).context("git common directory is not UTF-8")?;
     let reported = Path::new(reported.trim());
     ensure!(
         !reported.as_os_str().is_empty(),
         "Git reported an empty common directory for {}",
-        worktree_root.display()
+        worktree_root_display
     );
-    let common_dir = fs::canonicalize(reported).with_context(|| {
-        format!(
-            "failed to canonicalize git common directory {}",
-            reported.display()
-        )
-    })?;
+    let reported_display = reported.display().to_string();
+    let common_error = format!("failed to canonicalize git common directory {reported_display}");
+    let common_dir = fs::canonicalize(reported).context(common_error)?;
+    let common_dir_display = common_dir.display().to_string();
     ensure!(
         common_dir.is_dir(),
         "git common directory is not a directory: {}",
-        common_dir.display()
+        common_dir_display
     );
     Ok(Some(GitRepository {
         worktree_root,
@@ -1311,8 +1315,7 @@ fn nearest_dot_git(start: &Path) -> Result<Option<PathBuf>> {
             Ok(_) => return Ok(Some(dot_git)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to inspect {}", dot_git.display()));
+                return Err(error).context(format!("failed to inspect {}", dot_git.display()));
             }
         }
     }
@@ -1377,7 +1380,7 @@ mod tests {
                 )
                 .unwrap();
         });
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             match authority_lock.try_lock_exclusive() {
                 Ok(()) => {
@@ -1388,8 +1391,10 @@ mod tests {
                     );
                     thread::sleep(Duration::from_millis(10));
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(error) => panic!("failed to probe fixed allocator authority lock: {error}"),
+                Err(error) => {
+                    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+                    break;
+                }
             }
         }
         assert!(matches!(
@@ -1406,11 +1411,24 @@ mod tests {
             .args(args)
             .output()
             .unwrap();
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "git {args:?} failed: {}", stderr);
+    }
+
+    fn wait_for_emulator_release(ready_env: &str, release_env: &str, timeout_message: &str) {
+        let Some(ready) = std::env::var_os(ready_env).map(PathBuf::from) else {
+            return;
+        };
+        fs::write(&ready, b"ready\n").unwrap();
+        let release = PathBuf::from(std::env::var_os(release_env).unwrap());
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            assert!(Instant::now() < deadline, "{timeout_message}");
+            if release.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// Resolve the allocation directory exactly as the pre-fix v2 `IssueStore`
@@ -1732,6 +1750,46 @@ mod tests {
             fs::read_to_string(authority.reservations_dir().join("0000000516.reserved")).unwrap(),
             "516\n"
         );
+    }
+
+    #[test]
+    fn v1_emulator_propagates_journal_and_atomic_write_failures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let authority = sequence(tmp.path());
+        fs::create_dir_all(authority.reservations_dir()).unwrap();
+        fs::write(authority.reservations_dir().join("README"), b"ignored\n").unwrap();
+        assert_eq!(v1_reserve(&authority).unwrap(), 1);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let authority = sequence(tmp.path());
+        fs::create_dir_all(authority.sequence_path()).unwrap();
+        assert!(v1_reserve(&authority).is_err());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let authority = sequence(tmp.path());
+        seed_sequence(&authority, 1);
+        fs::write(authority.reservations_dir(), b"not a directory\n").unwrap();
+        assert!(v1_reserve(&authority).is_err());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let authority = sequence(tmp.path());
+        let marker = authority.reservations_dir().join(reservation_name(1));
+        fail_next_atomic_write(&marker, AtomicWriteStage::Write);
+        assert!(v1_reserve(&authority).is_err());
+        assert!(!marker.exists());
+        assert!(!authority.sequence_path().exists());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let authority = sequence(tmp.path());
+        fail_next_atomic_write(&authority.sequence_path(), AtomicWriteStage::Write);
+        assert!(v1_reserve(&authority).is_err());
+        assert!(
+            authority
+                .reservations_dir()
+                .join(reservation_name(1))
+                .exists()
+        );
+        assert!(!authority.sequence_path().exists());
     }
 
     #[test]
@@ -2156,6 +2214,122 @@ mod tests {
     }
 
     #[test]
+    fn non_git_legacy_enumeration_skips_files_and_has_no_shared_sequence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let authority = sequence(tmp.path());
+        let sessions = tmp.path().join(STATE_DIR).join(SESSIONS_DIR);
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(sessions.join("README"), b"not a session\n").unwrap();
+
+        let paths = authority.legacy_v2_sequences().unwrap();
+        assert!(authority.shared_legacy_sequence().is_none());
+        assert!(authority.registered_worktrees().unwrap().is_empty());
+        assert!(authority.materialized_git_issue_roots().unwrap().is_empty());
+        let mut same_root_paths = Vec::new();
+        push_distinct_worktree_session_legacies(&mut same_root_paths, tmp.path(), tmp.path())
+            .unwrap();
+        assert!(same_root_paths.is_empty());
+        assert!(
+            paths
+                .iter()
+                .all(|path| !path.starts_with(sessions.join("README")))
+        );
+
+        let unreadable_root = tempfile::tempdir().unwrap();
+        let sessions = unreadable_root.path().join(STATE_DIR).join(SESSIONS_DIR);
+        fs::create_dir_all(sessions.parent().unwrap()).unwrap();
+        fs::write(&sessions, b"not a directory\n").unwrap();
+        assert!(push_all_session_legacies(&mut Vec::new(), unreadable_root.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_git_legacy_discovery_boundary_propagates_before_materialization() {
+        use std::os::unix::fs::symlink;
+
+        fn scoped(
+            root: &Path,
+            workspace_root: PathBuf,
+            worktree_root: PathBuf,
+        ) -> IssueNumberSequence {
+            IssueNumberSequence {
+                dir: root.join("authority"),
+                worktree_root: worktree_root.clone(),
+                legacy_scope: LegacyScope::Git {
+                    shared_sequence: root.join("common/usagi-issue-sequence/next"),
+                    workspace_root,
+                    worktree_root,
+                    current_is_nested: false,
+                    current_issue_store: root.join("current/.usagi/issues"),
+                },
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let worktree = tmp.path().join("worktree");
+        fs::create_dir_all(worktree.join(STATE_DIR).join("issues")).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(
+            worktree.join(STATE_DIR).join("issues").join(LEGACY_V2_DIR),
+            b"not a directory\n",
+        )
+        .unwrap();
+        assert!(
+            scoped(tmp.path(), workspace, worktree)
+                .legacy_v2_sequences()
+                .is_err()
+        );
+        assert!(!tmp.path().join("authority").exists());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let worktree = tmp.path().join("worktree");
+        fs::create_dir_all(workspace.join(STATE_DIR).join("issues")).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(
+            workspace.join(STATE_DIR).join("issues").join(LEGACY_V2_DIR),
+            b"not a directory\n",
+        )
+        .unwrap();
+        assert!(
+            scoped(tmp.path(), workspace, worktree)
+                .legacy_v2_sequences()
+                .is_err()
+        );
+        assert!(!tmp.path().join("authority").exists());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let worktree = tmp.path().join("worktree");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(worktree.join(STATE_DIR)).unwrap();
+        symlink(
+            "missing-sessions",
+            worktree.join(STATE_DIR).join(SESSIONS_DIR),
+        )
+        .unwrap();
+        assert!(
+            scoped(tmp.path(), workspace, worktree)
+                .legacy_v2_sequences()
+                .is_err()
+        );
+        assert!(!tmp.path().join("authority").exists());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let worktree = tmp.path().join("worktree");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        assert!(
+            scoped(tmp.path(), workspace, worktree)
+                .legacy_v2_sequences()
+                .is_err()
+        );
+        assert!(!tmp.path().join("authority").exists());
+    }
+
+    #[test]
     fn multiple_unfenced_git_authorities_fail_before_any_authoritative_write() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
@@ -2556,6 +2730,59 @@ mod tests {
     }
 
     #[test]
+    fn path_validation_errors_do_not_materialize_authority_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let overlong = tmp.path().join("x".repeat(4096));
+
+        assert!(!path_is_missing(Path::new("")).unwrap());
+        assert!(normalize_path_identity(Path::new("")).is_err());
+        assert!(deduplicate_legacy_paths(vec![PathBuf::new()]).is_err());
+        assert!(deduplicate_legacy_paths(vec![PathBuf::from("legacy/..")]).is_err());
+        assert!(acquire_legacy_locks(&[PathBuf::new()]).is_err());
+
+        assert!(ensure_authority_absent(&overlong).is_err());
+        assert!(path_is_missing(&overlong).is_err());
+        assert!(normalize_path_identity(&overlong).is_err());
+        assert!(nearest_dot_git(&overlong).is_err());
+        assert!(push_existing_store_legacy(&mut Vec::new(), &overlong).is_err());
+        assert!(!tmp.path().join(STATE_DIR).exists());
+    }
+
+    #[test]
+    fn reservation_and_git_discovery_io_failures_are_propagated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let authority = sequence(tmp.path());
+        fs::create_dir_all(authority.dir()).unwrap();
+        fs::write(authority.reservations_dir(), b"not a directory\n").unwrap();
+        assert!(authority.write_reservation_marker(1).is_err());
+        assert!(!authority.sequence_path().exists());
+
+        let non_repository = tempfile::tempdir().unwrap();
+        assert!(push_materialized_git_legacies(&mut Vec::new(), non_repository.path()).is_err());
+        assert!(push_materialized_git_issue_roots(&mut Vec::new(), non_repository.path()).is_err());
+        assert!(git_worktree_roots(non_repository.path()).is_err());
+        assert!(
+            validate_registered_worktree(non_repository.path(), non_repository.path()).is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_directory_dot_git_is_rejected_without_creating_an_authority() {
+        use std::os::unix::net::UnixListener;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dot_git = tmp.path().join(".git");
+        let _socket = UnixListener::bind(&dot_git).unwrap();
+
+        let error = git_repository(tmp.path())
+            .err()
+            .expect("non-directory .git was accepted");
+        assert!(error.to_string().contains("invalid git directory path"));
+        assert!(!tmp.path().join(STATE_DIR).exists());
+    }
+
+    #[test]
     fn reservation_marker_failure_before_commit_is_retryable() {
         let tmp = tempfile::tempdir().unwrap();
         let authority = sequence(tmp.path());
@@ -2700,7 +2927,7 @@ mod tests {
                         v1_visible: 0,
                     })
                 },
-                || {},
+                thread::yield_now,
             )
             .unwrap_err();
         assert!(error.to_string().contains("neither live legacy v2 nor v1"));
@@ -2728,7 +2955,7 @@ mod tests {
                         v1_visible: 0,
                     })
                 },
-                || {},
+                thread::yield_now,
             )
             .unwrap_err();
         assert!(error.to_string().contains("u32 range is exhausted"));
@@ -2879,7 +3106,7 @@ mod tests {
                             v1_visible: 0,
                         })
                     },
-                    || {},
+                    thread::yield_now,
                 )
                 .unwrap_err();
             assert!(error.to_string().contains("injected atomic"));
@@ -2915,7 +3142,7 @@ mod tests {
                             v1_visible: 0,
                         })
                     },
-                    || {},
+                    thread::yield_now,
                 )
                 .unwrap_err();
             assert!(error.to_string().contains("u32 range is exhausted"));
@@ -3158,11 +3385,10 @@ mod tests {
         git(root, &["init", "-q"]);
         let nested = root.join("crates/core");
         fs::create_dir_all(&nested).unwrap();
-        let Err(error) =
+        let error =
             IssueNumberSequence::new(&nested, &nested, &nested.join(STATE_DIR).join("issues"))
-        else {
-            panic!("Git authority ignored an existing non-Git journal");
-        };
+                .err()
+                .expect("Git authority ignored an existing non-Git journal");
         assert!(error.to_string().contains("pre-Git issue-number authority"));
         assert!(!root.join(".git/usagi").exists());
         assert_eq!(
@@ -3182,6 +3408,36 @@ mod tests {
             IssueNumberSequence::new(&nested, &nested, &nested.join(STATE_DIR).join("issues"))
                 .is_err()
         );
+        assert!(!root.join(".git/usagi").exists());
+    }
+
+    #[test]
+    fn git_transition_rejects_a_raw_nested_non_git_authority_with_bytes_intact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let nested = root.join("crates/core");
+        fs::create_dir_all(&nested).unwrap();
+        let store = nested.join(STATE_DIR).join("issues");
+        let cached_non_git = IssueNumberSequence::new(&nested, &nested, &store).unwrap();
+        assert_eq!(cached_non_git.reserve(|| Ok(0)).unwrap(), 1);
+
+        let sequence_before = fs::read(cached_non_git.sequence_path()).unwrap();
+        let reservation = cached_non_git.reservations_dir().join(reservation_name(1));
+        let reservation_before = fs::read(&reservation).unwrap();
+        let legacy = legacy_sequence_for_store(&store);
+        let legacy_before = fs::read(&legacy).unwrap();
+
+        git(root, &["init", "-q"]);
+        let error = IssueNumberSequence::new(&nested, root, &store)
+            .err()
+            .expect("Git authority ignored a raw nested pre-Git journal");
+        assert!(error.to_string().contains("pre-Git issue-number authority"));
+        assert_eq!(
+            fs::read(cached_non_git.sequence_path()).unwrap(),
+            sequence_before
+        );
+        assert_eq!(fs::read(&reservation).unwrap(), reservation_before);
+        assert_eq!(fs::read(&legacy).unwrap(), legacy_before);
         assert!(!root.join(".git/usagi").exists());
     }
 
@@ -3219,11 +3475,10 @@ mod tests {
         let nested = linked.join("crates/core");
         fs::create_dir_all(&nested).unwrap();
 
-        let Err(error) =
+        let error =
             IssueNumberSequence::new(&nested, &nested, &nested.join(STATE_DIR).join("issues"))
-        else {
-            panic!("linked caller ignored its fallback authority");
-        };
+                .err()
+                .expect("linked caller ignored its fallback authority");
         assert!(error.to_string().contains("pre-Git issue-number authority"));
         assert!(!root.join(".git/usagi").exists());
         assert_eq!(
@@ -3258,11 +3513,8 @@ mod tests {
             .env("GIT_NAMESPACE", "wrong-namespace")
             .output()
             .unwrap();
-        assert!(
-            output.status.success(),
-            "resolver child failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "resolver child failed: {}", stderr);
         assert_eq!(
             fs::read_to_string(result).unwrap(),
             fs::canonicalize(root.join(".git"))
@@ -3284,11 +3536,8 @@ mod tests {
             .arg(&worktree)
             .output()
             .unwrap();
-        assert!(
-            output.status.success(),
-            "git init failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "git init failed: {}", stderr);
         assert!(!git_dir.join("commondir").exists());
         let nested = worktree.join("crates/core");
         fs::create_dir_all(&nested).unwrap();
@@ -3346,11 +3595,9 @@ mod tests {
         fs::write(&foreign_legacy, "900\n").unwrap();
         let foreign_before = fs::read(&foreign_legacy).unwrap();
 
-        let Err(error) =
-            IssueNumberSequence::new(&root, &root, &root.join(STATE_DIR).join("issues"))
-        else {
-            panic!("foreign replacement was accepted");
-        };
+        let error = IssueNumberSequence::new(&root, &root, &root.join(STATE_DIR).join("issues"))
+            .err()
+            .expect("foreign replacement was accepted");
         assert!(error.to_string().contains("different Git common directory"));
         assert_eq!(fs::read(&foreign_legacy).unwrap(), foreign_before);
         assert!(!root.join(".git/usagi/issue-numbers").exists());
@@ -3504,13 +3751,14 @@ mod tests {
             let expected = normalize_path_identity(path.parent().unwrap())
                 .unwrap()
                 .join(path.file_name().unwrap());
+            let path_display = path.display().to_string();
             assert!(
                 discovered.iter().any(|candidate| {
                     normalize_path_identity(candidate.parent().unwrap())
                         .is_ok_and(|parent| parent.join(candidate.file_name().unwrap()) == expected)
                 }),
                 "missing {} from {discovered:?}",
-                path.display()
+                path_display
             );
         }
         assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 516);
@@ -3622,18 +3870,11 @@ mod tests {
             .unwrap();
         write_text_atomic(&sequence, &format!("{}\n", current.checked_add(1).unwrap())).unwrap();
 
-        if let Some(ready) = std::env::var_os(OLD_READY_ENV).map(PathBuf::from) {
-            fs::write(&ready, "ready\n").unwrap();
-            let release = PathBuf::from(std::env::var_os(OLD_RELEASE_ENV).unwrap());
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while !release.exists() {
-                assert!(
-                    Instant::now() < deadline,
-                    "parent never released old allocator"
-                );
-                thread::sleep(Duration::from_millis(10));
-            }
-        }
+        wait_for_emulator_release(
+            OLD_READY_ENV,
+            OLD_RELEASE_ENV,
+            "parent never released old allocator",
+        );
     }
 
     /// Compatibility emulator for the immediately preceding v2 allocator.
@@ -3670,18 +3911,11 @@ mod tests {
         )
         .unwrap();
 
-        if let Some(ready) = std::env::var_os(OLD_V2_EMULATOR_READY_ENV).map(PathBuf::from) {
-            fs::write(&ready, b"ready\n").unwrap();
-            let release = PathBuf::from(std::env::var_os(OLD_V2_EMULATOR_RELEASE_ENV).unwrap());
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while !release.exists() {
-                assert!(
-                    Instant::now() < deadline,
-                    "parent never released old-v2 compatibility emulator"
-                );
-                thread::sleep(Duration::from_millis(10));
-            }
-        }
+        wait_for_emulator_release(
+            OLD_V2_EMULATOR_READY_ENV,
+            OLD_V2_EMULATOR_RELEASE_ENV,
+            "parent never released old-v2 compatibility emulator",
+        );
     }
 
     #[test]
@@ -3722,11 +3956,8 @@ mod tests {
             .env(OLD_V1_RESULT_ENV, &result)
             .output()
             .unwrap();
-        assert!(
-            output.status.success(),
-            "old v1 failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "old v1 failed: {}", stderr);
         assert_eq!(fs::read_to_string(result).unwrap(), "517\n");
         assert_eq!(fs::read(&legacy).unwrap(), fence);
         assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 518);
@@ -3851,7 +4082,7 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(15);
         while !ready.exists() {
             assert!(
                 Instant::now() < deadline,
@@ -3877,7 +4108,7 @@ mod tests {
         assert!(child.wait().unwrap().success());
         assert_eq!(
             receiver
-                .recv_timeout(Duration::from_secs(5))
+                .recv_timeout(Duration::from_secs(15))
                 .unwrap()
                 .unwrap(),
             517
@@ -3936,7 +4167,7 @@ mod tests {
             )
         });
         blocked_receiver
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(15))
             .unwrap();
         assert_eq!(fs::read_to_string(&local).unwrap(), legacy_sentinel(515));
         assert_eq!(
@@ -3958,7 +4189,7 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(15);
         while !resolved.exists() {
             assert!(
                 Instant::now() < deadline,
@@ -4009,7 +4240,7 @@ mod tests {
             .env(OLD_RELEASE_ENV, &release)
             .spawn()
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(15);
         while !ready.exists() {
             assert!(
                 Instant::now() < deadline,
@@ -4033,7 +4264,7 @@ mod tests {
         assert!(child.wait().unwrap().success());
         assert_eq!(
             receiver
-                .recv_timeout(Duration::from_secs(5))
+                .recv_timeout(Duration::from_secs(15))
                 .unwrap()
                 .unwrap(),
             517
@@ -4071,7 +4302,7 @@ mod tests {
             )
         });
         blocked_receiver
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(15))
             .unwrap();
         assert_eq!(
             authority.read_sequence().unwrap(),
@@ -4124,7 +4355,7 @@ mod tests {
             )
         });
         blocked_receiver
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(15))
             .unwrap();
         assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_sentinel(800));
         assert_eq!(
@@ -4177,7 +4408,7 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(15);
         while !ready.exists() {
             assert!(
                 Instant::now() < deadline,

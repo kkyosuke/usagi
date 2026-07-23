@@ -718,19 +718,16 @@ impl IssueStore {
         match fs::read_dir(&sessions) {
             Ok(entries) => {
                 for entry in entries {
-                    let entry = entry.with_context(|| {
-                        format!("failed to read a session entry in {}", sessions.display())
-                    })?;
-                    let file_type = entry.file_type().with_context(|| {
-                        format!("failed to inspect session entry {}", entry.path().display())
-                    })?;
+                    let entry = context_session_entry(entry, &sessions)?;
+                    let entry_path = entry.path();
+                    let file_type = context_session_file_type(&entry_path, entry.file_type())?;
                     anyhow::ensure!(
                         !file_type.is_symlink(),
                         "session entry is a symlink and cannot be safely enumerated: {}",
-                        entry.path().display()
+                        entry_path.display()
                     );
                     if file_type.is_dir() {
-                        v1_roots.insert(entry.path());
+                        v1_roots.insert(entry_path);
                     }
                 }
             }
@@ -738,15 +735,14 @@ impl IssueStore {
                 match fs::symlink_metadata(&sessions) {
                     Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {}
                     Ok(_) | Err(_) => {
-                        return Err(error).with_context(|| {
-                            format!("failed to read sessions {}", sessions.display())
-                        });
+                        return Err(error)
+                            .context(format!("failed to read sessions {}", sessions.display()));
                     }
                 }
             }
             Err(error) => {
                 return Err(error)
-                    .with_context(|| format!("failed to read sessions {}", sessions.display()));
+                    .context(format!("failed to read sessions {}", sessions.display()));
             }
         }
 
@@ -763,6 +759,26 @@ impl IssueStore {
         }
         Ok(ExistingIssueFloors { all, v1_visible: 0 })
     }
+}
+
+fn context_session_entry(
+    entry: std::io::Result<fs::DirEntry>,
+    sessions: &Path,
+) -> Result<fs::DirEntry> {
+    entry.context(format!(
+        "failed to read a session entry in {}",
+        sessions.display()
+    ))
+}
+
+fn context_session_file_type(
+    path: &Path,
+    file_type: std::io::Result<fs::FileType>,
+) -> Result<fs::FileType> {
+    file_type.context(format!(
+        "failed to inspect session entry {}",
+        path.display()
+    ))
 }
 
 /// Resolve the workspace root from a conventional session worktree path.
@@ -872,11 +888,8 @@ mod tests {
             .args(args)
             .output()
             .unwrap();
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "git {args:?} failed: {stderr}");
     }
 
     /// Pin a file's modification time so freshness tests are independent of the
@@ -1060,6 +1073,21 @@ mod tests {
     }
 
     #[test]
+    fn numbered_path_parser_rejects_a_mismatched_declaration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        fs::create_dir_all(store.dir()).unwrap();
+        let path = store.dir().join("007-moved.md");
+        fs::write(&path, issue(8, "Moved").to_markdown()).unwrap();
+
+        let error = store.read_numbered_path(7, &path).unwrap_err();
+        let mismatch = error.downcast_ref::<MismatchedIssueNumber>().unwrap();
+        assert_eq!(mismatch.filename_number, Some(7));
+        assert_eq!(mismatch.declared_number, 8);
+        assert_eq!(mismatch.file, path);
+    }
+
+    #[test]
     fn unparseable_filename_claim_blocks_write_and_remove_without_any_effect() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -1185,6 +1213,11 @@ mod tests {
             store.write(&issue(8, "Replacement")).unwrap_err(),
             store.remove(8).unwrap_err(),
         ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("filename has no numeric issue claim")
+            );
             let mismatch = error.downcast_ref::<MismatchedIssueNumber>().unwrap();
             assert_eq!(mismatch.filename_number, None);
             assert_eq!(mismatch.declared_number, 8);
@@ -2126,6 +2159,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn session_entry_iteration_errors_keep_their_operation_context() {
+        let sessions = Path::new("/workspace/.usagi/sessions");
+        let entry_error = std::io::Error::other("entry vanished");
+        let error = context_session_entry(Err(entry_error), sessions)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("failed to read a session entry"));
+        assert_eq!(
+            error
+                .root_cause()
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::Other
+        );
+
+        let entry_path = sessions.join("vanished");
+        let type_error = std::io::Error::new(std::io::ErrorKind::NotFound, "entry vanished");
+        let error = context_session_file_type(&entry_path, Err(type_error)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("failed to inspect session entry")
+        );
+        assert_eq!(
+            error
+                .root_cause()
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlinked_session_entry_fails_source_floor_discovery_without_effect() {
@@ -2158,9 +2226,9 @@ mod tests {
         let legacy_before = fs::read(&legacy).unwrap();
 
         let store = IssueStore::new(root);
-        let Err(error) = store.existing_issue_floors(root, root, &[], &[]) else {
-            panic!("symlinked session entry was accepted");
-        };
+        let error = store
+            .existing_issue_floors(root, root, &[], &[])
+            .unwrap_err();
         assert!(error.to_string().contains("session entry is a symlink"));
         assert_eq!(fs::read(&sequence).unwrap(), sequence_before);
         assert_eq!(fs::read(&reservation).unwrap(), reservation_before);
@@ -2175,6 +2243,48 @@ mod tests {
         assert!(!authority.join("legacy-v2-migrated").exists());
         assert!(!authority.join("reservations/0000000501.reserved").exists());
         assert!(!store.dir().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_or_unreadable_sessions_fail_source_floor_discovery() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dangling_tmp = tempfile::tempdir().unwrap();
+        let dangling_root = dangling_tmp.path();
+        fs::create_dir(dangling_root.join(STATE_DIR)).unwrap();
+        let dangling_sessions = dangling_root.join(STATE_DIR).join(SESSIONS_DIR);
+        symlink("missing-sessions", &dangling_sessions).unwrap();
+        let dangling_store = IssueStore::new(dangling_root);
+        let error = dangling_store
+            .existing_issue_floors(dangling_root, dangling_root, &[], &[])
+            .unwrap_err();
+        assert!(error.to_string().contains("failed to read sessions"));
+        assert_eq!(
+            fs::read_link(&dangling_sessions).unwrap(),
+            PathBuf::from("missing-sessions")
+        );
+
+        let unreadable_tmp = tempfile::tempdir().unwrap();
+        let unreadable_root = unreadable_tmp.path();
+        let unreadable_sessions = unreadable_root.join(STATE_DIR).join(SESSIONS_DIR);
+        fs::create_dir_all(&unreadable_sessions).unwrap();
+        let original = fs::metadata(&unreadable_sessions).unwrap().permissions();
+        fs::set_permissions(&unreadable_sessions, fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable_store = IssueStore::new(unreadable_root);
+        let error = unreadable_store
+            .existing_issue_floors(unreadable_root, unreadable_root, &[], &[])
+            .unwrap_err();
+        fs::set_permissions(&unreadable_sessions, original).unwrap();
+        assert!(error.to_string().contains("failed to read sessions"));
+        assert_eq!(
+            error
+                .root_cause()
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
     }
 
     fn assert_no_local_issue_reservation(root: &Path) {
