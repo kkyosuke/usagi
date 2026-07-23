@@ -1388,6 +1388,38 @@ mod tests {
     }
 
     #[test]
+    fn tab_previews_cover_empty_pending_and_previous_successors() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut runtime = closeup_on(workspace, session);
+        assert_eq!(runtime.terminal_after_close(), None);
+
+        let first_operation = OperationId::new();
+        let first = terminal_ref(workspace, session);
+        let _ = runtime.request_pane(target, first_operation, PaneKind::Agent);
+        let _ = runtime.complete_pane(target, first_operation, first.clone());
+        let pending = OperationId::new();
+        let _ = runtime.request_pane(target, pending, PaneKind::Agent);
+        let _ = runtime.focus_terminal(target, first.clone());
+
+        assert_eq!(runtime.terminal_after_close(), Some(None));
+        assert_eq!(
+            runtime.terminal_after_select(TabDirection::Next),
+            Some(None)
+        );
+        assert_eq!(
+            runtime.terminal_order_after_reorder(TabDirection::Next),
+            vec![first.clone()]
+        );
+
+        let second = terminal_ref(workspace, session);
+        let _ = runtime.complete_pane(target, pending, second.clone());
+        let _ = runtime.focus_terminal(target, second);
+        assert_eq!(runtime.terminal_after_close(), Some(Some(first)));
+    }
+
+    #[test]
     fn reorder_tab_moves_the_selected_stable_identity_without_refocusing() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();

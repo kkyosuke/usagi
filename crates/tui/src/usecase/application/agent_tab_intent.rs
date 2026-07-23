@@ -290,7 +290,7 @@ impl AgentTabIntent {
             // selected. Closing an unrelated Agent must not manufacture an
             // Agent selection and steal foreground on the next restore.
             if target.selected.is_some() {
-                target.selected = repaired_selection(target, &self.dismissed, |_| true);
+                target.selected = repaired_selection(target, &self.dismissed, &|_| true);
             }
         }
     }
@@ -400,7 +400,7 @@ impl AgentTabIntent {
         let mut projection = AgentTabProjection::default();
         for target in &mut self.targets {
             let selected = target.selected.and_then(|_| {
-                repaired_selection(target, &self.dismissed, |slot| {
+                repaired_selection(target, &self.dismissed, &|slot| {
                     live.get(&slot.continuation)
                         .is_some_and(|items| items.iter().any(|item| item.fences(&slot.terminal)))
                 })
@@ -484,7 +484,7 @@ fn inventory_set(
 fn repaired_selection(
     target: &AgentTabTargetIntent,
     dismissed: &BTreeSet<AgentContinuationRef>,
-    is_available: impl Fn(&AgentTabSlotIntent) -> bool,
+    is_available: &dyn Fn(&AgentTabSlotIntent) -> bool,
 ) -> Option<AgentContinuationRef> {
     let available =
         |slot: &AgentTabSlotIntent| !dismissed.contains(&slot.continuation) && is_available(slot);
@@ -962,6 +962,79 @@ mod tests {
     }
 
     #[test]
+    fn reconciliation_drops_a_duplicate_claim_and_repairs_an_unknown_selection() {
+        let workspace = WorkspaceId::new();
+        let first_session = SessionId::new();
+        let second_session = SessionId::new();
+        let continuation = AgentContinuationRef::new();
+        let fallback = AgentContinuationRef::new();
+        let first_terminal = terminal(workspace, Some(first_session), WorktreeId::new());
+        let second_terminal = terminal(workspace, Some(second_session), WorktreeId::new());
+        let fallback_terminal = terminal(workspace, Some(second_session), WorktreeId::new());
+        let mut intent = AgentTabIntent::empty(workspace);
+        intent.targets = vec![
+            AgentTabTargetIntent {
+                session_id: Some(first_session),
+                tabs: vec![AgentTabSlotIntent {
+                    continuation,
+                    terminal: first_terminal.clone(),
+                }],
+                selected: Some(continuation),
+            },
+            AgentTabTargetIntent {
+                session_id: Some(second_session),
+                tabs: vec![
+                    AgentTabSlotIntent {
+                        continuation,
+                        terminal: second_terminal.clone(),
+                    },
+                    AgentTabSlotIntent {
+                        continuation: fallback,
+                        terminal: fallback_terminal.clone(),
+                    },
+                ],
+                selected: Some(AgentContinuationRef::new()),
+            },
+        ];
+        let inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![
+                runtime(
+                    continuation,
+                    &first_terminal,
+                    AgentRuntimeInventoryState::Live,
+                ),
+                runtime(
+                    continuation,
+                    &second_terminal,
+                    AgentRuntimeInventoryState::Live,
+                ),
+                runtime(
+                    fallback,
+                    &fallback_terminal,
+                    AgentRuntimeInventoryState::Live,
+                ),
+            ],
+            resumable: Vec::new(),
+        };
+
+        let projection = intent.reconcile(
+            &[
+                live_entry(first_terminal),
+                live_entry(second_terminal),
+                live_entry(fallback_terminal),
+            ],
+            &inventory,
+            &BTreeSet::from([first_session, second_session]),
+        );
+
+        assert_eq!(intent.targets[0].tabs.len(), 1);
+        assert_eq!(intent.targets[1].tabs.len(), 1);
+        assert_eq!(intent.targets[1].tabs[0].continuation, fallback);
+        assert_eq!(projection.targets[1].selected, Some(fallback));
+    }
+
+    #[test]
     fn removed_session_drops_only_its_slots_and_dismissals_atomically() {
         let workspace = WorkspaceId::new();
         let removed_session = SessionId::new();
@@ -1050,6 +1123,25 @@ mod tests {
         });
         assert!(intent.targets.is_empty());
         assert_eq!(intent.validate(workspace), Ok(()));
+    }
+
+    #[test]
+    fn repaired_selection_uses_first_available_tab_when_no_selection_is_saved() {
+        let workspace = WorkspaceId::new();
+        let continuation = AgentContinuationRef::new();
+        let target = AgentTabTargetIntent {
+            session_id: None,
+            tabs: vec![AgentTabSlotIntent {
+                continuation,
+                terminal: terminal(workspace, None, WorktreeId::new()),
+            }],
+            selected: None,
+        };
+
+        assert_eq!(
+            repaired_selection(&target, &BTreeSet::new(), &|_| true),
+            Some(continuation)
+        );
     }
 
     #[test]
@@ -1209,7 +1301,7 @@ mod tests {
         });
         intent.apply(AgentTabIntentMutation::Reorder {
             session_id: Some(session),
-            continuations: vec![second],
+            continuations: vec![second, AgentContinuationRef::new()],
         });
         intent.apply(AgentTabIntentMutation::Select {
             session_id: Some(session),

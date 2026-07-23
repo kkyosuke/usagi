@@ -788,6 +788,7 @@ impl Drop for DaemonRestoreConnectionPort {
 }
 
 impl DaemonRestoreConnectionPublisher {
+    #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=passive_restore_socket_eof_emits_one_reconnect_epoch_and_drop_cancels_watchers
     fn watch(&self, stream: std::os::unix::net::UnixStream) -> Arc<AtomicBool> {
         let connection_cancelled = Arc::new(AtomicBool::new(false));
         let local_cancelled = Arc::clone(&connection_cancelled);
@@ -827,6 +828,7 @@ impl DaemonRestoreConnectionPublisher {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=passive_restore_socket_eof_emits_one_reconnect_epoch_and_drop_cancels_watchers
 fn unix_stream_closed(stream: &std::os::unix::net::UnixStream) -> bool {
     let mut byte = 0_u8;
     // SAFETY: `byte` is valid writable storage for one byte and `stream` owns

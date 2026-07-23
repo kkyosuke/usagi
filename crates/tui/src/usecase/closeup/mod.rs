@@ -217,6 +217,13 @@ mod tests {
                 .iter()
                 .all(|command| !command.description.is_empty() && !command.usage.is_empty())
         );
+        assert_eq!(
+            Command::Reopen {
+                arguments: String::new(),
+            }
+            .name(),
+            "reopen"
+        );
     }
 
     #[test]

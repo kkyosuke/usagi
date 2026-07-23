@@ -1238,6 +1238,130 @@ mod tests {
     }
 
     #[test]
+    fn reorder_noops_and_authoritative_empty_restore_cover_selection_fallbacks() {
+        let target = target();
+        let first = terminal(target);
+        let second = terminal(target);
+
+        let mut too_short = PaneState::new(PaneSelection::Target(target));
+        assert!(
+            reduce(
+                &mut too_short,
+                PaneEvent::ReorderSelected(TabDirection::Next),
+            )
+            .is_empty()
+        );
+
+        let live_tabs = vec![
+            PaneTab::Live(LivePane {
+                terminal: first.clone(),
+                kind: PaneKind::Agent,
+            }),
+            PaneTab::Live(LivePane {
+                terminal: second,
+                kind: PaneKind::Agent,
+            }),
+        ];
+        let mut target_selected = PaneState::new(PaneSelection::Target(target));
+        target_selected.tabs = live_tabs.clone();
+        let _ = reduce(
+            &mut target_selected,
+            PaneEvent::ReorderSelected(TabDirection::Next),
+        );
+        assert_eq!(target_selected.tabs, live_tabs);
+
+        let mut stale_selected =
+            PaneState::new(PaneSelection::Tab(TabSelection::Live(terminal(target))));
+        stale_selected.tabs = live_tabs.clone();
+        let stale_selection = stale_selected.selected.clone();
+        assert!(
+            reduce(
+                &mut stale_selected,
+                PaneEvent::ReorderSelected(TabDirection::Next),
+            )
+            .is_empty()
+        );
+        assert_eq!(stale_selected.tabs, live_tabs);
+        assert_eq!(stale_selected.selected, stale_selection);
+
+        for tab in [
+            PaneTab::Pending(PendingPane {
+                operation: OperationId::new(),
+                target,
+                kind: PaneKind::Agent,
+            }),
+            PaneTab::Ready(PendingPane {
+                operation: OperationId::new(),
+                target,
+                kind: PaneKind::Agent,
+            }),
+        ] {
+            let mut retained = PaneState::new(PaneSelection::Target(target));
+            retained.tabs.push(tab);
+            let _ = reduce(
+                &mut retained,
+                PaneEvent::RestoreBatch {
+                    panes: Vec::new(),
+                    selected: None,
+                    replace_order: true,
+                },
+            );
+            assert!(matches!(retained.selected(), PaneSelection::Tab(_)));
+        }
+
+        let mut empty = PaneState::new(PaneSelection::Tab(TabSelection::Live(first.clone())));
+        let _ = reduce(
+            &mut empty,
+            PaneEvent::RestoreBatch {
+                panes: Vec::new(),
+                selected: None,
+                replace_order: true,
+            },
+        );
+        assert_eq!(empty.selected(), &PaneSelection::Target(target));
+
+        let retained_terminal = terminal(target);
+        let mut retained_selection = PaneState::new(PaneSelection::Tab(TabSelection::Live(
+            retained_terminal.clone(),
+        )));
+        retained_selection.tabs.push(PaneTab::Live(LivePane {
+            terminal: retained_terminal.clone(),
+            kind: PaneKind::Agent,
+        }));
+        let _ = reduce(
+            &mut retained_selection,
+            PaneEvent::RestoreBatch {
+                panes: vec![LivePane {
+                    terminal: retained_terminal.clone(),
+                    kind: PaneKind::Agent,
+                }],
+                selected: None,
+                replace_order: true,
+            },
+        );
+        assert_eq!(
+            retained_selection.selected(),
+            &PaneSelection::Tab(TabSelection::Live(retained_terminal))
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "a tab selection without a target-scoped tab")]
+    fn authoritative_empty_restore_rejects_an_impossible_pending_selection() {
+        let mut state = PaneState::new(PaneSelection::Tab(TabSelection::Pending(
+            OperationId::new(),
+        )));
+        let _ = reduce(
+            &mut state,
+            PaneEvent::RestoreBatch {
+                panes: Vec::new(),
+                selected: None,
+                replace_order: true,
+            },
+        );
+    }
+
+    #[test]
     fn selected_tab_reorder_wraps_and_registry_revision_only_tracks_effective_mutation() {
         let target = target();
         let first = terminal(target);
