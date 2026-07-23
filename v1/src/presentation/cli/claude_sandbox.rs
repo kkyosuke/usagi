@@ -55,6 +55,8 @@ pub fn run(
         .context("failed to prepare Claude's sandbox temporary directory")?;
     extra_writable_roots.push(claude_state);
     extra_writable_roots.push(usagi_state);
+    #[cfg(target_os = "macos")]
+    extra_writable_roots.extend(macos_keychain_roots(&home)?);
 
     // `sandbox-exec` cannot create a second Seatbelt profile.  This is normal
     // when usagi itself is launched by a sandboxed host (for example Codex).
@@ -80,6 +82,45 @@ pub fn run(
                 .with_context(|| format!("failed to start OS sandbox {}", program.display()))
         },
     )
+}
+
+/// Writable roots that keep the macOS Keychain usable inside the sandbox.
+///
+/// Claude stores its OAuth credentials in the login Keychain. Reading them
+/// needs the Module Directory Service to maintain its per-user cache under
+/// `$DARWIN_USER_CACHE_DIR`, and a token refresh rewrites the keychain
+/// database under `~/Library/Keychains`. If either write is denied, Claude
+/// cannot reach the Keychain and falls back to a possibly stale
+/// `~/.claude/.credentials.json`, exiting with an authentication error.
+#[cfg(target_os = "macos")]
+fn macos_keychain_roots(home: &Path) -> Result<Vec<PathBuf>> {
+    Ok(vec![
+        home.join("Library/Keychains"),
+        darwin_user_cache_dir()?,
+    ])
+}
+
+/// The per-user Darwin cache directory
+/// (`confstr(_CS_DARWIN_USER_CACHE_DIR)`, e.g. `/var/folders/<xx>/<id>/C/`).
+#[cfg(target_os = "macos")]
+fn darwin_user_cache_dir() -> Result<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    // SAFETY: the buffer outlives the call and its capacity is passed with it.
+    let len = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_CACHE_DIR,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        )
+    };
+    if len == 0 || len > buf.len() {
+        bail!("Claude sandbox cannot resolve the Darwin user cache directory");
+    }
+    // `len` counts the trailing NUL, which PathBuf must not carry.
+    buf.truncate(len - 1);
+    Ok(PathBuf::from(OsString::from_vec(buf)))
 }
 
 /// Whether the current process already has a macOS Seatbelt profile that
@@ -283,6 +324,20 @@ mod tests {
         assert!(!is_nested_sandbox_rejection(
             b"sandbox-exec: profile invalid\n"
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_roots_cover_the_keychain_db_and_the_mds_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = macos_keychain_roots(temp.path()).unwrap();
+        assert_eq!(roots[0], temp.path().join("Library/Keychains"));
+        // The MDS cache root is the caller's real per-user cache directory: an
+        // absolute path that exists, so `canonical_roots` accepts it.
+        let cache = &roots[1];
+        assert!(cache.is_absolute());
+        assert!(cache.is_dir());
+        assert!(!cache.as_os_str().to_string_lossy().ends_with('\0'));
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
