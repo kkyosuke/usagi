@@ -7,7 +7,7 @@
 //! this layer stays clock-free and fully testable; the concrete store and clock
 //! are bound by the caller.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::{Component, Path};
 
@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::domain::issue::{Issue, IssuePriority, IssueStatus, IssueSummary};
-use crate::infrastructure::store::issue::{IssueSource, IssueStore, number_from_filename};
+use crate::infrastructure::store::issue::{IssueSourceSnapshot, IssueStore};
 
 #[cfg(test)]
 thread_local! {
@@ -176,11 +176,12 @@ pub fn ensure_write_allowed(repo_root: &Path) -> Result<()> {
 pub fn create(store: &IssueStore, spec: NewIssue, now: DateTime<Utc>) -> Result<Issue> {
     let lock = store.lock()?;
     if let Some(matching) = store
-        .scan_sources_lenient()?
+        .source_snapshot_locked(&lock)?
+        .sources
         .into_iter()
         .find(|source| matches_new_issue_source(&source.issue, &spec))
     {
-        let source_number = number_from_filename(Path::new(&matching.file)).context(format!(
+        let source_number = matching.filename_number.context(format!(
             "matching issue source {} has no numeric filename prefix",
             matching.file
         ))?;
@@ -190,14 +191,6 @@ pub fn create(store: &IssueStore, spec: NewIssue, now: DateTime<Utc>) -> Result<
             "matching issue source {} disappeared while validating create retry",
             matching.file
         ))?;
-        if existing.number != source_number {
-            bail!(
-                "matching issue source {} declares #{} but its filename claims #{}; refusing create retry",
-                matching.file,
-                existing.number,
-                source_number
-            );
-        }
         if !matches_new_issue_source(&existing, &spec) {
             bail!(
                 "matching issue source {} changed while validating create retry",
@@ -262,56 +255,72 @@ pub fn list(store: &IssueStore) -> Result<Vec<IssueSummary>> {
 }
 
 /// Search issue titles and bodies, apply metadata filters, and annotate
-/// dependency readiness. An empty query lists every issue through the index.
+/// dependency readiness from one lock-protected Markdown source snapshot.
 ///
 /// # Errors
 ///
 /// Returns an error when the store cannot be scanned or indexed.
 pub fn search(store: &IssueStore, query: &str, filter: &IssueFilter) -> Result<Vec<ListedIssue>> {
-    let all = store.summaries()?;
-    let mut identity_counts = HashMap::<u32, usize>::new();
-    for number in store.source_numbers()? {
-        *identity_counts.entry(number).or_default() += 1;
-    }
-    let done: HashSet<u32> = all
+    Ok(search_snapshot(store.source_snapshot()?, query, filter))
+}
+
+fn search_snapshot(
+    snapshot: IssueSourceSnapshot,
+    query: &str,
+    filter: &IssueFilter,
+) -> Vec<ListedIssue> {
+    let mut unsafe_numbers: HashSet<u32> = snapshot
+        .claims
         .iter()
-        .filter(|summary| {
-            summary.status == IssueStatus::Done
-                && number_from_filename(Path::new(&summary.file)) == Some(summary.number)
-                && identity_counts.get(&summary.number) == Some(&1)
+        .filter(|(_, files)| files.len() > 1)
+        .map(|(number, _)| *number)
+        .collect();
+    for source in &snapshot.sources {
+        if source.filename_number != Some(source.issue.number) {
+            unsafe_numbers.insert(source.issue.number);
+            if let Some(filename_number) = source.filename_number {
+                unsafe_numbers.insert(filename_number);
+            }
+        }
+    }
+    let done: HashSet<u32> = snapshot
+        .sources
+        .iter()
+        .filter(|source| {
+            source.issue.status == IssueStatus::Done
+                && source.filename_number == Some(source.issue.number)
+                && !unsafe_numbers.contains(&source.issue.number)
         })
-        .map(|summary| summary.number)
+        .map(|source| source.issue.number)
         .collect();
     let needle = query.to_lowercase();
-    let candidates = if needle.is_empty() {
-        all
-    } else {
-        store
-            .scan_sources_lenient()?
-            .into_iter()
-            .filter(|source| {
-                source.issue.title.to_lowercase().contains(&needle)
-                    || source.issue.body.to_lowercase().contains(&needle)
-            })
-            .map(IssueSource::summary)
-            .collect()
-    };
-    Ok(candidates
+    snapshot
+        .sources
         .into_iter()
-        .map(|summary| ListedIssue {
-            ambiguous: number_from_filename(Path::new(&summary.file))
-                .and_then(|number| identity_counts.get(&number))
-                .is_some_and(|count| *count > 1),
-            unmet_deps: summary
-                .dependson
-                .iter()
-                .copied()
-                .filter(|number| !done.contains(number))
-                .collect(),
-            summary,
+        .filter(|source| {
+            needle.is_empty()
+                || source.issue.title.to_lowercase().contains(&needle)
+                || source.issue.body.to_lowercase().contains(&needle)
+        })
+        .map(|source| {
+            let ambiguous = unsafe_numbers.contains(&source.issue.number)
+                || source
+                    .filename_number
+                    .is_none_or(|number| unsafe_numbers.contains(&number));
+            let summary = source.summary();
+            ListedIssue {
+                ambiguous,
+                unmet_deps: summary
+                    .dependson
+                    .iter()
+                    .copied()
+                    .filter(|number| !done.contains(number))
+                    .collect(),
+                summary,
+            }
         })
         .filter(|issue| filter.matches(issue))
-        .collect())
+        .collect()
 }
 
 /// Render an issue as a self-contained implementation prompt.
@@ -445,14 +454,20 @@ pub fn delete(store: &IssueStore, number: u32) -> Result<bool> {
 mod tests {
     use super::{
         IssueFilter, IssuePatch, NewIssue, create, delete, ensure_write_allowed, get, list, search,
-        set_create_retry_validation_hook, to_prompt, update,
+        search_snapshot, set_create_retry_validation_hook, to_prompt, update,
     };
     use crate::domain::frontmatter::FrontmatterDoc;
-    use crate::domain::issue::{IssuePriority, IssueStatus};
+    use crate::domain::issue::{Issue, IssuePriority, IssueStatus};
     use crate::infrastructure::persistence::json_file::{AtomicWriteStage, fail_next_atomic_write};
-    use crate::infrastructure::store::issue::{AmbiguousIssueNumber, IssueStore};
+    use crate::infrastructure::persistence::store_lock::StoreLock;
+    use crate::infrastructure::store::issue::{
+        AmbiguousIssueNumber, IssueStore, MismatchedIssueNumber, SourceSnapshotLockPhase,
+    };
     use chrono::{DateTime, TimeZone, Utc};
+    use fs2::FileExt;
     use std::fs;
+    use std::path::Path;
+    use std::process::Command;
     use std::sync::{Arc, Barrier};
     use std::thread;
 
@@ -475,6 +490,77 @@ mod tests {
         }
     }
 
+    fn persisted_issue(number: u32, title: &str) -> Issue {
+        Issue {
+            number,
+            title: title.to_string(),
+            status: IssueStatus::Todo,
+            priority: IssuePriority::Medium,
+            labels: vec![],
+            dependson: vec![],
+            related: vec![],
+            parent: None,
+            milestone: None,
+            created_at: ts(20),
+            updated_at: ts(20),
+            body: "body".to_string(),
+        }
+    }
+
+    fn assert_mismatched_crud_has_no_effect(
+        store: &IssueStore,
+        number: u32,
+        mismatch_file: &Path,
+        filename_number: Option<u32>,
+        source_paths: &[&Path],
+    ) {
+        let source_before: Vec<_> = source_paths
+            .iter()
+            .map(|path| fs::read(path).unwrap())
+            .collect();
+        let index_before = fs::read(store.index_path()).unwrap();
+        let dirty = store.dir().join(".derived-dirty");
+        let dirty_before = fs::read(&dirty).unwrap();
+
+        let errors = [
+            get(store, number).unwrap_err(),
+            update(
+                store,
+                number,
+                IssuePatch {
+                    status: Some(IssueStatus::Done),
+                    ..Default::default()
+                },
+                ts(21),
+            )
+            .unwrap_err(),
+            delete(store, number).unwrap_err(),
+        ];
+        for error in errors {
+            let mismatch = error.downcast_ref::<MismatchedIssueNumber>().unwrap();
+            assert_eq!(mismatch.filename_number, filename_number);
+            assert_eq!(mismatch.declared_number, 8);
+            assert_eq!(mismatch.file, mismatch_file);
+        }
+
+        for (path, before) in source_paths.iter().zip(source_before) {
+            assert_eq!(fs::read(path).unwrap(), before);
+        }
+        assert_eq!(fs::read(store.index_path()).unwrap(), index_before);
+        assert_eq!(fs::read(dirty).unwrap(), dirty_before);
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "git {args:?} failed: {stderr}");
+    }
+
     #[test]
     fn create_allocates_sequential_numbers_and_defaults_to_todo() {
         let (_tmp, store) = store();
@@ -494,18 +580,90 @@ mod tests {
         unsafe {
             std::env::set_var(crate::infrastructure::paths::DATA_DIR_ENV, logs.path());
         }
-        let (_tmp, store) = store();
+        let (tmp, store) = store();
         fail_next_atomic_write(&store.index_path(), AtomicWriteStage::Rename);
 
         let first = create(&store, spec("same request"), ts(20)).unwrap();
+        let authority = tmp.path().join(".usagi/issue-numbers");
+        let sequence_before = fs::read(authority.join("sequence.json")).unwrap();
+        let markers_before = fs::read_dir(authority.join("reservations"))
+            .unwrap()
+            .count();
         let retry = create(&store, spec("same request"), ts(21)).unwrap();
 
         assert_eq!(retry.number, first.number);
         assert_eq!(retry.created_at, first.created_at);
         assert_eq!(store.scan().unwrap().len(), 1);
+        assert_eq!(
+            fs::read(authority.join("sequence.json")).unwrap(),
+            sequence_before
+        );
+        assert_eq!(
+            fs::read_dir(authority.join("reservations"))
+                .unwrap()
+                .count(),
+            markers_before
+        );
 
         unsafe {
             std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
+        }
+    }
+
+    #[test]
+    fn source_write_failure_consumes_the_reservation_before_retrying() {
+        let (tmp, store) = store();
+        let failed_source = store.dir().join("001-source-failure.md");
+        fail_next_atomic_write(&failed_source, AtomicWriteStage::Rename);
+
+        assert!(create(&store, spec("source failure"), ts(20)).is_err());
+        assert!(!failed_source.exists());
+        let authority = tmp.path().join(".usagi/issue-numbers");
+        assert!(authority.join("reservations/0000000001.reserved").is_file());
+        assert!(
+            fs::read_to_string(authority.join("sequence.json"))
+                .unwrap()
+                .contains("\"last_reserved\": 1")
+        );
+
+        let retry = create(&store, spec("source failure"), ts(21)).unwrap();
+        assert_eq!(retry.number, 2);
+        assert!(authority.join("reservations/0000000002.reserved").is_file());
+    }
+
+    #[test]
+    fn corrupt_allocator_state_prevents_create_without_writing_a_source_or_new_reservation() {
+        for corrupt_marker in [false, true] {
+            let (tmp, store) = store();
+            let authority = tmp.path().join(".usagi/issue-numbers");
+            fs::create_dir_all(&authority).unwrap();
+            let corrupt_path = if corrupt_marker {
+                let reservations = authority.join("reservations");
+                fs::create_dir(&reservations).unwrap();
+                reservations.join("0000000007.reserved")
+            } else {
+                authority.join("sequence.json")
+            };
+            fs::write(&corrupt_path, b"corrupt authority state\n").unwrap();
+            let corrupt_before = fs::read(&corrupt_path).unwrap();
+
+            assert!(create(&store, spec("must not be written"), ts(20)).is_err());
+
+            assert_eq!(fs::read(&corrupt_path).unwrap(), corrupt_before);
+            assert!(store.scan().unwrap().is_empty());
+            assert!(!store.dir().join("001-must-not-be-written.md").exists());
+            assert!(!authority.join("legacy-v2-migrated").exists());
+            if corrupt_marker {
+                assert!(!authority.join("sequence.json").exists());
+                assert_eq!(
+                    fs::read_dir(authority.join("reservations"))
+                        .unwrap()
+                        .count(),
+                    1
+                );
+            } else {
+                assert!(!authority.join("reservations").exists());
+            }
         }
     }
 
@@ -638,22 +796,72 @@ mod tests {
     }
 
     #[test]
-    fn create_reserves_distinct_numbers_for_concurrent_sibling_worktrees() {
+    fn create_reserves_distinct_numbers_for_concurrent_real_git_sibling_worktrees() {
         let tmp = tempfile::tempdir().unwrap();
-        let common_git_dir = tmp.path().join("common.git");
-        let first_root = tmp.path().join("first");
-        let second_root = tmp.path().join("second");
-        for (name, root) in [("first", &first_root), ("second", &second_root)] {
-            let private_git_dir = common_git_dir.join("worktrees").join(name);
-            fs::create_dir_all(&private_git_dir).unwrap();
-            fs::create_dir_all(root).unwrap();
-            fs::write(
-                root.join(".git"),
-                format!("gitdir: {}\n", private_git_dir.display()),
-            )
-            .unwrap();
-            fs::write(private_git_dir.join("commondir"), "../..\n").unwrap();
-        }
+        let root = tmp.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.email", "test@example.com"]);
+        git(&root, &["config", "user.name", "Test"]);
+        fs::write(root.join("README.md"), "workspace\n").unwrap();
+        git(&root, &["add", "README.md"]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+
+        let sessions = root.join(".usagi/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let first_root = sessions.join("first");
+        let second_root = sessions.join("second");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "test-first",
+                first_root.to_str().unwrap(),
+            ],
+        );
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "test-second",
+                second_root.to_str().unwrap(),
+            ],
+        );
+
+        let seeded = Issue {
+            number: 515,
+            title: "unmerged sibling".to_string(),
+            status: IssueStatus::Todo,
+            priority: IssuePriority::High,
+            labels: vec![],
+            dependson: vec![],
+            related: vec![],
+            parent: None,
+            milestone: None,
+            created_at: ts(19),
+            updated_at: ts(19),
+            body: "already reserved outside main".to_string(),
+        };
+        IssueStore::new(&first_root).write(&seeded).unwrap();
+
+        // Production v1 has already reserved the unmerged source number in the
+        // Git-common authority. That shared floor is the safe side of the
+        // first old-v2 sentinel handshake.
+        let authority = root.join(".git/usagi/issue-numbers");
+        let reservations = authority.join("reservations");
+        fs::create_dir_all(&reservations).unwrap();
+        fs::write(
+            authority.join("sequence.json"),
+            b"{\"version\":1,\"last_reserved\":515}\n",
+        )
+        .unwrap();
+        fs::write(reservations.join("0000000515.reserved"), b"515\n").unwrap();
 
         let start = Arc::new(Barrier::new(2));
         let create_in = |root: std::path::PathBuf, title: &'static str| {
@@ -668,7 +876,18 @@ mod tests {
         let second = create_in(second_root, "second");
         let mut numbers = [first.join().unwrap(), second.join().unwrap()];
         numbers.sort_unstable();
-        assert_eq!(numbers, [1, 2]);
+        assert_eq!(numbers, [516, 517]);
+        assert!(
+            fs::read_to_string(authority.join("sequence.json"))
+                .unwrap()
+                .contains("\"last_reserved\": 517")
+        );
+        assert_eq!(
+            fs::read_dir(authority.join("reservations"))
+                .unwrap()
+                .count(),
+            3
+        );
     }
 
     #[test]
@@ -677,6 +896,53 @@ mod tests {
         create(&store, spec("first"), ts(20)).unwrap();
         assert_eq!(get(&store, 1).unwrap().unwrap().title, "first");
         assert!(get(&store, 99).unwrap().is_none());
+    }
+
+    #[test]
+    fn missing_store_get_and_search_are_read_only() {
+        let (_tmp, store) = store();
+        assert!(!store.dir().exists());
+
+        assert!(get(&store, 1).unwrap().is_none());
+        assert!(
+            search(&store, "", &IssueFilter::default())
+                .unwrap()
+                .is_empty()
+        );
+
+        assert!(!store.dir().exists());
+    }
+
+    #[test]
+    fn invalid_store_path_is_not_treated_as_an_empty_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("not-a-directory");
+        fs::write(&root, b"file").unwrap();
+        let store = IssueStore::new(root);
+
+        assert!(get(&store, 1).is_err());
+        assert!(search(&store, "", &IssueFilter::default()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_store_or_ancestor_is_not_treated_as_an_empty_get_or_search() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join(".usagi")).unwrap();
+        symlink("missing-issues", tmp.path().join(".usagi/issues")).unwrap();
+        let store = IssueStore::new(tmp.path());
+        assert!(get(&store, 1).is_err());
+        assert!(search(&store, "", &IssueFilter::default()).is_err());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("session");
+        fs::create_dir(&root).unwrap();
+        symlink("missing-state", root.join(".usagi")).unwrap();
+        let store = IssueStore::new(root);
+        assert!(get(&store, 1).is_err());
+        assert!(search(&store, "", &IssueFilter::default()).is_err());
     }
 
     #[test]
@@ -761,9 +1027,51 @@ mod tests {
     }
 
     #[test]
+    fn filename_and_declared_number_mismatches_fence_get_update_delete_from_both_sides() {
+        for with_canonical_eight in [false, true] {
+            let (_tmp, store) = store();
+            store.write(&persisted_issue(7, "Moved")).unwrap();
+            if with_canonical_eight {
+                store.write(&persisted_issue(8, "Canonical")).unwrap();
+            }
+            let moved = store.dir().join("007-moved.md");
+            fs::write(&moved, persisted_issue(8, "Moved").to_markdown()).unwrap();
+            let canonical = store.dir().join("008-canonical.md");
+            let dirty = store.dir().join(".derived-dirty");
+            fs::write(&dirty, b"pre-existing rebuild request\n").unwrap();
+            let paths: Vec<&Path> = if with_canonical_eight {
+                vec![moved.as_path(), canonical.as_path()]
+            } else {
+                vec![moved.as_path()]
+            };
+
+            assert_mismatched_crud_has_no_effect(&store, 7, &moved, Some(7), &paths);
+            assert_mismatched_crud_has_no_effect(&store, 8, &moved, Some(7), &paths);
+        }
+
+        let (_tmp, store) = store();
+        store.write(&persisted_issue(8, "Moved")).unwrap();
+        let manual = store.dir().join("manual.md");
+        fs::rename(store.dir().join("008-moved.md"), &manual).unwrap();
+        let dirty = store.dir().join(".derived-dirty");
+        fs::write(&dirty, b"pre-existing rebuild request\n").unwrap();
+        assert_mismatched_crud_has_no_effect(&store, 8, &manual, None, &[manual.as_path()]);
+    }
+
+    #[test]
     fn duplicate_diagnostics_use_source_paths_and_count_unparseable_siblings() {
         let (_tmp, store) = store();
         let created = create(&store, spec("first"), ts(20)).unwrap();
+        update(
+            &store,
+            created.number,
+            IssuePatch {
+                status: Some(IssueStatus::Done),
+                ..Default::default()
+            },
+            ts(21),
+        )
+        .unwrap();
         let first = store.dir().join(created.file_name());
         let copied = store.dir().join("001-copied.md");
         fs::copy(&first, &copied).unwrap();
@@ -785,6 +1093,10 @@ mod tests {
             ]
         );
 
+        let mut dependent = spec("dependent");
+        dependent.dependson = vec![1];
+        create(&store, dependent, ts(22)).unwrap();
+
         let mismatched = fs::read_to_string(&first)
             .unwrap()
             .replacen("number: 1", "number: 2", 1);
@@ -801,10 +1113,82 @@ mod tests {
         fs::remove_file(&copied).unwrap();
         fs::write(&copied, "not an issue").unwrap();
         let rows = search(&store, "", &IssueFilter::default()).unwrap();
+        assert_eq!(rows.len(), 2);
+        let first = rows.iter().find(|row| row.summary.number == 1).unwrap();
+        assert_eq!(first.summary.file, "001-first.md");
+        assert!(first.ambiguous);
+        assert!(!first.is_ready());
+        let dependent = rows.iter().find(|row| row.summary.number == 2).unwrap();
+        assert_eq!(dependent.unmet_deps, vec![1]);
+        assert!(!dependent.is_ready());
+    }
+
+    #[test]
+    fn search_holds_one_lock_while_capturing_the_source_snapshot() {
+        let (_tmp, store) = store();
+        let created = create(&store, spec("first"), ts(20)).unwrap();
+        let first = store.dir().join(created.file_name());
+        let second_source = fs::read(&first).unwrap();
+        let lock_path = Arc::new(StoreLock::path(store.dir()));
+        let mut observed = Vec::new();
+        let snapshot = store
+            .source_snapshot_after_lock_for_test(|phase| {
+                observed.push(phase);
+                let lock_path = Arc::clone(&lock_path);
+                let competing_writer_acquired = thread::spawn(move || {
+                    let file = fs::File::options()
+                        .read(true)
+                        .write(true)
+                        .open(lock_path.as_ref())
+                        .unwrap();
+                    file.try_lock_exclusive().is_ok()
+                })
+                .join()
+                .unwrap();
+                assert!(
+                    !competing_writer_acquired,
+                    "cooperative writer acquired the store lock during {phase:?}"
+                );
+            })
+            .unwrap();
+        let before = search_snapshot(snapshot, "", &IssueFilter::default());
+
+        assert_eq!(
+            observed,
+            [
+                SourceSnapshotLockPhase::LockAcquired,
+                SourceSnapshotLockPhase::DerivedRepaired,
+                SourceSnapshotLockPhase::SnapshotCaptured,
+            ]
+        );
+        assert_eq!(before.len(), 1);
+        assert!(!before[0].ambiguous);
+        assert!(before[0].is_ready());
+
+        {
+            let _lock = store.lock().unwrap();
+            fs::write(store.dir().join("001-second.md"), second_source).unwrap();
+        }
+        let after = search(&store, "", &IssueFilter::default()).unwrap();
+        assert_eq!(after.len(), 2);
+        assert!(after.iter().all(|row| row.ambiguous));
+        assert!(after.iter().all(|row| !row.is_ready()));
+    }
+
+    #[test]
+    fn search_repairs_a_scheduled_derived_rebuild_before_reading_the_source_snapshot() {
+        let (_tmp, store) = store();
+        create(&store, spec("first"), ts(20)).unwrap();
+        fs::remove_file(store.index_path()).unwrap();
+        let dirty = store.dir().join(".derived-dirty");
+        fs::write(&dirty, b"rebuild from markdown\n").unwrap();
+
+        let rows = search(&store, "", &IssueFilter::default()).unwrap();
+
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].summary.file, "001-first.md");
-        assert!(rows[0].ambiguous);
-        assert!(!rows[0].is_ready());
+        assert_eq!(rows[0].summary.title, "first");
+        assert!(store.index_path().is_file());
+        assert!(!dirty.exists());
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //!
 //! [`MarkdownStore`] owns the common mechanics for stores whose source of truth
 //! is a directory of frontmatter markdown files and whose JSON index is only a
-//! rebuildable metadata cache. Store-specific code supplies parsing, file/key
+//! rebuildable metadata cache. Store-specific code supplies parsing, filename
 //! derivation, summary extraction, the on-disk index shape, and any extra
 //! derived artifact such as memory's `MEMORY.md` table of contents.
 
@@ -30,7 +30,6 @@ const FINGERPRINT_ALGORITHM: &str = "sha256";
 pub(crate) trait MarkdownEntry: Sync {
     type Entry: Send;
     type Summary: Clone + Serialize + DeserializeOwned + Send + Sync;
-    type Key: Ord + Clone;
     type IndexFile: DeserializeOwned;
     type IndexFileRef<'a>: Serialize
     where
@@ -43,7 +42,6 @@ pub(crate) trait MarkdownEntry: Sync {
     fn parse_markdown(text: &str) -> Result<Self::Entry>;
     fn to_markdown(entry: &Self::Entry) -> String;
     fn file_name(entry: &Self::Entry) -> Result<String>;
-    fn key_from_path(path: &Path) -> Option<Self::Key>;
     fn summary(entry: &Self::Entry) -> Self::Summary;
     fn sort_entries(entries: &mut Vec<Self::Entry>);
     fn index_parts(index: Self::IndexFile) -> (u32, String, Vec<Self::Summary>);
@@ -81,6 +79,29 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
 
     pub(crate) fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Whether the source directory exists, distinguishing a genuinely absent
+    /// path from a dangling final component or ancestor.
+    pub(crate) fn source_dir_exists(&self) -> Result<bool> {
+        match fs::metadata(&self.dir) {
+            Ok(metadata) => {
+                anyhow::ensure!(
+                    metadata.is_dir(),
+                    "markdown source path is not a directory: {}",
+                    self.dir.display()
+                );
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if path_is_genuinely_missing(&self.dir)? {
+                    Ok(false)
+                } else {
+                    Err(error).context(format!("failed to inspect {}", self.dir.display()))
+                }
+            }
+            Err(error) => Err(error).context(format!("failed to inspect {}", self.dir.display())),
+        }
     }
 
     pub(crate) fn index_path(&self) -> PathBuf {
@@ -139,7 +160,12 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     pub(crate) fn entry_files(&self) -> Result<Vec<PathBuf>> {
         let entries = match fs::read_dir(&self.dir) {
             Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if path_is_genuinely_missing(&self.dir)? {
+                    return Ok(Vec::new());
+                }
+                return Err(e).context(format!("failed to read {}", self.dir.display()));
+            }
             Err(e) => return Err(e).context(format!("failed to read {}", self.dir.display())),
         };
         let mut files = Vec::new();
@@ -193,14 +219,6 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
         Ok(format!("{FINGERPRINT_ALGORITHM}:{:x}", hasher.finalize()))
     }
 
-    pub(crate) fn files_for_key(&self, key: &E::Key) -> Result<Vec<PathBuf>> {
-        Ok(self
-            .entry_files()?
-            .into_iter()
-            .filter(|path| E::key_from_path(path).as_ref() == Some(key))
-            .collect())
-    }
-
     // Takes `&self` for call-site consistency with the store's other methods
     // even though it only needs `path` and `E`.
     #[allow(clippy::unused_self)]
@@ -231,16 +249,8 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     /// committed source mutation. Derived errors are logged and retained as a
     /// dirty marker; they never masquerade as an unapplied source error.
     pub(crate) fn finish_committed<T>(&self, value: T, refresh: Result<()>) -> MutationOutcome<T> {
-        match refresh.and_then(|()| self.clear_derived_dirty()) {
-            Ok(()) => MutationOutcome::new(value, DerivedState::Fresh),
-            Err(error) => {
-                ErrorLog::record(&format!(
-                    "{} source committed but derived refresh failed; rebuild remains scheduled: {error:#}",
-                    E::NAME
-                ));
-                MutationOutcome::new(value, DerivedState::RebuildNeeded)
-            }
-        }
+        let refresh = refresh.and_then(|()| self.clear_derived_dirty());
+        MutationOutcome::new(value, committed_derived_state(E::NAME, refresh))
     }
 
     /// Repair a previously scheduled rebuild while the caller holds the store
@@ -276,7 +286,7 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
 
     /// Refresh derived files after a source removal under the same contract as
     /// [`reindex_after_write`](Self::reindex_after_write).
-    pub(crate) fn reindex_after_remove(&self, _key: &E::Key) -> Result<()> {
+    pub(crate) fn reindex_after_remove(&self) -> Result<()> {
         self.rebuild_derived().map(|_| ())
     }
 
@@ -367,8 +377,68 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     }
 }
 
+/// Keep the success/error branch outside the generic store implementation so
+/// every entry/value instantiation uses the same behavior and coverage.
+fn committed_derived_state(entry_name: &str, refresh: Result<()>) -> DerivedState {
+    match refresh {
+        Ok(()) => DerivedState::Fresh,
+        Err(error) => {
+            ErrorLog::record(&format!(
+                "{entry_name} source committed but derived refresh failed; rebuild remains scheduled: {error:#}"
+            ));
+            DerivedState::RebuildNeeded
+        }
+    }
+}
+
+/// Return true only when a missing path reaches an existing real-directory
+/// ancestor. Encountering a symlink or non-directory first is ambiguous (most
+/// importantly, a dangling symlink) and must not be treated as an empty store.
+fn path_is_genuinely_missing(path: &Path) -> Result<bool> {
+    for ancestor in path.ancestors() {
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) => {
+                return Ok(metadata.is_dir() && !metadata.file_type().is_symlink());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .context(format!("failed to inspect ancestor {}", ancestor.display()));
+            }
+        }
+    }
+    Ok(false)
+}
+
 fn valid_fingerprint(fingerprint: &str) -> bool {
     fingerprint.strip_prefix("sha256:").is_some_and(|digest| {
         digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
     })
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn relative_path_without_an_existing_ancestor_is_not_genuinely_missing() {
+        assert!(!path_is_genuinely_missing(Path::new("")).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_ancestor_is_not_treated_as_a_missing_store() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let unreadable = tmp.path().join("unreadable");
+        fs::create_dir(&unreadable).unwrap();
+        let original = fs::metadata(&unreadable).unwrap().permissions();
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let error = path_is_genuinely_missing(&unreadable.join("store/index.json")).unwrap_err();
+
+        fs::set_permissions(&unreadable, original).unwrap();
+        assert!(error.to_string().contains("failed to inspect ancestor"));
+    }
 }

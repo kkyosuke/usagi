@@ -5,6 +5,7 @@
 mod support;
 
 use std::fs;
+use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,7 +16,9 @@ use usagi_core::domain::{
     id::{AgentId, OperationId, UserDecisionId, WorkspaceId},
     user_decision::UserDecision,
 };
-use usagi_core::infrastructure::store::user_decision::UserDecisionStore;
+use usagi_core::infrastructure::store::{
+    DerivedState, issue::IssueStore, memory::MemoryStore, user_decision::UserDecisionStore,
+};
 use usagi_core::usecase::client::{
     DaemonClient, DaemonReply, DaemonRequest, DispatchAgentIntent, DispatchIntent,
     TuiUserDecisionAction,
@@ -266,12 +269,21 @@ fn production_store_tools_round_trip_through_stdio_and_durable_files() {
             "body":"remember me"
         }),
     ));
+    let memory_store = MemoryStore::new(mcp.cwd());
+    let memory_dirty = memory_store.dir().join(".derived-dirty");
+    fs::write(&memory_dirty, "rebuild from markdown\n").unwrap();
+    let repaired = memory_store.read("mcp-fact").unwrap().unwrap();
     let memory = tool_text(&mcp.tool("memory_get", &json!({"name":"mcp-fact"})));
 
     assert_eq!(created["number"], 1);
     assert_eq!(fetched["title"], "MCP durable issue");
     assert_eq!(found[0]["ready"], true);
     assert_eq!(saved["name"], "mcp-fact");
+    assert_eq!(repaired.body, "remember me");
+    assert!(!memory_dirty.exists());
+    let missing = memory_store.remove_with_outcome("missing-memory").unwrap();
+    assert!(!missing.value);
+    assert_eq!(missing.derived, DerivedState::Fresh);
     assert_eq!(memory["body"], "remember me");
     assert!(
         mcp.cwd()
@@ -279,6 +291,124 @@ fn production_store_tools_round_trip_through_stdio_and_durable_files() {
             .is_file()
     );
     assert!(mcp.cwd().join(".usagi/memory/mcp-fact.md").is_file());
+
+    fs::remove_file(memory_store.index_path()).unwrap();
+    fs::create_dir(memory_store.index_path()).unwrap();
+    fs::write(&memory_dirty, "rebuild from markdown\n").unwrap();
+    let fallback = memory_store.read("mcp-fact").unwrap().unwrap();
+    assert_eq!(fallback.body, "remember me");
+    assert!(memory_dirty.is_file());
+}
+
+#[test]
+fn production_issue_create_commits_source_when_derived_refresh_fails() {
+    let mut mcp = McpHarness::start_in_session("derived-refresh-failure");
+    let issues = mcp.cwd().join(".usagi/issues");
+    fs::create_dir_all(issues.join("index.json")).unwrap();
+
+    let created = tool_text(&mcp.tool("issue_create", &json!({"title":"Committed without index"})));
+
+    assert_eq!(created["number"], 1);
+    assert!(issues.join("001-committed-without-index.md").is_file());
+    assert_eq!(
+        fs::read_to_string(issues.join(".derived-dirty")).unwrap(),
+        "rebuild from markdown\n"
+    );
+    let fetched = tool_text(&mcp.tool("issue_get", &json!({"number":1})));
+    assert_eq!(fetched["title"], "Committed without index");
+    assert!(issues.join("index.json").is_dir());
+    assert!(issues.join(".derived-dirty").is_file());
+
+    // The RPC returns the committed Issue, while the store outcome retains the
+    // explicit derived-state contract for direct callers.
+    let store = IssueStore::new(mcp.cwd());
+    let persisted = store.read(1).unwrap().unwrap();
+    let outcome = store.write(&persisted).unwrap();
+    assert_eq!(outcome.derived, DerivedState::RebuildNeeded);
+
+    let unreadable_claim = issues.join("002-unreadable.md");
+    fs::create_dir(&unreadable_claim).unwrap();
+    let dirty_before = fs::read(issues.join(".derived-dirty")).unwrap();
+    let error = store.read(2).unwrap_err();
+    assert!(error.to_string().contains("failed to read"));
+    assert!(unreadable_claim.is_dir());
+    assert_eq!(
+        fs::read(issues.join(".derived-dirty")).unwrap(),
+        dirty_before
+    );
+
+    fs::remove_dir(&unreadable_claim).unwrap();
+    fs::remove_dir(issues.join("index.json")).unwrap();
+    let repaired = store.read(1).unwrap().unwrap();
+    assert_eq!(repaired.title, "Committed without index");
+    assert!(issues.join("index.json").is_file());
+    assert!(!issues.join(".derived-dirty").exists());
+    let missing = store.remove_with_outcome(999).unwrap();
+    assert!(!missing.value);
+    assert_eq!(missing.derived, DerivedState::Fresh);
+}
+
+#[test]
+fn production_issue_create_uses_the_v1_git_common_sequence_authority() {
+    let mut mcp = McpHarness::start_in_session("v1-sequence-compat");
+    let authority = mcp.workspace().join(".git/usagi/issue-numbers");
+    let reservations = authority.join("reservations");
+    fs::create_dir_all(&reservations).unwrap();
+    fs::write(
+        authority.join("sequence.json"),
+        "{\n  \"version\": 1,\n  \"last_reserved\": 515\n}\n",
+    )
+    .unwrap();
+    fs::write(reservations.join("0000000515.reserved"), "515\n").unwrap();
+
+    let created = tool_text(&mcp.tool("issue_create", &json!({"title":"After v1"})));
+
+    assert_eq!(created["number"], 516);
+    assert!(mcp.cwd().join(".usagi/issues/516-after-v1.md").is_file());
+    assert_eq!(
+        fs::read_to_string(reservations.join("0000000516.reserved")).unwrap(),
+        "516\n"
+    );
+    assert!(
+        fs::read_to_string(authority.join("sequence.json"))
+            .unwrap()
+            .contains("\"last_reserved\": 516")
+    );
+}
+
+#[test]
+fn production_issue_create_from_nested_linked_worktree_uses_git_common_authority() {
+    let mut mcp = McpHarness::start_in_nested_session("nested-v1-sequence-compat");
+    let authority = mcp.workspace().join(".git/usagi/issue-numbers");
+    fs::create_dir_all(&authority).unwrap();
+    fs::write(
+        authority.join("sequence.json"),
+        "{\n  \"version\": 1,\n  \"last_reserved\": 515\n}\n",
+    )
+    .unwrap();
+    let common_legacy = mcp.workspace().join(".git/usagi-issue-sequence/next");
+    fs::create_dir_all(common_legacy.parent().unwrap()).unwrap();
+    fs::write(&common_legacy, "migrated-to-usagi-issue-numbers:515\n").unwrap();
+    fs::write(authority.join("legacy-v2-migrated"), "515\n").unwrap();
+
+    let created = mcp.tool(
+        "issue_create",
+        &json!({"title":"Nested allocator authority","body":"body"}),
+    );
+    assert!(created.get("error").is_none(), "{created}");
+    let body: serde_json::Value =
+        serde_json::from_str(created["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(body["number"], 516);
+    assert!(authority.join("reservations/0000000516.reserved").is_file());
+    assert_eq!(
+        fs::read_to_string(common_legacy).unwrap(),
+        "migrated-to-usagi-issue-numbers:516\n"
+    );
+    assert_eq!(
+        fs::read_to_string(mcp.cwd().join(".usagi/issues/usagi-issue-sequence/next")).unwrap(),
+        "migrated-to-usagi-issue-numbers:516\n"
+    );
+    assert!(!mcp.cwd().join(".usagi/issue-numbers").exists());
 }
 
 #[test]
@@ -363,6 +493,43 @@ fn production_issue_point_tools_reject_duplicate_numbers_without_changing_siblin
             .join(format!("{number:03}-replacement.md"))
             .exists()
     );
+}
+
+#[test]
+fn production_delegate_issue_preserves_ambiguity_without_session_or_queue_side_effects() {
+    let mut mcp = McpHarness::start();
+    let issues_dir = mcp.workspace().join(".usagi/issues");
+    fs::create_dir_all(&issues_dir).unwrap();
+    let first = issues_dir.join("001-first.md");
+    let second = issues_dir.join("001-second.md");
+    let source = "---\nnumber: 1\ntitle: First\nstatus: todo\npriority: high\nlabels: []\ndependson: []\nrelated: []\ncreated_at: 2026-07-22T00:00:00+00:00\nupdated_at: 2026-07-22T00:00:00+00:00\n---\n\nbody\n";
+    fs::write(&first, source).unwrap();
+    fs::write(&second, source).unwrap();
+
+    let sessions_path = mcp.data_dir().join("daemon/sessions.json");
+    let dispatch_path = mcp.data_dir().join("daemon/dispatch.json");
+    let sessions_before = fs::read(&sessions_path).unwrap();
+    let dispatch_before = fs::read(&dispatch_path).ok();
+    let name = "ambiguous-must-not-exist";
+
+    let response = mcp.tool("session_delegate_issue", &json!({"number":1,"name":name}));
+
+    assert_eq!(response["error"]["code"], -32603);
+    let message = response["error"]["message"].as_str().unwrap();
+    assert!(message.contains("issue #1 is ambiguous"));
+    assert!(message.contains(first.to_str().unwrap()));
+    assert!(message.contains(second.to_str().unwrap()));
+    assert!(!mcp.workspace().join(".usagi/sessions").join(name).exists());
+    assert_eq!(fs::read(sessions_path).unwrap(), sessions_before);
+    assert_eq!(fs::read(dispatch_path).ok(), dispatch_before);
+
+    let branch = Command::new("git")
+        .args(["-C", mcp.workspace().to_str().unwrap(), "branch", "--list"])
+        .arg(format!("usagi/{name}"))
+        .output()
+        .unwrap();
+    assert!(branch.status.success());
+    assert!(branch.stdout.is_empty());
 }
 
 fn tool_text(response: &serde_json::Value) -> serde_json::Value {

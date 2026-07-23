@@ -44,20 +44,29 @@ struct McpProcess {
 impl McpHarness {
     #[must_use]
     pub fn start() -> Self {
-        Self::start_at(None, None)
+        Self::start_at(None, false, None)
     }
 
     #[must_use]
     pub fn start_in_session(name: &str) -> Self {
-        Self::start_at(Some(name), None)
+        Self::start_at(Some(name), false, None)
     }
 
     #[must_use]
     pub fn start_with_tool_availability(issue: bool, memory: bool) -> Self {
-        Self::start_at(None, Some((issue, memory)))
+        Self::start_at(None, false, Some((issue, memory)))
     }
 
-    fn start_at(session: Option<&str>, tool_availability: Option<(bool, bool)>) -> Self {
+    #[must_use]
+    pub fn start_in_nested_session(name: &str) -> Self {
+        Self::start_at(Some(name), true, None)
+    }
+
+    fn start_at(
+        session: Option<&str>,
+        nested: bool,
+        tool_availability: Option<(bool, bool)>,
+    ) -> Self {
         let workspace = short_dir("usagi-mcp-workspace-");
         git(workspace.path(), &["init", "-q"]);
         git(
@@ -70,15 +79,7 @@ impl McpHarness {
         git(workspace.path(), &["commit", "-qm", "fixture"]);
 
         let home = short_dir("usagi-mcp-home-");
-        if let Some((issue_enabled, memory_enabled)) = tool_availability {
-            Storage::new(channel_data_dir(home.path()))
-                .save_settings(&Settings {
-                    issue_enabled,
-                    memory_enabled,
-                    ..Settings::default()
-                })
-                .unwrap();
-        }
+        configure_tool_availability(home.path(), tool_availability);
         let fixture_bin = home.path().join("fixture-bin");
         let fixture_log = home.path().join("fixture-agent.log");
         fs::create_dir(&fixture_bin).unwrap();
@@ -94,9 +95,32 @@ impl McpHarness {
         git(workspace.path(), &["commit", "-qm", "fixture agent config"]);
         let cwd = session.map_or_else(
             || workspace.path().to_path_buf(),
-            |name| workspace.path().join(".usagi/sessions").join(name),
+            |name| {
+                let sessions = workspace.path().join(".usagi/sessions");
+                fs::create_dir_all(&sessions).unwrap();
+                let cwd = sessions.join(name);
+                let branch = format!("test/{name}");
+                git(
+                    workspace.path(),
+                    &[
+                        "worktree",
+                        "add",
+                        "-q",
+                        "-b",
+                        &branch,
+                        cwd.to_str().unwrap(),
+                    ],
+                );
+                cwd
+            },
         );
-        fs::create_dir_all(&cwd).unwrap();
+        let cwd = if nested {
+            let nested = cwd.join("crates/core");
+            fs::create_dir_all(&nested).unwrap();
+            nested
+        } else {
+            cwd
+        };
 
         let path = format!(
             "{}:{}",
@@ -332,6 +356,18 @@ impl McpHarness {
             assert!(Instant::now() < deadline, "daemon socket was not published");
             thread::sleep(Duration::from_millis(20));
         }
+    }
+}
+
+fn configure_tool_availability(home: &Path, availability: Option<(bool, bool)>) {
+    if let Some((issue_enabled, memory_enabled)) = availability {
+        Storage::new(channel_data_dir(home))
+            .save_settings(&Settings {
+                issue_enabled,
+                memory_enabled,
+                ..Settings::default()
+            })
+            .unwrap();
     }
 }
 

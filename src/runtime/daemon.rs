@@ -29,6 +29,7 @@ use usagi_core::infrastructure::ipc::BuildIdentity;
 use usagi_core::infrastructure::paths;
 use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::infrastructure::store::dispatch::DispatchStore;
+use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::pr_inventory::PrInventoryStore;
 use usagi_core::infrastructure::store::user_decision::UserDecisionStore;
 use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
@@ -3137,7 +3138,16 @@ fn dispatch_session_action(
                     .repository_root()
                     .to_path_buf();
                 let issue = issue::get(&IssueStore::new(root), number)
-                    .map_err(|_| SessionRuntimeError::Storage)?
+                    .map_err(|error| {
+                        error
+                            .chain()
+                            .find_map(|cause| cause.downcast_ref::<AmbiguousIssueNumber>())
+                            .cloned()
+                            .map_or(
+                                SessionRuntimeError::Storage,
+                                SessionRuntimeError::AmbiguousIssue,
+                            )
+                    })?
                     .ok_or(SessionRuntimeError::InvalidRequest)?;
                 (
                     payload
