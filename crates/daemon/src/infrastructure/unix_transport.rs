@@ -242,10 +242,70 @@ pub fn read_locator(daemon: &Path) -> io::Result<EndpointLocator> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+/// The crash-safe condition of the published current locator.
+///
+/// A rollover coordinator combines this with the owner's process identity before
+/// migrating or replacing a generation; the condition alone never authorises
+/// removing a locator, because a `Stale` endpoint can only be reclaimed once the
+/// owner is proven dead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocatorCondition {
+    /// No current locator is published.
+    Absent,
+    /// The locator names a verified endpoint that a liveness probe reached.
+    Live,
+    /// The locator is published but its endpoint is missing or unreachable,
+    /// i.e. crash debris left by an owner that exited without retiring.
+    Stale,
+}
+
+/// Classifies the published current locator without mutating it, so a rollover
+/// coordinator can pair this crash-safe condition with owner process identity
+/// before acting. `probe` reports whether the locator's verified endpoint is
+/// reachable. A missing `current.json` is [`LocatorCondition::Absent`]; a
+/// verified endpoint that `probe` reaches is [`LocatorCondition::Live`]; a
+/// locator whose endpoint file is gone or whose `probe` fails is
+/// [`LocatorCondition::Stale`]. This function never unlinks the locator.
+///
+/// # Errors
+///
+/// Returns an error when the locator is present but malformed, points outside
+/// the generation directory, or names an endpoint file with unsafe ownership or
+/// permissions.
+pub fn classify_locator(
+    daemon: &Path,
+    probe: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<LocatorCondition> {
+    let locator = match read_locator(daemon) {
+        Ok(locator) => locator,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(LocatorCondition::Absent);
+        }
+        Err(error) => return Err(error),
+    };
+    let endpoint = generation_endpoint_path(daemon, &locator)?;
+    match verify_private(&endpoint, SOCKET_MODE, false) {
+        Ok(()) => match probe(&endpoint) {
+            Ok(()) => Ok(LocatorCondition::Live),
+            Err(_) => Ok(LocatorCondition::Stale),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(LocatorCondition::Stale),
+        Err(error) => Err(error),
+    }
+}
+
 #[coverage(off)]
 fn write_locator(daemon: &Path, locator: &EndpointLocator) -> io::Result<()> {
     let _lock = lock_locator(daemon)?;
     let temporary = daemon.join(".current.json.tmp");
+    // Crash recovery (#515): a daemon that crashed between creating this
+    // temporary and the atomic rename can leave `.current.json.tmp` behind.
+    // Publication holds the exclusive locator lock, so no concurrent writer owns
+    // the temporary, and it is never a committed artifact; reclaiming it here
+    // keeps locator publication crash-safe instead of failing `create_new`
+    // forever. `remove_file` does not follow a symlink, so a planted symlink is
+    // unlinked (not followed) before the `O_NOFOLLOW` `create_new` below.
+    remove_file_if_present(&temporary)?;
     let bytes = serde_json::to_vec(locator).expect("endpoint locator serializes");
     let mut file = OpenOptions::new()
         .write(true)
@@ -349,6 +409,12 @@ fn remove_file_if_present(path: &Path) -> io::Result<()> {
 }
 
 fn checked_endpoint(daemon: &Path, locator: &EndpointLocator) -> io::Result<PathBuf> {
+    let endpoint = generation_endpoint_path(daemon, locator)?;
+    verify_private(&endpoint, SOCKET_MODE, false)?;
+    Ok(endpoint)
+}
+
+fn generation_endpoint_path(daemon: &Path, locator: &EndpointLocator) -> io::Result<PathBuf> {
     let endpoint = daemon.join(&locator.endpoint);
     let expected = daemon
         .join("generations")
@@ -360,7 +426,6 @@ fn checked_endpoint(daemon: &Path, locator: &EndpointLocator) -> io::Result<Path
             "locator endpoint is outside generation directory",
         ));
     }
-    verify_private(&endpoint, SOCKET_MODE, false)?;
     Ok(endpoint)
 }
 
@@ -554,6 +619,116 @@ mod tests {
         assert!(!socket.exists());
         assert!(!daemon.join("current.json").exists());
         assert!(!daemon.join(".current.json.tmp").exists());
+    }
+
+    #[test]
+    fn publication_recovers_a_temporary_left_by_a_crashed_writer() {
+        let temp = TempDir::new_in("/tmp").unwrap();
+        let daemon = temp.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        let temporary = daemon.join(".current.json.tmp");
+        fs::write(&temporary, b"partial locator from crashed daemon").unwrap();
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(SOCKET_MODE)).unwrap();
+
+        let listener = SecureUnixListener::bind(temp.path(), generation()).unwrap();
+
+        assert!(!temporary.exists());
+        assert_eq!(read_locator(&daemon).unwrap(), listener.locator().clone());
+        let client = connect_current(temp.path()).unwrap();
+        let accepted = listener.accept().unwrap();
+        drop((client, accepted));
+    }
+
+    #[test]
+    fn publication_unlinks_a_stale_temporary_symlink_without_following_it() {
+        let temp = TempDir::new_in("/tmp").unwrap();
+        let daemon = temp.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        let target = temp.path().join("outside");
+        fs::write(&target, b"must remain unchanged").unwrap();
+        let temporary = daemon.join(".current.json.tmp");
+        std::os::unix::fs::symlink(&target, &temporary).unwrap();
+
+        let listener = SecureUnixListener::bind(temp.path(), generation()).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"must remain unchanged");
+        assert!(!temporary.exists());
+        assert_eq!(read_locator(&daemon).unwrap(), listener.locator().clone());
+    }
+
+    #[test]
+    fn classifies_absent_live_and_stale_locators_without_mutating_them() {
+        let temp = TempDir::new_in("/tmp").unwrap();
+        let daemon = temp.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        assert_eq!(
+            classify_locator(&daemon, |_| panic!("absent locator must not probe")).unwrap(),
+            LocatorCondition::Absent
+        );
+
+        let listener = SecureUnixListener::bind(temp.path(), generation()).unwrap();
+        assert_eq!(
+            classify_locator(&daemon, |endpoint| {
+                assert_eq!(endpoint, listener.socket);
+                Ok(())
+            })
+            .unwrap(),
+            LocatorCondition::Live
+        );
+        assert_eq!(
+            classify_locator(&daemon, |_| Err(io::Error::other("connection refused"))).unwrap(),
+            LocatorCondition::Stale
+        );
+        assert_eq!(read_locator(&daemon).unwrap(), listener.locator().clone());
+
+        fs::remove_file(&listener.socket).unwrap();
+        assert_eq!(
+            classify_locator(&daemon, |_| panic!("missing endpoint must not probe")).unwrap(),
+            LocatorCondition::Stale
+        );
+        assert_eq!(read_locator(&daemon).unwrap(), listener.locator().clone());
+    }
+
+    #[test]
+    fn locator_classification_fails_closed_for_unsafe_or_invalid_endpoints() {
+        let temp = TempDir::new_in("/tmp").unwrap();
+        let daemon = temp.path().join("daemon");
+        let listener = SecureUnixListener::bind(temp.path(), generation()).unwrap();
+        fs::set_permissions(&listener.socket, fs::Permissions::from_mode(0o666)).unwrap();
+        assert_eq!(
+            classify_locator(&daemon, |_| panic!("unsafe endpoint must not probe"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+
+        let unsafe_locator = TempDir::new_in("/tmp").unwrap();
+        let daemon = unsafe_locator.path().join("daemon");
+        let _listener = SecureUnixListener::bind(unsafe_locator.path(), generation()).unwrap();
+        fs::set_permissions(
+            daemon.join("current.json"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        assert_eq!(
+            classify_locator(&daemon, |_| panic!("unsafe locator must not probe"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+
+        let clean = TempDir::new_in("/tmp").unwrap();
+        let daemon = clean.path().join("daemon");
+        let listener = SecureUnixListener::bind(clean.path(), generation()).unwrap();
+        let mut locator = listener.locator().clone();
+        locator.endpoint = "outside.sock".into();
+        write_locator(&daemon, &locator).unwrap();
+        assert_eq!(
+            classify_locator(&daemon, |_| panic!("invalid endpoint must not probe"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]
