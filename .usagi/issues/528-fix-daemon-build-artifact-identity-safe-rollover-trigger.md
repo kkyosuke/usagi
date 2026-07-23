@@ -1,14 +1,14 @@
 ---
 number: 528
 title: fix(daemon): build artifact identity で safe rollover trigger を判定する
-status: todo
+status: done
 priority: high
 labels: [review, v2, daemon, ipc, lifecycle, build, release, recovery]
 dependson: []
 related: [215, 275, 341, 461, 507, 508, 516, 518]
 parent: 507
 created_at: 2026-07-22T12:04:10.797067+00:00
-updated_at: 2026-07-22T12:12:35.922229+00:00
+updated_at: 2026-07-23T10:16:18.568559+00:00
 ---
 
 ## 問題・根拠

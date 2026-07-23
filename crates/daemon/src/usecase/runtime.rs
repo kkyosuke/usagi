@@ -164,6 +164,8 @@ impl RuntimeStoreSnapshot {
                     generation: owner,
                     endpoint: "retired-agent-runtime".to_owned(),
                     role: GenerationRole::Retired,
+                    expected_build: usagi_core::infrastructure::ipc::BuildIdentity::default(),
+                    build_verified: false,
                 });
             terminals.push(TerminalOwnership {
                 terminal: record.runtime.terminal.clone(),

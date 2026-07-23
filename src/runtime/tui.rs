@@ -1441,7 +1441,12 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             // "not sent", "partly sent" or "applied but ACK lost". Never label
             // either path undelivered and never replay it blindly.
             Ok(DaemonReply::Accepted { .. })
-            | Err(ClientError::Unavailable(_) | ClientError::Lifecycle(_)) => {
+            | Err(
+                ClientError::Unavailable(_)
+                | ClientError::Lifecycle(_)
+                | ClientError::RolloverRequired(_)
+                | ClientError::BuildIdentityUnavailable,
+            ) => {
                 self.reset_terminal();
                 Err(TerminalError::InputEffectUnknown)
             }
@@ -1799,6 +1804,14 @@ fn daemon_error_reason(error: ClientError) -> String {
     match error {
         ClientError::Protocol(error) => error.message,
         ClientError::Unavailable(message) | ClientError::Lifecycle(message) => message,
+        ClientError::RolloverRequired(trigger) => format!(
+            "daemon build rollover is required (operation {}); the current daemon remains running",
+            trigger.operation_id.0
+        ),
+        ClientError::BuildIdentityUnavailable => {
+            "exact daemon build identity is unavailable; the current daemon remains running"
+                .to_owned()
+        }
     }
 }
 
@@ -2614,14 +2627,16 @@ mod tests {
         use usagi_daemon::presentation::ipc::{handshake, server_protocol};
 
         let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let build = BuildIdentity {
+            version: "test".to_owned(),
+            commit: "test".to_owned(),
+            target: "test".to_owned(),
+            artifact: "test-artifact".to_owned(),
+        };
         let protocol = server_protocol(
             DaemonGeneration("input-ack-test".to_owned()),
             "input-ack-connection".to_owned(),
-            BuildIdentity {
-                version: "test".to_owned(),
-                commit: "test".to_owned(),
-                target: "test".to_owned(),
-            },
+            build.clone(),
         );
         let server = std::thread::spawn(move || {
             let mut reader = server_stream.try_clone().unwrap();
@@ -2666,6 +2681,7 @@ mod tests {
             "input-ack-client".to_owned(),
             "input-ack-nonce".to_owned(),
             ClientPolicy::tui(),
+            build,
         )
         .unwrap();
         (
@@ -2913,14 +2929,16 @@ mod tests {
         use usagi_tui::presentation::AgentCommandPort;
 
         let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let build = BuildIdentity {
+            version: "test".to_owned(),
+            commit: "test".to_owned(),
+            target: "test".to_owned(),
+            artifact: "test-artifact".to_owned(),
+        };
         let protocol = server_protocol(
             DaemonGeneration("input-ack-loss-test".to_owned()),
             "input-ack-loss-connection".to_owned(),
-            BuildIdentity {
-                version: "test".to_owned(),
-                commit: "test".to_owned(),
-                target: "test".to_owned(),
-            },
+            build.clone(),
         );
         let server = std::thread::spawn(move || {
             let mut reader = server_stream.try_clone().unwrap();
@@ -2942,6 +2960,7 @@ mod tests {
             "input-ack-loss-client".to_owned(),
             "input-ack-loss-nonce".to_owned(),
             ClientPolicy::tui(),
+            build,
         )
         .unwrap();
         let mut port = DaemonAgentCommandPort {
@@ -3359,6 +3378,38 @@ mod tests {
             probe_path(&temporary.path().join("missing")),
             usagi_core::usecase::workspace::WorkspaceProbe::Missing
         ));
+    }
+
+    #[test]
+    fn build_identity_errors_keep_the_old_daemon_in_the_tui_message() {
+        use usagi_core::usecase::client::ClientError;
+
+        let running = usagi_core::infrastructure::ipc::build_identity(
+            "1",
+            "a",
+            "test",
+            "debug",
+            &"a".repeat(64),
+        );
+        let expected = usagi_core::infrastructure::ipc::build_identity(
+            "1",
+            "b",
+            "test",
+            "debug",
+            &"b".repeat(64),
+        );
+        let trigger = usagi_core::infrastructure::ipc::build_rollover_trigger(
+            &running, &expected, "local", false,
+        )
+        .unwrap();
+        assert!(
+            daemon_error_reason(ClientError::RolloverRequired(trigger))
+                .contains("current daemon remains running")
+        );
+        assert_eq!(
+            daemon_error_reason(ClientError::BuildIdentityUnavailable),
+            "exact daemon build identity is unavailable; the current daemon remains running"
+        );
     }
 
     #[test]

@@ -406,6 +406,13 @@ pub enum DaemonReply {
 pub enum ClientError {
     Protocol(ProtocolError),
     Unavailable(String),
+    /// The connected daemon is a different known executable artifact. This is
+    /// an effect-free trigger: the old daemon and its terminals remain alive
+    /// until a generation-handoff consumer accepts the operation.
+    RolloverRequired(crate::infrastructure::ipc::BuildRolloverTrigger),
+    /// One peer could not prove an exact artifact identity. Callers must not
+    /// fall back to version/target equality or blind stop/start.
+    BuildIdentityUnavailable,
     /// A daemon lifecycle transition could not safely establish a verified
     /// endpoint. Callers must not replace it with a local implementation.
     Lifecycle(String),
@@ -417,6 +424,7 @@ impl ClientError {
         match self {
             Self::Protocol(error) => error.retry_mode,
             Self::Unavailable(_) | Self::Lifecycle(_) => RetryMode::Reconnect,
+            Self::RolloverRequired(_) | Self::BuildIdentityUnavailable => RetryMode::Manual,
         }
     }
 
@@ -425,6 +433,7 @@ impl ClientError {
         match self {
             Self::Protocol(error) => error.side_effect,
             Self::Unavailable(_) | Self::Lifecycle(_) => SideEffect::PartialOrUnknown,
+            Self::RolloverRequired(_) | Self::BuildIdentityUnavailable => SideEffect::None,
         }
     }
 
@@ -432,7 +441,10 @@ impl ClientError {
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::Protocol(error) => error.code,
-            Self::Unavailable(_) | Self::Lifecycle(_) => ErrorCode::Unavailable,
+            Self::Unavailable(_) | Self::Lifecycle(_) | Self::BuildIdentityUnavailable => {
+                ErrorCode::Unavailable
+            }
+            Self::RolloverRequired(_) => ErrorCode::Busy,
         }
     }
 }
@@ -442,6 +454,14 @@ impl fmt::Display for ClientError {
         match self {
             Self::Protocol(error) => write!(f, "{:?}: {}", error.code, error.message),
             Self::Unavailable(message) => write!(f, "Unavailable: {message}"),
+            Self::RolloverRequired(trigger) => write!(
+                f,
+                "RolloverRequired: daemon build rollover operation {}",
+                trigger.operation_id.0
+            ),
+            Self::BuildIdentityUnavailable => {
+                f.write_str("BuildIdentityUnavailable: exact daemon artifact is unknown")
+            }
             Self::Lifecycle(message) => write!(f, "Lifecycle: {message}"),
         }
     }
@@ -484,6 +504,7 @@ impl<S: Read + Write> IpcClient<S> {
         client_id: String,
         connection_nonce: String,
         policy: ClientPolicy,
+        build: BuildIdentity,
     ) -> Result<Self, ClientError> {
         let hello = Bootstrap::ClientHello(ClientHello {
             client_id: ClientId(client_id),
@@ -495,12 +516,12 @@ impl<S: Read + Write> IpcClient<S> {
                 max_revision: 1,
             }],
             capabilities: vec![],
-            required_capabilities: vec!["request.correlation.v1".into(), "pr.snapshot.v1".into()],
-            build: BuildIdentity {
-                version: env!("CARGO_PKG_VERSION").into(),
-                commit: "unknown".into(),
-                target: std::env::consts::ARCH.into(),
-            },
+            required_capabilities: vec![
+                "request.correlation.v1".into(),
+                "pr.snapshot.v1".into(),
+                "build.artifact.v1".into(),
+            ],
+            build,
         });
         write_json_frame(&mut stream, &hello, 1_048_576)
             .map_err(|error| ClientError::Unavailable(error.to_string()))?;
@@ -682,6 +703,15 @@ mod tests {
     use super::*;
     use std::io::{self, Cursor};
 
+    fn client_build() -> BuildIdentity {
+        BuildIdentity {
+            version: "test".into(),
+            commit: "test".into(),
+            target: "test".into(),
+            artifact: "test-artifact".into(),
+        }
+    }
+
     struct Scripted {
         input: Cursor<Vec<u8>>,
         output: Vec<u8>,
@@ -751,6 +781,7 @@ mod tests {
                 version: "test".into(),
                 commit: "test".into(),
                 target: "test".into(),
+                artifact: "server-artifact".into(),
             },
             limits: crate::infrastructure::ipc::ProtocolLimits::default(),
         });
@@ -806,6 +837,32 @@ mod tests {
     }
 
     #[test]
+    fn build_rollover_and_unknown_identity_are_typed_effect_free_failures() {
+        let running =
+            crate::infrastructure::ipc::build_identity("1", "a", "test", "debug", &"a".repeat(64));
+        let expected =
+            crate::infrastructure::ipc::build_identity("1", "b", "test", "debug", &"b".repeat(64));
+        let trigger =
+            crate::infrastructure::ipc::build_rollover_trigger(&running, &expected, "local", false)
+                .unwrap();
+        let rollover = ClientError::RolloverRequired(trigger.clone());
+        assert_eq!(rollover.code(), ErrorCode::Busy);
+        assert_eq!(rollover.retry_mode(), RetryMode::Manual);
+        assert_eq!(rollover.side_effect(), SideEffect::None);
+        assert!(rollover.to_string().contains(&trigger.operation_id.0));
+
+        let unknown = ClientError::BuildIdentityUnavailable;
+        assert_eq!(unknown.code(), ErrorCode::Unavailable);
+        assert_eq!(unknown.retry_mode(), RetryMode::Manual);
+        assert_eq!(unknown.side_effect(), SideEffect::None);
+        assert!(
+            unknown
+                .to_string()
+                .contains("exact daemon artifact is unknown")
+        );
+    }
+
+    #[test]
     fn policies_are_surface_specific() {
         assert!(ClientPolicy::tui().timeout_ms < ClientPolicy::cli().timeout_ms);
         assert!(ClientPolicy::mcp().timeout_ms > ClientPolicy::cli().timeout_ms);
@@ -846,9 +903,14 @@ mod tests {
             },
             "1",
         );
-        let mut client =
-            IpcClient::connect(stream, "client".into(), "nonce".into(), ClientPolicy::cli())
-                .unwrap();
+        let mut client = IpcClient::connect(
+            stream,
+            "client".into(),
+            "nonce".into(),
+            ClientPolicy::cli(),
+            client_build(),
+        )
+        .unwrap();
         assert_eq!(client.server_build().version, "test");
         assert_eq!(
             client
@@ -892,9 +954,14 @@ mod tests {
             ),
         ] {
             let stream = scripted(reply, "00000000-0000-4000-8000-000000000001");
-            let mut client =
-                IpcClient::connect(stream, "client".into(), "nonce".into(), ClientPolicy::cli())
-                    .unwrap();
+            let mut client = IpcClient::connect(
+                stream,
+                "client".into(),
+                "nonce".into(),
+                ClientPolicy::cli(),
+                client_build(),
+            )
+            .unwrap();
             let result = client.request(DaemonRequest::Terminal {
                 action: TerminalAction::Resync,
                 payload: serde_json::json!({}),
@@ -926,7 +993,8 @@ mod tests {
                 },
                 "c".into(),
                 "n".into(),
-                ClientPolicy::tui()
+                ClientPolicy::tui(),
+                client_build()
             ),
             Err(ClientError::Protocol(_))
         ));
@@ -938,12 +1006,19 @@ mod tests {
                 },
                 "c".into(),
                 "n".into(),
-                ClientPolicy::tui()
+                ClientPolicy::tui(),
+                client_build()
             ),
             Err(ClientError::Unavailable(_))
         ));
         assert!(matches!(
-            IpcClient::connect(Broken, "c".into(), "n".into(), ClientPolicy::tui()),
+            IpcClient::connect(
+                Broken,
+                "c".into(),
+                "n".into(),
+                ClientPolicy::tui(),
+                client_build()
+            ),
             Err(ClientError::Unavailable(_))
         ));
         assert!(matches!(
@@ -951,7 +1026,8 @@ mod tests {
                 ReadFails { output: vec![] },
                 "c".into(),
                 "n".into(),
-                ClientPolicy::tui()
+                ClientPolicy::tui(),
+                client_build()
             ),
             Err(ClientError::Unavailable(_))
         ));
@@ -969,8 +1045,9 @@ mod tests {
         };
         let server_build = BuildIdentity {
             version: "test".into(),
-            commit: "unknown".into(),
+            commit: "test".into(),
             target: "test".into(),
+            artifact: "server-artifact".into(),
         };
         let mut broken = IpcClient {
             stream: Broken,

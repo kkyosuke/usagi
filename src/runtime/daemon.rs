@@ -25,7 +25,10 @@ use usagi_core::infrastructure::daemon::{
     ShutdownSignal, Sleeper, Terminator,
 };
 use usagi_core::infrastructure::error_log::ErrorLog;
-use usagi_core::infrastructure::ipc::BuildIdentity;
+use usagi_core::infrastructure::ipc::{
+    BuildArtifactDecision, BuildIdentity, BuildRolloverTrigger, build_artifact_decision,
+    build_rollover_trigger,
+};
 use usagi_core::infrastructure::paths;
 use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::infrastructure::store::dispatch::DispatchStore;
@@ -1108,17 +1111,13 @@ fn spawn_ipc_server(
     listener: SecureUnixListener,
     generation: &usagi_core::infrastructure::ipc::DaemonGeneration,
     data_dir: &Path,
-    info: &AppInfo,
+    build: &BuildIdentity,
     shutdown: Arc<AtomicBool>,
 ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
     let server = usagi_daemon::presentation::ipc::server_protocol(
         generation.clone(),
         generation.0.clone(),
-        usagi_core::infrastructure::ipc::BuildIdentity {
-            version: info.version.to_owned(),
-            commit: "unknown".to_owned(),
-            target: std::env::consts::ARCH.to_owned(),
-        },
+        build.clone(),
     );
     let repo_root = std::env::current_dir()?;
     let daemon_generation = usagi_core::domain::id::DaemonGeneration::parse(&generation.0)
@@ -3941,7 +3940,7 @@ impl Terminator for SigtermTerminator {
 /// future duplicate invocation a no-op instead of binding a second endpoint.
 struct IpcReady<'a> {
     data_dir: &'a Path,
-    info: &'a AppInfo,
+    build: BuildIdentity,
     shutdown: Arc<AtomicBool>,
     published: AtomicBool,
     publication_attempted: AtomicBool,
@@ -3996,7 +3995,7 @@ impl DaemonReady for IpcReady<'_> {
                 listener,
                 &generation,
                 self.data_dir,
-                self.info,
+                &self.build,
                 Arc::clone(&self.shutdown),
             )
         })
@@ -4332,6 +4331,12 @@ fn run_inner(
         CliDaemonCommand::Status => PresentationDaemonCommand::Status,
         CliDaemonCommand::Stop => PresentationDaemonCommand::Stop,
         CliDaemonCommand::Restart => PresentationDaemonCommand::Restart,
+        CliDaemonCommand::Replace => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "daemon replace must be routed through the client trigger",
+            ));
+        }
     };
     ensure_private_dir(&daemon_dir)?;
     let store = DaemonRecordStore::new(FsRecordFile {
@@ -4346,7 +4351,10 @@ fn run_inner(
     };
     let ready = IpcReady {
         data_dir: &data_dir,
-        info,
+        // The daemon advertises the exact artifact it started as for its whole
+        // process lifetime. Atomic replacement of the executable path cannot
+        // mutate this startup snapshot.
+        build: current_build(),
         shutdown: Arc::new(AtomicBool::new(false)),
         published: AtomicBool::new(false),
         publication_attempted: AtomicBool::new(false),
@@ -4369,10 +4377,10 @@ fn run_inner(
     usagi_daemon::presentation::run(out, command, info, &env)
 }
 
-/// Connect to the daemon for this binary's isolated build channel. Debug
-/// binaries restart their development daemon once per bootstrap; release
-/// binaries reuse a matching production daemon and only roll over an older
-/// build.
+/// Connect to the daemon for this binary's isolated runtime channel. Every
+/// channel reuses an exact artifact. A different known artifact returns one
+/// deterministic, effect-free rollover trigger; it never stops the old daemon
+/// during ordinary bootstrap.
 pub(crate) fn client(
     policy: ClientPolicy,
 ) -> Result<IpcClient<std::os::unix::net::UnixStream>, ClientError> {
@@ -4382,16 +4390,57 @@ pub(crate) fn client(
         std::env::current_exe().map_err(|error| ClientError::Unavailable(error.to_string()))?;
     let _bootstrap_lock = acquire_bootstrap_lock(&data_dir)?;
     let expected_build = current_build();
+    let channel = runtime_channel();
     bootstrap::connect_or_start(
-        || connect_client(&data_dir, policy),
+        || connect_client(&data_dir, policy, expected_build.clone()),
         || run_lifecycle(&exe, "start"),
-        || run_lifecycle(&exe, "restart"),
         || recover_stale_client_endpoint(&data_dir),
         &expected_build,
+        channel,
         false,
         IpcClient::server_build,
     )
-    .map_err(|error| ClientError::Lifecycle(error.to_string()))
+    .map_err(|error| match error {
+        bootstrap::BootstrapError::RolloverRequired(trigger) => {
+            ClientError::RolloverRequired(trigger)
+        }
+        bootstrap::BootstrapError::UnknownBuildIdentity => ClientError::BuildIdentityUnavailable,
+        other => ClientError::Lifecycle(other.to_string()),
+    })
+}
+
+/// Requests intentional replacement of the currently running daemon artifact.
+/// This only creates the deterministic trigger; it never sends a stop signal or
+/// spawns a second daemon. Cross-process generation admission consumes the
+/// trigger in the handoff layer.
+pub(crate) fn request_replacement(
+    policy: ClientPolicy,
+) -> Result<BuildRolloverTrigger, ClientError> {
+    let data_dir =
+        paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let _bootstrap_lock = acquire_bootstrap_lock(&data_dir)?;
+    let expected_build = current_build();
+    let client = connect_client(&data_dir, policy, expected_build.clone())
+        .map_err(|_| ClientError::Unavailable("daemon endpoint is unavailable".into()))?;
+    let actual_build = client.server_build();
+    match build_artifact_decision(actual_build, &expected_build, true) {
+        BuildArtifactDecision::ForceReplace | BuildArtifactDecision::RolloverTrigger => {
+            build_rollover_trigger(actual_build, &expected_build, runtime_channel(), true)
+                .ok_or(ClientError::BuildIdentityUnavailable)
+        }
+        BuildArtifactDecision::Unknown => Err(ClientError::BuildIdentityUnavailable),
+        BuildArtifactDecision::Reuse => Err(ClientError::Lifecycle(
+            "daemon replacement trigger could not be created".into(),
+        )),
+    }
+}
+
+fn runtime_channel() -> &'static str {
+    match paths::runtime_mode() {
+        paths::RuntimeMode::Production => "production",
+        paths::RuntimeMode::Development => "development",
+        paths::RuntimeMode::Local => "local",
+    }
 }
 
 /// Reclaims an unreachable endpoint only after proving that no daemon owns the
@@ -4444,15 +4493,24 @@ fn recover_stale_client_endpoint_with(
 }
 
 fn current_build() -> BuildIdentity {
-    BuildIdentity {
-        version: env!("CARGO_PKG_VERSION").into(),
-        commit: "unknown".into(),
-        target: std::env::consts::ARCH.into(),
-    }
+    // The artifact identity is a compile-time constant baked in by `build.rs`
+    // from this binary's source/tree, profile, and target. It is therefore
+    // immutable for the process lifetime and never re-read from disk, so an
+    // atomic replacement of the executable path cannot change what a running
+    // daemon advertises. `build.rs` leaves the source id empty when it cannot
+    // uniquely identify the source, which keeps the identity fail-safe unknown.
+    usagi_core::infrastructure::ipc::build_identity(
+        env!("CARGO_PKG_VERSION"),
+        env!("USAGI_BUILD_COMMIT"),
+        env!("USAGI_BUILD_TARGET"),
+        env!("USAGI_BUILD_PROFILE"),
+        env!("USAGI_BUILD_SOURCE_ID"),
+    )
 }
 fn connect_client(
     data_dir: &Path,
     policy: ClientPolicy,
+    build: BuildIdentity,
 ) -> std::io::Result<IpcClient<std::os::unix::net::UnixStream>> {
     let stream = usagi_daemon::infrastructure::unix_transport::connect_current(data_dir)?;
     IpcClient::connect(
@@ -4460,6 +4518,7 @@ fn connect_client(
         format!("cli-{}", std::process::id()),
         format!("{}", std::process::id()),
         policy,
+        build,
     )
     .map_err(std::io::Error::other)
 }
@@ -4501,6 +4560,7 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::sync::atomic::AtomicUsize;
+
     use usagi_core::domain::{
         id::{
             ClientId, ConnectionId, DaemonGeneration, RequestId, SessionId, TerminalId,
@@ -4523,10 +4583,15 @@ mod tests {
         }
     }
 
-    fn fresh_ipc_ready<'a>(data_dir: &'a Path, info: &'a AppInfo) -> IpcReady<'a> {
+    fn fresh_ipc_ready<'a>(data_dir: &'a Path, _info: &'a AppInfo) -> IpcReady<'a> {
         IpcReady {
             data_dir,
-            info,
+            build: BuildIdentity {
+                version: "test".to_owned(),
+                commit: "test".to_owned(),
+                target: "test".to_owned(),
+                artifact: "test-artifact".to_owned(),
+            },
             shutdown: Arc::new(AtomicBool::new(false)),
             published: AtomicBool::new(false),
             publication_attempted: AtomicBool::new(false),
@@ -5799,6 +5864,7 @@ mod tests {
                 version: "test".into(),
                 commit: "test".into(),
                 target: "test".into(),
+                artifact: "test-artifact".into(),
             },
             limits: ProtocolLimits::default(),
         }

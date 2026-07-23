@@ -300,6 +300,7 @@ pub fn server_protocol(
             "request.correlation.v1".into(),
             "pr.snapshot.v1".into(),
             "pr.subscription.v1".into(),
+            "build.artifact.v1".into(),
         ],
         build,
         limits: usagi_core::infrastructure::ipc::ProtocolLimits::default(),
@@ -364,6 +365,7 @@ mod tests {
                 version: "1".into(),
                 commit: "x".into(),
                 target: "test".into(),
+                artifact: "server-artifact".into(),
             },
         )
     }
@@ -383,6 +385,7 @@ mod tests {
                 version: "other".into(),
                 commit: "y".into(),
                 target: "test".into(),
+                artifact: "client-artifact".into(),
             },
         })
     }
