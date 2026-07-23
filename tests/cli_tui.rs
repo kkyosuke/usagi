@@ -4,10 +4,11 @@ use std::ffi::OsStr;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::Mutex;
+use std::sync::{Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,7 +20,8 @@ use usagi_core::infrastructure::ipc::{
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_daemon::infrastructure::unix_transport::{
-    EndpointLocator, EndpointState, SecureUnixListener, connect_current, read_locator,
+    EndpointLocator, EndpointState, SecureUnixListener, connect_current, ensure_private_dir_all,
+    read_locator,
 };
 
 /// Daemon lifecycle tests spawn the same test binary as a background daemon.
@@ -30,10 +32,34 @@ static DAEMON_LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
 fn short_home() -> tempfile::TempDir {
     // A Unix-domain socket includes the data directory, generation, and socket
     // name. Keep the integration fixture below the platform sockaddr limit.
-    tempfile::Builder::new()
+    let home = tempfile::Builder::new()
         .prefix("usagi-")
         .tempdir_in("/tmp")
-        .expect("short daemon data directory")
+        .expect("short daemon data directory");
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("private daemon data directory");
+    home
+}
+
+fn precreate_restrictive_umask_coverage_profile(command: &mut Command) {
+    let Some(inherited_profile) = std::env::var_os("LLVM_PROFILE_FILE") else {
+        return;
+    };
+    let profile_directory = Path::new(&inherited_profile)
+        .parent()
+        .expect("coverage profile path has a parent");
+    let profile = tempfile::Builder::new()
+        .prefix("usagi-restrictive-umask-")
+        .suffix(".profraw")
+        .tempfile_in(profile_directory)
+        .expect("pre-create restrictive-umask coverage profile");
+    let (file, path) = profile
+        .keep()
+        .expect("retain restrictive-umask coverage profile");
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .expect("make restrictive-umask coverage profile readable");
+    drop(file);
+    command.env("LLVM_PROFILE_FILE", path);
 }
 
 fn git(repo: &Path, args: &[&str]) {
@@ -134,10 +160,12 @@ fn run_in_production(args: &[&OsStr], home: &Path) -> Output {
 }
 
 fn daemon_pid(home: &Path) -> Option<u32> {
+    daemon_record(home).map(|record| record.pid)
+}
+
+fn daemon_record(home: &Path) -> Option<usagi_core::domain::daemon::DaemonRecord> {
     let bytes = std::fs::read(home.join("daemon/daemon.json")).ok()?;
-    serde_json::from_slice::<serde_json::Value>(&bytes).ok()?["pid"]
-        .as_u64()
-        .and_then(|pid| u32::try_from(pid).ok())
+    serde_json::from_slice(&bytes).ok()
 }
 
 fn process_alive(pid: u32) -> bool {
@@ -220,7 +248,7 @@ enum FakeDaemonReply {
 
 fn spawn_fake_daemon(home: &Path, reply: FakeDaemonReply) -> thread::JoinHandle<()> {
     let data_dir = channel_data_dir(home);
-    std::fs::create_dir_all(&data_dir).unwrap();
+    ensure_private_dir_all(&data_dir).unwrap();
     let generation = DaemonGeneration(format!("fake-{}", std::process::id()));
     let listener = SecureUnixListener::bind(&data_dir, generation.clone()).unwrap();
     thread::spawn(move || {
@@ -294,13 +322,15 @@ fn install_absent_daemon_endpoint(home: &Path) {
     let daemon = data_dir.join("daemon");
     let generation = DaemonGeneration("absent-generation".into());
     let generation_dir = daemon.join("generations").join(&generation.0);
-    std::fs::create_dir_all(&generation_dir).unwrap();
+    ensure_private_dir_all(&generation_dir).unwrap();
     for directory in [&daemon, &daemon.join("generations"), &generation_dir] {
         std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     let socket = generation_dir.join("sock");
-    drop(UnixListener::bind(&socket).unwrap());
+    let listener = UnixListener::bind(&socket).unwrap();
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+    drop(listener);
+    std::fs::remove_file(&socket).unwrap();
     let locator = daemon.join("current.json");
     std::fs::write(
         &locator,
@@ -459,7 +489,8 @@ fn planned_stop_retires_generation_endpoint_and_allows_safe_autostart() {
         }),
         "daemon did not publish its production endpoint"
     );
-    let old_pid = daemon_pid(home.path()).expect("started daemon records its pid");
+    let old_record = daemon_record(home.path()).expect("started daemon records its identity");
+    let old_pid = old_record.pid;
     assert_eq!(old_pid, cleanup.pid());
     let old_locator = read_locator(&daemon_dir).expect("started daemon publishes a locator");
     let old_socket = daemon_dir.join(&old_locator.endpoint);
@@ -537,6 +568,125 @@ fn planned_stop_retires_generation_endpoint_and_allows_safe_autostart() {
         }),
         "replacement daemon did not stop cleanly"
     );
+}
+
+#[test]
+fn ordinary_client_recovers_a_sigkilled_daemon_without_manual_lifecycle() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let mut killed = ProductionDaemonCleanup::spawn(home.path());
+    let daemon_dir = home.path().join("daemon");
+
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            daemon_dir.join("daemon.json").is_file() && daemon_dir.join("current.json").is_file()
+        }),
+        "daemon did not publish its production endpoint"
+    );
+    let old_record = daemon_record(home.path()).expect("started daemon records its identity");
+    let old_pid = old_record.pid;
+    assert_eq!(old_pid, killed.pid());
+    let old_locator = read_locator(&daemon_dir).expect("started daemon publishes a locator");
+    let old_socket = daemon_dir.join(&old_locator.endpoint);
+    assert!(old_socket.exists());
+
+    // `Child` is the exact process created by this fixture. Reap it so the
+    // recovery path observes a completed SIGKILL rather than a zombie.
+    killed.owned.kill().expect("SIGKILL the owned daemon");
+    killed.owned.wait().expect("reap the killed daemon");
+    assert!(!process_alive(old_pid));
+    assert!(daemon_dir.join("daemon.json").exists());
+    assert!(daemon_dir.join("current.json").exists());
+    assert!(old_socket.exists());
+    assert_eq!(
+        connect_current(home.path()).unwrap_err().kind(),
+        std::io::ErrorKind::ConnectionRefused
+    );
+
+    // These are ordinary daemon-backed CLI requests. Release both callers
+    // from the barrier together so they contend at bootstrap.lock: one must
+    // retire and autostart, while the other reuses that replacement. No daemon
+    // lifecycle command is issued between SIGKILL and these requests.
+    let start = Barrier::new(3);
+    let clients = thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            start.wait();
+            run_in_production(
+                &[
+                    OsStr::new("session"),
+                    OsStr::new("remove"),
+                    OsStr::new("missing"),
+                ],
+                home.path(),
+            )
+        });
+        let second = scope.spawn(|| {
+            start.wait();
+            run_in_production(
+                &[
+                    OsStr::new("session"),
+                    OsStr::new("remove"),
+                    OsStr::new("missing"),
+                ],
+                home.path(),
+            )
+        });
+
+        start.wait();
+        [
+            first.join().expect("first ordinary client thread"),
+            second.join().expect("second ordinary client thread"),
+        ]
+    });
+    for (index, client) in clients.iter().enumerate() {
+        assert_eq!(
+            client.status.code(),
+            Some(1),
+            "client {index}: {}",
+            stderr(client)
+        );
+        assert!(
+            stderr(client).contains("session was not found"),
+            "client {index}: {}",
+            stderr(client)
+        );
+        assert!(
+            !stderr(client).contains("daemon endpoint is unavailable"),
+            "client {index}: {}",
+            stderr(client)
+        );
+    }
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            daemon_record(home.path())
+                .is_some_and(|record| record != old_record && process_alive(record.pid))
+                && daemon_dir.join("current.json").is_file()
+        }),
+        "ordinary bootstrap did not publish a replacement endpoint"
+    );
+
+    let replacement_record = daemon_record(home.path()).expect("replacement records its identity");
+    let replacement_pid = replacement_record.pid;
+    let replacement = read_locator(&daemon_dir).expect("replacement publishes a locator");
+    assert_ne!(replacement_record, old_record);
+    assert_ne!(replacement.generation, old_locator.generation);
+    assert!(!old_socket.exists());
+    assert!(daemon_dir.join(&replacement.endpoint).exists());
+
+    // Both concurrent bootstraps converged on exactly one live replacement
+    // owner and generation rather than launching a duplicate daemon.
+    assert_eq!(daemon_pid(home.path()), Some(replacement_pid));
+    assert_eq!(read_locator(&daemon_dir).unwrap(), replacement);
+
+    let stop = run_in_production(&[OsStr::new("daemon"), OsStr::new("stop")], home.path());
+    assert!(stop.status.success(), "{}", stderr(&stop));
+    assert!(wait_until(Duration::from_secs(5), || {
+        !process_alive(replacement_pid)
+            && !daemon_dir.join("daemon.json").exists()
+            && !daemon_dir.join("current.json").exists()
+    }));
 }
 
 #[test]
@@ -816,7 +966,7 @@ fn config_entry_renders_the_config_screen() {
     // 代わりに Config の 1 フレームを描いて返す。Config 自体は workspace registry を使わない
     // ため、registry が壊れていても起動できる。
     let home = short_home();
-    std::fs::create_dir_all(channel_data_dir(home.path())).unwrap();
+    ensure_private_dir_all(&channel_data_dir(home.path())).unwrap();
     std::fs::write(
         channel_data_dir(home.path()).join("workspaces.json"),
         "{ broken",
@@ -841,6 +991,54 @@ fn config_entry_renders_the_config_screen() {
         .expect("usagi daemon status を起動できる");
     assert!(status.status.success());
     assert!(stdout(&status).contains("daemon not running"));
+    stop_daemon(home.path());
+}
+
+#[test]
+fn config_first_boot_with_restrictive_umask_preserves_ordinary_daemon_bootstrap() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let mut config = Command::new(env!("CARGO_BIN_EXE_usagi"));
+    config
+        .arg("config")
+        .env("USAGI_HOME", home.path())
+        .stdin(Stdio::null());
+    // The coverage runtime creates its raw profile lazily. Pre-create this
+    // child's unique profile before applying umask 0777 so llvm-profdata can
+    // still read and merge the completed measurement.
+    precreate_restrictive_umask_coverage_profile(&mut config);
+    // SAFETY: the child has not started any threads; only its inherited umask
+    // is changed before exec to exercise the first-use creation boundary.
+    unsafe {
+        config.pre_exec(|| {
+            libc::umask(0o777);
+            Ok(())
+        });
+    }
+    let configured = config.output().expect("config first boot starts");
+    assert!(configured.status.success(), "{}", stderr(&configured));
+    assert_eq!(
+        std::fs::metadata(channel_data_dir(home.path()))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+
+    let ordinary = run_with_home(
+        &[
+            OsStr::new("session"),
+            OsStr::new("remove"),
+            OsStr::new("missing"),
+        ],
+        home.path(),
+    );
+    assert_eq!(ordinary.status.code(), Some(1));
+    assert!(stderr(&ordinary).contains("session was not found"));
+    assert_daemon_running(home.path());
     stop_daemon(home.path());
 }
 

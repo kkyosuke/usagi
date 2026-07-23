@@ -210,15 +210,6 @@
     },
     {
       "path": "src/runtime/bootstrap.rs",
-      "symbol": "fn:connect_or_start",
-      "occurrence": 1,
-      "reason": "migration_debt",
-      "owner": "root-cli",
-      "expires": "2027-01-31",
-      "tracking": "root-cli-follow-up"
-    },
-    {
-      "path": "src/runtime/bootstrap.rs",
       "symbol": "fn:require_expected_build",
       "occurrence": 1,
       "reason": "migration_debt",
@@ -238,15 +229,6 @@
     {
       "path": "src/runtime/bootstrap.rs",
       "symbol": "fn:wait_for_ready",
-      "occurrence": 1,
-      "reason": "migration_debt",
-      "owner": "root-cli",
-      "expires": "2027-01-31",
-      "tracking": "root-cli-follow-up"
-    },
-    {
-      "path": "src/runtime/bootstrap.rs",
-      "symbol": "module:tests",
       "occurrence": 1,
       "reason": "migration_debt",
       "owner": "root-cli",

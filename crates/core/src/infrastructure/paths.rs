@@ -138,6 +138,7 @@ mod tests {
 
     #[test]
     fn project_data_dir_uses_the_selected_mode_definition() {
+        let _guard = crate::test_support::process_env_guard();
         let expected = channel_data_dir("/project/.usagi");
         assert_eq!(project_data_dir("/project"), expected);
     }

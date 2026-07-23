@@ -23,7 +23,7 @@ use usagi_core::usecase::client::{
     AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest, IpcClient,
     SessionAction,
 };
-use usagi_daemon::infrastructure::unix_transport::connect_current;
+use usagi_daemon::infrastructure::unix_transport::{connect_current, ensure_private_dir_all};
 
 pub struct McpHarness {
     workspace: tempfile::TempDir,
@@ -361,7 +361,9 @@ impl McpHarness {
 
 fn configure_tool_availability(home: &Path, availability: Option<(bool, bool)>) {
     if let Some((issue_enabled, memory_enabled)) = availability {
-        Storage::new(channel_data_dir(home))
+        let data_dir = channel_data_dir(home);
+        ensure_private_dir_all(&data_dir).unwrap();
+        Storage::new(data_dir)
             .save_settings(&Settings {
                 issue_enabled,
                 memory_enabled,

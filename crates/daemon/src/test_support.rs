@@ -10,6 +10,9 @@ use usagi_core::infrastructure::daemon::{
     ShutdownSignal, Sleeper, Terminator,
 };
 
+use crate::usecase::serve::DaemonRecordPort;
+use crate::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
+
 /// An in-memory [`RecordFile`] standing in for `daemon.json` on disk.
 #[derive(Default)]
 pub struct InMemoryRecordFile {
@@ -166,6 +169,10 @@ impl ShutdownSignal for FailingShutdown {
 pub struct NoopReady;
 
 impl DaemonReady for NoopReady {
+    fn recover_stale_endpoint(&self) -> io::Result<()> {
+        Ok(())
+    }
+
     fn publish(&self) -> io::Result<()> {
         Ok(())
     }
@@ -176,6 +183,21 @@ impl DaemonReady for NoopReady {
 
     fn retire(&self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+impl StaleDaemonCleanup for NoopReady {
+    fn cleanup_if(
+        &self,
+        store: &dyn DaemonRecordPort,
+        expected: &DaemonRecord,
+    ) -> io::Result<StaleCleanup> {
+        match store.load()? {
+            Some(current) if current == *expected && store.clear_if(expected)? => {
+                Ok(StaleCleanup::Cleared)
+            }
+            Some(_) | None => Ok(StaleCleanup::Superseded),
+        }
     }
 }
 

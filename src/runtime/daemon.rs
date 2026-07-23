@@ -35,7 +35,10 @@ use usagi_core::infrastructure::store::user_decision::UserDecisionStore;
 use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
 use usagi_core::usecase::client::{DaemonRequest, DispatchToolAction, SupervisorToolAction};
 use usagi_daemon::infrastructure::pty::PtyTerminal;
-use usagi_daemon::infrastructure::unix_transport::{SecureUnixListener, ensure_private_dir};
+use usagi_daemon::infrastructure::unix_transport::{
+    EndpointCleanup, SecureUnixListener, ensure_private_dir, ensure_private_dir_all,
+    retire_stale_current,
+};
 use usagi_daemon::presentation::{DaemonCommand as PresentationDaemonCommand, DaemonEnv};
 use usagi_daemon::usecase::agent_ipc::{
     AgentRuntime, AgentTerminalActor, ResolvedAgentScope, ScopeResolveError, SessionScopeResolver,
@@ -60,7 +63,9 @@ use usagi_daemon::usecase::runtime::{
     OutputJournal, ProvisionContext, PtySpawner, RuntimeStore, RuntimeStoreSnapshot,
     SpawnProvision, TerminateReapError,
 };
+use usagi_daemon::usecase::serve::DaemonRecordPort;
 use usagi_daemon::usecase::session_runtime::{SessionRuntime, SessionRuntimeError, SystemGit};
+use usagi_daemon::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
 use usagi_daemon::usecase::supervisor_runtime::{
     DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime,
 };
@@ -1100,16 +1105,12 @@ use super::launchd;
 
 #[allow(clippy::too_many_lines)] // IPC request routing remains in the composition adapter.
 fn spawn_ipc_server(
+    listener: SecureUnixListener,
+    generation: &usagi_core::infrastructure::ipc::DaemonGeneration,
     data_dir: &Path,
     info: &AppInfo,
     shutdown: Arc<AtomicBool>,
 ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
-    let generation = usagi_core::infrastructure::ipc::DaemonGeneration(
-        usagi_core::domain::id::DaemonGeneration::new()
-            .as_str()
-            .clone(),
-    );
-    let listener = SecureUnixListener::bind(data_dir, generation.clone())?;
     let server = usagi_daemon::presentation::ipc::server_protocol(
         generation.clone(),
         generation.0.clone(),
@@ -1187,6 +1188,21 @@ fn spawn_ipc_server(
         supervisor,
         shutdown,
     )
+}
+
+fn bind_ipc_listener(
+    data_dir: &Path,
+) -> std::io::Result<(
+    SecureUnixListener,
+    usagi_core::infrastructure::ipc::DaemonGeneration,
+)> {
+    let generation = usagi_core::infrastructure::ipc::DaemonGeneration(
+        usagi_core::domain::id::DaemonGeneration::new()
+            .as_str()
+            .clone(),
+    );
+    let listener = SecureUnixListener::bind(data_dir, generation.clone())?;
+    Ok((listener, generation))
 }
 
 /// Starts the only production PR refresh worker. Remote calls happen outside
@@ -1471,6 +1487,9 @@ fn start_ipc_accept_loop(
     std::thread::Builder::new()
         .name("usagi-ipc".to_string())
         .spawn(move || {
+            let _exit = ShutdownOnIpcWorkerExit {
+                shutdown: Arc::clone(&shutdown),
+            };
             while !shutdown.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok(stream) => {
@@ -1539,6 +1558,19 @@ fn start_ipc_accept_loop(
             }
             listener
         })
+}
+
+/// Wakes the lifecycle owner whenever the accept worker unwinds or exits.
+/// Normal signal-driven shutdown has already set the same flag, so the guard
+/// is idempotent on the expected return path.
+struct ShutdownOnIpcWorkerExit {
+    shutdown: Arc<AtomicBool>,
+}
+
+impl Drop for ShutdownOnIpcWorkerExit {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+    }
 }
 
 fn dispatch_dispatch_tool(
@@ -3459,6 +3491,221 @@ static DAEMON_RECORD_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]
 thread_local! {
+    static FAIL_PRIVATE_LOCK_AFTER_CREATE: RefCell<Option<PathBuf>> = const {
+        RefCell::new(None)
+    };
+    static PRIVATE_LOCK_AFTER_FLOCK_BARRIER: RefCell<Option<PrivateLockAfterFlockBarrier>> = const {
+        RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+struct PrivateLockAfterFlockBarrier {
+    path: PathBuf,
+    acquired: Arc<std::sync::Barrier>,
+    replaced: Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+fn fail_private_lock_after_create(path: &Path) {
+    FAIL_PRIVATE_LOCK_AFTER_CREATE.with(|failpoint| {
+        *failpoint.borrow_mut() = Some(path.to_path_buf());
+    });
+}
+
+#[cfg(test)]
+fn take_private_lock_create_failpoint(path: &Path) -> bool {
+    FAIL_PRIVATE_LOCK_AFTER_CREATE.with(|failpoint| {
+        if failpoint.borrow().as_deref() == Some(path) {
+            failpoint.borrow_mut().take();
+            true
+        } else {
+            false
+        }
+    })
+}
+
+#[cfg(test)]
+fn install_private_lock_after_flock_barrier(
+    path: &Path,
+    acquired: Arc<std::sync::Barrier>,
+    replaced: Arc<std::sync::Barrier>,
+) {
+    PRIVATE_LOCK_AFTER_FLOCK_BARRIER.with(|barrier| {
+        *barrier.borrow_mut() = Some(PrivateLockAfterFlockBarrier {
+            path: path.to_path_buf(),
+            acquired,
+            replaced,
+        });
+    });
+}
+
+#[cfg(test)]
+fn wait_private_lock_after_flock_barrier(path: &Path) {
+    let barrier = PRIVATE_LOCK_AFTER_FLOCK_BARRIER.with(|slot| {
+        let matches = slot
+            .borrow()
+            .as_ref()
+            .is_some_and(|barrier| barrier.path == path);
+        matches.then(|| slot.borrow_mut().take().expect("barrier was present"))
+    });
+    if let Some(barrier) = barrier {
+        barrier.acquired.wait();
+        barrier.replaced.wait();
+    }
+}
+
+fn private_lock_error(label: &str, detail: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!("{label} {detail}"),
+    )
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PrivateLockModePolicy {
+    CrashResidue,
+    BootstrapLegacy0644,
+}
+
+fn verify_private_lock_metadata(
+    metadata: &std::fs::Metadata,
+    label: &str,
+    mode_policy: Option<PrivateLockModePolicy>,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let mode = metadata.permissions().mode() & 0o7777;
+    let mode_is_safe = match mode_policy {
+        None => mode == 0o600,
+        Some(PrivateLockModePolicy::CrashResidue) => mode & !0o600 == 0,
+        Some(PrivateLockModePolicy::BootstrapLegacy0644) => mode & !0o600 == 0 || mode == 0o644,
+    };
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.nlink() != 1
+        || !mode_is_safe
+    {
+        return Err(private_lock_error(
+            label,
+            "is not an exact private single-link regular owner file",
+        ));
+    }
+    Ok(())
+}
+
+fn open_private_lock(
+    path: &Path,
+    label: &str,
+    mode_policy: PrivateLockModePolicy,
+) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{label} path has no parent"),
+        )
+    })?;
+    ensure_private_dir(parent)?;
+    let open = |create_new| {
+        let mut options = std::fs::OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        if create_new {
+            options.create_new(true);
+        }
+        options.open(path)
+    };
+
+    let (file, created) = match open(true) {
+        Ok(file) => (file, true),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => match open(false) {
+            Ok(file) => (file, false),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                // A creator killed after create_new but before fd-fchmod can
+                // leave an owner-only directory containing a mode-000 lock.
+                // Validate that residue before path chmod, then require the
+                // O_NOFOLLOW reopen to resolve to the exact inode inspected.
+                let before = std::fs::symlink_metadata(path)?;
+                verify_private_lock_metadata(&before, label, Some(mode_policy))?;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+                let file = open(false)?;
+                let after = file.metadata()?;
+                if before.dev() != after.dev() || before.ino() != after.ino() {
+                    return Err(private_lock_error(
+                        label,
+                        "changed while repairing its mode",
+                    ));
+                }
+                (file, false)
+            }
+            Err(error) => return Err(error),
+        },
+        Err(error) => return Err(error),
+    };
+
+    #[cfg(not(test))]
+    let _ = created;
+    #[cfg(test)]
+    if created && take_private_lock_create_failpoint(path) {
+        return Err(std::io::Error::other(format!(
+            "injected {label} failure after create_new"
+        )));
+    }
+
+    // Reject links/non-owner nodes before chmod so widening a hostile inode is
+    // impossible. fd-fchmod then repairs both umask-reduced creation and safe
+    // legacy modes without reopening the pathname.
+    verify_private_lock_metadata(&file.metadata()?, label, Some(mode_policy))?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    verify_private_lock_metadata(&file.metadata()?, label, None)?;
+    Ok(file)
+}
+
+fn verify_private_lock_path(path: &Path, file: &std::fs::File, label: &str) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+
+    let descriptor = file.metadata()?;
+    verify_private_lock_metadata(&descriptor, label, None)?;
+    let pathname = std::fs::symlink_metadata(path)?;
+    verify_private_lock_metadata(&pathname, label, None)?;
+    if descriptor.dev() != pathname.dev() || descriptor.ino() != pathname.ino() {
+        return Err(private_lock_error(
+            label,
+            "pathname does not name the locked inode",
+        ));
+    }
+    let descriptor_flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+    if descriptor_flags == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if descriptor_flags & libc::FD_CLOEXEC == 0 {
+        return Err(private_lock_error(label, "descriptor is not close-on-exec"));
+    }
+    Ok(())
+}
+
+fn lock_private_exclusive(
+    path: &Path,
+    label: &str,
+    mode_policy: PrivateLockModePolicy,
+) -> std::io::Result<std::fs::File> {
+    let file = open_private_lock(path, label, mode_policy)?;
+    FileExt::lock_exclusive(&file)?;
+    #[cfg(test)]
+    wait_private_lock_after_flock_barrier(path);
+    verify_private_lock_path(path, &file, label)?;
+    Ok(file)
+}
+
+#[cfg(test)]
+thread_local! {
     static FAIL_RECORD_WRITE_BEFORE_RENAME: RefCell<Option<PathBuf>> = const {
         RefCell::new(None)
     };
@@ -3485,8 +3732,6 @@ fn take_record_write_failpoint(path: &Path) -> bool {
 
 impl FsRecordFile {
     fn transaction<T>(&self, operation: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-
         let parent = self.path.parent().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -3494,32 +3739,11 @@ impl FsRecordFile {
             )
         })?;
         ensure_private_dir(parent)?;
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-            .open(parent.join("record.lock"))?;
-        let metadata = lock.metadata()?;
-        if !metadata.is_file()
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.nlink() != 1
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "daemon record lock is not a private owner file",
-            ));
-        }
-        lock.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        if lock.metadata()?.mode() & 0o777 != 0o600 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "daemon record lock mode could not be made private",
-            ));
-        }
-        FileExt::lock_exclusive(&lock)?;
+        let _lock = lock_private_exclusive(
+            &parent.join("record.lock"),
+            "daemon record lock",
+            PrivateLockModePolicy::CrashResidue,
+        )?;
         operation()
     }
 
@@ -3720,17 +3944,34 @@ struct IpcReady<'a> {
     info: &'a AppInfo,
     shutdown: Arc<AtomicBool>,
     published: AtomicBool,
+    publication_attempted: AtomicBool,
     worker: RefCell<Option<std::thread::JoinHandle<SecureUnixListener>>>,
     listener: RefCell<Option<SecureUnixListener>>,
+    cleanup: RefCell<Option<EndpointCleanup>>,
 }
-impl DaemonReady for IpcReady<'_> {
-    fn publish(&self) -> std::io::Result<()> {
+impl IpcReady<'_> {
+    fn publish_with(
+        &self,
+        start: impl FnOnce(
+            SecureUnixListener,
+            usagi_core::infrastructure::ipc::DaemonGeneration,
+        ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>>,
+    ) -> std::io::Result<()> {
         if self
             .published
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            match spawn_ipc_server(self.data_dir, self.info, Arc::clone(&self.shutdown)) {
+            self.publication_attempted.store(true, Ordering::Release);
+            let (listener, generation) = match bind_ipc_listener(self.data_dir) {
+                Ok(bound) => bound,
+                Err(error) => {
+                    self.published.store(false, Ordering::Release);
+                    return Err(error);
+                }
+            };
+            *self.cleanup.borrow_mut() = Some(listener.cleanup_handle());
+            match start(listener, generation) {
                 Ok(worker) => {
                     *self.worker.borrow_mut() = Some(worker);
                 }
@@ -3741,6 +3982,24 @@ impl DaemonReady for IpcReady<'_> {
             }
         }
         Ok(())
+    }
+}
+
+impl DaemonReady for IpcReady<'_> {
+    fn recover_stale_endpoint(&self) -> std::io::Result<()> {
+        retire_stale_current(self.data_dir)
+    }
+
+    fn publish(&self) -> std::io::Result<()> {
+        self.publish_with(|listener, generation| {
+            spawn_ipc_server(
+                listener,
+                &generation,
+                self.data_dir,
+                self.info,
+                Arc::clone(&self.shutdown),
+            )
+        })
     }
 
     fn quiesce(&self) -> std::io::Result<()> {
@@ -3756,11 +4015,69 @@ impl DaemonReady for IpcReady<'_> {
     }
 
     fn retire(&self) -> std::io::Result<()> {
-        self.quiesce()?;
-        if let Some(mut listener) = self.listener.borrow_mut().take() {
-            listener.retire()?;
+        let quiesce = self.quiesce();
+        let cleanup = if let Some(cleanup) = self.cleanup.borrow().as_ref() {
+            cleanup.retire()
+        } else if self.publication_attempted.load(Ordering::Acquire) {
+            // Binding itself can fail before returning a token. Scan only while
+            // this serve process still owns daemon.lock, and require a complete
+            // filesystem proof before permitting record cleanup.
+            self.recover_stale_endpoint()
+        } else {
+            Ok(())
+        };
+
+        if cleanup.is_ok() {
+            self.listener.borrow_mut().take();
+            self.cleanup.borrow_mut().take();
+            self.publication_attempted.store(false, Ordering::Release);
+            self.published.store(false, Ordering::Release);
         }
-        Ok(())
+
+        match (quiesce, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(quiesce), Err(cleanup)) => Err(std::io::Error::new(
+                cleanup.kind(),
+                format!("{quiesce}; endpoint cleanup also failed: {cleanup}"),
+            )),
+        }
+    }
+}
+
+impl StaleDaemonCleanup for IpcReady<'_> {
+    fn cleanup_if(
+        &self,
+        store: &dyn DaemonRecordPort,
+        expected: &usagi_core::domain::daemon::DaemonRecord,
+    ) -> std::io::Result<StaleCleanup> {
+        if store.load()?.as_ref() != Some(expected) {
+            return Ok(StaleCleanup::Superseded);
+        }
+        // This guard is intentionally scoped to this method. `restart` must
+        // release daemon.lock before it launches the replacement serve process.
+        let lock = FileInstanceLock {
+            path: self.data_dir.join("daemon/daemon.lock"),
+            held: RefCell::new(None),
+        };
+        if !lock.acquire()? {
+            return match store.load()? {
+                Some(current) if current == *expected => Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "daemon singleton lock is still held during stale cleanup",
+                )),
+                Some(_) | None => Ok(StaleCleanup::Superseded),
+            };
+        }
+        if store.load()?.as_ref() != Some(expected) {
+            return Ok(StaleCleanup::Superseded);
+        }
+        self.recover_stale_endpoint()?;
+        if store.clear_if(expected)? {
+            Ok(StaleCleanup::Cleared)
+        } else {
+            Ok(StaleCleanup::Superseded)
+        }
     }
 }
 
@@ -3840,18 +4157,20 @@ impl ShutdownSignal for SignalShutdown {
         let signals = signals
             .as_mut()
             .ok_or_else(|| std::io::Error::other("daemon shutdown delivery was not prepared"))?;
-        // A signal may arrive after the flag handler is installed but before
-        // the blocking iterator is ready. In that case admission is already
-        // closed and there is no iterator event to consume.
-        if self.shutdown.load(Ordering::Acquire) {
-            return Ok(());
+        // Poll the shared flag as well as pending signals. The flag is set by
+        // both signal-hook and the accept-worker exit guard, so a worker panic
+        // cannot leave the owner blocked forever while holding daemon.lock and
+        // a stale lifecycle record.
+        loop {
+            if self.shutdown.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            if signals.pending().next().is_some() {
+                self.shutdown.store(true, Ordering::Release);
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
-        signals
-            .forever()
-            .next()
-            .ok_or_else(|| std::io::Error::other("daemon shutdown signal stream closed"))?;
-        self.shutdown.store(true, Ordering::Release);
-        Ok(())
     }
     #[cfg(not(unix))]
     fn wait(&self) -> std::io::Result<()> {
@@ -3892,42 +4211,23 @@ struct FileInstanceLock {
 }
 impl InstanceLock for FileInstanceLock {
     fn acquire(&self) -> std::io::Result<bool> {
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-
         const TIMEOUT: Duration = Duration::from_secs(2);
         const POLL: Duration = Duration::from_millis(20);
         if let Some(parent) = self.path.parent() {
             ensure_private_dir(parent)?;
         }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-            .open(&self.path)?;
-        let metadata = file.metadata()?;
-        if !metadata.is_file()
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.nlink() != 1
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "daemon instance lock is not a private owner file",
-            ));
-        }
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        if file.metadata()?.mode() & 0o777 != 0o600 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "daemon instance lock mode could not be made private",
-            ));
-        }
+        let file = open_private_lock(
+            &self.path,
+            "daemon instance lock",
+            PrivateLockModePolicy::CrashResidue,
+        )?;
         let deadline = Instant::now() + TIMEOUT;
         loop {
             match FileExt::try_lock_exclusive(&file) {
                 Ok(()) => {
+                    #[cfg(test)]
+                    wait_private_lock_after_flock_barrier(&self.path);
+                    verify_private_lock_path(&self.path, &file, "daemon instance lock")?;
                     *self.held.borrow_mut() = Some(file);
                     return Ok(true);
                 }
@@ -3958,6 +4258,19 @@ pub(crate) fn run(
             "daemon panicked; see the error log for details",
         )),
     }
+}
+
+/// Resolve and securely initialize the selected per-user data directory before
+/// any global store can become its first writer.
+///
+/// Config intentionally runs without starting the daemon, so its settings
+/// adapter cannot rely on bootstrap lock acquisition to establish the private
+/// directory invariant first.
+pub(crate) fn prepare_private_data_dir() -> std::io::Result<PathBuf> {
+    let data_dir =
+        paths::data_dir().map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+    ensure_private_dir_all(&data_dir)?;
+    Ok(data_dir)
 }
 
 /// Install one process-wide panic hook for the daemon. A daemon owns several
@@ -3993,18 +4306,8 @@ fn run_inner(
     command: CliDaemonCommand,
     info: &AppInfo,
 ) -> std::io::Result<()> {
-    let daemon_dir = paths::data_dir()
-        .map_err(|err| std::io::Error::other(format!("{err:#}")))?
-        .join("daemon");
-    let data_dir = daemon_dir
-        .parent()
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "daemon data path has no parent",
-            )
-        })?
-        .to_path_buf();
+    let data_dir = prepare_private_data_dir()?;
+    let daemon_dir = data_dir.join("daemon");
     let command = match command {
         CliDaemonCommand::InstallService => {
             let path = launchd::install(&std::env::current_exe()?, &data_dir)?;
@@ -4030,11 +4333,6 @@ fn run_inner(
         CliDaemonCommand::Stop => PresentationDaemonCommand::Stop,
         CliDaemonCommand::Restart => PresentationDaemonCommand::Restart,
     };
-    // The lifecycle lock is acquired before the listener binds. Prepare the
-    // endpoint directory with the same private-mode invariant that the
-    // listener enforces, so a first launch cannot leave it at create_dir_all's
-    // process-dependent default mode.
-    std::fs::create_dir_all(&data_dir)?;
     ensure_private_dir(&daemon_dir)?;
     let store = DaemonRecordStore::new(FsRecordFile {
         path: daemon_dir.join("daemon.json"),
@@ -4051,8 +4349,10 @@ fn run_inner(
         info,
         shutdown: Arc::new(AtomicBool::new(false)),
         published: AtomicBool::new(false),
+        publication_attempted: AtomicBool::new(false),
         worker: RefCell::new(None),
         listener: RefCell::new(None),
+        cleanup: RefCell::new(None),
     };
     let shutdown = SignalShutdown::new(Arc::clone(&ready.shutdown));
     let env = DaemonEnv {
@@ -4086,11 +4386,61 @@ pub(crate) fn client(
         || connect_client(&data_dir, policy),
         || run_lifecycle(&exe, "start"),
         || run_lifecycle(&exe, "restart"),
+        || recover_stale_client_endpoint(&data_dir),
         &expected_build,
         false,
         IpcClient::server_build,
     )
     .map_err(|error| ClientError::Lifecycle(error.to_string()))
+}
+
+/// Reclaims an unreachable endpoint only after proving that no daemon owns the
+/// lifecycle singleton and that the exact durable record has not changed.
+///
+/// The caller holds `bootstrap.lock`, so only one ordinary client may cross
+/// this recovery/start boundary. `daemon.lock` is the authoritative process
+/// ownership proof: unlike a raw PID probe it remains safe when a PID has been
+/// reused, and this path never signals a process. Future exact identity fields
+/// added by #514 remain part of the whole-record equality fence below.
+fn recover_stale_client_endpoint(data_dir: &Path) -> std::io::Result<bootstrap::StaleRecovery> {
+    recover_stale_client_endpoint_with(data_dir, InstanceLock::acquire, || {})
+}
+
+fn recover_stale_client_endpoint_with(
+    data_dir: &Path,
+    acquire: impl FnOnce(&FileInstanceLock) -> std::io::Result<bool>,
+    after_lock: impl FnOnce(),
+) -> std::io::Result<bootstrap::StaleRecovery> {
+    let daemon_dir = data_dir.join("daemon");
+    let store = DaemonRecordStore::new(FsRecordFile {
+        path: daemon_dir.join("daemon.json"),
+    });
+    let Some(expected) = store.load()? else {
+        return Ok(bootstrap::StaleRecovery::NotProven);
+    };
+    let lock = FileInstanceLock {
+        path: daemon_dir.join("daemon.lock"),
+        held: RefCell::new(None),
+    };
+    if !acquire(&lock)? {
+        // A live or starting owner still holds the authoritative singleton.
+        // Preserve every artifact and let bootstrap perform bounded reconnects
+        // instead of launching a competing daemon.
+        return Ok(bootstrap::StaleRecovery::OwnerActive);
+    }
+    after_lock();
+    if store.load()?.as_ref() != Some(&expected) {
+        return Ok(bootstrap::StaleRecovery::NotProven);
+    }
+
+    // Socket-first retirement and current.lock provide the endpoint commit
+    // fence. The record remains present on every cleanup error.
+    retire_stale_current(data_dir)?;
+    if store.clear_if(&expected)? {
+        Ok(bootstrap::StaleRecovery::Recovered)
+    } else {
+        Ok(bootstrap::StaleRecovery::NotProven)
+    }
 }
 
 fn current_build() -> BuildIdentity {
@@ -4126,30 +4476,18 @@ fn run_lifecycle(exe: &Path, command: &str) -> std::io::Result<()> {
         .ok_or_else(|| std::io::Error::other(format!("daemon {command} failed")))
 }
 fn acquire_bootstrap_lock(data_dir: &Path) -> Result<std::fs::File, ClientError> {
-    let daemon_dir = data_dir.join("daemon");
-    std::fs::create_dir_all(data_dir)
-        .map_err(|error| ClientError::Unavailable(error.to_string()))?;
-    match std::fs::create_dir(&daemon_dir) {
-        Ok(()) => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&daemon_dir, std::fs::Permissions::from_mode(0o700))
-                    .map_err(|error| ClientError::Unavailable(error.to_string()))?;
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(ClientError::Unavailable(error.to_string())),
-    }
-    let lock = std::fs::File::options()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(daemon_dir.join("bootstrap.lock"))
-        .map_err(|error| ClientError::Unavailable(error.to_string()))?;
-    FileExt::lock_exclusive(&lock).map_err(|error| ClientError::Unavailable(error.to_string()))?;
-    Ok(lock)
+    let result = (|| {
+        let daemon_dir = data_dir.join("daemon");
+        ensure_private_dir_all(data_dir)?;
+        ensure_private_dir(&daemon_dir)?;
+        let path = daemon_dir.join("bootstrap.lock");
+        lock_private_exclusive(
+            &path,
+            "bootstrap lock",
+            PrivateLockModePolicy::BootstrapLegacy0644,
+        )
+    })();
+    result.map_err(|error: std::io::Error| ClientError::Unavailable(error.to_string()))
 }
 
 /// Ensures that an active daemon endpoint exists before an interactive TUI is
@@ -4161,6 +4499,7 @@ pub(crate) fn ensure_ready() -> Result<(), ClientError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::sync::atomic::AtomicUsize;
     use usagi_core::domain::{
         id::{
@@ -4176,6 +4515,129 @@ mod tests {
     use usagi_daemon::usecase::terminal_ipc::{
         ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
     };
+
+    fn daemon_test_info() -> AppInfo {
+        AppInfo {
+            name: "usagi",
+            version: "0.1.0",
+        }
+    }
+
+    fn fresh_ipc_ready<'a>(data_dir: &'a Path, info: &'a AppInfo) -> IpcReady<'a> {
+        IpcReady {
+            data_dir,
+            info,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            published: AtomicBool::new(false),
+            publication_attempted: AtomicBool::new(false),
+            worker: RefCell::new(None),
+            listener: RefCell::new(None),
+            cleanup: RefCell::new(None),
+        }
+    }
+
+    fn ipc_generation() -> usagi_core::infrastructure::ipc::DaemonGeneration {
+        usagi_core::infrastructure::ipc::DaemonGeneration(
+            usagi_core::domain::id::DaemonGeneration::new()
+                .as_str()
+                .clone(),
+        )
+    }
+
+    struct SupersededCleanup;
+
+    impl usagi_daemon::usecase::stop::StaleDaemonCleanup for SupersededCleanup {
+        fn cleanup_if(
+            &self,
+            _store: &dyn usagi_daemon::usecase::serve::DaemonRecordPort,
+            _expected: &usagi_core::domain::daemon::DaemonRecord,
+        ) -> std::io::Result<StaleCleanup> {
+            Ok(StaleCleanup::Superseded)
+        }
+    }
+
+    fn replace_private_lock_after_flock(path: &Path) -> std::thread::JoinHandle<()> {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let mut replacement = path.as_os_str().to_owned();
+        replacement.push(".replacement");
+        let replacement = PathBuf::from(replacement);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&replacement)
+            .unwrap();
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        drop(file);
+
+        let acquired = Arc::new(std::sync::Barrier::new(2));
+        let replaced = Arc::new(std::sync::Barrier::new(2));
+        install_private_lock_after_flock_barrier(
+            path,
+            Arc::clone(&acquired),
+            Arc::clone(&replaced),
+        );
+        let path = path.to_path_buf();
+        std::thread::spawn(move || {
+            acquired.wait();
+            std::fs::rename(replacement, path).unwrap();
+            replaced.wait();
+        })
+    }
+
+    fn assert_private_lock_descriptor(file: &std::fs::File) {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let metadata = file.metadata().unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(metadata.nlink(), 1);
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        let descriptor_flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+        assert_ne!(descriptor_flags, -1);
+        assert_ne!(descriptor_flags & libc::FD_CLOEXEC, 0);
+    }
+
+    struct ImmediateTestShutdown;
+
+    impl ShutdownSignal for ImmediateTestShutdown {
+        fn prepare(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn wait(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct RecoveryOnlyReady<'a, 'b> {
+        ready: &'a IpcReady<'b>,
+        publishes: &'a Cell<u8>,
+    }
+
+    impl DaemonReady for RecoveryOnlyReady<'_, '_> {
+        fn recover_stale_endpoint(&self) -> std::io::Result<()> {
+            self.ready.recover_stale_endpoint()
+        }
+
+        fn publish(&self) -> std::io::Result<()> {
+            self.publishes.set(self.publishes.get() + 1);
+            Ok(())
+        }
+
+        fn quiesce(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn retire(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn delayed_record_clear_cannot_remove_a_concurrent_replacement() {
@@ -4239,7 +4701,8 @@ mod tests {
 
     #[test]
     fn lifecycle_private_files_override_a_restrictive_umask() {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
         const FIXTURE: &str = "USAGI_TEST_RESTRICTIVE_DAEMON_UMASK";
         if std::env::var_os(FIXTURE).is_none() {
@@ -4266,6 +4729,22 @@ mod tests {
         let data = directory.path().join("data");
         ensure_private_dir(&data).unwrap();
         let daemon = data.join("daemon");
+        let first_bootstrap = acquire_bootstrap_lock(&data).unwrap();
+        let bootstrap_metadata = first_bootstrap.metadata().unwrap();
+        assert!(bootstrap_metadata.is_file());
+        assert_eq!(bootstrap_metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(bootstrap_metadata.nlink(), 1);
+        assert_eq!(bootstrap_metadata.mode() & 0o777, 0o600);
+        let descriptor_flags = unsafe { libc::fcntl(first_bootstrap.as_raw_fd(), libc::F_GETFD) };
+        assert_ne!(descriptor_flags, -1);
+        assert_ne!(descriptor_flags & libc::FD_CLOEXEC, 0);
+        drop(first_bootstrap);
+        // Reopening after the creating fd closes is the regression boundary:
+        // the former code left a mode-000 node under umask 0777.
+        let bootstrap = acquire_bootstrap_lock(&data).unwrap();
+        let reopened_flags = unsafe { libc::fcntl(bootstrap.as_raw_fd(), libc::F_GETFD) };
+        assert_ne!(reopened_flags, -1);
+        assert_ne!(reopened_flags & libc::FD_CLOEXEC, 0);
         let path = daemon.join("daemon.json");
         let store = DaemonRecordStore::new(FsRecordFile { path });
         store
@@ -4291,6 +4770,7 @@ mod tests {
             "daemon.json",
             "daemon.lock",
             "record.lock",
+            "bootstrap.lock",
             "current.json",
             "current.lock",
         ] {
@@ -4304,10 +4784,846 @@ mod tests {
                 "{private_file} did not override umask 0777"
             );
         }
-        drop((listener, instance));
+        drop((listener, instance, bootstrap));
         unsafe {
             libc::umask(previous_umask);
         }
+    }
+
+    #[test]
+    fn all_lifecycle_locks_recover_a_crash_after_restrictive_umask_creation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const FIXTURE: &str = "USAGI_TEST_PRIVATE_LOCK_CREATE_CRASH";
+        if std::env::var_os(FIXTURE).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "runtime::daemon::tests::all_lifecycle_locks_recover_a_crash_after_restrictive_umask_creation",
+                    "--nocapture",
+                ])
+                .env(FIXTURE, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        // Isolate the process-global umask, then stop each lock immediately
+        // after create_new. The next API call must recover that durable mode-000
+        // residue and leave the same exact private invariant on every fd.
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let record_daemon = directory.path().join("record-daemon");
+        let instance_daemon = directory.path().join("instance-daemon");
+        let bootstrap_data = directory.path().join("bootstrap-data");
+        ensure_private_dir(&record_daemon).unwrap();
+        ensure_private_dir(&instance_daemon).unwrap();
+        ensure_private_dir(&bootstrap_data).unwrap();
+        let previous_umask = unsafe { libc::umask(0o777) };
+
+        let record_path = record_daemon.join("daemon.json");
+        let record_lock = record_daemon.join("record.lock");
+        let store = DaemonRecordStore::new(FsRecordFile { path: record_path });
+        fail_private_lock_after_create(&record_lock);
+        assert!(store.load().is_err());
+        assert_eq!(
+            std::fs::metadata(&record_lock)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0
+        );
+        assert_eq!(store.load().unwrap(), None);
+        let record_descriptor = lock_private_exclusive(
+            &record_lock,
+            "daemon record lock",
+            PrivateLockModePolicy::CrashResidue,
+        )
+        .unwrap();
+        assert_private_lock_descriptor(&record_descriptor);
+        drop(record_descriptor);
+
+        let instance_path = instance_daemon.join("daemon.lock");
+        let failed_instance = FileInstanceLock {
+            path: instance_path.clone(),
+            held: RefCell::new(None),
+        };
+        fail_private_lock_after_create(&instance_path);
+        assert!(failed_instance.acquire().is_err());
+        assert_eq!(
+            std::fs::metadata(&instance_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0
+        );
+        let instance = FileInstanceLock {
+            path: instance_path,
+            held: RefCell::new(None),
+        };
+        assert!(instance.acquire().unwrap());
+        assert_private_lock_descriptor(instance.held.borrow().as_ref().unwrap());
+
+        let bootstrap_path = bootstrap_data.join("daemon/bootstrap.lock");
+        fail_private_lock_after_create(&bootstrap_path);
+        assert!(acquire_bootstrap_lock(&bootstrap_data).is_err());
+        assert_eq!(
+            std::fs::metadata(&bootstrap_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0
+        );
+        let bootstrap = acquire_bootstrap_lock(&bootstrap_data).unwrap();
+        assert_private_lock_descriptor(&bootstrap);
+
+        drop((bootstrap, instance));
+        unsafe {
+            libc::umask(previous_umask);
+        }
+    }
+
+    #[test]
+    fn record_lock_rejects_a_path_replacement_after_flock() {
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let daemon = directory.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        let record_lock = daemon.join("record.lock");
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: daemon.join("daemon.json"),
+        });
+        let replacement = replace_private_lock_after_flock(&record_lock);
+
+        let error = store.load().unwrap_err();
+        replacement.join().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("daemon record lock"));
+        assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[test]
+    fn instance_lock_rejects_a_path_replacement_after_flock() {
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let daemon = directory.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        let path = daemon.join("daemon.lock");
+        let instance = FileInstanceLock {
+            path: path.clone(),
+            held: RefCell::new(None),
+        };
+        let replacement = replace_private_lock_after_flock(&path);
+
+        let error = instance.acquire().unwrap_err();
+        replacement.join().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("daemon instance lock"));
+        assert!(instance.held.borrow().is_none());
+        let retry = FileInstanceLock {
+            path,
+            held: RefCell::new(None),
+        };
+        assert!(retry.acquire().unwrap());
+    }
+
+    #[test]
+    fn bootstrap_lock_rejects_a_path_replacement_after_flock() {
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path().join("data");
+        ensure_private_dir(&data).unwrap();
+        let daemon = data.join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        let path = daemon.join("bootstrap.lock");
+        let replacement = replace_private_lock_after_flock(&path);
+
+        let error = acquire_bootstrap_lock(&data).unwrap_err();
+        replacement.join().unwrap();
+        assert!(error.to_string().contains("bootstrap lock"));
+        let retry = acquire_bootstrap_lock(&data).unwrap();
+        assert_private_lock_descriptor(&retry);
+    }
+
+    #[test]
+    fn record_and_instance_locks_reject_broad_modes_and_hardlinks_without_chmod() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let daemon = directory.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+
+        let broad_record_lock = daemon.join("record.lock");
+        std::fs::write(&broad_record_lock, []).unwrap();
+        std::fs::set_permissions(&broad_record_lock, std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: daemon.join("daemon.json"),
+        });
+        assert!(store.load().is_err());
+        assert_eq!(
+            std::fs::metadata(&broad_record_lock)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+        std::fs::remove_file(&broad_record_lock).unwrap();
+
+        let record_target = daemon.join("record-target");
+        std::fs::write(&record_target, b"preserve").unwrap();
+        std::fs::set_permissions(&record_target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::hard_link(&record_target, daemon.join("record.lock")).unwrap();
+        assert!(store.load().is_err());
+        assert_eq!(std::fs::read(&record_target).unwrap(), b"preserve");
+        assert_eq!(
+            std::fs::metadata(&record_target)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+
+        let broad_instance_lock = daemon.join("daemon.lock");
+        std::fs::write(&broad_instance_lock, []).unwrap();
+        std::fs::set_permissions(&broad_instance_lock, std::fs::Permissions::from_mode(0o640))
+            .unwrap();
+        let broad_instance = FileInstanceLock {
+            path: broad_instance_lock.clone(),
+            held: RefCell::new(None),
+        };
+        assert!(broad_instance.acquire().is_err());
+        assert_eq!(
+            std::fs::metadata(&broad_instance_lock)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o640
+        );
+        std::fs::remove_file(&broad_instance_lock).unwrap();
+
+        let instance_target = daemon.join("instance-target");
+        std::fs::write(&instance_target, b"preserve").unwrap();
+        std::fs::set_permissions(&instance_target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::hard_link(&instance_target, daemon.join("daemon.lock")).unwrap();
+        let instance = FileInstanceLock {
+            path: daemon.join("daemon.lock"),
+            held: RefCell::new(None),
+        };
+        assert!(instance.acquire().is_err());
+        assert_eq!(std::fs::read(&instance_target).unwrap(), b"preserve");
+        assert_eq!(
+            std::fs::metadata(instance_target)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+    }
+
+    #[test]
+    fn bootstrap_lock_rejects_symlink_hardlink_and_non_regular_nodes() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path().join("data");
+        ensure_private_dir(&data).unwrap();
+        let daemon = data.join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        let lock = daemon.join("bootstrap.lock");
+        let target = daemon.join("target");
+        std::fs::write(&target, b"preserve").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        std::os::unix::fs::symlink(&target, &lock).unwrap();
+        assert!(acquire_bootstrap_lock(&data).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"preserve");
+        std::fs::remove_file(&lock).unwrap();
+
+        std::fs::hard_link(&target, &lock).unwrap();
+        assert_eq!(std::fs::metadata(&target).unwrap().nlink(), 2);
+        assert!(acquire_bootstrap_lock(&data).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"preserve");
+        assert_eq!(std::fs::metadata(&target).unwrap().mode() & 0o777, 0o600);
+        std::fs::remove_file(&lock).unwrap();
+
+        std::fs::create_dir(&lock).unwrap();
+        assert!(acquire_bootstrap_lock(&data).is_err());
+        std::fs::remove_dir(&lock).unwrap();
+
+        // No broad mode other than the exact origin/main 0644 legacy state is
+        // a valid umask residue or migration candidate.
+        std::fs::write(&lock, []).unwrap();
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(acquire_bootstrap_lock(&data).is_err());
+        assert_eq!(std::fs::metadata(&lock).unwrap().mode() & 0o777, 0o666);
+
+        // Use the sticky bit for the exact-mode boundary: Darwin strips set-id
+        // bits when this test is built with coverage instrumentation.
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o1600)).unwrap();
+        assert_eq!(std::fs::metadata(&lock).unwrap().mode() & 0o7777, 0o1600);
+        assert!(acquire_bootstrap_lock(&data).is_err());
+        assert_eq!(std::fs::metadata(&lock).unwrap().mode() & 0o7777, 0o1600);
+
+        // origin/main created bootstrap.lock without an explicit mode, so the
+        // exact historical 0644 owner file is a one-time migration exception.
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let repaired = acquire_bootstrap_lock(&data).unwrap();
+        assert_eq!(repaired.metadata().unwrap().mode() & 0o777, 0o600);
+        drop(repaired);
+
+        // A creator killed between create_new and fd-fchmod can leave the same
+        // owner single-link inode at mode 000. Secure reopen repairs that
+        // durable residue instead of permanently wedging every later client.
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let repaired = acquire_bootstrap_lock(&data).unwrap();
+        assert_eq!(repaired.metadata().unwrap().mode() & 0o777, 0o600);
+        assert_eq!(repaired.metadata().unwrap().nlink(), 1);
+    }
+
+    #[test]
+    fn ipc_ready_retains_listener_cleanup_ownership_until_retry_succeeds() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let info = daemon_test_info();
+        let listener = SecureUnixListener::bind(data, ipc_generation()).unwrap();
+        let daemon = data.join("daemon");
+        let socket = daemon.join(&listener.locator().endpoint);
+        let cleanup = listener.cleanup_handle();
+        let lock = daemon.join("current.lock");
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let ready = fresh_ipc_ready(data, &info);
+        ready.publication_attempted.store(true, Ordering::Release);
+        ready.published.store(true, Ordering::Release);
+        *ready.listener.borrow_mut() = Some(listener);
+        *ready.cleanup.borrow_mut() = Some(cleanup);
+
+        assert!(ready.retire().is_err());
+        assert!(ready.listener.borrow().is_some());
+        assert!(ready.cleanup.borrow().is_some());
+        assert!(socket.exists());
+        assert!(daemon.join("current.json").exists());
+
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+        ready.retire().unwrap();
+        assert!(ready.listener.borrow().is_none());
+        assert!(ready.cleanup.borrow().is_none());
+        assert!(!socket.exists());
+        assert!(!daemon.join("current.json").exists());
+    }
+
+    #[test]
+    fn ipc_ready_retains_cleanup_token_when_accept_worker_panics() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let info = daemon_test_info();
+        let listener = SecureUnixListener::bind(data, ipc_generation()).unwrap();
+        let daemon = data.join("daemon");
+        let socket = daemon.join(&listener.locator().endpoint);
+        let cleanup = listener.cleanup_handle();
+        let lock = daemon.join("current.lock");
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let worker = std::thread::spawn(move || -> SecureUnixListener {
+            let _listener = listener;
+            panic!("injected accept-loop panic")
+        });
+        let ready = fresh_ipc_ready(data, &info);
+        ready.publication_attempted.store(true, Ordering::Release);
+        ready.published.store(true, Ordering::Release);
+        *ready.worker.borrow_mut() = Some(worker);
+        *ready.cleanup.borrow_mut() = Some(cleanup);
+
+        assert!(ready.quiesce().is_err());
+        assert!(ready.worker.borrow().is_none());
+        assert!(ready.listener.borrow().is_none());
+        assert!(ready.retire().is_err());
+        assert!(ready.cleanup.borrow().is_some());
+        assert!(socket.exists());
+        assert!(daemon.join("current.json").exists());
+
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+        ready.retire().unwrap();
+        assert!(ready.cleanup.borrow().is_none());
+        assert!(!socket.exists());
+        assert!(!daemon.join("current.json").exists());
+    }
+
+    #[test]
+    fn abnormal_startup_after_bind_keeps_retryable_cleanup_ownership() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let info = daemon_test_info();
+        let daemon = data.join("daemon");
+        let socket = RefCell::new(None);
+        let ready = fresh_ipc_ready(data, &info);
+
+        let error = ready
+            .publish_with(|listener, _generation| {
+                *socket.borrow_mut() = Some(daemon.join(&listener.locator().endpoint));
+                std::fs::set_permissions(
+                    daemon.join("current.lock"),
+                    std::fs::Permissions::from_mode(0o644),
+                )?;
+                Err(std::io::Error::other("injected post-bind startup failure"))
+            })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "injected post-bind startup failure");
+        assert!(ready.cleanup.borrow().is_some());
+        assert!(ready.publication_attempted.load(Ordering::Acquire));
+        assert!(socket.borrow().as_ref().unwrap().exists());
+        assert!(daemon.join("current.json").exists());
+
+        std::fs::set_permissions(
+            daemon.join("current.lock"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        ready.retire().unwrap();
+        assert!(ready.cleanup.borrow().is_none());
+        assert!(!socket.borrow().as_ref().unwrap().exists());
+        assert!(!daemon.join("current.json").exists());
+    }
+
+    #[test]
+    fn stale_cleanup_keeps_record_until_endpoint_retry_proves_absence() {
+        use std::mem::ManuallyDrop;
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let info = daemon_test_info();
+        let daemon = data.join("daemon");
+        let mut listener =
+            ManuallyDrop::new(SecureUnixListener::bind(data, ipc_generation()).unwrap());
+        let socket = daemon.join(&listener.locator().endpoint);
+        let record_path = daemon.join("daemon.json");
+        let store = DaemonRecordStore::new(FsRecordFile { path: record_path });
+        let record = usagi_core::domain::daemon::DaemonRecord::new(4242);
+        store.save(&record).unwrap();
+        let ready = fresh_ipc_ready(data, &info);
+        let lock = daemon.join("current.lock");
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert!(ready.cleanup_if(&store, &record).is_err());
+        assert_eq!(store.load().unwrap(), Some(record.clone()));
+        assert!(socket.exists());
+        assert!(daemon.join("current.json").exists());
+
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            ready.cleanup_if(&store, &record).unwrap(),
+            StaleCleanup::Cleared
+        );
+        assert_eq!(store.load().unwrap(), None);
+        assert!(!socket.exists());
+        assert!(!daemon.join("current.json").exists());
+        // SAFETY: the listener was not moved or dropped; cleanup is idempotent.
+        unsafe { ManuallyDrop::drop(&mut listener) };
+    }
+
+    #[test]
+    fn client_bootstrap_recovery_uses_the_instance_fence_not_a_raw_pid() {
+        use std::mem::ManuallyDrop;
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let daemon = data.join("daemon");
+        let mut listener =
+            ManuallyDrop::new(SecureUnixListener::bind(data, ipc_generation()).unwrap());
+        let socket = daemon.join(&listener.locator().endpoint);
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: daemon.join("daemon.json"),
+        });
+        // The PID is deliberately live (this test process), modelling PID
+        // reuse. Acquiring daemon.lock proves that this live process is not the
+        // daemon owner, and recovery never sends it a signal.
+        let record = usagi_core::domain::daemon::DaemonRecord::new(std::process::id());
+        store.save(&record).unwrap();
+
+        assert_eq!(
+            recover_stale_client_endpoint(data).unwrap(),
+            bootstrap::StaleRecovery::Recovered
+        );
+        assert_eq!(store.load().unwrap(), None);
+        assert!(!socket.exists());
+        assert!(!daemon.join("current.json").exists());
+        assert!(KillProbe.is_alive(std::process::id()));
+
+        // SAFETY: recovery removed only filesystem artifacts; dropping closes
+        // the still-owned listener fd and its cleanup is idempotent.
+        unsafe { ManuallyDrop::drop(&mut listener) };
+    }
+
+    #[test]
+    fn client_bootstrap_recovers_a_socket_first_partial_retire_with_a_reused_live_pid() {
+        use std::mem::ManuallyDrop;
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let daemon = data.join("daemon");
+        let mut listener =
+            ManuallyDrop::new(SecureUnixListener::bind(data, ipc_generation()).unwrap());
+        let cleanup = listener.cleanup_handle();
+        let socket = daemon.join(&listener.locator().endpoint);
+        let current = daemon.join("current.json");
+        let alias = daemon.join("current.alias");
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: daemon.join("daemon.json"),
+        });
+        // Model PID reuse: this process is alive, but it does not own the
+        // daemon singleton. Recovery must use daemon.lock rather than the PID.
+        let record = usagi_core::domain::daemon::DaemonRecord::new(std::process::id());
+        store.save(&record).unwrap();
+
+        // A locator hardlink forces retirement to stop after its socket-first
+        // step. Once the unsafe alias is repaired, the durable state is the
+        // exact crash window: record + locator remain, while the socket is
+        // absent. That endpoint absence must enter fenced recovery instead of
+        // the raw `NotFound => start` path.
+        std::fs::hard_link(&current, &alias).unwrap();
+        assert_eq!(
+            cleanup.retire().unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(!socket.exists());
+        assert!(current.exists());
+        assert_eq!(store.load().unwrap(), Some(record.clone()));
+        std::fs::remove_file(alias).unwrap();
+        assert_eq!(
+            usagi_daemon::infrastructure::unix_transport::connect_current(data)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::ConnectionRefused
+        );
+
+        assert_eq!(
+            recover_stale_client_endpoint(data).unwrap(),
+            bootstrap::StaleRecovery::Recovered
+        );
+        assert_eq!(store.load().unwrap(), None);
+        assert!(!current.exists());
+        assert!(KillProbe.is_alive(std::process::id()));
+
+        // SAFETY: recovery removed only filesystem artifacts; dropping closes
+        // the still-owned listener fd and its cleanup is idempotent.
+        unsafe { ManuallyDrop::drop(&mut listener) };
+    }
+
+    #[test]
+    fn client_bootstrap_recovery_requires_an_exact_lifecycle_record() {
+        use std::mem::ManuallyDrop;
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let daemon = data.join("daemon");
+        let mut listener =
+            ManuallyDrop::new(SecureUnixListener::bind(data, ipc_generation()).unwrap());
+        let socket = daemon.join(&listener.locator().endpoint);
+
+        assert_eq!(
+            recover_stale_client_endpoint(data).unwrap(),
+            bootstrap::StaleRecovery::NotProven
+        );
+        assert!(socket.exists());
+        assert!(daemon.join("current.json").exists());
+
+        // SAFETY: the listener has not moved and still owns normal cleanup.
+        unsafe { ManuallyDrop::drop(&mut listener) };
+    }
+
+    #[test]
+    fn client_bootstrap_recovery_preserves_an_active_owner() {
+        use std::mem::ManuallyDrop;
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let daemon = data.join("daemon");
+        let mut listener =
+            ManuallyDrop::new(SecureUnixListener::bind(data, ipc_generation()).unwrap());
+        let locator = listener.locator().clone();
+        let socket = daemon.join(&locator.endpoint);
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: daemon.join("daemon.json"),
+        });
+        let record = usagi_core::domain::daemon::DaemonRecord::new(4242);
+        store.save(&record).unwrap();
+
+        assert_eq!(
+            recover_stale_client_endpoint_with(
+                data,
+                |_lock| Ok(false),
+                || panic!("post-lock effects must not run for an active owner"),
+            )
+            .unwrap(),
+            bootstrap::StaleRecovery::OwnerActive
+        );
+        assert_eq!(store.load().unwrap(), Some(record));
+        assert_eq!(
+            usagi_daemon::infrastructure::unix_transport::read_locator(&daemon).unwrap(),
+            locator
+        );
+        assert!(socket.exists());
+
+        // SAFETY: the listener has not moved and still owns normal cleanup.
+        unsafe { ManuallyDrop::drop(&mut listener) };
+    }
+
+    #[test]
+    fn client_bootstrap_recovery_preserves_a_record_replaced_after_instance_lock() {
+        use std::mem::ManuallyDrop;
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let daemon = data.join("daemon");
+        let mut listener =
+            ManuallyDrop::new(SecureUnixListener::bind(data, ipc_generation()).unwrap());
+        let locator = listener.locator().clone();
+        let socket = daemon.join(&locator.endpoint);
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: daemon.join("daemon.json"),
+        });
+        let old = usagi_core::domain::daemon::DaemonRecord::new(4242);
+        let replacement = usagi_core::domain::daemon::DaemonRecord {
+            pid: old.pid,
+            started_at: old.started_at + chrono::Duration::nanoseconds(1),
+        };
+        store.save(&old).unwrap();
+
+        assert_eq!(
+            recover_stale_client_endpoint_with(data, InstanceLock::acquire, || {
+                store.save(&replacement).unwrap();
+            })
+            .unwrap(),
+            bootstrap::StaleRecovery::NotProven
+        );
+        assert_eq!(store.load().unwrap(), Some(replacement));
+        assert_eq!(
+            usagi_daemon::infrastructure::unix_transport::read_locator(&daemon).unwrap(),
+            locator
+        );
+        assert!(socket.exists());
+
+        // SAFETY: the listener has not moved and still owns normal cleanup.
+        unsafe { ManuallyDrop::drop(&mut listener) };
+    }
+
+    #[test]
+    fn client_bootstrap_recovery_keeps_record_when_current_lock_is_unsafe() {
+        use std::mem::ManuallyDrop;
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let daemon = data.join("daemon");
+        let mut listener =
+            ManuallyDrop::new(SecureUnixListener::bind(data, ipc_generation()).unwrap());
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: daemon.join("daemon.json"),
+        });
+        let record = usagi_core::domain::daemon::DaemonRecord::new(4242);
+        store.save(&record).unwrap();
+        let current_lock = daemon.join("current.lock");
+        std::fs::set_permissions(&current_lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert!(recover_stale_client_endpoint(data).is_err());
+        assert_eq!(store.load().unwrap(), Some(record));
+        assert!(daemon.join("current.json").exists());
+
+        std::fs::set_permissions(&current_lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // SAFETY: the listener has not moved and still owns normal cleanup.
+        unsafe { ManuallyDrop::drop(&mut listener) };
+    }
+
+    #[test]
+    fn stale_retry_clears_record_only_after_socket_first_partial_retire_commits_locator() {
+        use std::mem::ManuallyDrop;
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let info = daemon_test_info();
+        let daemon = data.join("daemon");
+        let mut listener =
+            ManuallyDrop::new(SecureUnixListener::bind(data, ipc_generation()).unwrap());
+        let cleanup = listener.cleanup_handle();
+        let socket = daemon.join(&listener.locator().endpoint);
+        let current = daemon.join("current.json");
+        let alias = daemon.join("current.alias");
+        std::fs::hard_link(&current, &alias).unwrap();
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: daemon.join("daemon.json"),
+        });
+        let record = usagi_core::domain::daemon::DaemonRecord::new(4242);
+        store.save(&record).unwrap();
+
+        assert_eq!(
+            cleanup.retire().unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(!socket.exists(), "owned socket is the first cleanup step");
+        assert!(current.exists(), "unsafe locator remains the commit fence");
+        assert_eq!(store.load().unwrap(), Some(record.clone()));
+
+        std::fs::remove_file(alias).unwrap();
+        let ready = fresh_ipc_ready(data, &info);
+        assert_eq!(
+            ready.cleanup_if(&store, &record).unwrap(),
+            StaleCleanup::Cleared
+        );
+        assert_eq!(store.load().unwrap(), None);
+        assert!(!current.exists());
+        // SAFETY: the listener was not moved or dropped; cleanup is idempotent.
+        unsafe { ManuallyDrop::drop(&mut listener) };
+    }
+
+    #[test]
+    fn serve_preserves_stale_record_until_real_pre_registration_recovery_succeeds() {
+        use std::mem::ManuallyDrop;
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let info = daemon_test_info();
+        let daemon = data.join("daemon");
+        let mut listener =
+            ManuallyDrop::new(SecureUnixListener::bind(data, ipc_generation()).unwrap());
+        let socket = daemon.join(&listener.locator().endpoint);
+        let current = daemon.join("current.json");
+        let current_lock = daemon.join("current.lock");
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: daemon.join("daemon.json"),
+        });
+        let stale = usagi_core::domain::daemon::DaemonRecord::new(4242);
+        store.save(&stale).unwrap();
+        std::fs::set_permissions(&current_lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let publishes = Cell::new(0);
+
+        {
+            let ready = fresh_ipc_ready(data, &info);
+            let recovery = RecoveryOnlyReady {
+                ready: &ready,
+                publishes: &publishes,
+            };
+            let lock = FileInstanceLock {
+                path: daemon.join("daemon.lock"),
+                held: RefCell::new(None),
+            };
+            assert!(
+                usagi_daemon::usecase::serve::serve(
+                    &mut Vec::new(),
+                    &store,
+                    &recovery,
+                    &ImmediateTestShutdown,
+                    &lock,
+                    7777,
+                    &info,
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(store.load().unwrap(), Some(stale));
+        assert_eq!(publishes.get(), 0);
+        assert!(socket.exists());
+        assert!(current.exists());
+
+        std::fs::set_permissions(&current_lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+        {
+            let ready = fresh_ipc_ready(data, &info);
+            let recovery = RecoveryOnlyReady {
+                ready: &ready,
+                publishes: &publishes,
+            };
+            let lock = FileInstanceLock {
+                path: daemon.join("daemon.lock"),
+                held: RefCell::new(None),
+            };
+            usagi_daemon::usecase::serve::serve(
+                &mut Vec::new(),
+                &store,
+                &recovery,
+                &ImmediateTestShutdown,
+                &lock,
+                7777,
+                &info,
+            )
+            .unwrap();
+        }
+        assert_eq!(publishes.get(), 1);
+        assert_eq!(store.load().unwrap(), None);
+        assert!(!socket.exists());
+        assert!(!current.exists());
+        // SAFETY: the listener was not moved or dropped; stale recovery already
+        // removed its filesystem endpoint and Drop only closes the descriptor.
+        unsafe { ManuallyDrop::drop(&mut listener) };
+    }
+
+    #[test]
+    fn stale_cleanup_preserves_a_saved_replacement_generation() {
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let info = daemon_test_info();
+        let daemon = data.join("daemon");
+        let old_listener = SecureUnixListener::bind(data, ipc_generation()).unwrap();
+        let replacement_listener = SecureUnixListener::bind(data, ipc_generation()).unwrap();
+        let replacement_locator = replacement_listener.locator().clone();
+        let replacement_socket = daemon.join(&replacement_locator.endpoint);
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: daemon.join("daemon.json"),
+        });
+        let old = usagi_core::domain::daemon::DaemonRecord::new(4242);
+        let replacement = usagi_core::domain::daemon::DaemonRecord {
+            pid: old.pid,
+            started_at: old.started_at + chrono::Duration::nanoseconds(1),
+        };
+        store.save(&replacement).unwrap();
+        let ready = fresh_ipc_ready(data, &info);
+
+        assert_eq!(
+            ready.cleanup_if(&store, &old).unwrap(),
+            StaleCleanup::Superseded
+        );
+        assert_eq!(store.load().unwrap(), Some(replacement));
+        assert_eq!(
+            usagi_daemon::infrastructure::unix_transport::read_locator(&daemon).unwrap(),
+            replacement_locator
+        );
+        assert!(replacement_socket.exists());
+        let client = usagi_daemon::infrastructure::unix_transport::connect_current(data).unwrap();
+        let accepted = replacement_listener.accept().unwrap();
+        drop((client, accepted, old_listener, replacement_listener));
+    }
+
+    #[test]
+    fn production_stop_preserves_a_superseded_stale_record() {
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let daemon = directory.path().join("daemon");
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: daemon.join("daemon.json"),
+        });
+        let record = usagi_core::domain::daemon::DaemonRecord::new(u32::MAX);
+        store.save(&record).unwrap();
+
+        let error = usagi_daemon::usecase::stop::stop(
+            &store,
+            &KillProbe,
+            &SigtermTerminator,
+            &RealSleeper,
+            &SupersededCleanup,
+            &daemon_test_info(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(store.load().unwrap(), Some(record));
     }
 
     #[test]
@@ -4333,6 +5649,40 @@ mod tests {
         signal_hook::low_level::raise(libc::SIGTERM).unwrap();
 
         assert!(admission_closed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn accept_worker_exit_wakes_shutdown_wait_without_an_os_signal() {
+        const FIXTURE: &str = "USAGI_TEST_IPC_WORKER_EXIT_WAKE";
+        if std::env::var_os(FIXTURE).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "runtime::daemon::tests::accept_worker_exit_wakes_shutdown_wait_without_an_os_signal",
+                    "--nocapture",
+                ])
+                .env(FIXTURE, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        let admission_closed = Arc::new(AtomicBool::new(false));
+        let shutdown = SignalShutdown::new(Arc::clone(&admission_closed));
+        shutdown.prepare().unwrap();
+        let worker_flag = Arc::clone(&admission_closed);
+        let worker = std::thread::spawn(move || {
+            let _exit = ShutdownOnIpcWorkerExit {
+                shutdown: worker_flag,
+            };
+            panic!("injected accept-worker panic");
+        });
+
+        shutdown.wait().unwrap();
+
+        assert!(admission_closed.load(Ordering::Acquire));
+        assert!(worker.join().is_err());
     }
 
     struct FixedRefreshClock {

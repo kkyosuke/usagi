@@ -77,7 +77,7 @@ pub fn run<
     P: LivenessProbe,
     T: Terminator,
     S: ShutdownSignal,
-    R: DaemonReady,
+    R: DaemonReady + usecase::stop::StaleDaemonCleanup,
     L: DaemonLauncher,
     K: Sleeper,
     M: InstanceLock,
@@ -107,8 +107,14 @@ pub fn run<
             writeln!(out, "{line}")
         }
         DaemonCommand::Stop => {
-            let line =
-                usecase::stop::stop(env.store, env.probe, env.terminator, env.sleeper, info)?;
+            let line = usecase::stop::stop(
+                env.store,
+                env.probe,
+                env.terminator,
+                env.sleeper,
+                env.ready,
+                info,
+            )?;
             writeln!(out, "{line}")
         }
         DaemonCommand::Restart => {
@@ -118,6 +124,7 @@ pub fn run<
                 env.terminator,
                 env.launcher,
                 env.sleeper,
+                env.ready,
                 info,
             )?;
             writeln!(out, "{line}")

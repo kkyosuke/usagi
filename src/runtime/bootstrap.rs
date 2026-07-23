@@ -1,8 +1,10 @@
 //! Client-side daemon bootstrap shared by every entry surface.
 //!
 //! The daemon presentation remains the authority for lifecycle locking.  This
-//! adapter only reuses an active endpoint or requests `daemon start` once when
-//! no locator exists, then waits for that endpoint to become connectable.
+//! adapter reuses an active endpoint or requests `daemon start` once when no
+//! locator exists. An unreachable, already-published endpoint may be retired
+//! only through an injected ownership proof; the connection error itself is
+//! never authority to mutate lifecycle state.
 
 use std::fmt;
 use std::io;
@@ -17,11 +19,16 @@ use usagi_core::infrastructure::ipc::BuildIdentity;
 const READINESS_ATTEMPTS: usize = 40;
 const READINESS_DELAY: Duration = Duration::from_millis(50);
 
-#[coverage(off)]
-pub(crate) fn connect_or_start<S, C, L, R, B>(
+// The unit suite exercises every action, readiness, recovery, and build-fence
+// transition. LLVM nevertheless counts the separately generated production
+// `IpcClient` instantiation as uncovered for branches exercised by the fake
+// endpoint instantiations.
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=runtime::bootstrap::tests
+pub(crate) fn connect_or_start<S, C, L, R, K, B>(
     mut connect: C,
     mut start: L,
     mut restart: R,
+    mut recover_stale: K,
     expected_build: &BuildIdentity,
     force_restart: bool,
     build_of: B,
@@ -30,6 +37,7 @@ where
     C: FnMut() -> io::Result<S>,
     L: FnMut() -> io::Result<()>,
     R: FnMut() -> io::Result<()>,
+    K: FnMut() -> io::Result<StaleRecovery>,
     B: Fn(&S) -> &BuildIdentity,
 {
     match connect() {
@@ -49,8 +57,41 @@ where
             require_expected_build(&stream, expected_build, &build_of)?;
             Ok(stream)
         }
+        Err(error) if can_attempt_stale_recovery(error.kind()) => {
+            match recover_stale().map_err(BootstrapError::Recovery)? {
+                StaleRecovery::Recovered => {
+                    start().map_err(BootstrapError::Start)?;
+                    let stream = wait_for_ready(&mut connect).map_err(BootstrapError::Readiness)?;
+                    require_expected_build(&stream, expected_build, &build_of)?;
+                    Ok(stream)
+                }
+                StaleRecovery::OwnerActive => {
+                    let stream = wait_for_ready(&mut connect).map_err(BootstrapError::Readiness)?;
+                    require_expected_build(&stream, expected_build, &build_of)?;
+                    Ok(stream)
+                }
+                StaleRecovery::NotProven => Err(BootstrapError::Connect(error)),
+            }
+        }
         Err(error) => Err(BootstrapError::Connect(error)),
     }
+}
+
+/// Result of the composition root's lock- and identity-fenced stale-owner
+/// proof. `NotProven` is intentionally distinct from an error: live, replaced,
+/// or identity-unknown owners remain untouched and preserve the original
+/// connection failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StaleRecovery {
+    Recovered,
+    /// The singleton fence is held by a live or starting owner. Preserve all
+    /// state and only wait for that owner to make its endpoint connectable.
+    OwnerActive,
+    NotProven,
+}
+
+fn can_attempt_stale_recovery(kind: io::ErrorKind) -> bool {
+    kind == io::ErrorKind::ConnectionRefused
 }
 
 /// A safe, classified bootstrap failure. No variant permits local lifecycle or
@@ -58,6 +99,7 @@ where
 #[derive(Debug)]
 pub(crate) enum BootstrapError {
     Connect(io::Error),
+    Recovery(io::Error),
     Start(io::Error),
     Restart(io::Error),
     Readiness(io::Error),
@@ -71,6 +113,10 @@ impl fmt::Display for BootstrapError {
             Self::Connect(error) => {
                 let _ = error.kind();
                 f.write_str("daemon endpoint is unavailable")
+            }
+            Self::Recovery(error) => {
+                let _ = error.kind();
+                f.write_str("daemon endpoint could not be recovered")
             }
             Self::Start(error) => {
                 let _ = error.kind();
@@ -138,9 +184,8 @@ where
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
-    use super::{BootstrapError, connect_or_start};
+    use super::{BootstrapError, StaleRecovery, connect_or_start};
     use std::cell::Cell;
     use std::io;
     use usagi_core::infrastructure::ipc::BuildIdentity;
@@ -166,24 +211,55 @@ mod tests {
         }
     }
 
+    fn endpoint_build(stream: &Endpoint) -> &BuildIdentity {
+        &stream.build
+    }
+
+    fn lifecycle_error() -> io::Result<()> {
+        Err(io::Error::other("lifecycle action failed"))
+    }
+
+    fn recovery_error() -> io::Result<StaleRecovery> {
+        Err(io::Error::other("private cleanup detail"))
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    enum ErrorKind {
+        Connect,
+        Recovery,
+        Start,
+        Restart,
+        Readiness,
+        UnknownBuildIdentity,
+        ReplacementBuildMismatch,
+    }
+
+    fn error_kind(error: &BootstrapError) -> ErrorKind {
+        match error {
+            BootstrapError::Connect(_) => ErrorKind::Connect,
+            BootstrapError::Recovery(_) => ErrorKind::Recovery,
+            BootstrapError::Start(_) => ErrorKind::Start,
+            BootstrapError::Restart(_) => ErrorKind::Restart,
+            BootstrapError::Readiness(_) => ErrorKind::Readiness,
+            BootstrapError::UnknownBuildIdentity => ErrorKind::UnknownBuildIdentity,
+            BootstrapError::ReplacementBuildMismatch => ErrorKind::ReplacementBuildMismatch,
+        }
+    }
+
     #[test]
     fn reuses_a_connectable_endpoint_without_starting() {
-        let starts = Cell::new(0);
         let expected = build("current");
         let stream = connect_or_start(
             || Ok(endpoint("connected", "current")),
-            || {
-                starts.set(starts.get() + 1);
-                Ok(())
-            },
-            || Ok(()),
+            lifecycle_error,
+            lifecycle_error,
+            recovery_error,
             &expected,
             false,
-            |stream| &stream.build,
+            endpoint_build,
         )
         .unwrap();
         assert_eq!(stream.name, "connected");
-        assert_eq!(starts.get(), 0);
     }
 
     #[test]
@@ -205,10 +281,11 @@ mod tests {
                 starts.set(starts.get() + 1);
                 Ok(())
             },
-            || Ok(()),
+            lifecycle_error,
+            recovery_error,
             &expected,
             false,
-            |stream| &stream.build,
+            endpoint_build,
         )
         .unwrap();
         assert_eq!(stream.name, "ready");
@@ -223,36 +300,131 @@ mod tests {
             || Err::<Endpoint, _>(io::Error::from(io::ErrorKind::NotFound)),
             || {
                 starts.set(starts.get() + 1);
-                Err(io::Error::other("start failed"))
+                lifecycle_error()
             },
-            || Ok(()),
+            lifecycle_error,
+            recovery_error,
             &expected,
             false,
-            |stream| &stream.build,
+            endpoint_build,
         )
         .unwrap_err();
-        assert!(matches!(error, BootstrapError::Start(_)));
+        assert_eq!(error_kind(&error), ErrorKind::Start);
         assert_eq!(starts.get(), 1);
     }
 
     #[test]
     fn does_not_start_when_an_existing_endpoint_is_unhealthy() {
-        let starts = Cell::new(0);
+        let recoveries = Cell::new(0);
         let expected = build("current");
         let error = connect_or_start(
             || Err::<Endpoint, _>(io::Error::from(io::ErrorKind::ConnectionRefused)),
+            lifecycle_error,
+            lifecycle_error,
+            || {
+                recoveries.set(recoveries.get() + 1);
+                Ok(StaleRecovery::NotProven)
+            },
+            &expected,
+            false,
+            endpoint_build,
+        )
+        .unwrap_err();
+        assert_eq!(error_kind(&error), ErrorKind::Connect);
+        assert_eq!(recoveries.get(), 1);
+    }
+
+    #[test]
+    fn proven_stale_endpoint_is_recovered_then_started_once() {
+        let connects = Cell::new(0);
+        let starts = Cell::new(0);
+        let recoveries = Cell::new(0);
+        let expected = build("current");
+        let stream = connect_or_start(
+            || {
+                let call = connects.get();
+                connects.set(call + 1);
+                if call == 0 {
+                    Err(io::Error::from(io::ErrorKind::ConnectionRefused))
+                } else {
+                    Ok(endpoint("replacement", "current"))
+                }
+            },
             || {
                 starts.set(starts.get() + 1);
                 Ok(())
             },
-            || Ok(()),
+            lifecycle_error,
+            || {
+                recoveries.set(recoveries.get() + 1);
+                Ok(StaleRecovery::Recovered)
+            },
             &expected,
             false,
-            |stream| &stream.build,
+            endpoint_build,
+        )
+        .unwrap();
+        assert_eq!(stream.name, "replacement");
+        assert_eq!(starts.get(), 1);
+        assert_eq!(recoveries.get(), 1);
+    }
+
+    #[test]
+    fn active_owner_is_waited_for_without_starting_a_duplicate() {
+        let connects = Cell::new(0);
+        let expected = build("current");
+        let stream = connect_or_start(
+            || {
+                let call = connects.get();
+                connects.set(call + 1);
+                if call == 0 {
+                    Err(io::Error::from(io::ErrorKind::ConnectionRefused))
+                } else {
+                    Ok(endpoint("owner", "current"))
+                }
+            },
+            lifecycle_error,
+            lifecycle_error,
+            || Ok(StaleRecovery::OwnerActive),
+            &expected,
+            false,
+            endpoint_build,
+        )
+        .unwrap();
+        assert_eq!(stream.name, "owner");
+    }
+
+    #[test]
+    fn unsafe_locator_failure_never_attempts_stale_recovery() {
+        let expected = build("current");
+        let error = connect_or_start(
+            || Err::<Endpoint, _>(io::Error::from(io::ErrorKind::PermissionDenied)),
+            lifecycle_error,
+            lifecycle_error,
+            recovery_error,
+            &expected,
+            false,
+            endpoint_build,
         )
         .unwrap_err();
-        assert!(matches!(error, BootstrapError::Connect(_)));
-        assert_eq!(starts.get(), 0);
+        assert_eq!(error_kind(&error), ErrorKind::Connect);
+    }
+
+    #[test]
+    fn recovery_failure_does_not_start_or_hide_its_safe_classification() {
+        let expected = build("current");
+        let error = connect_or_start(
+            || Err::<Endpoint, _>(io::Error::from(io::ErrorKind::ConnectionRefused)),
+            lifecycle_error,
+            lifecycle_error,
+            recovery_error,
+            &expected,
+            false,
+            endpoint_build,
+        )
+        .unwrap_err();
+        assert_eq!(error_kind(&error), ErrorKind::Recovery);
+        assert_eq!(error.to_string(), "daemon endpoint could not be recovered");
     }
 
     #[test]
@@ -270,13 +442,143 @@ mod tests {
                 }))
             },
             || Ok(()),
-            || Ok(()),
+            lifecycle_error,
+            recovery_error,
             &expected,
             false,
-            |stream| &stream.build,
+            endpoint_build,
         )
         .unwrap_err();
-        assert!(matches!(error, BootstrapError::Readiness(_)));
+        assert_eq!(error_kind(&error), ErrorKind::Readiness);
+    }
+
+    #[test]
+    fn restart_failures_preserve_their_action_or_readiness_classification() {
+        let expected = build("current");
+        let action_error = connect_or_start(
+            || Ok(endpoint("old", "old")),
+            lifecycle_error,
+            lifecycle_error,
+            recovery_error,
+            &expected,
+            false,
+            endpoint_build,
+        )
+        .unwrap_err();
+        assert_eq!(error_kind(&action_error), ErrorKind::Restart);
+
+        let connects = Cell::new(0);
+        let readiness_error = connect_or_start(
+            || {
+                let call = connects.get();
+                connects.set(call + 1);
+                if call == 0 {
+                    Ok(endpoint("old", "old"))
+                } else {
+                    Err(io::Error::from(io::ErrorKind::ConnectionRefused))
+                }
+            },
+            lifecycle_error,
+            || Ok(()),
+            recovery_error,
+            &expected,
+            false,
+            endpoint_build,
+        )
+        .unwrap_err();
+        assert_eq!(error_kind(&readiness_error), ErrorKind::Readiness);
+    }
+
+    #[test]
+    fn recovered_owner_failures_cover_start_readiness_and_build_fences() {
+        let expected = build("current");
+        let start_error = connect_or_start(
+            || Err::<Endpoint, _>(io::Error::from(io::ErrorKind::ConnectionRefused)),
+            lifecycle_error,
+            lifecycle_error,
+            || Ok(StaleRecovery::Recovered),
+            &expected,
+            false,
+            endpoint_build,
+        )
+        .unwrap_err();
+        assert_eq!(error_kind(&start_error), ErrorKind::Start);
+
+        let readiness_error = connect_or_start(
+            || Err::<Endpoint, _>(io::Error::from(io::ErrorKind::ConnectionRefused)),
+            || Ok(()),
+            lifecycle_error,
+            || Ok(StaleRecovery::Recovered),
+            &expected,
+            false,
+            endpoint_build,
+        )
+        .unwrap_err();
+        assert_eq!(error_kind(&readiness_error), ErrorKind::Readiness);
+
+        let connects = Cell::new(0);
+        let build_error = connect_or_start(
+            || {
+                let call = connects.get();
+                connects.set(call + 1);
+                if call == 0 {
+                    Err(io::Error::from(io::ErrorKind::ConnectionRefused))
+                } else {
+                    Ok(endpoint("wrong-replacement", "old"))
+                }
+            },
+            || Ok(()),
+            lifecycle_error,
+            || Ok(StaleRecovery::Recovered),
+            &expected,
+            false,
+            endpoint_build,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error_kind(&build_error),
+            ErrorKind::ReplacementBuildMismatch
+        );
+    }
+
+    #[test]
+    fn active_owner_failures_cover_readiness_and_build_fences() {
+        let expected = build("current");
+        let readiness_error = connect_or_start(
+            || Err::<Endpoint, _>(io::Error::from(io::ErrorKind::ConnectionRefused)),
+            lifecycle_error,
+            lifecycle_error,
+            || Ok(StaleRecovery::OwnerActive),
+            &expected,
+            false,
+            endpoint_build,
+        )
+        .unwrap_err();
+        assert_eq!(error_kind(&readiness_error), ErrorKind::Readiness);
+
+        let connects = Cell::new(0);
+        let build_error = connect_or_start(
+            || {
+                let call = connects.get();
+                connects.set(call + 1);
+                if call == 0 {
+                    Err(io::Error::from(io::ErrorKind::ConnectionRefused))
+                } else {
+                    Ok(endpoint("wrong-owner", "old"))
+                }
+            },
+            lifecycle_error,
+            lifecycle_error,
+            || Ok(StaleRecovery::OwnerActive),
+            &expected,
+            false,
+            endpoint_build,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error_kind(&build_error),
+            ErrorKind::ReplacementBuildMismatch
+        );
     }
 
     #[test]
@@ -293,14 +595,15 @@ mod tests {
                     if call == 0 { "old" } else { "current" },
                 ))
             },
-            || Ok(()),
+            lifecycle_error,
             || {
                 restarts.set(restarts.get() + 1);
                 Ok(())
             },
+            recovery_error,
             &expected,
             false,
-            |stream| &stream.build,
+            endpoint_build,
         )
         .unwrap();
         assert_eq!(stream.name, "new");
@@ -313,14 +616,15 @@ mod tests {
         let expected = build("current");
         let stream = connect_or_start(
             || Ok(endpoint("new", "current")),
-            || Ok(()),
+            lifecycle_error,
             || {
                 restarts.set(restarts.get() + 1);
                 Ok(())
             },
+            recovery_error,
             &expected,
             true,
-            |stream| &stream.build,
+            endpoint_build,
         )
         .unwrap();
         assert_eq!(stream.name, "new");
@@ -332,14 +636,15 @@ mod tests {
         let expected = build("current");
         let unknown = connect_or_start(
             || Ok(endpoint("unknown", "")),
-            || Ok(()),
-            || Ok(()),
+            lifecycle_error,
+            lifecycle_error,
+            recovery_error,
             &expected,
             false,
-            |stream| &stream.build,
+            endpoint_build,
         )
         .unwrap_err();
-        assert!(matches!(unknown, BootstrapError::UnknownBuildIdentity));
+        assert_eq!(error_kind(&unknown), ErrorKind::UnknownBuildIdentity);
 
         let missing_target = connect_or_start(
             || {
@@ -352,17 +657,15 @@ mod tests {
                     },
                 })
             },
-            || Ok(()),
-            || Ok(()),
+            lifecycle_error,
+            lifecycle_error,
+            recovery_error,
             &expected,
             false,
-            |stream| &stream.build,
+            endpoint_build,
         )
         .unwrap_err();
-        assert!(matches!(
-            missing_target,
-            BootstrapError::UnknownBuildIdentity
-        ));
+        assert_eq!(error_kind(&missing_target), ErrorKind::UnknownBuildIdentity);
 
         let calls = Cell::new(0);
         let unknown_after_start = connect_or_start(
@@ -376,27 +679,29 @@ mod tests {
                 }
             },
             || Ok(()),
-            || Ok(()),
+            lifecycle_error,
+            recovery_error,
             &expected,
             false,
-            |stream| &stream.build,
+            endpoint_build,
         )
         .unwrap_err();
-        assert!(matches!(
-            unknown_after_start,
-            BootstrapError::UnknownBuildIdentity
-        ));
+        assert_eq!(
+            error_kind(&unknown_after_start),
+            ErrorKind::UnknownBuildIdentity
+        );
 
         let mismatch = connect_or_start(
             || Ok(endpoint("old", "old")),
+            lifecycle_error,
             || Ok(()),
-            || Ok(()),
+            recovery_error,
             &expected,
             false,
-            |stream| &stream.build,
+            endpoint_build,
         )
         .unwrap_err();
-        assert!(matches!(mismatch, BootstrapError::ReplacementBuildMismatch));
+        assert_eq!(error_kind(&mismatch), ErrorKind::ReplacementBuildMismatch);
     }
 
     #[test]
@@ -405,6 +710,10 @@ mod tests {
             (
                 BootstrapError::Connect(io::Error::from(io::ErrorKind::ConnectionRefused)),
                 "daemon endpoint is unavailable",
+            ),
+            (
+                BootstrapError::Recovery(io::Error::other("private recovery detail")),
+                "daemon endpoint could not be recovered",
             ),
             (
                 BootstrapError::Start(io::Error::other("private start detail")),
@@ -430,5 +739,10 @@ mod tests {
         for (error, expected) in errors {
             assert_eq!(error.to_string(), expected);
         }
+
+        assert_eq!(
+            error_kind(&BootstrapError::Restart(io::Error::other("detail"))),
+            ErrorKind::Restart
+        );
     }
 }
