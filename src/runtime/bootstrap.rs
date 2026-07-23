@@ -214,6 +214,29 @@ mod tests {
         Err(io::Error::other("private cleanup detail"))
     }
 
+    #[derive(Debug, Eq, PartialEq)]
+    enum ErrorKind {
+        Connect,
+        Recovery,
+        Start,
+        Restart,
+        Readiness,
+        UnknownBuildIdentity,
+        ReplacementBuildMismatch,
+    }
+
+    fn error_kind(error: &BootstrapError) -> ErrorKind {
+        match error {
+            BootstrapError::Connect(_) => ErrorKind::Connect,
+            BootstrapError::Recovery(_) => ErrorKind::Recovery,
+            BootstrapError::Start(_) => ErrorKind::Start,
+            BootstrapError::Restart(_) => ErrorKind::Restart,
+            BootstrapError::Readiness(_) => ErrorKind::Readiness,
+            BootstrapError::UnknownBuildIdentity => ErrorKind::UnknownBuildIdentity,
+            BootstrapError::ReplacementBuildMismatch => ErrorKind::ReplacementBuildMismatch,
+        }
+    }
+
     #[test]
     fn reuses_a_connectable_endpoint_without_starting() {
         let expected = build("current");
@@ -277,7 +300,7 @@ mod tests {
             |stream| &stream.build,
         )
         .unwrap_err();
-        assert!(matches!(error, BootstrapError::Start(_)));
+        assert_eq!(error_kind(&error), ErrorKind::Start);
         assert_eq!(starts.get(), 1);
     }
 
@@ -298,7 +321,7 @@ mod tests {
             |stream| &stream.build,
         )
         .unwrap_err();
-        assert!(matches!(error, BootstrapError::Connect(_)));
+        assert_eq!(error_kind(&error), ErrorKind::Connect);
         assert_eq!(recoveries.get(), 1);
     }
 
@@ -375,7 +398,7 @@ mod tests {
             |stream| &stream.build,
         )
         .unwrap_err();
-        assert!(matches!(error, BootstrapError::Connect(_)));
+        assert_eq!(error_kind(&error), ErrorKind::Connect);
     }
 
     #[test]
@@ -391,7 +414,7 @@ mod tests {
             |stream| &stream.build,
         )
         .unwrap_err();
-        assert!(matches!(error, BootstrapError::Recovery(_)));
+        assert_eq!(error_kind(&error), ErrorKind::Recovery);
         assert_eq!(error.to_string(), "daemon endpoint could not be recovered");
     }
 
@@ -417,7 +440,7 @@ mod tests {
             |stream| &stream.build,
         )
         .unwrap_err();
-        assert!(matches!(error, BootstrapError::Readiness(_)));
+        assert_eq!(error_kind(&error), ErrorKind::Readiness);
     }
 
     #[test]
@@ -483,7 +506,7 @@ mod tests {
             |stream| &stream.build,
         )
         .unwrap_err();
-        assert!(matches!(unknown, BootstrapError::UnknownBuildIdentity));
+        assert_eq!(error_kind(&unknown), ErrorKind::UnknownBuildIdentity);
 
         let missing_target = connect_or_start(
             || {
@@ -504,10 +527,7 @@ mod tests {
             |stream| &stream.build,
         )
         .unwrap_err();
-        assert!(matches!(
-            missing_target,
-            BootstrapError::UnknownBuildIdentity
-        ));
+        assert_eq!(error_kind(&missing_target), ErrorKind::UnknownBuildIdentity);
 
         let calls = Cell::new(0);
         let unknown_after_start = connect_or_start(
@@ -528,10 +548,10 @@ mod tests {
             |stream| &stream.build,
         )
         .unwrap_err();
-        assert!(matches!(
-            unknown_after_start,
-            BootstrapError::UnknownBuildIdentity
-        ));
+        assert_eq!(
+            error_kind(&unknown_after_start),
+            ErrorKind::UnknownBuildIdentity
+        );
 
         let mismatch = connect_or_start(
             || Ok(endpoint("old", "old")),
@@ -543,7 +563,7 @@ mod tests {
             |stream| &stream.build,
         )
         .unwrap_err();
-        assert!(matches!(mismatch, BootstrapError::ReplacementBuildMismatch));
+        assert_eq!(error_kind(&mismatch), ErrorKind::ReplacementBuildMismatch);
     }
 
     #[test]
@@ -581,5 +601,10 @@ mod tests {
         for (error, expected) in errors {
             assert_eq!(error.to_string(), expected);
         }
+
+        assert_eq!(
+            error_kind(&BootstrapError::Restart(io::Error::other("detail"))),
+            ErrorKind::Restart
+        );
     }
 }

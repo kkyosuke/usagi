@@ -111,12 +111,13 @@ pub fn stop<F: RecordFile, P: LivenessProbe, T: Terminator, K: Sleeper>(
             let record = record
                 .as_ref()
                 .expect("classify reports Stale only for a present record");
-            match stale_cleanup.cleanup_if(store, record)? {
-                StaleCleanup::Cleared => Ok(format!("{describe}: cleared stale daemon record")),
-                StaleCleanup::Superseded => Err(io::Error::new(
+            match stale_cleanup.cleanup_if(store, record) {
+                Ok(StaleCleanup::Cleared) => Ok(format!("{describe}: cleared stale daemon record")),
+                Ok(StaleCleanup::Superseded) => Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
                     "daemon ownership changed during stale cleanup",
                 )),
+                Err(error) => Err(error),
             }
         }
         DaemonState::Absent => Ok(format!("{describe}: daemon not running")),
@@ -178,6 +179,8 @@ mod tests {
 
     struct FailOnceCleanup {
         calls: Cell<u8>,
+        saw_expected: Cell<bool>,
+        cleared: Cell<bool>,
     }
 
     impl StaleDaemonCleanup for FailOnceCleanup {
@@ -187,11 +190,21 @@ mod tests {
             expected: &DaemonRecord,
         ) -> std::io::Result<StaleCleanup> {
             self.calls.set(self.calls.get() + 1);
-            assert_eq!(store.load()?.as_ref(), Some(expected));
+            self.saw_expected.set(
+                store
+                    .load()
+                    .expect("in-memory record load must succeed")
+                    .as_ref()
+                    == Some(expected),
+            );
             if self.calls.get() == 1 {
                 return Err(std::io::Error::other("endpoint cleanup failed"));
             }
-            assert!(store.clear_if(expected)?);
+            self.cleared.set(
+                store
+                    .clear_if(expected)
+                    .expect("in-memory record clear must succeed"),
+            );
             Ok(StaleCleanup::Cleared)
         }
     }
@@ -423,6 +436,8 @@ mod tests {
         store.save(&record).unwrap();
         let cleanup = FailOnceCleanup {
             calls: Cell::new(0),
+            saw_expected: Cell::new(false),
+            cleared: Cell::new(false),
         };
 
         let first = stop_with_cleanup(
@@ -435,6 +450,8 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(first.to_string(), "endpoint cleanup failed");
+        assert!(cleanup.saw_expected.get());
+        assert!(!cleanup.cleared.get());
         assert_eq!(store.load().unwrap(), Some(record.clone()));
 
         assert_eq!(
@@ -450,6 +467,8 @@ mod tests {
             "usagi v0.1.0: cleared stale daemon record"
         );
         assert_eq!(cleanup.calls.get(), 2);
+        assert!(cleanup.saw_expected.get());
+        assert!(cleanup.cleared.get());
         assert_eq!(store.load().unwrap(), None);
     }
 
