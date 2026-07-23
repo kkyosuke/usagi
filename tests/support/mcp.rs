@@ -25,6 +25,16 @@ use usagi_core::usecase::client::{
 };
 use usagi_daemon::infrastructure::unix_transport::{connect_current, ensure_private_dir_all};
 
+fn shipping_build_identity() -> usagi_core::infrastructure::ipc::BuildIdentity {
+    usagi_core::infrastructure::ipc::build_identity(
+        env!("CARGO_PKG_VERSION"),
+        env!("USAGI_BUILD_COMMIT"),
+        env!("USAGI_BUILD_TARGET"),
+        env!("USAGI_BUILD_PROFILE"),
+        env!("USAGI_BUILD_SOURCE_ID"),
+    )
+}
+
 pub struct McpHarness {
     workspace: tempfile::TempDir,
     cwd: PathBuf,
@@ -350,6 +360,7 @@ impl McpHarness {
                     "mcp-production-e2e".into(),
                     OperationId::new().to_string(),
                     ClientPolicy::cli(),
+                    shipping_build_identity(),
                 )
                 .unwrap();
             }

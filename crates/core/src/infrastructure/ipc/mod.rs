@@ -11,6 +11,7 @@ use std::io::{self, Read, Write};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 /// Default and hard limit for one JSON frame (one MiB).
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 1024 * 1024;
@@ -39,12 +40,193 @@ string_id!(
 );
 string_id!(StreamId, "A durable stream identifier.");
 
-/// Build metadata for diagnostics; it never decides compatibility.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Build metadata. `version`, `commit`, and `target` are diagnostic and never
+/// decide protocol compatibility. `artifact` is the canonical, content-scoped
+/// identity of the build artifact this peer was compiled from: it is stable for
+/// one distributed artifact and differs whenever the source/tree or build
+/// configuration differs, even at the same Cargo version and target. A peer that
+/// cannot uniquely identify its artifact leaves it empty, which fails safe (an
+/// unknown identity is never promoted to "same build" by a version/target
+/// match). The daemon fixes this once at process startup and never re-derives
+/// it per handshake, so an atomic on-disk executable replacement does not make
+/// a running process advertise a new artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BuildIdentity {
     pub version: String,
     pub commit: String,
     pub target: String,
+    /// Canonical artifact identity. Empty means "unknown / not identifiable".
+    #[serde(default)]
+    pub artifact: String,
+}
+
+impl BuildIdentity {
+    /// Whether this identity can be compared as a real artifact. An empty
+    /// version, target, or artifact is unknown and must fail safe rather than
+    /// be promoted to a same-build match.
+    #[must_use]
+    pub fn is_known(&self) -> bool {
+        !self.version.is_empty()
+            && !self.target.is_empty()
+            && canonical_artifact(&self.artifact).is_some()
+    }
+
+    /// Whether two known identities describe the exact same executable
+    /// artifact. Version and target must also match so a colliding artifact
+    /// string alone can never bridge two distributions.
+    #[must_use]
+    pub fn same_artifact(&self, other: &Self) -> bool {
+        self.is_known()
+            && other.is_known()
+            && self.version == other.version
+            && self.target == other.target
+            && self.artifact == other.artifact
+    }
+}
+
+fn canonical_artifact(artifact: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = artifact.split(':');
+    if parts.next()? != "usagi-artifact-v1" {
+        return None;
+    }
+    let profile = parts.next()?;
+    let target = parts.next()?;
+    let source = parts.next()?;
+    if parts.next().is_some()
+        || profile.is_empty()
+        || target.is_empty()
+        || source.len() != 64
+        || !source.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some((profile, target, source))
+}
+
+/// Construct the canonical identity embedded by the composition root. The
+/// source identity is produced at compile time from the source tree and build
+/// configuration; an absent component yields an unknown artifact instead of a
+/// weaker version/target fallback.
+#[must_use]
+pub fn build_identity(
+    version: &str,
+    commit: &str,
+    target: &str,
+    profile: &str,
+    source_identity: &str,
+) -> BuildIdentity {
+    let artifact = if version.is_empty()
+        || target.is_empty()
+        || profile.is_empty()
+        || source_identity.len() != 64
+        || !source_identity.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        String::new()
+    } else {
+        format!("usagi-artifact-v1:{profile}:{target}:{source_identity}")
+    };
+    BuildIdentity {
+        version: version.to_owned(),
+        commit: commit.to_owned(),
+        target: target.to_owned(),
+        artifact,
+    }
+}
+
+/// The safe outcome of comparing a running daemon's advertised artifact against
+/// the client's own. It is a decision only: no variant signals or stops the old
+/// daemon by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildArtifactDecision {
+    /// The exact same artifact: reuse the running daemon with no side effect.
+    Reuse,
+    /// The exact same artifact, but an explicit force-replacement was asked
+    /// for. This is deliberately separate from an ordinary bootstrap so a plain
+    /// reconnect never churns the daemon.
+    ForceReplace,
+    /// A different but known artifact: the running daemon is a different build,
+    /// so exactly one safe rollover trigger is warranted. The old daemon and
+    /// its live terminals stay alive until a consumer performs the handoff.
+    RolloverTrigger,
+    /// One side's identity is unknown: fail safe. Never fall back to promoting
+    /// a version/target match to "same build".
+    Unknown,
+}
+
+/// A deterministic, effect-free request for a future generation handoff. The
+/// operation identity is derived only from the artifact pair, runtime channel,
+/// and force bit, so concurrent/repeated bootstrap observations converge on
+/// one durable key without exposing filesystem paths or user metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildRolloverTrigger {
+    pub operation_id: OperationId,
+    pub channel: String,
+    pub running_artifact: String,
+    pub expected_artifact: String,
+    pub forced: bool,
+}
+
+/// Create the canonical rollover trigger for a known artifact pair. Unknown
+/// identities return `None`; callers must refuse safely instead.
+#[must_use]
+pub fn build_rollover_trigger(
+    actual: &BuildIdentity,
+    expected: &BuildIdentity,
+    channel: &str,
+    forced: bool,
+) -> Option<BuildRolloverTrigger> {
+    if !actual.is_known() || !expected.is_known() || channel.is_empty() {
+        return None;
+    }
+    let mut digest = Sha256::new();
+    for component in [
+        b"usagi-build-rollover-v1".as_slice(),
+        channel.as_bytes(),
+        actual.artifact.as_bytes(),
+        expected.artifact.as_bytes(),
+        if forced { b"forced" } else { b"mismatch" },
+    ] {
+        digest.update((component.len() as u64).to_be_bytes());
+        digest.update(component);
+    }
+    let operation_id = digest
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut acc, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(acc, "{byte:02x}");
+            acc
+        });
+    Some(BuildRolloverTrigger {
+        operation_id: OperationId(format!("build-rollover-v1-{operation_id}")),
+        channel: channel.to_owned(),
+        running_artifact: actual.artifact.clone(),
+        expected_artifact: expected.artifact.clone(),
+        forced,
+    })
+}
+
+/// Decide how a client should treat a running daemon given both artifact
+/// identities. `force_replacement` requests an explicit, intentional swap of an
+/// otherwise-identical artifact; it never overrides the unknown fail-safe.
+#[must_use]
+pub fn build_artifact_decision(
+    actual: &BuildIdentity,
+    expected: &BuildIdentity,
+    force_replacement: bool,
+) -> BuildArtifactDecision {
+    if !actual.is_known() || !expected.is_known() {
+        return BuildArtifactDecision::Unknown;
+    }
+    if actual.same_artifact(expected) {
+        if force_replacement {
+            BuildArtifactDecision::ForceReplace
+        } else {
+            BuildArtifactDecision::Reuse
+        }
+    } else {
+        BuildArtifactDecision::RolloverTrigger
+    }
 }
 
 /// A generation-specific range of revisions a peer supports.

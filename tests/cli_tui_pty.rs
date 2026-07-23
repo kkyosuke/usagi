@@ -29,6 +29,16 @@ use usagi_daemon::infrastructure::unix_transport::{
 use usagi_tui::usecase::application::agent_tab_intent::AgentTabIntent;
 use usagi_tui::usecase::application::terminal_screen::TerminalScreen;
 
+fn shipping_build_identity() -> usagi_core::infrastructure::ipc::BuildIdentity {
+    usagi_core::infrastructure::ipc::build_identity(
+        env!("CARGO_PKG_VERSION"),
+        env!("USAGI_BUILD_COMMIT"),
+        env!("USAGI_BUILD_TARGET"),
+        env!("USAGI_BUILD_PROFILE"),
+        env!("USAGI_BUILD_SOURCE_ID"),
+    )
+}
+
 /// 100×24 の PTY master/slave pair を開く。
 fn open_pty() -> io::Result<(File, File)> {
     let mut master_fd = -1;
@@ -510,6 +520,7 @@ fn daemon_client(home: &Path) -> IpcClient<std::os::unix::net::UnixStream> {
         "agent-tab-intent-e2e".to_owned(),
         OperationId::new().to_string(),
         ClientPolicy::cli(),
+        shipping_build_identity(),
     )
     .unwrap()
 }

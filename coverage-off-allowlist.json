@@ -219,7 +219,7 @@
     },
     {
       "path": "src/runtime/bootstrap.rs",
-      "symbol": "fn:build_status",
+      "symbol": "fn:wait_for_ready",
       "occurrence": 1,
       "reason": "migration_debt",
       "owner": "root-cli",
@@ -228,7 +228,7 @@
     },
     {
       "path": "src/runtime/bootstrap.rs",
-      "symbol": "fn:wait_for_ready",
+      "symbol": "module:tests",
       "occurrence": 1,
       "reason": "migration_debt",
       "owner": "root-cli",

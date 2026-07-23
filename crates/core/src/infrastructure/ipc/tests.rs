@@ -21,11 +21,7 @@ impl io::Write for BadWriter {
 }
 
 fn build() -> BuildIdentity {
-    BuildIdentity {
-        version: "1".into(),
-        commit: "abc".into(),
-        target: "test".into(),
-    }
+    build_identity("1", "abc", "test", "debug", &"a".repeat(64))
 }
 fn hello() -> ClientHello {
     ClientHello {
@@ -172,6 +168,147 @@ fn negotiation_uses_protocol_not_build_identity() {
             revision: 2
         }
     );
+}
+
+#[test]
+fn artifact_identity_requires_a_canonical_artifact_and_compares_exactly() {
+    let known = build();
+    assert!(known.is_known());
+    assert!(known.same_artifact(&known));
+
+    let mut rebuilt = known.clone();
+    rebuilt.artifact = format!("usagi-artifact-v1:debug:test:{}", "b".repeat(64));
+    assert!(!known.same_artifact(&rebuilt));
+
+    for unknown in [
+        BuildIdentity {
+            version: String::new(),
+            ..known.clone()
+        },
+        BuildIdentity {
+            target: String::new(),
+            ..known.clone()
+        },
+        BuildIdentity {
+            artifact: String::new(),
+            ..known.clone()
+        },
+    ] {
+        assert!(!unknown.is_known());
+        assert!(!unknown.same_artifact(&known));
+    }
+}
+
+#[test]
+fn canonical_build_identity_includes_profile_target_and_source_or_is_unknown() {
+    let source_a = "a".repeat(64);
+    let source_b = "b".repeat(64);
+    let debug = build_identity("2.6.0", "abc", "aarch64-test", "debug", &source_a);
+    let release = build_identity("2.6.0", "abc", "aarch64-test", "release", &source_a);
+    let rebuilt = build_identity("2.6.0", "abc", "aarch64-test", "debug", &source_b);
+    assert_eq!(
+        debug.artifact,
+        format!("usagi-artifact-v1:debug:aarch64-test:{source_a}")
+    );
+    assert_ne!(debug.artifact, release.artifact);
+    assert_ne!(debug.artifact, rebuilt.artifact);
+    assert!(!build_identity("2.6.0", "", "aarch64-test", "debug", "").is_known());
+    assert!(!build_identity("2.6.0", "", "", "debug", &source_a).is_known());
+    assert!(
+        !BuildIdentity {
+            artifact: "malformed".into(),
+            ..debug
+        }
+        .is_known()
+    );
+    for malformed in [
+        format!("usagi-artifact-v1::aarch64-test:{source_a}"),
+        format!("usagi-artifact-v1:debug::{source_a}"),
+        "usagi-artifact-v1:debug:aarch64-test:short".into(),
+        format!("usagi-artifact-v1:debug:aarch64-test:{}", "z".repeat(64)),
+        format!("usagi-artifact-v1:debug:aarch64-test:{source_a}:extra"),
+    ] {
+        assert!(
+            !BuildIdentity {
+                artifact: malformed,
+                version: "2.6.0".into(),
+                commit: String::new(),
+                target: "aarch64-test".into(),
+            }
+            .is_known()
+        );
+    }
+}
+
+#[test]
+fn artifact_decision_reuses_exact_build_triggers_mismatch_and_fails_safe() {
+    let current = build();
+    assert_eq!(
+        build_artifact_decision(&current, &current, false),
+        BuildArtifactDecision::Reuse
+    );
+    assert_eq!(
+        build_artifact_decision(&current, &current, true),
+        BuildArtifactDecision::ForceReplace
+    );
+
+    let mut replacement = current.clone();
+    replacement.artifact = format!("usagi-artifact-v1:debug:test:{}", "c".repeat(64));
+    assert_eq!(
+        build_artifact_decision(&current, &replacement, false),
+        BuildArtifactDecision::RolloverTrigger
+    );
+    assert_eq!(
+        build_artifact_decision(&current, &replacement, true),
+        BuildArtifactDecision::RolloverTrigger
+    );
+
+    let mut unknown = current.clone();
+    unknown.artifact.clear();
+    assert_eq!(
+        build_artifact_decision(&unknown, &current, false),
+        BuildArtifactDecision::Unknown
+    );
+    assert_eq!(
+        build_artifact_decision(&current, &unknown, true),
+        BuildArtifactDecision::Unknown
+    );
+
+    let trigger = build_rollover_trigger(&current, &replacement, "development", false).unwrap();
+    assert_eq!(trigger.channel, "development");
+    assert!(!trigger.forced);
+    assert_eq!(trigger.running_artifact, current.artifact);
+    assert_eq!(trigger.expected_artifact, replacement.artifact);
+    assert_eq!(
+        trigger,
+        build_rollover_trigger(&current, &replacement, "development", false).unwrap()
+    );
+    assert_ne!(
+        trigger.operation_id,
+        build_rollover_trigger(&current, &replacement, "production", false)
+            .unwrap()
+            .operation_id
+    );
+    assert_ne!(
+        trigger.operation_id,
+        build_rollover_trigger(&current, &replacement, "development", true)
+            .unwrap()
+            .operation_id
+    );
+    assert!(build_rollover_trigger(&unknown, &current, "local", false).is_none());
+    assert!(build_rollover_trigger(&current, &replacement, "", false).is_none());
+}
+
+#[test]
+fn legacy_wire_identity_without_artifact_deserializes_as_unknown() {
+    let identity: BuildIdentity = serde_json::from_value(json!({
+        "version": "1",
+        "commit": "legacy",
+        "target": "test"
+    }))
+    .unwrap();
+    assert_eq!(identity.artifact, "");
+    assert!(!identity.is_known());
 }
 #[test]
 fn negotiation_rejects_missing_capability_and_generation() {

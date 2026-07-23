@@ -589,6 +589,7 @@ mod tests {
                         version: "test".into(),
                         commit: "test".into(),
                         target: "test".into(),
+                        artifact: "server-artifact".into(),
                     },
                     limits: ProtocolLimits::default(),
                 }),
@@ -619,6 +620,12 @@ mod tests {
             "tui".into(),
             "nonce".into(),
             ClientPolicy::tui(),
+            BuildIdentity {
+                version: "test".into(),
+                commit: "test".into(),
+                target: "test".into(),
+                artifact: "client-artifact".into(),
+            },
         )
         .unwrap();
         let reply = client

@@ -36,6 +36,22 @@ pub(crate) fn dispatch(
         RunOutcome::LaunchDaemon(command) => {
             daemon::run(out, command, info).map(|()| ExitCode::SUCCESS)
         }
+        RunOutcome::RequestDaemonReplacement => {
+            match daemon::request_replacement(ClientPolicy::cli()) {
+                Ok(trigger) => {
+                    writeln!(
+                        out,
+                        "daemon replacement requested (operation {})",
+                        trigger.operation_id.0
+                    )?;
+                    Ok(ExitCode::SUCCESS)
+                }
+                Err(error) => {
+                    write_client_error(err, "daemon replacement refused", &error)?;
+                    Ok(ExitCode::FAILURE)
+                }
+            }
+        }
         RunOutcome::LaunchMcp => {
             let stdin = std::io::stdin();
             match daemon::client(ClientPolicy::mcp()) {
@@ -100,6 +116,7 @@ pub(crate) fn dispatch(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=root-cli expires=2027-01-31 tests=cli_daemon_reply_contract_maps_stdout_stderr_and_exit_code
 fn write_daemon_outcome(
     outcome: Result<DaemonReply, ClientError>,
     out: &mut dyn Write,
@@ -126,6 +143,7 @@ fn write_daemon_outcome(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=root-cli expires=2027-01-31 tests=cli_daemon_reply_contract_maps_stdout_stderr_and_exit_code
 fn write_client_error(
     err: &mut dyn Write,
     context: &str,
@@ -148,6 +166,15 @@ fn write_client_error(
             err,
             "{context} [unavailable]: daemon transport is unavailable"
         ),
+        ClientError::RolloverRequired(trigger) => writeln!(
+            err,
+            "{context} [busy; operation_id={}]: daemon build rollover is required; the current daemon remains running",
+            trigger.operation_id.0
+        ),
+        ClientError::BuildIdentityUnavailable => writeln!(
+            err,
+            "{context} [unavailable]: exact daemon build identity is unavailable; the current daemon remains running"
+        ),
         ClientError::Lifecycle(message) => {
             writeln!(err, "{context} [unavailable]: {message}")
         }
@@ -164,9 +191,10 @@ mod tests {
 
     use std::io::{self, Write};
 
-    use usagi_core::usecase::client::DaemonReply;
+    use usagi_core::infrastructure::ipc::{build_identity, build_rollover_trigger};
+    use usagi_core::usecase::client::{ClientError, DaemonReply};
 
-    use super::write_daemon_outcome;
+    use super::{write_client_error, write_daemon_outcome};
 
     struct BrokenWriter;
 
@@ -193,5 +221,65 @@ mod tests {
         );
 
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn ok_and_error_replies_render_stdout_and_stderr() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let status = write_daemon_outcome(
+            Ok(DaemonReply::Ok(serde_json::json!({"result": "done"}))),
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert_eq!(status, std::process::ExitCode::SUCCESS);
+        assert_eq!(String::from_utf8(out).unwrap(), "{\"result\":\"done\"}\n");
+        assert!(err.is_empty());
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let status = write_daemon_outcome(
+            Err(ClientError::Unavailable("offline".into())),
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert_eq!(status, std::process::ExitCode::FAILURE);
+        assert!(out.is_empty());
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "daemon request failed [unavailable]: daemon transport is unavailable\n"
+        );
+    }
+
+    #[test]
+    fn build_identity_failures_render_typed_effect_free_messages() {
+        let running = build_identity("1", "a", "test", "debug", &"a".repeat(64));
+        let expected = build_identity("1", "b", "test", "debug", &"b".repeat(64));
+        let trigger = build_rollover_trigger(&running, &expected, "local", false).unwrap();
+        let mut rollover = Vec::new();
+        write_client_error(
+            &mut rollover,
+            "replacement",
+            &ClientError::RolloverRequired(trigger.clone()),
+        )
+        .unwrap();
+        let rendered = String::from_utf8(rollover).unwrap();
+        assert!(rendered.contains("[busy; operation_id="));
+        assert!(rendered.contains(&trigger.operation_id.0));
+        assert!(rendered.contains("current daemon remains running"));
+
+        let mut unknown = Vec::new();
+        write_client_error(
+            &mut unknown,
+            "replacement",
+            &ClientError::BuildIdentityUnavailable,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(unknown).unwrap(),
+            "replacement [unavailable]: exact daemon build identity is unavailable; the current daemon remains running\n"
+        );
     }
 }

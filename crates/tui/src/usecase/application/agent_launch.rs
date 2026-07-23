@@ -274,6 +274,7 @@ mod tests {
                 version: "test".into(),
                 commit: "test".into(),
                 target: "test".into(),
+                artifact: "server-artifact".into(),
             },
             limits: ProtocolLimits::default(),
         });
@@ -297,6 +298,12 @@ mod tests {
             "client".into(),
             "nonce".into(),
             usagi_core::usecase::client::ClientPolicy::tui(),
+            BuildIdentity {
+                version: "test".into(),
+                commit: "test".into(),
+                target: "test".into(),
+                artifact: "client-artifact".into(),
+            },
         )
         .unwrap()
     }

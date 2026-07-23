@@ -112,6 +112,16 @@ fn channel_data_dir(home: &Path) -> PathBuf {
     usagi_core::infrastructure::paths::channel_data_dir(home)
 }
 
+fn shipping_build_identity() -> BuildIdentity {
+    usagi_core::infrastructure::ipc::build_identity(
+        env!("CARGO_PKG_VERSION"),
+        env!("USAGI_BUILD_COMMIT"),
+        env!("USAGI_BUILD_TARGET"),
+        env!("USAGI_BUILD_PROFILE"),
+        env!("USAGI_BUILD_SOURCE_ID"),
+    )
+}
+
 fn run(args: &[&OsStr]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_usagi"))
         .args(args)
@@ -251,6 +261,7 @@ fn spawn_fake_daemon(home: &Path, reply: FakeDaemonReply) -> thread::JoinHandle<
     ensure_private_dir_all(&data_dir).unwrap();
     let generation = DaemonGeneration(format!("fake-{}", std::process::id()));
     let listener = SecureUnixListener::bind(&data_dir, generation.clone()).unwrap();
+    let server_build = shipping_build_identity();
     thread::spawn(move || {
         let mut stream = loop {
             match listener.accept() {
@@ -266,11 +277,7 @@ fn spawn_fake_daemon(home: &Path, reply: FakeDaemonReply) -> thread::JoinHandle<
         let server = usagi_daemon::presentation::ipc::server_protocol(
             generation,
             "fake-connection".into(),
-            BuildIdentity {
-                version: env!("CARGO_PKG_VERSION").into(),
-                commit: "unknown".into(),
-                target: std::env::consts::ARCH.into(),
-            },
+            server_build,
         );
         let hello = usagi_daemon::presentation::ipc::handshake(&mut stream, &mut writer, &server)
             .unwrap()
@@ -472,6 +479,34 @@ fn daemon_restart_initializes_a_private_endpoint_from_an_empty_data_dir() {
     assert!(stdout(&output).contains("daemon restarted"));
     assert_daemon_running(home.path());
     stop_daemon(home.path());
+}
+
+#[test]
+fn explicit_artifact_replacement_coalesces_without_stopping_the_running_daemon() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let cleanup = ProductionDaemonCleanup::spawn(home.path());
+    let daemon_dir = home.path().join("daemon");
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            daemon_dir.join("daemon.json").is_file() && daemon_dir.join("current.json").is_file()
+        }),
+        "daemon did not publish its production endpoint"
+    );
+    let old_pid = cleanup.pid();
+    let old_locator = read_locator(&daemon_dir).unwrap();
+
+    let first = run_in_production(&[OsStr::new("daemon"), OsStr::new("replace")], home.path());
+    let second = run_in_production(&[OsStr::new("daemon"), OsStr::new("replace")], home.path());
+    assert!(first.status.success(), "{}", stderr(&first));
+    assert!(second.status.success(), "{}", stderr(&second));
+    assert_eq!(stdout(&first), stdout(&second));
+    assert!(stdout(&first).contains("operation build-rollover-v1-"));
+    assert_eq!(daemon_pid(home.path()), Some(old_pid));
+    assert!(process_alive(old_pid));
+    assert_eq!(read_locator(&daemon_dir).unwrap(), old_locator);
 }
 
 #[test]
