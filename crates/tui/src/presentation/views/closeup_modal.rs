@@ -647,27 +647,28 @@ mod tests {
     }
 
     #[test]
-    fn reopen_choices_expand_and_complete_the_opaque_continuation() {
+    fn reopen_choices_expand_and_complete_by_continuation() {
         let continuation = usagi_core::domain::id::AgentContinuationRef::new();
         let choice = crate::presentation::workspace_runtime::AgentReopenChoice {
             label: "Agent safe".to_owned(),
             continuation,
         };
-        let mut modal = CloseupModal::new("daemon").with_reopen_choices(vec![choice.clone()]);
-        for character in "reopen".chars() {
-            modal.insert_char(character);
+        let mut actions = CloseupModal::new("daemon").with_reopen_choices(vec![choice.clone()]);
+        while actions.selected_action().name != "reopen" {
+            actions.select_next();
         }
-        modal.expand_selected();
-        assert!(joined(&modal).contains("Agent safe"));
+        actions.expand_selected();
+        assert!(joined(&actions).contains("Agent safe"));
+        assert_eq!(actions.submission(), format!("reopen {continuation}"));
 
         let mut prompt = CloseupModal::with_selection_mode("daemon", ModalSelectionMode::Prompt)
             .with_reopen_choices(vec![choice]);
-        let prefix = &continuation.to_string()[..8];
-        for character in format!("reopen {prefix}").chars() {
+        let continuation_text = continuation.to_string();
+        for character in format!("reopen {}", &continuation_text[..8]).chars() {
             prompt.insert_char(character);
         }
         prompt.complete_selected();
-        assert_eq!(prompt.input.value(), format!("reopen {continuation}"));
+        assert_eq!(prompt.input.value(), format!("reopen {continuation_text}"));
     }
 
     #[test]

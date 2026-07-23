@@ -1079,6 +1079,14 @@ impl usagi_daemon::presentation::ipc::TerminalOwner for SharedTerminal {
             })?
             .request(connection, client, request_id, action, payload)
     }
+    fn inventory(
+        &self,
+        scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+    ) -> Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry> {
+        self.0
+            .lock()
+            .map_or_else(|_| Vec::new(), |terminal| terminal.inventory(scope))
+    }
     fn disconnect(&mut self, connection: usagi_core::domain::id::ConnectionId) {
         if let Ok(mut terminal) = self.0.lock() {
             terminal.disconnect(connection);

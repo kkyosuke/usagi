@@ -530,6 +530,14 @@ impl<S: Read + Write> IpcClient<S> {
     pub fn server_build(&self) -> &BuildIdentity {
         &self.server_build
     }
+
+    /// Borrows the authenticated byte stream for composition-owned passive
+    /// lifecycle observation. Callers must not consume bytes through this
+    /// reference while requests are in flight.
+    #[must_use]
+    pub const fn transport(&self) -> &S {
+        &self.stream
+    }
 }
 
 impl<S: Read + Write> DaemonClient for IpcClient<S> {

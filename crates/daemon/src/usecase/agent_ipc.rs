@@ -620,7 +620,6 @@ impl AgentRuntime {
             .collect();
         AgentInventory {
             workspace_id: workspace,
-            complete: true,
             runtimes,
             resumable,
         }
@@ -5072,6 +5071,9 @@ mod tests {
         let mut owner = SharedTerminalOwner::new(agent, generic);
         let connection = ConnectionId::new();
         let client = ClientId::new();
+        // The shared owner handles Inventory through `request`; when used as a
+        // nested generic owner its trait-level default inventory is empty.
+        assert!(TerminalOwner::inventory(&owner, &inventory_scope).is_empty());
 
         let reply = owner
             .request(

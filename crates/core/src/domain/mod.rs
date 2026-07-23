@@ -4,7 +4,6 @@
 //! [`document/02-architecture.md`](../../../../document/02-architecture.md) の依存ルール）。
 
 pub mod agent;
-pub mod agent_tab_intent;
 pub mod daemon;
 pub mod frontmatter;
 pub mod id;

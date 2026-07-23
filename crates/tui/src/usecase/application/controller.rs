@@ -5118,6 +5118,32 @@ mod tests {
             state.notice().map(|notice| notice.message.as_str()),
             Some("unknown closeup command: \"chat\"")
         );
+
+        let continuation = AgentContinuationRef::new();
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        assert_eq!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitCloseup(format!("reopen {continuation}"))),
+            ),
+            vec![Effect::ReopenAgent {
+                workspace,
+                continuation,
+            }]
+        );
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitCloseup("reopen invalid".to_owned())),
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            state.notice().map(|notice| notice.message.as_str()),
+            Some("reopen requires a valid Agent continuation reference")
+        );
     }
 
     #[test]

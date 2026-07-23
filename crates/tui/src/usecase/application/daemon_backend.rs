@@ -732,6 +732,19 @@ mod tests {
     }
 
     #[test]
+    fn reopen_agent_routes_to_the_agent_port_without_a_completion() {
+        let mut backend = backend();
+        assert_eq!(
+            backend.dispatch(Effect::ReopenAgent {
+                workspace: WorkspaceId::new(),
+                continuation: AgentContinuationRef::new(),
+            }),
+            Flow::Continue
+        );
+        assert!(backend.drain_events().is_empty());
+    }
+
+    #[test]
     fn remove_session_refluxes_the_emptied_snapshot() {
         let mut backend = backend();
         let flow = backend.dispatch(Effect::RemoveSession {
