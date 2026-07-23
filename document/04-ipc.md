@@ -358,6 +358,13 @@ writable でない最深の既存 directory（または root-owned exact `01777`
 最初の component だけは atomic `mkdir(0700)` と sticky / trusted-anchor 検証で競合を解決する。作成済み path は同じ
 invariant で再検証し、それ以降の owner directory component は parent fd lock 下で直列化する。
 
+socket discovery と process lifecycle discovery は別の fence を使う。`current.json` は generation endpoint の owner
+を、`daemon.json` は daemon process の `(pid, process_start_identity, started_at)` を示す。client lifecycle は PID
+の存在だけで record を active / stale と判断しない。OS process-start identity が保存値と一致する場合だけ active、
+PID が存在しない場合だけ reclaimable stale とし、legacy identity 欠落、PID reuse、観測失敗は unverified として
+locator と record を保持する。exact owner signal と lifecycle cleanup の順序は
+[5. daemon](05-daemon.md#daemon-process-lifecycle) を正本とする。
+
 current locator の publish と retire は owner-only の `current.lock` で直列化する。listener owner は
 自分が publish した `(generation, endpoint)` と現在の locator が一致する場合だけ `current.json` を
 unlink し、自 generation 固有の socket だけを回収する。retire は socket の不在を先に確定し、その後だけ exact locator を

@@ -4541,16 +4541,19 @@ mod tests {
             .spawn()
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(15);
-        // Force at least one poll iteration so the wait body stays covered even
-        // when the spawned child publishes its file before the first check.
-        let mut first_poll = true;
-        while first_poll || !resolved.exists() {
-            first_poll = false;
+        // Force at least one completed poll before accepting the published file
+        // so this wait path remains covered even when the child publishes early.
+        let mut completed_one_poll = false;
+        loop {
             assert!(
                 Instant::now() < deadline,
                 "queued old-v2 compatibility emulator did not resolve its local authority"
             );
             thread::sleep(Duration::from_millis(10));
+            if completed_one_poll && resolved.exists() {
+                break;
+            }
+            completed_one_poll = true;
         }
         assert!(child.try_wait().unwrap().is_none());
         assert!(!result.exists());

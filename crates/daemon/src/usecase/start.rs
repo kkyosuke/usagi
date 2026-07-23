@@ -19,9 +19,9 @@ use std::io;
 
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::daemon::{DaemonState, classify};
-use usagi_core::infrastructure::daemon::{
-    DaemonLauncher, DaemonRecordStore, LivenessProbe, RecordFile, Sleeper,
-};
+use usagi_core::infrastructure::daemon::{DaemonLauncher, LivenessProbe, Sleeper};
+
+use crate::usecase::serve::DaemonRecordPort;
 
 /// How many times to poll for the launched daemon's record before giving up.
 /// At the synthesis root's ~50ms sleep this is a ~2s window.
@@ -38,26 +38,35 @@ pub(crate) const MAX_POLLS: usize = 40;
 ///
 /// Never in practice: the guard unwraps the record only after `classify`
 /// reports `Alive`, which happens only when a record is present.
-pub fn start<F: RecordFile, P: LivenessProbe, L: DaemonLauncher, K: Sleeper>(
-    store: &DaemonRecordStore<F>,
-    probe: &P,
-    launcher: &L,
-    sleeper: &K,
+pub fn start(
+    store: &dyn DaemonRecordPort,
+    probe: &dyn LivenessProbe,
+    launcher: &dyn DaemonLauncher,
+    sleeper: &dyn Sleeper,
     info: &AppInfo,
 ) -> io::Result<String> {
     let existing = store.load()?;
-    let alive = existing
-        .as_ref()
-        .is_some_and(|record| probe.is_alive(record.pid));
+    let observation = existing.as_ref().map_or(
+        usagi_core::domain::daemon::DaemonProcessObservation::Unknown,
+        |record| probe.observe(record),
+    );
     let describe = info.describe();
 
-    if matches!(classify(existing.as_ref(), alive), DaemonState::Alive) {
-        let running = existing
-            .expect("classify reports Alive only for a present record")
-            .pid;
-        return Ok(format!(
-            "{describe}: daemon already running (pid {running})"
-        ));
+    match classify(existing.as_ref(), observation) {
+        DaemonState::Alive => {
+            let running = existing
+                .expect("classify reports Alive only for a present record")
+                .pid;
+            return Ok(format!(
+                "{describe}: daemon already running (pid {running})"
+            ));
+        }
+        DaemonState::Unverified => {
+            return Err(io::Error::other(
+                "daemon owner identity is unverified; refusing to start a replacement",
+            ));
+        }
+        DaemonState::Stale | DaemonState::Absent => {}
     }
 
     let pid = launch_and_confirm(store, probe, launcher, sleeper)?;
@@ -73,17 +82,17 @@ pub fn start<F: RecordFile, P: LivenessProbe, L: DaemonLauncher, K: Sleeper>(
 ///
 /// Returns the launcher's spawn error, the store's load error, or a timeout
 /// error when the launched daemon does not register within [`MAX_POLLS`] polls.
-pub(crate) fn launch_and_confirm<F: RecordFile, P: LivenessProbe, L: DaemonLauncher, K: Sleeper>(
-    store: &DaemonRecordStore<F>,
-    probe: &P,
-    launcher: &L,
-    sleeper: &K,
+pub(crate) fn launch_and_confirm(
+    store: &dyn DaemonRecordPort,
+    probe: &dyn LivenessProbe,
+    launcher: &dyn DaemonLauncher,
+    sleeper: &dyn Sleeper,
 ) -> io::Result<u32> {
     launcher.launch()?;
 
     for _ in 0..MAX_POLLS {
         if let Some(record) = store.load()?
-            && probe.is_alive(record.pid)
+            && probe.observe(&record) == usagi_core::domain::daemon::DaemonProcessObservation::Exact
         {
             return Ok(record.pid);
         }
@@ -142,6 +151,28 @@ mod tests {
         // An idle launcher spawns nothing, so no record ever appears.
         let launcher = TestLauncher::idle(&store);
         assert!(start(&store, &FixedProbe(true), &launcher, &NoopSleeper, &info()).is_err());
+    }
+
+    struct UnknownProbe;
+
+    impl usagi_core::infrastructure::daemon::LivenessProbe for UnknownProbe {
+        fn observe(
+            &self,
+            _record: &DaemonRecord,
+        ) -> usagi_core::domain::daemon::DaemonProcessObservation {
+            usagi_core::domain::daemon::DaemonProcessObservation::Unknown
+        }
+    }
+
+    #[test]
+    fn refuses_to_replace_an_unverified_record() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let existing = DaemonRecord::new(1111);
+        store.save(&existing).unwrap();
+        let launcher = TestLauncher::registering(&store, 5555);
+        let error = start(&store, &UnknownProbe, &launcher, &NoopSleeper, &info()).unwrap_err();
+        assert!(error.to_string().contains("identity is unverified"));
+        assert_eq!(store.load().unwrap(), Some(existing));
     }
 
     #[test]

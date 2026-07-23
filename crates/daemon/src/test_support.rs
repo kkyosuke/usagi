@@ -4,10 +4,10 @@
 use std::cell::{Cell, RefCell};
 use std::io;
 
-use usagi_core::domain::daemon::DaemonRecord;
+use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::infrastructure::daemon::{
-    DaemonLauncher, DaemonReady, DaemonRecordStore, InstanceLock, LivenessProbe, RecordFile,
-    ShutdownSignal, Sleeper, Terminator,
+    DaemonLauncher, DaemonReady, DaemonRecordStore, InstanceLock, LivenessProbe,
+    ProcessIdentitySource, RecordFile, ShutdownSignal, Sleeper, Terminator,
 };
 
 use crate::usecase::serve::DaemonRecordPort;
@@ -93,12 +93,22 @@ impl RecordFile for InMemoryRecordFile {
     }
 }
 
-/// A [`LivenessProbe`] that reports a fixed answer regardless of pid.
+/// A [`LivenessProbe`] that reports a fixed exact/gone outcome.
 pub struct FixedProbe(pub bool);
 
 impl LivenessProbe for FixedProbe {
-    fn is_alive(&self, _pid: u32) -> bool {
-        self.0
+    fn observe(&self, _record: &DaemonRecord) -> DaemonProcessObservation {
+        if self.0 {
+            DaemonProcessObservation::Exact
+        } else {
+            DaemonProcessObservation::Gone
+        }
+    }
+}
+
+impl ProcessIdentitySource for FixedProbe {
+    fn process_start_identity(&self, pid: u32) -> io::Result<String> {
+        Ok(format!("test:{pid}"))
     }
 }
 
@@ -108,7 +118,7 @@ impl LivenessProbe for FixedProbe {
 #[derive(Default)]
 pub struct RecordingTerminator {
     fail: bool,
-    terminated: RefCell<Vec<u32>>,
+    terminated: RefCell<Vec<DaemonRecord>>,
 }
 
 impl RecordingTerminator {
@@ -122,13 +132,17 @@ impl RecordingTerminator {
 
     /// The pids `terminate` was called with, in order.
     pub fn terminated(&self) -> Vec<u32> {
-        self.terminated.borrow().clone()
+        self.terminated
+            .borrow()
+            .iter()
+            .map(|record| record.pid)
+            .collect()
     }
 }
 
 impl Terminator for RecordingTerminator {
-    fn terminate(&self, pid: u32) -> io::Result<()> {
-        self.terminated.borrow_mut().push(pid);
+    fn terminate(&self, record: &DaemonRecord) -> io::Result<()> {
+        self.terminated.borrow_mut().push(record.clone());
         if self.fail {
             Err(io::Error::other("terminate failed"))
         } else {

@@ -8,8 +8,8 @@ use std::io::Write;
 
 use usagi_core::domain::AppInfo;
 use usagi_core::infrastructure::daemon::{
-    DaemonLauncher, DaemonReady, DaemonRecordStore, InstanceLock, LivenessProbe, RecordFile,
-    ShutdownSignal, Sleeper, Terminator,
+    DaemonLauncher, DaemonReady, DaemonRecordStore, InstanceLock, LivenessProbe,
+    ProcessIdentitySource, RecordFile, ShutdownSignal, Sleeper, Terminator,
 };
 
 use crate::usecase;
@@ -35,17 +35,17 @@ pub enum DaemonCommand {
 }
 
 /// daemon 面が実 IO を行うために注入される依存一式。合成ルートが本物（ファイル・
-/// signal 0・SIGTERM・signal 待受・detached spawn・sleep・単一インスタンスロック・
+/// process-start identity 観測・fenced SIGTERM・signal 待受・detached spawn・sleep・単一インスタンスロック・
 /// 自プロセス pid）を束ねて構築し、テストは fake を差し込む。[`run`] にまとめて渡すことで、
 /// verb ごとに必要な seam が増えても entry point の引数を平らに保つ。
 pub struct DaemonEnv<'a, F, P, T, R, S, L, K, M> {
     /// `daemon.json` の read/write/incarnation-conditional clear。
     pub store: &'a DaemonRecordStore<F>,
-    /// pid の生存判定。
+    /// daemon owner の exact process identity 観測。
     pub probe: &'a P,
     /// 稼働中 daemon への終了要求（signal）。
     pub terminator: &'a T,
-    /// `serve` が PID 登録後に IPC endpoint を公開する ready hook。
+    /// `serve` が exact owner record 登録後に IPC endpoint を公開する ready hook。
     pub ready: &'a R,
     /// `serve` が shutdown まで待つための待受。
     pub shutdown: &'a S,
@@ -74,7 +74,7 @@ pub struct DaemonEnv<'a, F, P, T, R, S, L, K, M> {
 /// への書き込みに失敗した場合、そのエラーを返す。
 pub fn run<
     F: RecordFile,
-    P: LivenessProbe,
+    P: LivenessProbe + ProcessIdentitySource,
     T: Terminator,
     S: ShutdownSignal,
     R: DaemonReady + usecase::stop::StaleDaemonCleanup,
@@ -94,6 +94,7 @@ pub fn run<
             env.ready,
             env.shutdown,
             env.lock,
+            env.probe,
             env.pid,
             info,
         ),
