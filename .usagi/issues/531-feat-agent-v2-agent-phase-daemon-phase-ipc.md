@@ -1,13 +1,13 @@
 ---
 number: 531
 title: feat(agent): v2 で agent-phase を daemon へ phase 報告する IPC を配線する
-status: todo
+status: done
 priority: medium
 labels: [agent, daemon, claude, ipc]
 dependson: []
 related: [530]
 created_at: 2026-07-24T12:39:19.153344+00:00
-updated_at: 2026-07-24T12:39:19.153344+00:00
+updated_at: 2026-07-24T21:55:34.911106+00:00
 ---
 
 ## 背景

@@ -164,7 +164,7 @@ mod tests {
                 PhaseInputError::InvalidPayload,
             ),
             (
-                br#"{}"#.as_slice(),
+                br"{}".as_slice(),
                 "ended",
                 Some("runtime-secret".to_owned()),
                 PhaseInputError::InvalidPayload,
