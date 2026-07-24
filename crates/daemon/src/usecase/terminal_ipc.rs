@@ -316,6 +316,12 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
     ) -> Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry> {
         self.coordinator.inventory(scope)
     }
+    fn completed_inventory(
+        &self,
+        scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+    ) -> Vec<usagi_core::domain::terminal_visibility::CompletedTerminalEntry> {
+        self.coordinator.completed_inventory(scope)
+    }
     fn disconnect(&mut self, connection: ConnectionId) {
         self.coordinator.disconnect(connection);
     }

@@ -417,6 +417,22 @@ durable terminal record と bounded output journal は transport entry とは別
 保持しない。したがって final replay の保持量は terminal 数に対する byte bound の範囲内であり、transport の
 回収を妨げない。
 
+この tombstone は exact `TerminalRef`（daemon generation・terminal・workspace・optional session・worktree を
+全て含む）を key に retain され、その `TerminalRef` が retention identity を兼ねる。`completed_inventory` は
+generic / Agent 両 owner の `Exited` record だけを列挙し、[4. IPC](04-ipc.md#exited-tombstone-visibility) の
+`CompletedTerminalEntry` として返す。running / reserved / reconcile 中 / reclaimed は tombstone ではないため
+列挙しない。daemon restart 後は未終端 record が `identity_unknown`（`live: false`）へ reconcile され `Exited`
+ではなくなるため、completed inventory には現れない。tombstone の lifetime 上限（aggregate retention と GC）は
+[#526](../.usagi/issues/526-fix-daemon-terminal-agent-tombstone-retention-aggregate-bound-gc.md) が所有する。
+
+tombstone の可視状態は daemon が唯一の authority として保持する **workspace-global visibility** である。root IPC
+server は全 client connection で共有する 1 つの visibility ledger を持ち、connection ごとに生成される terminal owner
+がそれを参照する。ledger は exact `TerminalRef` を key に `unobserved < observed < dismissed` の monotonic lattice と
+`revision` を保持し、`observe` / `dismiss` の compare-and-swap で更新する。したがって複数 TUI process や再 open は
+同じ結果へ収束し、late / out-of-order な write が completed entry を復活させない。visibility は表示 intent であり、
+runtime の liveness・PTY ownership・process には一切作用しない（CAS / merge の正本は
+[4. IPC](04-ipc.md#exited-tombstone-visibility)）。
+
 generic shell terminal は root IPC server が全 connection で共有する ownership runtime へ渡す。runtime は
 generic terminal coordinator、trusted `login-shell` profile resolver、durable terminal store、実 PTY adapter
 を一つの ownership loop に保持する。PTY reader は output journal へ drain され、connection close は runtime

@@ -34,6 +34,16 @@ pub trait TerminalOwner {
     ) -> Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry> {
         Vec::new()
     }
+    /// Lists this owner's exited tombstones in the exact requested scope (#525).
+    /// The default owner holds none; the generic terminal owner returns its
+    /// exited terminals. `SharedTerminalOwner` merges this with the Agent owner
+    /// and stamps each entry's authoritative workspace-global visibility.
+    fn completed_inventory(
+        &self,
+        _scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+    ) -> Vec<usagi_core::domain::terminal_visibility::CompletedTerminalEntry> {
+        Vec::new()
+    }
     fn disconnect(&mut self, connection: usagi_core::domain::id::ConnectionId);
 }
 

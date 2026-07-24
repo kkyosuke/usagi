@@ -30,3 +30,4 @@ pub mod supervisor_runtime;
 pub mod terminal;
 pub mod terminal_ipc;
 pub mod terminal_profile;
+pub mod terminal_visibility_ipc;

@@ -581,6 +581,16 @@ impl AgentTerminalActor for SharedAgent {
             .map(|agent| AgentTerminalActor::terminal_inventory(&*agent, scope))
             .unwrap_or_default()
     }
+    fn completed_inventory(
+        &self,
+        scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+    ) -> Vec<usagi_core::domain::terminal_visibility::CompletedTerminalEntry> {
+        // A poisoned lock is a safe empty tombstone list, never a fallback.
+        self.0
+            .lock()
+            .map(|agent| AgentTerminalActor::completed_inventory(&*agent, scope))
+            .unwrap_or_default()
+    }
     fn disconnect(&mut self, connection: usagi_core::domain::id::ConnectionId) {
         if let Ok(mut agent) = self.0.lock() {
             AgentTerminalActor::disconnect(&mut *agent, connection);
@@ -1097,6 +1107,15 @@ impl usagi_daemon::presentation::ipc::TerminalOwner for SharedTerminal {
             .lock()
             .map_or_else(|_| Vec::new(), |terminal| terminal.inventory(scope))
     }
+    fn completed_inventory(
+        &self,
+        scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+    ) -> Vec<usagi_core::domain::terminal_visibility::CompletedTerminalEntry> {
+        self.0.lock().map_or_else(
+            |_| Vec::new(),
+            |terminal| terminal.completed_inventory(scope),
+        )
+    }
     fn disconnect(&mut self, connection: usagi_core::domain::id::ConnectionId) {
         if let Ok(mut terminal) = self.0.lock() {
             terminal.disconnect(connection);
@@ -1492,6 +1511,11 @@ fn start_ipc_accept_loop(
             let _exit = ShutdownOnIpcWorkerExit {
                 shutdown: Arc::clone(&shutdown),
             };
+            // One workspace-global visibility authority for exited terminal
+            // tombstones (#525), shared by every client connection so multiple
+            // TUIs converge on the same Observed / Dismissed state.
+            let visibility =
+                usagi_daemon::usecase::terminal_visibility_ipc::SharedTerminalVisibility::new();
             while !shutdown.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok(stream) => {
@@ -1502,6 +1526,7 @@ fn start_ipc_accept_loop(
                         let session = Arc::clone(&runtime);
                         let scope_sessions = Arc::clone(&runtime);
                         let terminal = Arc::clone(&terminal);
+                        let visibility = visibility.clone();
                         let agent_owner = Arc::clone(&agent);
                         let agent_launch = Arc::clone(&agent);
                         let pr_inventory = Arc::clone(&pr_inventory);
@@ -1518,9 +1543,10 @@ fn start_ipc_accept_loop(
                                     return;
                                 };
                                 let mut reader = stream;
-                                let mut owner = SharedTerminalOwner::new(
+                                let mut owner = SharedTerminalOwner::with_visibility(
                                     SharedAgent(agent_owner),
                                     SharedTerminal(terminal),
+                                    visibility,
                                 );
                                 let mut metrics_observer = None;
                                 let result = usagi_daemon::presentation::ipc::handle_connection_with_terminal_and(
