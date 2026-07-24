@@ -162,6 +162,14 @@ fn claude_sandbox(
         launch_roots: writable_roots,
         tmpdir: std::env::var_os("TMPDIR").map(PathBuf::from),
         home: std::env::var_os("HOME").map(PathBuf::from),
+        // E2E テスト専用 seam。release ビルドでは `cfg!(debug_assertions)` が false になるため、
+        // 配布バイナリはこの環境変数を見ても拘束を外さない。
+        passthrough: claude_sandbox::passthrough_requested(
+            cfg!(debug_assertions),
+            std::env::var(claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE)
+                .ok()
+                .as_deref(),
+        ),
         command,
     };
     match claude_sandbox::plan(&request) {

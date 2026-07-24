@@ -14,7 +14,12 @@ use usagi_core::domain::{
 /// Public, non-secret terminal and shell-configuration inputs inherited by an
 /// interactive login shell. Values are used only for the live PTY and never
 /// written into the durable terminal record.
-pub const TERMINAL_ENVIRONMENT_VARIABLES: [&str; 15] = [
+///
+/// `TMPDIR` is inherited so a child confined by the OS sandbox launcher
+/// (`usagi claude-sandbox`) can still write into its own temporary area: the
+/// launcher turns `$TMPDIR` into a writable root, and the product needs the same
+/// value to actually use it.
+pub const TERMINAL_ENVIRONMENT_VARIABLES: [&str; 16] = [
     "SHELL",
     "TERM",
     "PATH",
@@ -30,6 +35,7 @@ pub const TERMINAL_ENVIRONMENT_VARIABLES: [&str; 15] = [
     "NO_COLOR",
     "ZDOTDIR",
     "XDG_CONFIG_HOME",
+    "TMPDIR",
 ];
 
 /// Resolves a trusted shell and its public terminal characteristics.
