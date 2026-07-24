@@ -696,6 +696,10 @@ mod tests {
                 "daemon could not be started",
             ),
             (
+                BootstrapError::Restart(io::Error::other("private restart detail")),
+                "daemon generation could not be restarted",
+            ),
+            (
                 BootstrapError::Readiness(io::Error::from(io::ErrorKind::TimedOut)),
                 "daemon did not become ready",
             ),
