@@ -1,13 +1,13 @@
 ---
 number: 521
 title: fix(ipc): ClientPolicyのrequest deadlineとreconnect budgetを実効化する
-status: todo
+status: done
 priority: high
 labels: [review, v2, core, ipc, client, resilience, timeout]
 dependson: []
 related: [197, 215, 216, 463, 489, 518, 519]
 created_at: 2026-07-22T11:40:05.764143+00:00
-updated_at: 2026-07-22T12:10:14.415776+00:00
+updated_at: 2026-07-24T13:10:41.732573+00:00
 ---
 
 ## 問題・影響

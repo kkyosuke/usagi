@@ -61,7 +61,7 @@ pub(crate) fn dispatch(
         }
         RunOutcome::LaunchMcp => {
             let stdin = std::io::stdin();
-            match daemon::client(ClientPolicy::mcp()) {
+            match daemon::policy_client(ClientPolicy::mcp()) {
                 Ok(mut client) => {
                     usagi_cli::mcp::serve_with_client(stdin.lock(), out, info.version, &mut client)
                         .map(|()| ExitCode::SUCCESS)
@@ -85,7 +85,7 @@ pub(crate) fn dispatch(
                     return Ok(ExitCode::FAILURE);
                 }
             };
-            match daemon::client(ClientPolicy::cli()) {
+            match daemon::policy_client(ClientPolicy::cli()) {
                 Ok(mut client) => match client.request(request) {
                     Ok(_) => Ok(ExitCode::SUCCESS),
                     Err(error) => {
@@ -105,7 +105,7 @@ pub(crate) fn dispatch(
             writable_roots,
             command,
         } => claude_sandbox(mode, writable_roots, command, err),
-        RunOutcome::DaemonRequest(request) => match daemon::client(ClientPolicy::cli()) {
+        RunOutcome::DaemonRequest(request) => match daemon::policy_client(ClientPolicy::cli()) {
             Ok(mut client) => write_daemon_outcome(client.request(request), out, err),
             Err(error) => {
                 write_client_error(err, "daemon unavailable", &error)?;
