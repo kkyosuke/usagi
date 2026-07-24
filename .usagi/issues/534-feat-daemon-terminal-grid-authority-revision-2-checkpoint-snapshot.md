@@ -1,14 +1,14 @@
 ---
 number: 534
 title: feat(daemon): terminal grid authority と revision 2 checkpoint snapshot
-status: todo
+status: done
 priority: high
 labels: [feat, v2, daemon, terminal, vt, replay]
 dependson: [533]
 related: [524, 199, 472]
 parent: 524
 created_at: 2026-07-24T12:46:51.706653+00:00
-updated_at: 2026-07-24T12:46:51.706653+00:00
+updated_at: 2026-07-24T20:53:35.046993+00:00
 ---
 
 [#524](524-fix-terminal-raw-64kib-tail-vt-parser-safe-snapshot.md) の設計 [`document/proposals/12-terminal-vt-snapshot.md`](../../document/proposals/12-terminal-vt-snapshot.md) の **Phase 3**。#533 の上に構築する。

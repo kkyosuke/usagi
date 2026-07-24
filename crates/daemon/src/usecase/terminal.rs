@@ -1174,6 +1174,14 @@ mod tests {
                 .append_output(&r, format!("history line {line}\r\n").into_bytes())
                 .unwrap();
         }
+        // A full-screen application then owns the alternate buffer, so the
+        // checkpoint carries history in both buffers and both are trimmed.
+        registry.append_output(&r, b"\x1b[?1049h".to_vec()).unwrap();
+        for line in 0..64 {
+            registry
+                .append_output(&r, format!("alternate line {line}\r\n").into_bytes())
+                .unwrap();
+        }
         let before = output_pipeline_counters();
         let frame = registry
             .snapshot(&r)
