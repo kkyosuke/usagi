@@ -387,6 +387,7 @@ pub struct TerminalRegistry {
     input_cache_limit: usize,
     checkpoint_bytes_limit: usize,
     screen_cells_limit: usize,
+    screen_cells_aggregate_limit: usize,
 }
 
 impl TerminalRegistry {
@@ -398,6 +399,7 @@ impl TerminalRegistry {
             input_cache_limit,
             checkpoint_bytes_limit: CHECKPOINT_BYTES_MAX,
             screen_cells_limit: SCREEN_CELLS_PER_TERMINAL_MAX,
+            screen_cells_aggregate_limit: SCREEN_CELLS_AGGREGATE_MAX,
         }
     }
 
@@ -413,14 +415,21 @@ impl TerminalRegistry {
         self
     }
 
-    /// Overrides the per-terminal screen retention budget.
+    /// Overrides the screen retention budgets: what one terminal may retain and
+    /// the ceiling its process shares.
     ///
-    /// The default is [`SCREEN_CELLS_PER_TERMINAL_MAX`]. The process-local
-    /// [`SCREEN_CELLS_AGGREGATE_MAX`] ceiling still applies: a terminal keeps
-    /// the smaller of the two.
+    /// The defaults are [`SCREEN_CELLS_PER_TERMINAL_MAX`] and
+    /// [`SCREEN_CELLS_AGGREGATE_MAX`]. A terminal keeps the smaller of its own
+    /// budget and whatever the ceiling leaves after the other terminals'
+    /// current retention, so a test can isolate either bound.
     #[must_use]
-    pub const fn with_screen_cells_limit(mut self, cells: usize) -> Self {
-        self.screen_cells_limit = cells;
+    pub const fn with_screen_cell_budgets(
+        mut self,
+        per_terminal: usize,
+        process_aggregate: usize,
+    ) -> Self {
+        self.screen_cells_limit = per_terminal;
+        self.screen_cells_aggregate_limit = process_aggregate;
         self
     }
 
@@ -536,12 +545,12 @@ impl TerminalRegistry {
         data: Vec<u8>,
     ) -> Result<Output, RegistryError> {
         let limit = self.journal_limit;
-        let cells_limit = self.screen_cells_limit;
+        let budgets = self.screen_budgets();
         let entry = self.entry_mut(reference)?;
         // The screen is the authority: it sees every accepted byte, including
         // the bytes the bounded journal is about to drop.
         entry.screen.advance(&data);
-        enforce_screen_budget(entry, cells_limit);
+        enforce_screen_budget(entry, budgets);
         let start_offset = entry.next_offset;
         entry.next_offset += data.len() as u64;
         let output = Output {
@@ -650,7 +659,7 @@ impl TerminalRegistry {
         // racing an already validated resize, so a client observes either the
         // old or the new geometry with its matching revision, never a mix.
         let checkpoint_bytes_limit = self.checkpoint_bytes_limit;
-        let cells_limit = self.screen_cells_limit;
+        let budgets = self.screen_budgets();
         let entry = self.entry(reference)?;
         if entry.exited.is_some() {
             return Err(RegistryError::Exited);
@@ -665,7 +674,7 @@ impl TerminalRegistry {
         // bytes at the new width, then re-account the changed cell retention.
         let (rows, cols) = screen_dimensions(geometry);
         entry.screen.resize(rows, cols);
-        enforce_screen_budget(entry, cells_limit);
+        enforce_screen_budget(entry, budgets);
         snapshot(entry, checkpoint_bytes_limit)
     }
 
@@ -754,6 +763,13 @@ impl TerminalRegistry {
         Ok(self.entry(reference)?.exited)
     }
 
+    const fn screen_budgets(&self) -> ScreenBudgets {
+        ScreenBudgets {
+            per_terminal: self.screen_cells_limit,
+            process_aggregate: self.screen_cells_aggregate_limit,
+        }
+    }
+
     fn entry(&self, reference: &TerminalRef) -> Result<&Entry, RegistryError> {
         self.entries
             .get(&key(reference))
@@ -793,17 +809,24 @@ fn release_screen_cells(cells: usize) {
     RETAINED_SCREEN_CELLS.fetch_sub(counted(cells), Ordering::Relaxed);
 }
 
+/// The screen retention budgets one registry enforces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScreenBudgets {
+    per_terminal: usize,
+    process_aggregate: usize,
+}
+
 /// Re-accounts this screen's retention and trims its oldest history until it
-/// fits both the per-terminal budget and whatever the process-local aggregate
-/// ceiling leaves after the other terminals' current retention.
-fn enforce_screen_budget(entry: &mut Entry, per_terminal_limit: usize) {
+/// fits both the per-terminal budget and whatever the process aggregate ceiling
+/// leaves after the other terminals' current retention.
+fn enforce_screen_budget(entry: &mut Entry, budgets: ScreenBudgets) {
     let cells = account_screen(entry);
     let others = RETAINED_SCREEN_CELLS
         .load(Ordering::Relaxed)
         .saturating_sub(counted(cells));
     let aggregate_share =
-        usize::try_from(counted(SCREEN_CELLS_AGGREGATE_MAX).saturating_sub(others)).unwrap_or(0);
-    let budget = per_terminal_limit.min(aggregate_share);
+        usize::try_from(counted(budgets.process_aggregate).saturating_sub(others)).unwrap_or(0);
+    let budget = budgets.per_terminal.min(aggregate_share);
     if cells <= budget {
         return;
     }
@@ -1112,52 +1135,85 @@ mod tests {
         assert_eq!(fresh.geometry, Geometry { cols: 6, rows: 2 });
     }
 
-    #[test]
-    fn screen_retention_stays_within_the_per_terminal_and_process_budgets() {
-        // One row of history per fed line; the budget admits four rows total.
-        let rows: u16 = 2;
-        let cols: u16 = 8;
-        let budget = 4 * usize::from(cols);
-        let before = output_pipeline_counters();
-        let terminals = [reference(), reference()];
-        let mut registry = TerminalRegistry::new(MAX_RETAINED_OUTPUT_BYTES, 2)
-            .with_screen_cells_limit(budget)
-            .with_checkpoint_bytes_limit(CHECKPOINT_BYTES_MAX);
+    /// Rows a checkpoint's primary buffer retains (visible grid plus history).
+    fn retained_rows(frame: &SnapshotFrame) -> usize {
+        let SnapshotContent::Screen { screen } = &frame.content else {
+            panic!("checkpoint frame");
+        };
+        screen.primary.grid.len() + screen.primary.scrollback.len()
+    }
+    /// Registers `count` terminals and feeds each of them `lines` rows.
+    fn fed_terminals(
+        registry: &mut TerminalRegistry,
+        geometry: Geometry,
+        count: usize,
+        lines: usize,
+    ) -> Vec<TerminalRef> {
+        let terminals: Vec<TerminalRef> = (0..count).map(|_| reference()).collect();
         for terminal in &terminals {
-            registry
-                .register(terminal.clone(), Geometry { cols, rows })
-                .unwrap();
+            registry.register(terminal.clone(), geometry).unwrap();
         }
-        for line in 0..64 {
+        for line in 0..lines {
             for terminal in &terminals {
                 registry
                     .append_output(terminal, format!("line{line}\r\n").into_bytes())
                     .unwrap();
             }
         }
+        terminals
+    }
+
+    #[test]
+    fn a_screen_retains_at_most_its_per_terminal_cell_budget() {
+        let geometry = Geometry { cols: 8, rows: 2 };
+        // Four rows of retention: the two visible rows plus two of history.
+        let budget = 4 * usize::from(geometry.cols);
+        let before = output_pipeline_counters();
+        // The process ceiling is lifted so this asserts the per-terminal bound
+        // alone, independent of the screens other tests hold in this process.
+        let mut registry = TerminalRegistry::new(MAX_RETAINED_OUTPUT_BYTES, 2)
+            .with_screen_cell_budgets(budget, usize::MAX);
+        let terminals = fed_terminals(&mut registry, geometry, 2, 64);
 
         for terminal in &terminals {
             let frame = registry
                 .snapshot(terminal)
                 .unwrap()
                 .into_frame(SnapshotWire::ScreenCheckpoint);
-            let SnapshotContent::Screen { screen } = &frame.content else {
-                panic!("checkpoint frame");
-            };
-            // Per-terminal peak: the visible grid plus the history that fits.
-            let retained =
-                (screen.primary.grid.len() + screen.primary.scrollback.len()) * usize::from(cols);
-            assert!(
-                retained <= budget,
-                "retained {retained} cells exceeds the {budget} cell budget"
-            );
-            assert!(!screen.primary.scrollback.is_empty(), "history survives");
+            let retained = retained_rows(&frame) * usize::from(geometry.cols);
+            assert_eq!(retained, budget, "the budget is used, and not exceeded");
+            // History survives: the peak is not paid for by dropping everything.
+            assert!(retained_rows(&frame) > usize::from(geometry.rows));
         }
+        assert!(output_pipeline_counters().screen_trimmed_rows > before.screen_trimmed_rows);
+    }
 
-        let after = output_pipeline_counters();
-        assert!(after.screen_trimmed_rows > before.screen_trimmed_rows);
-        // Process-local aggregate peak across every daemon-owned screen.
-        assert!(after.retained_screen_cells <= SCREEN_CELLS_AGGREGATE_MAX as u64);
+    #[test]
+    fn every_screen_is_trimmed_into_the_process_aggregate_ceiling() {
+        let geometry = Geometry { cols: 8, rows: 2 };
+        // A ceiling this small cannot be shared by three terminals, so each one
+        // is trimmed as it grows however much the others already retain.
+        let ceiling = 6 * usize::from(geometry.cols);
+        let mut registry = TerminalRegistry::new(MAX_RETAINED_OUTPUT_BYTES, 2)
+            .with_screen_cell_budgets(usize::MAX, ceiling);
+        let terminals = fed_terminals(&mut registry, geometry, 3, 64);
+
+        let mut total = 0;
+        for terminal in &terminals {
+            let frame = registry
+                .snapshot(terminal)
+                .unwrap()
+                .into_frame(SnapshotWire::ScreenCheckpoint);
+            let retained = retained_rows(&frame) * usize::from(geometry.cols);
+            assert!(
+                retained <= ceiling,
+                "one terminal retained {retained} cells above the {ceiling} cell ceiling"
+            );
+            total += retained;
+        }
+        // The visible grids are the floor the ceiling cannot reclaim.
+        let floor = terminals.len() * usize::from(geometry.rows) * usize::from(geometry.cols);
+        assert!(total <= ceiling + floor);
     }
 
     #[test]
