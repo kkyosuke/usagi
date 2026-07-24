@@ -1,14 +1,13 @@
 ---
 number: 529
 title: fix(daemon): failed session を一覧へ投影して remove 可能にする
-status: todo
+status: done
 priority: high
 labels: [v2, daemon, tui, cli, mcp, lifecycle, ux, presentation]
 dependson: []
 related: []
-parent: null
-created_at: 2026-07-24T00:00:00.000000+00:00
-updated_at: 2026-07-24T00:00:00.000000+00:00
+created_at: 2026-07-24T00:00:00+00:00
+updated_at: 2026-07-24T11:37:26.630055+00:00
 ---
 
 ## 問題・根拠
