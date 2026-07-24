@@ -1109,6 +1109,7 @@ dependencies = [
  "shell-words",
  "tempfile",
  "toml",
+ "unicode-width",
  "uuid",
 ]
 

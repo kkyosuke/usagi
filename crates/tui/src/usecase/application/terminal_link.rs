@@ -1,9 +1,10 @@
 //! Pure `http(s)` URL detection and validation over the ANSI-free terminal grid.
 //!
-//! The daemon streams raw PTY bytes that [`TerminalScreen`] decodes into a
-//! character grid; its [`cells`](super::terminal_screen::TerminalScreen::cells)
-//! and
-//! [`cells_with_scrollback`](super::terminal_screen::TerminalScreen::cells_with_scrollback)
+//! The daemon streams raw PTY bytes that the shared core
+//! [`VtScreen`](usagi_core::usecase::vt_screen::VtScreen) decodes into a
+//! character grid; its
+//! [`cells`](usagi_core::usecase::vt_screen::VtScreen::cells) and
+//! [`cells_with_scrollback`](usagi_core::usecase::vt_screen::VtScreen::cells_with_scrollback)
 //! projections hand this module one `String` per row with the ANSI styling and
 //! wide-glyph continuation cells already stripped. From that grid this module:
 //!
@@ -26,7 +27,7 @@
 //! coexistence, and the browser spawn itself live in later wiring (#389);
 //! everything here is pure and unit-tested against plain row strings.
 //!
-//! Because [`cells`](super::terminal_screen::TerminalScreen::cells) drops the
+//! Because [`cells`](usagi_core::usecase::vt_screen::VtScreen::cells) drops the
 //! per-row wrap flag, a logical line is reconstructed from the grid width: a row
 //! whose last display column is non-blank is taken to wrap into the next. A line
 //! whose real content happens to fill the last column with no trailing space is
@@ -46,7 +47,7 @@ const SCHEMES: [&str; 2] = ["https://", "http://"];
 
 /// The terminal grid expanded to one `char` per display column.
 ///
-/// [`cells`](super::terminal_screen::TerminalScreen::cells) already dropped
+/// [`cells`](usagi_core::usecase::vt_screen::VtScreen::cells) already dropped
 /// wide-glyph continuation cells, so a wide glyph is one `char` spanning two
 /// columns. Re-expanding to a column per cell lets a click column index straight
 /// into a row and keeps wrapped rows aligned when they are joined.
@@ -376,7 +377,7 @@ mod tests {
     use super::*;
 
     /// A viewport whose rows are padded to `cols` display columns, matching what
-    /// [`TerminalScreen::cells`](super::super::terminal_screen::TerminalScreen::cells)
+    /// [`VtScreen::cells`](usagi_core::usecase::vt_screen::VtScreen::cells)
     /// hands this module. Wrapping is inferred from a full final column, so
     /// padding a short line keeps it a standalone logical line.
     fn grid(cols: usize, lines: &[&str]) -> Vec<String> {
