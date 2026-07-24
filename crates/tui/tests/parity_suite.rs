@@ -696,6 +696,8 @@ fn home_frame_golden_covers_live_terminal_viewport() {
             "running 3 tests".into(),
             "test result: ok".into(),
         ],
+        row_offset: 0,
+        total_rows: 3,
         scroll: 0,
         feedback: Some("streaming live output".into()),
     };

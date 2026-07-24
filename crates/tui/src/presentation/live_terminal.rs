@@ -235,13 +235,53 @@ impl LiveTerminalControls {
     /// recomputing the scroll extent from the row count and `viewport_rows` so a
     /// shrunk history re-clamps the offset.
     pub fn project(&mut self, rows: Vec<String>, viewport_rows: usize) -> TerminalViewProjection {
-        self.max_scroll = rows.len().saturating_sub(viewport_rows);
+        let total_rows = rows.len();
+        self.max_scroll = total_rows.saturating_sub(viewport_rows);
         self.scroll = self.scroll.min(self.max_scroll);
         TerminalViewProjection {
             rows,
+            row_offset: 0,
+            total_rows,
             scroll: self.scroll,
             feedback: self.feedback.clone(),
         }
+    }
+
+    /// Clamp the current scroll offset against a retained row count and return
+    /// the exact row range needed for the visible viewport.
+    #[must_use]
+    pub fn visible_range(
+        &mut self,
+        total_rows: usize,
+        viewport_rows: usize,
+    ) -> std::ops::Range<usize> {
+        self.max_scroll = total_rows.saturating_sub(viewport_rows);
+        self.scroll = self.scroll.min(self.max_scroll);
+        let end = total_rows.saturating_sub(self.scroll);
+        end.saturating_sub(viewport_rows)..end
+    }
+
+    /// Project an already-windowed row range while retaining global scroll
+    /// coordinates for rendering and pointer hit testing.
+    #[must_use]
+    pub fn project_window(
+        &self,
+        rows: Vec<String>,
+        row_offset: usize,
+        total_rows: usize,
+    ) -> TerminalViewProjection {
+        TerminalViewProjection {
+            rows,
+            row_offset,
+            total_rows,
+            scroll: self.scroll,
+            feedback: self.feedback.clone(),
+        }
+    }
+
+    #[must_use]
+    pub const fn scroll(&self) -> usize {
+        self.scroll
     }
 }
 

@@ -1681,6 +1681,25 @@ impl WorkspaceUi {
         })
     }
 
+    fn terminal_row_count(&self, terminal: &TerminalRef) -> Option<usize> {
+        self.terminals
+            .iter()
+            .find(|session| session.terminal().fences(terminal))
+            .map(TerminalSession::display_row_count)
+    }
+
+    fn terminal_row_window(
+        &self,
+        terminal: &TerminalRef,
+        start: usize,
+        end: usize,
+    ) -> Option<Vec<String>> {
+        self.terminals
+            .iter()
+            .find(|session| session.terminal().fences(terminal))
+            .map(|session| session.display_row_window(start, end))
+    }
+
     /// The stable visible cells for `terminal`, snapshotted so a drag selection
     /// stays fixed while later output arrives. `None` when no session matches.
     fn terminal_cells(&self, terminal: &TerminalRef) -> Option<Vec<String>> {
@@ -2636,8 +2655,14 @@ fn controller_terminal_view(
     let terminal = runtime.focused_terminal();
     controls.sync_focus(terminal.as_ref());
     let terminal = terminal?;
-    let rows = ui.terminal_rows(&terminal, controls.selection())?;
-    let mut projection = controls.project(rows, viewport_rows);
+    let mut projection = if let Some(selection) = controls.selection() {
+        controls.project(ui.terminal_rows(&terminal, Some(selection))?, viewport_rows)
+    } else {
+        let total_rows = ui.terminal_row_count(&terminal)?;
+        let range = controls.visible_range(total_rows, viewport_rows);
+        let rows = ui.terminal_row_window(&terminal, range.start, range.end)?;
+        controls.project_window(rows, range.start, total_rows)
+    };
     if let Some(error) = ui.terminal_error(&terminal) {
         projection.feedback = Some(error.to_owned());
     }
@@ -2657,7 +2682,7 @@ fn poll_and_project_terminals(
     close_exited_panes(ui, runtime);
     let terminal_view = controller_terminal_view(ui, runtime, controls, usize::from(geometry.rows));
     let (rows_len, scroll) = match &terminal_view {
-        Some(view) => (view.rows.len(), view.scroll),
+        Some(view) => (view.total_rows, controls.scroll()),
         None => (0, 0),
     };
     (terminal_view, rows_len, scroll)
@@ -10924,7 +10949,7 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let terminal = live_terminal_ref(workspace, session);
-        let (ui, _runtime) = focused_live_pane(
+        let (ui, runtime) = focused_live_pane(
             workspace,
             session,
             terminal.clone(),
@@ -10939,9 +10964,12 @@ mod tests {
         let cells = ui.terminal_cells(&terminal).expect("attached cells");
         let mut selection = TerminalSelection::begin(cells, TerminalPoint { row: 0, column: 0 });
         selection.extend(TerminalPoint { row: 1, column: 5 });
-        let rows = ui
-            .terminal_rows(&terminal, Some(&selection))
-            .expect("selection rows");
+        let mut controls = LiveTerminalControls::default();
+        controls.sync_focus(Some(&terminal));
+        controls.begin_selection(selection);
+        let rows = controller_terminal_view(&ui, &runtime, &mut controls, 10)
+            .expect("selection view")
+            .rows;
         // Row 0's trailing padding and the blank row 1 are highlighted.
         assert!(
             rows[0].contains("\u{1b}[7m") && rows[0].contains("ab"),
@@ -10980,19 +11008,23 @@ mod tests {
         let viewport_rows = usize::from(terminal_geometry(20, 80).rows);
 
         // The first projection anchors at the live bottom (scroll 0).
+        let live_bottom = controller_terminal_view(&ui, &runtime, &mut controls, viewport_rows)
+            .expect("live view");
+        assert_eq!(live_bottom.scroll, 0);
+        assert!(live_bottom.total_rows > live_bottom.rows.len());
+        assert_eq!(live_bottom.rows.len(), viewport_rows);
         assert_eq!(
-            controller_terminal_view(&ui, &runtime, &mut controls, viewport_rows)
-                .expect("live view")
-                .scroll,
-            0
+            live_bottom.row_offset + live_bottom.rows.len(),
+            live_bottom.total_rows
         );
         controls.scroll_up();
         controls.scroll_up();
+        let scrolled = controller_terminal_view(&ui, &runtime, &mut controls, viewport_rows)
+            .expect("live view");
+        assert_eq!(scrolled.scroll, 2);
         assert_eq!(
-            controller_terminal_view(&ui, &runtime, &mut controls, viewport_rows)
-                .expect("live view")
-                .scroll,
-            2
+            scrolled.row_offset + scrolled.rows.len() + scrolled.scroll,
+            scrolled.total_rows
         );
     }
 
