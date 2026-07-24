@@ -2,15 +2,22 @@
 //! adapter へ接続する composition adapter。
 
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use usagi_cli::cli::{RunOutcome, TuiRequest};
 use usagi_core::domain::AppInfo;
+use usagi_core::usecase::claude_sandbox::{
+    self, Platform, SandboxMode, SandboxPlan, SandboxRequest,
+};
 use usagi_core::usecase::client::{ClientError, ClientPolicy, DaemonClient, DaemonReply};
 use usagi_tui::usecase::application::EntryScreen;
 
 use super::{daemon, tui};
 
+// 各 `RunOutcome` を実行面へ接続するだけの routing match。arm が増えて 100 行を超えるが、
+// 分割しても routing の一覧性が下がるだけなので too_many_lines を許容する。
+#[allow(clippy::too_many_lines)]
 #[coverage(off)]
 pub(crate) fn dispatch(
     args: Vec<std::ffi::OsString>,
@@ -93,6 +100,11 @@ pub(crate) fn dispatch(
             }
         }
         RunOutcome::GuardWorkspace => guard_workspace(out),
+        RunOutcome::ClaudeSandbox {
+            mode,
+            writable_roots,
+            command,
+        } => claude_sandbox(mode, writable_roots, command, err),
         RunOutcome::DaemonRequest(request) => match daemon::client(ClientPolicy::cli()) {
             Ok(mut client) => write_daemon_outcome(client.request(request), out, err),
             Err(error) => {
@@ -124,6 +136,89 @@ fn guard_workspace(out: &mut dyn Write) -> std::io::Result<ExitCode> {
     let stdin = std::io::stdin();
     usagi_cli::cli::hooks::guard_workspace::evaluate(&mut stdin.lock(), out)?;
     Ok(ExitCode::SUCCESS)
+}
+
+// Claude を OS sandbox の中で fail-closed 起動する合成の縁。実 platform / backend / 環境の解決と
+// exec を束ね、純粋な起動計画は `usagi_core::usecase::claude_sandbox` に委ねる。backend 不在・未対応
+// platform では無保護フォールバックせず、拒否理由を stderr へ書いて失敗終了する。
+#[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=macos_wraps_claude_with_a_write_confining_profile
+fn claude_sandbox(
+    mode: SandboxMode,
+    writable_roots: Vec<PathBuf>,
+    command: Vec<String>,
+    err: &mut dyn Write,
+) -> std::io::Result<ExitCode> {
+    let platform = if cfg!(target_os = "macos") {
+        Platform::MacOs
+    } else if cfg!(target_os = "linux") {
+        Platform::Linux
+    } else {
+        Platform::Unsupported
+    };
+    let request = SandboxRequest {
+        platform,
+        mode,
+        backend: resolve_sandbox_backend(platform),
+        launch_roots: writable_roots,
+        tmpdir: std::env::var_os("TMPDIR").map(PathBuf::from),
+        home: std::env::var_os("HOME").map(PathBuf::from),
+        command,
+    };
+    match claude_sandbox::plan(&request) {
+        SandboxPlan::Launch { program, argv } => exec_sandbox(&program, &argv, err),
+        SandboxPlan::Reject { reason } => {
+            writeln!(err, "claude-sandbox: {reason}")?;
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
+// 対象 platform の sandbox backend を探索する。macOS は既定パスの `sandbox-exec`、Linux は
+// PATH 上の `bwrap`。見つからなければ `None`（呼び出し側が fail-closed で拒否する）。
+#[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=a_missing_backend_is_rejected_on_each_supported_platform
+fn resolve_sandbox_backend(platform: Platform) -> Option<PathBuf> {
+    match platform {
+        Platform::MacOs => {
+            let path = PathBuf::from("/usr/bin/sandbox-exec");
+            path.exists().then_some(path)
+        }
+        Platform::Linux => std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|directory| directory.join("bwrap"))
+                .find(|candidate| candidate.is_file())
+        }),
+        Platform::Unsupported => None,
+    }
+}
+
+// backend を現在のプロセスに置き換えて起動する。exec は成功時に戻らないため、戻った場合は
+// 失敗であり、理由を stderr に書いて失敗終了する。unix 以外では plan() が既に拒否している。
+#[cfg(unix)]
+#[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=macos_wraps_claude_with_a_write_confining_profile
+fn exec_sandbox(
+    program: &std::path::Path,
+    argv: &[String],
+    err: &mut dyn Write,
+) -> std::io::Result<ExitCode> {
+    use std::os::unix::process::CommandExt;
+    let error = std::process::Command::new(program).args(argv).exec();
+    writeln!(
+        err,
+        "claude-sandbox: {} を exec できません: {error}",
+        program.display()
+    )?;
+    Ok(ExitCode::FAILURE)
+}
+
+#[cfg(not(unix))]
+#[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=unsupported_platform_never_launches_unprotected
+fn exec_sandbox(
+    _program: &std::path::Path,
+    _argv: &[String],
+    err: &mut dyn Write,
+) -> std::io::Result<ExitCode> {
+    writeln!(err, "claude-sandbox: OS sandbox は unix でのみ利用できます")?;
+    Ok(ExitCode::FAILURE)
 }
 
 #[coverage(off)] // coverage: reason=composition owner=root-cli expires=2027-01-31 tests=cli_daemon_reply_contract_maps_stdout_stderr_and_exit_code

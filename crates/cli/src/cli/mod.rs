@@ -18,8 +18,9 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
+use usagi_core::usecase::claude_sandbox::SandboxMode;
 use usagi_core::usecase::client::{DaemonRequest, SessionAction};
 
 /// CLI が合成ルートへ依頼する TUI の起動画面。
@@ -60,6 +61,16 @@ pub enum RunOutcome {
     /// Claude `PreToolUse` hook の payload を stdin から読み、worktree を出る
     /// ツール呼び出しなら deny 判定を stdout へ書く。判定は純粋（daemon 不要）。
     GuardWorkspace,
+    /// OS sandbox の中で Claude を fail-closed 起動する。合成ルートが platform / backend /
+    /// 環境を解決して sandbox を組み立て、backend 不在・未対応 platform では起動を拒否する。
+    ClaudeSandbox {
+        /// session（worktree 隔離）か root（コーディネータ）か。
+        mode: SandboxMode,
+        /// sandbox が書き込みを許す起動固有 root（複数指定可）。
+        writable_roots: Vec<PathBuf>,
+        /// sandbox の中で exec する program と引数（`claude …`）。
+        command: Vec<String>,
+    },
     /// A managed session mutation to be sent by the composition root through
     /// the daemon client. It deliberately is not executed against local state.
     DaemonRequest(DaemonRequest),
@@ -160,6 +171,39 @@ pub enum Command {
     /// （ヘルプ非表示・内部）worktree の外へ出るツール呼び出しを拒否する（`PreToolUse` フックが呼ぶ）
     #[command(hide = true)]
     GuardWorkspace,
+    /// （ヘルプ非表示・内部）OS sandbox の中で Claude を fail-closed 起動する
+    #[command(hide = true)]
+    ClaudeSandbox {
+        /// 起動モード（session / root）
+        #[arg(long)]
+        mode: SandboxModeArg,
+        /// sandbox が書き込みを許す起動固有 root（複数指定可）
+        #[arg(long = "writable-root")]
+        writable_root: Vec<PathBuf>,
+        /// sandbox の中で exec する program と引数（`-- claude …`）
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+}
+
+/// `usagi claude-sandbox --mode` が受け付ける起動モード。core の [`SandboxMode`] に写す
+/// （core は clap に依存しないため、CLI 面がこの薄い写像を持つ）。`Debug` は `Command` の
+/// derive、`Clone` は clap の値解析が使う。
+#[derive(Debug, Clone, ValueEnum)]
+pub enum SandboxModeArg {
+    /// session worktree に隔離されたエージェント。
+    Session,
+    /// workspace root で動くコーディネータ。
+    Root,
+}
+
+impl From<SandboxModeArg> for SandboxMode {
+    fn from(mode: SandboxModeArg) -> Self {
+        match mode {
+            SandboxModeArg::Session => SandboxMode::Session,
+            SandboxModeArg::Root => SandboxMode::Root,
+        }
+    }
 }
 
 /// daemon control plane が受理する閉じた lifecycle verb。
@@ -254,6 +298,15 @@ impl Command {
             Command::AgentPhase { phase } => Box::new(hooks::AgentPhase { phase }),
             Command::CodexSessionCapture => Box::new(hooks::CodexSessionCapture),
             Command::GuardWorkspace => Box::new(hooks::GuardWorkspace),
+            Command::ClaudeSandbox {
+                mode,
+                writable_root,
+                command,
+            } => Box::new(hooks::ClaudeSandbox {
+                mode: mode.into(),
+                writable_roots: writable_root,
+                command,
+            }),
         }
     }
 }
