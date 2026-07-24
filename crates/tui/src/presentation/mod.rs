@@ -10949,7 +10949,7 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let terminal = live_terminal_ref(workspace, session);
-        let (ui, _runtime) = focused_live_pane(
+        let (ui, runtime) = focused_live_pane(
             workspace,
             session,
             terminal.clone(),
@@ -10964,9 +10964,12 @@ mod tests {
         let cells = ui.terminal_cells(&terminal).expect("attached cells");
         let mut selection = TerminalSelection::begin(cells, TerminalPoint { row: 0, column: 0 });
         selection.extend(TerminalPoint { row: 1, column: 5 });
-        let rows = ui
-            .terminal_rows(&terminal, Some(&selection))
-            .expect("selection rows");
+        let mut controls = LiveTerminalControls::default();
+        controls.sync_focus(Some(&terminal));
+        controls.begin_selection(selection);
+        let rows = controller_terminal_view(&ui, &runtime, &mut controls, 10)
+            .expect("selection view")
+            .rows;
         // Row 0's trailing padding and the blank row 1 are highlighted.
         assert!(
             rows[0].contains("\u{1b}[7m") && rows[0].contains("ab"),
