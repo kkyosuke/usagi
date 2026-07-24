@@ -18,6 +18,7 @@ pub mod session_lifecycle;
 pub mod settings;
 pub mod supervisor;
 pub mod terminal_launch;
+pub mod terminal_visibility;
 pub mod trace;
 pub mod user_decision;
 pub mod workspace;

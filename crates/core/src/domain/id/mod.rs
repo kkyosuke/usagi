@@ -250,7 +250,7 @@ impl std::error::Error for ProtocolVersionError {}
 ///
 /// let _: WorkspaceId = SessionId::new();
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TerminalRef {
     /// Daemon generation that owns the terminal.
     pub daemon_generation: DaemonGeneration,
