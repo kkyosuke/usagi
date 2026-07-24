@@ -16,14 +16,15 @@ use std::time::{Duration, Instant};
 
 use usagi_core::domain::agent::AgentProfileId;
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId, WorktreeId};
+use usagi_core::domain::session_lifecycle::AgentPhase;
 use usagi_core::domain::terminal_launch::{
     TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
 };
 use usagi_core::infrastructure::ipc::ErrorCode;
 use usagi_core::usecase::client::{
     AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest,
-    IpcClient, SessionAction, TerminalAction, TerminalGeometry, TerminalLaunchIntent,
-    TerminalRequest,
+    IpcClient, McpCallerContext, SessionAction, TerminalAction, TerminalGeometry,
+    TerminalLaunchIntent, TerminalRequest,
 };
 use usagi_daemon::infrastructure::unix_transport::connect_current;
 
@@ -458,6 +459,45 @@ fn root_ipc_missing_or_not_authenticated_codex_is_safe_and_redacted() {
         safe_readiness_error(client.request(request()).unwrap_err());
         assert!(!count.exists(), "readiness failure must not spawn the PTY");
     }
+}
+
+/// An agent phase report is routed to the Agent owner over the real socket, and
+/// the credential is the only thing that can bind it to a runtime. A forged or
+/// malformed report is refused instead of silently answering `ok`.
+#[test]
+fn root_ipc_agent_phase_report_without_a_live_credential_fails_closed() {
+    let _serial = DAEMON_START_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let repo = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let _daemon = start_daemon(repo.path(), home.path(), &bin, None);
+    let mut client = client(&channel_data_dir(home.path()));
+
+    let forged = client
+        .request(DaemonRequest::AgentPhaseReport {
+            phase: AgentPhase::Waiting,
+            caller_context: McpCallerContext {
+                credential: "forged-credential".into(),
+            },
+        })
+        .unwrap_err();
+    assert_eq!(forged.code(), ErrorCode::OwnershipUnknown);
+    assert!(!forged.is_transport_failure(), "{forged}");
+    assert!(!forged.to_string().contains("forged-credential"));
+
+    // An empty credential is refused before the Agent owner is consulted.
+    let empty = client
+        .request(DaemonRequest::AgentPhaseReport {
+            phase: AgentPhase::Ready,
+            caller_context: McpCallerContext {
+                credential: String::new(),
+            },
+        })
+        .unwrap_err();
+    assert_eq!(empty.code(), ErrorCode::InvalidArgument);
 }
 
 #[test]

@@ -34,6 +34,59 @@ pub enum AgentPhase {
     Exited,
 }
 
+/// The documented provider lifecycle hook events usagi wires to a phase report,
+/// paired with the phase each event means.
+///
+/// This table is the single source for both the adapter which injects the hooks
+/// into a launched agent and the hook entry which validates one report.  A hook
+/// event outside this table has no phase, so a report naming it is refused.
+pub const AGENT_PHASE_HOOK_EVENTS: [(&str, AgentPhase); 6] = [
+    ("SessionStart", AgentPhase::Ready),
+    ("UserPromptSubmit", AgentPhase::Running),
+    ("PreToolUse", AgentPhase::Running),
+    ("Notification", AgentPhase::Waiting),
+    ("Stop", AgentPhase::Ended),
+    ("SessionEnd", AgentPhase::Exited),
+];
+
+impl AgentPhase {
+    /// Returns the closed, non-sensitive token used for this phase in a hook
+    /// argument and in the daemon's phase projection. It equals the wire name.
+    #[must_use]
+    pub const fn as_token(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Running => "running",
+            Self::Waiting => "waiting",
+            Self::Ended => "ended",
+            Self::Exited => "exited",
+        }
+    }
+
+    /// Parses one phase token. An unknown token yields `None` rather than a
+    /// default phase, so a caller cannot widen this closed vocabulary.
+    #[must_use]
+    pub fn parse_token(token: &str) -> Option<Self> {
+        [
+            Self::Ready,
+            Self::Running,
+            Self::Waiting,
+            Self::Ended,
+            Self::Exited,
+        ]
+        .into_iter()
+        .find(|phase| phase.as_token() == token)
+    }
+
+    /// Returns the phase usagi wires one documented hook event to, if any.
+    #[must_use]
+    pub fn for_hook_event(event: &str) -> Option<Self> {
+        AGENT_PHASE_HOOK_EVENTS
+            .into_iter()
+            .find_map(|(wired, phase)| (wired == event).then_some(phase))
+    }
+}
+
 /// The git relationship of a worktree; it is intentionally independent of lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -627,6 +680,36 @@ mod tests {
         assert_eq!(adopted.lifecycle, SessionLifecycle::Available);
         assert_eq!(adopted.changed_at, now());
         assert!(adopted.operation_id.is_none());
+    }
+    #[test]
+    fn agent_phase_tokens_and_wired_hook_events_stay_a_closed_vocabulary() {
+        for phase in [
+            AgentPhase::Ready,
+            AgentPhase::Running,
+            AgentPhase::Waiting,
+            AgentPhase::Ended,
+            AgentPhase::Exited,
+        ] {
+            // The token is the wire name, so one vocabulary covers the hook
+            // argument, the IPC request, and the daemon phase projection.
+            assert_eq!(
+                serde_json::to_value(phase).unwrap(),
+                serde_json::json!(phase.as_token())
+            );
+            assert_eq!(AgentPhase::parse_token(phase.as_token()), Some(phase));
+        }
+        assert_eq!(AgentPhase::parse_token("interrupted"), None);
+        assert_eq!(AgentPhase::parse_token(""), None);
+        assert_eq!(
+            AgentPhase::for_hook_event("SessionStart"),
+            Some(AgentPhase::Ready)
+        );
+        assert_eq!(
+            AgentPhase::for_hook_event("PreToolUse"),
+            Some(AgentPhase::Running)
+        );
+        assert_eq!(AgentPhase::for_hook_event("PostToolUse"), None);
+        assert_eq!(AGENT_PHASE_HOOK_EVENTS.len(), 6);
     }
     #[test]
     fn creation_completion_and_reverse_snapshot_are_fenced() {

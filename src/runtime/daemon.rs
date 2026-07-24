@@ -1681,6 +1681,7 @@ fn start_ipc_accept_loop(
                                         Some("session") => dispatch_session(&session, &agent_launch, &pr_inventory, request_id, &body, hello),
                                         Some("agent" | "agent_inventory" | "resume_agent") => dispatch_agent(&agent_launch, &scope_sessions, request_id, &body, hello),
                                         Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, request_id, &body, hello),
+                                        Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, request_id, &body, hello),
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &scope_sessions, request_id, &body, hello),
                                         Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
                                         Some("pr") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
@@ -3619,6 +3620,51 @@ fn dispatch_codex_session_capture(
             serde_json::Value::Null,
         ),
     }
+}
+
+/// Routes one private agent lifecycle phase report to the Agent owner.
+///
+/// Unlike the generic fallback dispatch, a body which is not a well formed phase
+/// report is refused here: an agent-originated report must fail closed instead
+/// of being echoed back as a success.
+fn dispatch_agent_phase_report(
+    agent: &SharedAgentRuntime,
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    body: &serde_json::Value,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
+
+    let request = serde_json::from_value::<DaemonRequest>(body.clone())
+        .ok()
+        .and_then(|request| match request {
+            DaemonRequest::AgentPhaseReport {
+                phase,
+                caller_context,
+            } => Some((phase, caller_context)),
+            _ => None,
+        });
+    let result = request
+        .filter(|(_, caller_context)| !caller_context.credential.is_empty())
+        .ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "agent phase report is not a valid credential-bound report",
+            )
+        })
+        .and_then(|(phase, caller_context)| {
+            agent
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                })?
+                .report_agent_phase(&caller_context.credential, phase)
+        });
+    let outcome = match result {
+        Ok(()) => ResponseOutcome::Ok,
+        Err(error) => ResponseOutcome::Error(error),
+    };
+    envelope(hello, request_id, outcome, serde_json::Value::Null)
 }
 
 fn envelope(

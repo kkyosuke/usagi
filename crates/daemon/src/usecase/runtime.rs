@@ -1099,6 +1099,34 @@ impl RuntimeCoordinator {
         record.provider_resume = Some(provider_resume);
         self.persist(store)
     }
+    /// Refines only the safe phase of an existing provider resume reference for
+    /// a live runtime.
+    ///
+    /// Process death stays observation-owned: this path never writes
+    /// `last_known_status`, and a runtime which is not `Running` is refused so a
+    /// late report cannot make a reconciled or exited record look alive.  A
+    /// record without provider metadata (for example Codex before its
+    /// structured capture) is a no-op rather than a synthesized reference, and
+    /// an unchanged phase does not persist a snapshot.
+    pub fn record_provider_phase(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        phase: ProviderResumePhase,
+        store: &mut dyn RuntimeStore,
+    ) -> Result<(), RuntimeError> {
+        let record = self.record_mut(runtime)?;
+        if record.state != RuntimeState::Running {
+            return Err(RuntimeError::ProviderResumeMismatch);
+        }
+        let Some(reference) = record.provider_resume.as_mut() else {
+            return Ok(());
+        };
+        if reference.last_known_phase == Some(phase) {
+            return Ok(());
+        }
+        reference.last_known_phase = Some(phase);
+        self.persist(store)
+    }
     #[must_use]
     pub fn snapshot(&self) -> RuntimeStoreSnapshot {
         RuntimeStoreSnapshot {
@@ -1985,6 +2013,68 @@ mod tests {
         c.terminals.disconnect(connection);
         assert_eq!(attached.snapshot.replay, b"hello");
         assert_eq!(c.occupied_slots(), 1);
+    }
+    #[test]
+    fn provider_phase_refinement_is_live_only_deduped_and_never_synthesizes_metadata() {
+        let request = request();
+        let (runtime, fence) = refs(&request);
+        let mut c = RuntimeCoordinator::new(1, 1024, 2);
+        let mut store = Store::default();
+        let mut spawner = Spawner(Ok(process()));
+        launch(
+            &mut c,
+            &request,
+            runtime.clone(),
+            fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+
+        // A record without provider metadata has no durable phase to refine.
+        let saves = store.0.len();
+        c.record_provider_phase(&runtime, ProviderResumePhase::Running, &mut store)
+            .unwrap();
+        assert_eq!(store.0.len(), saves);
+        assert!(c.record_for(&runtime).unwrap().provider_resume.is_none());
+
+        // With metadata, only a changed phase persists a snapshot.
+        let reference = ProviderResumeRef {
+            provider: usagi_core::domain::agent::ProviderKind::Claude,
+            native_session_id: usagi_core::domain::agent::ProviderSessionId::new("native").unwrap(),
+            adapter_revision: 7,
+            scope: request.scope.clone(),
+            provenance: usagi_core::domain::agent::ProviderCaptureProvenance::DaemonIssued,
+            last_known_status: ProviderResumeStatus::Active,
+            last_known_phase: Some(ProviderResumePhase::Starting),
+        };
+        c.record_provider_resume(&runtime, reference, &mut store)
+            .unwrap();
+        let saves = store.0.len();
+        c.record_provider_phase(&runtime, ProviderResumePhase::Starting, &mut store)
+            .unwrap();
+        assert_eq!(store.0.len(), saves);
+        c.record_provider_phase(&runtime, ProviderResumePhase::Running, &mut store)
+            .unwrap();
+        assert_eq!(store.0.len(), saves + 1);
+        let refined = c.record_for(&runtime).unwrap().provider_resume.clone();
+        assert_eq!(
+            refined.as_ref().and_then(|value| value.last_known_phase),
+            Some(ProviderResumePhase::Running)
+        );
+        // The refinement never touches liveness.
+        assert_eq!(
+            refined.map(|value| value.last_known_status),
+            Some(ProviderResumeStatus::Active)
+        );
+
+        // A runtime which is no longer live refuses the refinement outright.
+        c.exit(&runtime, 0, &mut store).unwrap();
+        assert_eq!(
+            c.record_provider_phase(&runtime, ProviderResumePhase::Running, &mut store)
+                .unwrap_err(),
+            RuntimeError::ProviderResumeMismatch
+        );
     }
     #[test]
     fn inventory_lists_only_in_scope_agents_and_marks_live_until_exit() {
