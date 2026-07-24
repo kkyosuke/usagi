@@ -1,13 +1,13 @@
 ---
 number: 525
 title: fix(tui/daemon): TUI不在中にexitしたterminalのfinal replayへ到達可能にする
-status: todo
+status: done
 priority: high
 labels: [review, v2, tui, daemon, terminal, replay, recovery]
 dependson: []
 related: [385, 386, 388, 473, 506, 510]
 created_at: 2026-07-22T11:42:27.682373+00:00
-updated_at: 2026-07-22T12:02:26.531821+00:00
+updated_at: 2026-07-24T13:51:29.004604+00:00
 ---
 
 ## 問題・影響

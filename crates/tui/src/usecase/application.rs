@@ -21,6 +21,8 @@ pub mod agent_launch;
 pub mod agent_runtime;
 /// Agent tab の表示 intent を daemon inventory と照合する純粋 reducer と永続化 port。
 pub mod agent_tab_intent;
+/// exited tombstone を read-only completed tab へ投影する純粋 reducer（#525）。
+pub mod completed_tab;
 /// Home の application controller。端末や daemon wire 型に依存しない reducer と
 /// fake backend seam を提供する。
 pub mod controller;
