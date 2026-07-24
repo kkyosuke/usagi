@@ -347,9 +347,12 @@ fn main() -> anyhow::Result<()> {
         Commands::AgentPhase { phase } => {
             usagi::presentation::cli::agent_phase::run(phase, std::io::stdin().lock())
         }
-        Commands::Clean { dry_run, agent } => {
-            usagi::presentation::cli::clean::run(dry_run, agent, spawn_detached)
-        }
+        Commands::Clean { dry_run, agent } => usagi::presentation::cli::clean::run(
+            dry_run,
+            agent,
+            spawn_detached,
+            usagi::usecase::session::resume_pending_removals,
+        ),
         Commands::Completion { shell } => {
             let mut cmd = Cli::command();
             let mut stdout = std::io::stdout();
