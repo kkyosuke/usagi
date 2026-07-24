@@ -187,65 +187,6 @@ pub fn worktree_from_hook_json(raw: &str) -> Option<PathBuf> {
     serde_json::from_str::<HookInput>(raw).ok()?.cwd
 }
 
-/// Extract the file path a tool is about to touch from a Claude Code
-/// `PreToolUse` hook payload: `tool_input.file_path` (the field Read / Edit /
-/// Write carry). Returns `None` when the payload is not JSON, carries no
-/// `tool_input`, or the tool has no `file_path` (e.g. `Bash`, `Grep`), so the
-/// caller treats those calls as nothing to guard. Used by
-/// [`crate::presentation::cli::guard_workspace`] to confine the agent to its
-/// session worktree.
-pub fn tool_path_from_hook_json(raw: &str) -> Option<PathBuf> {
-    /// The nested fields usagi reads from a `PreToolUse` payload.
-    #[derive(Deserialize)]
-    struct HookInput {
-        tool_input: Option<ToolInput>,
-    }
-    #[derive(Deserialize)]
-    struct ToolInput {
-        file_path: Option<PathBuf>,
-    }
-    serde_json::from_str::<HookInput>(raw)
-        .ok()?
-        .tool_input?
-        .file_path
-}
-
-/// Extract the tool name a Claude Code `PreToolUse` hook is about to run:
-/// `tool_name` (e.g. `"Edit"`, `"Write"`, `"Bash"`). Returns `None` when the
-/// payload is not JSON or carries no `tool_name`. Used by
-/// [`crate::presentation::cli::guard_workspace`]'s root mode to deny
-/// file-writing tools regardless of their target path.
-pub fn tool_name_from_hook_json(raw: &str) -> Option<String> {
-    /// The single field usagi reads from a `PreToolUse` payload here.
-    #[derive(Deserialize)]
-    struct HookInput {
-        tool_name: Option<String>,
-    }
-    serde_json::from_str::<HookInput>(raw).ok()?.tool_name
-}
-
-/// Extract the shell command a `Bash` tool call is about to run from a Claude
-/// Code `PreToolUse` hook payload: `tool_input.command`. Returns `None` when the
-/// payload is not JSON, carries no `tool_input`, or the tool has no `command`
-/// (every non-`Bash` tool). Used by
-/// [`crate::presentation::cli::guard_workspace`]'s root mode to inspect the git
-/// subcommand a `Bash` call would run.
-pub fn bash_command_from_hook_json(raw: &str) -> Option<String> {
-    /// The nested fields usagi reads from a `Bash` `PreToolUse` payload.
-    #[derive(Deserialize)]
-    struct HookInput {
-        tool_input: Option<ToolInput>,
-    }
-    #[derive(Deserialize)]
-    struct ToolInput {
-        command: Option<String>,
-    }
-    serde_json::from_str::<HookInput>(raw)
-        .ok()?
-        .tool_input?
-        .command
-}
-
 /// Extract the `source` of a Claude Code `SessionStart` hook from its JSON
 /// payload: `"startup"`, `"resume"`, `"clear"`, or `"compact"`. Returns `None`
 /// when the payload is not JSON or carries no `source` (every non-`SessionStart`
@@ -424,63 +365,6 @@ mod tests {
         assert_eq!(worktree_from_hook_json(r#"{"session_id":"x"}"#), None);
         // Not JSON at all.
         assert_eq!(worktree_from_hook_json("not json"), None);
-    }
-
-    #[test]
-    fn tool_path_reads_the_file_path_from_tool_input() {
-        let json = r#"{"cwd":"/repo/wt","tool_name":"Edit","tool_input":{"file_path":"/repo/src/main.rs"}}"#;
-        assert_eq!(
-            tool_path_from_hook_json(json),
-            Some(PathBuf::from("/repo/src/main.rs"))
-        );
-    }
-
-    #[test]
-    fn tool_path_is_none_when_the_tool_has_no_file_path_or_on_garbage() {
-        // A Bash call carries a `command`, not a `file_path`: nothing to guard.
-        assert_eq!(
-            tool_path_from_hook_json(r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#),
-            None
-        );
-        // No tool_input at all.
-        assert_eq!(tool_path_from_hook_json(r#"{"cwd":"/repo/wt"}"#), None);
-        // Not JSON at all.
-        assert_eq!(tool_path_from_hook_json("not json"), None);
-    }
-
-    #[test]
-    fn tool_name_reads_the_tool_name_field() {
-        let json =
-            r#"{"cwd":"/repo","tool_name":"Edit","tool_input":{"file_path":"/repo/src/main.rs"}}"#;
-        assert_eq!(tool_name_from_hook_json(json), Some("Edit".to_string()));
-    }
-
-    #[test]
-    fn tool_name_is_none_without_a_tool_name_or_on_garbage() {
-        assert_eq!(tool_name_from_hook_json(r#"{"cwd":"/repo"}"#), None);
-        assert_eq!(tool_name_from_hook_json("not json"), None);
-    }
-
-    #[test]
-    fn bash_command_reads_the_command_from_tool_input() {
-        let json = r#"{"tool_name":"Bash","tool_input":{"command":"git status"}}"#;
-        assert_eq!(
-            bash_command_from_hook_json(json),
-            Some("git status".to_string())
-        );
-    }
-
-    #[test]
-    fn bash_command_is_none_when_the_tool_has_no_command_or_on_garbage() {
-        // An Edit call carries a `file_path`, not a `command`.
-        assert_eq!(
-            bash_command_from_hook_json(r#"{"tool_name":"Edit","tool_input":{"file_path":"/x"}}"#),
-            None
-        );
-        // No tool_input at all.
-        assert_eq!(bash_command_from_hook_json(r#"{"cwd":"/repo"}"#), None);
-        // Not JSON at all.
-        assert_eq!(bash_command_from_hook_json("not json"), None);
     }
 
     #[test]
