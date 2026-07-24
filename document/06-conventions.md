@@ -50,7 +50,7 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 | `fs2` | ストア、daemon current locator、合成ルートの daemon 単一インスタンスの cross-process ロック（`flock` 相当） | 本依存 |
 | `dirs` | 既定データディレクトリ（`~/.usagi`）の解決 | 本依存 |
 | `rayon` | markdown ファイルの並列スキャン | 本依存 |
-| `unicode-width` | 端末描画の表示桁数測定（CJK など全角の 2 桁計上） | 本依存 |
+| `unicode-width` | 端末セルの表示桁数測定（CJK など全角の 2 桁計上）。`usagi-core` の VT parser（`usecase::vt_screen`）と `usagi-tui` の描画が使う | 本依存 |
 | `clap` | 入口面 CLI の引数解析（コマンドツリー定義） | 本依存 |
 | `clap_complete` | `usagi completion <shell>` のシェル補完スクリプト生成 | 本依存 |
 | `crossterm` | 対話 TUI の実端末バックエンド（raw mode・代替スクリーン・キー/リサイズイベント） | 本依存 |
@@ -62,7 +62,9 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 `chrono` / `serde` / `uuid` だけを使う。`serde_json` / `anyhow` / `fs2` / `dirs` / `rayon` は
 `infrastructure/`（永続化）が使い、`serde_json` は加えて `usagi-cli` の MCP サーバ（stdio
 JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う。`unicode-width` は
-`usagi-tui`、`clap` / `clap_complete` は `usagi-cli` が使う。
+`usagi-core` の usecase 層（VT parser `vt_screen`）と `usagi-tui` の描画が使う（domain の
+`chrono` / `serde` / `uuid` 規則は不変で、`unicode-width` は domain には持ち込まない）。
+`clap` / `clap_complete` は `usagi-cli` が使う。
 `sha2` は合成ルートの `build.rs` が source / build configuration identity、IPC contract が rollover operation ID を
 作るためにも使う。
 `chrono` / `anyhow` は `usagi-cli` の MCP store adapter が実時計の束縛と core usecase の

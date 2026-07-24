@@ -1,14 +1,14 @@
 ---
 number: 532
 title: refactor(core): VT parser を usagi-core へ抽出（挙動不変）
-status: todo
+status: done
 priority: high
 labels: [refactor, v2, core, tui, terminal, vt]
 dependson: []
 related: [524, 199]
 parent: 524
 created_at: 2026-07-24T12:46:06.279910+00:00
-updated_at: 2026-07-24T12:46:06.279910+00:00
+updated_at: 2026-07-24T13:53:44.555517+00:00
 ---
 
 [#524](524-fix-terminal-raw-64kib-tail-vt-parser-safe-snapshot.md) の設計 [`document/proposals/12-terminal-vt-snapshot.md`](../../document/proposals/12-terminal-vt-snapshot.md) の **Phase 1**。

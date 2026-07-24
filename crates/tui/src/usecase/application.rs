@@ -44,7 +44,8 @@ pub mod pr;
 pub mod terminal_launch;
 /// Pure http(s) URL detection and validation over the ANSI-free terminal grid.
 pub mod terminal_link;
-/// Minimal VT screen grid turning raw daemon PTY output into renderable rows.
+/// Rendering wrapper over the shared core VT parser, projecting the screen into
+/// styled/selection/cursor rows for the pane.
 pub mod terminal_screen;
 /// Pure selection and text extraction for daemon-owned terminal output.
 pub mod terminal_selection;
