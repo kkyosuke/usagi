@@ -21,6 +21,8 @@ toml.workspace = true
 # MCP store adapters bind the production clock and translate core usecase errors.
 chrono.workspace = true
 anyhow.workspace = true
+# claude-sandbox launcher が macOS の Darwin user cache directory を confstr で解決するため。
+libc.workspace = true
 
 [dev-dependencies]
 # update のテストで GitRunner のフェイクを書くため（seam の戻り値が anyhow::Result）。

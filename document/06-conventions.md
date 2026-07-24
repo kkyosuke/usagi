@@ -53,8 +53,9 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 | `unicode-width` | 端末描画の表示桁数測定（CJK など全角の 2 桁計上） | 本依存 |
 | `clap` | 入口面 CLI の引数解析（コマンドツリー定義） | 本依存 |
 | `clap_complete` | `usagi completion <shell>` のシェル補完スクリプト生成 | 本依存 |
+| `shell-words` | `usagi-core` の workspace_guard usecase が root 行の Bash command を字句解析して read-only allowlist と照合する | 本依存 |
 | `crossterm` | 対話 TUI の実端末バックエンド（raw mode・代替スクリーン・キー/リサイズイベント） | 本依存 |
-| `libc` | 合成ルートでの daemon process-start identity 観測と exact-owner signal | 本依存 |
+| `libc` | 合成ルートでの daemon process-start identity 観測と exact-owner signal、`usagi-cli` の claude-sandbox launcher が macOS の Darwin user cache directory を confstr で解決する | 本依存 |
 | `signal-hook` | 合成ルートで daemon の SIGINT / SIGTERM handler と同期 wait を worker spawn 前に準備する | 本依存 |
 | `tempfile` | ストアのユニットテスト用の一時ディレクトリ | dev |
 
@@ -62,13 +63,14 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 `chrono` / `serde` / `uuid` だけを使う。`serde_json` / `anyhow` / `fs2` / `dirs` / `rayon` は
 `infrastructure/`（永続化）が使い、`serde_json` は加えて `usagi-cli` の MCP サーバ（stdio
 JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う。`unicode-width` は
-`usagi-tui`、`clap` / `clap_complete` は `usagi-cli` が使う。
+`usagi-tui`、`clap` / `clap_complete` は `usagi-cli` が使う。`shell-words` は `usagi-core` の
+workspace_guard usecase（root 行の Bash 字句解析）が使う。
 `sha2` は合成ルートの `build.rs` が source / build configuration identity、IPC contract が rollover operation ID を
 作るためにも使う。
 `chrono` / `anyhow` は `usagi-cli` の MCP store adapter が実時計の束縛と core usecase の
 エラー変換にも使う。`fs2` は `usagi-daemon` の current locator publish / retire も直列化する。
 `crossterm`（実端末 IO）・`libc`（daemon の process-start identity 観測と fenced signal）・`signal-hook`（daemon shutdown signal）・`fs2`（daemon 単一インスタンス
-ロック）は合成ルート（`src/main.rs`）も使い、`usagi-tui` は `Terminal` ポートに対して純粋に振る舞う
+ロック）は合成ルート（`src/main.rs`）も使い、`libc` は加えて `usagi-cli` の claude-sandbox launcher が macOS の Darwin user cache 解決に使う。`usagi-tui` は `Terminal` ポートに対して純粋に振る舞う
 （[2. アーキテクチャ#依存ルール](02-architecture.md#依存ルール)）。
 
 ## ブランチ名
