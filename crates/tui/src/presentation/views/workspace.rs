@@ -3681,6 +3681,7 @@ mod tests {
     /// #510: an interrupted history tab is labelled and explained only from the
     /// closed provider/reason vocabulary, and its body replaces the phase line.
     #[test]
+    #[allow(clippy::too_many_lines)] // Label, selection, and every body variant.
     fn interrupted_history_tabs_render_safe_labels_and_a_resume_hint() {
         use crate::usecase::application::interrupted_tab::InterruptedTab;
         use crate::usecase::application::pane::{InterruptedPane, PaneEvent, PaneState, reduce};

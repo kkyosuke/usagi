@@ -669,6 +669,7 @@ fn wait_for_spawns(count: &Path, expected: usize) {
 /// action must produce exactly one operation, one child spawn, and one new
 /// `TerminalRef` for exactly the selected lineage.
 #[test]
+#[allow(clippy::too_many_lines)] // One cold-restart product flow, asserted end to end.
 fn root_ipc_cold_restart_projects_interrupted_history_and_resumes_one_exact_tab() {
     use std::collections::BTreeSet;
     use usagi_core::domain::agent::{
