@@ -5356,12 +5356,10 @@ mod tests {
         let visibility = |value: &Value| -> TerminalVisibility {
             serde_json::from_value(value["visibility"].clone()).unwrap()
         };
-        let send = |owner: &mut SharedTerminalOwner<_, _>, request: TerminalRequest| -> Value {
-            let action = match request {
-                TerminalRequest::Observe { .. } => TerminalAction::Observe,
-                TerminalRequest::Dismiss { .. } => TerminalAction::Dismiss,
-                _ => unreachable!(),
-            };
+        let send = |owner: &mut SharedTerminalOwner<_, _>,
+                    action: TerminalAction,
+                    request: TerminalRequest|
+         -> Value {
             owner
                 .request(
                     connection,
@@ -5375,6 +5373,7 @@ mod tests {
 
         let observed = send(
             &mut owner,
+            TerminalAction::Observe,
             TerminalRequest::Observe {
                 terminal: terminal.clone(),
                 expected_revision: 0,
@@ -5389,6 +5388,7 @@ mod tests {
         // A stale dismiss conflicts and returns the authoritative snapshot.
         let conflict = send(
             &mut owner,
+            TerminalAction::Dismiss,
             TerminalRequest::Dismiss {
                 terminal: terminal.clone(),
                 expected_revision: 0,
@@ -5404,6 +5404,7 @@ mod tests {
         // Merging to the authoritative revision succeeds.
         let dismissed = send(
             &mut owner,
+            TerminalAction::Dismiss,
             TerminalRequest::Dismiss {
                 terminal: terminal.clone(),
                 expected_revision: 1,
@@ -5418,6 +5419,7 @@ mod tests {
         // A stale observe never lowers the dismissed state (idempotent no-op).
         let idempotent = send(
             &mut owner,
+            TerminalAction::Observe,
             TerminalRequest::Observe {
                 terminal,
                 expected_revision: 0,
