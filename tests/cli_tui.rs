@@ -336,10 +336,10 @@ fn spawn_fake_daemon(home: &Path, reply: FakeDaemonReply) -> thread::JoinHandle<
 
 #[cfg(target_os = "linux")]
 fn fixture_process_start_identity(pid: u32) -> String {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-    let close = stat.rfind(')').unwrap();
-    let start = stat[close + 1..].split_whitespace().nth(19).unwrap();
-    format!("linux:{start}")
+    let stat_text = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let close = stat_text.rfind(')').unwrap();
+    let start_ticks = stat_text[close + 1..].split_whitespace().nth(19).unwrap();
+    format!("linux:{start_ticks}")
 }
 
 #[cfg(target_os = "macos")]
