@@ -102,6 +102,10 @@ crossterm = "0.29"
 clap = { version = "4.5", features = ["derive", "string"] }
 # `usagi completion <shell>` がシェル補完スクリプトを clap のコマンドツリーから生成する。
 clap_complete = "4.5"
+# root 行の workspace guard が Bash ツール呼び出しの shell command を字句解析し、
+# mutating な git サブコマンドを read-only allowlist と照合するため（usagi-core の
+# workspace_guard usecase が使う）。
+shell-words = "1.1"
 
 # 合成ルートが daemon の pid 生存判定（Unix の signal 0）に使う。
 libc = "0.2"

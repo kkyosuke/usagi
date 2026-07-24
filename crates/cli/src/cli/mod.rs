@@ -57,6 +57,9 @@ pub enum RunOutcome {
     LaunchMcp,
     /// Codex `SessionStart` hook の structured payload を daemon へ渡す。
     CaptureCodexSession,
+    /// Claude `PreToolUse` hook の payload を stdin から読み、worktree を出る
+    /// ツール呼び出しなら deny 判定を stdout へ書く。判定は純粋（daemon 不要）。
+    GuardWorkspace,
     /// A managed session mutation to be sent by the composition root through
     /// the daemon client. It deliberately is not executed against local state.
     DaemonRequest(DaemonRequest),

@@ -6,8 +6,9 @@
 //! コマンドとして持つしかない。`--help` には出さない（`hide = true`）が、CLI コマンド
 //! ツリーの一部として同じ `Run` dispatch に載る。
 //!
-//! Codex capture は documented stdin JSON を private daemon request に変換する。Claude 用の
-//! guard / phase はまだ枠だけで、終了コード 0 を返す。
+//! Codex capture は documented stdin JSON を private daemon request に変換する。Claude の
+//! `guard-workspace` は `PreToolUse` payload を検査し、worktree を出るツール呼び出しを deny する
+//! （判定は [`usagi_core::usecase::workspace_guard`]）。phase 報告はまだ枠だけで終了コード 0 を返す。
 
 pub mod agent_phase;
 pub mod codex_session_capture;

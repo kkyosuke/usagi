@@ -92,6 +92,7 @@ pub(crate) fn dispatch(
                 }
             }
         }
+        RunOutcome::GuardWorkspace => guard_workspace(out),
         RunOutcome::DaemonRequest(request) => match daemon::client(ClientPolicy::cli()) {
             Ok(mut client) => write_daemon_outcome(client.request(request), out, err),
             Err(error) => {
@@ -114,6 +115,15 @@ pub(crate) fn dispatch(
             }
         }
     }
+}
+
+// Claude `PreToolUse` フックの実 stdin を束ね、純粋な判定 usecase に委ねる合成の縁。
+// deny は終了コードではなく stdout の JSON payload で伝えるため、常に成功終了する。
+#[coverage(off)] // coverage: reason=composition owner=root-cli expires=2027-01-31 tests=denies_a_tool_targeting_the_parent_repo
+fn guard_workspace(out: &mut dyn Write) -> std::io::Result<ExitCode> {
+    let stdin = std::io::stdin();
+    usagi_cli::cli::hooks::guard_workspace::evaluate(&mut stdin.lock(), out)?;
+    Ok(ExitCode::SUCCESS)
 }
 
 #[coverage(off)] // coverage: reason=composition owner=root-cli expires=2027-01-31 tests=cli_daemon_reply_contract_maps_stdout_stderr_and_exit_code
