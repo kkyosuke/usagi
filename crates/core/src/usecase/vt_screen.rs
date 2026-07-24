@@ -1645,8 +1645,8 @@ mod tests {
         }
     }
 
-    fn reject(cp: ScreenCheckpoint) -> CheckpointError {
-        VtScreen::from_checkpoint(&cp).expect_err("hostile checkpoint must fail closed")
+    fn reject(cp: &ScreenCheckpoint) -> CheckpointError {
+        VtScreen::from_checkpoint(cp).expect_err("hostile checkpoint must fail closed")
     }
 
     #[test]
@@ -1654,7 +1654,7 @@ mod tests {
         let mut cp = valid_checkpoint();
         cp.schema_version = 99;
         assert_eq!(
-            reject(cp),
+            reject(&cp),
             CheckpointError::UnknownSchemaVersion {
                 found: 99,
                 expected: SCHEMA_VERSION
@@ -1667,7 +1667,7 @@ mod tests {
             rows: 100_000,
             cols: 100_000,
         };
-        assert_eq!(reject(cp), CheckpointError::CellCountOverflow);
+        assert_eq!(reject(&cp), CheckpointError::CellCountOverflow);
 
         // Product fits but exceeds the per-terminal cell budget.
         let mut cp = valid_checkpoint();
@@ -1675,58 +1675,58 @@ mod tests {
             rows: 2048,
             cols: 2048,
         };
-        assert_eq!(reject(cp), CheckpointError::TooManyCells(4_194_304));
+        assert_eq!(reject(&cp), CheckpointError::TooManyCells(4_194_304));
 
         let mut cp = valid_checkpoint();
         cp.geometry = Geometry { rows: 0, cols: 1 };
-        assert_eq!(reject(cp), CheckpointError::RowsOutOfRange(0));
+        assert_eq!(reject(&cp), CheckpointError::RowsOutOfRange(0));
         let mut cp = valid_checkpoint();
         cp.geometry = Geometry {
             rows: ROWS_MAX + 1,
             cols: 1,
         };
-        assert_eq!(reject(cp), CheckpointError::RowsOutOfRange(ROWS_MAX + 1));
+        assert_eq!(reject(&cp), CheckpointError::RowsOutOfRange(ROWS_MAX + 1));
 
         let mut cp = valid_checkpoint();
         cp.geometry = Geometry { rows: 1, cols: 0 };
-        assert_eq!(reject(cp), CheckpointError::ColsOutOfRange(0));
+        assert_eq!(reject(&cp), CheckpointError::ColsOutOfRange(0));
         let mut cp = valid_checkpoint();
         cp.geometry = Geometry {
             rows: 1,
             cols: COLS_MAX + 1,
         };
-        assert_eq!(reject(cp), CheckpointError::ColsOutOfRange(COLS_MAX + 1));
+        assert_eq!(reject(&cp), CheckpointError::ColsOutOfRange(COLS_MAX + 1));
 
         let mut cp = valid_checkpoint();
         cp.styles = vec![String::new(); STYLES_MAX + 1];
-        assert_eq!(reject(cp), CheckpointError::TooManyStyles(STYLES_MAX + 1));
+        assert_eq!(reject(&cp), CheckpointError::TooManyStyles(STYLES_MAX + 1));
 
         let mut cp = valid_checkpoint();
         cp.decoder.params = "1".repeat(PARAMS_MAX + 1);
-        assert_eq!(reject(cp), CheckpointError::ParamsTooLong(PARAMS_MAX + 1));
+        assert_eq!(reject(&cp), CheckpointError::ParamsTooLong(PARAMS_MAX + 1));
 
         let mut cp = valid_checkpoint();
         cp.decoder.utf8_pending = vec![0x80; UTF8_PENDING_MAX + 1];
         assert_eq!(
-            reject(cp),
+            reject(&cp),
             CheckpointError::Utf8PendingTooLong(UTF8_PENDING_MAX + 1)
         );
 
         let mut cp = valid_checkpoint();
         cp.decoder.utf8_needed = UTF8_NEEDED_MAX + 1;
         assert_eq!(
-            reject(cp),
+            reject(&cp),
             CheckpointError::Utf8NeededOutOfRange(UTF8_NEEDED_MAX + 1)
         );
 
         // Alternate advertised as active but not carried.
         let mut cp = valid_checkpoint();
         cp.active = ActiveBuffer::Alternate;
-        assert_eq!(reject(cp), CheckpointError::ActiveBufferMismatch);
+        assert_eq!(reject(&cp), CheckpointError::ActiveBufferMismatch);
         // Alternate carried but not active.
         let mut cp = valid_checkpoint();
         cp.alternate = Some(cp.primary.clone());
-        assert_eq!(reject(cp), CheckpointError::ActiveBufferMismatch);
+        assert_eq!(reject(&cp), CheckpointError::ActiveBufferMismatch);
     }
 
     #[test]
@@ -1734,7 +1734,7 @@ mod tests {
         let mut cp = valid_checkpoint();
         cp.geometry = Geometry { rows: 2, cols: 1 };
         assert_eq!(
-            reject(cp),
+            reject(&cp),
             CheckpointError::GridRowCount {
                 expected: 2,
                 actual: 1
@@ -1744,7 +1744,7 @@ mod tests {
         let mut cp = valid_checkpoint();
         cp.primary.scrollback = vec![RowCheckpoint { runs: Vec::new() }; SCROLLBACK_MAX + 1];
         assert_eq!(
-            reject(cp),
+            reject(&cp),
             CheckpointError::ScrollbackTooLong(SCROLLBACK_MAX + 1)
         );
 
@@ -1752,7 +1752,7 @@ mod tests {
         let mut cp = valid_checkpoint();
         cp.primary.style_id = 5;
         assert_eq!(
-            reject(cp),
+            reject(&cp),
             CheckpointError::StyleIdOutOfRange { id: 5, styles: 1 }
         );
 
@@ -1767,7 +1767,7 @@ mod tests {
             }],
         }];
         assert_eq!(
-            reject(cp),
+            reject(&cp),
             CheckpointError::StyleIdOutOfRange { id: 9, styles: 1 }
         );
 
@@ -1790,38 +1790,41 @@ mod tests {
                 },
             ],
         }];
-        assert_eq!(reject(cp), CheckpointError::RowRepeatOverflow);
+        assert_eq!(reject(&cp), CheckpointError::RowRepeatOverflow);
 
         // Runs do not expand to `cols`.
         let mut cp = valid_checkpoint();
         cp.geometry = Geometry { rows: 1, cols: 3 };
         assert_eq!(
-            reject(cp),
+            reject(&cp),
             CheckpointError::RowLength {
                 expected: 3,
                 actual: 1
             }
         );
+    }
 
+    #[test]
+    fn hostile_cursor_and_scroll_region_fail_closed() {
         // Cursor row past the grid.
         let mut cp = valid_checkpoint();
         cp.primary.cursor = (1, 0);
         assert_eq!(
-            reject(cp),
+            reject(&cp),
             CheckpointError::CursorOutOfRange { row: 1, col: 0 }
         );
         // Cursor column past the one-cell-past-last limit.
         let mut cp = valid_checkpoint();
         cp.primary.cursor = (0, 2);
         assert_eq!(
-            reject(cp),
+            reject(&cp),
             CheckpointError::CursorOutOfRange { row: 0, col: 2 }
         );
         // Saved cursor out of range.
         let mut cp = valid_checkpoint();
         cp.primary.saved_cursor = Some((0, 9));
         assert_eq!(
-            reject(cp),
+            reject(&cp),
             CheckpointError::CursorOutOfRange { row: 0, col: 9 }
         );
 
@@ -1829,7 +1832,7 @@ mod tests {
         let mut cp = valid_checkpoint();
         cp.primary.scroll_region = (0, 5);
         assert_eq!(
-            reject(cp),
+            reject(&cp),
             CheckpointError::ScrollRegionInvalid { top: 0, bottom: 5 }
         );
         // Inverted scroll region.
@@ -1848,7 +1851,7 @@ mod tests {
         ];
         cp.primary.scroll_region = (2, 1);
         assert_eq!(
-            reject(cp),
+            reject(&cp),
             CheckpointError::ScrollRegionInvalid { top: 2, bottom: 1 }
         );
     }
