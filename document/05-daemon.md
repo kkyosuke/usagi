@@ -38,6 +38,8 @@ session incarnation で fence する。IPC の create/remove は daemon が rese
 effect を実行し、同じ daemon generation・operation・session attempt・revision の completion だけを反映する。
 失敗した effect は safe failure として残り、client が local worktree 操作へ fallback しない。
 
+create/remove の重い Git worktree 構築・撤去（`git worktree add` / `remove`）は**共有 session lock を解放した状態で実行する**。lock を握るのは fast な durable transition（reservation・`BeginRemove`・completion の永続化）だけであり、その間に session 一覧・terminal poll・user-decision 一覧など他 connection の read が同じ lock 待ちで固まらない。したがって長い worktree 操作の最中も daemon は応答し続け、TUI の描画・入力ループが session 作成・削除で凍結しない。
+
 各 managed session は `SessionId` と `WorktreeId` を同時に永続化する。agent / delegation が必要とする path は、available の workspace / session / worktree identity がすべて一致する場合だけ daemon が返す。creating、deleting、failed、stale identity、表示名・path-only の指定は scope に解決しない。
 
 workspace root（`⌂ root`）も一つの scope として同じ仕組みで解決する。root scope は `session_id` を持たず（`None`）、workspace ごとに一度だけ生成して永続化した **root `WorktreeId`** で識別する。daemon は snapshot でこの root worktree id を公開し、launch 時に要求された workspace / root worktree identity が自分のものと一致する場合だけ、cwd を **trusted repository root** に解決する。root scope の cwd は常に daemon が持つ trusted root であり、client 供給の path は使わない。session scope の fence（`session_id` 必須の completion）はこの追加で回帰しない。詳細な設計根拠は [proposals/10-workspace-root-scope.md](proposals/10-workspace-root-scope.md)。

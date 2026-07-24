@@ -71,7 +71,9 @@ use usagi_daemon::usecase::runtime::{
     SpawnProvision, TerminateReapError,
 };
 use usagi_daemon::usecase::serve::DaemonRecordPort;
-use usagi_daemon::usecase::session_runtime::{SessionRuntime, SessionRuntimeError, SystemGit};
+use usagi_daemon::usecase::session_runtime::{
+    SessionRuntime, SessionRuntimeError, SystemGit, perform_create, perform_remove,
+};
 use usagi_daemon::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
 use usagi_daemon::usecase::supervisor_runtime::{
     DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime,
@@ -3366,6 +3368,13 @@ fn dispatch_session_action(
                 serde_json::json!({"name": name, "session_id": id, "created": created.body, "delivered_to": delivery.delivered_to, "queued": delivery.queued}),
             )
         }
+        // Create and Remove run their heavy Git worktree build/teardown with the
+        // shared session lock released, so a long `git worktree add`/`remove`
+        // never freezes concurrent readers (session list, terminal poll,
+        // user-decision list) on the daemon. The fast durable transitions still
+        // run under the lock inside `perform_*`.
+        SessionAction::Create => perform_create(sessions, &SystemGit, operation_id, payload),
+        SessionAction::Remove => perform_remove(sessions, &SystemGit, operation_id, payload),
         _ => sessions
             .lock()
             .map_err(|_| SessionRuntimeError::Storage)?
