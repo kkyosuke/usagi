@@ -39,12 +39,26 @@ impl Run for ClaudeSandbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{Cli, Command, RunOutcome};
+    use crate::cli::{Cli, Command, RunOutcome, SandboxModeArg};
     use clap::Parser;
 
+    /// argv を解析し、`Command::into_handler` 経由でハンドラを実行して `RunOutcome` を得る。
+    /// `Command` を直接分解せず（未実行 panic 行を作らず）、解析 → mode 変換 → 引数受け渡しの
+    /// フロー全体を被覆する。`into_handler` は coverage-off の合成点で、その中の
+    /// `SandboxModeArg::into()` は本 crate の [`From`] を実際に呼ぶ。
+    fn run_parsed(argv: &[&str]) -> RunOutcome {
+        Cli::try_parse_from(argv)
+            .unwrap()
+            .command
+            .unwrap()
+            .into_handler("9.9.9")
+            .run(&mut Vec::new())
+            .unwrap()
+    }
+
     #[test]
-    fn packages_parsed_arguments_into_a_launch_request() {
-        let cli = Cli::try_parse_from([
+    fn session_mode_packages_writable_roots_and_command_after_dashes() {
+        let outcome = run_parsed(&[
             "usagi",
             "claude-sandbox",
             "--mode",
@@ -56,24 +70,7 @@ mod tests {
             "--",
             "claude",
             "--print",
-        ])
-        .unwrap();
-        let Some(Command::ClaudeSandbox {
-            mode,
-            writable_root,
-            command,
-        }) = cli.command
-        else {
-            panic!("expected a claude-sandbox command");
-        };
-        // SandboxModeArg の derive（Debug / Clone）を実行する。
-        assert!(format!("{mode:?}").contains("Session"));
-        let handler = ClaudeSandbox {
-            mode: mode.clone().into(),
-            writable_roots: writable_root,
-            command,
-        };
-        let outcome = handler.run(&mut Vec::new()).unwrap();
+        ]);
         assert_eq!(
             outcome,
             RunOutcome::ClaudeSandbox {
@@ -91,16 +88,37 @@ mod tests {
     }
 
     #[test]
-    fn root_mode_parses_and_requires_a_command() {
-        let cli =
-            Cli::try_parse_from(["usagi", "claude-sandbox", "--mode", "root", "--", "claude"])
-                .unwrap();
-        let Some(Command::ClaudeSandbox { mode, command, .. }) = cli.command else {
-            panic!("expected a claude-sandbox command");
-        };
-        assert_eq!(SandboxMode::from(mode), SandboxMode::Root);
-        assert_eq!(command, ["claude"]);
+    fn root_mode_maps_and_requires_a_command() {
+        let outcome = run_parsed(&["usagi", "claude-sandbox", "--mode", "root", "--", "claude"]);
+        assert_eq!(
+            outcome,
+            RunOutcome::ClaudeSandbox {
+                mode: SandboxMode::Root,
+                writable_roots: vec![],
+                command: vec!["claude".to_owned()],
+            }
+        );
         // command（`-- …`）を省くと required により解析が失敗する。
         assert!(Cli::try_parse_from(["usagi", "claude-sandbox", "--mode", "root"]).is_err());
+    }
+
+    #[test]
+    fn mode_argument_parses_and_exposes_derives() {
+        // clap ValueEnum の解析と、`Command` の Debug derive が要求する SandboxModeArg の
+        // Debug / Clone を直接実行する。
+        assert!(matches!(
+            Cli::try_parse_from([
+                "usagi",
+                "claude-sandbox",
+                "--mode",
+                "session",
+                "--",
+                "claude"
+            ])
+            .unwrap()
+            .command,
+            Some(Command::ClaudeSandbox { .. })
+        ));
+        assert_eq!(format!("{:?}", SandboxModeArg::Root.clone()), "Root");
     }
 }
