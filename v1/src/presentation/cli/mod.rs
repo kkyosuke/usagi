@@ -1,9 +1,11 @@
 pub mod agent_phase;
+pub mod claude_sandbox;
 pub mod clean;
 pub mod completion;
 pub mod config;
 pub mod doctor;
 pub mod feature;
+pub mod guard_workspace;
 pub mod hop;
 pub mod icon;
 pub mod init;

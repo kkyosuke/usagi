@@ -133,7 +133,7 @@ fn mcp_config_json(wiring: &AgentWiring) -> String {
 /// (see [`Hooks`]). `usagi_bin` is the resolved usagi binary path; `serde_json`
 /// escapes it, and the JSON contains only double quotes so it survives the
 /// single-quoted shell argument.
-fn claude_hooks_settings(usagi_bin: &str) -> String {
+fn claude_hooks_settings(usagi_bin: &str, is_root: bool) -> String {
     let phase = |phase: AgentPhase| {
         vec![HookEntry {
             hooks: vec![HookCommand {
@@ -142,10 +142,23 @@ fn claude_hooks_settings(usagi_bin: &str) -> String {
             }],
         }]
     };
+    let mut pre_tool_use = phase(AgentPhase::Running);
+    // Session launches retain the worktree guard so direct file tools cannot
+    // target the parent project or a sibling session. Root launches deliberately
+    // omit it: their cwd is the project root, which the OS sandbox now grants as
+    // a writable root. The sandbox remains the hard boundary in both modes.
+    if !is_root {
+        pre_tool_use.push(HookEntry {
+            hooks: vec![HookCommand {
+                kind: "command",
+                command: format!("{usagi_bin} guard-workspace"),
+            }],
+        });
+    }
     let settings = HookSettings {
         hooks: Hooks {
             user_prompt_submit: phase(AgentPhase::Running),
-            pre_tool_use: phase(AgentPhase::Running),
+            pre_tool_use,
             post_tool_use: phase(AgentPhase::Running),
             stop: phase(AgentPhase::Ended),
             notification: phase(AgentPhase::Waiting),
@@ -155,6 +168,24 @@ fn claude_hooks_settings(usagi_bin: &str) -> String {
         },
     };
     serde_json::to_string(&settings).expect("hook settings serialize to JSON")
+}
+
+/// Prefix a Claude argv with usagi's fail-closed OS sandbox launcher. Every
+/// path is one shell-escaped argument; the hidden launcher canonicalizes it
+/// before granting write access and refuses to start Claude on any failure.
+fn sandbox_prefix(wiring: &AgentWiring) -> String {
+    let mode = if wiring.is_root { "root" } else { "session" };
+    let mut prefix = format!(
+        "{} claude-sandbox --mode {}",
+        shell_single_quote(&wiring.usagi_bin),
+        shell_single_quote(mode)
+    );
+    for root in &wiring.sandbox_writable_roots {
+        prefix.push_str(" --writable-root ");
+        prefix.push_str(&shell_single_quote(&root.to_string_lossy()));
+    }
+    prefix.push_str(" -- ");
+    prefix
 }
 
 /// The Claude Code adapter.
@@ -187,7 +218,7 @@ impl Agent for ClaudeAgent {
         // so it skips creating one, and — when the local LLM is on — to delegate
         // light tasks to it.
         let system_prompt = super::session_system_prompt(wiring.is_root, false, local_llm_model);
-        let hooks = claude_hooks_settings(&wiring.usagi_bin);
+        let hooks = claude_hooks_settings(&wiring.usagi_bin, wiring.is_root);
         // Every wiring value is escaped for the single-quoted `sh -c` context via
         // [`shell_single_quote`] rather than being wrapped in bare `'…'`. The JSON
         // blobs and system prompt are normally quote-free, but a single quote can
@@ -218,9 +249,10 @@ impl Agent for ClaudeAgent {
         let system_prompt = shell_single_quote(&system_prompt);
         let hooks = shell_single_quote(&hooks);
         format!(
-            "claude {resume_flag}{model_flag}--mcp-config {mcp_config} \
+            "{}claude {resume_flag}{model_flag}--mcp-config {mcp_config} \
              --append-system-prompt {system_prompt} \
-             --settings {hooks}{prompt_arg}"
+             --settings {hooks}{prompt_arg}",
+            sandbox_prefix(wiring)
         )
     }
 
@@ -230,7 +262,8 @@ impl Agent for ClaudeAgent {
         // interactive launch via `--mcp-config`, so the agent can drive usagi
         // (session_list / session_remove …) while it works. No interactive person
         // is present, so `--dangerously-skip-permissions` lets it act (delete
-        // worktrees, run git) without approval prompts.
+        // worktrees, run git) without approval prompts. The command still runs
+        // inside the same fail-closed OS sandbox as an interactive launch.
         // Lifecycle hooks are omitted: a headless run reports no phase to watch.
         let mcp_config = mcp_config_json(wiring);
         let mcp_config = shell_single_quote(&mcp_config);
@@ -240,7 +273,8 @@ impl Agent for ClaudeAgent {
             None => String::new(),
         };
         format!(
-            "claude -p {prompt} {model_flag}--dangerously-skip-permissions --mcp-config {mcp_config}"
+            "{}claude -p {prompt} {model_flag}--dangerously-skip-permissions --mcp-config {mcp_config}",
+            sandbox_prefix(wiring)
         )
     }
 
@@ -321,7 +355,7 @@ mod tests {
         let index = tokens
             .iter()
             .position(|token| token == "claude")
-            .expect("command contains Claude argv");
+            .expect("sandbox command contains Claude argv");
         tokens[index..].to_vec()
     }
 
@@ -343,15 +377,17 @@ mod tests {
     }
 
     #[test]
-    fn interactive_and_headless_launches_start_claude_directly() {
+    fn interactive_and_headless_launches_always_enter_the_os_sandbox() {
         let wiring = wiring("/opt/usagi", None);
         for command in [
             ClaudeAgent::new().launch_command(&wiring, false, None),
             ClaudeAgent::new().headless_command(&wiring, "clean"),
         ] {
             let tokens = shell_words::split(&command).unwrap();
-            assert_eq!(tokens[0], "claude");
-            assert!(!tokens.contains(&"claude-sandbox".to_string()));
+            assert_eq!(tokens[0], "/opt/usagi");
+            assert_eq!(tokens[1], "claude-sandbox");
+            assert_eq!(tokens[2..5], ["--mode", "session", "--"]);
+            assert_eq!(tokens[5], "claude");
         }
     }
 
@@ -379,7 +415,7 @@ mod tests {
         assert_eq!(tokens[5], "--settings");
         assert_eq!(
             tokens[6],
-            "{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"PostToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"PermissionRequest\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ready\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase exited\"}]}]}}"
+            "{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]},{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi guard-workspace\"}]}],\"PostToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"PermissionRequest\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ready\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase exited\"}]}]}}"
         );
     }
 
@@ -389,10 +425,10 @@ mod tests {
         // picks up the worktree's previous conversation; the rest of the wiring
         // is unchanged.
         let resumed = ClaudeAgent::new().launch_command(&wiring("usagi", None), true, None);
-        assert!(resumed.starts_with("claude --continue --mcp-config '"));
+        assert!(resumed.contains(" -- claude --continue --mcp-config '"));
         // Without resuming the flag is absent and the command starts plainly.
         let fresh = ClaudeAgent::new().launch_command(&wiring("usagi", None), false, None);
-        assert!(fresh.starts_with("claude --mcp-config '"));
+        assert!(fresh.contains(" -- claude --mcp-config '"));
         assert!(!fresh.contains("--continue"));
     }
 
@@ -406,7 +442,7 @@ mod tests {
             ClaudeAgent::new().launch_command(&wiring("usagi", None), false, Some("fix issue #50"));
         assert!(launch.ends_with(" -- 'fix issue #50'"));
         // The wiring is still present and the program still starts plainly.
-        assert!(launch.starts_with("claude --mcp-config '"));
+        assert!(launch.contains(" -- claude --mcp-config '"));
         assert!(launch.contains("--append-system-prompt '"));
         // With no prompt the trailing query is absent: the command is exactly the
         // prompt-carrying one with its ` -- '…'` suffix stripped.
@@ -439,7 +475,7 @@ mod tests {
         // the program name and the prompt is still the trailing query.
         let launch =
             ClaudeAgent::new().launch_command(&wiring("usagi", None), true, Some("keep going"));
-        assert!(launch.starts_with("claude --continue --mcp-config '"));
+        assert!(launch.contains(" -- claude --continue --mcp-config '"));
         assert!(launch.ends_with(" 'keep going'"));
     }
 
@@ -479,9 +515,21 @@ mod tests {
             // Every tool call mid-turn re-asserts `running`, so a session resumes
             // out of `waiting` once the user answers a prompt or grants a
             // permission (no fresh UserPromptSubmit fires then). The PreToolUse
-            assert!(launch.contains("\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}]"));
+            // array carries a second entry — the worktree guard — right after it.
+            assert!(launch.contains("\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]},{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi guard-workspace\"}]}]"));
             assert!(launch.contains("\"PostToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}]"));
         }
+    }
+
+    #[test]
+    fn root_launch_omits_the_workspace_guard_but_keeps_phase_hooks() {
+        let mut root = wiring("usagi", None);
+        root.is_root = true;
+        let launch = ClaudeAgent::new().launch_command(&root, false, None);
+
+        assert!(launch.contains("usagi agent-phase running"));
+        assert!(!launch.contains("usagi guard-workspace"));
+        assert!(launch.contains("claude-sandbox --mode 'root'"));
     }
 
     #[test]
@@ -505,6 +553,8 @@ mod tests {
         assert!(launch.contains("/opt/usagi/bin/usagi agent-phase running"));
         assert!(launch.contains("/opt/usagi/bin/usagi agent-phase waiting"));
         assert!(launch.contains("/opt/usagi/bin/usagi agent-phase ended"));
+        // The worktree guard hook runs the same resolved binary too.
+        assert!(launch.contains("/opt/usagi/bin/usagi guard-workspace"));
         // The bare name no longer appears as a standalone command.
         assert!(!launch.contains(r#""command":"usagi""#));
     }
