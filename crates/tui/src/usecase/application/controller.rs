@@ -106,6 +106,18 @@ impl CreateSessionForm {
         self.revalidate();
     }
 
+    /// Replace the advisory session/worktree names while the form is open.
+    ///
+    /// A daemon refresh or the presentation layer's read-only worktree scan can
+    /// discover a conflict after the user opened the inline input. Revalidate
+    /// immediately so that newly known failures appear without another key
+    /// press or a doomed submit.
+    fn replace_existing(&mut self, existing: &[String]) {
+        self.existing.clear();
+        self.existing.extend_from_slice(existing);
+        self.revalidate();
+    }
+
     /// 入力のたびに name の live validation を反映する。空名は「入力途中」であって
     /// error にはせず（submit 時にだけ弾く）、不正文字・64 文字超過・既知 worktree との
     /// 同名は即座に
@@ -2206,6 +2218,9 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         }
         AppEvent::Backend(BackendEvent::SessionNames(names)) => {
             state.session_names = names;
+            if let Some(form) = state.create_session.as_mut() {
+                form.replace_existing(&state.session_names);
+            }
             Vec::new()
         }
         AppEvent::Backend(BackendEvent::Notice(notice)) => {
@@ -3742,6 +3757,35 @@ mod tests {
         }
         let form = state.create_session_form().unwrap();
         assert_eq!(form.error().unwrap().message, "worktree already exists");
+    }
+
+    #[test]
+    fn open_create_session_revalidates_when_a_conflict_becomes_known() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        for character in "alpha".chars() {
+            let _ = update(&mut state, AppEvent::Key(AppKey::Char(character)));
+        }
+        assert!(state.create_session_form().unwrap().error().is_none());
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionNames(vec!["alpha".to_owned()])),
+        );
+        let form = state.create_session_form().unwrap();
+        assert_eq!(form.name(), "alpha", "the draft is preserved");
+        assert_eq!(form.error().unwrap().message, "worktree already exists");
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionNames(Vec::new())),
+        );
+        assert!(
+            state.create_session_form().unwrap().error().is_none(),
+            "removing the conflict also clears the live error"
+        );
     }
 
     #[test]
