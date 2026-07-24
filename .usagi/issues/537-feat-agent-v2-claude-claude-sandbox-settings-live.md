@@ -1,13 +1,13 @@
 ---
 number: 537
 title: feat(agent): v2 で Claude 起動を claude-sandbox と --settings フックに live 配線する
-status: in-progress
+status: done
 priority: high
 labels: [agent, daemon, security, claude, sandbox]
 dependson: []
 related: [530]
 created_at: 2026-07-24T13:01:00.604658+00:00
-updated_at: 2026-07-24T19:23:52.602513+00:00
+updated_at: 2026-07-24T20:13:00.387783+00:00
 ---
 
 ## 背景
