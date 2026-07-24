@@ -16,6 +16,7 @@
 //!   許可判定する純粋ロジック。Claude の `PreToolUse` フックが呼ぶ `guard-workspace` の中身。
 
 pub mod agent;
+pub mod claude_sandbox;
 pub mod client;
 pub mod environment;
 pub mod issue;
