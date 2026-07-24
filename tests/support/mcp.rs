@@ -25,6 +25,13 @@ use usagi_core::usecase::client::{
 };
 use usagi_daemon::infrastructure::unix_transport::{connect_current, ensure_private_dir_all};
 
+/// Claude は必ず OS sandbox launcher の中で起動するため、`bwrap` を持たない Linux CI では
+/// fail-closed で起動が拒否される。この debug ビルド専用 seam は launcher と `--settings` フックの
+/// live 配線をそのまま通したまま拘束だけを外し、E2E を platform 非依存にする
+/// （[`usagi_core::usecase::claude_sandbox::passthrough_requested`]）。
+const SANDBOX_PASSTHROUGH: &str =
+    usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE;
+
 fn shipping_build_identity() -> usagi_core::infrastructure::ipc::BuildIdentity {
     usagi_core::infrastructure::ipc::build_identity(
         env!("CARGO_PKG_VERSION"),
@@ -142,6 +149,7 @@ impl McpHarness {
             .current_dir(&cwd)
             .env("USAGI_HOME", home.path())
             .env("PATH", path)
+            .env(SANDBOX_PASSTHROUGH, "1")
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_COMMON_DIR")
@@ -328,6 +336,7 @@ impl McpHarness {
             .env("USAGI_HOME", self.home.path())
             .env("USAGI_MCP_CALLER_CREDENTIAL", credential)
             .env("PATH", path)
+            .env(SANDBOX_PASSTHROUGH, "1")
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_COMMON_DIR")

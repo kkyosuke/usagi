@@ -13,6 +13,10 @@
 //! 補う普遍領域（`$TMPDIR`・`/tmp`・`/var/tmp`・Claude state・macOS の Keychain / MDS cache）である。
 //! sandbox は書き込みだけをこの root 集合に閉じ込め、読み取りは許す（読み取り側の論理境界は
 //! [`crate::usecase::workspace_guard`] の `PreToolUse` フックが担う）。
+//!
+//! 唯一の例外は [`SandboxRequest::passthrough`] で、これは E2E テスト専用の seam である。
+//! [`passthrough_requested`] が唯一の判定点で、shipping（release）ビルドでは常に false を返すため、
+//! 配布バイナリにこの迂回路は存在しない。
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -49,6 +53,23 @@ impl SandboxMode {
     }
 }
 
+/// [`SandboxRequest::passthrough`] を要求するテスト専用の環境変数名。
+///
+/// live な Claude 起動経路（daemon の provisioner）は自身の環境にこの変数があるときだけ、launcher の
+/// 子プロセス環境へ同じ変数を注入する。launcher 側は [`passthrough_requested`] で最終判定する。
+pub const PASSTHROUGH_ENVIRONMENT_VARIABLE: &str = "USAGI_CLAUDE_SANDBOX_PASSTHROUGH";
+
+/// 拘束を省いて product をそのまま exec してよいか（E2E テスト専用 seam）を決める。
+///
+/// `bwrap` を持たない Linux CI でも live な Claude 起動経路（launcher・`--settings` フック・PTY
+/// ライフサイクル）を E2E で通すための seam である。**shipping ビルドには存在しない**: `debug_build`
+/// は合成ルートが `cfg!(debug_assertions)` を渡すため、release ビルドでは環境変数があっても常に
+/// false になる。値は厳密に `"1"` のときだけ有効で、空文字や他の値では拘束を外さない。
+#[must_use]
+pub fn passthrough_requested(debug_build: bool, value: Option<&str>) -> bool {
+    debug_build && value == Some("1")
+}
+
 /// sandbox 起動計画の入力。合成ルートが実環境から読み取った値をここへ渡す。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxRequest {
@@ -64,6 +85,9 @@ pub struct SandboxRequest {
     pub tmpdir: Option<PathBuf>,
     /// `$HOME`（あれば）。Claude state・macOS の Keychain に使う。
     pub home: Option<PathBuf>,
+    /// テスト専用 seam。true なら backend で包まず command をそのまま exec する。合成ルートは
+    /// [`passthrough_requested`] の結果だけをここへ入れる（release ビルドでは常に false）。
+    pub passthrough: bool,
     /// sandbox の中で exec する program と引数（先頭が program、以降が引数）。
     pub command: Vec<String>,
 }
@@ -87,6 +111,10 @@ pub enum SandboxPlan {
 
 /// 入力から sandbox 起動計画を決める。backend 不在・未対応 platform・空 command は
 /// すべて [`SandboxPlan::Reject`]（fail-closed）。
+///
+/// [`SandboxRequest::passthrough`] は唯一の迂回路で、これだけが backend を要求せずに command を
+/// そのまま exec する計画を返す。合成ルートは [`passthrough_requested`] を通した値しか渡さないため、
+/// release ビルドでこの分岐に入ることはない。
 #[must_use]
 pub fn plan(request: &SandboxRequest) -> SandboxPlan {
     let Some((program, program_args)) = request.command.split_first() else {
@@ -94,6 +122,12 @@ pub fn plan(request: &SandboxRequest) -> SandboxPlan {
             reason: "sandbox に渡す command がありません".to_owned(),
         };
     };
+    if request.passthrough {
+        return SandboxPlan::Launch {
+            program: PathBuf::from(program),
+            argv: program_args.to_vec(),
+        };
+    }
     let roots = writable_roots(request);
     match request.platform {
         Platform::Unsupported => SandboxPlan::Reject {
@@ -269,6 +303,7 @@ mod tests {
             launch_roots: vec![PathBuf::from("/repo/.usagi/sessions/work")],
             tmpdir: Some(PathBuf::from("/tmp/user")),
             home: Some(PathBuf::from("/home/dev")),
+            passthrough: false,
             command: vec!["claude".to_owned(), "--print".to_owned()],
         }
     }
@@ -423,6 +458,34 @@ mod tests {
     fn profile_string_literals_escape_quotes_and_backslashes() {
         let literal = sandbox_string_literal(Path::new(r#"/a"b\c"#));
         assert_eq!(literal, r#""/a\"b\\c""#);
+    }
+
+    #[test]
+    fn the_test_seam_is_off_unless_a_debug_build_sees_the_exact_opt_in_value() {
+        assert!(passthrough_requested(true, Some("1")));
+        // release ビルド（debug_assertions なし）では環境変数があっても拘束を外さない。
+        assert!(!passthrough_requested(false, Some("1")));
+        // 不在・空・別値はいずれも opt-in にならない。
+        assert!(!passthrough_requested(true, None));
+        assert!(!passthrough_requested(true, Some("")));
+        assert!(!passthrough_requested(true, Some("true")));
+        assert_eq!(
+            PASSTHROUGH_ENVIRONMENT_VARIABLE,
+            "USAGI_CLAUDE_SANDBOX_PASSTHROUGH"
+        );
+    }
+
+    #[test]
+    fn passthrough_execs_the_command_itself_without_requiring_a_backend() {
+        // backend も未対応 platform も要求しない（bwrap の無い Linux CI 用の seam）。
+        let mut request = request(Platform::Unsupported, None);
+        request.passthrough = true;
+        let (program, argv) = plan(&request).into_launch().unwrap();
+        assert_eq!(program, PathBuf::from("claude"));
+        assert_eq!(argv, ["--print"]);
+        // 空 command は passthrough でも fail-closed のまま。
+        request.command.clear();
+        assert!(plan(&request).into_reject().is_some());
     }
 
     #[test]

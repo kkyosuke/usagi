@@ -36,6 +36,7 @@ use usagi_core::infrastructure::store::dispatch::DispatchStore;
 use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::pr_inventory::PrInventoryStore;
 use usagi_core::infrastructure::store::user_decision::UserDecisionStore;
+use usagi_core::usecase::claude_sandbox::{self, SandboxMode};
 use usagi_core::usecase::client::{
     ClientError, ClientPolicy, DaemonClient, DeadlineConnection, DeadlineStream, IpcClient,
     MonotonicClock, PolicyClient,
@@ -52,7 +53,7 @@ use usagi_daemon::usecase::agent_ipc::{
     SharedTerminalOwner, TerminalOutcome,
 };
 use usagi_daemon::usecase::claude::{
-    ClaudeAdapter, ClaudeProvision, ClaudeProvisionFailure, ClaudeProvisioner,
+    ClaudeAdapter, ClaudeProvision, ClaudeProvisionFailure, ClaudeProvisioner, scoped_settings_json,
 };
 use usagi_daemon::usecase::codex::{
     CodexAdapter, CodexProvision, CodexProvisionFailure, CodexProvisioner,
@@ -68,7 +69,7 @@ use usagi_daemon::usecase::pr_inventory::{
 };
 use usagi_daemon::usecase::runtime::{
     OutputJournal, ProvisionContext, PtySpawner, RuntimeStore, RuntimeStoreSnapshot,
-    SpawnProvision, TerminateReapError,
+    SandboxLauncher, SpawnProvision, TerminateReapError,
 };
 use usagi_daemon::usecase::serve::DaemonRecordPort;
 use usagi_daemon::usecase::session_runtime::{SessionRuntime, SessionRuntimeError, SystemGit};
@@ -243,6 +244,9 @@ struct RootClaudeProvisioner {
     readiness: Arc<dyn AgentReadinessProbe>,
     mcp_command: PathBuf,
     data_home: PathBuf,
+    /// E2E テスト専用 seam（[`claude_sandbox::passthrough_requested`]）。true のとき launcher の子へ
+    /// 同じ opt-in を伝え、backend の無い環境でも live 起動経路を通す。release ビルドでは常に false。
+    sandbox_passthrough: bool,
 }
 impl ClaudeProvisioner for RootClaudeProvisioner {
     fn provision(
@@ -254,28 +258,109 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             .map_err(|()| ClaudeProvisionFailure::ExecutableUnavailable)?;
         let (working_directory, workspace_root) = working_directories(&self.sessions, context)
             .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
-        // NOTE(#530 第2段): the `--settings` hook payload and the OS sandbox
-        // launcher are implemented and unit-tested
-        // (`usagi_daemon::usecase::claude::scoped_settings_json`,
-        // `usagi_core::usecase::claude_sandbox`, `SpawnProvision::sandbox_launcher`)
-        // but not yet attached to the live spawn here. Flipping them on requires
-        // the E2E fixture backend seam / writable-root work tracked as the next
-        // stage; until then Claude launches exactly as before.
+        // Claude は必ず OS sandbox の中で起動する（多層防御の hard boundary）。論理境界の
+        // `guard-workspace` フックは session 起動だけに配線し、root 起動では書き込みの境界を
+        // sandbox の writable root に委ねる。
+        let mode = sandbox_mode(context);
+        let mut arguments = context
+            .inject_mcp
+            .then(|| claude_mcp_arguments(&self.mcp_command))
+            .transpose()
+            .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?
+            .unwrap_or_default();
+        arguments.extend(
+            claude_settings_arguments(&self.mcp_command, mode)
+                .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?,
+        );
+        let mut spawn = SpawnProvision::new(
+            mcp_environment(context, &self.data_home, &workspace_root)
+                .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?,
+            arguments,
+        );
+        spawn.set_sandbox_launcher(
+            claude_sandbox_launcher(
+                &self.mcp_command,
+                mode,
+                &claude_writable_roots(&working_directory, &workspace_root, &self.data_home),
+            )
+            .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?,
+        );
+        if self.sandbox_passthrough {
+            spawn.insert_daemon_environment(
+                EnvironmentVariableName::new(claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE)
+                    .expect("literal environment variable name is valid"),
+                "1".to_owned(),
+            );
+        }
         Ok(ClaudeProvision {
             working_directory,
             environment_allowlist: mcp_environment_allowlist(context),
-            spawn: SpawnProvision::new(
-                mcp_environment(context, &self.data_home, &workspace_root)
-                    .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?,
-                context
-                    .inject_mcp
-                    .then(|| claude_mcp_arguments(&self.mcp_command))
-                    .transpose()
-                    .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?
-                    .unwrap_or_default(),
-            ),
+            spawn,
         })
     }
+}
+
+/// A launch without a managed session is the workspace-root coordinator; every
+/// other launch is confined to its session worktree.
+fn sandbox_mode(context: &ProvisionContext) -> SandboxMode {
+    if context.scope.session_id.is_some() {
+        SandboxMode::Session
+    } else {
+        SandboxMode::Root
+    }
+}
+
+/// The launch-specific writable roots handed to `usagi claude-sandbox`.  The
+/// launcher adds the universal areas (`$TMPDIR`, `/tmp`, Claude state, …) itself.
+/// A session launch therefore writes into its own worktree plus the shared usagi
+/// state it must update (issue store, Git common dir, daemon data home), while a
+/// root launch writes into the project root because that *is* its cwd.
+fn claude_writable_roots(
+    working_directory: &Path,
+    workspace_root: &Path,
+    data_home: &Path,
+) -> Vec<PathBuf> {
+    vec![
+        working_directory.to_path_buf(),
+        workspace_root.join(".usagi"),
+        workspace_root.join(".git"),
+        data_home.to_path_buf(),
+    ]
+}
+
+/// `usagi claude-sandbox --mode <mode> [--writable-root <path>]… --`, the ephemeral
+/// instruction that makes the spawned child the launcher instead of the bare
+/// product.  Host paths stay out of the durable launch snapshot.
+fn claude_sandbox_launcher(
+    usagi: &Path,
+    mode: SandboxMode,
+    writable_roots: &[PathBuf],
+) -> Result<SandboxLauncher, ()> {
+    let mut prefix = vec![
+        "claude-sandbox".to_owned(),
+        "--mode".to_owned(),
+        mode.as_str().to_owned(),
+    ];
+    for root in writable_roots {
+        prefix.push("--writable-root".to_owned());
+        prefix.push(root.to_str().ok_or(())?.to_owned());
+    }
+    prefix.push("--".to_owned());
+    Ok(SandboxLauncher {
+        program: usagi.to_str().ok_or(())?.to_owned(),
+        prefix,
+    })
+}
+
+/// `--settings <json>`: the scoped hook wiring Claude loads for this launch.
+/// The payload is passed inline so no host path or rendered product payload has
+/// to be materialized on disk.
+fn claude_settings_arguments(usagi: &Path, mode: SandboxMode) -> Result<Vec<String>, ()> {
+    let usagi = usagi.to_str().ok_or(())?;
+    Ok(vec![
+        "--settings".to_owned(),
+        scoped_settings_json(usagi, mode == SandboxMode::Session),
+    ])
 }
 
 fn mcp_environment_allowlist(context: &ProvisionContext) -> BTreeSet<EnvironmentVariableName> {
@@ -1361,6 +1446,14 @@ fn open_agent_runtime(
             readiness,
             mcp_command,
             data_home,
+            // E2E テスト専用 seam。release ビルドでは `cfg!(debug_assertions)` が false になるため、
+            // 配布バイナリは常に拘束された Claude だけを起動する。
+            sandbox_passthrough: claude_sandbox::passthrough_requested(
+                cfg!(debug_assertions),
+                std::env::var(claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE)
+                    .ok()
+                    .as_deref(),
+            ),
         }),
     );
     let runtime = AgentRuntime::hydrate_with_dispatch_and_locator(
@@ -6539,6 +6632,100 @@ mod tests {
                 "mcp__usagi",
             ]
         );
+    }
+
+    fn provision_context(session: Option<SessionId>) -> ProvisionContext {
+        ProvisionContext {
+            scope: usagi_core::domain::agent::LaunchScope {
+                workspace_id: WorkspaceId::new(),
+                session_id: session,
+                worktree_id: WorktreeId::new(),
+            },
+            inject_mcp: true,
+        }
+    }
+
+    #[test]
+    fn a_session_claude_is_confined_to_its_worktree_and_gets_the_guard_hook() {
+        let usagi = Path::new("/opt/usagi/bin/usagi");
+        let context = provision_context(Some(SessionId::new()));
+        let mode = sandbox_mode(&context);
+        assert_eq!(mode, SandboxMode::Session);
+
+        let roots = claude_writable_roots(
+            Path::new("/repo/.usagi/sessions/work"),
+            Path::new("/repo"),
+            Path::new("/home/dev/.usagi"),
+        );
+        assert_eq!(
+            roots,
+            [
+                PathBuf::from("/repo/.usagi/sessions/work"),
+                PathBuf::from("/repo/.usagi"),
+                PathBuf::from("/repo/.git"),
+                PathBuf::from("/home/dev/.usagi"),
+            ]
+        );
+        // The workspace root itself is not writable for a session launch.
+        assert!(!roots.contains(&PathBuf::from("/repo")));
+
+        let launcher = claude_sandbox_launcher(usagi, mode, &roots).unwrap();
+        assert_eq!(launcher.program, "/opt/usagi/bin/usagi");
+        assert_eq!(
+            launcher.prefix,
+            [
+                "claude-sandbox",
+                "--mode",
+                "session",
+                "--writable-root",
+                "/repo/.usagi/sessions/work",
+                "--writable-root",
+                "/repo/.usagi",
+                "--writable-root",
+                "/repo/.git",
+                "--writable-root",
+                "/home/dev/.usagi",
+                "--",
+            ]
+        );
+
+        let arguments = claude_settings_arguments(usagi, mode).unwrap();
+        assert_eq!(arguments[0], "--settings");
+        let settings: serde_json::Value = serde_json::from_str(&arguments[1]).unwrap();
+        let pre_tool_use = settings["hooks"]["PreToolUse"][0]["hooks"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            pre_tool_use[1]["command"],
+            serde_json::json!("'/opt/usagi/bin/usagi' guard-workspace")
+        );
+        assert_eq!(
+            settings["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+            serde_json::json!("'/opt/usagi/bin/usagi' agent-phase ready")
+        );
+    }
+
+    #[test]
+    fn a_root_claude_is_confined_to_the_project_root_without_the_guard_hook() {
+        let usagi = Path::new("/opt/usagi/bin/usagi");
+        let mode = sandbox_mode(&provision_context(None));
+        assert_eq!(mode, SandboxMode::Root);
+
+        // A root launch's cwd *is* the project root, so that root is writable.
+        let roots = claude_writable_roots(
+            Path::new("/repo"),
+            Path::new("/repo"),
+            Path::new("/home/dev/.usagi"),
+        );
+        assert!(roots.contains(&PathBuf::from("/repo")));
+        let launcher = claude_sandbox_launcher(usagi, mode, &roots).unwrap();
+        assert_eq!(&launcher.prefix[..3], ["claude-sandbox", "--mode", "root"]);
+        assert_eq!(launcher.prefix.last().unwrap(), "--");
+
+        let arguments = claude_settings_arguments(usagi, mode).unwrap();
+        assert!(!arguments[1].contains("guard-workspace"));
+        // Lifecycle phase reporting stays wired for a root coordinator.
+        assert!(arguments[1].contains("agent-phase running"));
     }
 
     #[derive(Clone)]

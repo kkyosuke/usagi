@@ -133,6 +133,12 @@ fn start_daemon(repo: &Path, home: &Path, path: &Path, shell: Option<&Path>) -> 
         .env("USAGI_HOME", home)
         .env("PATH", fixture_path)
         .env("USAGI_PTY_SENTINEL", "must-not-leak")
+        // Claude は OS sandbox launcher 経由で起動するため、backend を持たない CI でも live
+        // 配線を通すテスト専用 seam を有効にする（debug ビルド限定）。
+        .env(
+            usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE,
+            "1",
+        )
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_COMMON_DIR")

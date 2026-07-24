@@ -29,6 +29,13 @@ use usagi_daemon::infrastructure::unix_transport::{
 use usagi_tui::usecase::application::agent_tab_intent::AgentTabIntent;
 use usagi_tui::usecase::application::terminal_screen::TerminalScreen;
 
+/// Claude は必ず OS sandbox launcher の中で起動するため、`bwrap` を持たない Linux CI では
+/// fail-closed で起動が拒否される。この debug ビルド専用 seam は launcher と `--settings` フックの
+/// live 配線をそのまま通したまま拘束だけを外し、E2E を platform 非依存にする
+/// （[`usagi_core::usecase::claude_sandbox::passthrough_requested`]）。
+const SANDBOX_PASSTHROUGH: &str =
+    usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE;
+
 fn shipping_build_identity() -> usagi_core::infrastructure::ipc::BuildIdentity {
     usagi_core::infrastructure::ipc::build_identity(
         env!("CARGO_PKG_VERSION"),
@@ -244,6 +251,7 @@ fn spawn_hop(home: &Path, workspace: &Path, slave: &File) -> io::Result<TuiChild
         .arg("hop")
         .current_dir(workspace)
         .env("USAGI_HOME", home)
+        .env(SANDBOX_PASSTHROUGH, "1")
         .stdin(Stdio::from(slave.try_clone()?))
         .stdout(Stdio::from(slave.try_clone()?))
         .stderr(Stdio::from(slave.try_clone()?))
@@ -262,6 +270,7 @@ fn spawn_hop_with_path(
         .current_dir(workspace)
         .env("USAGI_HOME", home)
         .env("PATH", path)
+        .env(SANDBOX_PASSTHROUGH, "1")
         .stdin(Stdio::from(slave.try_clone()?))
         .stdout(Stdio::from(slave.try_clone()?))
         .stderr(Stdio::from(slave.try_clone()?))
@@ -310,15 +319,17 @@ fn git(workspace: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
-fn write_agent_fixtures(bin: &Path, codex_count: &Path, claude_count: &Path) {
+fn write_agent_fixtures(bin: &Path, codex_count: &Path, claude_count: &Path, claude_argv: &Path) {
     fs::create_dir_all(bin).unwrap();
     let codex = format!(
         "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nprintf '%s' '{{\"session_id\":\"tui-codex-lineage\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | \"{}\" codex-session-capture || exit 8\nprintf 'spawn\\n' >> \"{}\"\nprintf 'codex-ready-unique:%s\\n' \"$$\"\nwhile IFS= read line; do printf 'codex-input:%s\\n' \"$line\"; done\n",
         env!("CARGO_BIN_EXE_usagi"),
         codex_count.display(),
     );
+    // 起動 argv も 1 行として記録し、live 配線（`--settings` のフック JSON）を E2E で観測できるようにする。
     let claude = format!(
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nif [ \"$1\" = auth ] && [ \"$2\" = status ]; then exit 0; fi\nprintf 'spawn\\n' >> \"{}\"\nprintf 'claude-ready-unique:%s\\n' \"$$\"\nwhile IFS= read line; do printf 'claude-input:%s\\n' \"$line\"; done\n",
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nif [ \"$1\" = auth ] && [ \"$2\" = status ]; then exit 0; fi\nprintf '%s\\n' \"$*\" >> \"{}\"\nprintf 'spawn\\n' >> \"{}\"\nprintf 'claude-ready-unique:%s\\n' \"$$\"\nwhile IFS= read line; do printf 'claude-input:%s\\n' \"$line\"; done\n",
+        claude_argv.display(),
         claude_count.display(),
     );
     for (name, script) in [("codex", codex), ("claude", claude)] {
@@ -978,7 +989,8 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     let bin = fixtures.path().join("bin");
     let codex_count = fixtures.path().join("codex-count");
     let claude_count = fixtures.path().join("claude-count");
-    write_agent_fixtures(&bin, &codex_count, &claude_count);
+    let claude_argv = fixtures.path().join("claude-argv");
+    write_agent_fixtures(&bin, &codex_count, &claude_count, &claude_argv);
     let fixture_path = format!("{}:/usr/bin:/bin", bin.display());
     let _daemon_stop = DaemonStopGuard::new(home.path());
 
@@ -987,6 +999,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
         .current_dir(&workspace)
         .env("USAGI_HOME", home.path())
         .env("PATH", &fixture_path)
+        .env(SANDBOX_PASSTHROUGH, "1")
         .output()
         .expect("workspace registers");
     assert!(registered.status.success());
@@ -1047,6 +1060,26 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     let session_claude_terminal =
         launch_agent(home.path(), workspace_id, Some(session_id), "claude");
     wait_for_file_lines(&claude_count, 2);
+    // live 配線: 両 scope の Claude は `usagi claude-sandbox … -- claude` 経由で起動し、`--settings` の
+    // フック JSON を受け取る。`guard-workspace` は session 起動だけに配線される（root は OS sandbox の
+    // writable root に委ねる）。
+    let launched_argv = fs::read_to_string(&claude_argv).unwrap();
+    let launched: Vec<&str> = launched_argv.lines().collect();
+    assert_eq!(launched.len(), 2, "{launched_argv}");
+    assert!(
+        launched
+            .iter()
+            .all(|argv| argv.contains("--settings") && argv.contains("agent-phase running")),
+        "{launched_argv}"
+    );
+    assert_eq!(
+        launched
+            .iter()
+            .filter(|argv| argv.contains("guard-workspace"))
+            .count(),
+        1,
+        "{launched_argv}"
+    );
     let first_processes = agent_processes(home.path(), 3);
     assert!(
         initial_processes
