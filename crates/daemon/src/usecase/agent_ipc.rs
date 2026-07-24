@@ -59,7 +59,7 @@ use usagi_core::domain::terminal_visibility::VisibilityOutcome;
 use super::{
     orchestration::{AdapterRegistry, OrchestrationError, Orchestrator, RuntimeAuthorization},
     runtime::{OutputJournal, PtySpawner, RuntimeCoordinator, RuntimeError},
-    terminal::{Geometry, InputRequest, PtyWriter, RegistryError},
+    terminal::{Geometry, InputRequest, PtyWriter, RegistryError, SnapshotWire},
 };
 
 /// A daemon-resolved, fully fenced checkout for an available scope (a managed
@@ -157,6 +157,8 @@ pub enum TerminalOutcome {
 /// owner can compose it with the generic terminal owner without duplicating the
 /// ownership loop.
 pub trait AgentTerminalActor {
+    /// Handles one terminal request addressed to an Agent terminal. `wire` is
+    /// the snapshot payload this connection negotiated.
     fn handle_terminal(
         &mut self,
         connection: ConnectionId,
@@ -164,6 +166,7 @@ pub trait AgentTerminalActor {
         request_id: RequestId,
         action: TerminalAction,
         request: TerminalRequest,
+        wire: SnapshotWire,
     ) -> TerminalOutcome;
     /// Lists the Agent runtimes this actor holds in the exact requested scope.
     /// `SharedTerminalOwner` merges this with the generic terminal owner so a
@@ -1794,12 +1797,13 @@ impl AgentRuntime {
         action: TerminalAction,
         request: TerminalRequest,
         runtime: &AgentRuntimeRef,
+        wire: SnapshotWire,
     ) -> Result<Value, ProtocolError> {
         match (action, request) {
             (TerminalAction::Attach, TerminalRequest::Attach { .. }) => self
                 .coordinator
                 .attach(runtime, connection)
-                .map(|attached| json!(attached))
+                .map(|attached| json!(attached.into_frame(wire)))
                 .map_err(map_runtime_error),
             (TerminalAction::Resume, TerminalRequest::Resume { after_offset, .. }) => {
                 let output = self
@@ -1812,22 +1816,21 @@ impl AgentRuntime {
                 // pane tab is never dropped from the Closeup strip.
                 let exited = self
                     .coordinator
-                    .terminal_snapshot(runtime)
+                    .terminal_exit_status(runtime)
                     .map_err(map_runtime_error)?
-                    .exited
                     .is_some();
                 Ok(json!({ "output": output, "exited": exited }))
             }
             (TerminalAction::Resync, TerminalRequest::Resync { .. }) => self
                 .coordinator
                 .terminal_snapshot(runtime)
-                .map(|snapshot| json!(snapshot))
+                .map(|snapshot| json!(snapshot.into_frame(wire)))
                 .map_err(map_runtime_error),
             (TerminalAction::Resize, TerminalRequest::Resize { geometry, .. }) => {
                 let geometry = terminal_geometry(geometry)?;
                 self.coordinator
                     .resize(runtime, geometry, &mut *self.pty)
-                    .map(|snapshot| json!(snapshot))
+                    .map(|snapshot| json!(snapshot.into_frame(wire)))
                     .map_err(map_runtime_error)
             }
             (TerminalAction::Detach, TerminalRequest::Detach { subscription, .. }) => self
@@ -1877,6 +1880,7 @@ impl AgentTerminalActor for AgentRuntime {
         request_id: RequestId,
         action: TerminalAction,
         request: TerminalRequest,
+        wire: SnapshotWire,
     ) -> TerminalOutcome {
         let Some(terminal) = terminal_of(&request) else {
             return TerminalOutcome::NotOwned;
@@ -1884,9 +1888,9 @@ impl AgentTerminalActor for AgentRuntime {
         let Some(runtime) = self.coordinator.runtime_for_terminal(terminal) else {
             return TerminalOutcome::NotOwned;
         };
-        TerminalOutcome::Handled(
-            self.dispatch_terminal(connection, client, request_id, action, request, &runtime),
-        )
+        TerminalOutcome::Handled(self.dispatch_terminal(
+            connection, client, request_id, action, request, &runtime, wire,
+        ))
     }
 
     fn terminal_inventory(
@@ -1955,6 +1959,7 @@ impl<G: TerminalOwner, A: AgentTerminalActor> TerminalOwner for SharedTerminalOw
         request_id: RequestId,
         action: TerminalAction,
         payload: Value,
+        wire: SnapshotWire,
     ) -> Result<Value, ProtocolError> {
         // Inventory addresses no single terminal, so it is not routed by
         // `handle_terminal`. Merge both owners' in-scope runtimes here so a
@@ -2020,14 +2025,14 @@ impl<G: TerminalOwner, A: AgentTerminalActor> TerminalOwner for SharedTerminalOw
         let routed = match serde_json::from_value::<TerminalRequest>(payload.clone()) {
             Ok(request) => self
                 .agent
-                .handle_terminal(connection, client, request_id, action, request),
+                .handle_terminal(connection, client, request_id, action, request, wire),
             Err(_) => TerminalOutcome::NotOwned,
         };
         match routed {
             TerminalOutcome::Handled(result) => result,
             TerminalOutcome::NotOwned => self
                 .generic
-                .request(connection, client, request_id, action, payload),
+                .request(connection, client, request_id, action, payload, wire),
         }
     }
 
@@ -2204,20 +2209,12 @@ fn durable_resume_relation(
     })
 }
 
+/// Agent and generic terminals share one geometry contract, including the
+/// screen bounds the daemon's grid authority must respect.
 fn terminal_geometry(
     geometry: usagi_core::usecase::client::TerminalGeometry,
 ) -> Result<Geometry, ProtocolError> {
-    (geometry.cols > 0 && geometry.rows > 0)
-        .then_some(Geometry {
-            cols: geometry.cols,
-            rows: geometry.rows,
-        })
-        .ok_or_else(|| {
-            ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "terminal geometry must be non-zero",
-            )
-        })
+    super::terminal_ipc::geometry(geometry)
 }
 
 fn stale_terminal() -> ProtocolError {
@@ -2322,6 +2319,12 @@ fn map_runtime_error(error: RuntimeError) -> ProtocolError {
         RuntimeError::Terminal(RegistryError::PtyResizeFailed) => {
             (ErrorCode::Unavailable, "terminal resize failed")
         }
+        // The screen does not fit one frame: no partial screen is emitted and
+        // the client keeps its current state until a retry succeeds.
+        RuntimeError::Terminal(RegistryError::CheckpointUnavailable) => (
+            ErrorCode::ResourceExhausted,
+            "agent terminal screen exceeds the snapshot budget",
+        ),
         RuntimeError::Terminal(_)
         | RuntimeError::UnknownRuntime
         | RuntimeError::TerminalGenerationMismatch
@@ -2549,6 +2552,7 @@ mod tests {
             _: RequestId,
             _: TerminalAction,
             _: Value,
+            _: SnapshotWire,
         ) -> Result<Value, ProtocolError> {
             self.requests += 1;
             Ok(json!({ "generic": true }))
@@ -4143,6 +4147,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One ordered scenario keeps launch, both snapshot revisions, input, detach, reattach and exit visibly sequential.
     fn end_to_end_launch_output_attach_input_detach_reattach_and_exit() {
         let mut runtime = runtime();
         let fake_scope = FakeScope(Ok(scope()));
@@ -4169,9 +4174,40 @@ mod tests {
             TerminalRequest::Attach {
                 terminal: terminal.clone(),
             },
+            SnapshotWire::RawTail,
         ));
         assert_eq!(attached["snapshot"]["replay"], json!(b"ready\n".to_vec()));
         let subscription = attached["subscription"].as_u64().unwrap();
+
+        // The same Agent terminal serves a revision 2 connection its semantic
+        // screen instead of the raw tail (#534): Agent and generic terminals
+        // share one snapshot contract.
+        let checkpointed = handled(runtime.handle_terminal(
+            connection,
+            client,
+            RequestId::new(),
+            TerminalAction::Attach,
+            TerminalRequest::Attach {
+                terminal: terminal.clone(),
+            },
+            SnapshotWire::ScreenCheckpoint,
+        ));
+        let screen = &checkpointed["snapshot"]["screen"];
+        assert!(checkpointed["snapshot"]["replay"].is_null());
+        assert_eq!(
+            checkpointed["snapshot"]["base_offset"],
+            checkpointed["snapshot"]["output_offset"]
+        );
+        assert_eq!(
+            screen["schema_version"].as_u64(),
+            Some(u64::from(usagi_core::usecase::vt_screen::SCHEMA_VERSION))
+        );
+        // The screen is the authority for what the PTY printed.
+        let restored = usagi_core::usecase::vt_screen::VtScreen::from_checkpoint(
+            &serde_json::from_value(screen.clone()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored.cells()[0].trim_end(), "ready");
 
         handled(runtime.handle_terminal(
             connection,
@@ -4182,6 +4218,7 @@ mod tests {
                 terminal: terminal.clone(),
                 geometry: TerminalGeometry { cols: 43, rows: 17 },
             },
+            SnapshotWire::RawTail,
         ));
         assert_eq!(
             pty(&runtime).resized,
@@ -4199,6 +4236,7 @@ mod tests {
                 input_seq: 0,
                 bytes: b"go\n".to_vec(),
             },
+            SnapshotWire::RawTail,
         ));
         assert_eq!(ack["ack"], "Written");
 
@@ -4211,6 +4249,7 @@ mod tests {
                 terminal: terminal.clone(),
                 subscription,
             },
+            SnapshotWire::RawTail,
         ));
         // A disconnect drops only subscriptions; the process/PTY stay alive.
         runtime.disconnect(connection);
@@ -4223,6 +4262,7 @@ mod tests {
             TerminalRequest::Attach {
                 terminal: terminal.clone(),
             },
+            SnapshotWire::RawTail,
         ));
         assert_eq!(reattached["snapshot"]["output_offset"], 6);
 
@@ -4240,6 +4280,7 @@ mod tests {
             TerminalRequest::Resync {
                 terminal: terminal.clone(),
             },
+            SnapshotWire::RawTail,
         ));
         assert_eq!(resync["exited"], 0);
         assert_eq!(pty(&runtime).selected.as_ref(), Some(&terminal));
@@ -4273,6 +4314,7 @@ mod tests {
                 terminal: terminal.clone(),
                 after_offset: 0,
             },
+            SnapshotWire::RawTail,
         ));
         assert_eq!(live["exited"], false);
 
@@ -4291,6 +4333,7 @@ mod tests {
                 terminal: terminal.clone(),
                 geometry: TerminalGeometry { cols: 80, rows: 24 },
             },
+            SnapshotWire::RawTail,
         );
         assert!(matches!(
             late_resize,
@@ -4308,6 +4351,7 @@ mod tests {
                 terminal: terminal.clone(),
                 after_offset: 8,
             },
+            SnapshotWire::RawTail,
         ));
         assert_eq!(exited["exited"], true);
     }
@@ -4353,6 +4397,7 @@ mod tests {
             TerminalRequest::Attach {
                 terminal: terminal.clone(),
             },
+            SnapshotWire::RawTail,
         ));
         assert_eq!(
             attached["snapshot"]["replay"],
@@ -4922,6 +4967,7 @@ mod tests {
                 TerminalRequest::Attach {
                     terminal: foreign.clone()
                 },
+                SnapshotWire::RawTail,
             ),
             TerminalOutcome::NotOwned
         ));
@@ -4939,6 +4985,7 @@ mod tests {
                         worktree_id: WorktreeId::new(),
                     },
                 },
+                SnapshotWire::RawTail,
             ),
             TerminalOutcome::NotOwned
         ));
@@ -4994,6 +5041,7 @@ mod tests {
                             rows: 40
                         },
                     },
+                    SnapshotWire::RawTail,
                 ),
                 TerminalOutcome::NotOwned
             ));
@@ -5026,6 +5074,7 @@ mod tests {
                     rows: 40,
                 },
             },
+            SnapshotWire::RawTail,
         );
         let error = handled_result(outcome).unwrap_err();
         assert_eq!(error.code, ErrorCode::Unavailable);
@@ -5038,6 +5087,7 @@ mod tests {
             TerminalRequest::Resync {
                 terminal: terminal.clone(),
             },
+            SnapshotWire::RawTail,
         ));
         assert_eq!(snapshot["geometry"], json!({"cols":80,"rows":24}));
         assert_eq!(
@@ -5049,6 +5099,7 @@ mod tests {
                 TerminalRequest::Resync {
                     terminal: terminal.clone(),
                 },
+                SnapshotWire::RawTail,
             ))
             .unwrap_err()
             .code,
@@ -5082,6 +5133,7 @@ mod tests {
                     terminal: terminal.clone(),
                 })
                 .unwrap(),
+                SnapshotWire::RawTail,
             )
             .unwrap();
         assert_eq!(attached["snapshot"]["replay"], json!(b"hi\n".to_vec()));
@@ -5114,6 +5166,7 @@ mod tests {
                     },
                 })
                 .unwrap(),
+                SnapshotWire::RawTail,
             )
             .unwrap();
         assert_eq!(generic["generic"], true);
@@ -5126,6 +5179,7 @@ mod tests {
                 RequestId::new(),
                 TerminalAction::Attach,
                 json!({ "operation": "bogus" }),
+                SnapshotWire::RawTail,
             )
             .unwrap();
 
@@ -5185,6 +5239,7 @@ mod tests {
                     scope: inventory_scope,
                 })
                 .unwrap(),
+                SnapshotWire::RawTail,
             )
             .unwrap();
         let entries: Vec<TerminalInventoryEntry> =
@@ -5210,6 +5265,7 @@ mod tests {
                 RequestId::new(),
                 TerminalAction::Inventory,
                 json!({ "operation": "bogus" }),
+                SnapshotWire::RawTail,
             )
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidArgument);
@@ -5268,6 +5324,7 @@ mod tests {
                         scope: query_scope.clone(),
                     })
                     .unwrap(),
+                    SnapshotWire::RawTail,
                 )
                 .unwrap();
             serde_json::from_value(reply["entries"].clone()).unwrap()
@@ -5298,6 +5355,7 @@ mod tests {
                     expected_revision: 0,
                 })
                 .unwrap(),
+                SnapshotWire::RawTail,
             )
             .unwrap();
         assert_eq!(observed["applied"], serde_json::json!(true));
@@ -5331,6 +5389,7 @@ mod tests {
                 RequestId::new(),
                 TerminalAction::CompletedInventory,
                 json!({ "operation": "bogus" }),
+                SnapshotWire::RawTail,
             )
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidArgument);
@@ -5367,6 +5426,7 @@ mod tests {
                     RequestId::new(),
                     action,
                     serde_json::to_value(request).unwrap(),
+                    SnapshotWire::RawTail,
                 )
                 .unwrap()
         };
@@ -5450,6 +5510,7 @@ mod tests {
                     },
                 })
                 .unwrap(),
+                SnapshotWire::RawTail,
             )
             .unwrap_err();
         assert_eq!(mismatch.code, ErrorCode::InvalidArgument);
@@ -5462,6 +5523,7 @@ mod tests {
                 RequestId::new(),
                 TerminalAction::Observe,
                 json!({ "operation": "bogus" }),
+                SnapshotWire::RawTail,
             )
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidArgument);
@@ -5688,6 +5750,10 @@ mod tests {
             (
                 RuntimeError::Terminal(RegistryError::PtyResizeFailed),
                 ErrorCode::Unavailable,
+            ),
+            (
+                RuntimeError::Terminal(RegistryError::CheckpointUnavailable),
+                ErrorCode::ResourceExhausted,
             ),
             (
                 RuntimeError::Terminal(RegistryError::StaleTarget),

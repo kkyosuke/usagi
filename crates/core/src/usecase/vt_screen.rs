@@ -228,6 +228,45 @@ impl VtScreen {
         &self.scrollback
     }
 
+    /// The number of cells this screen retains: both buffers' visible grid and
+    /// scrollback, including the primary buffer saved while a full-screen
+    /// application owns the alternate one.
+    ///
+    /// A holder that must bound memory (the daemon owns one screen per
+    /// terminal) measures retention with this and reclaims it with
+    /// [`trim_scrollback`](Self::trim_scrollback), instead of reaching into the
+    /// cell representation itself.
+    #[must_use]
+    pub fn retained_cells(&self) -> usize {
+        let live = self.rows.saturating_add(self.scrollback.len());
+        let saved = self.primary_screen.as_ref().map_or(0, |primary| {
+            primary.grid.len().saturating_add(primary.scrollback.len())
+        });
+        live.saturating_add(saved).saturating_mul(self.cols)
+    }
+
+    /// Drops the oldest scrollback rows until the screen retains at most
+    /// `max_cells` cells, and returns how many rows were dropped.
+    ///
+    /// Only history is reclaimed, oldest first, and each buffer keeps an equal
+    /// share of the surviving history. The visible grids, cursor, styles, scroll
+    /// region and decoder state are untouched, so the screen stays a faithful
+    /// authority for everything still retained. A `max_cells` below the visible
+    /// grids drops all history and stops there: the grids are the floor.
+    pub fn trim_to_cells(&mut self, max_cells: usize) -> usize {
+        let buffers = 1 + usize::from(self.primary_screen.is_some());
+        let grid_rows = self
+            .rows
+            .saturating_add(self.primary_screen.as_ref().map_or(0, |p| p.grid.len()));
+        let history_rows = (max_cells / self.cols).saturating_sub(grid_rows);
+        let keep_rows = history_rows / buffers;
+        let mut dropped = trim_rows(&mut self.scrollback, keep_rows);
+        if let Some(primary) = &mut self.primary_screen {
+            dropped += trim_rows(&mut primary.scrollback, keep_rows);
+        }
+        dropped
+    }
+
     /// The style active at the cursor, used by the renderer when drawing an
     /// empty cursor cell that carries no cell style of its own.
     #[must_use]
@@ -977,6 +1016,13 @@ fn row_text(row: &[Cell]) -> String {
         .filter(|cell| !cell.continuation)
         .map(|cell| cell.ch)
         .collect()
+}
+
+/// Drops the oldest rows so at most `keep_rows` remain, returning the count.
+fn trim_rows(rows: &mut Vec<Vec<Cell>>, keep_rows: usize) -> usize {
+    let dropped = rows.len().saturating_sub(keep_rows);
+    rows.drain(..dropped);
+    dropped
 }
 
 fn resize_row(row: &mut Vec<Cell>, cols: usize) {
@@ -1915,6 +1961,60 @@ mod tests {
             assert!(!format!("{err:?}").is_empty());
             let _: &dyn std::error::Error = &err;
         }
+    }
+
+    #[test]
+    fn retention_is_measurable_and_history_trims_to_a_cell_budget() {
+        // 3 rows × 8 cols with three rows of history: 6 rows retained.
+        let mut screen = built(3, 8, &[b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix"]);
+        assert_eq!(screen.scrollback().len(), 3);
+        assert_eq!(screen.retained_cells(), 6 * 8);
+
+        // A budget above the retention keeps every row.
+        assert_eq!(screen.trim_to_cells(6 * 8), 0);
+        assert_eq!(screen.scrollback().len(), 3);
+
+        // A budget for five rows drops the oldest history row.
+        assert_eq!(screen.trim_to_cells(5 * 8), 1);
+        assert_eq!(screen.retained_cells(), 5 * 8);
+        assert_eq!(
+            rows_with_scrollback(&screen),
+            vec!["two", "three", "four", "five", "six"]
+        );
+
+        // The visible grid is the floor: a budget below it drops all history and
+        // stops there.
+        assert_eq!(screen.trim_to_cells(0), 2);
+        assert!(screen.scrollback().is_empty());
+        assert!(screen.scrollback().is_empty());
+        assert_eq!(screen.retained_cells(), 3 * 8);
+        assert_eq!(screen.trim_to_cells(0), 0);
+    }
+
+    #[test]
+    fn retention_accounts_and_trims_the_saved_primary_buffer() {
+        // Alternate active: the saved primary keeps its own grid and history, and
+        // both buffers are measured and trimmed.
+        let mut screen = built(
+            2,
+            6,
+            &[b"one\r\ntwo\r\nthree\r\nfour\x1b[?1049halt\r\nmore\r\nrows\r\nhere"],
+        );
+        // Both grids (2 rows each) plus both buffers' history are accounted for.
+        assert!(
+            screen.retained_cells() > 4 * 6,
+            "the saved primary buffer is accounted for too"
+        );
+
+        // Each buffer keeps an equal share of the surviving history.
+        let dropped = screen.trim_to_cells(5 * 6);
+        assert!(dropped > 0);
+        assert!(screen.retained_cells() <= 5 * 6);
+
+        // Below the two grids, all history in both buffers is gone.
+        screen.trim_to_cells(0);
+        assert!(screen.scrollback().is_empty());
+        assert_eq!(screen.retained_cells(), 4 * 6);
     }
 
     #[test]

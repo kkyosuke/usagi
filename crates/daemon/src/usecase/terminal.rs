@@ -4,12 +4,23 @@
 //! The daemon's actor owns one instance and supplies output/exit observations;
 //! this keeps all fencing, cursor and input-deduplication decisions in one
 //! serial turn.
+//!
+//! The registry is also the terminal **grid authority**: every terminal owns one
+//! [`VtScreen`], fed with the bytes the PTY produced and resized with the
+//! terminal, so an attaching client is handed a complete semantic screen
+//! checkpoint instead of a raw byte tail cut at an arbitrary boundary. The
+//! bounded raw journal stays: it serves the incremental `Resume` suffix a
+//! client feeds into the screen restored from the checkpoint.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use usagi_core::domain::id::{ClientId, ConnectionId, RequestId, TerminalRef};
+use usagi_core::infrastructure::ipc::TERMINAL_CHECKPOINT_REVISION;
+use usagi_core::usecase::vt_screen::{
+    CHECKPOINT_BYTES_MAX, COLS_MAX, ROWS_MAX, ScreenCheckpoint, VtScreen,
+};
 
 /// Maximum terminal bytes retained for attach/resync and incremental replay.
 ///
@@ -18,15 +29,40 @@ use usagi_core::domain::id::{ClientId, ConnectionId, RequestId, TerminalRef};
 /// terminal identity inside the protocol's one MiB frame limit.
 pub const MAX_RETAINED_OUTPUT_BYTES: usize = 64 * 1024;
 
+/// Cells one terminal's screen may retain (both buffers' visible grid plus
+/// their scrollback). A decoded cell costs roughly 32 bytes plus its style, so
+/// this bounds a single terminal at about 16 MiB of screen state.
+pub const SCREEN_CELLS_PER_TERMINAL_MAX: usize = 512 * 1024;
+
+/// Process-local ceiling for the cells retained by every daemon-owned screen,
+/// about 64 MiB of screen state.
+///
+/// It is enforced on the terminal that just grew: that terminal is trimmed to
+/// whatever the ceiling leaves after the other terminals' current retention, so
+/// the process total stays at or below the ceiling. A newly registered terminal
+/// adds only its visible grid before its first output is accounted for.
+pub const SCREEN_CELLS_AGGREGATE_MAX: usize = 2 * 1024 * 1024;
+
 static RETENTION_DROPPED_BYTES: AtomicU64 = AtomicU64::new(0);
 static RETENTION_COALESCED_BYTES: AtomicU64 = AtomicU64::new(0);
+static SCREEN_TRIMMED_ROWS: AtomicU64 = AtomicU64::new(0);
+static CHECKPOINT_TRIMMED_ROWS: AtomicU64 = AtomicU64::new(0);
+static RETAINED_SCREEN_CELLS: AtomicU64 = AtomicU64::new(0);
 
-/// Process-local terminal retention counters. Values are byte counts only and
-/// never contain terminal output or identity data.
+/// Process-local terminal retention counters. Values are byte, row and cell
+/// counts only and never contain terminal output or identity data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutputPipelineCounters {
     pub dropped_bytes: u64,
     pub coalesced_bytes: u64,
+    /// Scrollback rows dropped from a screen to keep retention inside the
+    /// per-terminal and process aggregate cell budgets.
+    pub screen_trimmed_rows: u64,
+    /// Scrollback rows dropped from a checkpoint payload to keep it inside the
+    /// frame budget. The screen itself keeps those rows.
+    pub checkpoint_trimmed_rows: u64,
+    /// Cells currently retained by daemon-owned screens in this process.
+    pub retained_screen_cells: u64,
 }
 
 #[must_use]
@@ -34,6 +70,9 @@ pub fn output_pipeline_counters() -> OutputPipelineCounters {
     OutputPipelineCounters {
         dropped_bytes: RETENTION_DROPPED_BYTES.load(Ordering::Relaxed),
         coalesced_bytes: RETENTION_COALESCED_BYTES.load(Ordering::Relaxed),
+        screen_trimmed_rows: SCREEN_TRIMMED_ROWS.load(Ordering::Relaxed),
+        checkpoint_trimmed_rows: CHECKPOINT_TRIMMED_ROWS.load(Ordering::Relaxed),
+        retained_screen_cells: RETAINED_SCREEN_CELLS.load(Ordering::Relaxed),
     }
 }
 
@@ -79,7 +118,13 @@ pub struct Geometry {
 }
 
 /// A point-in-time terminal view returned by attach and resync.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// It holds both wire payloads: the legacy raw tail retained by the bounded
+/// journal, and the semantic checkpoint of the authoritative screen. The
+/// negotiated wire revision selects exactly one when the view is projected onto
+/// the wire with [`into_frame`](Self::into_frame), so one frame never carries
+/// both.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub terminal: TerminalRef,
     pub revision: u64,
@@ -88,7 +133,109 @@ pub struct Snapshot {
     pub output_offset: u64,
     pub geometry: Geometry,
     pub replay: Vec<u8>,
+    /// The complete screen state at `output_offset`.
+    pub screen: Box<ScreenCheckpoint>,
     pub exited: Option<i32>,
+}
+
+/// Which snapshot payload a negotiated wire revision receives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SnapshotWire {
+    /// Generation 1 revision 1: the legacy raw byte tail. Kept for the
+    /// migration window so an older client observes its existing contract.
+    #[default]
+    RawTail,
+    /// Generation 1 revision 2: the semantic screen checkpoint.
+    ScreenCheckpoint,
+}
+
+impl SnapshotWire {
+    /// The payload a negotiated generation 1 revision receives.
+    #[must_use]
+    pub const fn for_revision(revision: u16) -> Self {
+        if revision >= TERMINAL_CHECKPOINT_REVISION {
+            Self::ScreenCheckpoint
+        } else {
+            Self::RawTail
+        }
+    }
+}
+
+/// One negotiated wire payload of a snapshot. Revision 1 carries the raw tail
+/// `[base_offset, output_offset)`; revision 2 carries the checkpoint, which is
+/// complete at `output_offset` and therefore has no tail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum SnapshotContent {
+    RawTail { replay: Vec<u8> },
+    Screen { screen: Box<ScreenCheckpoint> },
+}
+
+impl SnapshotContent {
+    /// The raw tail, or `None` when this payload is a checkpoint.
+    #[must_use]
+    pub fn replay(&self) -> Option<&[u8]> {
+        match self {
+            Self::RawTail { replay } => Some(replay),
+            Self::Screen { .. } => None,
+        }
+    }
+
+    /// The semantic screen, or `None` when this payload is a raw tail.
+    #[must_use]
+    pub fn screen(&self) -> Option<&ScreenCheckpoint> {
+        match self {
+            Self::Screen { screen } => Some(screen),
+            Self::RawTail { .. } => None,
+        }
+    }
+}
+
+/// A [`Snapshot`] narrowed to one negotiated wire revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SnapshotFrame {
+    pub terminal: TerminalRef,
+    pub revision: u64,
+    pub base_offset: u64,
+    pub output_offset: u64,
+    pub geometry: Geometry,
+    #[serde(flatten)]
+    pub content: SnapshotContent,
+    pub exited: Option<i32>,
+}
+
+impl Snapshot {
+    /// Narrows this view to the payload the negotiated revision expects.
+    ///
+    /// A checkpoint represents the screen exactly at `output_offset`, so its
+    /// frame reports `base_offset == output_offset`: the client resumes from
+    /// there and never feeds a tail into a restored screen twice.
+    #[must_use]
+    pub fn into_frame(self, wire: SnapshotWire) -> SnapshotFrame {
+        let (base_offset, content) = match wire {
+            SnapshotWire::RawTail => (
+                self.base_offset,
+                SnapshotContent::RawTail {
+                    replay: self.replay,
+                },
+            ),
+            SnapshotWire::ScreenCheckpoint => (
+                self.output_offset,
+                SnapshotContent::Screen {
+                    screen: self.screen,
+                },
+            ),
+        };
+        SnapshotFrame {
+            terminal: self.terminal,
+            revision: self.revision,
+            base_offset,
+            output_offset: self.output_offset,
+            geometry: self.geometry,
+            content,
+            exited: self.exited,
+        }
+    }
 }
 
 /// A retained contiguous output segment.
@@ -116,10 +263,28 @@ pub enum Event {
 }
 
 /// Result of atomically registering an attachment and taking its initial view.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attached {
     pub subscription: u64,
     pub snapshot: Snapshot,
+}
+
+impl Attached {
+    /// Narrows the attached view to the negotiated wire revision.
+    #[must_use]
+    pub fn into_frame(self, wire: SnapshotWire) -> AttachedFrame {
+        AttachedFrame {
+            subscription: self.subscription,
+            snapshot: self.snapshot.into_frame(wire),
+        }
+    }
+}
+
+/// An [`Attached`] narrowed to one negotiated wire revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AttachedFrame {
+    pub subscription: u64,
+    pub snapshot: SnapshotFrame,
 }
 
 /// Result of an input write.
@@ -192,6 +357,10 @@ pub enum RegistryError {
     IdempotencyExpired,
     Exited,
     PtyResizeFailed,
+    /// The screen cannot be captured inside the frame budget even with all of
+    /// its history dropped. The daemon emits no oversized frame and no partial
+    /// screen; the client keeps its current state and retries.
+    CheckpointUnavailable,
 }
 
 #[derive(Debug)]
@@ -206,6 +375,19 @@ struct Entry {
     attachments: BTreeMap<u64, ConnectionId>,
     next_subscription: u64,
     inputs: BTreeMap<ClientId, InputLedger>,
+    /// The authoritative decoded screen for this terminal (#199). Every byte
+    /// this registry accepts is fed to it, so a checkpoint never depends on
+    /// where the bounded journal happens to start.
+    screen: VtScreen,
+    /// Cells this screen contributed to [`RETAINED_SCREEN_CELLS`] when it was
+    /// last accounted for.
+    screen_cells: usize,
+}
+
+impl Drop for Entry {
+    fn drop(&mut self) {
+        release_screen_cells(self.screen_cells);
+    }
 }
 
 #[derive(Debug, Default)]
@@ -223,6 +405,9 @@ pub struct TerminalRegistry {
     entries: BTreeMap<String, Entry>,
     journal_limit: usize,
     input_cache_limit: usize,
+    checkpoint_bytes_limit: usize,
+    screen_cells_limit: usize,
+    screen_cells_aggregate_limit: usize,
 }
 
 impl TerminalRegistry {
@@ -232,7 +417,40 @@ impl TerminalRegistry {
             entries: BTreeMap::new(),
             journal_limit: journal_limit.min(MAX_RETAINED_OUTPUT_BYTES),
             input_cache_limit,
+            checkpoint_bytes_limit: CHECKPOINT_BYTES_MAX,
+            screen_cells_limit: SCREEN_CELLS_PER_TERMINAL_MAX,
+            screen_cells_aggregate_limit: SCREEN_CELLS_AGGREGATE_MAX,
         }
+    }
+
+    /// Overrides the serialized checkpoint budget.
+    ///
+    /// The default is [`CHECKPOINT_BYTES_MAX`], the largest payload a peer
+    /// accepts and the value that keeps a snapshot inside the one MiB frame; a
+    /// smaller budget only makes the trimming and fail-closed paths observable
+    /// without building a multi-megabyte screen.
+    #[must_use]
+    pub const fn with_checkpoint_bytes_limit(mut self, bytes: usize) -> Self {
+        self.checkpoint_bytes_limit = bytes;
+        self
+    }
+
+    /// Overrides the screen retention budgets: what one terminal may retain and
+    /// the ceiling its process shares.
+    ///
+    /// The defaults are [`SCREEN_CELLS_PER_TERMINAL_MAX`] and
+    /// [`SCREEN_CELLS_AGGREGATE_MAX`]. A terminal keeps the smaller of its own
+    /// budget and whatever the ceiling leaves after the other terminals'
+    /// current retention, so a test can isolate either bound.
+    #[must_use]
+    pub const fn with_screen_cell_budgets(
+        mut self,
+        per_terminal: usize,
+        process_aggregate: usize,
+    ) -> Self {
+        self.screen_cells_limit = per_terminal;
+        self.screen_cells_aggregate_limit = process_aggregate;
+        self
     }
 
     /// # Errors
@@ -248,6 +466,10 @@ impl TerminalRegistry {
         if self.entries.contains_key(&key) {
             return Err(RegistryError::StaleTarget);
         }
+        let (rows, cols) = screen_dimensions(geometry);
+        let screen = VtScreen::new(rows, cols);
+        let screen_cells = screen.retained_cells();
+        reserve_screen_cells(screen_cells);
         self.entries.insert(
             key,
             Entry {
@@ -261,6 +483,8 @@ impl TerminalRegistry {
                 attachments: BTreeMap::new(),
                 next_subscription: 1,
                 inputs: BTreeMap::new(),
+                screen,
+                screen_cells,
             },
         );
         Ok(())
@@ -275,6 +499,7 @@ impl TerminalRegistry {
         reference: &TerminalRef,
         connection: ConnectionId,
     ) -> Result<Attached, RegistryError> {
+        let checkpoint_bytes_limit = self.checkpoint_bytes_limit;
         let entry = self.entry_mut(reference)?;
         if let Some(subscription) = entry
             .attachments
@@ -283,15 +508,18 @@ impl TerminalRegistry {
         {
             return Ok(Attached {
                 subscription,
-                snapshot: snapshot(entry),
+                snapshot: snapshot(entry, checkpoint_bytes_limit)?,
             });
         }
+        // Capture before the subscription is recorded: a snapshot the client
+        // cannot be handed must not leave an attachment behind.
+        let snapshot = snapshot(entry, checkpoint_bytes_limit)?;
         let subscription = entry.next_subscription;
         entry.next_subscription += 1;
         entry.attachments.insert(subscription, connection);
         Ok(Attached {
             subscription,
-            snapshot: snapshot(entry),
+            snapshot,
         })
     }
 
@@ -337,7 +565,12 @@ impl TerminalRegistry {
         data: Vec<u8>,
     ) -> Result<Output, RegistryError> {
         let limit = self.journal_limit;
+        let budgets = self.screen_budgets();
         let entry = self.entry_mut(reference)?;
+        // The screen is the authority: it sees every accepted byte, including
+        // the bytes the bounded journal is about to drop.
+        entry.screen.advance(&data);
+        enforce_screen_budget(entry, budgets);
         let start_offset = entry.next_offset;
         entry.next_offset += data.len() as u64;
         let output = Output {
@@ -443,7 +676,10 @@ impl TerminalRegistry {
     ) -> Result<Snapshot, RegistryError> {
         // Hold the registry's exclusive borrow across preflight, effect, and
         // commit. The terminal actor mutex then keeps exit/replacement from
-        // racing an already validated resize.
+        // racing an already validated resize, so a client observes either the
+        // old or the new geometry with its matching revision, never a mix.
+        let checkpoint_bytes_limit = self.checkpoint_bytes_limit;
+        let budgets = self.screen_budgets();
         let entry = self.entry(reference)?;
         if entry.exited.is_some() {
             return Err(RegistryError::Exited);
@@ -454,7 +690,12 @@ impl TerminalRegistry {
         let entry = self.entry_mut(reference)?;
         entry.geometry = geometry;
         entry.revision += 1;
-        Ok(snapshot(entry))
+        // Reshape the decoded cells rather than replaying historical control
+        // bytes at the new width, then re-account the changed cell retention.
+        let (rows, cols) = screen_dimensions(geometry);
+        entry.screen.resize(rows, cols);
+        enforce_screen_budget(entry, budgets);
+        snapshot(entry, checkpoint_bytes_limit)
     }
 
     /// # Errors
@@ -523,9 +764,30 @@ impl TerminalRegistry {
 
     /// # Errors
     ///
-    /// Returns [`RegistryError::StaleTarget`] for a non-current terminal.
+    /// Returns [`RegistryError::StaleTarget`] for a non-current terminal, or
+    /// [`RegistryError::CheckpointUnavailable`] when the screen does not fit the
+    /// frame budget.
     pub fn snapshot(&self, reference: &TerminalRef) -> Result<Snapshot, RegistryError> {
-        Ok(snapshot(self.entry(reference)?))
+        snapshot(self.entry(reference)?, self.checkpoint_bytes_limit)
+    }
+
+    /// The committed exit status of a terminal, without capturing a screen.
+    ///
+    /// The incremental `Resume` path only needs liveness, so it must not pay for
+    /// a checkpoint on every poll.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::StaleTarget`] for a non-current terminal.
+    pub fn exit_status(&self, reference: &TerminalRef) -> Result<Option<i32>, RegistryError> {
+        Ok(self.entry(reference)?.exited)
+    }
+
+    const fn screen_budgets(&self) -> ScreenBudgets {
+        ScreenBudgets {
+            per_terminal: self.screen_cells_limit,
+            process_aggregate: self.screen_cells_aggregate_limit,
+        }
     }
 
     fn entry(&self, reference: &TerminalRef) -> Result<&Entry, RegistryError> {
@@ -545,7 +807,76 @@ impl TerminalRegistry {
 fn key(reference: &TerminalRef) -> String {
     reference.terminal_id.as_str()
 }
-fn snapshot(entry: &Entry) -> Snapshot {
+
+/// The screen dimensions a wire geometry maps to, clamped to the checkpoint's
+/// bounds so a forged or absurd geometry cannot drive a huge grid allocation.
+/// The IPC boundary rejects such a geometry outright; this keeps the authority
+/// bounded regardless of the caller.
+fn screen_dimensions(geometry: Geometry) -> (usize, usize) {
+    (
+        usize::from(geometry.rows).clamp(1, ROWS_MAX as usize),
+        usize::from(geometry.cols).clamp(1, COLS_MAX as usize),
+    )
+}
+
+fn counted(cells: usize) -> u64 {
+    u64::try_from(cells).unwrap_or(u64::MAX)
+}
+fn reserve_screen_cells(cells: usize) {
+    RETAINED_SCREEN_CELLS.fetch_add(counted(cells), Ordering::Relaxed);
+}
+fn release_screen_cells(cells: usize) {
+    RETAINED_SCREEN_CELLS.fetch_sub(counted(cells), Ordering::Relaxed);
+}
+
+/// The screen retention budgets one registry enforces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScreenBudgets {
+    per_terminal: usize,
+    process_aggregate: usize,
+}
+
+/// Re-accounts this screen's retention and trims its oldest history until it
+/// fits both the per-terminal budget and whatever the process aggregate ceiling
+/// leaves after the other terminals' current retention.
+fn enforce_screen_budget(entry: &mut Entry, budgets: ScreenBudgets) {
+    let cells = account_screen(entry);
+    let others = RETAINED_SCREEN_CELLS
+        .load(Ordering::Relaxed)
+        .saturating_sub(counted(cells));
+    let aggregate_share =
+        usize::try_from(counted(budgets.process_aggregate).saturating_sub(others)).unwrap_or(0);
+    let budget = budgets.per_terminal.min(aggregate_share);
+    if cells <= budget {
+        return;
+    }
+    let dropped = entry.screen.trim_to_cells(budget);
+    SCREEN_TRIMMED_ROWS.fetch_add(counted(dropped), Ordering::Relaxed);
+    account_screen(entry);
+}
+
+/// Publishes this screen's current retention to the process-local aggregate and
+/// returns it.
+fn account_screen(entry: &mut Entry) -> usize {
+    let cells = entry.screen.retained_cells();
+    if cells >= entry.screen_cells {
+        reserve_screen_cells(cells - entry.screen_cells);
+    } else {
+        release_screen_cells(entry.screen_cells - cells);
+    }
+    entry.screen_cells = cells;
+    cells
+}
+
+/// Captures the terminal view: the retained raw tail plus a screen checkpoint
+/// that fits `checkpoint_bytes_limit`.
+///
+/// The checkpoint is trimmed, oldest history first, until its serialized form
+/// fits the budget, so an attach frame stays inside the protocol's frame limit.
+/// Only the payload is trimmed; the authoritative screen keeps those rows for
+/// the terminal's own bounds. A screen whose visible grids alone exceed the
+/// budget fails closed rather than emitting a partial screen.
+fn snapshot(entry: &Entry, checkpoint_bytes_limit: usize) -> Result<Snapshot, RegistryError> {
     let base_offset = entry
         .journal
         .front()
@@ -554,15 +885,56 @@ fn snapshot(entry: &Entry) -> Snapshot {
     for segment in &entry.journal {
         replay.extend_from_slice(&segment.data);
     }
-    Snapshot {
+    let screen = checkpoint_within(&entry.screen, checkpoint_bytes_limit)?;
+    Ok(Snapshot {
         terminal: entry.reference.clone(),
         revision: entry.revision,
         base_offset,
         output_offset: entry.next_offset,
         geometry: entry.geometry,
         replay,
+        screen,
         exited: entry.exited,
+    })
+}
+
+/// Serialized size of a checkpoint payload, the quantity the frame budget bounds.
+fn checkpoint_bytes(checkpoint: &ScreenCheckpoint) -> usize {
+    // Serializing a well-formed checkpoint cannot fail; an unmeasurable payload
+    // is treated as over budget so the trimming loop stays fail-closed.
+    serde_json::to_vec(checkpoint).map_or(usize::MAX, |bytes| bytes.len())
+}
+
+fn checkpoint_within(
+    screen: &VtScreen,
+    bytes_limit: usize,
+) -> Result<Box<ScreenCheckpoint>, RegistryError> {
+    let mut checkpoint = screen.checkpoint();
+    while checkpoint_bytes(&checkpoint) > bytes_limit {
+        let dropped = halve_history(&mut checkpoint);
+        if dropped == 0 {
+            return Err(RegistryError::CheckpointUnavailable);
+        }
+        CHECKPOINT_TRIMMED_ROWS.fetch_add(counted(dropped), Ordering::Relaxed);
     }
+    Ok(Box::new(checkpoint))
+}
+
+/// Drops the oldest half of each buffer's checkpoint history, returning the rows
+/// dropped. Halving converges in a bounded number of measurements; returning
+/// zero means only the visible grids remain.
+fn halve_history(checkpoint: &mut ScreenCheckpoint) -> usize {
+    let mut dropped = drop_oldest_half(&mut checkpoint.primary.scrollback);
+    if let Some(alternate) = &mut checkpoint.alternate {
+        dropped += drop_oldest_half(&mut alternate.scrollback);
+    }
+    dropped
+}
+
+fn drop_oldest_half<T>(rows: &mut Vec<T>) -> usize {
+    let dropped = rows.len().div_ceil(2);
+    rows.drain(..dropped);
+    dropped
 }
 
 #[cfg(test)]
@@ -616,6 +988,342 @@ mod tests {
             request,
             input_seq,
         }
+    }
+
+    /// The screen a client reconstructs from a revision 2 frame.
+    fn restored(frame: &SnapshotFrame) -> VtScreen {
+        let checkpoint = frame
+            .content
+            .screen()
+            .expect("a revision 2 frame carries a screen checkpoint");
+        VtScreen::from_checkpoint(checkpoint).expect("the daemon emits a decodable checkpoint")
+    }
+
+    #[test]
+    fn revision_2_snapshot_reconstructs_a_screen_a_trimmed_raw_tail_cannot() {
+        let r = reference();
+        // A four byte journal keeps almost nothing, so the raw tail starts in the
+        // middle of an escape sequence — the #199 regression this replaces.
+        let mut registry = TerminalRegistry::new(4, 2);
+        registry
+            .register(r.clone(), Geometry { cols: 12, rows: 3 })
+            .unwrap();
+        let stream: Vec<&[u8]> = vec![
+            b"\x1b[1;31mred\x1b[0m plain\r\n",
+            "\u{65e5}\u{672c}".as_bytes(),
+            b"\x1b[?1049halt\r\nscreen\x1b[?1049l",
+            b"tail\x1b[2;3Hx\x1b[1;38;5;208m",
+        ];
+        for chunk in &stream {
+            registry.append_output(&r, (*chunk).to_vec()).unwrap();
+        }
+
+        let attached = registry.attach(&r, ConnectionId::new()).unwrap();
+        let checkpoint = attached
+            .clone()
+            .into_frame(SnapshotWire::ScreenCheckpoint)
+            .snapshot;
+        // A checkpoint is complete at `output_offset`, so it carries no tail.
+        assert_eq!(checkpoint.base_offset, checkpoint.output_offset);
+        assert_eq!(checkpoint.geometry, Geometry { cols: 12, rows: 3 });
+
+        // The reconstructed screen equals a reference parser fed every byte,
+        // including the cursor move, the styles and the alternate excursion the
+        // four byte tail cannot express.
+        let mut reference_screen = VtScreen::new(3, 12);
+        for chunk in &stream {
+            reference_screen.advance(chunk);
+        }
+        let rebuilt = restored(&checkpoint);
+        assert_eq!(rebuilt.cells(), reference_screen.cells());
+        assert_eq!(
+            rebuilt.cells_with_scrollback(),
+            reference_screen.cells_with_scrollback()
+        );
+        assert_eq!(rebuilt.cursor(), reference_screen.cursor());
+        assert_eq!(rebuilt.cursor_style(), reference_screen.cursor_style());
+
+        // A revision 1 client keeps the legacy raw tail contract unchanged.
+        let raw = attached.into_frame(SnapshotWire::RawTail).snapshot;
+        assert_eq!(
+            raw.content,
+            SnapshotContent::RawTail {
+                replay: b"208m".to_vec()
+            }
+        );
+        assert_eq!(raw.content.replay(), Some(&b"208m"[..]));
+        assert_eq!(raw.base_offset + 4, raw.output_offset);
+        // Each payload exposes only its own shape.
+        assert!(raw.content.screen().is_none());
+        assert!(checkpoint.content.replay().is_none());
+
+        // Wire selection follows the negotiated revision.
+        assert_eq!(SnapshotWire::for_revision(0), SnapshotWire::RawTail);
+        assert_eq!(SnapshotWire::for_revision(1), SnapshotWire::RawTail);
+        assert_eq!(
+            SnapshotWire::for_revision(2),
+            SnapshotWire::ScreenCheckpoint
+        );
+        assert_eq!(SnapshotWire::default(), SnapshotWire::RawTail);
+    }
+
+    #[test]
+    fn checkpoint_and_resume_suffix_reconstruct_the_authoritative_screen() {
+        let r = reference();
+        let mut registry = TerminalRegistry::new(MAX_RETAINED_OUTPUT_BYTES, 2);
+        registry
+            .register(r.clone(), Geometry { cols: 10, rows: 4 })
+            .unwrap();
+        registry
+            .append_output(&r, b"first\r\nsecond\x1b[1m".to_vec())
+            .unwrap();
+
+        let frame = registry
+            .snapshot(&r)
+            .unwrap()
+            .into_frame(SnapshotWire::ScreenCheckpoint);
+        let mut client = restored(&frame);
+
+        // Output produced after the checkpoint arrives as a contiguous raw
+        // suffix; the restored parser continues the interrupted sequence.
+        registry
+            .append_output(&r, b"bold\r\nthird".to_vec())
+            .unwrap();
+        for segment in registry.replay_from(&r, frame.output_offset).unwrap() {
+            client.advance(&segment.data);
+        }
+        let authority = registry
+            .snapshot(&r)
+            .unwrap()
+            .into_frame(SnapshotWire::ScreenCheckpoint);
+        assert_eq!(client, restored(&authority));
+    }
+
+    #[test]
+    fn resize_fences_revision_and_geometry_around_checkpoint_capture() {
+        let r = reference();
+        let mut registry = TerminalRegistry::new(MAX_RETAINED_OUTPUT_BYTES, 2);
+        registry
+            .register(r.clone(), Geometry { cols: 12, rows: 3 })
+            .unwrap();
+        registry
+            .append_output(&r, b"alpha\r\nbeta\r\ngamma".to_vec())
+            .unwrap();
+
+        // Captured before the resize.
+        let before = registry
+            .snapshot(&r)
+            .unwrap()
+            .into_frame(SnapshotWire::ScreenCheckpoint);
+
+        // The resize holds the registry's exclusive borrow across preflight, PTY
+        // effect and commit, and returns the post-resize view.
+        let after = registry
+            .resize(&r, Geometry { cols: 6, rows: 2 }, &mut Writer::default())
+            .unwrap()
+            .into_frame(SnapshotWire::ScreenCheckpoint);
+        assert_eq!(after.revision, before.revision + 1);
+        assert_eq!(after.geometry, Geometry { cols: 6, rows: 2 });
+
+        // No frame ever mixes geometries: the envelope and the screen it carries
+        // always agree, so a client detects the fence by comparing either one.
+        for frame in [&before, &after] {
+            let screen = frame.content.screen().expect("checkpoint frame");
+            assert_eq!(u32::from(frame.geometry.rows), screen.geometry.rows);
+            assert_eq!(u32::from(frame.geometry.cols), screen.geometry.cols);
+        }
+
+        // A suffix applied to the pre-resize checkpoint diverges from the
+        // authority, which is exactly why the client must retry on the revision
+        // or geometry mismatch instead of merging the two states.
+        registry.append_output(&r, b"\r\nafter".to_vec()).unwrap();
+        let mut stale = restored(&before);
+        for segment in registry.replay_from(&r, before.output_offset).unwrap() {
+            stale.advance(&segment.data);
+        }
+        let authority = registry
+            .snapshot(&r)
+            .unwrap()
+            .into_frame(SnapshotWire::ScreenCheckpoint);
+        assert_ne!(stale, restored(&authority));
+        assert!(authority.revision > before.revision);
+
+        // Re-attaching after the fence converges: the fresh checkpoint plus its
+        // own suffix reproduces the authority at the new geometry.
+        let fresh = registry
+            .snapshot(&r)
+            .unwrap()
+            .into_frame(SnapshotWire::ScreenCheckpoint);
+        assert_eq!(restored(&fresh), restored(&authority));
+        assert_eq!(fresh.geometry, Geometry { cols: 6, rows: 2 });
+    }
+
+    /// Rows a checkpoint's primary buffer retains (visible grid plus history).
+    fn retained_rows(frame: &SnapshotFrame) -> usize {
+        let screen = frame.content.screen().expect("checkpoint frame");
+        screen.primary.grid.len() + screen.primary.scrollback.len()
+    }
+    /// Registers `count` terminals and feeds each of them `lines` rows.
+    fn fed_terminals(
+        registry: &mut TerminalRegistry,
+        geometry: Geometry,
+        count: usize,
+        lines: usize,
+    ) -> Vec<TerminalRef> {
+        let terminals: Vec<TerminalRef> = (0..count).map(|_| reference()).collect();
+        for terminal in &terminals {
+            registry.register(terminal.clone(), geometry).unwrap();
+        }
+        for line in 0..lines {
+            for terminal in &terminals {
+                registry
+                    .append_output(terminal, format!("line{line}\r\n").into_bytes())
+                    .unwrap();
+            }
+        }
+        terminals
+    }
+
+    #[test]
+    fn a_screen_retains_at_most_its_per_terminal_cell_budget() {
+        let geometry = Geometry { cols: 8, rows: 2 };
+        // Four rows of retention: the two visible rows plus two of history.
+        let budget = 4 * usize::from(geometry.cols);
+        let before = output_pipeline_counters();
+        // The process ceiling is lifted so this asserts the per-terminal bound
+        // alone, independent of the screens other tests hold in this process.
+        let mut registry = TerminalRegistry::new(MAX_RETAINED_OUTPUT_BYTES, 2)
+            .with_screen_cell_budgets(budget, usize::MAX);
+        let terminals = fed_terminals(&mut registry, geometry, 2, 64);
+
+        for terminal in &terminals {
+            let frame = registry
+                .snapshot(terminal)
+                .unwrap()
+                .into_frame(SnapshotWire::ScreenCheckpoint);
+            let retained = retained_rows(&frame) * usize::from(geometry.cols);
+            assert_eq!(retained, budget, "the budget is used, and not exceeded");
+            // History survives: the peak is not paid for by dropping everything.
+            assert!(retained_rows(&frame) > usize::from(geometry.rows));
+        }
+        assert!(output_pipeline_counters().screen_trimmed_rows > before.screen_trimmed_rows);
+    }
+
+    #[test]
+    fn every_screen_is_trimmed_into_the_process_aggregate_ceiling() {
+        let geometry = Geometry { cols: 8, rows: 2 };
+        // A ceiling this small cannot be shared by three terminals, so each one
+        // is trimmed as it grows however much the others already retain.
+        let ceiling = 6 * usize::from(geometry.cols);
+        let mut registry = TerminalRegistry::new(MAX_RETAINED_OUTPUT_BYTES, 2)
+            .with_screen_cell_budgets(usize::MAX, ceiling);
+        let terminals = fed_terminals(&mut registry, geometry, 3, 64);
+
+        let mut total = 0;
+        for terminal in &terminals {
+            let frame = registry
+                .snapshot(terminal)
+                .unwrap()
+                .into_frame(SnapshotWire::ScreenCheckpoint);
+            let retained = retained_rows(&frame) * usize::from(geometry.cols);
+            assert!(
+                retained <= ceiling,
+                "one terminal retained {retained} cells above the {ceiling} cell ceiling"
+            );
+            total += retained;
+        }
+        // The visible grids are the floor the ceiling cannot reclaim.
+        let floor = terminals.len() * usize::from(geometry.rows) * usize::from(geometry.cols);
+        assert!(total <= ceiling + floor);
+    }
+
+    #[test]
+    fn oversized_checkpoints_trim_history_and_then_fail_closed() {
+        let r = reference();
+        // A budget far below a full checkpoint forces payload trimming.
+        let mut registry =
+            TerminalRegistry::new(MAX_RETAINED_OUTPUT_BYTES, 2).with_checkpoint_bytes_limit(2048);
+        registry
+            .register(r.clone(), Geometry { cols: 16, rows: 2 })
+            .unwrap();
+        for line in 0..64 {
+            registry
+                .append_output(&r, format!("history line {line}\r\n").into_bytes())
+                .unwrap();
+        }
+        // A full-screen application then owns the alternate buffer, so the
+        // checkpoint carries history in both buffers and both are trimmed.
+        registry.append_output(&r, b"\x1b[?1049h".to_vec()).unwrap();
+        for line in 0..64 {
+            registry
+                .append_output(&r, format!("alternate line {line}\r\n").into_bytes())
+                .unwrap();
+        }
+        let before = output_pipeline_counters();
+        let frame = registry
+            .snapshot(&r)
+            .unwrap()
+            .into_frame(SnapshotWire::ScreenCheckpoint);
+        let screen = frame.content.screen().expect("checkpoint frame");
+        assert!(serde_json::to_vec(screen).unwrap().len() <= 2048);
+        let trimmed_once = output_pipeline_counters().checkpoint_trimmed_rows;
+        assert!(trimmed_once > before.checkpoint_trimmed_rows);
+
+        // Only the payload was trimmed: the authoritative screen keeps its
+        // history, so the next capture has to trim the same rows again.
+        registry.snapshot(&r).unwrap();
+        assert!(output_pipeline_counters().checkpoint_trimmed_rows > trimmed_once);
+
+        // A budget that cannot hold even the visible grid fails closed, and the
+        // failed attach leaves no subscription behind.
+        let mut tiny =
+            TerminalRegistry::new(MAX_RETAINED_OUTPUT_BYTES, 2).with_checkpoint_bytes_limit(8);
+        tiny.register(r.clone(), Geometry { cols: 8, rows: 2 })
+            .unwrap();
+        let connection = ConnectionId::new();
+        assert_eq!(
+            tiny.attach(&r, connection),
+            Err(RegistryError::CheckpointUnavailable)
+        );
+        assert_eq!(
+            tiny.detach(&r, 1, connection),
+            Err(RegistryError::UnknownSubscription)
+        );
+        assert_eq!(tiny.snapshot(&r), Err(RegistryError::CheckpointUnavailable));
+        assert_eq!(
+            tiny.resize(&r, Geometry { cols: 9, rows: 2 }, &mut Writer::default()),
+            Err(RegistryError::CheckpointUnavailable)
+        );
+    }
+
+    #[test]
+    fn a_geometry_beyond_the_screen_bounds_is_clamped_by_the_authority() {
+        // The IPC boundary rejects such a geometry; the authority still clamps so
+        // a forged dimension cannot drive an unbounded grid allocation.
+        assert_eq!(
+            screen_dimensions(Geometry {
+                cols: u16::MAX,
+                rows: u16::MAX
+            }),
+            (ROWS_MAX as usize, COLS_MAX as usize)
+        );
+        assert_eq!(screen_dimensions(Geometry { cols: 0, rows: 0 }), (1, 1));
+        assert_eq!(screen_dimensions(Geometry { cols: 80, rows: 24 }), (24, 80));
+    }
+
+    #[test]
+    fn exit_status_is_readable_without_capturing_a_screen() {
+        let r = reference();
+        let mut registry = registry(r.clone());
+        assert_eq!(registry.exit_status(&r), Ok(None));
+        registry.exited(&r, 3).unwrap();
+        assert_eq!(registry.exit_status(&r), Ok(Some(3)));
+        let mut stale = r;
+        stale.worktree_id = WorktreeId::new();
+        assert_eq!(
+            registry.exit_status(&stale),
+            Err(RegistryError::StaleTarget)
+        );
     }
 
     #[test]
@@ -741,9 +1449,17 @@ mod tests {
                 attached.snapshot.base_offset + attached.snapshot.replay.len() as u64,
                 attached.snapshot.output_offset
             );
-            let mut frame = Vec::new();
-            write_json_frame(&mut frame, &attached, DEFAULT_MAX_FRAME_BYTES).unwrap();
-            assert!(frame.len() < DEFAULT_MAX_FRAME_BYTES);
+            // Both negotiated payloads stay inside one frame.
+            for wire in [SnapshotWire::RawTail, SnapshotWire::ScreenCheckpoint] {
+                let mut frame = Vec::new();
+                write_json_frame(
+                    &mut frame,
+                    &attached.clone().into_frame(wire),
+                    DEFAULT_MAX_FRAME_BYTES,
+                )
+                .unwrap();
+                assert!(frame.len() < DEFAULT_MAX_FRAME_BYTES);
+            }
 
             let cursor = attached.snapshot.base_offset + 123;
             let resumed = registry.replay_from(terminal, cursor).unwrap();

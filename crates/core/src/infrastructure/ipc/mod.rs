@@ -18,6 +18,19 @@ pub const DEFAULT_MAX_FRAME_BYTES: usize = 1024 * 1024;
 /// The largest logical snapshot permitted by the protocol (sixteen MiB).
 pub const HARD_MAX_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
 
+/// The wire generation that carries terminal attach / resync snapshots.
+pub const TERMINAL_WIRE_GENERATION: u16 = 1;
+/// The revision of [`TERMINAL_WIRE_GENERATION`] at which an attach / resync
+/// snapshot carries a semantic screen checkpoint instead of a raw byte tail.
+///
+/// A peer that negotiates a lower revision keeps the legacy `replay` tail, so
+/// the daemon serves both during the migration window.
+pub const TERMINAL_CHECKPOINT_REVISION: u16 = 2;
+/// The capability a daemon advertises when its snapshots can carry a semantic
+/// screen checkpoint. It is the truth source for the checkpoint path: a client
+/// requires this capability even when the negotiated revision would allow it.
+pub const TERMINAL_SCREEN_CHECKPOINT_CAPABILITY: &str = "terminal.screen-checkpoint.v1";
+
 macro_rules! string_id {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]

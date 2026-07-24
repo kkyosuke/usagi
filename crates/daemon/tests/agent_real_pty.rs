@@ -50,7 +50,9 @@ use usagi_daemon::usecase::runtime::{
     AdapterError, AgentAdapter, OutputJournal, ProvisionContext, PtySpawner, ResolvedLaunch,
     RuntimeStore, RuntimeStoreSnapshot, SpawnProvision, TerminateReapError,
 };
-use usagi_daemon::usecase::terminal::{Geometry, Output, PtyWriteError, PtyWriter, SpawnFailure};
+use usagi_daemon::usecase::terminal::{
+    Geometry, Output, PtyWriteError, PtyWriter, SnapshotWire, SpawnFailure,
+};
 
 // ---- shared fakes -----------------------------------------------------------
 
@@ -65,6 +67,7 @@ impl TerminalOwner for EmptyGeneric {
         _: RequestId,
         _: TerminalAction,
         _: Value,
+        _: SnapshotWire,
     ) -> Result<Value, usagi_core::infrastructure::ipc::ProtocolError> {
         Err(usagi_core::infrastructure::ipc::ProtocolError::new(
             ErrorCode::NotFound,
@@ -412,6 +415,7 @@ fn agent_real_pty_rebuilds_the_allowlisted_environment_and_commits_exit() {
         TerminalRequest::Attach {
             terminal: terminal.clone(),
         },
+        SnapshotWire::RawTail,
     ));
 
     finish_real_pty(&mut runtime, &observations, &terminal);
@@ -424,6 +428,7 @@ fn agent_real_pty_rebuilds_the_allowlisted_environment_and_commits_exit() {
         TerminalRequest::Resync {
             terminal: terminal.clone(),
         },
+        SnapshotWire::RawTail,
     ));
     assert_eq!(resync["exited"], 0);
     let replay = resync["replay"].as_array().unwrap();
@@ -457,6 +462,7 @@ fn agent_real_pty_rebuilds_the_allowlisted_environment_and_commits_exit() {
                     scope: query_scope.clone(),
                 })
                 .unwrap(),
+                SnapshotWire::RawTail,
             )
             .unwrap();
         serde_json::from_value::<Vec<CompletedTerminalEntry>>(response["entries"].clone()).unwrap()
@@ -483,6 +489,7 @@ fn agent_real_pty_rebuilds_the_allowlisted_environment_and_commits_exit() {
                 expected_revision: 0,
             })
             .unwrap(),
+            SnapshotWire::RawTail,
         )
         .unwrap();
     assert_eq!(observed["applied"], serde_json::json!(true));
@@ -497,6 +504,7 @@ fn agent_real_pty_rebuilds_the_allowlisted_environment_and_commits_exit() {
                 expected_revision: 1,
             })
             .unwrap(),
+            SnapshotWire::RawTail,
         )
         .unwrap();
     assert_eq!(dismissed["applied"], serde_json::json!(true));
@@ -964,6 +972,7 @@ fn real_pty_claude_launch_fails_closed_when_the_binary_is_unavailable() {
             RequestId::new(),
             TerminalAction::Attach,
             TerminalRequest::Attach { terminal: foreign },
+            SnapshotWire::RawTail,
         ),
         TerminalOutcome::NotOwned
     ));

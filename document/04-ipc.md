@@ -20,6 +20,7 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 - [Codex structured capture request](#codex-structured-capture-request)
 - [dispatch request](#dispatch-request)
 - [generic terminal request](#generic-terminal-request)
+  - [snapshot payload と revision](#snapshot-payload-と-revision)
 - [exited tombstone visibility](#exited-tombstone-visibility)
 
 ## identity と fence
@@ -313,10 +314,10 @@ terminal command の effect は、daemon generation、terminal、workspace、opt
 runtime ownership/state の全 fence を read-only で検証した後だけ実行する。resize はこの preflight から
 PTY effect、geometry commit まで terminal actor の排他区間を保持するため、途中の exit/replacement は
 割り込まない。PTY effect が失敗した場合は `unavailable` を返し、committed geometry を更新しない。
-output は `(start_offset, end_offset)` の連続範囲で表す。attach / resync snapshot は retention
-window の先頭 `base_offset`、末尾 `output_offset`、その半開区間 `[base_offset, output_offset)` の
-`replay` を返し、常に `base_offset + replay.length == output_offset` を満たす。window は最大 64 KiB
-であるため、byte array の JSON 展開と response envelope を含めても既定 1 MiB frame 上限内に収まる。
+output は `(start_offset, end_offset)` の連続範囲で表す。attach / resync / resize が返す snapshot の
+payload は negotiated revision で決まり（[snapshot payload と revision](#snapshot-payload-と-revision)）、
+どちらの revision でも `revision`（terminal 側の geometry/exit fence）・`geometry`・`output_offset`・
+`exited` を持つ。
 
 resume は `after_offset` が window より古い場合、または `output_offset` より未来の場合に
 `resync_required` を返す。window 内の segment
@@ -324,6 +325,40 @@ resume は `after_offset` が window より古い場合、または `output_offs
 `after_offset` と一致する。client は `resync_required` 後に snapshot で画面を置換し、返された
 `output_offset` から resume する。同じ古い cursor を再送しない。この `base_offset` は protocol
 generation 1 revision 1 の additive field であり、revision 1 client は必須 field として検証する。
+resume の response は raw suffix と `exited` だけを返し、snapshot（screen capture）を伴わない。
+
+### snapshot payload と revision
+
+daemon は terminal grid / scrollback の唯一の権威であり、terminal ごとに VT screen を 1 つ持って
+受信 byte を feed し、resize で screen を reshape する。snapshot payload は generation 1 の
+negotiated revision で決まる。
+
+| negotiated revision | payload | offset | 意味 |
+|---|---|---|---|
+| 1 | `replay`（raw byte tail） | `base_offset + replay.length == output_offset` | 移行互換の legacy 経路。tail は最大 64 KiB |
+| 2 | `screen`（semantic checkpoint） | `base_offset == output_offset`（tail 長 0） | `output_offset` 時点の完全な screen state |
+
+daemon は generation 1 の `max_revision` を 2 として広告し、`ServerHello.capabilities` に
+`terminal.screen-checkpoint.v1` を含める。共通 revision が 1 に落ちる旧 client には従来どおり raw tail を
+返すため、両 revision が同じ daemon で同時に成立する。revision 2 の `screen` は schema version・
+geometry・active buffer・primary（常に存在）と alternate（active のときだけ）の grid / scrollback /
+cursor / saved cursor / scroll region、interned style table、decoder の途中状態を持つ。client は
+checkpoint から screen を復元し、`output_offset` からの raw suffix を同じ parser へ feed する。
+raw tail を blank parser へ流すことに起因する UTF-8 / CSI / OSC の切断は revision 2 では起こらない。
+
+snapshot の `geometry` と `screen.geometry` は常に一致し、片方だけ新しい frame は存在しない。resize は
+preflight → PTY effect → geometry commit → screen reshape を terminal actor の排他区間で行い `revision` を
+1 つ進めるため、checkpoint の生成前後に resize が割り込んでも client は `revision` / `geometry` の
+不一致として検出し、old / new state を混ぜずに snapshot 再取得（retry / typed resync）へ落とせる。
+
+daemon 側の bound は次のとおりで、いずれも既定 1 MiB frame と process の memory peak を守る。
+
+| bound | 効果 |
+|---|---|
+| geometry の上限（`ROWS_MAX` / `COLS_MAX`） | 範囲外の geometry は `invalid_argument` で PTY effect も grid 確保も行わない |
+| per-terminal cell budget | screen が超えたら古い scrollback から trim する（trim 行数を counter に計上） |
+| process-local aggregate cell budget | 直前に増えた terminal を、他 terminal の現在の retention が残す範囲まで trim する |
+| serialized checkpoint budget | checkpoint payload の古い scrollback を落として frame 内に収める。可視 grid だけでも収まらない場合は `resource_exhausted` で fail closed とし、部分的な screen を返さない |
 
 `stale_target`、`ownership_unknown`、partial write を含む安全に証明
 できない結果は typed error であり、client は local PTY を生成しない。

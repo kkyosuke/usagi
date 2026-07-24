@@ -904,8 +904,22 @@ impl RuntimeCoordinator {
 
     pub fn terminal_snapshot(&self, runtime: &AgentRuntimeRef) -> Result<Snapshot, RuntimeError> {
         self.record(runtime)?;
+        // The registry's typed failure is preserved: a fencing failure and a
+        // screen that does not fit one frame are different client contracts.
         self.terminals
             .snapshot(&runtime.terminal)
+            .map_err(RuntimeError::Terminal)
+    }
+
+    /// The hosting terminal's committed exit status without capturing a screen,
+    /// for the incremental `Resume` path.
+    pub fn terminal_exit_status(
+        &self,
+        runtime: &AgentRuntimeRef,
+    ) -> Result<Option<i32>, RuntimeError> {
+        self.record(runtime)?;
+        self.terminals
+            .exit_status(&runtime.terminal)
             .map_err(|_| RuntimeError::TerminalGenerationMismatch)
     }
 
@@ -2200,10 +2214,16 @@ mod tests {
             c.terminal_snapshot(&runtime).unwrap().terminal,
             runtime.terminal
         );
+        // Liveness is readable without capturing a screen.
+        assert_eq!(c.terminal_exit_status(&runtime), Ok(None));
         let mut stale = runtime.clone();
         stale.terminal.daemon_generation = DaemonGeneration::new();
         assert_eq!(
             c.terminal_snapshot(&stale),
+            Err(RuntimeError::UnknownRuntime)
+        );
+        assert_eq!(
+            c.terminal_exit_status(&stale),
             Err(RuntimeError::UnknownRuntime)
         );
         assert_eq!(
