@@ -134,12 +134,12 @@ mod tests {
         let agent = agent_for(AgentCli::Claude);
         assert_eq!(agent.program(), "claude");
         let launch = agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None);
-        assert!(launch.contains(" -- claude --mcp-config '{\"mcpServers\":"));
+        assert!(launch.starts_with("claude --mcp-config '{\"mcpServers\":"));
         assert!(launch.contains("--append-system-prompt"));
         assert!(launch.contains("--settings '{\"hooks\":"));
         // Resuming routes through to Claude's `--continue` flag.
         let resumed = agent.launch_command(&Settings::default().agent_wiring("usagi"), true, None);
-        assert!(resumed.contains(" -- claude --continue --mcp-config '"));
+        assert!(resumed.starts_with("claude --continue --mcp-config '"));
     }
 
     #[test]
