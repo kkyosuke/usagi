@@ -10270,6 +10270,91 @@ mod tests {
     }
 
     #[test]
+    fn double_clicked_append_restored_session_attaches_and_receives_input() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let root_terminal = scoped_terminal_ref(workspace, None);
+        let session_terminal = scoped_terminal_ref(workspace, Some(session));
+        let inputs = Arc::new(Mutex::new(Vec::new()));
+        let entries = vec![
+            TerminalInventoryEntry {
+                terminal: root_terminal.clone(),
+                kind: TerminalKind::Terminal,
+                live: true,
+            },
+            TerminalInventoryEntry {
+                terminal: session_terminal.clone(),
+                kind: TerminalKind::Agent,
+                live: true,
+            },
+        ];
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(RestoreInventoryPort {
+                    entries,
+                    fail: false,
+                    inputs: inputs.clone(),
+                }),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let (interaction, revision) = runtime.restore_fence();
+        assert!(runtime.append_restore_snapshot(
+            interaction,
+            revision,
+            vec![
+                super::PaneRestoreTarget {
+                    target: Target::Root(workspace),
+                    panes: vec![LivePane {
+                        terminal: root_terminal,
+                        kind: PaneKind::Terminal,
+                    }],
+                    selected: None,
+                },
+                super::PaneRestoreTarget {
+                    target: Target::Session(session),
+                    panes: vec![LivePane {
+                        terminal: session_terminal.clone(),
+                        kind: PaneKind::Agent,
+                    }],
+                    selected: None,
+                },
+            ],
+        ));
+        let _ = runtime.apply_event(AppEvent::Resize {
+            width: 100,
+            height: 30,
+        });
+        for at in [1_000, 1_100] {
+            let _ = runtime.apply_event(AppEvent::Pointer {
+                column: 5,
+                row: 4,
+                at: std::time::Duration::from_millis(at),
+            });
+        }
+        ui.sync_foreground_terminal(
+            runtime.focused_terminal().as_ref(),
+            terminal_geometry(20, 80),
+        );
+
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        assert!(forward_live_terminal_input(
+            &mut ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            &Key::Char('x'),
+        ));
+        assert_eq!(
+            *inputs.lock().unwrap(),
+            vec![(session_terminal, b"x".to_vec())]
+        );
+    }
+
+    #[test]
     fn restore_open_panes_restores_nothing_on_daemon_failure_or_without_a_port() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();

@@ -785,14 +785,22 @@ fn restore_batch(
         for pane in unique {
             let _ = restore(state, pane);
         }
-        if was_empty
-            && let Some(selected) = selected
-            && state
-                .tabs
-                .iter()
-                .any(|tab| matches!(tab, PaneTab::Live(live) if live.terminal.fences(&selected)))
-        {
-            state.selected = PaneSelection::Tab(TabSelection::Live(selected));
+        if was_empty {
+            state.selected = selected
+                .filter(|selected| {
+                    state.tabs.iter().any(
+                        |tab| matches!(tab, PaneTab::Live(live) if live.terminal.fences(selected)),
+                    )
+                })
+                .map_or_else(
+                    || {
+                        state
+                            .tabs
+                            .first()
+                            .map_or_else(|| state.selected.clone(), selection_for)
+                    },
+                    |selected| PaneSelection::Tab(TabSelection::Live(selected)),
+                );
         }
     }
     Vec::new()
@@ -1170,6 +1178,68 @@ mod tests {
         assert_eq!(state.selected(), &selection);
         assert_eq!(&state.tabs()[..2], order.as_slice());
         assert_eq!(state.tabs().len(), 3);
+    }
+
+    #[test]
+    fn append_restore_selects_the_first_live_tab_for_an_empty_target() {
+        let target = target();
+        let first = terminal(target);
+        let second = terminal(target);
+        let mut state = PaneState::new(PaneSelection::Target(target));
+
+        let _ = reduce(
+            &mut state,
+            PaneEvent::RestoreBatch {
+                panes: vec![
+                    LivePane {
+                        terminal: first.clone(),
+                        kind: PaneKind::Terminal,
+                    },
+                    LivePane {
+                        terminal: second,
+                        kind: PaneKind::Agent,
+                    },
+                ],
+                selected: None,
+                replace_order: false,
+            },
+        );
+
+        assert_eq!(
+            state.selected(),
+            &PaneSelection::Tab(TabSelection::Live(first))
+        );
+    }
+
+    #[test]
+    fn append_restore_honours_a_valid_selection_for_an_empty_target() {
+        let target = target();
+        let first = terminal(target);
+        let selected = terminal(target);
+        let mut state = PaneState::new(PaneSelection::Target(target));
+
+        let _ = reduce(
+            &mut state,
+            PaneEvent::RestoreBatch {
+                panes: vec![
+                    LivePane {
+                        terminal: first,
+                        kind: PaneKind::Terminal,
+                    },
+                    LivePane {
+                        terminal: selected.clone(),
+                        kind: PaneKind::Agent,
+                    },
+                ],
+                selected: Some(selected.clone()),
+                replace_order: false,
+            },
+        );
+
+        assert_eq!(
+            state.selected(),
+            &PaneSelection::Tab(TabSelection::Live(selected))
+        );
     }
 
     #[test]
