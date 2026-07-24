@@ -179,6 +179,9 @@ pub enum LiveTerminalAction {
     Agent,
     /// Close the active tab.
     CloseTab,
+    /// Explicitly resume the selected interrupted Agent tab (#510). Nothing else
+    /// starts a provider resume.
+    ResumeTab,
     /// Open quit confirmation.
     QuitConfirmation,
     /// Scroll the focused terminal pane one line toward older output.
@@ -383,6 +386,7 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
     }
     match key.code {
         KeyCode::Char('x') => Some(LiveTerminalAction::CloseTab),
+        KeyCode::Char('r') => Some(LiveTerminalAction::ResumeTab),
         KeyCode::Char(']') => Some(LiveTerminalAction::MoveTabNext),
         KeyCode::Char('[') => Some(LiveTerminalAction::MoveTabPrevious),
         KeyCode::Char('u') | KeyCode::Up => Some(LiveTerminalAction::ScrollUp),

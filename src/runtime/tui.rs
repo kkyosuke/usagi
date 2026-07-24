@@ -58,8 +58,9 @@ use usagi_tui::presentation::views::workspace::GitDiff;
 use usagi_tui::presentation::{
     self, AgentCommandPort, AgentPaneAdmission, BannerScreenRunner, ControllerBackendComposition,
     ControllerBackendFactory, ControllerHost, DecisionCommandPort, DesktopNotificationPort,
-    EnvironmentStorePort, Exit, ExternalTerminalPort, MetricsPort, RestoreConnectionPort,
-    SessionCommandPort, SessionCommandResult, Start, WorkspaceLoader, WorkspaceSnapshot,
+    EnvironmentStorePort, ExactAgentResume, Exit, ExternalTerminalPort, MetricsPort,
+    RestoreConnectionPort, SessionCommandPort, SessionCommandResult, Start, WorkspaceLoader,
+    WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::agent_tab_intent::{
     AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabIntentPort,
@@ -1179,6 +1180,35 @@ fn exact_agent_resume_request(
     }
 }
 
+/// Decode one exact-target resume answer, keeping the daemon's own lineage and
+/// source-to-replacement relation. Nothing is inferred here: a body without a
+/// decodable relation yields `None` and the TUI refuses the replacement (#510).
+fn decode_exact_agent_resume(body: &serde_json::Value) -> Result<ExactAgentResume, String> {
+    let terminal = body
+        .get("terminal")
+        .cloned()
+        .ok_or_else(|| "provider resume returned no terminal".to_owned())
+        .and_then(|terminal| {
+            serde_json::from_value(terminal)
+                .map_err(|_| "provider resume returned an invalid terminal".to_owned())
+        })?;
+    let continuation = body
+        .get("continuation")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
+    let relation = body
+        .get("resume_relation")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
+    Ok(ExactAgentResume {
+        terminal,
+        continuation,
+        relation,
+    })
+}
+
 fn decode_agent_admission(
     body: &serde_json::Value,
     operation: &str,
@@ -1279,7 +1309,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         &mut self,
         target: usagi_core::domain::agent::AgentResumeTarget,
         operation_id: usagi_core::domain::id::OperationId,
-    ) -> Result<usagi_core::domain::id::TerminalRef, String> {
+    ) -> Result<ExactAgentResume, String> {
         let mut client =
             crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
                 .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
@@ -1287,14 +1317,9 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             .request(exact_agent_resume_request(operation_id, target))
             .map_err(|_| "provider resume failed; refresh Agent inventory".to_owned())?
         {
-            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => body
-                .get("terminal")
-                .cloned()
-                .ok_or_else(|| "provider resume returned no terminal".to_owned())
-                .and_then(|terminal| {
-                    serde_json::from_value(terminal)
-                        .map_err(|_| "provider resume returned an invalid terminal".to_owned())
-                }),
+            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => {
+                decode_exact_agent_resume(&body)
+            }
         }
     }
 

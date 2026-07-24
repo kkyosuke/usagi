@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use usagi_core::domain::agent::AgentResumeRelation;
 use usagi_core::domain::id::AgentContinuationRef;
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef};
 use usagi_core::domain::settings::ModalSelectionMode;
@@ -30,10 +31,13 @@ use crate::usecase::application::Key;
 use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, Effect, HomeMode, Overlay, Route, TabDirection, Target, update,
 };
+use crate::usecase::application::interrupted_tab::{
+    InterruptedTab, ResumeCommand, ResumeRejection, accept_replacement, resume_command,
+};
 use crate::usecase::application::pane::{
-    LivePane, PaneEvent, PaneInputOwner, PaneKind, PaneRegistry, PaneRegistryEffect,
-    PaneRegistryEvent, PaneSelection, PaneState, PaneTab, PaneTabCommand, TabSelection,
-    reduce_registry, route_tab_command,
+    InterruptedPane, LivePane, PaneEvent, PaneInputOwner, PaneKind, PaneRegistry,
+    PaneRegistryEffect, PaneRegistryEvent, PaneSelection, PaneState, PaneTab, PaneTabCommand,
+    TabSelection, reduce_registry, route_tab_command,
 };
 
 use super::app_event_from_key;
@@ -56,12 +60,16 @@ pub struct AgentReopenChoice {
     pub continuation: AgentContinuationRef,
 }
 
-/// One target's ordered live panes from a completed restore job.
+/// One target's ordered live panes from a completed restore job, plus the
+/// interrupted Agent conversations projected for the same target (#510).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneRestoreTarget {
     pub target: Target,
     pub panes: Vec<LivePane>,
     pub selected: Option<TerminalRef>,
+    /// Interrupted conversations of this target, in display order. They are
+    /// read-only tabs until the user explicitly resumes one.
+    pub interrupted: Vec<InterruptedTab>,
 }
 
 /// Home runtime backed by the controller reducer and pane registry.
@@ -215,14 +223,26 @@ impl WorkspaceRuntime {
             return false;
         }
         for target in targets {
+            let entry = target.target;
             let _ = reduce_registry(
                 &mut self.panes,
                 PaneRegistryEvent::Pane {
-                    target: target.target,
+                    target: entry,
                     event: PaneEvent::RestoreBatch {
                         panes: target.panes,
                         selected: target.selected,
                         replace_order,
+                    },
+                },
+            );
+            // The interrupted projection is merged after live membership so a
+            // history tab keeps its slot behind this target's live tabs.
+            let _ = reduce_registry(
+                &mut self.panes,
+                PaneRegistryEvent::Pane {
+                    target: entry,
+                    event: PaneEvent::RestoreInterrupted {
+                        tabs: target.interrupted,
                     },
                 },
             );
@@ -481,7 +501,9 @@ impl WorkspaceRuntime {
     pub fn focused_terminal(&self) -> Option<TerminalRef> {
         match self.panes.active_pane().selected() {
             PaneSelection::Tab(TabSelection::Live(terminal)) => Some(terminal.clone()),
-            PaneSelection::Tab(TabSelection::Pending(_) | TabSelection::Ready(_))
+            PaneSelection::Tab(
+                TabSelection::Pending(_) | TabSelection::Ready(_) | TabSelection::Interrupted(_),
+            )
             | PaneSelection::Target(_) => None,
         }
     }
@@ -636,7 +658,11 @@ impl WorkspaceRuntime {
                 detach: None,
                 cancel: Some(*operation),
             },
-            PaneSelection::Target(_) => CloseOutcome::default(),
+            // An interrupted tab owns no daemon transport: closing it is purely
+            // a display dismissal, which the shell persists through #506 intent.
+            PaneSelection::Tab(TabSelection::Interrupted(_)) | PaneSelection::Target(_) => {
+                CloseOutcome::default()
+            }
         };
         // A cancelled pending launch will never complete, so drop its focus gate
         // before the placeholder leaves the registry.
@@ -646,6 +672,168 @@ impl WorkspaceRuntime {
         let _ = route_tab_command(&mut self.panes, PaneTabCommand::Close);
         self.sync_live_pane();
         outcome
+    }
+
+    /// The interrupted conversation the active pane's selected tab shows, if the
+    /// selection is an interrupted tab. The shell uses it to persist the
+    /// continuation-scoped dismissal of a closed history tab (#506) and to label
+    /// the explicit Resume action.
+    #[must_use]
+    pub fn focused_interrupted(&self) -> Option<&InterruptedTab> {
+        let PaneSelection::Tab(TabSelection::Interrupted(selected)) =
+            self.panes.active_pane().selected()
+        else {
+            return None;
+        };
+        self.panes
+            .active_pane()
+            .tabs()
+            .iter()
+            .find_map(|tab| match tab {
+                PaneTab::Interrupted(pane) if pane.tab.continuation == *selected => Some(&pane.tab),
+                PaneTab::Interrupted(_)
+                | PaneTab::Pending(_)
+                | PaneTab::Live(_)
+                | PaneTab::Ready(_) => None,
+            })
+    }
+
+    /// Start the explicit resume of the selected interrupted tab under a fresh
+    /// durable `operation`.
+    ///
+    /// Nothing else can produce this request: inventory refresh, reconnect, and
+    /// workspace open never call it. On success exactly that tab becomes pending
+    /// and the returned command is the daemon request the shell must send.
+    ///
+    /// # Errors
+    ///
+    /// Returns the safe [`ResumeRejection`] when no interrupted tab is selected,
+    /// the tab has no trustworthy exact target, or a resume for it is already in
+    /// flight. The rejection is also surfaced as the pane's feedback.
+    pub fn resume_selected_tab(
+        &mut self,
+        operation: OperationId,
+    ) -> Result<ResumeCommand, ResumeRejection> {
+        let target = self.panes.active();
+        let Some(pane) = self.selected_interrupted_pane() else {
+            return Err(ResumeRejection::NotResumable);
+        };
+        let continuation = pane.tab.continuation;
+        let command = resume_command(&pane.tab, pane.resuming, operation);
+        match command {
+            Ok(command) => {
+                let _ = reduce_registry(
+                    &mut self.panes,
+                    PaneRegistryEvent::Pane {
+                        target,
+                        event: PaneEvent::ResumeStarted {
+                            continuation,
+                            operation,
+                        },
+                    },
+                );
+                Ok(command)
+            }
+            Err(rejection) => {
+                self.fail_tab_resume(continuation, rejection.safe_message().to_owned());
+                Err(rejection)
+            }
+        }
+    }
+
+    /// Turn one resuming interrupted tab into its new live Agent terminal.
+    ///
+    /// The answer is accepted only when the operation, the lineage, the exact
+    /// interrupted source, and a genuinely new fenced terminal all agree
+    /// ([`accept_replacement`]). Any disagreement leaves every tab as it was and
+    /// surfaces safe feedback instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns the safe [`ResumeRejection`] describing which fence disagreed.
+    pub fn complete_tab_resume(
+        &mut self,
+        continuation: AgentContinuationRef,
+        answered: OperationId,
+        answered_continuation: Option<AgentContinuationRef>,
+        relation: Option<&AgentResumeRelation>,
+        terminal: &TerminalRef,
+    ) -> Result<Vec<PaneRegistryEffect>, ResumeRejection> {
+        let target = self.panes.active();
+        let Some(pane) = self.interrupted_pane(continuation) else {
+            return Err(ResumeRejection::NotResumable);
+        };
+        let Some(in_flight) = pane.resuming else {
+            return Err(ResumeRejection::OperationMismatch);
+        };
+        let accepted = accept_replacement(
+            &pane.tab,
+            in_flight,
+            answered,
+            answered_continuation,
+            relation,
+            terminal,
+        );
+        match accepted {
+            Ok(replacement) => {
+                let effects = reduce_registry(
+                    &mut self.panes,
+                    PaneRegistryEvent::Pane {
+                        target,
+                        event: PaneEvent::ResumeReplaced {
+                            continuation: replacement.continuation,
+                            terminal: replacement.terminal,
+                        },
+                    },
+                );
+                self.sync_live_pane();
+                Ok(effects)
+            }
+            Err(rejection) => {
+                self.fail_tab_resume(continuation, rejection.safe_message().to_owned());
+                Err(rejection)
+            }
+        }
+    }
+
+    /// Leave one interrupted tab in place after a refused or failed resume and
+    /// show `message`. The tab becomes activatable again so an explicit retry is
+    /// possible.
+    pub fn fail_tab_resume(&mut self, continuation: AgentContinuationRef, message: String) {
+        let target = self.panes.active();
+        let _ = reduce_registry(
+            &mut self.panes,
+            PaneRegistryEvent::Pane {
+                target,
+                event: PaneEvent::ResumeFailed {
+                    continuation,
+                    message,
+                },
+            },
+        );
+    }
+
+    fn selected_interrupted_pane(&self) -> Option<&InterruptedPane> {
+        let PaneSelection::Tab(TabSelection::Interrupted(selected)) =
+            self.panes.active_pane().selected()
+        else {
+            return None;
+        };
+        self.interrupted_pane(*selected)
+    }
+
+    fn interrupted_pane(&self, continuation: AgentContinuationRef) -> Option<&InterruptedPane> {
+        self.panes
+            .active_pane()
+            .tabs()
+            .iter()
+            .find_map(|tab| match tab {
+                PaneTab::Interrupted(pane) if pane.tab.continuation == continuation => Some(pane),
+                PaneTab::Interrupted(_)
+                | PaneTab::Pending(_)
+                | PaneTab::Live(_)
+                | PaneTab::Ready(_) => None,
+            })
     }
 
     /// Preview the live terminal selected after closing the current live tab.
@@ -672,7 +860,7 @@ impl WorkspaceRuntime {
         };
         Some(match successor {
             PaneTab::Live(live) => Some(live.terminal.clone()),
-            PaneTab::Pending(_) | PaneTab::Ready(_) => None,
+            PaneTab::Pending(_) | PaneTab::Ready(_) | PaneTab::Interrupted(_) => None,
         })
     }
 
@@ -695,7 +883,9 @@ impl WorkspaceRuntime {
         self.adjacent_tab(direction)
             .map(|selection| match selection {
                 TabSelection::Live(terminal) => Some(terminal),
-                TabSelection::Pending(_) | TabSelection::Ready(_) => None,
+                TabSelection::Pending(_)
+                | TabSelection::Ready(_)
+                | TabSelection::Interrupted(_) => None,
             })
     }
 
@@ -719,7 +909,7 @@ impl WorkspaceRuntime {
             .iter()
             .filter_map(|tab| match tab {
                 PaneTab::Live(pane) => Some(pane.terminal.clone()),
-                PaneTab::Pending(_) | PaneTab::Ready(_) => None,
+                PaneTab::Pending(_) | PaneTab::Ready(_) | PaneTab::Interrupted(_) => None,
             })
             .collect()
     }
@@ -841,6 +1031,7 @@ fn tab_selection(tab: &PaneTab) -> TabSelection {
         PaneTab::Pending(pending) => TabSelection::Pending(pending.operation),
         PaneTab::Live(live) => TabSelection::Live(live.terminal.clone()),
         PaneTab::Ready(pending) => TabSelection::Ready(pending.operation),
+        PaneTab::Interrupted(pane) => TabSelection::Interrupted(pane.tab.continuation),
     }
 }
 
@@ -1313,6 +1504,7 @@ mod tests {
                         kind: PaneKind::Terminal,
                     }],
                     selected: None,
+                    interrupted: Vec::new(),
                 },
                 PaneRestoreTarget {
                     target: Target::Session(second_session),
@@ -1321,6 +1513,7 @@ mod tests {
                         kind: PaneKind::Agent,
                     }],
                     selected: None,
+                    interrupted: Vec::new(),
                 },
             ],
         ));
@@ -1548,6 +1741,7 @@ mod tests {
                     },
                 ],
                 selected: Some(discovered),
+                interrupted: Vec::new(),
             }],
         );
 

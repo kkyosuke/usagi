@@ -1,7 +1,7 @@
 ---
 number: 510
 title: feat(tui): interrupted Claude/Codex を tab 単位で選択 resume する
-status: todo
+status: in-progress
 priority: high
 labels: [review, v2, tui, agent, recovery]
 dependson: [504, 506, 509]

@@ -197,6 +197,9 @@ pub struct HomeProjection {
     terminal_view: Option<TerminalViewProjection>,
     pane_tabs: Vec<HomePaneTab>,
     pane_error: Option<String>,
+    /// Non-sensitive detail of the selected interrupted Agent tab (#510). It
+    /// replaces the phase line while a read-only history tab is selected.
+    pane_detail: Option<String>,
     /// Whether the Closeup action modal covers the right pane this frame. Its
     /// final value is only known once [`Self::with_pane`] has seen the pane
     /// strip: the modal is the launcher surface only while Closeup has no tab at
@@ -307,6 +310,7 @@ impl HomeProjection {
             terminal_view: None,
             pane_tabs: Vec::new(),
             pane_error: None,
+            pane_detail: None,
             // Seed only the explicit/forced action modal here (an open
             // `Overlay::Closeup`). The launcher-over-empty-pane case cannot be
             // decided without the pane strip, so `with_pane` finalizes it; this
@@ -374,6 +378,14 @@ impl HomeProjection {
             })
             .collect();
         self.pane_error = pane.error().map(str::to_owned);
+        self.pane_detail = pane
+            .tabs()
+            .iter()
+            .find(|tab| pane_tab_selected(tab, pane.selected()))
+            .and_then(|tab| match tab {
+                PaneTab::Interrupted(interrupted) => Some(interrupted_detail(interrupted)),
+                PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_) => None,
+            });
         // In Closeup the action modal is the launcher shown only while the pane
         // holds no tab at all — pending placeholders included. A pending launch
         // therefore keeps the wave visible instead of being re-covered every
@@ -450,6 +462,15 @@ impl HomeProjection {
 
 fn pane_tab_label(tab: &PaneTab) -> String {
     match tab {
+        // Interrupted history is labelled from the closed provider vocabulary
+        // only, so no provider-native identity can reach the tab strip.
+        PaneTab::Interrupted(pane) => match pane.resuming {
+            Some(_) => format!(
+                "{} (resuming)",
+                crate::usecase::application::interrupted_tab::provider_label(pane.tab.provider)
+            ),
+            None => pane.tab.safe_label(),
+        },
         PaneTab::Pending(pending) => match pending.kind {
             PaneKind::Terminal => "Terminal".to_owned(),
             PaneKind::Agent => "Agent".to_owned(),
@@ -468,29 +489,17 @@ fn pane_tab_label(tab: &PaneTab) -> String {
 }
 
 fn pane_tab_selected(tab: &PaneTab, selection: &PaneSelection) -> bool {
-    match (tab, selection) {
-        (PaneTab::Pending(pending), PaneSelection::Tab(TabSelection::Pending(selected))) => {
-            pending.operation == *selected
-        }
-        (PaneTab::Live(live), PaneSelection::Tab(TabSelection::Live(selected))) => {
-            live.terminal == *selected
-        }
-        (PaneTab::Ready(ready), PaneSelection::Tab(TabSelection::Ready(selected))) => {
-            ready.operation == *selected
-        }
-        (PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_), PaneSelection::Target(_))
-        | (
-            PaneTab::Pending(_),
-            PaneSelection::Tab(TabSelection::Live(_) | TabSelection::Ready(_)),
-        )
-        | (
-            PaneTab::Live(_),
-            PaneSelection::Tab(TabSelection::Pending(_) | TabSelection::Ready(_)),
-        )
-        | (
-            PaneTab::Ready(_),
-            PaneSelection::Tab(TabSelection::Pending(_) | TabSelection::Live(_)),
-        ) => false,
+    // Each tab kind carries its own stable selection key, so comparing keys is
+    // enough: a mismatched kind or identity simply compares unequal.
+    *selection == PaneSelection::Tab(pane_tab_selection(tab))
+}
+
+fn pane_tab_selection(tab: &PaneTab) -> TabSelection {
+    match tab {
+        PaneTab::Pending(pending) => TabSelection::Pending(pending.operation),
+        PaneTab::Live(live) => TabSelection::Live(live.terminal.clone()),
+        PaneTab::Ready(ready) => TabSelection::Ready(ready.operation),
+        PaneTab::Interrupted(pane) => TabSelection::Interrupted(pane.tab.continuation),
     }
 }
 
@@ -1666,7 +1675,10 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
             chrome[1].clone(),
             String::new(),
             Style::new().dim().paint(&widgets::pad_to_width(
-                &format!("  agent: {}", phase_label(home.active_phase)),
+                &home.pane_detail.as_ref().map_or_else(
+                    || format!("  agent: {}", phase_label(home.active_phase)),
+                    |detail| format!("  agent: {detail}"),
+                ),
                 width,
             )),
             Style::new().dim().paint(&widgets::pad_to_width(
@@ -1682,6 +1694,19 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         height,
         footer,
     )
+}
+
+/// The selected interrupted tab's body line. It states what an explicit Resume
+/// does, or why the conversation cannot be resumed, using only the closed
+/// display vocabulary of [`InterruptedTab`].
+fn interrupted_detail(pane: &crate::usecase::application::pane::InterruptedPane) -> String {
+    match pane.resuming {
+        Some(_) => "resuming this conversation in a new Agent".to_owned(),
+        None if pane.tab.resumable() => {
+            format!("{} — Ctrl-O r resumes it", pane.tab.safe_detail())
+        }
+        None => pane.tab.safe_detail().to_owned(),
+    }
 }
 
 fn phase_label(phase: TargetPhase) -> &'static str {

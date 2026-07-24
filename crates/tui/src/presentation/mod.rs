@@ -24,8 +24,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use chrono::{DateTime, Utc};
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::{
-    AgentInventory, AgentProfileId, AgentResumeTarget, AgentRuntimeInventoryState,
-    ProviderResumeProjection,
+    AgentInventory, AgentProfileId, AgentResumeRelation, AgentResumeTarget,
+    AgentRuntimeInventoryState, ProviderResumeProjection,
 };
 use usagi_core::domain::id::{
     AgentContinuationRef, OperationId, SessionId, TerminalRef, UserDecisionId, WorkspaceId,
@@ -72,6 +72,7 @@ use crate::usecase::application::daemon_backend::{
     ReopenAgentRequest, ResumeAgentRequest, SessionCommandPort as BackendSessionCommandPort,
     TargetStorePort as BackendTargetStorePort, WorkspaceCommandPort as BackendWorkspaceCommandPort,
 };
+use crate::usecase::application::interrupted_tab::{InterruptedTab, ResumeCommand};
 use crate::usecase::application::pane::{PaneKind, PaneTab};
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
@@ -134,6 +135,10 @@ pub trait AgentCommandPort: Send {
 
     /// Resumes only the exact daemon-issued target selected by the caller.
     ///
+    /// The answer must carry the daemon's source-to-replacement relation: the
+    /// TUI accepts a replacement only when that relation, the lineage, and a new
+    /// fully fenced terminal all agree (#510).
+    ///
     /// # Errors
     ///
     /// Returns safe feedback when the daemon rejects the exact target or does
@@ -142,7 +147,7 @@ pub trait AgentCommandPort: Send {
         &mut self,
         _target: AgentResumeTarget,
         _operation_id: OperationId,
-    ) -> Result<TerminalRef, String> {
+    ) -> Result<ExactAgentResume, String> {
         Err("Exact Agent resume is unavailable.".to_owned())
     }
 
@@ -1253,6 +1258,21 @@ enum SessionBackendCompletion {
     },
 }
 
+/// One accepted exact-target Agent resume as the daemon answered it (#510).
+///
+/// Every field is daemon-authoritative: the TUI never infers the lineage or the
+/// relation, and a missing relation is refused rather than assumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExactAgentResume {
+    /// The replacement runtime's new, fully fenced terminal.
+    pub terminal: TerminalRef,
+    /// Lineage the daemon says the replacement continues.
+    pub continuation: Option<AgentContinuationRef>,
+    /// Source-to-replacement relation proving which interrupted runtime was
+    /// replaced.
+    pub relation: Option<AgentResumeRelation>,
+}
+
 /// Completion of one non-blocking Agent / terminal launch. Keeping the port in
 /// the message mirrors session creation: one daemon client remains the owner
 /// of its request sequence while the TUI continues rendering the wave.
@@ -1269,6 +1289,12 @@ enum PaneLaunchOutcome {
     Terminal {
         operation: OperationId,
         result: Result<TerminalRef, String>,
+    },
+    /// One explicit per-tab provider resume (#510).
+    ResumeExact {
+        operation: OperationId,
+        continuation: AgentContinuationRef,
+        result: Result<ExactAgentResume, String>,
     },
 }
 
@@ -1288,6 +1314,13 @@ enum PaneLaunch {
         /// Absent for a workspace-root terminal.
         session: Option<SessionId>,
         arguments: String,
+    },
+    /// The user explicitly resumed one interrupted tab. The opaque target came
+    /// from the daemon's own inventory; the TUI adds only the operation.
+    ResumeExact {
+        operation: OperationId,
+        continuation: AgentContinuationRef,
+        target: AgentResumeTarget,
     },
 }
 
@@ -1623,6 +1656,31 @@ impl WorkspaceUi {
                     })
                     .collect()
             })
+    }
+
+    /// The saved Agent slot order of the whole workspace, flattened across
+    /// targets. It gives a restored interrupted tab the position the user last
+    /// saw it in (#506 slots keyed by lineage).
+    fn agent_slot_order(&self) -> Vec<AgentContinuationRef> {
+        self.agent_tab_intent
+            .as_ref()
+            .map_or_else(Vec::new, |context| {
+                context
+                    .state
+                    .targets
+                    .iter()
+                    .flat_map(|target| &target.tabs)
+                    .map(|slot| slot.continuation)
+                    .collect()
+            })
+    }
+
+    /// Lineages the user dismissed. They stay hidden until an explicit reopen
+    /// clears the dismissal; inventory absence never clears it.
+    fn agent_dismissed(&self) -> BTreeSet<AgentContinuationRef> {
+        self.agent_tab_intent
+            .as_ref()
+            .map_or_else(BTreeSet::new, |context| context.state.dismissed.clone())
     }
 
     fn persist_agent_order(
@@ -2395,6 +2453,34 @@ fn drain_pane_launches(ui: &mut WorkspaceUi, geometry: Geometry) {
                 ui.pane_launches.append(&mut launches);
                 return;
             }
+            PaneLaunch::ResumeExact {
+                operation,
+                continuation,
+                target,
+            } => {
+                let Some(mut port) = ui.agent.as_mut().and_then(|agent| agent.port.take()) else {
+                    ui.pane_launches.push(PaneLaunch::ResumeExact {
+                        operation,
+                        continuation,
+                        target,
+                    });
+                    continue;
+                };
+                let sender = ui.pane_completion_sender.clone();
+                std::thread::spawn(move || {
+                    let result = port.resume_exact(target, operation);
+                    let _ = sender.send(PaneLaunchCompletion {
+                        port,
+                        outcome: PaneLaunchOutcome::ResumeExact {
+                            operation,
+                            continuation,
+                            result,
+                        },
+                    });
+                });
+                ui.pane_launches.append(&mut launches);
+                return;
+            }
             PaneLaunch::Terminal {
                 operation,
                 workspace,
@@ -2517,6 +2603,7 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
         LiveTerminalAction::Agent => Some(AppKey::CtrlA),
         LiveTerminalAction::QuitConfirmation => Some(AppKey::OpenQuitConfirmation),
         LiveTerminalAction::CloseTab
+        | LiveTerminalAction::ResumeTab
         | LiveTerminalAction::MoveTabNext
         | LiveTerminalAction::MoveTabPrevious
         | LiveTerminalAction::ScrollUp
@@ -2947,6 +3034,7 @@ fn pane_restore_targets(
     agents: AgentTabProjection,
     terminals: &[TerminalInventoryEntry],
     current_selected: Option<&TerminalRef>,
+    interrupted: Vec<InterruptedTab>,
 ) -> Vec<PaneRestoreTarget> {
     let mut targets: BTreeMap<
         Option<SessionId>,
@@ -3003,9 +3091,17 @@ fn pane_restore_targets(
             });
         }
     }
+    // Interrupted history joins its own scope's entry. A lineage whose session
+    // is out of scope is already excluded by the projection.
+    let mut histories: BTreeMap<Option<SessionId>, Vec<InterruptedTab>> = BTreeMap::new();
+    for tab in interrupted {
+        targets.entry(tab.session_id).or_default();
+        histories.entry(tab.session_id).or_default().push(tab);
+    }
     targets
         .into_iter()
         .map(|(session, (panes, selected))| {
+            let interrupted = histories.remove(&session).unwrap_or_default();
             let selected = selected
                 .or_else(|| {
                     current_selected
@@ -3024,6 +3120,7 @@ fn pane_restore_targets(
                 target: session.map_or(Target::Root(workspace), Target::Session),
                 panes,
                 selected,
+                interrupted,
             }
         })
         .collect()
@@ -3057,6 +3154,7 @@ fn generic_restore_targets(
         AgentTabProjection::default(),
         terminals,
         focused.as_ref(),
+        Vec::new(),
     )
     .into_iter()
     .filter(|target| !target.panes.is_empty())
@@ -3103,6 +3201,17 @@ fn apply_restore_completion(
     }
     let terminals = terminals.expect("coherent restore checked terminal transport");
     let agents = agents.expect("coherent restore checked Agent transport");
+    // The interrupted projection reads the same coherent observation as the live
+    // one, before the intent mutation consumes it.
+    let interrupted = crate::usecase::application::interrupted_tab::project(
+        &agents,
+        workspace,
+        allowed_sessions,
+        &ui.agent_slot_order(),
+        &ui.agent_dismissed(),
+        &BTreeSet::new(),
+    )
+    .tabs;
     let observation = match ui.observe_agent_tabs(terminals.clone(), agents) {
         Ok(observation) => observation,
         Err(error) => {
@@ -3132,6 +3241,7 @@ fn apply_restore_completion(
         observation.projection,
         &terminals,
         selected.as_ref(),
+        interrupted,
     );
     let fence_accepted = runtime.restore_snapshot(
         dispatched_interaction,
@@ -3180,6 +3290,7 @@ fn restore_open_panes(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, geom
             target: session.map_or(Target::Root(workspace), Target::Session),
             selected: panes.first().map(|pane| pane.terminal.clone()),
             panes,
+            interrupted: Vec::new(),
         })
         .collect();
     let (interaction, revision) = runtime.restore_fence();
@@ -3198,10 +3309,19 @@ fn close_focused_terminal_pane(
     runtime: &mut WorkspaceRuntime,
     pending_targets: &mut std::collections::HashMap<OperationId, Target>,
 ) {
+    // A live Agent tab is dismissed by its saved lineage; an interrupted history
+    // tab already carries its own lineage, so both close through the same
+    // continuation-scoped dismissal (#506) and neither deletes a provider
+    // conversation or a daemon runtime.
     let dismissed = runtime
-        .focused_terminal()
-        .as_ref()
-        .and_then(|terminal| ui.agent_continuation_for(terminal));
+        .focused_interrupted()
+        .map(|interrupted| interrupted.continuation)
+        .or_else(|| {
+            runtime
+                .focused_terminal()
+                .as_ref()
+                .and_then(|terminal| ui.agent_continuation_for(terminal))
+        });
     if let Some(continuation) = dismissed {
         let selected = runtime
             .terminal_after_close()
@@ -3227,9 +3347,9 @@ fn close_focused_terminal_pane(
         let mut found = None;
         for (index, launch) in ui.pane_launches.iter().enumerate() {
             let queued = match launch {
-                PaneLaunch::Agent { operation, .. } | PaneLaunch::Terminal { operation, .. } => {
-                    *operation
-                }
+                PaneLaunch::Agent { operation, .. }
+                | PaneLaunch::Terminal { operation, .. }
+                | PaneLaunch::ResumeExact { operation, .. } => *operation,
             };
             if queued == operation {
                 found = Some(index);
@@ -3364,6 +3484,7 @@ fn intercept_live_terminal_control(
         *action == LiveTerminalAction::ScrollUp
             || *action == LiveTerminalAction::ScrollDown
             || *action == LiveTerminalAction::CloseTab
+            || *action == LiveTerminalAction::ResumeTab
             || *action == LiveTerminalAction::MoveTabNext
             || *action == LiveTerminalAction::MoveTabPrevious
     } else {
@@ -3378,6 +3499,9 @@ fn intercept_live_terminal_control(
         Key::Live(LiveTerminalAction::CloseTab) => {
             close_focused_terminal_pane(ui, runtime, pending_targets);
         }
+        Key::Live(LiveTerminalAction::ResumeTab) => {
+            resume_focused_interrupted_tab(ui, runtime, pending_targets);
+        }
         Key::Live(LiveTerminalAction::MoveTabNext) => {
             let direction = crate::usecase::application::controller::TabDirection::Next;
             let current = runtime
@@ -3386,7 +3510,7 @@ fn intercept_live_terminal_control(
                 .iter()
                 .filter_map(|tab| match tab {
                     PaneTab::Live(pane) => Some(pane.terminal.clone()),
-                    PaneTab::Pending(_) | PaneTab::Ready(_) => None,
+                    PaneTab::Pending(_) | PaneTab::Ready(_) | PaneTab::Interrupted(_) => None,
                 })
                 .collect::<Vec<_>>();
             let next = runtime.terminal_order_after_reorder(direction);
@@ -3405,7 +3529,7 @@ fn intercept_live_terminal_control(
                 .iter()
                 .filter_map(|tab| match tab {
                     PaneTab::Live(pane) => Some(pane.terminal.clone()),
-                    PaneTab::Pending(_) | PaneTab::Ready(_) => None,
+                    PaneTab::Pending(_) | PaneTab::Ready(_) | PaneTab::Interrupted(_) => None,
                 })
                 .collect::<Vec<_>>();
             let next = runtime.terminal_order_after_reorder(direction);
@@ -3731,6 +3855,14 @@ fn drain_pane_completions_into_runtime(
                     }
                 }
             }
+            PaneLaunchOutcome::ResumeExact {
+                operation,
+                continuation,
+                result,
+            } => {
+                pending_targets.remove(&operation);
+                apply_exact_resume(ui, runtime, operation, continuation, result);
+            }
             PaneLaunchOutcome::Terminal { operation, result } => {
                 let Some(target) = pending_targets.remove(&operation) else {
                     continue;
@@ -3747,6 +3879,87 @@ fn drain_pane_completions_into_runtime(
             }
         }
     }
+}
+
+/// Apply one explicit per-tab resume answer (#510).
+///
+/// The runtime validates the answer against the exact interrupted tab before any
+/// tab changes; only an accepted replacement turns that one tab live, and its new
+/// terminal is recorded as #506 display intent so the next observation keeps it.
+/// Every refusal leaves the interrupted tab in place with safe feedback.
+fn apply_exact_resume(
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+    operation: OperationId,
+    continuation: AgentContinuationRef,
+    result: Result<ExactAgentResume, String>,
+) {
+    let resume = match result {
+        Ok(resume) => resume,
+        Err(message) => {
+            runtime.fail_tab_resume(continuation, message);
+            return;
+        }
+    };
+    let accepted = runtime.complete_tab_resume(
+        continuation,
+        operation,
+        resume.continuation,
+        resume.relation.as_ref(),
+        &resume.terminal,
+    );
+    if accepted.is_err() {
+        return;
+    }
+    let session_id = runtime.panes().active().session_id();
+    if let Err(error) = ui.mutate_agent_intent(AgentTabIntentMutation::Upsert {
+        session_id,
+        continuation,
+        terminal: resume.terminal,
+        select: false,
+    }) {
+        surface_agent_tab_intent_error(runtime, error);
+    }
+    runtime.set_reopen_choices(ui.agent_reopen_choices());
+}
+
+/// Start the explicit resume of the selected interrupted tab (`Ctrl-O r`).
+///
+/// This is the only path that asks the daemon to resume a provider conversation
+/// per tab: the request carries the daemon's own opaque target plus a fresh
+/// durable operation, and it marks exactly that tab pending.
+fn resume_focused_interrupted_tab(
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+    pending_targets: &mut std::collections::HashMap<OperationId, Target>,
+) {
+    let Some(workspace) = ui.agent.as_ref().map(|agent| agent.workspace) else {
+        return;
+    };
+    let Some(continuation) = runtime
+        .focused_interrupted()
+        .map(|interrupted| interrupted.continuation)
+    else {
+        return;
+    };
+    let target = runtime.panes().active();
+    // A refusal (no trustworthy exact target, or a repeated activation whose
+    // request is already in flight) is already the pane's own feedback and must
+    // never reach the daemon as a second request.
+    let Ok(ResumeCommand {
+        target: resume_target,
+        operation,
+    }) = runtime.resume_selected_tab(OperationId::new())
+    else {
+        return;
+    };
+    debug_assert_eq!(resume_target.workspace_id, workspace);
+    pending_targets.insert(operation, target);
+    ui.pane_launches.push(PaneLaunch::ResumeExact {
+        operation,
+        continuation,
+        target: resume_target,
+    });
 }
 
 /// Build the controller event for a sidebar click. The shell supplies the raw
@@ -8454,6 +8667,7 @@ mod tests {
                     },
                 ],
                 selected: Some(agent.clone()),
+                interrupted: Vec::new(),
             }],
         ));
         let fence = runtime.restore_fence();
@@ -8716,6 +8930,7 @@ mod tests {
                     },
                 ],
                 selected: Some(first_terminal.clone()),
+                interrupted: Vec::new(),
             }],
         ));
 
@@ -9445,6 +9660,7 @@ mod tests {
             projection,
             &entries,
             Some(&session_generic_second),
+            Vec::new(),
         );
         assert_eq!(targets.len(), 2);
         let root = targets
@@ -9492,6 +9708,7 @@ mod tests {
                     kind: PaneKind::Agent,
                 }],
                 selected: None,
+                interrupted: Vec::new(),
             }],
         ));
         assert_eq!(
@@ -9510,6 +9727,7 @@ mod tests {
             AgentTabProjection::default(),
             &[],
             None,
+            Vec::new(),
         );
         assert_eq!(empty.len(), 2);
         assert!(empty.iter().all(|target| target.panes.is_empty()));
@@ -9565,6 +9783,7 @@ mod tests {
                     },
                 ],
                 selected: Some(first.clone()),
+                interrupted: Vec::new(),
             }],
         );
         let geometry = terminal_geometry(20, 80);
@@ -9620,6 +9839,7 @@ mod tests {
                     kind: PaneKind::Agent,
                 }],
                 selected: Some(terminal.clone()),
+                interrupted: Vec::new(),
             }],
         ));
 
@@ -9751,6 +9971,7 @@ mod tests {
                     },
                 ],
                 selected: Some(agent_terminal.clone()),
+                interrupted: Vec::new(),
             }],
         ));
         super::close_focused_terminal_pane(
@@ -9840,7 +10061,7 @@ mod tests {
             .iter()
             .filter_map(|tab| match tab {
                 PaneTab::Live(pane) => Some(pane.terminal.clone()),
-                PaneTab::Pending(_) | PaneTab::Ready(_) => None,
+                PaneTab::Pending(_) | PaneTab::Ready(_) | PaneTab::Interrupted(_) => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(restored, vec![agent_terminal, generic_terminal.clone()]);
@@ -9987,6 +10208,7 @@ mod tests {
                     },
                 ],
                 selected: Some(generic.clone()),
+                interrupted: Vec::new(),
             }],
         ));
         let _ = runtime.focus_terminal(
@@ -10058,6 +10280,7 @@ mod tests {
                     },
                 ],
                 selected: Some(first_terminal.clone()),
+                interrupted: Vec::new(),
             }],
         ));
         let _ = runtime.handle_key(Key::Enter);
@@ -10153,6 +10376,7 @@ mod tests {
                     },
                 ],
                 selected: Some(generic_first),
+                interrupted: Vec::new(),
             }],
         ));
         let _ = generic_runtime.handle_key(Key::Enter);
@@ -10243,6 +10467,7 @@ mod tests {
                     },
                 ],
                 selected: Some(first_terminal),
+                interrupted: Vec::new(),
             }],
         );
         let _ = runtime.apply_event(AppEvent::Key(AppKey::Down));
@@ -10483,6 +10708,7 @@ mod tests {
                         kind: PaneKind::Terminal,
                     }],
                     selected: None,
+                    interrupted: Vec::new(),
                 },
                 super::PaneRestoreTarget {
                     target: Target::Session(session),
@@ -10491,6 +10717,7 @@ mod tests {
                         kind: PaneKind::Agent,
                     }],
                     selected: None,
+                    interrupted: Vec::new(),
                 },
             ],
         ));

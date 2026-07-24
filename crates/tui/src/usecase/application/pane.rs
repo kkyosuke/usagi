@@ -4,9 +4,10 @@
 //! exit を [`PaneEvent`] に翻訳し、[`reduce`] が返す [`PaneEffect`] だけを実行する。
 //! tab の identity は表示名ではなく、完全な [`TerminalRef`] である。
 
-use usagi_core::domain::id::{OperationId, TerminalRef};
+use usagi_core::domain::id::{AgentContinuationRef, OperationId, TerminalRef};
 
 use super::controller::{TabDirection, Target};
+use super::interrupted_tab::InterruptedTab;
 
 /// Closeup tab が表示する terminal 種別。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +40,20 @@ pub struct LivePane {
     pub kind: PaneKind,
 }
 
+/// One interrupted Agent conversation shown as its own tab (#510).
+///
+/// The tab is read-only: it owns no terminal incarnation, so it never attaches,
+/// resizes, or accepts input. Only the user's explicit Resume action fills
+/// [`Self::resuming`], and only a validated replacement turns the tab live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterruptedPane {
+    /// Projected, non-sensitive conversation. Its lineage is the tab identity.
+    pub tab: InterruptedTab,
+    /// The explicit resume operation while it is in flight. `None` leaves the
+    /// tab inert, and a second activation converges to this same operation.
+    pub resuming: Option<OperationId>,
+}
+
 /// Closeup tab。pending は operation、live は terminal incarnation で識別する。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneTab {
@@ -52,6 +67,8 @@ pub enum PaneTab {
     /// the same request/pending/completion tab lifecycle as terminal and
     /// Agent.  Its operation remains the stable tab identity.
     Ready(PendingPane),
+    /// An interrupted Agent conversation awaiting an explicit resume (#510).
+    Interrupted(InterruptedPane),
 }
 
 /// tab を index でなく stable identity により選ぶための key。
@@ -63,6 +80,9 @@ pub enum TabSelection {
     Live(TerminalRef),
     /// A completed non-terminal tab.
     Ready(OperationId),
+    /// An interrupted Agent conversation, keyed by its durable lineage so the
+    /// selection survives inventory refresh and its own resume.
+    Interrupted(AgentContinuationRef),
 }
 
 /// attach 判断に必要な TUI-local の選択位置。
@@ -370,12 +390,18 @@ pub fn route_tab_command(
 fn event_belongs_to_target(event: &PaneEvent, target: Target) -> bool {
     match event {
         PaneEvent::Select(PaneSelection::Target(selected)) => *selected == target,
+        // Tab-keyed events name their own stable identity, so only the entry
+        // that owns that tab reacts. Resume progress is keyed by lineage the
+        // same way.
         PaneEvent::Select(PaneSelection::Tab(_))
         | PaneEvent::Succeeded { .. }
         | PaneEvent::Resolved { .. }
         | PaneEvent::Failed { .. }
         | PaneEvent::ReorderSelected(_)
-        | PaneEvent::CloseSelected => true,
+        | PaneEvent::CloseSelected
+        | PaneEvent::ResumeStarted { .. }
+        | PaneEvent::ResumeReplaced { .. }
+        | PaneEvent::ResumeFailed { .. } => true,
         PaneEvent::Request {
             target: requested, ..
         } => *requested == target,
@@ -384,6 +410,11 @@ fn event_belongs_to_target(event: &PaneEvent, target: Target) -> bool {
         PaneEvent::RestoreBatch { panes, .. } => panes
             .iter()
             .all(|pane| target_for_terminal(&pane.terminal) == target),
+        // A projected interrupted lineage carries its own scope, so a batch for
+        // another target can never reach this entry's tabs.
+        PaneEvent::RestoreInterrupted { tabs } => {
+            tabs.iter().all(|tab| target_for_interrupted(tab) == target)
+        }
     }
 }
 
@@ -439,6 +470,29 @@ pub enum PaneEvent {
     ReorderSelected(TabDirection),
     /// Close the selected pane tab. Selecting a target without a tab is a no-op.
     CloseSelected,
+    /// Merge one target's projected interrupted Agent conversations (#510).
+    ///
+    /// The projection is authoritative for interrupted membership: a lineage it
+    /// no longer carries loses its tab unless the user's own resume is still in
+    /// flight for it. A retained lineage keeps its slot, its selection, and its
+    /// in-flight operation while its display material is refreshed.
+    RestoreInterrupted { tabs: Vec<InterruptedTab> },
+    /// The user explicitly resumed one interrupted tab under `operation`. No
+    /// other tab changes.
+    ResumeStarted {
+        continuation: AgentContinuationRef,
+        operation: OperationId,
+    },
+    /// A validated replacement turns exactly one resuming tab live, in place.
+    ResumeReplaced {
+        continuation: AgentContinuationRef,
+        terminal: TerminalRef,
+    },
+    /// One resume failed. The interrupted tab stays, carrying safe feedback.
+    ResumeFailed {
+        continuation: AgentContinuationRef,
+        message: String,
+    },
 }
 
 /// reducer が adapter / route reducer へ返す局所 effect。
@@ -485,7 +539,162 @@ pub fn reduce(state: &mut PaneState, event: PaneEvent) -> Vec<PaneEffect> {
         } => restore_batch(state, panes, selected, replace_order),
         PaneEvent::ReorderSelected(direction) => reorder_selected(state, direction),
         PaneEvent::CloseSelected => close_selected(state),
+        PaneEvent::RestoreInterrupted { tabs } => restore_interrupted(state, tabs),
+        PaneEvent::ResumeStarted {
+            continuation,
+            operation,
+        } => resume_started(state, continuation, operation),
+        PaneEvent::ResumeReplaced {
+            continuation,
+            terminal,
+        } => resume_replaced(state, continuation, &terminal),
+        PaneEvent::ResumeFailed {
+            continuation,
+            message,
+        } => resume_failed(state, continuation, message),
     }
+}
+
+/// Merge one target's projected interrupted tabs (see
+/// [`PaneEvent::RestoreInterrupted`]).
+fn restore_interrupted(state: &mut PaneState, tabs: Vec<InterruptedTab>) -> Vec<PaneEffect> {
+    let mut projected: Vec<InterruptedTab> = Vec::new();
+    for tab in tabs {
+        if !projected
+            .iter()
+            .any(|current| current.continuation == tab.continuation)
+        {
+            projected.push(tab);
+        }
+    }
+    let fallback = state
+        .tabs
+        .iter()
+        .find_map(|tab| match tab {
+            PaneTab::Interrupted(pane) => Some(target_for_interrupted(&pane.tab)),
+            PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_) => None,
+        })
+        .or_else(|| projected.first().map(target_for_interrupted));
+    state.tabs.retain(|tab| match tab {
+        PaneTab::Interrupted(pane) => {
+            // An in-flight explicit resume owns its tab until it answers: a
+            // refresh that no longer lists the source must not make the user's
+            // own request disappear.
+            pane.resuming.is_some()
+                || projected
+                    .iter()
+                    .any(|fresh| fresh.continuation == pane.tab.continuation)
+        }
+        PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_) => true,
+    });
+    for fresh in projected {
+        if let Some(existing) = state.tabs.iter_mut().find_map(|tab| match tab {
+            PaneTab::Interrupted(pane) if pane.tab.continuation == fresh.continuation => Some(pane),
+            PaneTab::Interrupted(_)
+            | PaneTab::Pending(_)
+            | PaneTab::Live(_)
+            | PaneTab::Ready(_) => None,
+        }) {
+            existing.tab = fresh;
+            continue;
+        }
+        state.tabs.push(PaneTab::Interrupted(InterruptedPane {
+            tab: fresh,
+            resuming: None,
+        }));
+    }
+    repair_interrupted_selection(state, fallback);
+    Vec::new()
+}
+
+/// Move the selection off an interrupted tab the projection removed. Every other
+/// selection kind is left untouched.
+fn repair_interrupted_selection(state: &mut PaneState, fallback: Option<Target>) {
+    if !matches!(
+        state.selected,
+        PaneSelection::Tab(TabSelection::Interrupted(_))
+    ) || state
+        .tabs
+        .iter()
+        .any(|tab| selection_for(tab) == state.selected)
+    {
+        return;
+    }
+    state.selected = state.tabs.first().map_or_else(
+        || {
+            PaneSelection::Target(
+                fallback.expect("a removed interrupted selection had an interrupted tab"),
+            )
+        },
+        selection_for,
+    );
+}
+
+fn interrupted_mut(
+    state: &mut PaneState,
+    continuation: AgentContinuationRef,
+) -> Option<&mut InterruptedPane> {
+    state.tabs.iter_mut().find_map(|tab| match tab {
+        PaneTab::Interrupted(pane) if pane.tab.continuation == continuation => Some(pane),
+        PaneTab::Interrupted(_) | PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_) => {
+            None
+        }
+    })
+}
+
+fn resume_started(
+    state: &mut PaneState,
+    continuation: AgentContinuationRef,
+    operation: OperationId,
+) -> Vec<PaneEffect> {
+    let Some(pane) = interrupted_mut(state, continuation) else {
+        return Vec::new();
+    };
+    pane.resuming = Some(operation);
+    state.error = None;
+    Vec::new()
+}
+
+fn resume_replaced(
+    state: &mut PaneState,
+    continuation: AgentContinuationRef,
+    terminal: &TerminalRef,
+) -> Vec<PaneEffect> {
+    let Some(index) = state.tabs.iter().position(
+        |tab| matches!(tab, PaneTab::Interrupted(pane) if pane.tab.continuation == continuation),
+    ) else {
+        return Vec::new();
+    };
+    let selected = state.selected == PaneSelection::Tab(TabSelection::Interrupted(continuation));
+    // The replacement takes the interrupted tab's own slot, so neither the live
+    // tabs nor the remaining history move.
+    state.tabs[index] = PaneTab::Live(LivePane {
+        terminal: terminal.clone(),
+        kind: PaneKind::Agent,
+    });
+    if selected {
+        state.selected = PaneSelection::Tab(TabSelection::Live(terminal.clone()));
+    }
+    state.error = None;
+    // Only a foreground success attaches; a background one stays a live tab
+    // until the user selects it.
+    selected
+        .then(|| PaneEffect::Attach(terminal.clone()))
+        .into_iter()
+        .collect()
+}
+
+fn resume_failed(
+    state: &mut PaneState,
+    continuation: AgentContinuationRef,
+    message: String,
+) -> Vec<PaneEffect> {
+    let Some(pane) = interrupted_mut(state, continuation) else {
+        return Vec::new();
+    };
+    pane.resuming = None;
+    state.error = Some(message);
+    Vec::new()
 }
 
 fn reorder_selected(state: &mut PaneState, direction: TabDirection) -> Vec<PaneEffect> {
@@ -511,36 +720,13 @@ fn reorder_selected(state: &mut PaneState, direction: TabDirection) -> Vec<PaneE
 }
 
 fn close_selected(state: &mut PaneState) -> Vec<PaneEffect> {
+    // Every tab kind projects its own stable selection key, so comparing against
+    // it needs no per-kind product match: a target selection owns no tab and
+    // therefore closes nothing.
     let Some(index) = state
         .tabs
         .iter()
-        .position(|tab| match (tab, &state.selected) {
-            (PaneTab::Pending(pending), PaneSelection::Tab(TabSelection::Pending(selected))) => {
-                pending.operation == *selected
-            }
-            (PaneTab::Live(live), PaneSelection::Tab(TabSelection::Live(selected))) => {
-                live.terminal == *selected
-            }
-            (PaneTab::Ready(ready), PaneSelection::Tab(TabSelection::Ready(selected))) => {
-                ready.operation == *selected
-            }
-            (
-                PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_),
-                PaneSelection::Target(_),
-            )
-            | (
-                PaneTab::Pending(_),
-                PaneSelection::Tab(TabSelection::Live(_) | TabSelection::Ready(_)),
-            )
-            | (
-                PaneTab::Live(_),
-                PaneSelection::Tab(TabSelection::Pending(_) | TabSelection::Ready(_)),
-            )
-            | (
-                PaneTab::Ready(_),
-                PaneSelection::Tab(TabSelection::Pending(_) | TabSelection::Live(_)),
-            ) => false,
-        })
+        .position(|tab| selection_for(tab) == state.selected)
     else {
         return Vec::new();
     };
@@ -551,6 +737,7 @@ fn close_selected(state: &mut PaneState) -> Vec<PaneEffect> {
             None => Target::Root(live.terminal.workspace_id),
         },
         PaneTab::Ready(ready) => ready.target,
+        PaneTab::Interrupted(pane) => target_for_interrupted(&pane.tab),
     };
     if state.tabs.is_empty() {
         state.selected = PaneSelection::Target(target);
@@ -585,7 +772,10 @@ fn succeed(
                 PaneTab::Pending(pending) if pending.operation == operation => {
                     Some((index, *pending))
                 }
-                PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_) => None,
+                PaneTab::Pending(_)
+                | PaneTab::Live(_)
+                | PaneTab::Ready(_)
+                | PaneTab::Interrupted(_) => None,
             })
     else {
         return Vec::new();
@@ -637,7 +827,10 @@ fn resolve(state: &mut PaneState, operation: OperationId) -> Vec<PaneEffect> {
         .enumerate()
         .find_map(|(index, tab)| match tab {
             PaneTab::Pending(pending) if pending.operation == operation => Some((index, *pending)),
-            PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_) => None,
+            PaneTab::Pending(_)
+            | PaneTab::Live(_)
+            | PaneTab::Ready(_)
+            | PaneTab::Interrupted(_) => None,
         })
     else {
         return Vec::new();
@@ -662,7 +855,10 @@ fn fail(state: &mut PaneState, operation: OperationId, message: String) -> Vec<P
             PaneTab::Pending(pending) if pending.operation == operation => {
                 Some((index, pending.target))
             }
-            PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_) => None,
+            PaneTab::Pending(_)
+            | PaneTab::Live(_)
+            | PaneTab::Ready(_)
+            | PaneTab::Interrupted(_) => None,
         })
     else {
         return Vec::new();
@@ -742,13 +938,21 @@ fn restore_batch(
             PaneTab::Pending(pending) => pending.target,
             PaneTab::Live(live) => target_for_terminal(&live.terminal),
             PaneTab::Ready(ready) => ready.target,
+            PaneTab::Interrupted(pane) => target_for_interrupted(&pane.tab),
         });
         let mut retained = std::mem::take(&mut state.tabs);
         let mut ordered = unique.into_iter().map(PaneTab::Live).collect::<Vec<_>>();
         // A coherent restore is authoritative for live membership. Preserve
         // only local in-flight placeholders; live tabs absent from the fresh
         // inventory (including cross-client dismissals and exits) are removed.
-        retained.retain(|tab| matches!(tab, PaneTab::Pending(_) | PaneTab::Ready(_)));
+        // Interrupted history is projected by its own event, not by live
+        // inventory, so a live restore neither drops nor reorders it.
+        retained.retain(|tab| {
+            matches!(
+                tab,
+                PaneTab::Pending(_) | PaneTab::Ready(_) | PaneTab::Interrupted(_)
+            )
+        });
         ordered.extend(retained);
         state.tabs = ordered;
         if let Some(selected) = selected
@@ -772,7 +976,9 @@ fn restore_batch(
                                 target_for_terminal(terminal)
                             }
                             PaneSelection::Tab(
-                                TabSelection::Pending(_) | TabSelection::Ready(_),
+                                TabSelection::Pending(_)
+                                | TabSelection::Ready(_)
+                                | TabSelection::Interrupted(_),
                             ) => unreachable!("a tab selection without a target-scoped tab"),
                         },
                     ))
@@ -811,7 +1017,20 @@ fn selection_for(tab: &PaneTab) -> PaneSelection {
         PaneTab::Pending(pending) => PaneSelection::Tab(TabSelection::Pending(pending.operation)),
         PaneTab::Live(live) => PaneSelection::Tab(TabSelection::Live(live.terminal.clone())),
         PaneTab::Ready(ready) => PaneSelection::Tab(TabSelection::Ready(ready.operation)),
+        PaneTab::Interrupted(pane) => {
+            PaneSelection::Tab(TabSelection::Interrupted(pane.tab.continuation))
+        }
     }
+}
+
+/// The pane target an interrupted lineage belongs to. It mirrors
+/// [`target_for_terminal`] so root and managed-session histories land in the same
+/// registry entry as their live siblings.
+fn target_for_interrupted(tab: &InterruptedTab) -> Target {
+    tab.session_id.map_or(
+        Target::Root(tab.last_terminal.workspace_id),
+        Target::Session,
+    )
 }
 
 #[cfg(test)]
