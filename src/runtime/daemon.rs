@@ -40,8 +40,8 @@ use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
 use usagi_core::usecase::client::{DaemonRequest, DispatchToolAction, SupervisorToolAction};
 use usagi_daemon::infrastructure::pty::PtyTerminal;
 use usagi_daemon::infrastructure::unix_transport::{
-    EndpointCleanup, SecureUnixListener, ensure_private_dir, ensure_private_dir_all,
-    retire_stale_current,
+    EndpointCleanup, SecureUnixListener, ensure_private_dir, ensure_private_dir_all, peer_pid,
+    read_locator, retire_stale_current,
 };
 use usagi_daemon::presentation::{DaemonCommand as PresentationDaemonCommand, DaemonEnv};
 use usagi_daemon::usecase::agent_ipc::{
@@ -1113,12 +1113,14 @@ fn spawn_ipc_server(
     generation: &usagi_core::infrastructure::ipc::DaemonGeneration,
     data_dir: &Path,
     build: &BuildIdentity,
+    daemon_process: DaemonRecord,
     shutdown: Arc<AtomicBool>,
 ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
     let server = usagi_daemon::presentation::ipc::server_protocol(
         generation.clone(),
         generation.0.clone(),
         build.clone(),
+        daemon_process,
     );
     let repo_root = std::env::current_dir()?;
     let daemon_generation = usagi_core::domain::id::DaemonGeneration::parse(&generation.0)
@@ -4157,12 +4159,22 @@ impl DaemonReady for IpcReady<'_> {
     }
 
     fn publish(&self) -> std::io::Result<()> {
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: self.data_dir.join("daemon/daemon.json"),
+        });
+        let process = store.load()?.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "daemon process record is unavailable for endpoint publication",
+            )
+        })?;
         self.publish_with(|listener, generation| {
             spawn_ipc_server(
                 listener,
                 &generation,
                 self.data_dir,
                 &self.build,
+                process,
                 Arc::clone(&self.shutdown),
             )
         })
@@ -4661,6 +4673,15 @@ fn recover_stale_client_endpoint_with(
     if store.load()?.as_ref() != Some(&expected) {
         return Ok(bootstrap::StaleRecovery::NotProven);
     }
+    match ExactProcessControl.observe(&expected) {
+        DaemonProcessObservation::Gone | DaemonProcessObservation::IdentityMismatch => {}
+        DaemonProcessObservation::Exact => {
+            return Ok(bootstrap::StaleRecovery::OwnerActive);
+        }
+        DaemonProcessObservation::Unknown => {
+            return Ok(bootstrap::StaleRecovery::NotProven);
+        }
+    }
 
     // Socket-first retirement and current.lock provide the endpoint commit
     // fence. The record remains present on every cleanup error.
@@ -4692,13 +4713,30 @@ fn connect_client(
     policy: ClientPolicy,
     build: BuildIdentity,
 ) -> std::io::Result<IpcClient<std::os::unix::net::UnixStream>> {
+    let daemon = data_dir.join("daemon");
+    let locator = read_locator(&daemon)?;
     let stream = usagi_daemon::infrastructure::unix_transport::connect_current(data_dir)?;
-    IpcClient::connect(
+    let store = DaemonRecordStore::new(FsRecordFile {
+        path: daemon.join("daemon.json"),
+    });
+    let expected = store.load()?.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "daemon process record is unavailable",
+        )
+    })?;
+    let peer = peer_pid(&stream)?;
+    let observation = ExactProcessControl.observe(&expected);
+    IpcClient::connect_expected_owner(
         stream,
         format!("cli-{}", std::process::id()),
         format!("{}", std::process::id()),
         policy,
         build,
+        &expected,
+        &locator.generation,
+        peer,
+        observation,
     )
     .map_err(std::io::Error::other)
 }
@@ -4919,6 +4957,56 @@ mod tests {
             ExactProcessControl.observe(&absent),
             DaemonProcessObservation::Gone
         );
+    }
+
+    #[test]
+    fn forged_same_uid_endpoint_cannot_echo_another_process_record() {
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let generation = ipc_generation();
+        let listener = SecureUnixListener::bind(data, generation.clone()).unwrap();
+        let mut recorded = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
+        let record = DaemonRecord::identified(
+            recorded.id(),
+            process_start_identity(recorded.id()).unwrap(),
+        );
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: data.join("daemon/daemon.json"),
+        });
+        store.save(&record).unwrap();
+        let protocol = usagi_daemon::presentation::ipc::server_protocol(
+            generation,
+            "forged".into(),
+            current_build(),
+            record,
+        );
+        let server = std::thread::spawn(move || {
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok(stream) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("forged endpoint accept failed: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            let mut writer = stream.try_clone().unwrap();
+            usagi_daemon::presentation::ipc::handshake(&mut stream, &mut writer, &protocol)
+                .unwrap()
+                .unwrap();
+        });
+
+        let error = connect_client(data, ClientPolicy::cli(), current_build())
+            .err()
+            .expect("forged endpoint must be rejected");
+        assert!(error.to_string().contains("endpoint owner"));
+        server.join().unwrap();
+        recorded.kill().unwrap();
+        recorded.wait().unwrap();
     }
 
     #[test]
@@ -5548,7 +5636,7 @@ mod tests {
         // The PID is deliberately live (this test process), modelling PID
         // reuse. Acquiring daemon.lock proves that this live process is not the
         // daemon owner, and recovery never sends it a signal.
-        let record = usagi_core::domain::daemon::DaemonRecord::new(std::process::id());
+        let record = DaemonRecord::identified(std::process::id(), "reused-process");
         store.save(&record).unwrap();
 
         assert_eq!(
@@ -5587,7 +5675,7 @@ mod tests {
         });
         // Model PID reuse: this process is alive, but it does not own the
         // daemon singleton. Recovery must use daemon.lock rather than the PID.
-        let record = usagi_core::domain::daemon::DaemonRecord::new(std::process::id());
+        let record = DaemonRecord::identified(std::process::id(), "reused-process");
         store.save(&record).unwrap();
 
         // A locator hardlink forces retirement to stop after its socket-first
@@ -5664,7 +5752,7 @@ mod tests {
         let store = DaemonRecordStore::new(FsRecordFile {
             path: daemon.join("daemon.json"),
         });
-        let record = usagi_core::domain::daemon::DaemonRecord::new(4242);
+        let record = DaemonRecord::identified(4242, "gone-process");
         store.save(&record).unwrap();
 
         assert_eq!(
@@ -5740,7 +5828,7 @@ mod tests {
         let store = DaemonRecordStore::new(FsRecordFile {
             path: daemon.join("daemon.json"),
         });
-        let record = usagi_core::domain::daemon::DaemonRecord::new(4242);
+        let record = DaemonRecord::identified(4242, "gone-process");
         store.save(&record).unwrap();
         let current_lock = daemon.join("current.lock");
         std::fs::set_permissions(&current_lock, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -6116,6 +6204,7 @@ mod tests {
                 artifact: "test-artifact".into(),
             },
             limits: ProtocolLimits::default(),
+            daemon_process: None,
         }
     }
 

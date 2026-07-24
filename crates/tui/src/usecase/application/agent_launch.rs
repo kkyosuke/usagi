@@ -277,6 +277,7 @@ mod tests {
                 artifact: "server-artifact".into(),
             },
             limits: ProtocolLimits::default(),
+            daemon_process: None,
         });
         let reply = Envelope {
             protocol,

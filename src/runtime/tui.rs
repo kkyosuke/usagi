@@ -2651,6 +2651,7 @@ mod tests {
             DaemonGeneration("input-ack-test".to_owned()),
             "input-ack-connection".to_owned(),
             build.clone(),
+            usagi_core::domain::daemon::DaemonRecord::identified(2, "test-process"),
         );
         let server = std::thread::spawn(move || {
             let mut reader = server_stream.try_clone().unwrap();
@@ -2953,6 +2954,7 @@ mod tests {
             DaemonGeneration("input-ack-loss-test".to_owned()),
             "input-ack-loss-connection".to_owned(),
             build.clone(),
+            usagi_core::domain::daemon::DaemonRecord::identified(2, "test-process"),
         );
         let server = std::thread::spawn(move || {
             let mut reader = server_stream.try_clone().unwrap();

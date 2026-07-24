@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::domain::agent::{
     AgentProfileId, AgentResumeTarget, CallerRef, ModelSelector, ProviderSessionId,
 };
+use crate::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use crate::domain::id::{AgentId, SessionId, TerminalRef, WorkspaceId};
 use crate::domain::pr_inventory::{PrEntry, PrInventory};
 use crate::domain::terminal_launch::{
@@ -20,8 +21,8 @@ use crate::domain::terminal_launch::{
 };
 use crate::infrastructure::ipc::{
     Bootstrap, BuildIdentity, ClientHello, ClientId, DaemonGeneration, Envelope, EnvelopeKind,
-    ErrorCode, ProtocolError, ProtocolRange, ProtocolVersion, ResponseOutcome, RetryMode,
-    SideEffect, read_json_frame, write_json_frame,
+    ErrorCode, GenerationRole, ProtocolError, ProtocolRange, ProtocolVersion, ResponseOutcome,
+    RetryMode, ServerHello, SideEffect, read_json_frame, write_json_frame,
 };
 
 /// A daemon request understood by every presentation surface.
@@ -492,6 +493,14 @@ pub struct IpcClient<S> {
     policy: ClientPolicy,
 }
 
+#[derive(Clone, Copy)]
+struct ExpectedOwner<'a> {
+    record: &'a DaemonRecord,
+    generation: &'a DaemonGeneration,
+    peer_pid: u32,
+    observation: DaemonProcessObservation,
+}
+
 impl<S: Read + Write> IpcClient<S> {
     /// Performs the mandatory hello handshake before returning a usable client.
     ///
@@ -500,27 +509,86 @@ impl<S: Read + Write> IpcClient<S> {
     /// Returns a typed protocol error from the peer, or an unavailable error
     /// when the byte stream cannot complete the handshake.
     pub fn connect(
-        mut stream: S,
+        stream: S,
         client_id: String,
         connection_nonce: String,
         policy: ClientPolicy,
         build: BuildIdentity,
     ) -> Result<Self, ClientError> {
+        Self::connect_with(stream, client_id, connection_nonce, policy, build, None)
+    }
+
+    /// Performs a handshake authorized by the established stream's OS peer
+    /// PID, its process-start observation, the durable record, and locator
+    /// generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an effect-zero ownership error unless all evidence agrees.
+    #[allow(clippy::too_many_arguments)] // Keeps every independent ownership fence explicit.
+    pub fn connect_expected_owner(
+        stream: S,
+        client_id: String,
+        connection_nonce: String,
+        policy: ClientPolicy,
+        build: BuildIdentity,
+        record: &DaemonRecord,
+        generation: &DaemonGeneration,
+        peer_pid: u32,
+        observation: DaemonProcessObservation,
+    ) -> Result<Self, ClientError> {
+        Self::connect_with(
+            stream,
+            client_id,
+            connection_nonce,
+            policy,
+            build,
+            Some(ExpectedOwner {
+                record,
+                generation,
+                peer_pid,
+                observation,
+            }),
+        )
+        .map_err(|error| match error {
+            ClientError::Protocol(error) => ClientError::Protocol(error),
+            other => ClientError::Protocol(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                other.to_string(),
+            )),
+        })
+    }
+
+    fn connect_with(
+        mut stream: S,
+        client_id: String,
+        connection_nonce: String,
+        policy: ClientPolicy,
+        build: BuildIdentity,
+        expected_owner: Option<ExpectedOwner<'_>>,
+    ) -> Result<Self, ClientError> {
+        let expected_nonce = connection_nonce.clone();
+        let mut required_capabilities = vec![
+            "request.correlation.v1".into(),
+            "pr.snapshot.v1".into(),
+            "build.artifact.v1".into(),
+        ];
+        if expected_owner.is_some() {
+            required_capabilities.push("daemon.owner-identity.v1".into());
+        }
         let hello = Bootstrap::ClientHello(ClientHello {
             client_id: ClientId(client_id),
             connection_nonce,
-            expected_daemon_generation: None,
+            expected_daemon_generation: expected_owner
+                .as_ref()
+                .map(|owner| (*owner.generation).clone()),
             supported_protocols: vec![ProtocolRange {
                 generation: 1,
                 min_revision: 0,
                 max_revision: 1,
             }],
             capabilities: vec![],
-            required_capabilities: vec![
-                "request.correlation.v1".into(),
-                "pr.snapshot.v1".into(),
-                "build.artifact.v1".into(),
-            ],
+            required_capabilities,
             build,
         });
         write_json_frame(&mut stream, &hello, 1_048_576)
@@ -528,14 +596,31 @@ impl<S: Read + Write> IpcClient<S> {
         match read_json_frame::<Bootstrap>(&mut stream, 1_048_576)
             .map_err(|error| ClientError::Unavailable(error.to_string()))?
         {
-            Some(Bootstrap::ServerHello(hello)) => Ok(Self {
-                stream,
-                protocol: hello.protocol,
-                daemon_generation: hello.daemon_generation,
-                server_build: hello.build,
-                next_request: 0,
-                policy,
-            }),
+            Some(Bootstrap::ServerHello(hello)) => {
+                if hello.connection_nonce != expected_nonce {
+                    return Err(ClientError::Protocol(ProtocolError::new(
+                        ErrorCode::Unauthenticated,
+                        "daemon hello nonce does not match this connection",
+                    )));
+                }
+                if let Some(owner) = expected_owner {
+                    verify_owner_binding(&hello, &owner).map_err(ClientError::Protocol)?;
+                }
+                Ok(Self {
+                    stream,
+                    protocol: hello.protocol,
+                    daemon_generation: hello.daemon_generation,
+                    server_build: hello.build,
+                    next_request: 0,
+                    policy,
+                })
+            }
+            Some(Bootstrap::Error(_error)) if expected_owner.is_some() => {
+                Err(ClientError::Protocol(ProtocolError::new(
+                    ErrorCode::OwnershipUnknown,
+                    "daemon owner handshake failed before authentication",
+                )))
+            }
             Some(Bootstrap::Error(error)) => Err(ClientError::Protocol(error)),
             Some(Bootstrap::ClientHello(_)) | None => Err(ClientError::Unavailable(
                 "daemon closed before a server hello".into(),
@@ -558,6 +643,29 @@ impl<S: Read + Write> IpcClient<S> {
     #[must_use]
     pub const fn transport(&self) -> &S {
         &self.stream
+    }
+}
+
+fn verify_owner_binding(
+    hello: &ServerHello,
+    owner: &ExpectedOwner<'_>,
+) -> Result<(), ProtocolError> {
+    let valid = owner.peer_pid == owner.record.pid
+        && owner.observation == DaemonProcessObservation::Exact
+        && &hello.daemon_generation == owner.generation
+        && hello.generation_role == GenerationRole::Active
+        && hello
+            .capabilities
+            .iter()
+            .any(|capability| capability == "daemon.owner-identity.v1")
+        && hello.daemon_process.as_ref() == Some(owner.record);
+    if valid {
+        Ok(())
+    } else {
+        Err(ProtocolError::new(
+            ErrorCode::OwnershipUnknown,
+            "daemon endpoint owner does not match OS peer, record, and generation",
+        ))
     }
 }
 
@@ -712,6 +820,74 @@ mod tests {
         }
     }
 
+    fn owner_hello(record: &DaemonRecord, generation: &DaemonGeneration) -> ServerHello {
+        ServerHello {
+            connection_nonce: "nonce".into(),
+            connection_id: crate::infrastructure::ipc::ConnectionId("connection".into()),
+            daemon_generation: generation.clone(),
+            generation_role: GenerationRole::Active,
+            protocol: ProtocolVersion {
+                generation: 1,
+                revision: 1,
+            },
+            capabilities: vec!["daemon.owner-identity.v1".into()],
+            build: client_build(),
+            limits: crate::infrastructure::ipc::ProtocolLimits::default(),
+            daemon_process: Some(record.clone()),
+        }
+    }
+
+    #[test]
+    fn owner_binding_requires_peer_process_record_and_generation_to_all_match() {
+        let record = DaemonRecord::identified(4321, "process-start");
+        let generation = DaemonGeneration("generation".into());
+        let hello = owner_hello(&record, &generation);
+        let exact = ExpectedOwner {
+            record: &record,
+            generation: &generation,
+            peer_pid: record.pid,
+            observation: DaemonProcessObservation::Exact,
+        };
+        assert!(verify_owner_binding(&hello, &exact).is_ok());
+
+        for invalid in [
+            ExpectedOwner {
+                peer_pid: record.pid + 1,
+                ..exact
+            },
+            ExpectedOwner {
+                observation: DaemonProcessObservation::IdentityMismatch,
+                ..exact
+            },
+            ExpectedOwner {
+                observation: DaemonProcessObservation::Gone,
+                ..exact
+            },
+            ExpectedOwner {
+                observation: DaemonProcessObservation::Unknown,
+                ..exact
+            },
+        ] {
+            let error = verify_owner_binding(&hello, &invalid).unwrap_err();
+            assert_eq!(error.code, ErrorCode::OwnershipUnknown);
+            assert_eq!(error.side_effect, SideEffect::None);
+        }
+
+        let mut wrong_generation = hello.clone();
+        wrong_generation.daemon_generation = DaemonGeneration("replacement".into());
+        let mut draining = hello.clone();
+        draining.generation_role = GenerationRole::Draining;
+        let mut missing_capability = hello.clone();
+        missing_capability.capabilities.clear();
+        let mut wrong_record = hello.clone();
+        wrong_record.daemon_process = Some(DaemonRecord::identified(record.pid, "replacement"));
+        for invalid in [wrong_generation, draining, missing_capability, wrong_record] {
+            let error = verify_owner_binding(&invalid, &exact).unwrap_err();
+            assert_eq!(error.code, ErrorCode::OwnershipUnknown);
+            assert_eq!(error.side_effect, SideEffect::None);
+        }
+    }
+
     struct Scripted {
         input: Cursor<Vec<u8>>,
         output: Vec<u8>,
@@ -764,6 +940,68 @@ mod tests {
         }
     }
 
+    fn bootstrap_script(message: &Bootstrap) -> Scripted {
+        let mut input = Vec::new();
+        write_json_frame(&mut input, &message, 1_048_576).unwrap();
+        Scripted {
+            input: Cursor::new(input),
+            output: vec![],
+        }
+    }
+
+    #[test]
+    fn exact_owner_handshake_maps_every_pre_authentication_failure_to_effect_zero() {
+        let record = DaemonRecord::identified(4321, "process-start");
+        let generation = DaemonGeneration("generation".into());
+        let connect = |stream| {
+            IpcClient::connect_expected_owner(
+                stream,
+                "client".into(),
+                "nonce".into(),
+                ClientPolicy::cli(),
+                client_build(),
+                &record,
+                &generation,
+                record.pid,
+                DaemonProcessObservation::Exact,
+            )
+        };
+
+        assert!(
+            connect(bootstrap_script(&Bootstrap::ServerHello(owner_hello(
+                &record,
+                &generation,
+            ))))
+            .is_ok()
+        );
+
+        let protocol_error = connect(bootstrap_script(&Bootstrap::Error(ProtocolError::new(
+            ErrorCode::Busy,
+            "not authenticated",
+        ))))
+        .err()
+        .unwrap();
+        assert_eq!(protocol_error.code(), ErrorCode::OwnershipUnknown);
+        assert_eq!(protocol_error.side_effect(), SideEffect::None);
+
+        let unavailable = connect(Scripted {
+            input: Cursor::new(vec![]),
+            output: vec![],
+        })
+        .err()
+        .unwrap();
+        assert_eq!(unavailable.code(), ErrorCode::OwnershipUnknown);
+        assert_eq!(unavailable.side_effect(), SideEffect::None);
+
+        let mut wrong_nonce = owner_hello(&record, &generation);
+        wrong_nonce.connection_nonce = "other-connection".into();
+        let unauthenticated = connect(bootstrap_script(&Bootstrap::ServerHello(wrong_nonce)))
+            .err()
+            .unwrap();
+        assert_eq!(unauthenticated.code(), ErrorCode::Unauthenticated);
+        assert_eq!(unauthenticated.side_effect(), SideEffect::None);
+    }
+
     fn scripted(reply: ResponseOutcome, request_id: &str) -> Scripted {
         let protocol = ProtocolVersion {
             generation: 1,
@@ -784,6 +1022,7 @@ mod tests {
                 artifact: "server-artifact".into(),
             },
             limits: crate::infrastructure::ipc::ProtocolLimits::default(),
+            daemon_process: None,
         });
         let response = Envelope {
             protocol,

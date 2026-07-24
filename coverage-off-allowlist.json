@@ -327,6 +327,15 @@
     },
     {
       "path": "crates/daemon/src/infrastructure/unix_transport.rs",
+      "symbol": "fn:peer_pid",
+      "occurrence": 3,
+      "reason": "real_io",
+      "owner": "daemon",
+      "expires": "2027-01-31",
+      "tests": "unix_peer_pid_contract"
+    },
+    {
+      "path": "crates/daemon/src/infrastructure/unix_transport.rs",
       "symbol": "fn:bind",
       "occurrence": 1,
       "reason": "real_io",

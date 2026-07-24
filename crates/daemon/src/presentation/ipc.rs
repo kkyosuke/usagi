@@ -286,6 +286,7 @@ pub fn server_protocol(
     daemon_generation: DaemonGeneration,
     connection_id: String,
     build: usagi_core::infrastructure::ipc::BuildIdentity,
+    daemon_process: usagi_core::domain::daemon::DaemonRecord,
 ) -> ServerProtocol {
     ServerProtocol {
         daemon_generation,
@@ -301,9 +302,11 @@ pub fn server_protocol(
             "pr.snapshot.v1".into(),
             "pr.subscription.v1".into(),
             "build.artifact.v1".into(),
+            "daemon.owner-identity.v1".into(),
         ],
         build,
         limits: usagi_core::infrastructure::ipc::ProtocolLimits::default(),
+        daemon_process: Some(daemon_process),
     }
 }
 
@@ -367,6 +370,7 @@ mod tests {
                 target: "test".into(),
                 artifact: "server-artifact".into(),
             },
+            usagi_core::domain::daemon::DaemonRecord::identified(2, "test-process"),
         )
     }
     fn hello() -> Bootstrap {
