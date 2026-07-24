@@ -128,6 +128,104 @@ pub struct SessionRuntime {
     git: Box<dyn GitRunner + Send>,
 }
 
+/// Outcome of [`SessionRuntime::begin_create`]: either an outcome fully resolved
+/// under the lock (idempotent replay) or a pending worktree build to run with
+/// the lock released.
+enum SessionCreateStep {
+    Done(SessionReply),
+    Pending(SessionCreateInFlight),
+}
+
+/// The reserved-but-not-yet-built state of a create, carried across the lock
+/// release so [`SessionRuntime::execute_create`] can build the worktree without
+/// the shared session lock held.
+struct SessionCreateInFlight {
+    operation_id: OperationId,
+    fence: CompletionFence,
+    name: String,
+    workspace_root: PathBuf,
+    destination: PathBuf,
+    branch: String,
+}
+
+/// Outcome of [`SessionRuntime::begin_remove`]: an idempotent replay resolved
+/// under the lock, or a pending worktree teardown to run with the lock released.
+enum SessionRemoveStep {
+    Done(SessionReply),
+    Pending(SessionRemoveInFlight),
+}
+
+/// The marked-deleting state of a remove, carried across the lock release so
+/// [`SessionRuntime::execute_remove`] can tear down the worktree without the
+/// shared session lock held.
+struct SessionRemoveInFlight {
+    operation_id: OperationId,
+    fence: CompletionFence,
+    session_root: PathBuf,
+    force: bool,
+}
+
+/// Creates a session while holding the shared session lock only for the fast
+/// durable transitions. The heavy Git worktree build runs with the lock
+/// released so concurrent reads (session list, terminal poll, user-decision
+/// list) stay responsive during a create — the daemon no longer freezes the TUI
+/// for the duration of `git worktree add`.
+///
+/// # Errors
+///
+/// Returns a typed safe error when the request cannot be admitted or completed.
+pub fn perform_create(
+    runtime: &std::sync::Mutex<SessionRuntime>,
+    git: &dyn GitRunner,
+    operation_id: &str,
+    payload: &Value,
+) -> Result<SessionReply, SessionRuntimeError> {
+    let step = runtime
+        .lock()
+        .map_err(|_| SessionRuntimeError::Storage)?
+        .begin_create(operation_id, payload)?;
+    match step {
+        SessionCreateStep::Done(reply) => Ok(reply),
+        SessionCreateStep::Pending(in_flight) => {
+            let result = SessionRuntime::execute_create(git, &in_flight);
+            runtime
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .finish_create(in_flight, result)
+        }
+    }
+}
+
+/// Removes a session while holding the shared session lock only for the fast
+/// durable transitions. The heavy Git worktree teardown runs with the lock
+/// released so concurrent reads stay responsive during a remove — the daemon no
+/// longer freezes the TUI for the duration of `git worktree remove`.
+///
+/// # Errors
+///
+/// Returns a typed safe error when the request cannot be admitted or completed.
+pub fn perform_remove(
+    runtime: &std::sync::Mutex<SessionRuntime>,
+    git: &dyn GitRunner,
+    operation_id: &str,
+    payload: &Value,
+) -> Result<SessionReply, SessionRuntimeError> {
+    let step = runtime
+        .lock()
+        .map_err(|_| SessionRuntimeError::Storage)?
+        .begin_remove(operation_id, payload)?;
+    match step {
+        SessionRemoveStep::Done(reply) => Ok(reply),
+        SessionRemoveStep::Pending(in_flight) => {
+            let result = SessionRuntime::execute_remove(git, &in_flight);
+            runtime
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .finish_remove(in_flight, result)
+        }
+    }
+}
+
 impl SessionRuntime {
     /// Returns the repository root durably trusted by this daemon's session store.
     #[must_use]
@@ -430,12 +528,29 @@ impl SessionRuntime {
         })
     }
 
-    #[allow(clippy::single_match_else)]
     fn create(
         &mut self,
         operation_id: &str,
         payload: &Value,
     ) -> Result<SessionReply, SessionRuntimeError> {
+        match self.begin_create(operation_id, payload)? {
+            SessionCreateStep::Done(reply) => Ok(reply),
+            SessionCreateStep::Pending(in_flight) => {
+                let result = Self::execute_create(self.git.as_ref(), &in_flight);
+                self.finish_create(in_flight, result)
+            }
+        }
+    }
+
+    /// Validates the request, reserves the create operation, and computes the
+    /// worktree build plan. Runs under the shared session lock; the heavy Git
+    /// build is deferred to [`Self::execute_create`] so the lock can be released
+    /// (see [`perform_create`]).
+    fn begin_create(
+        &mut self,
+        operation_id: &str,
+        payload: &Value,
+    ) -> Result<SessionCreateStep, SessionRuntimeError> {
         let name = session_name(payload)?;
         let operation_id =
             OperationId::parse(operation_id).map_err(|_| SessionRuntimeError::InvalidOperation)?;
@@ -449,7 +564,7 @@ impl SessionRuntime {
             if existing.semantic_key != semantic_key {
                 return Err(SessionRuntimeError::IdempotencyConflict);
             }
-            return self.replay(&before, existing);
+            return self.replay(&before, existing).map(SessionCreateStep::Done);
         }
         // A failed or otherwise retained lifecycle record still owns the
         // session name. Report that concrete conflict before asking the
@@ -488,12 +603,44 @@ impl SessionRuntime {
             .last()
             .ok_or(SessionRuntimeError::Rejected)?;
         let fence = fence(&reserved, session, operation_id);
-        match build_session_tree(
-            self.git.as_ref(),
-            &self.repo_root,
-            &path,
-            &format!("usagi/{name}"),
-        ) {
+        Ok(SessionCreateStep::Pending(SessionCreateInFlight {
+            operation_id,
+            fence,
+            branch: format!("usagi/{name}"),
+            name,
+            workspace_root: self.repo_root.clone(),
+            destination: path,
+        }))
+    }
+
+    /// Builds the reserved session's worktree. Pure Git/filesystem work that
+    /// runs with the shared session lock released.
+    fn execute_create(
+        git: &dyn GitRunner,
+        in_flight: &SessionCreateInFlight,
+    ) -> anyhow::Result<()> {
+        build_session_tree(
+            git,
+            &in_flight.workspace_root,
+            &in_flight.destination,
+            &in_flight.branch,
+        )
+    }
+
+    /// Records the durable outcome of a create whose worktree build already ran.
+    /// Runs under the shared session lock.
+    fn finish_create(
+        &mut self,
+        in_flight: SessionCreateInFlight,
+        result: anyhow::Result<()>,
+    ) -> Result<SessionReply, SessionRuntimeError> {
+        let SessionCreateInFlight {
+            operation_id,
+            fence,
+            name,
+            ..
+        } = in_flight;
+        match result {
             Ok(()) => {
                 let completed = self
                     .store
@@ -543,12 +690,29 @@ impl SessionRuntime {
         }
     }
 
-    #[allow(clippy::single_match_else)]
     fn remove(
         &mut self,
         operation_id: &str,
         payload: &Value,
     ) -> Result<SessionReply, SessionRuntimeError> {
+        match self.begin_remove(operation_id, payload)? {
+            SessionRemoveStep::Done(reply) => Ok(reply),
+            SessionRemoveStep::Pending(in_flight) => {
+                let result = Self::execute_remove(self.git.as_ref(), &in_flight);
+                self.finish_remove(in_flight, result)
+            }
+        }
+    }
+
+    /// Validates the request and marks the session deleting, computing the
+    /// worktree teardown plan. Runs under the shared session lock; the heavy Git
+    /// teardown is deferred to [`Self::execute_remove`] so the lock can be
+    /// released (see [`perform_remove`]).
+    fn begin_remove(
+        &mut self,
+        operation_id: &str,
+        payload: &Value,
+    ) -> Result<SessionRemoveStep, SessionRuntimeError> {
         let name = session_name(payload)?;
         let force = force(payload)?;
         let operation_id =
@@ -563,7 +727,7 @@ impl SessionRuntime {
             if existing.semantic_key != semantic_key {
                 return Err(SessionRuntimeError::IdempotencyConflict);
             }
-            return self.replay(&before, existing);
+            return self.replay(&before, existing).map(SessionRemoveStep::Done);
         }
         let session = before
             .sessions
@@ -598,7 +762,39 @@ impl SessionRuntime {
             .join(STATE_DIR)
             .join(SESSIONS_DIR)
             .join(&name);
-        match remove_session_tree(self.git.as_ref(), &path, force) {
+        Ok(SessionRemoveStep::Pending(SessionRemoveInFlight {
+            operation_id,
+            fence,
+            session_root: path,
+            force,
+        }))
+    }
+
+    /// Tears down the deleting session's worktree. Pure Git/filesystem work that
+    /// runs with the shared session lock released.
+    fn execute_remove(
+        git: &dyn GitRunner,
+        in_flight: &SessionRemoveInFlight,
+    ) -> anyhow::Result<()> {
+        remove_session_tree(git, &in_flight.session_root, in_flight.force)
+    }
+
+    /// Records the durable outcome of a remove whose worktree teardown already
+    /// ran. Runs under the shared session lock.
+    // Any teardown failure maps to one safe durable message, so `result`'s error
+    // is deliberately not read; the Ok/Err arms mirror the original `remove`.
+    #[allow(clippy::single_match_else, clippy::needless_pass_by_value)]
+    fn finish_remove(
+        &mut self,
+        in_flight: SessionRemoveInFlight,
+        result: anyhow::Result<()>,
+    ) -> Result<SessionReply, SessionRuntimeError> {
+        let SessionRemoveInFlight {
+            operation_id,
+            fence,
+            ..
+        } = in_flight;
+        match result {
             Ok(()) => {
                 let completed = self
                     .store
@@ -2230,5 +2426,187 @@ mod tests {
             std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap(),
             "target\n"
         );
+    }
+
+    /// A Git runner that records whether the shared session lock was free at the
+    /// moment Git ran. `perform_create`/`perform_remove` must release the lock
+    /// before invoking Git, so a same-thread `try_lock` succeeds here.
+    struct LockProbeGit {
+        runtime: std::sync::Weak<Mutex<SessionRuntime>>,
+        observed_unlocked: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl GitRunner for LockProbeGit {
+        fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
+            if let Some(runtime) = self.runtime.upgrade()
+                && runtime.try_lock().is_ok()
+            {
+                self.observed_unlocked
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(GitOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    /// A Git runner that poisons the shared session lock while it runs, so the
+    /// `finish_*` re-lock inside `perform_*` observes a poisoned lock.
+    struct PoisoningGit {
+        runtime: std::sync::Weak<Mutex<SessionRuntime>>,
+    }
+    impl GitRunner for PoisoningGit {
+        fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
+            if let Some(runtime) = self.runtime.upgrade() {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _guard = runtime.lock().unwrap();
+                    panic!("poison the session lock mid Git effect");
+                }));
+            }
+            Ok(GitOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    fn poison_lock(runtime: &Arc<Mutex<SessionRuntime>>) {
+        let clone = Arc::clone(runtime);
+        let _ = std::thread::spawn(move || {
+            let _guard = clone.lock().unwrap();
+            panic!("poison the session lock before begin");
+        })
+        .join();
+    }
+
+    #[test]
+    fn perform_create_releases_the_session_lock_while_building_the_worktree() {
+        let (_tmp, rt) = runtime(FakeGit::ok());
+        let runtime = Arc::new(Mutex::new(rt));
+        let observed_unlocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let git = LockProbeGit {
+            runtime: Arc::downgrade(&runtime),
+            observed_unlocked: Arc::clone(&observed_unlocked),
+        };
+        let reply = perform_create(&runtime, &git, &operation(), &json!({"name":"one"})).unwrap();
+        assert!(
+            observed_unlocked.load(std::sync::atomic::Ordering::SeqCst),
+            "the session lock must be released while `git worktree add` runs"
+        );
+        assert_eq!(reply.body["sessions"][0]["name"], "one");
+    }
+
+    #[test]
+    fn perform_remove_releases_the_session_lock_while_tearing_down_the_worktree() {
+        let (tmp, rt) = runtime(FakeGit::ok());
+        let runtime = Arc::new(Mutex::new(rt));
+        perform_create(
+            &runtime,
+            &FakeGit::ok(),
+            &operation(),
+            &json!({"name":"one"}),
+        )
+        .unwrap();
+        // Materialize a linked worktree so the teardown actually invokes Git.
+        let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
+        std::fs::create_dir_all(&session_root).unwrap();
+        std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+        let observed_unlocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let git = LockProbeGit {
+            runtime: Arc::downgrade(&runtime),
+            observed_unlocked: Arc::clone(&observed_unlocked),
+        };
+        let reply = perform_remove(&runtime, &git, &operation(), &json!({"name":"one"})).unwrap();
+        assert!(
+            observed_unlocked.load(std::sync::atomic::Ordering::SeqCst),
+            "the session lock must be released while `git worktree remove` runs"
+        );
+        assert!(reply.body.get("sessions").is_some());
+    }
+
+    #[test]
+    fn perform_create_and_remove_replay_a_completed_operation_under_the_lock() {
+        let (_tmp, rt) = runtime(FakeGit::ok());
+        let runtime = Arc::new(Mutex::new(rt));
+        let create_op = operation();
+        let created =
+            perform_create(&runtime, &FakeGit::ok(), &create_op, &json!({"name":"one"})).unwrap();
+        let replayed_create =
+            perform_create(&runtime, &FakeGit::ok(), &create_op, &json!({"name":"one"})).unwrap();
+        assert_eq!(created.body, replayed_create.body);
+
+        let remove_op = operation();
+        perform_remove(&runtime, &FakeGit::ok(), &remove_op, &json!({"name":"one"})).unwrap();
+        let replayed_remove =
+            perform_remove(&runtime, &FakeGit::ok(), &remove_op, &json!({"name":"one"})).unwrap();
+        assert!(replayed_remove.body.get("sessions").is_some());
+    }
+
+    #[test]
+    fn perform_create_maps_a_poisoned_session_lock_to_storage() {
+        // Poisoned before begin: the first re-lock fails.
+        let (_tmp, rt) = runtime(FakeGit::ok());
+        let shared = Arc::new(Mutex::new(rt));
+        poison_lock(&shared);
+        assert!(matches!(
+            perform_create(
+                &shared,
+                &FakeGit::ok(),
+                &operation(),
+                &json!({"name":"one"})
+            ),
+            Err(SessionRuntimeError::Storage)
+        ));
+
+        // Poisoned mid-build: begin succeeds, the finish re-lock fails.
+        let (_tmp, rt) = runtime(FakeGit::ok());
+        let shared = Arc::new(Mutex::new(rt));
+        let git = PoisoningGit {
+            runtime: Arc::downgrade(&shared),
+        };
+        assert!(matches!(
+            perform_create(&shared, &git, &operation(), &json!({"name":"one"})),
+            Err(SessionRuntimeError::Storage)
+        ));
+    }
+
+    #[test]
+    fn perform_remove_maps_a_poisoned_session_lock_to_storage() {
+        // Poisoned before begin: the first re-lock fails.
+        let (_tmp, rt) = runtime(FakeGit::ok());
+        let shared = Arc::new(Mutex::new(rt));
+        poison_lock(&shared);
+        assert!(matches!(
+            perform_remove(
+                &shared,
+                &FakeGit::ok(),
+                &operation(),
+                &json!({"name":"one"})
+            ),
+            Err(SessionRuntimeError::Storage)
+        ));
+
+        // Poisoned mid-teardown: begin succeeds, the finish re-lock fails.
+        let (tmp, rt) = runtime(FakeGit::ok());
+        let shared = Arc::new(Mutex::new(rt));
+        perform_create(
+            &shared,
+            &FakeGit::ok(),
+            &operation(),
+            &json!({"name":"one"}),
+        )
+        .unwrap();
+        let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
+        std::fs::create_dir_all(&session_root).unwrap();
+        std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+        let git = PoisoningGit {
+            runtime: Arc::downgrade(&shared),
+        };
+        assert!(matches!(
+            perform_remove(&shared, &git, &operation(), &json!({"name":"one"})),
+            Err(SessionRuntimeError::Storage)
+        ));
     }
 }
