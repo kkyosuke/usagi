@@ -820,11 +820,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn owner_binding_requires_peer_process_record_and_generation_to_all_match() {
-        let record = DaemonRecord::identified(4321, "process-start");
-        let generation = DaemonGeneration("generation".into());
-        let hello = ServerHello {
+    fn owner_hello(record: &DaemonRecord, generation: &DaemonGeneration) -> ServerHello {
+        ServerHello {
             connection_nonce: "nonce".into(),
             connection_id: crate::infrastructure::ipc::ConnectionId("connection".into()),
             daemon_generation: generation.clone(),
@@ -837,7 +834,14 @@ mod tests {
             build: client_build(),
             limits: crate::infrastructure::ipc::ProtocolLimits::default(),
             daemon_process: Some(record.clone()),
-        };
+        }
+    }
+
+    #[test]
+    fn owner_binding_requires_peer_process_record_and_generation_to_all_match() {
+        let record = DaemonRecord::identified(4321, "process-start");
+        let generation = DaemonGeneration("generation".into());
+        let hello = owner_hello(&record, &generation);
         let exact = ExpectedOwner {
             record: &record,
             generation: &generation,
@@ -865,6 +869,20 @@ mod tests {
             },
         ] {
             let error = verify_owner_binding(&hello, &invalid).unwrap_err();
+            assert_eq!(error.code, ErrorCode::OwnershipUnknown);
+            assert_eq!(error.side_effect, SideEffect::None);
+        }
+
+        let mut wrong_generation = hello.clone();
+        wrong_generation.daemon_generation = DaemonGeneration("replacement".into());
+        let mut draining = hello.clone();
+        draining.generation_role = GenerationRole::Draining;
+        let mut missing_capability = hello.clone();
+        missing_capability.capabilities.clear();
+        let mut wrong_record = hello.clone();
+        wrong_record.daemon_process = Some(DaemonRecord::identified(record.pid, "replacement"));
+        for invalid in [wrong_generation, draining, missing_capability, wrong_record] {
+            let error = verify_owner_binding(&invalid, &exact).unwrap_err();
             assert_eq!(error.code, ErrorCode::OwnershipUnknown);
             assert_eq!(error.side_effect, SideEffect::None);
         }
@@ -920,6 +938,68 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    fn bootstrap_script(message: &Bootstrap) -> Scripted {
+        let mut input = Vec::new();
+        write_json_frame(&mut input, &message, 1_048_576).unwrap();
+        Scripted {
+            input: Cursor::new(input),
+            output: vec![],
+        }
+    }
+
+    #[test]
+    fn exact_owner_handshake_maps_every_pre_authentication_failure_to_effect_zero() {
+        let record = DaemonRecord::identified(4321, "process-start");
+        let generation = DaemonGeneration("generation".into());
+        let connect = |stream| {
+            IpcClient::connect_expected_owner(
+                stream,
+                "client".into(),
+                "nonce".into(),
+                ClientPolicy::cli(),
+                client_build(),
+                &record,
+                &generation,
+                record.pid,
+                DaemonProcessObservation::Exact,
+            )
+        };
+
+        assert!(
+            connect(bootstrap_script(&Bootstrap::ServerHello(owner_hello(
+                &record,
+                &generation,
+            ))))
+            .is_ok()
+        );
+
+        let protocol_error = connect(bootstrap_script(&Bootstrap::Error(ProtocolError::new(
+            ErrorCode::Busy,
+            "not authenticated",
+        ))))
+        .err()
+        .unwrap();
+        assert_eq!(protocol_error.code(), ErrorCode::OwnershipUnknown);
+        assert_eq!(protocol_error.side_effect(), SideEffect::None);
+
+        let unavailable = connect(Scripted {
+            input: Cursor::new(vec![]),
+            output: vec![],
+        })
+        .err()
+        .unwrap();
+        assert_eq!(unavailable.code(), ErrorCode::OwnershipUnknown);
+        assert_eq!(unavailable.side_effect(), SideEffect::None);
+
+        let mut wrong_nonce = owner_hello(&record, &generation);
+        wrong_nonce.connection_nonce = "other-connection".into();
+        let unauthenticated = connect(bootstrap_script(&Bootstrap::ServerHello(wrong_nonce)))
+            .err()
+            .unwrap();
+        assert_eq!(unauthenticated.code(), ErrorCode::Unauthenticated);
+        assert_eq!(unauthenticated.side_effect(), SideEffect::None);
     }
 
     fn scripted(reply: ResponseOutcome, request_id: &str) -> Scripted {
