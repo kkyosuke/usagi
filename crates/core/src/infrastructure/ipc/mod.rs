@@ -291,6 +291,11 @@ pub struct ServerHello {
     pub capabilities: Vec<String>,
     pub build: BuildIdentity,
     pub limits: ProtocolLimits,
+    /// Process owner asserted by the server. Lifecycle clients treat this as
+    /// authority only after binding it to OS peer credentials and the durable
+    /// daemon record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_process: Option<crate::domain::daemon::DaemonRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -458,6 +463,7 @@ pub struct ServerProtocol {
     pub capabilities: Vec<String>,
     pub build: BuildIdentity,
     pub limits: ProtocolLimits,
+    pub daemon_process: Option<crate::domain::daemon::DaemonRecord>,
 }
 
 /// Negotiate version/capabilities, rejecting mismatched generation before normal traffic.
@@ -518,6 +524,7 @@ pub fn negotiate(
         capabilities: server.capabilities.clone(),
         build: server.build.clone(),
         limits: server.limits.clone(),
+        daemon_process: server.daemon_process.clone(),
     })
 }
 

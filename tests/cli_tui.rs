@@ -261,6 +261,15 @@ fn spawn_fake_daemon(home: &Path, reply: FakeDaemonReply) -> thread::JoinHandle<
     ensure_private_dir_all(&data_dir).unwrap();
     let generation = DaemonGeneration(format!("fake-{}", std::process::id()));
     let listener = SecureUnixListener::bind(&data_dir, generation.clone()).unwrap();
+    let record = usagi_core::domain::daemon::DaemonRecord::identified(
+        std::process::id(),
+        fixture_process_start_identity(std::process::id()),
+    );
+    std::fs::write(
+        data_dir.join("daemon/daemon.json"),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
     let server_build = shipping_build_identity();
     thread::spawn(move || {
         let mut stream = loop {
@@ -278,6 +287,7 @@ fn spawn_fake_daemon(home: &Path, reply: FakeDaemonReply) -> thread::JoinHandle<
             generation,
             "fake-connection".into(),
             server_build,
+            record,
         );
         let hello = usagi_daemon::presentation::ipc::handshake(&mut stream, &mut writer, &server)
             .unwrap()
@@ -322,6 +332,28 @@ fn spawn_fake_daemon(home: &Path, reply: FakeDaemonReply) -> thread::JoinHandle<
         )
         .unwrap();
     })
+}
+
+#[cfg(target_os = "linux")]
+fn fixture_process_start_identity(pid: u32) -> String {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let close = stat.rfind(')').unwrap();
+    let start = stat[close + 1..].split_whitespace().nth(19).unwrap();
+    format!("linux:{start}")
+}
+
+#[cfg(target_os = "macos")]
+fn fixture_process_start_identity(pid: u32) -> String {
+    let pid = libc::pid_t::try_from(pid).unwrap();
+    // SAFETY: the buffer is initialized and has the exact proc_bsdinfo size.
+    let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).unwrap();
+    // SAFETY: `info` remains valid writable storage for this call.
+    assert_eq!(
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) },
+        size
+    );
+    format!("macos:{}:{}", info.pbi_start_tvsec, info.pbi_start_tvusec)
 }
 
 fn install_absent_daemon_endpoint(home: &Path) {

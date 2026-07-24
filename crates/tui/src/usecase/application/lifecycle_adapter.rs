@@ -592,6 +592,7 @@ mod tests {
                         artifact: "server-artifact".into(),
                     },
                     limits: ProtocolLimits::default(),
+                    daemon_process: None,
                 }),
                 1_048_576,
             )

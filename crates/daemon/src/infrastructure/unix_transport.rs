@@ -1989,6 +1989,12 @@ fn verify_private(path: &Path, mode: u32, directory: bool) -> io::Result<()> {
 #[cfg(target_os = "linux")]
 #[coverage(off)]
 fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    linux_peer_credentials(stream).map(|credential| credential.uid)
+}
+
+#[cfg(target_os = "linux")]
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=unix_peer_pid_contract
+fn linux_peer_credentials(stream: &UnixStream) -> io::Result<libc::ucred> {
     use std::os::fd::AsRawFd;
     let mut credential = libc::ucred {
         pid: 0,
@@ -1996,7 +2002,7 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
         gid: 0,
     };
     let mut size = libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>())
-        .expect("ucred size fits socklen_t");
+        .map_err(|_| io::Error::other("ucred size does not fit socklen_t"))?;
     // SAFETY: credential is initialized and sized for SO_PEERCRED; fd belongs
     // to the live Unix stream for the duration of this call.
     let result = unsafe {
@@ -2008,11 +2014,16 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
             &raw mut size,
         )
     };
-    if result == 0 && size as usize == std::mem::size_of::<libc::ucred>() {
-        Ok(credential.uid)
-    } else {
-        Err(io::Error::last_os_error())
+    if result != 0 {
+        return Err(io::Error::last_os_error());
     }
+    if size as usize != std::mem::size_of::<libc::ucred>() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SO_PEERCRED returned an invalid credential size",
+        ));
+    }
+    Ok(credential)
 }
 
 #[cfg(target_os = "macos")]
@@ -2039,6 +2050,74 @@ fn peer_uid(_stream: &UnixStream) -> io::Result<u32> {
     ))
 }
 
+/// Returns the OS-authenticated PID of an established Unix-stream peer.
+///
+/// # Errors
+///
+/// Returns an error when the platform cannot provide a valid positive PID.
+#[cfg(target_os = "linux")]
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=unix_peer_pid_contract
+pub fn peer_pid(stream: &UnixStream) -> io::Result<u32> {
+    validated_peer_pid(linux_peer_credentials(stream)?.pid)
+}
+
+/// Returns the OS-authenticated PID of an established Unix-stream peer.
+///
+/// # Errors
+///
+/// Returns an error when the platform cannot provide a valid positive PID.
+#[cfg(target_os = "macos")]
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=unix_peer_pid_contract
+pub fn peer_pid(stream: &UnixStream) -> io::Result<u32> {
+    use std::os::fd::AsRawFd;
+    let mut pid: libc::pid_t = 0;
+    let mut size = libc::socklen_t::try_from(std::mem::size_of::<libc::pid_t>())
+        .map_err(|_| io::Error::other("pid_t size does not fit socklen_t"))?;
+    // SAFETY: `pid` is initialized writable storage sized by `size`; the fd
+    // belongs to the established stream for this call.
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&raw mut pid).cast(),
+            &raw mut size,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if size as usize != std::mem::size_of::<libc::pid_t>() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "LOCAL_PEERPID returned an invalid PID size",
+        ));
+    }
+    validated_peer_pid(pid)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[coverage(off)]
+pub fn peer_pid(_stream: &UnixStream) -> io::Result<u32> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "peer PID credentials unavailable",
+    ))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+fn validated_peer_pid(pid: libc::pid_t) -> io::Result<u32> {
+    let pid = u32::try_from(pid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "peer PID is negative"))?;
+    if !(2..=i32::MAX.cast_unsigned()).contains(&pid) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "peer PID is not a single-process target",
+        ));
+    }
+    Ok(pid)
+}
+
 #[coverage(off)]
 fn effective_uid() -> u32 {
     // SAFETY: geteuid has no preconditions.
@@ -2048,6 +2127,14 @@ fn effective_uid() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_pid_validation_rejects_non_process_targets() {
+        for invalid in [-1, 0, 1] {
+            assert!(validated_peer_pid(invalid).is_err());
+        }
+        assert_eq!(validated_peer_pid(2).unwrap(), 2);
+    }
     use std::os::unix::ffi::OsStringExt;
     use std::sync::{Arc, Barrier};
     use tempfile::TempDir;

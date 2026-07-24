@@ -51,6 +51,7 @@ fn server() -> ServerProtocol {
         capabilities: vec!["request.correlation.v1".into()],
         build: build(),
         limits: ProtocolLimits::default(),
+        daemon_process: None,
     }
 }
 
