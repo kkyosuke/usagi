@@ -165,7 +165,8 @@ workspace の root へ戻す。これにより、削除済み session を target
 使わない。
 
 Home の mode は Switch と Closeup である。Switch 中の右ペインは tab strip、content、footer を含めて dim
-表示し、左 sidebar が操作対象であることを示す。Closeup では右ペインを active な明度へ戻す。Overview、Closeup action、PR、preview、text、notes、
+表示し、左 sidebar が操作対象であることを示す。この間、右ペインの scroll、tab close / reorder、text selection、copy、link open は入力を受け取らない。
+Closeup では右ペインを active な明度へ戻す。Overview、Closeup action、PR、preview、text、notes、
 environment、pending user decision、session 作成失敗 dialog は Home の背景を残す overlay として開き、最前面の overlay が入力を受け取る。diff は
 Closeup pane の tab として開く。
 

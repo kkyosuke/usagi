@@ -3244,6 +3244,25 @@ fn intercept_live_terminal_control(
     rows_len: usize,
     scroll: usize,
 ) -> bool {
+    // The right pane is interactive only on the unobscured Closeup surface.
+    // Pending/ready tabs still need Closeup tab controls even though they do not
+    // own PTY input yet. Consume pane-only controls while Switch or a foreground
+    // overlay owns the surface so wheel/prefix/pointer events cannot mutate the
+    // dimmed/covered background. Ordinary clicks still fall through to the
+    // controller: its sidebar hit-test accepts the left pane and treats the
+    // dimmed right pane as inert.
+    let pane_only_control = if let Key::Live(action) = key {
+        *action == LiveTerminalAction::ScrollUp
+            || *action == LiveTerminalAction::ScrollDown
+            || *action == LiveTerminalAction::CloseTab
+            || *action == LiveTerminalAction::MoveTabNext
+            || *action == LiveTerminalAction::MoveTabPrevious
+    } else {
+        matches!(key, Key::Pointer(_))
+    };
+    if !runtime.wants_pane_control_input() && pane_only_control {
+        return true;
+    }
     match key {
         Key::Live(LiveTerminalAction::ScrollUp) => controls.scroll_up(),
         Key::Live(LiveTerminalAction::ScrollDown) => controls.scroll_down(),
@@ -4570,8 +4589,8 @@ mod tests {
         AgentTabSlotIntent, AgentTabTargetProjection,
     };
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, BackendEvent, Effect, EnvironmentEntry, NewRequest, PendingToken,
-        SessionCreateIntent, TabDirection, Target,
+        AppEvent, AppKey, BackendEvent, Effect, EnvironmentEntry, NewRequest, Overlay,
+        PendingToken, SessionCreateIntent, TabDirection, Target,
     };
     use crate::usecase::application::daemon_backend::{DaemonBackend, ReopenAgentRequest};
     use crate::usecase::application::pane::{LivePane, PaneKind, PaneTab};
@@ -7067,15 +7086,159 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One fixture audits every pane-only and reducer-owned key.
+    fn switch_consumes_right_pane_controls_without_mutating_the_dimmed_pane() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let detaches = Arc::new(Mutex::new(Vec::new()));
+        let (mut ui, mut runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(ScriptedAgentPort {
+                terminal,
+                subscription: 18,
+                replay: b"one\ntwo\nthree\nhttps://example.com".to_vec(),
+                poll_error: None,
+                detaches: Arc::clone(&detaches),
+            }),
+        );
+        let mut controls = LiveTerminalControls::default();
+        let rows = vec![
+            "one".to_owned(),
+            "two".to_owned(),
+            "three".to_owned(),
+            "https://example.com".to_owned(),
+        ];
+        let _ = controls.project(rows.clone(), 1);
+        controls.scroll_up();
+        let before = controls.project(rows.clone(), 1).scroll;
+        assert_eq!(before, 1);
+        let tabs_before = runtime.active_pane().tabs().to_vec();
+
+        let mut term = FakeTerminal::default();
+        let mut browser = RecordingBrowser::default();
+        let mut pending = std::collections::HashMap::new();
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::OpenCloseupModal));
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::ScrollUp),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending,
+            20,
+            80,
+            4,
+            before,
+        ));
+        let _ = runtime.handle_key(Key::Escape);
+        assert!(!runtime.wants_live_input());
+        for key in [
+            Key::Live(LiveTerminalAction::ScrollUp),
+            Key::Live(LiveTerminalAction::ScrollDown),
+            Key::Live(LiveTerminalAction::CloseTab),
+            Key::Live(LiveTerminalAction::MoveTabNext),
+            Key::Live(LiveTerminalAction::MoveTabPrevious),
+            Key::Pointer(PointerEvent {
+                kind: PointerKind::Drag,
+                column: 41,
+                row: 5,
+            }),
+            Key::Pointer(PointerEvent {
+                kind: PointerKind::Up,
+                column: 41,
+                row: 5,
+            }),
+        ] {
+            assert!(intercept_live_terminal_control(
+                &key,
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &mut browser,
+                &mut pending,
+                20,
+                80,
+                4,
+                before,
+            ));
+        }
+
+        for key in [
+            Key::Live(LiveTerminalAction::NextTab),
+            Key::Passthrough(Vec::new()),
+            Key::TerminalCopy {
+                fallback: Vec::new(),
+            },
+            Key::Up,
+            Key::Down,
+            Key::Left,
+            Key::Right,
+            Key::Home,
+            Key::End,
+            Key::Delete,
+            Key::LineStart,
+            Key::LineEnd,
+            Key::SelectLeft,
+            Key::SelectRight,
+            Key::SelectHome,
+            Key::SelectEnd,
+            Key::Enter,
+            Key::Backspace,
+            Key::Tab,
+            Key::Escape,
+            Key::Quit,
+            Key::CtrlQ,
+            Key::CtrlD,
+            Key::Char('x'),
+            Key::Click { column: 41, row: 5 },
+            Key::Other,
+        ] {
+            assert!(!intercept_live_terminal_control(
+                &key,
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &mut browser,
+                &mut pending,
+                20,
+                80,
+                4,
+                before,
+            ));
+        }
+        assert_eq!(controls.project(rows, 1).scroll, before);
+        assert!(!controls.has_selection());
+        assert_eq!(runtime.active_pane().tabs(), tabs_before.as_slice());
+        assert!(detaches.lock().unwrap().is_empty());
+        assert!(term.copied.is_empty());
+        assert!(browser.opened.is_empty());
+    }
+
+    #[test]
     fn close_tab_live_action_cancels_the_focused_pending_launch() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let target = Target::Session(session);
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
-        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
-        let _ = runtime.handle_key(Key::Down);
-        let _ = runtime.handle_key(Key::Enter);
+        let live = live_terminal_ref(workspace, session);
+        let (mut ui, mut runtime) = focused_live_pane(
+            workspace,
+            session,
+            live.clone(),
+            Box::new(ScriptedAgentPort {
+                terminal: live.clone(),
+                subscription: 19,
+                replay: Vec::new(),
+                poll_error: None,
+                detaches: Arc::new(Mutex::new(Vec::new())),
+            }),
+        );
         let operation = OperationId::new();
         let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
         let _ = runtime.select_tab(crate::usecase::application::controller::TabDirection::Next);
@@ -7111,7 +7274,8 @@ mod tests {
             0,
         ));
 
-        assert!(runtime.active_pane().tabs().is_empty());
+        assert_eq!(runtime.active_pane().tabs().len(), 1);
+        assert_eq!(runtime.focused_terminal(), Some(live));
         assert!(!pending_targets.contains_key(&operation));
         assert!(matches!(
             ui.pane_launches.as_slice(),
@@ -7128,6 +7292,25 @@ mod tests {
             ui.pane_launches.as_slice(),
             [PaneLaunch::Terminal { .. }]
         ));
+
+        // Closeup still permits dismissing its only pending tab. Switch blocks
+        // the same control before it can reach this pane mutation path.
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut pending_ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut pending_runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = pending_runtime.handle_key(Key::Down);
+        let _ = pending_runtime.handle_key(Key::Enter);
+        let operation = OperationId::new();
+        let _ = pending_runtime.request_pane(target, operation, PaneKind::Terminal);
+        let _ = pending_runtime.select_tab(TabDirection::Next);
+        let mut pending_targets = std::collections::HashMap::from([(operation, target)]);
+        super::close_focused_terminal_pane(
+            &mut pending_ui,
+            &mut pending_runtime,
+            &mut pending_targets,
+        );
+        assert!(pending_runtime.active_pane().tabs().is_empty());
+        assert!(pending_targets.is_empty());
     }
 
     /// A daemon inventory double for restore-on-open. It returns a fixed set of
@@ -9681,6 +9864,7 @@ mod tests {
                 selected: Some(first_terminal.clone()),
             }],
         ));
+        let _ = runtime.handle_key(Key::Enter);
         let tabs_before = runtime.active_pane().tabs().to_vec();
         let mut controls = LiveTerminalControls::default();
         let mut term = FakeTerminal::default();
@@ -9775,6 +9959,7 @@ mod tests {
                 selected: Some(generic_first),
             }],
         ));
+        let _ = generic_runtime.handle_key(Key::Enter);
         assert!(intercept_live_terminal_control(
             &Key::Live(LiveTerminalAction::MoveTabNext),
             &mut generic_ui,
@@ -10442,6 +10627,28 @@ mod tests {
         ));
         let empty_view = WorkspaceView::with_runtime_ids(ws("empty"), state("empty"), vec![]);
         let empty_ui = WorkspaceUi::new(empty_view, Box::new(UnavailableSessionCommandPort));
+        let mut detached_controls = LiveTerminalControls::default();
+        detached_controls.sync_focus(runtime.focused_terminal().as_ref());
+        detached_controls.press_pointer(TerminalSelection::begin(
+            vec!["detached".to_owned()],
+            TerminalPoint { row: 0, column: 0 },
+        ));
+        assert!(handle_terminal_pointer(
+            &empty_ui,
+            &runtime,
+            &mut detached_controls,
+            &mut term,
+            &mut browser,
+            20,
+            80,
+            1,
+            0,
+            PointerEvent {
+                kind: PointerKind::Up,
+                column: 40,
+                row: 5,
+            },
+        ));
         assert!(!handle_terminal_pointer(
             &empty_ui,
             &runtime,
