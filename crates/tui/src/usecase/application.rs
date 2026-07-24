@@ -29,6 +29,9 @@ pub mod controller;
 /// controller の [`controller::Effect`] を daemon-owned ポート群へ実行する本番
 /// executor。effect → 実行 → `AppEvent` 還流の単方向ループを閉じる。
 pub mod daemon_backend;
+/// interrupted Agent runtime を tab へ投影し、tab 単位の明示 resume を検証する
+/// 純粋 reducer（#510）。
+pub mod interrupted_tab;
 /// Session create/remove の pending 表示と safe landing を扱う純粋 reducer。
 pub mod lifecycle;
 /// daemon SessionLifecycle の effect / replay / snapshot を lifecycle reducer へ

@@ -8,7 +8,8 @@ use usagi_core::{
             AgentCapability, AgentInventory, AgentProfile, AgentProfileId,
             AgentResumableInventoryItem, AgentResumeTarget, AgentRuntimeInventoryItem,
             AgentRuntimeInventoryState, DurableLaunchSnapshot, EnvironmentVariableName, LaunchMode,
-            LaunchPlan, LaunchRequest, LaunchScope, LaunchValidationError, ProviderResumeReason,
+            LaunchPlan, LaunchRequest, LaunchScope, LaunchValidationError, ProviderKind,
+            ProviderResumePhase, ProviderResumeReason,
         },
         id::{
             AgentContinuationRef, AgentResumeSourceId, AgentRuntimeId, AgentRuntimeRef,
@@ -216,6 +217,8 @@ fn exact_resume_inventory_round_trips_only_public_resource_fences() {
             target: Some(target),
             available: true,
             reason: ProviderResumeReason::ExplicitResumeAvailable,
+            provider: Some(ProviderKind::Codex),
+            last_known_phase: Some(ProviderResumePhase::Interrupted),
         }],
     };
 

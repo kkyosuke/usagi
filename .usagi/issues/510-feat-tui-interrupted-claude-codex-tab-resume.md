@@ -53,3 +53,19 @@ Codex success case は #504 の production structured capture を通す。captur
 ## docs / migration
 
 [TUI](../../document/03-tui.md) に interrupted tab、明示 Resume action、pending / failure / live transition、root UX、privacy 表示を追記し、[workspace pane restore proposal](../../document/proposals/11-workspace-restore-panes.md) の live-only restore と cold-restart resume の責務境界を更新する。旧 TUI-local state に resume target が無い場合は inventory から安全に再構成し、provider ID を推測しない。
+
+## 進捗（2026-07-25 時点）
+
+1/2 として次を landed した。
+
+- `crates/tui/src/usecase/application/interrupted_tab.rs`: daemon inventory を interrupted tab へ投影する純粋 reducer
+  （root / managed session 共通、continuation 単位の dedup、live/reserved との収束、#506 dismissal と明示 reopen、
+  saved 順の保持、untrustworthy target の fail-closed 破棄）と、明示 resume の request 生成 / 応答検証
+  （operation・relation・lineage・source・新 exact `TerminalRef` の全一致だけを受理、double click は in-flight へ収束）。
+- daemon `AgentInventory.resumable` に safe な `provider` / `last_known_phase`（closed enum のみ）を additive に追加。
+- `document/03-tui.md` に「interrupted Agent の tab 投影と明示 resume」節、`04-ipc.md` / `05-daemon.md` /
+  `proposals/11-workspace-restore-panes.md` を更新。
+
+2/2 で残るのは pane registry / tab strip / resume worker への配線（`PaneTab` の interrupted variant、
+`resume_exact` port の relation 返却、tab label と body 表示、明示 Resume action）と、実 daemon / PTY / fixture を
+使う product E2E である。
