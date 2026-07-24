@@ -86,6 +86,7 @@ use usagi_tui::usecase::terminal_input::{
 
 use crate::runtime::agent_tab_intent::FileAgentTabIntentStore;
 use crate::runtime::clipboard::PlatformClipboard;
+use crate::runtime::terminal_pump::TerminalPollPump;
 use crate::tui_input::{CrosstermSource, EventPump, NoBackend};
 
 /// Composition adapter for Overview's daemon-owned session lifecycle commands.
@@ -588,9 +589,10 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         ControllerBackendComposition {
             backend,
             session_commands: Box::new(DaemonSessionCommandPort),
-            agent_commands: Box::new(DaemonAgentCommandPort::new()),
+            agent_commands: Box::new(DaemonAgentCommandPort::new(spawn_poll_pump())),
             restore_commands: Box::new(
-                DaemonAgentCommandPort::new().with_restore_connection(restore_publisher),
+                DaemonAgentCommandPort::new(spawn_poll_pump())
+                    .with_restore_connection(restore_publisher),
             ),
             restore_connection: Box::new(restore_connection),
             agent_tab_intents: Box::new(UserAgentTabIntentPort::new()),
@@ -856,14 +858,18 @@ fn unix_stream_closed(stream: &std::os::unix::net::UnixStream) -> bool {
     )
 }
 
-#[derive(Default)]
 struct DaemonAgentCommandPort {
     terminal: Option<IpcClient<std::os::unix::net::UnixStream>>,
-    /// Dedicated connection for the stateless `Resume` (poll) and `Resize`
-    /// actions, carrying a per-request read deadline. Kept separate from
-    /// `terminal` so a timed-out read only drops this lane and never disturbs
-    /// the attach/input connection's subscription or exactly-once ledger.
+    /// Dedicated connection for the stateless `Resize` action, carrying a
+    /// per-request read deadline. Kept separate from `terminal` so a timed-out
+    /// read only drops this lane and never disturbs the attach/input
+    /// connection's subscription or exactly-once ledger. (`Resume` polling runs
+    /// on the background `pump` instead of any render-thread connection.)
     poll: Option<IpcClient<std::os::unix::net::UnixStream>>,
+    /// Background poll pump. `Resume` fetches run on its own thread and
+    /// connection, so the render thread only drains ready output and never
+    /// blocks on the daemon. Attach registers a terminal here; detach removes it.
+    pump: TerminalPollPump,
     terminal_epoch: u64,
     restore_connection: Option<DaemonRestoreConnectionPublisher>,
     terminal_watch_cancelled: Option<Arc<AtomicBool>>,
@@ -909,10 +915,11 @@ impl DaemonAgentCommandPort {
     /// dispatch), so the render thread drops a stale frame instead of freezing.
     const POLL_LANE_DEADLINE: Duration = Duration::from_millis(50);
 
-    const fn new() -> Self {
+    fn new(pump: TerminalPollPump) -> Self {
         Self {
             terminal: None,
             poll: None,
+            pump,
             terminal_epoch: 0,
             restore_connection: None,
             terminal_watch_cancelled: None,
@@ -1422,6 +1429,10 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         }
         // `exited` is `Option<i32>`: null while the process is still running.
         let exited = !snapshot["exited"].is_null();
+        // Resume polling for this terminal on the background pump from the
+        // snapshot's output offset. Reattach (after a reconnect/resync) resets
+        // the pump to the fresh offset, discarding any stale buffered output.
+        self.pump.register(terminal, output_offset);
         Ok(TerminalAttach {
             subscription,
             connection_epoch: self.terminal_epoch,
@@ -1454,14 +1465,10 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         terminal: &usagi_core::domain::id::TerminalRef,
         after_offset: u64,
     ) -> Result<Vec<TerminalChunk>, TerminalError> {
-        let body = self.poll_request(
-            TerminalAction::Resume,
-            TerminalRequest::Resume {
-                terminal: terminal.clone(),
-                after_offset,
-            },
-        )?;
-        decode_terminal_poll(&body)
+        // Non-blocking: drain whatever the background pump has already fetched.
+        // The daemon `Resume` IPC happens on the pump thread, so a busy daemon
+        // never stalls the render/input loop.
+        self.pump.take(terminal, after_offset)
     }
 
     fn input_terminal(
@@ -1525,6 +1532,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         terminal: &usagi_core::domain::id::TerminalRef,
         subscription: u64,
     ) {
+        self.pump.unregister(terminal);
         let _ = self.terminal_request(
             TerminalAction::Detach,
             TerminalRequest::Detach {
@@ -1532,6 +1540,56 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                 subscription,
             },
         );
+    }
+}
+
+/// Spawns a background poll pump backed by a dedicated, deadline-bounded daemon
+/// connection so every `Resume` fetch runs off the render thread.
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
+fn spawn_poll_pump() -> TerminalPollPump {
+    let mut client: Option<IpcClient<std::os::unix::net::UnixStream>> = None;
+    TerminalPollPump::spawn(move |terminal, after_offset| {
+        fetch_terminal_output(&mut client, terminal, after_offset)
+    })
+}
+
+/// Performs one `Resume` fetch on the pump's own deadline-bounded connection,
+/// reconnecting on any transport error (including a read timeout). Called only
+/// by the background pump thread, never the render thread.
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
+fn fetch_terminal_output(
+    client: &mut Option<IpcClient<std::os::unix::net::UnixStream>>,
+    terminal: &usagi_core::domain::id::TerminalRef,
+    after_offset: u64,
+) -> Result<Vec<TerminalChunk>, TerminalError> {
+    if client.is_none() {
+        let opened = crate::runtime::daemon::client(ClientPolicy::tui())
+            .map_err(|_| TerminalError::Unavailable)?;
+        let _ = opened
+            .transport()
+            .set_read_timeout(Some(DaemonAgentCommandPort::POLL_LANE_DEADLINE));
+        *client = Some(opened);
+    }
+    let payload = serde_json::to_value(TerminalRequest::Resume {
+        terminal: terminal.clone(),
+        after_offset,
+    })
+    .expect("terminal request is serializable");
+    let reply = client
+        .as_mut()
+        .expect("poll connection was just set")
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Resume,
+            payload,
+        });
+    match reply {
+        Ok(DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. }) => {
+            decode_terminal_poll(&body)
+        }
+        Err(error) => {
+            *client = None;
+            Err(map_terminal_error(&error))
+        }
     }
 }
 
@@ -2668,6 +2726,7 @@ mod tests {
         provider_resume_projection, session_snapshot_result, terminal_copy_key,
         terminal_inventory_matches_scope, validate_workspace_directory,
     };
+    use crate::runtime::terminal_pump::TerminalPollPump;
     use chrono::Utc;
     use serde_json::json;
     use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
@@ -2797,6 +2856,7 @@ mod tests {
             DaemonAgentCommandPort {
                 terminal: Some(client),
                 poll: None,
+                pump: TerminalPollPump::spawn(|_, _| Ok(Vec::new())),
                 terminal_epoch: 1,
                 restore_connection: None,
                 terminal_watch_cancelled: None,
@@ -3077,6 +3137,7 @@ mod tests {
         let mut port = DaemonAgentCommandPort {
             terminal: Some(client),
             poll: None,
+            pump: TerminalPollPump::spawn(|_, _| Ok(Vec::new())),
             terminal_epoch: 1,
             restore_connection: None,
             terminal_watch_cancelled: None,

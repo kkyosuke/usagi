@@ -9,4 +9,5 @@ pub(crate) mod cli;
 pub(crate) mod clipboard;
 pub(crate) mod daemon;
 pub(crate) mod launchd;
+pub(crate) mod terminal_pump;
 pub(crate) mod tui;
