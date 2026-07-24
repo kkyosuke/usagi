@@ -19,7 +19,18 @@
 //! `cursor` / `cursor_style` and [`Cell`] accessors) that those faces build on
 //! without reaching into parser state.
 
+use std::collections::HashMap;
+
 use unicode_width::UnicodeWidthChar;
+
+mod checkpoint;
+
+pub use checkpoint::{
+    ActiveBuffer, BufferCheckpoint, CELLS_PER_TERMINAL_MAX, CHECKPOINT_BYTES_MAX, COLS_MAX,
+    CellRun, CheckpointError, DecoderCheckpoint, DecoderPhase, Geometry, PARAMS_MAX, ROWS_MAX,
+    RowCheckpoint, SCHEMA_VERSION, SCROLLBACK_MAX, STYLES_MAX, ScreenCheckpoint, UTF8_NEEDED_MAX,
+    UTF8_PENDING_MAX,
+};
 
 /// Escape-sequence parser position.  Only these five states are reachable; any
 /// byte that does not belong to the active state returns the parser to
@@ -609,6 +620,356 @@ impl VtScreen {
     }
 }
 
+impl Phase {
+    /// The serializable checkpoint representation of this parser position.
+    const fn to_checkpoint(self) -> DecoderPhase {
+        match self {
+            Self::Ground => DecoderPhase::Ground,
+            Self::Escape => DecoderPhase::Escape,
+            Self::Csi => DecoderPhase::Csi,
+            Self::Osc => DecoderPhase::Osc,
+            Self::Charset => DecoderPhase::Charset,
+        }
+    }
+
+    /// Restores a parser position from its checkpoint representation.
+    const fn from_checkpoint(phase: DecoderPhase) -> Self {
+        match phase {
+            DecoderPhase::Ground => Self::Ground,
+            DecoderPhase::Escape => Self::Escape,
+            DecoderPhase::Csi => Self::Csi,
+            DecoderPhase::Osc => Self::Osc,
+            DecoderPhase::Charset => Self::Charset,
+        }
+    }
+}
+
+/// Assigns a stable index to each distinct SGR style string encountered while
+/// building a checkpoint, so repeated styles are carried once and cells
+/// reference the interned table by index.
+#[derive(Default)]
+struct StyleInterner {
+    ids: HashMap<String, u32>,
+    table: Vec<String>,
+}
+
+impl StyleInterner {
+    fn intern(&mut self, style: &str) -> u32 {
+        if let Some(&id) = self.ids.get(style) {
+            return id;
+        }
+        // Distinct styles are bounded by the cell count (well within `u32`).
+        #[allow(clippy::cast_possible_truncation)]
+        let id = self.table.len() as u32;
+        self.table.push(style.to_owned());
+        self.ids.insert(style.to_owned(), id);
+        id
+    }
+}
+
+/// Run-length encodes a row of cells into [`CellRun`]s, interning styles.
+fn encode_row(row: &[Cell], styles: &mut StyleInterner) -> RowCheckpoint {
+    let mut runs: Vec<CellRun> = Vec::new();
+    for cell in row {
+        let style_id = styles.intern(&cell.style);
+        match runs.last_mut() {
+            Some(last)
+                if last.style_id == style_id
+                    && last.ch == cell.ch
+                    && last.continuation == cell.continuation =>
+            {
+                last.repeat += 1;
+            }
+            _ => runs.push(CellRun {
+                style_id,
+                ch: cell.ch,
+                continuation: cell.continuation,
+                repeat: 1,
+            }),
+        }
+    }
+    RowCheckpoint { runs }
+}
+
+/// Decodes a run-length row into exactly `cols` cells, validating the run
+/// repeats (arithmetic → budget) before allocating.
+// `cols` is already validated `<= COLS_MAX`, so it fits `u32` in the error.
+#[allow(clippy::cast_possible_truncation)]
+fn decode_row(
+    row: &RowCheckpoint,
+    cols: usize,
+    styles: &[String],
+) -> Result<Vec<Cell>, CheckpointError> {
+    let mut total: u32 = 0;
+    for run in &row.runs {
+        if run.style_id as usize >= styles.len() {
+            return Err(CheckpointError::StyleIdOutOfRange {
+                id: run.style_id,
+                styles: styles.len(),
+            });
+        }
+        total = total
+            .checked_add(run.repeat)
+            .ok_or(CheckpointError::RowRepeatOverflow)?;
+    }
+    if total as usize != cols {
+        return Err(CheckpointError::RowLength {
+            expected: cols as u32,
+            actual: total,
+        });
+    }
+    let mut cells = Vec::with_capacity(cols);
+    for run in &row.runs {
+        let cell = Cell {
+            ch: run.ch,
+            style: styles[run.style_id as usize].clone(),
+            continuation: run.continuation,
+        };
+        for _ in 0..run.repeat {
+            cells.push(cell.clone());
+        }
+    }
+    Ok(cells)
+}
+
+impl VtScreen {
+    /// Captures the complete screen state as a versioned semantic checkpoint.
+    ///
+    /// The `primary` buffer is always present; when a full-screen application
+    /// owns the alternate buffer, the saved primary is captured as `primary`
+    /// and the live alternate as `alternate`. Styles are interned into a shared
+    /// table that cells reference by index.
+    // Geometry and cursor/region coordinates are terminal dimensions bounded far
+    // within `u32`; a screen larger than `u32` is not representable and would be
+    // rejected on decode.
+    #[allow(clippy::cast_possible_truncation)]
+    #[must_use]
+    pub fn checkpoint(&self) -> ScreenCheckpoint {
+        let mut styles = StyleInterner::default();
+        let (active, primary, alternate) = if let Some(saved) = &self.primary_screen {
+            // A full-screen app owns the alternate buffer: the live parser
+            // fields are the alternate; `primary_screen` holds the background.
+            let alternate = self.live_buffer_checkpoint(&mut styles);
+            let primary = buffer_checkpoint_from(saved, &mut styles);
+            (ActiveBuffer::Alternate, primary, Some(alternate))
+        } else {
+            // The primary buffer is live.
+            let primary = self.live_buffer_checkpoint(&mut styles);
+            (ActiveBuffer::Primary, primary, None)
+        };
+        ScreenCheckpoint {
+            schema_version: SCHEMA_VERSION,
+            geometry: Geometry {
+                rows: self.rows as u32,
+                cols: self.cols as u32,
+            },
+            active,
+            primary,
+            alternate,
+            decoder: DecoderCheckpoint {
+                phase: self.phase.to_checkpoint(),
+                params: self.params.clone(),
+                utf8_pending: self.utf8_pending.clone(),
+                utf8_needed: self.utf8_needed as u8,
+            },
+            styles: styles.table,
+        }
+    }
+
+    /// Encodes the live parser buffer (grid / scrollback / cursor / region /
+    /// pending style) into a [`BufferCheckpoint`].
+    // Cursor/region coordinates are bounded terminal dimensions (see `checkpoint`).
+    #[allow(clippy::cast_possible_truncation)]
+    fn live_buffer_checkpoint(&self, styles: &mut StyleInterner) -> BufferCheckpoint {
+        BufferCheckpoint {
+            grid: self
+                .grid
+                .iter()
+                .map(|row| encode_row(row, styles))
+                .collect(),
+            scrollback: self
+                .scrollback
+                .iter()
+                .map(|row| encode_row(row, styles))
+                .collect(),
+            cursor: (self.cursor_row as u32, self.cursor_col as u32),
+            saved_cursor: self.saved_cursor.map(|(row, col)| (row as u32, col as u32)),
+            scroll_region: (self.scroll_top as u32, self.scroll_bottom as u32),
+            style_id: styles.intern(&self.style),
+        }
+    }
+
+    /// Reconstructs a screen from a checkpoint, or fails closed with a typed
+    /// [`CheckpointError`].
+    ///
+    /// Decoding follows **arithmetic check → budget check → allocate**: geometry
+    /// and table lengths are validated first, then every row's run repeats and
+    /// style indices, so an out-of-range, overflowing or hostile checkpoint is
+    /// rejected before any grid is allocated. It never panics, never allocates
+    /// unbounded and never yields a corrupt parser.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`CheckpointError`] describing the first bound the checkpoint
+    /// violates (unknown schema, out-of-range geometry, overflow, oversized
+    /// tables, style index out of range, malformed rows, cursor/region out of
+    /// range, or `active`/`alternate` disagreement).
+    pub fn from_checkpoint(cp: &ScreenCheckpoint) -> Result<Self, CheckpointError> {
+        let geometry = cp.validated_geometry()?;
+        let (rows, cols) = (geometry.rows, geometry.cols);
+
+        let primary = decode_buffer(&cp.primary, rows, cols, &cp.styles)?;
+        let alternate = match &cp.alternate {
+            Some(alt) => Some(decode_buffer(alt, rows, cols, &cp.styles)?),
+            None => None,
+        };
+
+        let mut screen = Self::new(rows, cols);
+        screen.phase = Phase::from_checkpoint(cp.decoder.phase);
+        screen.params.clone_from(&cp.decoder.params);
+        screen.utf8_pending.clone_from(&cp.decoder.utf8_pending);
+        screen.utf8_needed = cp.decoder.utf8_needed as usize;
+
+        match alternate {
+            // The alternate buffer is live; the primary is the saved background.
+            Some(alt) => {
+                screen.install_live_buffer(alt);
+                screen.primary_screen = Some(Box::new(ScreenBuffer {
+                    grid: primary.grid,
+                    scrollback: primary.scrollback,
+                    cursor_row: primary.cursor_row,
+                    cursor_col: primary.cursor_col,
+                    style: primary.style,
+                    saved_cursor: primary.saved_cursor,
+                    scroll_top: primary.scroll_top,
+                    scroll_bottom: primary.scroll_bottom,
+                }));
+            }
+            // The primary buffer is live.
+            None => screen.install_live_buffer(primary),
+        }
+        Ok(screen)
+    }
+
+    /// Moves a decoded buffer into the live parser fields.
+    fn install_live_buffer(&mut self, buffer: DecodedBuffer) {
+        self.grid = buffer.grid;
+        self.scrollback = buffer.scrollback;
+        self.cursor_row = buffer.cursor_row;
+        self.cursor_col = buffer.cursor_col;
+        self.style = buffer.style;
+        self.saved_cursor = buffer.saved_cursor;
+        self.scroll_top = buffer.scroll_top;
+        self.scroll_bottom = buffer.scroll_bottom;
+    }
+}
+
+/// A [`BufferCheckpoint`] decoded and validated into owned parser fields.
+struct DecodedBuffer {
+    grid: Vec<Vec<Cell>>,
+    scrollback: Vec<Vec<Cell>>,
+    cursor_row: usize,
+    cursor_col: usize,
+    style: String,
+    saved_cursor: Option<(usize, usize)>,
+    scroll_top: usize,
+    scroll_bottom: usize,
+}
+
+/// Builds a [`BufferCheckpoint`] from a saved (background primary) screen.
+// Cursor/region coordinates are bounded terminal dimensions (see `checkpoint`).
+#[allow(clippy::cast_possible_truncation)]
+fn buffer_checkpoint_from(buffer: &ScreenBuffer, styles: &mut StyleInterner) -> BufferCheckpoint {
+    BufferCheckpoint {
+        grid: buffer
+            .grid
+            .iter()
+            .map(|row| encode_row(row, styles))
+            .collect(),
+        scrollback: buffer
+            .scrollback
+            .iter()
+            .map(|row| encode_row(row, styles))
+            .collect(),
+        cursor: (buffer.cursor_row as u32, buffer.cursor_col as u32),
+        saved_cursor: buffer
+            .saved_cursor
+            .map(|(row, col)| (row as u32, col as u32)),
+        scroll_region: (buffer.scroll_top as u32, buffer.scroll_bottom as u32),
+        style_id: styles.intern(&buffer.style),
+    }
+}
+
+/// Decodes and bounds-checks one buffer against the validated `rows`/`cols`.
+// `rows`/`cols` are already validated `<= ROWS_MAX`/`COLS_MAX`, so the width
+// echoed back in error variants fits `u32`.
+#[allow(clippy::cast_possible_truncation)]
+fn decode_buffer(
+    buffer: &BufferCheckpoint,
+    rows: usize,
+    cols: usize,
+    styles: &[String],
+) -> Result<DecodedBuffer, CheckpointError> {
+    if buffer.grid.len() != rows {
+        return Err(CheckpointError::GridRowCount {
+            expected: rows as u32,
+            actual: buffer.grid.len(),
+        });
+    }
+    if buffer.scrollback.len() > SCROLLBACK_MAX {
+        return Err(CheckpointError::ScrollbackTooLong(buffer.scrollback.len()));
+    }
+    if buffer.style_id as usize >= styles.len() {
+        return Err(CheckpointError::StyleIdOutOfRange {
+            id: buffer.style_id,
+            styles: styles.len(),
+        });
+    }
+    // Cursor may rest one column past the last cell (the wrap-pending position),
+    // so columns are bounded inclusively by `cols`.
+    check_cursor(buffer.cursor, rows, cols)?;
+    if let Some(saved) = buffer.saved_cursor {
+        check_cursor(saved, rows, cols)?;
+    }
+    let (top, bottom) = buffer.scroll_region;
+    if bottom as usize >= rows || top > bottom {
+        return Err(CheckpointError::ScrollRegionInvalid { top, bottom });
+    }
+
+    let grid = buffer
+        .grid
+        .iter()
+        .map(|row| decode_row(row, cols, styles))
+        .collect::<Result<Vec<_>, _>>()?;
+    let scrollback = buffer
+        .scrollback
+        .iter()
+        .map(|row| decode_row(row, cols, styles))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(DecodedBuffer {
+        grid,
+        scrollback,
+        cursor_row: buffer.cursor.0 as usize,
+        cursor_col: buffer.cursor.1 as usize,
+        style: styles[buffer.style_id as usize].clone(),
+        saved_cursor: buffer
+            .saved_cursor
+            .map(|(row, col)| (row as usize, col as usize)),
+        scroll_top: top as usize,
+        scroll_bottom: bottom as usize,
+    })
+}
+
+/// Validates a `(row, col)` cursor: the row must be inside the grid and the
+/// column at most one past the last cell.
+fn check_cursor((row, col): (u32, u32), rows: usize, cols: usize) -> Result<(), CheckpointError> {
+    if row as usize >= rows || col as usize > cols {
+        return Err(CheckpointError::CursorOutOfRange { row, col });
+    }
+    Ok(())
+}
+
 /// Non-continuation characters of a row as a `String` (wide-glyph continuation
 /// cells dropped, trailing spaces kept).
 fn row_text(row: &[Cell]) -> String {
@@ -1110,5 +1471,466 @@ mod tests {
         let mut screen = VtScreen::new(3, 6);
         screen.advance(b"\x1b[;3HX");
         assert_eq!(rows(&screen), vec!["  X", "", ""]);
+    }
+
+    // ----- ScreenCheckpoint round-trip and bounded/hostile decode -----
+
+    /// Builds a screen and feeds each chunk in order.
+    fn built(rows: usize, cols: usize, chunks: &[&[u8]]) -> VtScreen {
+        let mut screen = VtScreen::new(rows, cols);
+        for chunk in chunks {
+            screen.advance(chunk);
+        }
+        screen
+    }
+
+    /// Asserts a checkpoint reconstructs its source exactly, both directly and
+    /// across the serialized-bytes boundary (so serde and the byte budget are
+    /// exercised too).
+    fn assert_roundtrip(screen: &VtScreen) {
+        let cp = screen.checkpoint();
+        let restored = VtScreen::from_checkpoint(&cp).expect("valid checkpoint reconstructs");
+        assert_eq!(&restored, screen);
+
+        let bytes = cp
+            .to_json_bytes()
+            .expect("checkpoint fits the frame budget");
+        let decoded = ScreenCheckpoint::from_json_bytes(&bytes).expect("bytes decode");
+        assert_eq!(decoded, cp);
+        let restored =
+            VtScreen::from_checkpoint(&decoded).expect("decoded checkpoint reconstructs");
+        assert_eq!(&restored, screen);
+    }
+
+    /// A spread of parser states: geometry edges, wrap/scrollback, interned
+    /// styles, wide/combining glyphs, cursor/saved-cursor, scroll region,
+    /// active/left alternate buffer, and every mid-sequence decoder phase.
+    fn sample_screens() -> Vec<VtScreen> {
+        let star = "☆".as_bytes();
+        vec![
+            VtScreen::new(1, 1),
+            built(4, 12, &[b"hello world\r\nsecond line here"]),
+            built(2, 6, &[b"one\r\ntwo\r\nthree\r\nfour"]),
+            built(2, 20, &[b"\x1b[1;38;5;208mstyled\x1b[0m plain \x1b[31mred"]),
+            built(2, 8, &["A\u{65e5}\u{672c}B".as_bytes()]),
+            built(1, 12, &[b"a\xcc\x81 combined"]),
+            built(3, 10, &[b"x\x1b[2;4HY\x1b[s\x1b[3;1Hz\x1b[u!"]),
+            built(5, 12, &[b"head\x1b[2;4rbody\r\nmore\r\ntail"]),
+            built(2, 8, &[b"shell\r\nsecond\r\nthird\x1b[?1049halt\r\nmore"]),
+            built(3, 12, &[b"base\r\nline\x1b[?1049halt\x1b[?1049l"]),
+            built(2, 8, &[b"mid-escape\x1b"]),
+            built(2, 8, &[b"mid-csi\x1b[1;2"]),
+            built(2, 8, &[b"mid-osc\x1b]0;partial title"]),
+            built(2, 8, &[b"mid-charset\x1b("]),
+            built(1, 8, &[&star[..1]]),
+        ]
+    }
+
+    #[test]
+    fn checkpoint_round_trips_every_sample_state() {
+        for screen in sample_screens() {
+            assert_roundtrip(&screen);
+        }
+        // A hand-built minimal checkpoint also reconstructs.
+        VtScreen::from_checkpoint(&valid_checkpoint()).expect("minimal checkpoint reconstructs");
+    }
+
+    /// One block exercising UTF-8, CJK width, combining marks, CSI moves/erase,
+    /// OSC, charset select, alternate enter/leave, tabs/wrap and malformed bytes.
+    fn rich_block() -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"\x1b[1;31mred\x1b[0m plain ");
+        out.extend_from_slice("\u{65e5}\u{672c}\u{8a9e}CJK".as_bytes());
+        out.extend_from_slice(b"a\xcc\x81e\xcc\x80");
+        out.extend_from_slice(b"\x1b[3;4Hmoved\x1b[K");
+        out.extend_from_slice(b"\x1b]0;window title\x07done");
+        out.extend_from_slice(b"\x1b(0lqk\x1b(B");
+        out.extend_from_slice(b"\x1b[?1049h\x1b[2J\x1b[Halt\r\nbuf\x1b[?1049l");
+        out.extend_from_slice(b"tab\there\r\nnext line\r\n");
+        out.extend_from_slice(b"\xe3\x81\x82");
+        out.extend_from_slice(b"\xff\x80bad\r\n");
+        out
+    }
+
+    #[test]
+    fn checkpoint_and_suffix_reconstruct_reference_at_every_split_position() {
+        let (rows, cols) = (6, 20);
+        let mut stream = Vec::new();
+        while stream.len() < 4096 {
+            stream.extend_from_slice(&rich_block());
+        }
+        let mut reference = VtScreen::new(rows, cols);
+        reference.advance(&stream);
+
+        // `live` tracks `stream[..i]`; checkpoint there, reconstruct, feed the
+        // suffix, and require the result to match the untrimmed reference.
+        let mut live = VtScreen::new(rows, cols);
+        for i in 0..=stream.len() {
+            let cp = live.checkpoint();
+            let mut rebuilt = VtScreen::from_checkpoint(&cp).expect("reconstruct");
+            rebuilt.advance(&stream[i..]);
+            assert_eq!(rebuilt, reference, "split at {i}");
+            if i < stream.len() {
+                live.advance(&stream[i..=i]);
+            }
+        }
+    }
+
+    #[test]
+    fn checkpoint_reconstructs_output_larger_than_the_raw_journal_window() {
+        let (rows, cols) = (6, 20);
+        let mut stream = Vec::new();
+        while stream.len() <= 64 * 1024 {
+            stream.extend_from_slice(&rich_block());
+        }
+        assert!(stream.len() > 64 * 1024);
+
+        let mut reference = VtScreen::new(rows, cols);
+        reference.advance(&stream);
+        // Output far exceeds any 64 KiB raw tail, so real history accumulated —
+        // a raw-tail snapshot could not reconstruct it.
+        assert!(!reference.scrollback().is_empty());
+
+        let check = |i: usize| {
+            let mut restored = VtScreen::new(rows, cols);
+            restored.advance(&stream[..i]);
+            let cp = restored.checkpoint();
+            let mut rebuilt = VtScreen::from_checkpoint(&cp).expect("reconstruct");
+            rebuilt.advance(&stream[i..]);
+            assert_eq!(rebuilt, reference, "split at {i}");
+        };
+        // Coarse stride across the whole >64 KiB stream ...
+        let mut i = 0;
+        while i <= stream.len() {
+            check(i);
+            i += 257;
+        }
+        // ... plus every split position inside the final rich block, where the
+        // mid-sequence boundaries at full scale matter most.
+        for i in (stream.len() - rich_block().len())..=stream.len() {
+            check(i);
+        }
+    }
+
+    /// A minimal valid checkpoint: a blank 1×1 primary screen. Tests mutate one
+    /// field to drive a single rejection.
+    fn valid_checkpoint() -> ScreenCheckpoint {
+        ScreenCheckpoint {
+            schema_version: SCHEMA_VERSION,
+            geometry: Geometry { rows: 1, cols: 1 },
+            active: ActiveBuffer::Primary,
+            primary: BufferCheckpoint {
+                grid: vec![RowCheckpoint {
+                    runs: vec![CellRun {
+                        style_id: 0,
+                        ch: ' ',
+                        continuation: false,
+                        repeat: 1,
+                    }],
+                }],
+                scrollback: Vec::new(),
+                cursor: (0, 0),
+                saved_cursor: None,
+                scroll_region: (0, 0),
+                style_id: 0,
+            },
+            alternate: None,
+            styles: vec![String::new()],
+            decoder: DecoderCheckpoint {
+                phase: DecoderPhase::Ground,
+                params: String::new(),
+                utf8_pending: Vec::new(),
+                utf8_needed: 0,
+            },
+        }
+    }
+
+    fn reject(cp: &ScreenCheckpoint) -> CheckpointError {
+        VtScreen::from_checkpoint(cp).expect_err("hostile checkpoint must fail closed")
+    }
+
+    #[test]
+    fn hostile_geometry_and_top_level_bounds_fail_closed() {
+        let mut cp = valid_checkpoint();
+        cp.schema_version = 99;
+        assert_eq!(
+            reject(&cp),
+            CheckpointError::UnknownSchemaVersion {
+                found: 99,
+                expected: SCHEMA_VERSION
+            }
+        );
+
+        // Arithmetic check first: `rows × cols` overflows before any budget.
+        let mut cp = valid_checkpoint();
+        cp.geometry = Geometry {
+            rows: 100_000,
+            cols: 100_000,
+        };
+        assert_eq!(reject(&cp), CheckpointError::CellCountOverflow);
+
+        // Product fits but exceeds the per-terminal cell budget.
+        let mut cp = valid_checkpoint();
+        cp.geometry = Geometry {
+            rows: 2048,
+            cols: 2048,
+        };
+        assert_eq!(reject(&cp), CheckpointError::TooManyCells(4_194_304));
+
+        let mut cp = valid_checkpoint();
+        cp.geometry = Geometry { rows: 0, cols: 1 };
+        assert_eq!(reject(&cp), CheckpointError::RowsOutOfRange(0));
+        let mut cp = valid_checkpoint();
+        cp.geometry = Geometry {
+            rows: ROWS_MAX + 1,
+            cols: 1,
+        };
+        assert_eq!(reject(&cp), CheckpointError::RowsOutOfRange(ROWS_MAX + 1));
+
+        let mut cp = valid_checkpoint();
+        cp.geometry = Geometry { rows: 1, cols: 0 };
+        assert_eq!(reject(&cp), CheckpointError::ColsOutOfRange(0));
+        let mut cp = valid_checkpoint();
+        cp.geometry = Geometry {
+            rows: 1,
+            cols: COLS_MAX + 1,
+        };
+        assert_eq!(reject(&cp), CheckpointError::ColsOutOfRange(COLS_MAX + 1));
+
+        let mut cp = valid_checkpoint();
+        cp.styles = vec![String::new(); STYLES_MAX + 1];
+        assert_eq!(reject(&cp), CheckpointError::TooManyStyles(STYLES_MAX + 1));
+
+        let mut cp = valid_checkpoint();
+        cp.decoder.params = "1".repeat(PARAMS_MAX + 1);
+        assert_eq!(reject(&cp), CheckpointError::ParamsTooLong(PARAMS_MAX + 1));
+
+        let mut cp = valid_checkpoint();
+        cp.decoder.utf8_pending = vec![0x80; UTF8_PENDING_MAX + 1];
+        assert_eq!(
+            reject(&cp),
+            CheckpointError::Utf8PendingTooLong(UTF8_PENDING_MAX + 1)
+        );
+
+        let mut cp = valid_checkpoint();
+        cp.decoder.utf8_needed = UTF8_NEEDED_MAX + 1;
+        assert_eq!(
+            reject(&cp),
+            CheckpointError::Utf8NeededOutOfRange(UTF8_NEEDED_MAX + 1)
+        );
+
+        // Alternate advertised as active but not carried.
+        let mut cp = valid_checkpoint();
+        cp.active = ActiveBuffer::Alternate;
+        assert_eq!(reject(&cp), CheckpointError::ActiveBufferMismatch);
+        // Alternate carried but not active.
+        let mut cp = valid_checkpoint();
+        cp.alternate = Some(cp.primary.clone());
+        assert_eq!(reject(&cp), CheckpointError::ActiveBufferMismatch);
+    }
+
+    #[test]
+    fn hostile_buffer_contents_fail_closed_before_allocation() {
+        let mut cp = valid_checkpoint();
+        cp.geometry = Geometry { rows: 2, cols: 1 };
+        assert_eq!(
+            reject(&cp),
+            CheckpointError::GridRowCount {
+                expected: 2,
+                actual: 1
+            }
+        );
+
+        let mut cp = valid_checkpoint();
+        cp.primary.scrollback = vec![RowCheckpoint { runs: Vec::new() }; SCROLLBACK_MAX + 1];
+        assert_eq!(
+            reject(&cp),
+            CheckpointError::ScrollbackTooLong(SCROLLBACK_MAX + 1)
+        );
+
+        // The buffer's own pending style references past the table.
+        let mut cp = valid_checkpoint();
+        cp.primary.style_id = 5;
+        assert_eq!(
+            reject(&cp),
+            CheckpointError::StyleIdOutOfRange { id: 5, styles: 1 }
+        );
+
+        // A cell run references past the table.
+        let mut cp = valid_checkpoint();
+        cp.primary.grid = vec![RowCheckpoint {
+            runs: vec![CellRun {
+                style_id: 9,
+                ch: ' ',
+                continuation: false,
+                repeat: 1,
+            }],
+        }];
+        assert_eq!(
+            reject(&cp),
+            CheckpointError::StyleIdOutOfRange { id: 9, styles: 1 }
+        );
+
+        // Compression bomb: repeats overflow while being summed, before any cell
+        // is allocated.
+        let mut cp = valid_checkpoint();
+        cp.primary.grid = vec![RowCheckpoint {
+            runs: vec![
+                CellRun {
+                    style_id: 0,
+                    ch: ' ',
+                    continuation: false,
+                    repeat: u32::MAX,
+                },
+                CellRun {
+                    style_id: 0,
+                    ch: ' ',
+                    continuation: false,
+                    repeat: u32::MAX,
+                },
+            ],
+        }];
+        assert_eq!(reject(&cp), CheckpointError::RowRepeatOverflow);
+
+        // Runs do not expand to `cols`.
+        let mut cp = valid_checkpoint();
+        cp.geometry = Geometry { rows: 1, cols: 3 };
+        assert_eq!(
+            reject(&cp),
+            CheckpointError::RowLength {
+                expected: 3,
+                actual: 1
+            }
+        );
+    }
+
+    #[test]
+    fn hostile_cursor_and_scroll_region_fail_closed() {
+        // Cursor row past the grid.
+        let mut cp = valid_checkpoint();
+        cp.primary.cursor = (1, 0);
+        assert_eq!(
+            reject(&cp),
+            CheckpointError::CursorOutOfRange { row: 1, col: 0 }
+        );
+        // Cursor column past the one-cell-past-last limit.
+        let mut cp = valid_checkpoint();
+        cp.primary.cursor = (0, 2);
+        assert_eq!(
+            reject(&cp),
+            CheckpointError::CursorOutOfRange { row: 0, col: 2 }
+        );
+        // Saved cursor out of range.
+        let mut cp = valid_checkpoint();
+        cp.primary.saved_cursor = Some((0, 9));
+        assert_eq!(
+            reject(&cp),
+            CheckpointError::CursorOutOfRange { row: 0, col: 9 }
+        );
+
+        // Scroll region reaching past the last row.
+        let mut cp = valid_checkpoint();
+        cp.primary.scroll_region = (0, 5);
+        assert_eq!(
+            reject(&cp),
+            CheckpointError::ScrollRegionInvalid { top: 0, bottom: 5 }
+        );
+        // Inverted scroll region.
+        let mut cp = valid_checkpoint();
+        cp.geometry = Geometry { rows: 3, cols: 1 };
+        cp.primary.grid = vec![
+            RowCheckpoint {
+                runs: vec![CellRun {
+                    style_id: 0,
+                    ch: ' ',
+                    continuation: false,
+                    repeat: 1
+                }],
+            };
+            3
+        ];
+        cp.primary.scroll_region = (2, 1);
+        assert_eq!(
+            reject(&cp),
+            CheckpointError::ScrollRegionInvalid { top: 2, bottom: 1 }
+        );
+    }
+
+    #[test]
+    fn json_boundary_rejects_oversized_and_malformed_input() {
+        // Serializing a checkpoint larger than one frame is rejected.
+        let mut cp = valid_checkpoint();
+        cp.styles = vec!["x".repeat(4096); 400];
+        let err = cp.to_json_bytes().expect_err("oversized checkpoint");
+        assert!(matches!(err, CheckpointError::TooLarge { .. }));
+
+        // Oversized input is rejected before it is parsed.
+        let big = vec![b' '; CHECKPOINT_BYTES_MAX + 1];
+        assert!(matches!(
+            ScreenCheckpoint::from_json_bytes(&big),
+            Err(CheckpointError::TooLarge { .. })
+        ));
+
+        // Input that is not a valid encoding fails closed.
+        assert!(matches!(
+            ScreenCheckpoint::from_json_bytes(b"not a checkpoint"),
+            Err(CheckpointError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn every_checkpoint_error_renders_a_message() {
+        let errors = [
+            CheckpointError::UnknownSchemaVersion {
+                found: 2,
+                expected: 1,
+            },
+            CheckpointError::RowsOutOfRange(0),
+            CheckpointError::ColsOutOfRange(0),
+            CheckpointError::CellCountOverflow,
+            CheckpointError::TooManyCells(9),
+            CheckpointError::ScrollbackTooLong(9),
+            CheckpointError::TooManyStyles(9),
+            CheckpointError::StyleIdOutOfRange { id: 9, styles: 1 },
+            CheckpointError::RowRepeatOverflow,
+            CheckpointError::RowLength {
+                expected: 3,
+                actual: 1,
+            },
+            CheckpointError::GridRowCount {
+                expected: 2,
+                actual: 1,
+            },
+            CheckpointError::CursorOutOfRange { row: 1, col: 1 },
+            CheckpointError::ScrollRegionInvalid { top: 2, bottom: 1 },
+            CheckpointError::ParamsTooLong(9),
+            CheckpointError::Utf8PendingTooLong(9),
+            CheckpointError::Utf8NeededOutOfRange(9),
+            CheckpointError::ActiveBufferMismatch,
+            CheckpointError::TooLarge { size: 9, limit: 1 },
+            CheckpointError::Malformed("bad".to_owned()),
+        ];
+        for err in errors {
+            assert!(!err.to_string().is_empty());
+            assert!(!format!("{err:?}").is_empty());
+            let _: &dyn std::error::Error = &err;
+        }
+    }
+
+    #[test]
+    fn checkpoint_types_support_debug_clone_and_equality() {
+        // An alternate-active checkpoint exercises the `Some(alternate)` and
+        // `Some(saved_cursor)` arms of the derived Debug / Clone / PartialEq.
+        let alt = built(2, 4, &[b"hi\x1b[s\x1b[?1049halt"]).checkpoint();
+        assert!(!format!("{alt:?}").is_empty());
+        assert_eq!(alt.clone(), alt);
+        // A primary-only checkpoint exercises the `None` arms.
+        let primary_only = built(1, 2, &[b"x"]).checkpoint();
+        assert!(!format!("{primary_only:?}").is_empty());
+        // VtScreen Debug (referenced by the round-trip assertions).
+        assert!(!format!("{:?}", VtScreen::new(1, 1)).is_empty());
+        assert!(!format!("{:?}", ActiveBuffer::Alternate).is_empty());
+        assert!(!format!("{:?}", DecoderPhase::Csi).is_empty());
+        assert!(!format!("{:?}", Geometry { rows: 1, cols: 1 }).is_empty());
     }
 }

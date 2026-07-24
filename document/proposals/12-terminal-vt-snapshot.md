@@ -86,23 +86,24 @@ trim で失われた pre-window state を復元する方法は「**daemon が VT
 wire は既存の generation 1 に revision 2 を追加して運ぶ。`Snapshot.replay: Vec<u8>` を廃し、revision 2 では `Snapshot.screen: ScreenCheckpoint` を持つ。`base_offset` は checkpoint が `output_offset` 時点の完全 state を表すため常に `base_offset == output_offset`（tail 長 0）となる。
 
 ```rust
-// usagi-core（usecase 層）。すべて serde derive。
+// usagi-core（usecase 層 `vt_screen::checkpoint`）。すべて serde derive。
 pub struct ScreenCheckpoint {
-    pub schema_version: u16,          // checkpoint schema。初版 1
-    pub geometry: Geometry,           // cols, rows
+    pub schema_version: u16,          // checkpoint schema。SCHEMA_VERSION（初版 1）
+    pub geometry: Geometry,           // { rows: u32, cols: u32 }
     pub active: ActiveBuffer,         // Primary | Alternate
     pub primary: BufferCheckpoint,    // 常に存在（cells_with_scrollback / copy history の権威）
-    pub alternate: Option<BufferCheckpoint>, // alternate screen が active のときだけ Some
+    pub alternate: Option<BufferCheckpoint>, // alternate が active のときだけ Some
     pub styles: Vec<String>,          // interned SGR 文字列表（attribute table）。cell は index 参照
     pub decoder: DecoderCheckpoint,   // parser/decoder の途中状態
 }
 
 pub struct BufferCheckpoint {
     pub grid: Vec<RowCheckpoint>,        // 可視 grid（rows 行）
-    pub scrollback: Vec<RowCheckpoint>,  // primary の履歴（≤ SCROLLBACK_MAX）
-    pub cursor: (u32, u32),              // row, col
+    pub scrollback: Vec<RowCheckpoint>,  // 履歴（≤ SCROLLBACK_MAX）
+    pub cursor: (u32, u32),              // row, col（col は wrap-pending の 1 桁分だけ cols を許容）
     pub saved_cursor: Option<(u32, u32)>,// DECSC / SCP
     pub scroll_region: (u32, u32),       // DECSTBM top, bottom
+    pub style_id: u32,                   // 次に印字するセルの SGR（styles への index）
 }
 
 pub struct RowCheckpoint {
@@ -112,17 +113,22 @@ pub struct RowCheckpoint {
 pub struct CellRun { pub style_id: u32, pub ch: char, pub continuation: bool, pub repeat: u32 }
 
 pub struct DecoderCheckpoint {
-    pub phase: Phase,          // Ground | Escape | Csi | Osc | Charset
-    pub params: String,        // CSI 収集途中（bounded）
-    pub utf8_pending: Vec<u8>, // ≤3 byte
-    pub utf8_needed: u8,       // 0..=4
+    pub phase: DecoderPhase,   // Ground | Escape | Csi | Osc | Charset
+    pub params: String,        // CSI 収集途中（≤ PARAMS_MAX）
+    pub utf8_pending: Vec<u8>, // ≤ UTF8_PENDING_MAX（3 byte）
+    pub utf8_needed: u8,       // ≤ UTF8_NEEDED_MAX（4）
 }
 ```
 
+`VtScreen::checkpoint()` が上記を生成し、`VtScreen::from_checkpoint(&ScreenCheckpoint)
+-> Result<VtScreen, CheckpointError>` が bounded に復元する。serialized wire の運搬は
+`ScreenCheckpoint::to_json_bytes()` / `from_json_bytes()` が担い、`CHECKPOINT_BYTES_MAX`
+を確保前に強制する（parse 前に過大 payload を弾く）。
+
 **設計上の要点**
 
-- **primary saved buffer を明示保存**。現行 `TerminalScreen` は alternate 中に primary を `primary_screen` へ退避する。checkpoint では常に `primary`（背景の primary）を保存し、alternate が active なら `alternate` に可視 alt を保存する。これで alternate から戻った後の primary buffer・`cells_with_scrollback`・selection/copy history が untrimmed reference と一致する（受入条件 2/3）。
-- **interned style table**。cell は SGR 文字列を直接持たず `styles` の index を参照する。反復する style を 1 度だけ運び、hostile な「巨大 attribute table」は table 長の上限で decode 前に拒否できる。
+- **primary saved buffer を明示保存**。現行 `VtScreen` は alternate 中に primary を `primary_screen` へ退避する。checkpoint では常に `primary`（背景の primary）を保存し、alternate が active なら `alternate` に可視 alt を保存する。これで alternate から戻った後の primary buffer・`cells_with_scrollback`・selection/copy history が untrimmed reference と一致する（受入条件 2/3）。
+- **interned style table**。cell は SGR 文字列を直接持たず `styles` の index を参照する（各 buffer の「次に印字する SGR」も `style_id` で index 参照）。反復する style を 1 度だけ運び、hostile な「巨大 attribute table」は table 長の上限で decode 前に拒否できる。
 - **decoder state を含む**。checkpoint が UTF-8 / CSI / OSC の途中で取られても、`decoder` が phase・params・utf8_pending を保持するため、以後の suffix が sequence を正しく継続する（受入条件 1）。
 - **run-length**。agent が描く空白 padding 中心の画面を圧縮し、frame/memory bound 内に収める。
 
