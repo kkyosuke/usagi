@@ -15,6 +15,7 @@ use chrono::{DateTime, Utc};
 use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
 use usagi_core::domain::pullrequest::PrLink;
 use usagi_core::domain::session::SessionRecord;
+use usagi_core::domain::session_lifecycle::{SessionLifecycle, SessionLifecycleProjection};
 use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
 use usagi_core::domain::workspace_state::WorkspaceState;
 use usagi_core::usecase::client::DaemonMetrics;
@@ -91,6 +92,13 @@ pub struct ProjectedSession {
     /// Safe interrupted/resume projection; provider-native IDs never enter the
     /// presentation model.
     pub agent_resume: Option<ProviderResumeProjection>,
+    /// Daemon-authoritative lifecycle for this row. The sidebar derives per-row
+    /// affordances from [`SessionLifecycle::capabilities`] (a `Failed` row is not
+    /// attachable but is removable) and, for `Failed`, shows
+    /// [`failure_summary`](Self::failure_summary).
+    pub lifecycle: SessionLifecycle,
+    /// Safe failure summary shown on a `Failed` row; `None` for other lifecycles.
+    pub failure_summary: Option<String>,
 }
 
 /// Read-only Git facts supplied asynchronously by the composition layer.
@@ -120,6 +128,12 @@ impl ProjectedSession {
             pr_summary: pr_summary(&record.prs),
             removing: false,
             agent_resume: None,
+            // Lifecycle is daemon-authoritative and joined by stable ID in
+            // `project_controller_sessions`; a record with no snapshot lifecycle
+            // (e.g. the non-interactive Home fallback) defaults to `Available`,
+            // the only state those legacy paths ever projected.
+            lifecycle: SessionLifecycle::Available,
+            failure_summary: None,
         }
     }
 }
@@ -522,6 +536,10 @@ pub struct Workspace {
     metrics: Option<DaemonMetrics>,
     /// Non-persistent, asynchronously refreshed Git observations by stable ID.
     git_diffs: BTreeMap<SessionId, GitDiff>,
+    /// Daemon-authoritative lifecycle projection by stable ID. Non-persistent;
+    /// refreshed from each lifecycle snapshot. A session absent here (older
+    /// snapshot or a name-only fallback) is treated as `Available`.
+    session_lifecycles: BTreeMap<SessionId, SessionLifecycleProjection>,
 }
 
 impl Workspace {
@@ -554,6 +572,7 @@ impl Workspace {
             session_ids,
             metrics: None,
             git_diffs: BTreeMap::new(),
+            session_lifecycles: BTreeMap::new(),
         }
     }
 
@@ -632,6 +651,21 @@ impl Workspace {
     #[must_use]
     pub fn git_diffs(&self) -> &BTreeMap<SessionId, GitDiff> {
         &self.git_diffs
+    }
+
+    /// Replace the daemon-authoritative lifecycle projection keyed by stable ID.
+    pub fn set_session_lifecycles(
+        &mut self,
+        lifecycles: BTreeMap<SessionId, SessionLifecycleProjection>,
+    ) {
+        self.session_lifecycles = lifecycles;
+    }
+
+    /// The lifecycle projection keyed by stable ID, joined onto each sidebar row
+    /// in `project_controller_sessions`.
+    #[must_use]
+    pub fn session_lifecycles(&self) -> &BTreeMap<SessionId, SessionLifecycleProjection> {
+        &self.session_lifecycles
     }
 
     /// The workspace record passed to the daemon lifecycle command port.
@@ -1320,6 +1354,39 @@ fn home_row_label(
     }
 }
 
+/// Render a `Failed` session row: a danger-toned label tagged `failed` with its
+/// safe failure reason below. The row is not a usable checkout (attach is gated
+/// in the controller by `can_use=false`) but stays removable (`can_remove=true`).
+fn home_failed_row_lines(
+    session: &ProjectedSession,
+    row: Selection,
+    width: usize,
+    selected: bool,
+    current: bool,
+) -> Vec<String> {
+    let clipped = widgets::clip_to_width(&session.label, width.saturating_sub(9));
+    let label = if selected {
+        Role::Danger.style().bold().paint(&clipped)
+    } else {
+        Role::Danger.style().dim().paint(&clipped)
+    };
+    let marker = home_row_marker(row, selected, current);
+    let tag = Role::Danger.style().dim().paint("failed");
+    let first = widgets::pad_to_width(&format!("{marker} {label}  {tag}"), width);
+    let reason = session
+        .failure_summary
+        .as_deref()
+        .unwrap_or("session create failed");
+    let reason = format!(
+        "{} {reason}",
+        home_session_continuation_marker(selected, current)
+    );
+    let reason = Style::new()
+        .dim()
+        .paint(&widgets::clip_to_width(&reason, width));
+    vec![first, widgets::pad_to_width(&reason, width)]
+}
+
 fn home_row_lines_at(
     width: usize,
     home: &HomeProjection,
@@ -1372,6 +1439,9 @@ fn home_row_lines_at(
         ];
     }
     let current = target == Some(home.active);
+    if let Some(session) = session.filter(|session| session.lifecycle == SessionLifecycle::Failed) {
+        return home_failed_row_lines(session, row, width, selected, current);
+    }
     let marker = home_row_marker(row, selected, current);
     let label = if session.is_some() {
         widgets::clip_to_width(label, width.saturating_sub(6))
@@ -1813,6 +1883,8 @@ mod tests {
             pr_summary: None,
             removing: false,
             agent_resume: None,
+            lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
+            failure_summary: None,
         }
     }
 
@@ -1894,6 +1966,55 @@ mod tests {
         let frame = joined_home(&home);
         assert!(frame.contains("interrupted · resume available"));
         assert!(!frame.contains("provider-session-id"));
+    }
+
+    #[test]
+    fn failed_session_row_shows_the_failed_state_and_its_failure_reason() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let state = AppState::home(workspace, vec![session]);
+        let mut failed = projected_session(session, "stale", "/work/stale");
+        failed.lifecycle = usagi_core::domain::session_lifecycle::SessionLifecycle::Failed;
+        // Keep the reason short enough to survive the fixed sidebar-width clip so
+        // the test asserts the reason is rendered, not the exact wrap width.
+        failed.failure_summary = Some("branch exists".to_owned());
+        let home = HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            std::slice::from_ref(&failed),
+        );
+
+        let frame = joined_home(&home);
+        // The row is tagged as failed and shows its safe failure reason so the
+        // operator can see why the name is stuck and remove it.
+        assert!(frame.contains("stale"));
+        assert!(frame.contains("failed"));
+        assert!(frame.contains("branch exists"));
+
+        // Selecting the failed row keeps the failed treatment (the emphasised
+        // cursor variant of the danger label).
+        let mut selected_state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut selected_state, AppEvent::Key(AppKey::Down));
+        let selected = joined_home(&HomeProjection::from_state(
+            &selected_state,
+            "work",
+            Path::new("/work"),
+            std::slice::from_ref(&failed),
+        ));
+        assert!(selected.contains("failed"));
+        assert!(selected.contains("branch exists"));
+
+        // An Available row shows neither the failed tag nor a failure reason.
+        let available = projected_session(session, "healthy", "/work/healthy");
+        let quiet = joined_home(&HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            std::slice::from_ref(&available),
+        ));
+        assert!(quiet.contains("healthy"));
+        assert!(!quiet.contains("failed"));
     }
 
     #[test]

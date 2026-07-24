@@ -1750,6 +1750,8 @@ mod tests {
             pr_summary: None,
             removing: false,
             agent_resume: None,
+            lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
+            failure_summary: None,
         };
         let frame = runtime.render(
             20,

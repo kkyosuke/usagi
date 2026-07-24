@@ -89,6 +89,8 @@ fn session_projection(id: SessionId, label: &str) -> ProjectedSession {
         pr_summary: None,
         removing: false,
         agent_resume: None,
+        lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
+        failure_summary: None,
     }
 }
 

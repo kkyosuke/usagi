@@ -272,7 +272,8 @@ Home sidebar は `main → divider → session* → + new session` の順序と 
 
 2 行目は daemon snapshot の `last_active`、または旧 record の `created_at` を基準に、`now`、`12m ago`、`3h ago`
 のような相対時刻で表示し、dismissed でない PR があれば先頭の PR 番号と残り件数を続ける。Git の検査が完了した session は、remote の既定 branch（`origin/HEAD`）を優先した base との差分として `↑ahead ↓behind + added - removed` を続ける。base branch 名は表示しない。追加数は緑、削除数は赤で描く。相対時刻・commit 差分・追加数・削除数は、表示中の全 session で共有する固定幅の列に配置する。検査は sidebar の描画とは別スレッドで行い、完了後は 1 秒以上あけて現在の session 集合を再検査する。未完了・取得不能・意味を持たない base branch 自身の状態は表示しない。PR title の解決はこの行の前提にしない。snapshot に無い
-session は selected / active を main に縮退させ、空一覧でも main と作成 action は残る。
+session は selected / active を main に縮退させ、空一覧でも main と作成 action は残る。作成に失敗した `failed` session は
+Danger 表現で `failed` タグとその失敗理由（daemon の安全な `failure.summary`）を 2 行目に表示し、使用可能な行と区別する。
 
 Switch で `+ new session` を選び Enter（または `t`）を押すと、その行が `+ new: <name>` の
 inline 入力欄へ置き換わる。置き換わった入力欄でも `+ new` affordance は静的な `+ new session` と同じ
@@ -340,8 +341,11 @@ modal に安全な error を表示する。
 昇格する。この pending pane を伴う経路は controller の `ResumeAgent` effect だけが所有し、他の session command
 port は resume を受理しない。provider-native ID は受け取らず表示もしない。live Agent、resume metadata の欠落、
 scope/revision 不一致は安全な error として収束し、provider の last session や旧 PTY を推測しない。
-sidebar と session 選択 modal は daemon snapshot の `available` session だけを表示する。作成に失敗した
-reservation は durable state に残っていても選択対象にしない。
+sidebar は daemon snapshot の `available` session に加えて、名前を占有し続ける `failed` session も
+`failed` の状態と失敗理由付きで表示する。`failed` 行は使用不可（`can_use=false`）なので attach を提示せず、
+削除可能（`can_remove=true`）なので `x` / `X` の remove をそのまま受け付ける。各行の可否は snapshot の lifecycle
+から client 側で導出する（`SessionLifecycle::capabilities` が正本）。過渡状態（`creating` / `deleting` など）は
+一覧に出さず、attach 対象を広げないため scope 解決は引き続き `available` だけを対象とする。
 
 `env` は現在 active な target（workspace root か session）の environment editor を開き、その target の
 永続化済み環境変数を読み込んで表示する。正本は notes・todos・decisions と同じ repository の `state.json`

@@ -42,7 +42,7 @@ effect を実行し、同じ daemon generation・operation・session attempt・r
 
 workspace root（`⌂ root`）も一つの scope として同じ仕組みで解決する。root scope は `session_id` を持たず（`None`）、workspace ごとに一度だけ生成して永続化した **root `WorktreeId`** で識別する。daemon は snapshot でこの root worktree id を公開し、launch 時に要求された workspace / root worktree identity が自分のものと一致する場合だけ、cwd を **trusted repository root** に解決する。root scope の cwd は常に daemon が持つ trusted root であり、client 供給の path は使わない。session scope の fence（`session_id` 必須の completion）はこの追加で回帰しない。詳細な設計根拠は [proposals/10-workspace-root-scope.md](proposals/10-workspace-root-scope.md)。
 
-client に返す session 一覧は `available` の managed session だけを投影する。作成に失敗した reservation と中断後に reconcile された record は、operation の再送・復旧判断のため daemon の durable state に残すが、TUI の選択可能な一覧には出さない。
+client に返す session 一覧は、使用可能な `available` に加えて、名前を占有し続ける `failed`（作成に失敗した reservation と中断後に reconcile された record）も lifecycle と失敗理由付きで投影する。過渡状態（`creating` / `initializing` / `deleting`）は一覧に出さない。各行の可否（attach / remove など）は wire に載る lifecycle から client 側で導出する（`SessionLifecycle::capabilities` が正本）。`failed` 行は使用不可（attach を提示しない）だが削除可能で、削除すると worktree 未作成でも名前が解放されて同名 create が再び通る。一覧への投影は attach 対象を広げない: scope 解決は引き続き `available` だけを対象とする（前述）。
 
 ## session tree と ignore rules
 

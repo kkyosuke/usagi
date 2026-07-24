@@ -31,6 +31,7 @@ use usagi_core::domain::id::{
     AgentContinuationRef, OperationId, SessionId, TerminalRef, UserDecisionId, WorkspaceId,
 };
 use usagi_core::domain::recent::Recent;
+use usagi_core::domain::session_lifecycle::{SessionLifecycle, SessionLifecycleProjection};
 use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
 use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
@@ -842,6 +843,10 @@ pub struct SessionCommandResult {
     pub session_ids: Option<Vec<SessionId>>,
     /// Safe provider resume state keyed by the same stable session identities.
     pub agent_resumes: Option<BTreeMap<SessionId, ProviderResumeProjection>>,
+    /// Safe lifecycle projection keyed by the same stable session identities.
+    /// Carries each row's lifecycle (and a `Failed` row's failure summary) so the
+    /// sidebar can show state and gate attach/remove by capability.
+    pub session_lifecycles: Option<BTreeMap<SessionId, SessionLifecycleProjection>>,
     /// Monotonically increasing daemon lifecycle revision for this snapshot.
     /// The UI uses it to ignore a response that arrives after a newer command.
     pub revision: Option<u64>,
@@ -855,6 +860,7 @@ impl SessionCommandResult {
             sessions: None,
             session_ids: None,
             agent_resumes: None,
+            session_lifecycles: None,
             revision: None,
         }
     }
@@ -2177,19 +2183,34 @@ fn apply_session_projection(
     sessions: Option<Vec<usagi_core::domain::session::SessionRecord>>,
     session_ids: Option<Vec<SessionId>>,
     agent_resumes: Option<BTreeMap<SessionId, ProviderResumeProjection>>,
+    session_lifecycles: Option<BTreeMap<SessionId, SessionLifecycleProjection>>,
 ) {
     let Some(sessions) = sessions else {
         return;
     };
+    let lifecycles = session_lifecycles.unwrap_or_default();
     if let Some(session_ids) = session_ids.filter(|ids| ids.len() == sessions.len()) {
         ui.workspace
             .replace_sessions_with_runtime_ids(sessions, session_ids.clone());
         if let Some(agent) = ui.agent.as_mut() {
-            agent.sessions = session_ids;
+            // Only usable (attachable) sessions can host an Agent. A Failed row
+            // owns its name and is now listed, but must never become an Agent
+            // launch target, so gate the allowed set by `can_use`. A session with
+            // no lifecycle entry (legacy path) stays allowed as before.
+            agent.sessions = session_ids
+                .iter()
+                .copied()
+                .filter(|id| {
+                    lifecycles
+                        .get(id)
+                        .is_none_or(|projection| projection.capabilities().can_use)
+                })
+                .collect();
         }
     } else {
         ui.workspace.replace_sessions(sessions);
     }
+    ui.workspace.set_session_lifecycles(lifecycles);
     if let Some(agent_resumes) = agent_resumes {
         ui.agent_resumes = agent_resumes;
     }
@@ -2233,6 +2254,7 @@ fn drain_session_completions(ui: &mut WorkspaceUi) {
                     result.sessions,
                     result.session_ids,
                     result.agent_resumes,
+                    result.session_lifecycles,
                 );
             }
         }
@@ -2584,6 +2606,12 @@ fn project_controller_sessions(ui: &WorkspaceUi) -> Vec<ProjectedSession> {
             let mut projected = ProjectedSession::from_record(*id, record);
             projected.removing = ui.removing_session == Some(*id);
             projected.agent_resume = ui.agent_resumes.get(id).copied();
+            if let Some(projection) = ui.workspace.session_lifecycles().get(id) {
+                projected.lifecycle = projection.lifecycle;
+                projected
+                    .failure_summary
+                    .clone_from(&projection.failure_summary);
+            }
             projected
         })
         .collect()
@@ -2610,7 +2638,16 @@ pub fn render_home_snapshot(
         .sessions()
         .iter()
         .zip(workspace.session_ids())
-        .map(|(record, id)| ProjectedSession::from_record(*id, record))
+        .map(|(record, id)| {
+            let mut projected = ProjectedSession::from_record(*id, record);
+            if let Some(projection) = snapshot.session_lifecycles.get(id) {
+                projected.lifecycle = projection.lifecycle;
+                projected
+                    .failure_summary
+                    .clone_from(&projection.failure_summary);
+            }
+            projected
+        })
         .collect();
     let state = AppState::home(snapshot.workspace_id, snapshot.session_ids.clone());
     let projection = HomeProjection::from_state(
@@ -2643,6 +2680,20 @@ fn sync_runtime_sessions(runtime: &mut WorkspaceRuntime, ui: &WorkspaceUi) {
     let names: Vec<String> = names.into_iter().collect();
     if runtime.state().session_names() != names.as_slice() {
         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionNames(names)));
+    }
+    // Keep the reducer's per-session lifecycle in step so it can gate attach by
+    // capability. Only the lifecycle enum is needed reducer-side; the failure
+    // summary is presentation-only and stays in the sidebar projection.
+    let lifecycles: BTreeMap<SessionId, SessionLifecycle> = ui
+        .workspace
+        .session_lifecycles()
+        .iter()
+        .map(|(id, projection)| (*id, projection.lifecycle))
+        .collect();
+    if runtime.state().session_lifecycles() != &lifecycles {
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionLifecycles(
+            lifecycles,
+        )));
     }
 }
 
@@ -3720,6 +3771,7 @@ fn drive_workspace_controller(
     let workspace_name = snapshot.workspace.name.clone();
     let root_cwd = snapshot.workspace.path.clone();
     let agent_resumes = snapshot.agent_resumes.clone();
+    let session_lifecycles = snapshot.session_lifecycles.clone();
     let (host, host_rx) = ControllerHost::channel();
     let composition = backend_factory.create(&snapshot, host);
     let mut backend = composition.backend;
@@ -3727,8 +3779,9 @@ fn drive_workspace_controller(
     let mut restore_commands = Some(composition.restore_commands);
     let mut restore_connection = composition.restore_connection;
     let (restore_sender, restore_completions) = mpsc::channel();
-    let workspace =
+    let mut workspace =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, session_ids.clone());
+    workspace.set_session_lifecycles(session_lifecycles);
     let mut ui = WorkspaceUi::new(workspace, composition.session_commands)
         .with_agent_resumes(agent_resumes)
         .with_agent_context(
@@ -5125,6 +5178,36 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_lifecycle_flows_to_the_sidebar_rows_and_the_reducer() {
+        use usagi_core::domain::session_lifecycle::{SessionLifecycle, SessionLifecycleProjection};
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        view.set_session_lifecycles(std::collections::BTreeMap::from([(
+            session,
+            SessionLifecycleProjection {
+                lifecycle: SessionLifecycle::Failed,
+                failure_summary: Some("create failed".into()),
+            },
+        )]));
+        let ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+
+        // The projected sidebar row carries the Failed lifecycle and its reason.
+        let rows = super::project_controller_sessions(&ui);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].lifecycle, SessionLifecycle::Failed);
+        assert_eq!(rows[0].failure_summary.as_deref(), Some("create failed"));
+
+        // The reducer receives the lifecycle so it can gate attach by capability.
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        super::sync_runtime_sessions(&mut runtime, &ui);
+        assert_eq!(
+            runtime.state().session_lifecycles().get(&session).copied(),
+            Some(SessionLifecycle::Failed)
+        );
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)] // One shell fixture keeps port absence and async completion in sequence.
     fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_completion() {
         let workspace = WorkspaceId::new();
@@ -5148,14 +5231,15 @@ mod tests {
         assert_eq!(super::session_name_for(&ui, SessionId::new()), None);
 
         let records = ui.workspace.sessions().to_vec();
-        super::apply_session_projection(&mut ui, None, None, None);
-        super::apply_session_projection(&mut ui, Some(records.clone()), None, None);
-        super::apply_session_projection(&mut ui, Some(records), Some(vec![session]), None);
+        super::apply_session_projection(&mut ui, None, None, None, None);
+        super::apply_session_projection(&mut ui, Some(records.clone()), None, None, None);
+        super::apply_session_projection(&mut ui, Some(records), Some(vec![session]), None, None);
         let records = ui.workspace.sessions().to_vec();
         super::apply_session_projection(
             &mut ui,
             Some(records),
             Some(vec![session]),
+            Some(std::collections::BTreeMap::new()),
             Some(std::collections::BTreeMap::new()),
         );
         let mut mismatched_runtime = WorkspaceRuntime::new(workspace, Vec::new());
@@ -5236,6 +5320,7 @@ mod tests {
             &mut ui,
             Some(projected_records),
             Some(vec![session]),
+            None,
             None,
         );
 
@@ -5625,6 +5710,7 @@ mod tests {
                 sessions,
                 session_ids: None,
                 agent_resumes: None,
+                session_lifecycles: None,
                 revision: None,
             })
         }
@@ -5679,6 +5765,8 @@ mod tests {
             pr_summary: None,
             removing: false,
             agent_resume: None,
+            lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
+            failure_summary: None,
         };
         let sessions = std::slice::from_ref(&projected);
         let git = std::collections::BTreeMap::new();
@@ -6324,6 +6412,7 @@ mod tests {
                     sessions: Some(vec![newer_record]),
                     session_ids: Some(vec![newer]),
                     agent_resumes: None,
+                    session_lifecycles: None,
                     revision: Some(2),
                 }),
                 completion: super::SessionBackendCompletion::Refresh {
@@ -6343,6 +6432,7 @@ mod tests {
                     sessions: Some(ui.workspace.sessions().to_vec()),
                     session_ids: Some(vec![original]),
                     agent_resumes: None,
+                    session_lifecycles: None,
                     revision: Some(1),
                 }),
                 completion: super::SessionBackendCompletion::Refresh {
@@ -6380,6 +6470,7 @@ mod tests {
             sessions: Some(records),
             session_ids: Some(vec![existing, created]),
             agent_resumes: None,
+            session_lifecycles: None,
             revision: None,
         });
         let completion = super::SessionBackendCompletion::Create {
@@ -6476,6 +6567,7 @@ mod tests {
                 sessions: None,
                 session_ids: Some(session_ids),
                 agent_resumes: None,
+                session_lifecycles: None,
                 revision: None,
             })
         }
@@ -6640,6 +6732,7 @@ mod tests {
                 sessions: None,
                 session_ids: Some(vec![self.existing, self.created]),
                 agent_resumes: None,
+                session_lifecycles: None,
                 revision: None,
             })
         }
@@ -6877,6 +6970,7 @@ mod tests {
             sessions: Some(records),
             session_ids: Some(vec![session]),
             agent_resumes: None,
+            session_lifecycles: None,
             revision: None,
         });
         let completion = super::SessionBackendCompletion::Refresh {
@@ -12898,6 +12992,21 @@ mod tests {
         assert!(frame.contains("+ new session"));
         // A zero size safely falls back to the default geometry.
         assert!(!render_home_snapshot(0, 0, &snapshot("demo")).is_empty());
+
+        // A Failed session in the snapshot renders with its failed treatment and
+        // failure reason, so the initial fallback frame surfaces it too.
+        let mut failed_snapshot = snapshot("demo");
+        let id = failed_snapshot.session_ids[0];
+        failed_snapshot.session_lifecycles.insert(
+            id,
+            usagi_core::domain::session_lifecycle::SessionLifecycleProjection {
+                lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Failed,
+                failure_summary: Some("branch exists".into()),
+            },
+        );
+        let failed_frame = render_home_snapshot(30, 100, &failed_snapshot).join("\n");
+        assert!(failed_frame.contains("failed"));
+        assert!(failed_frame.contains("branch exists"));
     }
 
     #[test]

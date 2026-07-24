@@ -1056,23 +1056,20 @@ fn fence(
 }
 
 fn snapshot(state: &WorkspaceLifecycleState, root_worktree_id: WorktreeId) -> Value {
-    // A reservation is durable so a crashed daemon can reconcile it and replay
-    // its operation safely, but it is not a usable session.  Publishing failed
-    // (or otherwise non-available) reservations lets a failed create become a
-    // selectable sidebar row.  Keep lifecycle recovery state durable while
-    // projecting only checkouts that were actually created to clients.
-    let sessions = state
-        .sessions
-        .iter()
-        .filter(|session| {
-            session.lifecycle == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
-        })
-        .collect::<Vec<_>>();
+    // Project every durable session record, not only `Available` ones. A failed
+    // create is durable so a crashed daemon can reconcile and replay it safely,
+    // and it keeps owning the session name — so hiding it from the list left the
+    // name blocked with no way for a client to see or remove it. Each row
+    // carries its `lifecycle` (and `failure` when present), so clients derive
+    // per-row capabilities (a `Failed` row is not usable but is removable) from
+    // the lifecycle without widening the wire surface. Scope resolution stays
+    // `Available`-only (see `resolve_scope`), so listing a session never makes an
+    // unusable one attachable.
     json!({
         "workspace_id": state.workspace_id,
         "root_worktree_id": root_worktree_id,
         "revision": state.state_revision,
-        "sessions": sessions,
+        "sessions": state.sessions,
     })
 }
 
@@ -1544,12 +1541,14 @@ mod tests {
             error.safe_message(),
             "cannot create session \"one\": branch usagi/one already exists; choose a different name or remove the stale branch"
         );
-        assert!(
-            runtime.snapshot().unwrap()["sessions"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
+        // The failed reservation is projected so the client can see and remove
+        // the name it still owns.
+        let listed = runtime.snapshot().unwrap();
+        let sessions = listed["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0]["name"], "one");
+        assert_eq!(sessions[0]["lifecycle"], "failed");
+        assert_eq!(sessions[0]["failure"]["summary"], error.safe_message());
         assert_eq!(
             runtime.state().unwrap().sessions[0]
                 .failure
@@ -1584,12 +1583,14 @@ mod tests {
             error.safe_message(),
             "cannot create session \"one\": workspace already exists; choose a different name or remove the stale workspace"
         );
-        assert!(
-            runtime.snapshot().unwrap()["sessions"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
+        // The failed reservation is projected so the client can see and remove
+        // the name it still owns.
+        let listed = runtime.snapshot().unwrap();
+        let sessions = listed["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0]["name"], "one");
+        assert_eq!(sessions[0]["lifecycle"], "failed");
+        assert_eq!(sessions[0]["failure"]["summary"], error.safe_message());
         assert_eq!(
             runtime.state().unwrap().sessions[0]
                 .failure
@@ -1598,6 +1599,55 @@ mod tests {
                 .summary,
             error.safe_message()
         );
+    }
+
+    #[test]
+    fn lists_a_failed_session_but_refuses_to_resolve_it_then_removes_it_to_free_the_name() {
+        let (_tmp, mut runtime) = runtime(FakeGit::ok());
+        runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+            .unwrap();
+        // Force the created session into the Failed lifecycle a real create
+        // failure would leave behind: the name stays owned, but the row is not a
+        // usable checkout.
+        let mut state = runtime.state().unwrap();
+        let revision = state.state_revision;
+        state.sessions[0].lifecycle = SessionLifecycle::Failed;
+        state.sessions[0].failure = Some(Failure {
+            stage: FailureStage::Create,
+            summary: "create failed".into(),
+        });
+        runtime.store.replace_if_revision(revision, &state).unwrap();
+
+        // The failed row is projected with its lifecycle and failure summary.
+        let listed = runtime.snapshot().unwrap();
+        assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["sessions"][0]["name"], "one");
+        assert_eq!(listed["sessions"][0]["lifecycle"], "failed");
+        assert_eq!(listed["sessions"][0]["failure"]["summary"], "create failed");
+
+        // Scope resolution still refuses it: attach targets only Available.
+        let workspace = state.workspace_id;
+        let session_id = state.sessions[0].session_id;
+        let worktree_id = state.sessions[0].worktree_id;
+        assert_eq!(
+            runtime
+                .resolve_scope(workspace, session_id, worktree_id)
+                .unwrap_err(),
+            SessionRuntimeError::ScopeUnavailable
+        );
+
+        // Removing the failed row succeeds even though no worktree was created,
+        // frees the name, and a same-name create then succeeds.
+        let removed = runtime
+            .handle(SessionAction::Remove, &operation(), &json!({"name":"one"}))
+            .unwrap();
+        assert!(removed.body["sessions"].as_array().unwrap().is_empty());
+        let recreated = runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+            .unwrap();
+        assert_eq!(recreated.body["sessions"][0]["name"], "one");
+        assert_eq!(recreated.body["sessions"][0]["lifecycle"], "available");
     }
 
     #[test]
@@ -1951,8 +2001,20 @@ mod tests {
             FakeGit::ok(),
         )
         .unwrap();
+        // Both the completed `Available` session and the interrupted work,
+        // reconciled to `Failed` on restart, are projected to the client.
         let snapshot = restarted.snapshot().unwrap();
-        assert_eq!(snapshot["sessions"].as_array().unwrap().len(), 1);
+        let listed = snapshot["sessions"].as_array().unwrap();
+        assert_eq!(listed.len(), 2);
+        let interrupted = listed
+            .iter()
+            .find(|session| session["name"] == "interrupted")
+            .unwrap();
+        assert_eq!(interrupted["lifecycle"], "failed");
+        assert_eq!(
+            interrupted["failure"]["summary"],
+            "interrupted; explicit recovery required"
+        );
         assert_eq!(
             restarted.state().unwrap().sessions[1]
                 .failure
@@ -2090,12 +2152,13 @@ mod tests {
 
         assert_eq!(migrated.repo_root, repository);
         assert_eq!(migrated.state().unwrap().sessions[0].name, "legacy");
-        assert!(
-            migrated.snapshot().unwrap()["sessions"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
+        // The interrupted `Creating` reservation is reconciled to `Failed` on
+        // open and then projected, so the migrated name is visible and removable.
+        let listed = migrated.snapshot().unwrap();
+        let sessions = listed["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0]["name"], "legacy");
+        assert_eq!(sessions[0]["lifecycle"], "failed");
         assert!(state_dir.join("sessions.json").is_file());
         assert!(!legacy_dir.join("lifecycle-state.json").exists());
     }
