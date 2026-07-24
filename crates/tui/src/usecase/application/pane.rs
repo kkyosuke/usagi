@@ -1209,6 +1209,17 @@ mod tests {
             state.selected(),
             &PaneSelection::Tab(TabSelection::Live(first))
         );
+
+        let mut still_empty = PaneState::new(PaneSelection::Target(target));
+        let _ = reduce(
+            &mut still_empty,
+            PaneEvent::RestoreBatch {
+                panes: Vec::new(),
+                selected: None,
+                replace_order: false,
+            },
+        );
+        assert_eq!(still_empty.selected(), &PaneSelection::Target(target));
     }
 
     #[test]
