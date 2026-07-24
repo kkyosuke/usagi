@@ -67,11 +67,14 @@ build schema、profile、full target、source tree / compiler / feature / rustfl
 literal `"unknown"` を same build と扱わない。Git metadata の無い package build も package source set で
 識別し、identity read failure は unknown として fail safe にする。
 
-build mismatch の通常 bootstrap は old daemon を停止しない。artifact pair と channel から決まる stable operation ID の
-typed rollover trigger を返し、old endpoint と live PTY をそのまま維持する。同じ artifact の通常 TUI / CLI / MCP 起動は
-trigger 0 であり、#275 の development 毎 bootstrap restart はこの exact-artifact reuse 契約で置き換える。intentional な
+build mismatch の通常 bootstrap は artifact pair と channel から決まる stable operation ID の typed rollover trigger を
+生成する。production / local は old daemon を停止せず、trigger を返して old endpoint と live PTY をそのまま維持する。
+development は trigger を cold restart で消費し、replacement の exact artifact を handshake で確認してから再接続する。
+これにより `USAGI_RUNTIME_MODE=development cargo run` は再コンパイル後も起動できるが、old daemon が所有する live
+Agent / generic Terminal は継続しない。同じ artifact の通常 TUI / CLI / MCP 起動は trigger 0 で daemon を再利用する。intentional な
 same-artifact replacement は通常 bootstrap と分離した `usagi daemon replace` が force trigger を発行する。trigger は
-effect-free であり、cross-process standby / admission consumer が未接続の間は cold stop/start や二重 spawn に進まない。
+effect-free であり、production / local は cross-process standby / admission consumer が未接続の間は cold stop/start や
+二重 spawn に進まない。
 unknown identity、`build.artifact.v1` capability の無い old daemon、read / verification failure も old daemon を維持した
 typed refusal になる。
 
@@ -99,6 +102,9 @@ same build reconnect
 detected build mismatch / daemon replace
   client -> stable rollover operation -> typed trigger, stop effect 0
                                   -> old daemon process + PTY remain alive
+
+development build mismatch
+  client -> stable rollover operation -> cold restart -> exact build reconnect
 
 manual cold restart
   client -> stop old -> quiesce / retire endpoint -> old process exit
