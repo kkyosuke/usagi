@@ -36,7 +36,10 @@ use usagi_core::infrastructure::store::dispatch::DispatchStore;
 use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::pr_inventory::PrInventoryStore;
 use usagi_core::infrastructure::store::user_decision::UserDecisionStore;
-use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
+use usagi_core::usecase::client::{
+    ClientError, ClientPolicy, DaemonClient, DeadlineConnection, DeadlineStream, IpcClient,
+    MonotonicClock, PolicyClient,
+};
 use usagi_core::usecase::client::{DaemonRequest, DispatchToolAction, SupervisorToolAction};
 use usagi_daemon::infrastructure::pty::PtyTerminal;
 use usagi_daemon::infrastructure::unix_transport::{
@@ -4581,6 +4584,20 @@ fn run_inner(
 pub(crate) fn client(
     policy: ClientPolicy,
 ) -> Result<IpcClient<std::os::unix::net::UnixStream>, ClientError> {
+    bootstrap_client(|data_dir, build| connect_client(data_dir, policy, build.clone()))
+}
+
+/// Establishes a bootstrapped, build-fenced daemon connection. `connect` builds
+/// one authenticated session over any stream type (a plain `UnixStream` for the
+/// persistent terminal path, or a deadline-armed stream for [`policy_client`]),
+/// so both surfaces share the identical cold-start, stale-recovery, and
+/// development rollover handling.
+// LLVM counts the deadline-stream instantiation as uncovered for branches the
+// UnixStream instantiation already exercises through the integration suite.
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=cli_tui_pty
+fn bootstrap_client<S: Read + Write>(
+    connect: impl Fn(&Path, &BuildIdentity) -> std::io::Result<IpcClient<S>>,
+) -> Result<IpcClient<S>, ClientError> {
     let data_dir =
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
     let exe =
@@ -4589,7 +4606,7 @@ pub(crate) fn client(
     let expected_build = current_build();
     let channel = runtime_channel();
     let connection = bootstrap::connect_or_start(
-        || connect_client(&data_dir, policy, expected_build.clone()),
+        || connect(&data_dir, &expected_build),
         || run_lifecycle(&exe, "start"),
         || recover_stale_client_endpoint(&data_dir),
         &expected_build,
@@ -4602,7 +4619,7 @@ pub(crate) fn client(
             if paths::runtime_mode() == paths::RuntimeMode::Development =>
         {
             bootstrap::restart_and_connect(
-                || connect_client(&data_dir, policy, expected_build.clone()),
+                || connect(&data_dir, &expected_build),
                 || run_lifecycle(&exe, "restart"),
                 &expected_build,
                 IpcClient::server_build,
@@ -4617,6 +4634,109 @@ pub(crate) fn client(
         bootstrap::BootstrapError::UnknownBuildIdentity => ClientError::BuildIdentityUnavailable,
         other => ClientError::Lifecycle(other.to_string()),
     })
+}
+
+/// The real process monotonic clock. Only differences between observations are
+/// meaningful; the origin is captured once so a wall-clock jump cannot rewind a
+/// deadline.
+#[derive(Clone, Copy)]
+struct SystemClock {
+    origin: Instant,
+}
+
+impl SystemClock {
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=mcp_e2e
+    fn new() -> Self {
+        Self {
+            origin: Instant::now(),
+        }
+    }
+}
+
+impl MonotonicClock for SystemClock {
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=mcp_e2e
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+}
+
+/// A deadline-armed Unix domain socket. Arming maps to OS receive/send timeouts
+/// so a stalled daemon cannot block a surface past its policy budget.
+struct DeadlineUnixStream(std::os::unix::net::UnixStream);
+
+impl Read for DeadlineUnixStream {
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=mcp_e2e
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl Write for DeadlineUnixStream {
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=mcp_e2e
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=mcp_e2e
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl DeadlineConnection for DeadlineUnixStream {
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=mcp_e2e
+    fn set_read_deadline(&mut self, timeout: std::time::Duration) -> std::io::Result<()> {
+        self.0.set_read_timeout(Some(timeout))
+    }
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=mcp_e2e
+    fn set_write_deadline(&mut self, timeout: std::time::Duration) -> std::io::Result<()> {
+        self.0.set_write_timeout(Some(timeout))
+    }
+}
+
+type DeadlineIpcClient = IpcClient<DeadlineStream<SystemClock, DeadlineUnixStream>>;
+
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=mcp_e2e
+fn connect_deadline_client(
+    data_dir: &Path,
+    policy: ClientPolicy,
+    build: BuildIdentity,
+    clock: SystemClock,
+    budget_ms: u64,
+) -> std::io::Result<DeadlineIpcClient> {
+    let stream = usagi_daemon::infrastructure::unix_transport::connect_current(data_dir)?;
+    let deadline = DeadlineStream::new(clock, DeadlineUnixStream(stream), budget_ms);
+    IpcClient::connect(
+        deadline,
+        format!("cli-{}", std::process::id()),
+        format!("{}", std::process::id()),
+        policy,
+        build,
+    )
+    .map_err(std::io::Error::other)
+}
+
+/// A resilient daemon client that enforces the surface [`ClientPolicy`] end to
+/// end: each attempt consumes one monotonic deadline budget (connect/handshake,
+/// write, response read) and `reconnect_attempts` bounds retries gated by the
+/// request's retry eligibility. CLI, MCP, and the TUI's per-request calls use
+/// this so a hung daemon cannot block a surface indefinitely.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=mcp_e2e
+pub(crate) fn policy_client(policy: ClientPolicy) -> Result<impl DaemonClient, ClientError> {
+    let clock = SystemClock::new();
+    let initial = bootstrap_client(|data_dir, build| {
+        connect_deadline_client(data_dir, policy, build.clone(), clock, policy.timeout_ms)
+    })?;
+    let data_dir =
+        paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let build = current_build();
+    // Reconnects target the already-running daemon; the initial bootstrap above
+    // owns cold-start and rollover, so a plain connect that fails simply exhausts
+    // the budget as a typed unavailable rather than churning the daemon.
+    let reconnect = move |clock: SystemClock, budget_ms: u64| {
+        connect_deadline_client(&data_dir, policy, build.clone(), clock, budget_ms)
+            .map_err(|error| ClientError::Unavailable(error.to_string()))
+    };
+    Ok(PolicyClient::new(clock, policy, reconnect, Some(initial)))
 }
 
 /// Requests intentional replacement of the currently running daemon artifact.

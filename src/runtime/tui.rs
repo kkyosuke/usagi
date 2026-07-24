@@ -128,7 +128,7 @@ impl DesktopNotificationPort for PlatformDesktopNotifier {
 impl DaemonDecisionCommandPort {
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=decision_port_completion_contract
     fn client() -> Result<impl DaemonClient, String> {
-        match crate::runtime::daemon::client(ClientPolicy::tui()) {
+        match crate::runtime::daemon::policy_client(ClientPolicy::tui()) {
             Ok(client) => Ok(client),
             Err(error) => Err(format!("daemon unavailable: {error}")),
         }
@@ -634,7 +634,7 @@ impl MetricsPort for DaemonMetricsPort {
             return self.latest.clone();
         }
         self.last_sample = Some(Instant::now());
-        let mut client = crate::runtime::daemon::client(ClientPolicy::tui()).ok()?;
+        let mut client = crate::runtime::daemon::policy_client(ClientPolicy::tui()).ok()?;
         match client
             .request(DaemonRequest::Metrics {
                 action: MetricsAction::Snapshot,
@@ -1117,7 +1117,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         profile: Option<usagi_core::domain::agent::AgentProfileId>,
     ) -> Result<AgentPaneAdmission, String> {
         let mut client =
-            crate::runtime::daemon::client(usagi_core::usecase::client::ClientPolicy::tui())
+            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
                 .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
         let operation_id = usagi_core::domain::id::OperationId::new().to_string();
         match client
@@ -1145,7 +1145,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         operation_id: usagi_core::domain::id::OperationId,
     ) -> Result<AgentPaneAdmission, String> {
         let mut client =
-            crate::runtime::daemon::client(usagi_core::usecase::client::ClientPolicy::tui())
+            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
                 .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
         match client
             .request(DaemonRequest::Session {
@@ -1166,7 +1166,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         workspace: WorkspaceId,
     ) -> Result<usagi_core::domain::agent::AgentInventory, String> {
         let mut client =
-            crate::runtime::daemon::client(usagi_core::usecase::client::ClientPolicy::tui())
+            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
                 .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
         match client
             .request(agent_inventory_request(workspace))
@@ -1185,7 +1185,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         operation_id: usagi_core::domain::id::OperationId,
     ) -> Result<usagi_core::domain::id::TerminalRef, String> {
         let mut client =
-            crate::runtime::daemon::client(usagi_core::usecase::client::ClientPolicy::tui())
+            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
                 .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
         match client
             .request(exact_agent_resume_request(operation_id, target))
@@ -1266,7 +1266,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                 rows: geometry.rows,
             },
         };
-        let mut client = crate::runtime::daemon::client(ClientPolicy::tui())
+        let mut client = crate::runtime::daemon::policy_client(ClientPolicy::tui())
             .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
         let payload = serde_json::to_value(TerminalRequest::Launch { intent })
             .expect("terminal request is serializable");
@@ -1723,7 +1723,7 @@ impl SessionCommandPort for DaemonSessionCommandPort {
         };
         let operation_id = usagi_core::domain::id::OperationId::new().to_string();
         let mut client =
-            crate::runtime::daemon::client(usagi_core::usecase::client::ClientPolicy::tui())
+            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
                 .map_err(|error| format!("daemon unavailable: {error}"))?;
         let reply = client
             .request(DaemonRequest::Session {
@@ -1814,7 +1814,7 @@ fn session_snapshot_result(
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_session_completion_contract
 fn request_lifecycle_snapshot() -> Result<LifecycleSnapshot, String> {
     let mut client =
-        crate::runtime::daemon::client(usagi_core::usecase::client::ClientPolicy::tui())
+        crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
             .map_err(|error| format!("daemon unavailable: {error}"))?;
     match client
         .request(DaemonRequest::Session {
@@ -2392,7 +2392,8 @@ fn run_in_terminal(
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=metrics_hook_registration_contract
 fn run_with_metrics_hook(run: impl FnOnce() -> std::io::Result<Exit>) -> std::io::Result<Exit> {
     let mut hook = MetricsHook::default();
-    let mut client = crate::runtime::daemon::client(ClientPolicy::tui()).map_err(io_error)?;
+    let mut client =
+        crate::runtime::daemon::policy_client(ClientPolicy::tui()).map_err(io_error)?;
     hook.connect(&mut client).map_err(io_error)?;
     let result = run();
     let cleanup = hook.shutdown(&mut client).map_err(io_error);
@@ -2478,7 +2479,7 @@ impl PrSnapshotPort for DaemonPrSnapshotPort {
         &mut self,
         session_id: usagi_core::domain::id::SessionId,
     ) -> Result<usagi_core::usecase::client::PrSnapshot, String> {
-        let mut client = crate::runtime::daemon::client(ClientPolicy::tui())
+        let mut client = crate::runtime::daemon::policy_client(ClientPolicy::tui())
             .map_err(|_| "daemon unavailable".to_owned())?;
         let reply = client
             .request(DaemonRequest::Pr {
