@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use super::tree;
+use crate::domain::agent::Agent;
 use crate::domain::workspace_state::{
     PendingSessionRemoval, SessionRemovalPhase, WorkspaceState, WorktreeProvenance,
 };
@@ -23,25 +24,48 @@ use crate::infrastructure::workspace_store::WorkspaceStore;
 /// never force-deletes it because the missing record means ownership cannot be
 /// established safely. Loose files are left untouched.
 ///
-/// Returns the stray directories newly quarantined by this pass.
+/// Returns the stray directories newly quarantined by this pass, together with
+/// every interrupted removal it resumed.
 ///
-/// This is the public, self-locking entry point: it acquires the workspace
-/// store lock for the duration of the scan-and-quarantine so it never races a
-/// concurrent writer. [`create`](super::create) and [`remove`](super::remove)
-/// already hold that lock across their whole operation and call
-/// [`reconcile_locked`] directly instead, so the load-and-destroy here cannot
-/// delete a worktree another process has built but not yet recorded.
-pub fn reconcile(workspace_root: &Path) -> Result<Vec<PathBuf>> {
+/// This is the public, self-locking entry point. It acquires the workspace store
+/// lock for the duration of the scan-and-quarantine so it never races a
+/// concurrent writer, then **releases it** and finishes any removal a crash left
+/// mid-transaction ([`resume_pending_removals`](super::resume_pending_removals)).
+/// Resuming runs outside the lock because it deletes worktrees and session trees,
+/// which can take minutes — exactly the work [`remove`](super::remove) keeps out
+/// of the locked window.
+///
+/// [`create`](super::create) and [`remove`](super::remove) hold the store lock
+/// across their own durable transitions and call [`reconcile_locked`] directly
+/// instead, so the load-and-quarantine here cannot mistake a worktree another
+/// process has built but not yet recorded for a stray.
+pub fn reconcile(workspace_root: &Path, agent: &dyn Agent) -> Result<ReconcileOutcome> {
     let store = WorkspaceStore::new(workspace_root);
-    let _lock = store.lock()?;
-    reconcile_locked(workspace_root)
+    let quarantined = {
+        let _lock = store.lock()?;
+        reconcile_locked(workspace_root)?
+    };
+    Ok(ReconcileOutcome {
+        quarantined,
+        resumed: super::resume_pending_removals(workspace_root, agent),
+    })
+}
+
+/// What one [`reconcile`] pass did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconcileOutcome {
+    /// Stray session directories newly quarantined as orphaned pending removals.
+    pub quarantined: Vec<PathBuf>,
+    /// Interrupted removals this pass attempted to finish.
+    pub resumed: Vec<super::ResumedRemoval>,
 }
 
 /// Reconcile assuming the caller already holds the workspace store lock (see
-/// [`WorkspaceStore::lock`]). [`create`](super::create) and
-/// [`remove`](super::remove) hold the lock across reconcile → build/teardown →
-/// record so the whole sequence is serialised against other usagi processes;
-/// they call this directly to avoid re-acquiring the non-reentrant lock.
+/// [`WorkspaceStore::lock`]). [`create`](super::create) holds the lock across
+/// reconcile → build → record, and [`remove`](super::remove) holds it across
+/// reconcile → tombstone, so each sequence is serialised against other usagi
+/// processes; they call this directly to avoid re-acquiring the non-reentrant
+/// lock.
 pub(super) fn reconcile_locked(workspace_root: &Path) -> Result<Vec<PathBuf>> {
     let sessions_base = workspace_root.join(STATE_DIR).join(SESSIONS_DIR);
     if !sessions_base.is_dir() {
@@ -91,6 +115,7 @@ pub(super) fn reconcile_locked(workspace_root: &Path) -> Result<Vec<PathBuf>> {
             root: stray.clone(),
             worktrees: Vec::new(),
             provenance: Vec::new(),
+            force: false,
             phase: SessionRemovalPhase::Orphaned,
         });
         quarantined.push(stray);

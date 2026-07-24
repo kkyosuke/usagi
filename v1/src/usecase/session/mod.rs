@@ -20,15 +20,29 @@
 //! This module owns the session lifecycle and state recording. The recursive
 //! mirroring and repository discovery live in [`tree`]; reconciling the on-disk
 //! tree with `state.json` lives in [`reconcile`].
+//!
+//! Two locks order the lifecycle, and always in this direction:
+//!
+//! 1. a session's **removal lock** (`.usagi/removals/<name>/.lock`), held for the
+//!    whole of that session's teardown, and
+//! 2. the **workspace store lock** (`.usagi/.lock`), which serialises reads and
+//!    writes of `state.json` across usagi processes.
+//!
+//! [`create`] holds the store lock across its whole build. [`remove`] must not:
+//! its teardown deletes a session tree that can be gigabytes and run for
+//! minutes, so it holds the store lock only for the durable transitions and
+//! relies on the removal lock plus a durable tombstone for safety in between.
+//! [`resume_pending_removals`] finishes tombstones a crash left behind.
 
 mod reconcile;
 mod tree;
 
-pub use reconcile::reconcile;
+pub use reconcile::{reconcile, ReconcileOutcome};
 
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -38,9 +52,10 @@ use crate::domain::agent_phase::AgentPhase;
 use crate::domain::settings::LocalSettings;
 use crate::domain::workspace_state::{
     BranchStatus, PendingSessionRemoval, PrLink, SessionAgent, SessionDecision, SessionOrigin,
-    SessionRecord, SessionRemovalPhase, SessionTodo, WorkspaceState,
+    SessionRecord, SessionRemovalPhase, SessionTodo, WorkspaceState, WorktreeProvenance,
 };
 use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR};
+use crate::infrastructure::store_lock::StoreLock;
 use crate::infrastructure::workspace_store::WorkspaceStore;
 use crate::infrastructure::{
     agent_live_pane_store, agent_live_prompt_store, agent_prompt_store, agent_state_store, git,
@@ -230,6 +245,11 @@ fn create_with_setup_runner(
     // record). The lock is released when `create` returns. The trade-off is
     // that a long worktree build holds the lock for its duration; correctness
     // wins over the rare lock-wait timeout.
+    //
+    // [`remove`] cannot make the same trade: deleting a session tree (its
+    // `target/` can be gigabytes) runs for minutes, far past the lock's acquire
+    // timeout, so it splits the operation into short locked transitions around an
+    // unlocked teardown. See [`remove`]'s locking notes.
     let _lock = store.lock()?;
 
     // Quarantine unrecorded directories before creation. They are never
@@ -1387,36 +1407,215 @@ pub struct RemovalOutcome {
 /// Without `force`, a session whose worktrees have uncommitted changes is left
 /// untouched and the dirty worktrees are returned for the caller to warn about.
 /// With `force`, those changes are discarded.
+///
+/// # Locking
+///
+/// The workspace store lock is held only for the *durable state transitions* —
+/// writing the removal tombstone, advancing its phase, and dropping the record.
+/// The heavy work between them (`git worktree remove`, deleting a session tree
+/// whose `target/` can be several gigabytes, pruning, dropping the branch, and
+/// the per-worktree context cleanup) runs with the store lock released, so a
+/// removal that takes minutes no longer makes every other usagi process fail on
+/// the store lock's acquire timeout.
+///
+/// What keeps that safe is the pair of locks:
+///
+/// - the durable tombstone (written under the store lock before the first
+///   destructive effect) makes the whole teardown resumable and stops `create`
+///   from resurrecting the name, and
+/// - the per-session removal lock, held across the whole call, stops a second
+///   process from tearing the same session down concurrently — a race whose
+///   half-applied ownership evidence would otherwise quarantine the session as
+///   [`SessionRemovalPhase::Orphaned`] and demand manual recovery.
+///
+/// The removal lock is always taken *before* the store lock so the two never
+/// form a cycle.
 pub fn remove(
     workspace_root: &Path,
     name: &str,
     force: bool,
     agent: &dyn Agent,
 ) -> Result<RemovalOutcome> {
+    // Fail fast on an unknown or quarantined session before creating this
+    // session's removal lock file.
     let store = WorkspaceStore::new(workspace_root);
-    // Hold the lock across prepare → teardown → commit cleanup so a concurrent
-    // writer cannot lose the tombstone, resurrect the session, or observe a
-    // half-committed removal.
-    let _lock = store.lock()?;
+    removal_target(&load_state(&store)?, name)?;
 
-    // Quarantine unrecorded directories before touching the requested session.
-    // Reconcile no longer force-deletes state whose ownership cannot be proven.
-    reconcile::reconcile_locked(workspace_root)?;
+    let _removal_lock = acquire_removal_lock(workspace_root, name)?;
+    match begin_removal(workspace_root, name, force)? {
+        BeginOutcome::Blocked(dirty) => Ok(RemovalOutcome {
+            removed: false,
+            dirty,
+        }),
+        BeginOutcome::Ready(plan) => {
+            run_removal(workspace_root, &plan, agent)?;
+            Ok(RemovalOutcome {
+                removed: true,
+                dirty: Vec::new(),
+            })
+        }
+    }
+}
 
-    let mut state = store
+/// One interrupted removal a [`resume_pending_removals`] pass worked on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumedRemoval {
+    /// The session the pending removal belongs to.
+    pub name: String,
+    /// `None` when the removal completed. Otherwise why it is still pending: the
+    /// tombstone stays durable and context-preserving, so a later pass (or an
+    /// explicit `session remove`) retries it.
+    pub error: Option<String>,
+}
+
+/// Finish every removal left mid-transaction by a crashed or interrupted
+/// [`remove`] — a tombstone still sitting at [`SessionRemovalPhase::GitTeardown`]
+/// or [`SessionRemovalPhase::ContextCleanup`].
+///
+/// v1 has no resident daemon to drain such work in the background, so recovery
+/// happens on the next synchronous entry point that reaches here:
+/// [`reconcile`](reconcile()) (which `usagi clean` runs) and an explicit
+/// [`remove`] of the same session. Without this, an interrupted teardown stayed
+/// pending forever: nothing resumed it, and the tombstone kept owning the name
+/// so [`create`] refused to reuse it until someone re-ran `session remove` by
+/// hand.
+///
+/// Each resumed removal keeps the `force` decision recorded when it started, so
+/// a forced teardown stays forced and an unforced one still refuses to discard
+/// uncommitted work.
+///
+/// Never fails the caller: one wedged tombstone must not block the operation
+/// that triggered the sweep. Every attempt is reported, failures included.
+/// Quarantined ([`SessionRemovalPhase::Orphaned`]) removals are skipped — their
+/// ownership is unproven and only an operator may clean them up.
+pub fn resume_pending_removals(workspace_root: &Path, agent: &dyn Agent) -> Vec<ResumedRemoval> {
+    let store = WorkspaceStore::new(workspace_root);
+    let pending: Vec<(String, bool)> = match store.load() {
+        Ok(Some(state)) => state
+            .pending_removals
+            .iter()
+            .filter(|pending| pending.phase != SessionRemovalPhase::Orphaned)
+            .map(|pending| (pending.name.clone(), pending.force))
+            .collect(),
+        // No state (or an unreadable one) means nothing to resume here; the
+        // caller's own operation reports a broken store on its next read.
+        _ => Vec::new(),
+    };
+
+    pending
+        .into_iter()
+        .map(|(name, force)| ResumedRemoval {
+            error: resume_removal(workspace_root, &name, force, agent)
+                .err()
+                .map(|error| format!("{error:#}")),
+            name,
+        })
+        .collect()
+}
+
+/// Resume the pending removal of one session, reusing the same phased machinery
+/// (and the same locking discipline) as [`remove`].
+fn resume_removal(workspace_root: &Path, name: &str, force: bool, agent: &dyn Agent) -> Result<()> {
+    let _removal_lock = acquire_removal_lock(workspace_root, name)?;
+    match begin_removal(workspace_root, name, force)? {
+        BeginOutcome::Blocked(dirty) => bail!(
+            "session \"{name}\" removal is pending at git_teardown; context is preserved; \
+             resolve the dirty worktree(s) or retry with --force: {}",
+            dirty
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        BeginOutcome::Ready(plan) => run_removal(workspace_root, &plan, agent),
+    }
+}
+
+/// Directory under `.usagi/` holding one lock directory per session whose
+/// removal is in flight.
+const REMOVALS_DIR: &str = "removals";
+
+/// How long to wait for another process's in-flight teardown of the same
+/// session. A teardown legitimately runs for minutes (deleting a multi-gigabyte
+/// session tree), so waiting it out would just move the freeze somewhere else:
+/// report it and let the caller retry.
+const REMOVAL_LOCK_WAIT: Duration = Duration::from_millis(500);
+
+/// The lock directory for session `name`'s removal. It lives under `.usagi/`
+/// rather than inside the session tree because the session tree is exactly what
+/// the removal deletes.
+fn removal_lock_dir(workspace_root: &Path, name: &str) -> PathBuf {
+    workspace_root.join(STATE_DIR).join(REMOVALS_DIR).join(name)
+}
+
+/// Take session `name`'s removal lock, or report that another usagi process is
+/// already tearing it down.
+///
+/// The lock file is deliberately left behind afterwards: unlinking it would let
+/// a process still waiting on the old inode lock a fresh file and run a second,
+/// concurrent teardown. The directories are empty, ignored by git (`.usagi/`'s
+/// own `.gitignore`), and reused by later removals of the same name.
+fn acquire_removal_lock(workspace_root: &Path, name: &str) -> Result<StoreLock> {
+    StoreLock::acquire_with_timeout(&removal_lock_dir(workspace_root, name), REMOVAL_LOCK_WAIT)
+        .map_err(|error| {
+            anyhow!(
+                "session \"{name}\" removal is already in progress in another usagi process; \
+                 retry session remove once it finishes: {error}"
+            )
+        })
+}
+
+/// A removal that has passed its durable tombstone and is ready for the heavy,
+/// lock-free stages. Every field is copied out of the state written under the
+/// store lock, so the stages below need no state access of their own.
+struct RemovalPlan {
+    name: String,
+    /// The session tree Git teardown owns.
+    root: PathBuf,
+    /// The session's branch in every source repository.
+    branch: String,
+    /// Ownership evidence the teardown must prove before issuing any effect.
+    provenance: Vec<WorktreeProvenance>,
+    /// Canonical per-worktree keys for the ancillary context cleanup.
+    worktrees: Vec<PathBuf>,
+    /// Whether uncommitted work may be discarded.
+    force: bool,
+    /// The durable boundary the removal is resuming from.
+    phase: SessionRemovalPhase,
+}
+
+/// What [`begin_removal`] committed.
+enum BeginOutcome {
+    /// The tombstone is durable; run the teardown stages next.
+    Ready(RemovalPlan),
+    /// Uncommitted work blocked an unforced removal. Nothing was written.
+    Blocked(Vec<PathBuf>),
+}
+
+fn load_state(store: &WorkspaceStore) -> Result<WorkspaceState> {
+    store
         .load()?
-        .ok_or_else(|| anyhow!("no sessions recorded for this workspace"))?;
-    let index = state
+        .ok_or_else(|| anyhow!("no sessions recorded for this workspace"))
+}
+
+/// The recorded session `name`, plus the phase of any pending removal for it.
+/// Refuses a removal quarantined as [`SessionRemovalPhase::Orphaned`]: its
+/// ownership is unproven, so usagi never force-deletes it on its own.
+fn removal_target(
+    state: &WorkspaceState,
+    name: &str,
+) -> Result<(SessionRecord, Option<SessionRemovalPhase>)> {
+    let session = state
         .sessions
         .iter()
-        .position(|s| s.name == name)
+        .find(|s| s.name == name)
+        .cloned()
         .ok_or_else(|| anyhow!("no such session: \"{name}\""))?;
-    let session = state.sessions[index].clone();
-    let pending_index = state
+    let pending_phase = state
         .pending_removals
         .iter()
-        .position(|pending| pending.name == name);
-    let pending_phase = pending_index.map(|index| state.pending_removals[index].phase);
+        .find(|pending| pending.name == name)
+        .map(|pending| pending.phase);
     if pending_phase == Some(SessionRemovalPhase::Orphaned) {
         bail!(
             "session \"{name}\" is quarantined as an orphaned pending removal; \
@@ -1424,131 +1623,121 @@ pub fn remove(
              inspect state.json and `git worktree list`, then clean up the confirmed paths manually"
         );
     }
+    Ok((session, pending_phase))
+}
 
-    // Refuse to discard uncommitted work unless forced. Dirtiness goes through
-    // the same single `worktree_status` call the rest of the codebase uses; a
-    // path that is not (or no longer) a git worktree reports clean.
-    if pending_phase != Some(SessionRemovalPhase::ContextCleanup) {
-        let dirty: Vec<PathBuf> = session
+/// Durably mark session `name` as being removed and hand back the plan its
+/// teardown runs from. Holds the store lock only for this transition.
+///
+/// The dirtiness probe runs *before* the lock is taken. It is advisory: the
+/// authoritative refusal to discard uncommitted work is Git's own — an unforced
+/// [`reconcile::discard_session`] runs `git worktree remove` without `--force`,
+/// which git refuses on a dirty worktree and which aborts before the session
+/// directory is deleted.
+fn begin_removal(workspace_root: &Path, name: &str, force: bool) -> Result<BeginOutcome> {
+    let store = WorkspaceStore::new(workspace_root);
+    let (session, pending_phase) = removal_target(&load_state(&store)?, name)?;
+
+    // Dirtiness goes through the same single `worktree_status` call the rest of
+    // the codebase uses; a path that is not (or no longer) a git worktree reports
+    // clean. A removal already past Git teardown has no worktrees left to check.
+    let dirty: Vec<PathBuf> = if pending_phase == Some(SessionRemovalPhase::ContextCleanup) {
+        Vec::new()
+    } else {
+        session
             .worktrees
             .iter()
             .filter(|wt| git::worktree_status(&wt.path).is_some_and(|s| s.dirty))
             .map(|wt| wt.path.clone())
-            .collect();
-        if !dirty.is_empty() && !force {
-            if pending_phase.is_some() {
-                bail!(
-                    "session \"{name}\" removal is pending at git_teardown; context is \
-                     preserved; resolve the dirty worktree(s) or retry with --force: {}",
-                    dirty
-                        .iter()
-                        .map(|path| path.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-            }
-            return Ok(RemovalOutcome {
-                removed: false,
-                dirty,
-            });
+            .collect()
+    };
+
+    let _lock = store.lock()?;
+
+    // Quarantine unrecorded directories before touching the requested session.
+    // Reconcile no longer force-deletes state whose ownership cannot be proven.
+    reconcile::reconcile_locked(workspace_root)?;
+
+    // Re-read under the lock: the snapshot the probe above used is not
+    // authoritative, and every index into it is stale.
+    let mut state = load_state(&store)?;
+    let (session, pending_phase) = removal_target(&state, name)?;
+
+    if !dirty.is_empty() && !force && pending_phase != Some(SessionRemovalPhase::ContextCleanup) {
+        if pending_phase.is_some() {
+            bail!(
+                "session \"{name}\" removal is pending at git_teardown; context is \
+                 preserved; resolve the dirty worktree(s) or retry with --force: {}",
+                dirty
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
+        return Ok(BeginOutcome::Blocked(dirty));
     }
 
-    // Prepare: persist the identity and canonical cleanup keys before the first
-    // destructive Git operation. A crash from this point onward is resumable.
-    if pending_index.is_none() {
-        state.pending_removals.push(PendingSessionRemoval {
-            name: name.to_string(),
-            root: session.root.clone(),
-            worktrees: session
-                .worktrees
-                .iter()
-                .map(|worktree| worktree_keyed_store::key(&worktree.path))
-                .collect(),
-            provenance: session.worktree_provenance.clone(),
-            phase: SessionRemovalPhase::GitTeardown,
-        });
-        state.updated_at = Utc::now();
-        store.save(&state)?;
-    }
-
-    let pending_index = state
+    // Prepare: persist the identity, the canonical cleanup keys, and the force
+    // decision before the first destructive Git operation. A crash from this
+    // point onward is resumable. An existing tombstone is reused as-is, except
+    // that a retry passing `force` upgrades it so the resumed teardown may
+    // discard the work the first attempt refused to touch.
+    match state
         .pending_removals
         .iter()
         .position(|pending| pending.name == name)
+    {
+        None => {
+            state.pending_removals.push(PendingSessionRemoval {
+                name: name.to_string(),
+                root: session.root.clone(),
+                worktrees: session
+                    .worktrees
+                    .iter()
+                    .map(|worktree| worktree_keyed_store::key(&worktree.path))
+                    .collect(),
+                provenance: session.worktree_provenance.clone(),
+                force,
+                phase: SessionRemovalPhase::GitTeardown,
+            });
+            state.updated_at = Utc::now();
+            store.save(&state)?;
+        }
+        Some(index) if force && !state.pending_removals[index].force => {
+            state.pending_removals[index].force = true;
+            state.updated_at = Utc::now();
+            store.save(&state)?;
+        }
+        Some(_) => {}
+    }
+
+    let pending = state
+        .pending_removals
+        .iter()
+        .find(|pending| pending.name == name)
         .expect("prepared removal must have a tombstone");
-    if state.pending_removals[pending_index].phase == SessionRemovalPhase::GitTeardown {
-        let repo_worktrees = reconcile::list_repo_worktrees(workspace_root).map_err(|error| {
-            anyhow!(
-                "session \"{name}\" removal is pending at git_teardown; context is \
-                 preserved; repair repository access and retry session remove: {error}"
-            )
-        })?;
-        let discard = reconcile::discard_session(
-            &session.root,
-            &branch_name(name),
-            &state.pending_removals[pending_index].provenance,
-            &repo_worktrees,
-            force,
-        );
-        if let Err(error) = discard {
-            if error.downcast_ref::<reconcile::OwnershipError>().is_some() {
-                state.pending_removals[pending_index].phase = SessionRemovalPhase::Orphaned;
-                state.updated_at = Utc::now();
-                store.save(&state)?;
-                bail!(
-                    "session \"{name}\" ownership is ambiguous and has been quarantined; \
-                     no automatic force-remove effect was issued; inspect state.json and \
-                     `git worktree list`, then clean up confirmed paths manually: {error}"
-                );
-            }
-            return Err(anyhow!(
-                "session \"{name}\" removal is pending at git_teardown; context is \
-                 preserved; repair locked/dirty worktrees and retry session remove: {error}"
-            ));
-        }
-        state.pending_removals[pending_index].phase = SessionRemovalPhase::ContextCleanup;
-        state.updated_at = Utc::now();
-        store.save(&state).map_err(|error| {
-            anyhow!(
-                "session \"{name}\" Git teardown completed but committing context_cleanup \
-                 failed; session identity and context remain preserved; retry session remove: \
-                 {error}"
-            )
-        })?;
-    }
+    Ok(BeginOutcome::Ready(RemovalPlan {
+        name: name.to_string(),
+        root: session.root.clone(),
+        branch: branch_name(name),
+        provenance: pending.provenance.clone(),
+        worktrees: pending.worktrees.clone(),
+        force: pending.force,
+        phase: pending.phase,
+    }))
+}
 
-    // Commit cleanup only after every managed Git teardown succeeded. Every
-    // delete is idempotent, so a crash or failure may safely retry this stage.
-    let cleanup_keys = state.pending_removals[pending_index].worktrees.clone();
-    for worktree in cleanup_keys {
-        agent.forget_session(&worktree);
-        if agent.has_resumable_session(&worktree) {
-            bail!(
-                "session \"{name}\" removal is pending at context_cleanup; Git teardown \
-                 completed and session context is preserved; conversation cleanup for {} \
-                 did not complete, so repair its agent storage and retry session remove",
-                worktree.display()
-            );
-        }
-        clear_removal_context(&worktree).map_err(|error| {
-            anyhow!(
-                "session \"{name}\" removal is pending at context_cleanup; Git teardown \
-                 completed and session context is preserved; repair ancillary storage and \
-                 retry session remove: {error}"
-            )
-        })?;
+/// Drive a prepared removal to completion: the heavy stages run with the store
+/// lock released, each durable boundary takes it back for one short write.
+fn run_removal(workspace_root: &Path, plan: &RemovalPlan, agent: &dyn Agent) -> Result<()> {
+    let name = plan.name.as_str();
+    if plan.phase == SessionRemovalPhase::GitTeardown {
+        execute_teardown(workspace_root, plan)?;
+        commit_teardown(workspace_root, name)?;
     }
-
-    state.sessions.remove(index);
-    state.pending_removals.remove(pending_index);
-    state.updated_at = Utc::now();
-    store.save(&state).map_err(|error| {
-        anyhow!(
-            "session \"{name}\" context cleanup completed but committing removal failed; \
-             the durable marker remains retryable; retry session remove: {error}"
-        )
-    })?;
+    execute_context_cleanup(plan, agent)?;
+    finish_removal(workspace_root, name)?;
 
     crate::infrastructure::trace_log::TraceLog::record(
         crate::domain::trace::TraceEvent::now(
@@ -1557,11 +1746,121 @@ pub fn remove(
         )
         .with_detail(name),
     );
+    Ok(())
+}
 
-    Ok(RemovalOutcome {
-        removed: true,
-        dirty: Vec::new(),
+/// Remove the managed worktrees, the session tree and the session branch. This
+/// is the minutes-long stage — it runs with **no** store lock held.
+fn execute_teardown(workspace_root: &Path, plan: &RemovalPlan) -> Result<()> {
+    let name = plan.name.as_str();
+    let repo_worktrees = reconcile::list_repo_worktrees(workspace_root).map_err(|error| {
+        anyhow!(
+            "session \"{name}\" removal is pending at git_teardown; context is \
+             preserved; repair repository access and retry session remove: {error}"
+        )
+    })?;
+    let discard = reconcile::discard_session(
+        &plan.root,
+        &plan.branch,
+        &plan.provenance,
+        &repo_worktrees,
+        plan.force,
+    );
+    if let Err(error) = discard {
+        if error.downcast_ref::<reconcile::OwnershipError>().is_some() {
+            update_pending(workspace_root, name, |pending| {
+                pending.phase = SessionRemovalPhase::Orphaned
+            })?;
+            bail!(
+                "session \"{name}\" ownership is ambiguous and has been quarantined; \
+                 no automatic force-remove effect was issued; inspect state.json and \
+                 `git worktree list`, then clean up confirmed paths manually: {error}"
+            );
+        }
+        return Err(anyhow!(
+            "session \"{name}\" removal is pending at git_teardown; context is \
+             preserved; repair locked/dirty worktrees and retry session remove: {error}"
+        ));
+    }
+    Ok(())
+}
+
+/// Commit the `git_teardown` → `context_cleanup` boundary once every managed Git
+/// teardown succeeded.
+fn commit_teardown(workspace_root: &Path, name: &str) -> Result<()> {
+    update_pending(workspace_root, name, |pending| {
+        pending.phase = SessionRemovalPhase::ContextCleanup
     })
+    .map_err(|error| {
+        anyhow!(
+            "session \"{name}\" Git teardown completed but committing context_cleanup \
+             failed; session identity and context remain preserved; retry session remove: \
+             {error}"
+        )
+    })
+}
+
+/// Discard the agent conversation and usagi's per-worktree files for every key
+/// captured while the directories still existed. Runs with no store lock held;
+/// every delete is idempotent, so a crash or failure may safely retry it.
+fn execute_context_cleanup(plan: &RemovalPlan, agent: &dyn Agent) -> Result<()> {
+    let name = plan.name.as_str();
+    for worktree in &plan.worktrees {
+        agent.forget_session(worktree);
+        if agent.has_resumable_session(worktree) {
+            bail!(
+                "session \"{name}\" removal is pending at context_cleanup; Git teardown \
+                 completed and session context is preserved; conversation cleanup for {} \
+                 did not complete, so repair its agent storage and retry session remove",
+                worktree.display()
+            );
+        }
+        clear_removal_context(worktree).map_err(|error| {
+            anyhow!(
+                "session \"{name}\" removal is pending at context_cleanup; Git teardown \
+                 completed and session context is preserved; repair ancillary storage and \
+                 retry session remove: {error}"
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Drop the session record and its tombstone in one short locked write.
+fn finish_removal(workspace_root: &Path, name: &str) -> Result<()> {
+    let store = WorkspaceStore::new(workspace_root);
+    let _lock = store.lock()?;
+    let mut state = load_state(&store)?;
+    state.sessions.retain(|session| session.name != name);
+    state
+        .pending_removals
+        .retain(|pending| pending.name != name);
+    state.updated_at = Utc::now();
+    store.save(&state).map_err(|error| {
+        anyhow!(
+            "session \"{name}\" context cleanup completed but committing removal failed; \
+             the durable marker remains retryable; retry session remove: {error}"
+        )
+    })
+}
+
+/// Edit session `name`'s removal tombstone inside one short store-lock window.
+fn update_pending(
+    workspace_root: &Path,
+    name: &str,
+    edit: impl FnOnce(&mut PendingSessionRemoval),
+) -> Result<()> {
+    let store = WorkspaceStore::new(workspace_root);
+    let _lock = store.lock()?;
+    let mut state = load_state(&store)?;
+    let index = state
+        .pending_removals
+        .iter()
+        .position(|pending| pending.name == name)
+        .ok_or_else(|| anyhow!("no pending removal recorded for session \"{name}\""))?;
+    edit(&mut state.pending_removals[index]);
+    state.updated_at = Utc::now();
+    store.save(&state)
 }
 
 fn clear_removal_context(worktree: &Path) -> Result<()> {
@@ -3207,6 +3506,10 @@ mod tests {
 
     #[test]
     fn remove_deletes_a_clean_single_repo_session() {
+        // A completed removal clears per-worktree files below the process-wide
+        // data directory. Other tests temporarily redirect that directory, so hold
+        // the shared environment guard while this runs.
+        let _guard = crate::test_support::process_env_guard();
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
         let created = create(root.path(), "feature").unwrap();
@@ -3228,6 +3531,10 @@ mod tests {
 
     #[test]
     fn remove_cleans_a_multi_repo_session_including_copied_files() {
+        // A completed removal clears per-worktree files below the process-wide
+        // data directory. Other tests temporarily redirect that directory, so hold
+        // the shared environment guard while this runs.
+        let _guard = crate::test_support::process_env_guard();
         let root = tempfile::tempdir().unwrap();
         init_repo(&root.path().join("app-a"));
         init_repo(&root.path().join("be/be1"));
@@ -3244,6 +3551,10 @@ mod tests {
 
     #[test]
     fn remove_warns_on_uncommitted_changes_and_forces_through() {
+        // A completed removal clears per-worktree files below the process-wide
+        // data directory. Other tests temporarily redirect that directory, so hold
+        // the shared environment guard while this runs.
+        let _guard = crate::test_support::process_env_guard();
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
         let created = create(root.path(), "dirty").unwrap();
@@ -3454,6 +3765,7 @@ mod tests {
                 .map(|worktree| worktree_keyed_store::key(worktree))
                 .collect(),
             provenance: provenance.clone(),
+            force: false,
             phase: SessionRemovalPhase::GitTeardown,
         });
         store.save(&state).unwrap();
@@ -3675,7 +3987,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
         // No `.usagi/sessions/` exists yet, so there is nothing to reconcile.
-        assert!(reconcile(root.path()).unwrap().is_empty());
+        assert!(reconcile(root.path(), noop_agent().as_ref())
+            .unwrap()
+            .quarantined
+            .is_empty());
     }
 
     #[test]
@@ -3687,7 +4002,9 @@ mod tests {
         // Forget "stray" in state.json while its worktree stays on disk.
         drop_record(root.path(), "stray");
 
-        let quarantined = reconcile(root.path()).unwrap();
+        let quarantined = reconcile(root.path(), noop_agent().as_ref())
+            .unwrap()
+            .quarantined;
 
         assert_eq!(quarantined, vec![stray.root.clone()]);
         assert!(stray.root.exists());
@@ -3712,7 +4029,9 @@ mod tests {
         fs::write(stray.root.join("scratch.txt"), "wip").unwrap();
         drop_record(root.path(), "stray");
 
-        let quarantined = reconcile(root.path()).unwrap();
+        let quarantined = reconcile(root.path(), noop_agent().as_ref())
+            .unwrap()
+            .quarantined;
 
         assert_eq!(quarantined, vec![stray.root.clone()]);
         assert!(stray.root.exists());
@@ -3732,7 +4051,9 @@ mod tests {
         let loose = root.path().join(".usagi/sessions/NOTES.txt");
         fs::write(&loose, "scratch").unwrap();
 
-        let removed = reconcile(root.path()).unwrap();
+        let removed = reconcile(root.path(), noop_agent().as_ref())
+            .unwrap()
+            .quarantined;
 
         assert!(removed.is_empty());
         assert!(loose.is_file());
@@ -3746,7 +4067,9 @@ mod tests {
         fs::create_dir_all(&ghost).unwrap();
         fs::write(ghost.join("leftover.txt"), "x").unwrap();
 
-        let quarantined = reconcile(root.path()).unwrap();
+        let quarantined = reconcile(root.path(), noop_agent().as_ref())
+            .unwrap()
+            .quarantined;
 
         assert_eq!(quarantined, vec![ghost.clone()]);
         assert!(ghost.exists());
@@ -3758,7 +4081,10 @@ mod tests {
         assert_eq!(projected[0].name, "ghost");
         assert_eq!(projected[0].removal, Some(SessionRemovalPhase::Orphaned));
         assert!(projected[0].worktrees.is_empty());
-        assert!(reconcile(root.path()).unwrap().is_empty());
+        assert!(reconcile(root.path(), noop_agent().as_ref())
+            .unwrap()
+            .quarantined
+            .is_empty());
         assert_eq!(
             WorkspaceStore::new(root.path())
                 .load()
@@ -3779,7 +4105,9 @@ mod tests {
         let stray = create(root.path(), "wip").unwrap();
         drop_record(root.path(), "wip");
 
-        let quarantined = reconcile(root.path()).unwrap();
+        let quarantined = reconcile(root.path(), noop_agent().as_ref())
+            .unwrap()
+            .quarantined;
 
         assert_eq!(quarantined, vec![stray.root.clone()]);
         assert!(stray.root.exists());
@@ -4022,6 +4350,392 @@ mod tests {
             Some(SessionRemovalPhase::Orphaned)
         );
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    /// Record an interrupted removal for `name` at `phase`, exactly as a crash
+    /// between two durable boundaries leaves it: the session record and its
+    /// context are still there, the tombstone owns the name, and nothing is
+    /// running the teardown.
+    fn interrupt_removal(root: &Path, name: &str, phase: SessionRemovalPhase, force: bool) {
+        let store = WorkspaceStore::new(root);
+        let mut state = store.load().unwrap().unwrap();
+        let session = state
+            .sessions
+            .iter()
+            .find(|session| session.name == name)
+            .expect("the interrupted session must still be recorded")
+            .clone();
+        state.pending_removals.push(PendingSessionRemoval {
+            name: name.to_string(),
+            root: session.root.clone(),
+            worktrees: session
+                .worktrees
+                .iter()
+                .map(|worktree| worktree_keyed_store::key(&worktree.path))
+                .collect(),
+            provenance: session.worktree_provenance.clone(),
+            force,
+            phase,
+        });
+        state.updated_at = Utc::now();
+        store.save(&state).unwrap();
+    }
+
+    /// Whether the workspace store lock can be taken right now. The lock is an
+    /// `flock` on its own file descriptor, so a holder in *this* process is
+    /// observed too (see the `store_lock` mutual-exclusion tests) — which is what
+    /// lets these tests prove the lock is not held across the heavy stages.
+    fn store_lock_is_free(root: &Path) -> bool {
+        StoreLock::acquire_with_timeout(WorkspaceStore::new(root).dir(), Duration::from_millis(100))
+            .is_ok()
+    }
+
+    #[test]
+    fn remove_releases_the_store_lock_across_the_git_teardown() {
+        // `remove` clears per-worktree files below the process-wide data
+        // directory. Other tests temporarily redirect that directory, so hold the
+        // shared environment guard (without redirecting it) while this runs.
+        let _guard = crate::test_support::process_env_guard();
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "heavy").unwrap();
+
+        // The tombstone is committed while the store lock is held...
+        let plan = match begin_removal(root.path(), "heavy", false).unwrap() {
+            BeginOutcome::Ready(plan) => plan,
+            BeginOutcome::Blocked(dirty) => panic!("a clean session reported dirty: {dirty:?}"),
+        };
+        assert_eq!(
+            pending_of(root.path(), "heavy"),
+            Some(SessionRemovalPhase::GitTeardown)
+        );
+        // ...and released before the teardown that deletes the session tree,
+        // which for a real session can run for minutes. Holding it there is what
+        // made every other usagi process fail on the lock's acquire timeout.
+        assert!(store_lock_is_free(root.path()));
+
+        run_removal(root.path(), &plan, noop_agent().as_ref()).unwrap();
+        assert!(sessions_of(root.path()).is_empty());
+        assert!(pending_of(root.path(), "heavy").is_none());
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    /// An agent that records whether the workspace store lock was free at the
+    /// moment its conversation was discarded — i.e. during context cleanup.
+    struct LockProbingAgent {
+        workspace_root: PathBuf,
+        lock_was_free: std::sync::atomic::AtomicBool,
+    }
+
+    impl crate::domain::agent::Agent for LockProbingAgent {
+        fn program(&self) -> &'static str {
+            "lock-probe"
+        }
+
+        fn launch_command(
+            &self,
+            _wiring: &crate::domain::agent::AgentWiring,
+            _resume: bool,
+            _initial_prompt: Option<&str>,
+        ) -> String {
+            String::new()
+        }
+
+        fn has_resumable_session(&self, _dir: &Path) -> bool {
+            false
+        }
+
+        fn forget_session(&self, _dir: &Path) {
+            self.lock_was_free.store(
+                store_lock_is_free(&self.workspace_root),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+
+        fn headless_command(
+            &self,
+            _wiring: &crate::domain::agent::AgentWiring,
+            _prompt: &str,
+        ) -> String {
+            String::new()
+        }
+    }
+
+    #[test]
+    fn remove_releases_the_store_lock_across_the_context_cleanup() {
+        // `remove` clears per-worktree files below the process-wide data
+        // directory. Other tests temporarily redirect that directory, so hold the
+        // shared environment guard (without redirecting it) while this runs.
+        let _guard = crate::test_support::process_env_guard();
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "chatty").unwrap();
+
+        let agent = LockProbingAgent {
+            workspace_root: root.path().to_path_buf(),
+            lock_was_free: std::sync::atomic::AtomicBool::new(false),
+        };
+        assert!(
+            remove(root.path(), "chatty", false, &agent)
+                .unwrap()
+                .removed
+        );
+        assert!(
+            agent
+                .lock_was_free
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "the store lock must be released while the agent conversation is discarded"
+        );
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn remove_reports_a_concurrent_teardown_of_the_same_session() {
+        // `remove` clears per-worktree files below the process-wide data
+        // directory. Other tests temporarily redirect that directory, so hold the
+        // shared environment guard (without redirecting it) while this runs.
+        let _guard = crate::test_support::process_env_guard();
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "busy").unwrap();
+
+        // Another process is already tearing this session down. Because the store
+        // lock is no longer held for the whole removal, this per-session lock is
+        // what keeps a second teardown from racing the first — a race whose
+        // half-applied ownership evidence would quarantine the session.
+        let held = acquire_removal_lock(root.path(), "busy").unwrap();
+        let error = remove(root.path(), "busy", false, noop_agent().as_ref()).unwrap_err();
+        assert!(
+            error.to_string().contains("already in progress"),
+            "unexpected error: {error:#}"
+        );
+        // Nothing was written: no tombstone, no dropped record.
+        assert_eq!(sessions_of(root.path()), vec!["busy"]);
+        assert!(pending_of(root.path(), "busy").is_none());
+
+        drop(held);
+        assert!(
+            remove(root.path(), "busy", false, noop_agent().as_ref())
+                .unwrap()
+                .removed
+        );
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn reconcile_resumes_a_removal_interrupted_at_git_teardown() {
+        // `remove` clears per-worktree files below the process-wide data
+        // directory. Other tests temporarily redirect that directory, so hold the
+        // shared environment guard (without redirecting it) while this runs.
+        let _guard = crate::test_support::process_env_guard();
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "crashed").unwrap();
+        interrupt_removal(
+            root.path(),
+            "crashed",
+            SessionRemovalPhase::GitTeardown,
+            false,
+        );
+        // The tombstone owns the name, so the session cannot be recreated while
+        // the interrupted removal is outstanding.
+        assert!(create(root.path(), "crashed").is_err());
+
+        let outcome = reconcile(root.path(), noop_agent().as_ref()).unwrap();
+
+        assert!(outcome.quarantined.is_empty());
+        assert_eq!(
+            outcome.resumed,
+            vec![ResumedRemoval {
+                name: "crashed".to_string(),
+                error: None,
+            }]
+        );
+        assert!(!created.root.exists());
+        assert!(!branch_exists(root.path(), &branch_name("crashed")));
+        assert!(sessions_of(root.path()).is_empty());
+        assert!(pending_of(root.path(), "crashed").is_none());
+        // And the name is reusable without hand-editing state.json.
+        create(root.path(), "crashed").unwrap();
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn reconcile_resumes_a_removal_interrupted_at_context_cleanup() {
+        // `remove` clears per-worktree files below the process-wide data
+        // directory. Other tests temporarily redirect that directory, so hold the
+        // shared environment guard (without redirecting it) while this runs.
+        let _guard = crate::test_support::process_env_guard();
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "half").unwrap();
+        interrupt_removal(
+            root.path(),
+            "half",
+            SessionRemovalPhase::ContextCleanup,
+            false,
+        );
+        // Git teardown already completed before the crash.
+        let repo_worktrees = reconcile::list_repo_worktrees(root.path()).unwrap();
+        let provenance = WorkspaceStore::new(root.path())
+            .load()
+            .unwrap()
+            .unwrap()
+            .sessions[0]
+            .worktree_provenance
+            .clone();
+        reconcile::discard_session(
+            &created.root,
+            &branch_name("half"),
+            &provenance,
+            &repo_worktrees,
+            false,
+        )
+        .unwrap();
+
+        let outcome = reconcile(root.path(), noop_agent().as_ref()).unwrap();
+
+        assert_eq!(
+            outcome.resumed,
+            vec![ResumedRemoval {
+                name: "half".to_string(),
+                error: None,
+            }]
+        );
+        assert!(sessions_of(root.path()).is_empty());
+        assert!(pending_of(root.path(), "half").is_none());
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn resume_keeps_the_force_decision_the_interrupted_removal_started_with() {
+        // `remove` clears per-worktree files below the process-wide data
+        // directory. Other tests temporarily redirect that directory, so hold the
+        // shared environment guard (without redirecting it) while this runs.
+        let _guard = crate::test_support::process_env_guard();
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "forced").unwrap();
+        fs::write(created.root.join("scratch.txt"), "uncommitted").unwrap();
+        // A forced removal was interrupted after its tombstone was written. The
+        // operator already authorised discarding this work, so the resume must
+        // not silently downgrade to a context-preserving retry that never ends.
+        interrupt_removal(
+            root.path(),
+            "forced",
+            SessionRemovalPhase::GitTeardown,
+            true,
+        );
+
+        let outcome = reconcile(root.path(), noop_agent().as_ref()).unwrap();
+
+        assert_eq!(
+            outcome.resumed,
+            vec![ResumedRemoval {
+                name: "forced".to_string(),
+                error: None,
+            }]
+        );
+        assert!(!created.root.exists());
+        assert!(sessions_of(root.path()).is_empty());
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn resume_preserves_uncommitted_work_and_reports_the_still_pending_removal() {
+        // `remove` clears per-worktree files below the process-wide data
+        // directory. Other tests temporarily redirect that directory, so hold the
+        // shared environment guard (without redirecting it) while this runs.
+        let _guard = crate::test_support::process_env_guard();
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "wip").unwrap();
+        fs::write(created.root.join("scratch.txt"), "uncommitted").unwrap();
+        interrupt_removal(root.path(), "wip", SessionRemovalPhase::GitTeardown, false);
+
+        // An unforced removal stays context-preserving: the sweep reports it and
+        // leaves the work alone rather than resuming into a deletion.
+        let outcome = reconcile(root.path(), noop_agent().as_ref()).unwrap();
+        let error = outcome.resumed[0]
+            .error
+            .clone()
+            .expect("an unforced removal of a dirty worktree cannot complete");
+        assert!(error.contains("context is preserved"), "{error}");
+        assert!(created.root.join("scratch.txt").exists());
+        assert_eq!(
+            pending_of(root.path(), "wip"),
+            Some(SessionRemovalPhase::GitTeardown)
+        );
+
+        // An explicit forced retry upgrades the recorded decision and finishes it.
+        assert!(
+            remove(root.path(), "wip", true, noop_agent().as_ref())
+                .unwrap()
+                .removed
+        );
+        assert!(!created.root.exists());
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn reconcile_never_resumes_a_quarantined_removal() {
+        // `remove` clears per-worktree files below the process-wide data
+        // directory. Other tests temporarily redirect that directory, so hold the
+        // shared environment guard (without redirecting it) while this runs.
+        let _guard = crate::test_support::process_env_guard();
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let stray = create(root.path(), "stray").unwrap();
+        drop_record(root.path(), "stray");
+
+        let first = reconcile(root.path(), noop_agent().as_ref()).unwrap();
+        assert_eq!(first.quarantined, vec![stray.root.clone()]);
+        assert!(first.resumed.is_empty());
+
+        // A quarantined removal has no proven ownership, so no later pass may
+        // delete it: only an operator can.
+        let second = reconcile(root.path(), noop_agent().as_ref()).unwrap();
+        assert!(second.quarantined.is_empty());
+        assert!(second.resumed.is_empty());
+        assert!(stray.root.exists());
+        assert_eq!(
+            pending_of(root.path(), "stray"),
+            Some(SessionRemovalPhase::Orphaned)
+        );
+    }
+
+    #[test]
+    fn resume_reports_a_tombstone_whose_session_record_is_gone() {
+        // `remove` clears per-worktree files below the process-wide data
+        // directory. Other tests temporarily redirect that directory, so hold the
+        // shared environment guard (without redirecting it) while this runs.
+        let _guard = crate::test_support::process_env_guard();
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "ghost").unwrap();
+        interrupt_removal(
+            root.path(),
+            "ghost",
+            SessionRemovalPhase::GitTeardown,
+            false,
+        );
+        // A hand-edited state.json can leave a tombstone without its record.
+        drop_record(root.path(), "ghost");
+
+        let resumed = resume_pending_removals(root.path(), noop_agent().as_ref());
+
+        assert_eq!(resumed.len(), 1);
+        let error = resumed[0]
+            .error
+            .clone()
+            .expect("a tombstone without a record cannot be resumed");
+        assert!(error.contains("no such session"), "{error}");
+        // The durable marker survives for an operator to inspect, and the sweep
+        // reported the failure instead of propagating it.
+        assert_eq!(
+            pending_of(root.path(), "ghost"),
+            Some(SessionRemovalPhase::GitTeardown)
+        );
     }
 
     #[test]

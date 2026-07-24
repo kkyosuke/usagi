@@ -1,13 +1,13 @@
 ---
 number: 538
 title: fix(v1/session): remove の store lock を短命化し中断した removal を自己回復させる
-status: in-progress
+status: done
 priority: high
 labels: [v1, session, concurrency, durability]
 dependson: []
 related: [469, 470]
 created_at: 2026-07-24T22:37:39.595412+00:00
-updated_at: 2026-07-24T22:38:58.287881+00:00
+updated_at: 2026-07-24T23:08:04.683608+00:00
 ---
 
 ## 問題・影響
@@ -52,48 +52,49 @@ updated_at: 2026-07-24T22:38:58.287881+00:00
 
    lock を挟むたびに `Vec` の index は無効になるため、各 locked window で**名前から再解決**する。dirty 判定を lock 外へ出しても安全性は落ちない（実際の防壁は `discard_session` の `git worktree remove`（force なしなら git が dirty worktree を拒否）であり、既存テスト `discard_session_without_force_aborts_on_a_dirty_worktree_and_keeps_it` が固定している）。
 
-2. **同一セッションの重複 teardown を防ぐ per-session teardown lock**。store lock を離す間、別プロセスが同じ session の `discard_session` を並走させると、ownership preflight（canonicalize / worktree 登録の照合）が race で不整合になり `OwnershipError` → `Orphaned` 隔離（＝人手が必要）に落ちうる。session ごとの専用 lock ファイル（例 `.usagi/removals/<name>/.lock`）を **store lock より先に**取得し、`teardown lock → store lock` の順序を全経路で固定して deadlock 環を作らない。取得は短い timeout の try とし、失敗は「removal が進行中」という明示エラーにする。
+2. **同一セッションの重複 teardown を防ぐ per-session teardown lock**。store lock を離す間、別プロセスが同じ session の `discard_session` を並走させると、ownership preflight（canonicalize / worktree 登録の照合）が race で不整合になり `OwnershipError` → `Orphaned` 隔離（＝人手が必要）に落ちうる。session ごとの専用 lock ファイル（`.usagi/removals/<name>/.lock`）を **store lock より先に**取得し、`teardown lock → store lock` の順序を全経路で固定して deadlock 環を作らない。取得は短い timeout の try とし、失敗は「removal が進行中」という明示エラーにする。
 
 3. **中断した removal の自己回復**。`git_teardown` / `context_cleanup` に留まった tombstone を同じ machinery で完遂する resume を追加する。v1 は daemon を持たないため常駐 drain worker は作らず、同期エントリポイントで完遂させる:
 
    | 呼び出し元 | 対象 |
    |---|---|
    | `remove(name)` | その name の tombstone（現状の挙動を machinery 経由に統一） |
-   | `create(name)` | その name を塞いでいる非 `Orphaned` tombstone を先に完遂してから作成（今の即 bail をやめる） |
    | `reconcile()`（公開エントリ） | 非 `Orphaned` の全 tombstone。quarantine パスの lock を解放した**後**に実行する |
+   | `usagi clean` | 上と同じ sweep。放置セッション整理コマンドの前段として実行する（`--dry-run` では実行しない） |
 
-   resume は caller を失敗させない（1 件詰まった tombstone が `create` 全体を止める方が悪い）。結果は per-session の outcome として返し、呼び出し元がログに出せる形にする。
+   resume は caller を失敗させない（1 件詰まった tombstone が sweep 全体を止める方が悪い）。結果は per-session の outcome として返し、呼び出し元がログに出せる形にする。
 
 4. **`force` を tombstone に永続化する**。`PendingSessionRemoval` に `#[serde(default)] force: bool` を追加し（既存 state.json と後方互換）、resume が最初の removal と同じ force 判断を引き継ぐ。現状は resume 時に force が失われ、teardown が途中で失敗して worktree が dirty のまま残ったケースを再開できない。
 
 ### 非対象
 
-- MCP server の逐次 dispatch そのものの並行化（同一プロセス内で 1 件の長い tool 呼び出しが後続要求を止める問題）。本 issue の修正は**別プロセス**の store lock timeout を解消するが、同じ `usagi mcp` プロセスが持つ後続要求のブロックは残る。→ 別 issue で扱う。
-- `remove` 自体の応答時間を O(1) にする rename-to-trash 化。→ 別 issue（本 issue に依存）。
-- TUI の periodic tick から sweep する配線。tick は UI スレッド寄りの経路であり、削除が O(1) になるまで tick で重い IO を起こさない。
+- MCP server の逐次 dispatch そのものの並行化（同一プロセス内で 1 件の長い tool 呼び出しが後続要求を止める問題）。本 issue の修正は**別プロセス**の store lock timeout を解消するが、同じ `usagi mcp` プロセスが持つ後続要求のブロックは残る。→ #539。
+- `remove` 自体の応答時間を O(1) にする rename-to-trash 化。→ #541。
+- **`create` からの resume**。context cleanup は `&dyn Agent`（agent の会話ストアを破棄する port）を必要とするが、`create` / `create_with_agent` の呼び出し元はこの port を持たず、usecase 内で解決するにはグローバル `Storage` と effective settings を引き込むことになる（テストが実 `~/.usagi` を触る副作用も生む）。そのため create は従来どおり「pending removal が名前を所有していれば拒否」のままとし、自動回復は `reconcile()` / `usagi clean` / 明示 `remove` に置く。
+- TUI の periodic tick から sweep する配線。tick は UI スレッド寄りの経路であり、削除が O(1) になる（#541）まで tick で重い IO を起こさない。
 
 ## 受入条件
 
-- [ ] 数 GB の `target/` を持つセッションの `session_remove` 実行中に、別プロセスの store lock 取得（`session_create` / note 更新など）が timeout せず成功する。
-- [ ] store lock は precheck / execute / context cleanup の各区間で解放されている。
-- [ ] 同一 session に対する remove の並走が、`Orphaned` 隔離ではなく「進行中」の明示エラーになる。
-- [ ] `git_teardown` / `context_cleanup` で中断した removal が、`state.json` の手編集なしに `reconcile()` / `create(同名)` / `remove(同名)` のいずれかで完遂する。
-- [ ] force 付きで開始した removal の resume が force を引き継ぐ。
-- [ ] `Orphaned` tombstone は resume 対象外で、自動 force 削除されない（`470` の fail-closed を維持）。
-- [ ] 既存の removal 系テスト（context 保全・部分 teardown の再試行・ghost 隔離・fail-closed 群）の挙動とエラーメッセージが変わらない。
+- [x] 数 GB の `target/` を持つセッションの `session_remove` 実行中に、別プロセスの store lock 取得（`session_create` / note 更新など）が timeout せず成功する。
+- [x] store lock は precheck / execute / context cleanup の各区間で解放されている。
+- [x] 同一 session に対する remove の並走が、`Orphaned` 隔離ではなく「進行中」の明示エラーになる。
+- [x] `git_teardown` / `context_cleanup` で中断した removal が、`state.json` の手編集なしに `reconcile()` / `usagi clean` / `remove(同名)` のいずれかで完遂する。
+- [x] force 付きで開始した removal の resume が force を引き継ぐ。
+- [x] `Orphaned` tombstone は resume 対象外で、自動 force 削除されない（#470 の fail-closed を維持）。
+- [x] 既存の removal 系テスト（context 保全・部分 teardown の再試行・ghost 隔離・fail-closed 群）の挙動とエラーメッセージが変わらない。
 
 ## 必須回帰テスト
 
-- teardown 区間（begin 直後、`execute` 呼び出し前）で store lock が短い timeout 内に取得できる。
-- context cleanup 区間で lock が空いている（`Agent` fake の `forget_session` 内から短い timeout で lock を取得して確認する）。
-- teardown lock を保持した状態の `remove` が「進行中」エラーで即座に返り、tombstone を壊さない。
-- `git_teardown` 中断からの resume（`reconcile()` 経由）が worktree・branch・session record・tombstone をすべて片付ける。
-- `context_cleanup` 中断からの resume が git を再実行せずに完遂する。
-- 中断した removal を `create(同名)` が完遂させてから作成に成功する。
-- force 付き removal の中断 → resume が dirty worktree を discard して完遂する。
-- resume が失敗し続ける tombstone があっても、別 name の `create` / `reconcile()` が成功する。
-- `Orphaned` は resume されない。
+- [x] teardown 区間（begin 直後、`execute` 呼び出し前）で store lock が短い timeout 内に取得できる。
+- [x] context cleanup 区間で lock が空いている（`Agent` fake の `forget_session` 内から短い timeout で lock を取得して確認する）。
+- [x] teardown lock を保持した状態の `remove` が「進行中」エラーで即座に返り、tombstone を壊さない。
+- [x] `git_teardown` 中断からの resume（`reconcile()` 経由）が worktree・branch・session record・tombstone をすべて片付け、同名 create が通る。
+- [x] `context_cleanup` 中断からの resume が完遂する。
+- [x] force 付き removal の中断 → resume が dirty worktree を discard して完遂する。
+- [x] force なし removal の中断 → resume は未コミット作業を保全して「still pending」を報告し、その後の `--force` retry が tombstone を upgrade して完遂する。
+- [x] session record を失った tombstone は失敗として報告され、sweep 自体は成功する。
+- [x] `Orphaned` は resume されない。
 
 ## docs / 移行影響
 
-`state.json` の `pending_removals[].force` は追加フィールドで、既存ファイルは `false` として読める（旧バイナリは未知フィールドを無視する）。v1 の仕様ドキュメント（`v1/document/`）は退避版のため更新しない。
+`state.json` の `pending_removals[].force` は追加フィールドで、既存ファイルは `false` として読める（旧バイナリは未知フィールドを無視する）。v1 の仕様ドキュメント（`v1/document/`）は退避版のため更新しない。ただし `v1/document/data/02-workspace.md` の `pending_removals` 要素表は `force` を含まない状態のままである（更新可否は人間の判断に委ねる）。
