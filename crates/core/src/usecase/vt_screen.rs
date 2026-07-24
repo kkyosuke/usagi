@@ -230,7 +230,7 @@ impl VtScreen {
     /// selection layer works from this unstyled, wrap-flag-stripped grid.
     #[must_use]
     pub fn cells(&self) -> Vec<String> {
-        self.grid.iter().map(row_text).collect()
+        self.grid.iter().map(|row| row_text(row)).collect()
     }
 
     /// Returns retained scrollback followed by the complete visible grid, with
@@ -241,7 +241,7 @@ impl VtScreen {
             .scrollback
             .iter()
             .chain(&self.grid)
-            .map(row_text)
+            .map(|row| row_text(row))
             .collect();
         while rows.last().is_some_and(String::is_empty) {
             rows.pop();
@@ -611,7 +611,7 @@ impl VtScreen {
 
 /// Non-continuation characters of a row as a `String` (wide-glyph continuation
 /// cells dropped, trailing spaces kept).
-fn row_text(row: &Vec<Cell>) -> String {
+fn row_text(row: &[Cell]) -> String {
     row.iter()
         .filter(|cell| !cell.continuation)
         .map(|cell| cell.ch)
