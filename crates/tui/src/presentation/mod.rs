@@ -10354,6 +10354,42 @@ mod tests {
                 row: 0,
             },
         );
+        // A focus change or an out-of-content release after a valid press
+        // consumes the gesture without opening or copying.
+        for (release_runtime, column, row) in [(&inactive, 40, 5), (&runtime, 0, 0)] {
+            assert!(handle_terminal_pointer(
+                &ui,
+                &runtime,
+                &mut controls,
+                &mut term,
+                &mut browser,
+                20,
+                80,
+                1,
+                0,
+                PointerEvent {
+                    kind: PointerKind::Down,
+                    column: 40,
+                    row: 5,
+                },
+            ));
+            assert!(handle_terminal_pointer(
+                &ui,
+                release_runtime,
+                &mut controls,
+                &mut term,
+                &mut browser,
+                20,
+                80,
+                1,
+                0,
+                PointerEvent {
+                    kind: PointerKind::Up,
+                    column,
+                    row,
+                },
+            ));
+        }
         for column in [40, 41] {
             handle_terminal_pointer(
                 &ui,

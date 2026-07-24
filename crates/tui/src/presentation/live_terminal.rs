@@ -367,6 +367,7 @@ mod tests {
         assert_eq!(controls.release_pointer(), PointerRelease::Click);
 
         controls.press_pointer(TerminalSelection::begin(viewport, anchor));
+        assert!(controls.drag_pointer(TerminalPoint { row: 0, column: 2 }));
         assert!(controls.drag_pointer(TerminalPoint { row: 0, column: 4 }));
         assert!(controls.has_selection());
         assert!(controls.is_dragging());
