@@ -197,16 +197,17 @@ decode は **算術検証 → 予算検証 → 確保** の順に行い、途中
 
 ## 実装 issue 分割
 
-100% coverage gate 下で reviewable に保つため、次の順で PR を分割する。各 PR は緑になってから次へ進む。
+100% coverage gate 下で reviewable に保つため、次の順で PR を分割する。各 PR は緑になってから次へ進む。実装 issue は #524 を親に持ち、`dependson` で線形に連結する（#532 → #533 → #534 → #535 → #536）。
 
-1. **core: VT parser 抽出**。`TerminalScreen` の state+parser+resize を `usagi-core` の `VtScreen` へ移し、TUI は core screen を wrap して描画のみ担当。挙動不変の pure refactor（既存 test を core へ移送）。
-2. **core: checkpoint 型と bounded decode**。`ScreenCheckpoint` / `from_checkpoint` / `checkpoint` と全上限・checked 算術・typed rejection。property/fuzz test（本書 テスト #2/#4）。
-3. **daemon: grid authority**。`TerminalRegistry` に per-terminal `VtScreen` を持たせ append_output/resize で feed。revision 2 の `Snapshot.screen` 生成、frame/aggregate bound 強制、`terminal.screen-checkpoint.v1` 広告（テスト #5/#6）。
-4. **wire + tui: negotiation と reconstruct**。revision 2 negotiation、`TerminalAttach` を checkpoint 版へ、`TerminalSession::replace` を `from_checkpoint`+suffix へ、legacy fail-closed（テスト #3）。
-5. **E2E**。実 daemon + 実 PTY の reattach 一致（テスト #1）。
-6. **docs 畳み込み**。[04-ipc.md](../04-ipc.md) / [03-tui.md](../03-tui.md) を更新し、本提案を「畳み込み済み」に落とす。
+| Phase | issue | 内容 | テスト |
+|---|---|---|---|
+| 1 | [#532](../../.usagi/issues/532-refactor-core-vt-parser-usagi-core.md) | **core: VT parser 抽出**。`TerminalScreen` の state+parser+resize を `usagi-core` の `VtScreen` へ移し、TUI は core screen を wrap して描画のみ担当。挙動不変の pure refactor | 既存 test を core へ移送 |
+| 2 | [#533](../../.usagi/issues/533-feat-core-screencheckpoint-bounded-hostile-decode.md) | **core: checkpoint 型と bounded decode**。`ScreenCheckpoint` / `from_checkpoint` / `checkpoint` と全上限・checked 算術・typed rejection | #2 / #4 |
+| 3 | [#534](../../.usagi/issues/534-feat-daemon-terminal-grid-authority-revision-2-checkpoint-snapshot.md) | **daemon: grid authority**。`TerminalRegistry` に per-terminal `VtScreen` を持たせ append_output/resize で feed。revision 2 の `Snapshot.screen` 生成、frame/aggregate bound 強制、`terminal.screen-checkpoint.v1` 広告 | #5 / #6 |
+| 4 | [#535](../../.usagi/issues/535-fix-tui-checkpoint-negotiation-screen-reconstruct-legacy-fail-closed.md) | **wire + tui: negotiation と reconstruct**。revision 2 negotiation、`TerminalAttach` を checkpoint 版へ、`TerminalSession::replace` を `from_checkpoint`+suffix へ、legacy fail-closed。**この Phase で P1 correctness が解消** | #3 |
+| 5 | [#536](../../.usagi/issues/536-test-daemon-pty-reattach-checkpoint-e2e-proposal.md) | **E2E + docs 畳み込み**。実 daemon + 実 PTY の reattach 一致。[04-ipc.md](../04-ipc.md) / [03-tui.md](../03-tui.md) を更新し、本提案を「畳み込み済み」に落とす | #1 |
 
-root は committed の #524 が todo かつ生存 session が無い状態を ready 候補として扱えるため、実装は #524 を基点に本書の順で session 委譲する（必要なら Phase ごとに子 issue を起票する）。
+root は committed の #524 が todo かつ生存 session が無い状態を ready 候補として扱えるため、実装は Phase 1（#532）から `dependson` の順に session 委譲する。#524 自体は最終 Phase（#536）完了時に `done` にする。
 
 ## docs 畳み込み先
 
