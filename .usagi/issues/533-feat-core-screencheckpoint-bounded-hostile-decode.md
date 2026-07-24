@@ -1,14 +1,14 @@
 ---
 number: 533
 title: feat(core): ScreenCheckpoint 型と bounded/hostile decode
-status: todo
+status: done
 priority: high
 labels: [feat, v2, core, terminal, vt, correctness]
 dependson: [532]
 related: [524]
 parent: 524
 created_at: 2026-07-24T12:46:27.738605+00:00
-updated_at: 2026-07-24T12:46:27.738605+00:00
+updated_at: 2026-07-24T14:52:57.341569+00:00
 ---
 
 [#524](524-fix-terminal-raw-64kib-tail-vt-parser-safe-snapshot.md) の設計 [`document/proposals/12-terminal-vt-snapshot.md`](../../document/proposals/12-terminal-vt-snapshot.md) の **Phase 2**。#532 の上に構築する。
