@@ -16,6 +16,10 @@ use usagi_core::infrastructure::ipc::{
 /// the composition root and may own a generic coordinator, profile resolver,
 /// durable store and PTY adapter.
 pub trait TerminalOwner {
+    /// Handles one terminal request. `wire` is the snapshot payload this
+    /// connection negotiated, so an attach / resync / resize response carries
+    /// either the legacy raw tail or the semantic screen checkpoint — never a
+    /// payload the peer did not negotiate.
     fn request(
         &mut self,
         connection: usagi_core::domain::id::ConnectionId,
@@ -23,6 +27,7 @@ pub trait TerminalOwner {
         request_id: usagi_core::domain::id::RequestId,
         action: usagi_core::usecase::client::TerminalAction,
         payload: serde_json::Value,
+        wire: crate::usecase::terminal::SnapshotWire,
     ) -> Result<serde_json::Value, ProtocolError>;
     /// Lists the daemon-owned runtimes this owner holds in the exact requested
     /// scope. The default owner holds none; the generic terminal owner returns
@@ -238,7 +243,16 @@ pub fn handle_connection_with_terminal_and(
             {
                 match usagi_core::domain::id::RequestId::parse(&request_id.0) {
                     Ok(owner_request_id) => terminal
-                        .request(connection, client, owner_request_id, action, payload)
+                        .request(
+                            connection,
+                            client,
+                            owner_request_id,
+                            action,
+                            payload,
+                            crate::usecase::terminal::SnapshotWire::for_revision(
+                                hello.protocol.revision,
+                            ),
+                        )
                         .map(ok_response),
                     Err(_) => Err(ProtocolError::new(
                         ErrorCode::InvalidArgument,
@@ -303,9 +317,11 @@ pub fn server_protocol(
         connection_id: usagi_core::infrastructure::ipc::ConnectionId(connection_id),
         generation_role: usagi_core::infrastructure::ipc::GenerationRole::Active,
         supported_protocols: vec![usagi_core::infrastructure::ipc::ProtocolRange {
-            generation: 1,
+            generation: usagi_core::infrastructure::ipc::TERMINAL_WIRE_GENERATION,
             min_revision: 0,
-            max_revision: 1,
+            // Revision 2 adds the semantic screen checkpoint; a client that
+            // negotiates a lower revision keeps the legacy raw tail.
+            max_revision: usagi_core::infrastructure::ipc::TERMINAL_CHECKPOINT_REVISION,
         }],
         capabilities: vec![
             "request.correlation.v1".into(),
@@ -313,6 +329,7 @@ pub fn server_protocol(
             "pr.subscription.v1".into(),
             "build.artifact.v1".into(),
             "daemon.owner-identity.v1".into(),
+            usagi_core::infrastructure::ipc::TERMINAL_SCREEN_CHECKPOINT_CAPABILITY.into(),
         ],
         build,
         limits: usagi_core::infrastructure::ipc::ProtocolLimits::default(),
@@ -344,6 +361,7 @@ mod tests {
         fail: bool,
         requests: usize,
         disconnects: usize,
+        wires: Vec<crate::usecase::terminal::SnapshotWire>,
     }
     impl TerminalOwner for RecordingTerminal {
         fn request(
@@ -353,8 +371,10 @@ mod tests {
             _: usagi_core::domain::id::RequestId,
             _: usagi_core::usecase::client::TerminalAction,
             _: serde_json::Value,
+            wire: crate::usecase::terminal::SnapshotWire,
         ) -> Result<serde_json::Value, ProtocolError> {
             self.requests += 1;
+            self.wires.push(wire);
             if self.fail {
                 Err(ProtocolError::new(
                     ErrorCode::Unavailable,
@@ -511,6 +531,71 @@ mod tests {
                 ..
             } if body.is_null()
         ));
+    }
+
+    #[test]
+    fn the_negotiated_revision_advertises_and_selects_the_checkpoint_wire() {
+        use crate::usecase::terminal::SnapshotWire;
+        use usagi_core::infrastructure::ipc::{
+            TERMINAL_CHECKPOINT_REVISION, TERMINAL_SCREEN_CHECKPOINT_CAPABILITY,
+            TERMINAL_WIRE_GENERATION,
+        };
+
+        // The daemon advertises the checkpoint capability and revision 2.
+        let server = server();
+        assert!(
+            server
+                .capabilities
+                .iter()
+                .any(|capability| capability == TERMINAL_SCREEN_CHECKPOINT_CAPABILITY)
+        );
+        assert_eq!(
+            server.supported_protocols,
+            vec![ProtocolRange {
+                generation: TERMINAL_WIRE_GENERATION,
+                min_revision: 0,
+                max_revision: TERMINAL_CHECKPOINT_REVISION,
+            }]
+        );
+
+        // A revision 1 client keeps the raw tail; a revision 2 client gets the
+        // checkpoint wire. Both are served by the same daemon.
+        for (client_max, expected_revision, expected_wire) in [
+            (1, 1, SnapshotWire::RawTail),
+            (
+                TERMINAL_CHECKPOINT_REVISION,
+                TERMINAL_CHECKPOINT_REVISION,
+                SnapshotWire::ScreenCheckpoint,
+            ),
+        ] {
+            let Bootstrap::ClientHello(mut client) = hello() else {
+                panic!("fixture client hello");
+            };
+            client.supported_protocols = vec![ProtocolRange {
+                generation: TERMINAL_WIRE_GENERATION,
+                min_revision: 0,
+                max_revision: client_max,
+            }];
+            let mut request =
+                terminal_request(usagi_core::domain::id::RequestId::new().to_string());
+            request.protocol = ProtocolVersion {
+                generation: TERMINAL_WIRE_GENERATION,
+                revision: expected_revision,
+            };
+            let mut input = Vec::new();
+            write_json_frame(&mut input, &Bootstrap::ClientHello(client), 1024).unwrap();
+            write_json_frame(&mut input, &request, 1024).unwrap();
+            let mut terminal = RecordingTerminal::default();
+            handle_connection_with_terminal_and(
+                &mut Cursor::new(input),
+                &mut Vec::new(),
+                &server,
+                &mut terminal,
+                &mut test_dispatch,
+            )
+            .unwrap();
+            assert_eq!(terminal.wires, vec![expected_wire]);
+        }
     }
 
     #[test]

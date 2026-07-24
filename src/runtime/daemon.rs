@@ -77,7 +77,8 @@ use usagi_daemon::usecase::supervisor_runtime::{
     DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime,
 };
 use usagi_daemon::usecase::terminal::{
-    Geometry, Output, PtyWriteError, PtyWriter, SpawnFailure, output_pipeline_counters,
+    Geometry, Output, PtyWriteError, PtyWriter, SnapshotWire, SpawnFailure,
+    output_pipeline_counters,
 };
 use usagi_daemon::usecase::terminal_ipc::{
     GenericTerminalRuntime, ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
@@ -558,6 +559,7 @@ impl AgentTerminalActor for SharedAgent {
         request_id: usagi_core::domain::id::RequestId,
         action: usagi_core::usecase::client::TerminalAction,
         request: usagi_core::usecase::client::TerminalRequest,
+        wire: SnapshotWire,
     ) -> TerminalOutcome {
         match self.0.lock() {
             Ok(mut agent) => AgentTerminalActor::handle_terminal(
@@ -567,6 +569,7 @@ impl AgentTerminalActor for SharedAgent {
                 request_id,
                 action,
                 request,
+                wire,
             ),
             Err(_) => {
                 TerminalOutcome::Handled(Err(usagi_core::infrastructure::ipc::ProtocolError::new(
@@ -1109,6 +1112,7 @@ impl usagi_daemon::presentation::ipc::TerminalOwner for SharedTerminal {
         request_id: usagi_core::domain::id::RequestId,
         action: usagi_core::usecase::client::TerminalAction,
         payload: serde_json::Value,
+        wire: SnapshotWire,
     ) -> Result<serde_json::Value, usagi_core::infrastructure::ipc::ProtocolError> {
         self.0
             .lock()
@@ -1118,7 +1122,7 @@ impl usagi_daemon::presentation::ipc::TerminalOwner for SharedTerminal {
                     "terminal owner is unavailable",
                 )
             })?
-            .request(connection, client, request_id, action, payload)
+            .request(connection, client, request_id, action, payload, wire)
     }
     fn inventory(
         &self,
@@ -6942,6 +6946,7 @@ mod tests {
                     RequestId::new(),
                     TerminalAction::Launch,
                     serde_json::to_value(TerminalRequest::Launch { intent: launch }).unwrap(),
+                    SnapshotWire::RawTail,
                 )
                 .unwrap()["terminal"]
                 .clone(),
@@ -6959,6 +6964,7 @@ mod tests {
                     terminal: terminal.clone(),
                 })
                 .unwrap(),
+                SnapshotWire::RawTail,
             )
             .unwrap()["subscription"]
             .as_u64()
@@ -7001,6 +7007,7 @@ mod tests {
                     RequestId::new(),
                     action,
                     serde_json::to_value(request).unwrap(),
+                    SnapshotWire::RawTail,
                 )
             })
         })
@@ -7028,6 +7035,7 @@ mod tests {
                     terminal: terminal.clone(),
                 })
                 .unwrap(),
+                SnapshotWire::RawTail,
             )
             .unwrap()["subscription"]
             .as_u64()
@@ -7047,6 +7055,7 @@ mod tests {
                     bytes: b"exit\n".to_vec(),
                 })
                 .unwrap(),
+                SnapshotWire::RawTail,
             )
             .unwrap();
 
@@ -7065,6 +7074,7 @@ mod tests {
                         after_offset: 0,
                     })
                     .unwrap(),
+                    SnapshotWire::RawTail,
                 )
                 .unwrap();
             if response["exited"] == true {
@@ -7174,6 +7184,7 @@ mod tests {
                         },
                     })
                     .unwrap(),
+                    SnapshotWire::RawTail,
                 )
                 .unwrap()["terminal"]
                 .clone(),
@@ -7242,6 +7253,7 @@ mod tests {
                     RequestId::new(),
                     action,
                     serde_json::to_value(request).unwrap(),
+                    SnapshotWire::RawTail,
                 )
                 .unwrap_err();
             assert_eq!(
@@ -7265,6 +7277,7 @@ mod tests {
                         },
                     })
                     .unwrap(),
+                    SnapshotWire::RawTail,
                 )
                 .unwrap()["terminal"]
                 .clone(),

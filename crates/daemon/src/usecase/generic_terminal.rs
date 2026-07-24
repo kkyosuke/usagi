@@ -266,8 +266,21 @@ impl GenericTerminalCoordinator {
         terminal: &TerminalRef,
     ) -> Result<Snapshot, GenericTerminalError> {
         self.record(terminal)?;
+        // The registry's typed failure is preserved: a fencing failure and a
+        // screen that does not fit one frame are different client contracts.
         self.terminals
             .snapshot(terminal)
+            .map_err(GenericTerminalError::Terminal)
+    }
+    /// The committed exit status without capturing a screen, for the incremental
+    /// `Resume` path.
+    pub fn terminal_exit_status(
+        &self,
+        terminal: &TerminalRef,
+    ) -> Result<Option<i32>, GenericTerminalError> {
+        self.record(terminal)?;
+        self.terminals
+            .exit_status(terminal)
             .map_err(|_| GenericTerminalError::TerminalGenerationMismatch)
     }
     /// Atomically takes a snapshot and assigns a connection-owned subscription.
@@ -1078,6 +1091,10 @@ mod tests {
         let stale = coordinator.records[&key].terminal.clone();
         assert_eq!(
             coordinator.terminal_snapshot(&stale),
+            Err(GenericTerminalError::Terminal(RegistryError::StaleTarget))
+        );
+        assert_eq!(
+            coordinator.terminal_exit_status(&stale),
             Err(GenericTerminalError::TerminalGenerationMismatch)
         );
     }

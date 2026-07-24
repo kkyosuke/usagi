@@ -22,7 +22,10 @@ use usagi_core::{
         },
     },
     infrastructure::ipc::{ErrorCode, ProtocolError},
-    usecase::client::{TerminalAction, TerminalGeometry, TerminalRequest},
+    usecase::{
+        client::{TerminalAction, TerminalGeometry, TerminalRequest},
+        vt_screen::{COLS_MAX, ROWS_MAX},
+    },
 };
 
 use crate::presentation::ipc::TerminalOwner;
@@ -32,7 +35,7 @@ use super::{
         GenericPtySpawner, GenericTerminalCoordinator, GenericTerminalError,
         TerminalProfileResolver, TerminalStore,
     },
-    terminal::{Geometry, InputRequest, PtyWriter, RegistryError},
+    terminal::{Geometry, InputRequest, PtyWriter, RegistryError, SnapshotWire},
 };
 
 /// Injected process boundary used by the runtime.  It is intentionally the
@@ -168,6 +171,7 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
         request_id: RequestId,
         action: TerminalAction,
         payload: Value,
+        wire: SnapshotWire,
     ) -> Result<Value, ProtocolError> {
         let request: TerminalRequest = serde_json::from_value(payload).map_err(|_| {
             ProtocolError::new(
@@ -231,7 +235,7 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
             (TerminalAction::Attach, TerminalRequest::Attach { terminal }) => self
                 .coordinator
                 .attach(&terminal, connection)
-                .map(|attached| json!(attached))
+                .map(|attached| json!(attached.into_frame(wire)))
                 .map_err(map_error),
             (
                 TerminalAction::Resume,
@@ -244,18 +248,19 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
                     .coordinator
                     .replay_from(&terminal, after_offset)
                     .map_err(map_error)?;
+                // Liveness only: an incremental poll must not pay for a
+                // screen capture.
                 let exited = self
                     .coordinator
-                    .terminal_snapshot(&terminal)
+                    .terminal_exit_status(&terminal)
                     .map_err(map_error)?
-                    .exited
                     .is_some();
                 Ok(json!({"output": output, "exited": exited}))
             }
             (TerminalAction::Resync, TerminalRequest::Resync { terminal }) => self
                 .coordinator
                 .terminal_snapshot(&terminal)
-                .map(|snapshot| json!(snapshot))
+                .map(|snapshot| json!(snapshot.into_frame(wire)))
                 .map_err(map_error),
             (
                 TerminalAction::Resize,
@@ -267,7 +272,7 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
                 let geometry = geometry(size)?;
                 self.coordinator
                     .resize(&terminal, geometry, &mut self.pty)
-                    .map(|snapshot| json!(snapshot))
+                    .map(|snapshot| json!(snapshot.into_frame(wire)))
                     .map_err(map_error)
             }
             (
@@ -343,8 +348,17 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q>
     }
 }
 
-fn geometry(value: TerminalGeometry) -> Result<Geometry, ProtocolError> {
-    (value.cols > 0 && value.rows > 0)
+/// Validates a requested geometry before it reaches a PTY or a decoded grid.
+///
+/// The daemon now allocates one screen per terminal, so an absurd geometry is a
+/// memory amplifier: dimensions are bounded by the checkpoint's `ROWS_MAX` /
+/// `COLS_MAX` and rejected rather than silently clamped.
+pub(super) fn geometry(value: TerminalGeometry) -> Result<Geometry, ProtocolError> {
+    let bounded = value.cols > 0
+        && value.rows > 0
+        && u32::from(value.rows) <= ROWS_MAX
+        && u32::from(value.cols) <= COLS_MAX;
+    bounded
         .then_some(Geometry {
             cols: value.cols,
             rows: value.rows,
@@ -352,7 +366,7 @@ fn geometry(value: TerminalGeometry) -> Result<Geometry, ProtocolError> {
         .ok_or_else(|| {
             ProtocolError::new(
                 ErrorCode::InvalidArgument,
-                "terminal geometry must be non-zero",
+                "terminal geometry must be non-zero and within the supported bounds",
             )
         })
 }
@@ -367,6 +381,11 @@ fn map_error(error: GenericTerminalError) -> ProtocolError {
         GenericTerminalError::Terminal(RegistryError::ResyncRequired) => ErrorCode::ResyncRequired,
         GenericTerminalError::Terminal(RegistryError::PtyResizeFailed)
         | GenericTerminalError::SpawnFailed => ErrorCode::Unavailable,
+        // The screen does not fit one frame: no partial screen is emitted and
+        // the client keeps its current state until a retry succeeds.
+        GenericTerminalError::Terminal(RegistryError::CheckpointUnavailable) => {
+            ErrorCode::ResourceExhausted
+        }
         GenericTerminalError::UnknownTerminal
         | GenericTerminalError::TerminalGenerationMismatch
         | GenericTerminalError::Terminal(_) => ErrorCode::StaleTarget,
@@ -509,6 +528,23 @@ mod tests {
         action: TerminalAction,
         request: TerminalRequest,
     ) -> Value {
+        call_on_wire(
+            runtime,
+            connection,
+            client,
+            action,
+            request,
+            SnapshotWire::RawTail,
+        )
+    }
+    fn call_on_wire(
+        runtime: &mut GenericTerminalRuntime<Resolver, Store, Pty, Scope>,
+        connection: ConnectionId,
+        client: ClientId,
+        action: TerminalAction,
+        request: TerminalRequest,
+        wire: SnapshotWire,
+    ) -> Value {
         runtime
             .request(
                 connection,
@@ -516,6 +552,7 @@ mod tests {
                 RequestId::new(),
                 action,
                 serde_json::to_value(request).unwrap(),
+                wire,
             )
             .unwrap()
     }
@@ -598,6 +635,7 @@ mod tests {
                         },
                     })
                     .unwrap(),
+                    SnapshotWire::RawTail,
                 )
                 .unwrap_err();
             assert_eq!(error.code, ErrorCode::StaleTarget, "forged {field}");
@@ -625,6 +663,7 @@ mod tests {
                     },
                 })
                 .unwrap(),
+                SnapshotWire::RawTail,
             )
             .unwrap_err();
 
@@ -665,9 +704,31 @@ mod tests {
                     },
                 })
                 .unwrap(),
+                SnapshotWire::RawTail,
             )
         });
         started_rx.recv().unwrap();
+
+        // A screen capture cannot interleave with the resize either: the attach
+        // blocks until geometry, revision and screen are committed together.
+        let attach_runtime = Arc::clone(&runtime);
+        let attach_terminal = terminal.clone();
+        let (attach_tx, attach_rx) = mpsc::sync_channel(0);
+        let attach = std::thread::spawn(move || {
+            let attached = attach_runtime.lock().unwrap().request(
+                ConnectionId::new(),
+                ClientId::new(),
+                RequestId::new(),
+                TerminalAction::Attach,
+                serde_json::to_value(TerminalRequest::Attach {
+                    terminal: attach_terminal,
+                })
+                .unwrap(),
+                SnapshotWire::ScreenCheckpoint,
+            );
+            attach_tx.send(attached).unwrap();
+        });
+        assert!(attach_rx.recv_timeout(Duration::from_millis(50)).is_err());
 
         let exit_runtime = Arc::clone(&runtime);
         let exit_terminal = terminal.clone();
@@ -683,6 +744,18 @@ mod tests {
             resize.join().unwrap().unwrap()["geometry"],
             json!({"cols":100,"rows":40})
         );
+        // The captured screen is the post-resize one, never a mix of the two.
+        let attached = attach_rx.recv().unwrap().unwrap();
+        assert_eq!(
+            attached["snapshot"]["geometry"],
+            json!({"cols":100,"rows":40})
+        );
+        assert_eq!(
+            attached["snapshot"]["screen"]["geometry"],
+            json!({"cols":100,"rows":40})
+        );
+        assert_eq!(attached["snapshot"]["revision"], 1);
+        attach.join().unwrap();
         exit_rx.recv().unwrap().unwrap();
         exit.join().unwrap();
         let runtime = runtime.lock().unwrap();
@@ -821,6 +894,7 @@ mod tests {
                     geometry: TerminalGeometry { cols: 80, rows: 24 },
                 })
                 .unwrap(),
+                SnapshotWire::RawTail,
             )
             .unwrap_err();
         assert_eq!(late_resize.code, ErrorCode::StaleTarget);
@@ -837,6 +911,7 @@ mod tests {
                     bytes: b"late\n".to_vec(),
                 })
                 .unwrap(),
+                SnapshotWire::RawTail,
             )
             .unwrap_err();
         assert_eq!(late_input.code, ErrorCode::StaleTarget);
@@ -905,6 +980,7 @@ mod tests {
                     },
                 })
                 .unwrap(),
+                SnapshotWire::RawTail,
             )
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidArgument);
@@ -942,11 +1018,152 @@ mod tests {
                         },
                     })
                     .unwrap(),
+                    SnapshotWire::RawTail,
                 )
                 .unwrap_err()
                 .code,
             ErrorCode::InvalidArgument
         );
+    }
+
+    #[test]
+    fn attach_resync_and_resize_follow_the_negotiated_snapshot_revision() {
+        let (mut runtime, terminal) = launched_runtime();
+        let connection = ConnectionId::new();
+        let client = ClientId::new();
+        runtime
+            .output(&terminal, b"\x1b[1mbold\x1b[0m plain\r\nsecond".to_vec())
+            .unwrap();
+
+        // Revision 1 keeps the raw tail and its `[base_offset, output_offset)`
+        // window; no checkpoint is put on that connection's wire.
+        let legacy = call_on_wire(
+            &mut runtime,
+            connection,
+            client,
+            TerminalAction::Attach,
+            TerminalRequest::Attach {
+                terminal: terminal.clone(),
+            },
+            SnapshotWire::RawTail,
+        );
+        let legacy_snapshot = &legacy["snapshot"];
+        assert!(legacy_snapshot["replay"].is_array());
+        assert!(legacy_snapshot["screen"].is_null());
+        assert_eq!(
+            legacy_snapshot["base_offset"].as_u64().unwrap()
+                + legacy_snapshot["replay"].as_array().unwrap().len() as u64,
+            legacy_snapshot["output_offset"].as_u64().unwrap()
+        );
+
+        // Revision 2 carries the semantic screen instead, with no tail.
+        for (action, request) in [
+            (
+                TerminalAction::Attach,
+                TerminalRequest::Attach {
+                    terminal: terminal.clone(),
+                },
+            ),
+            (
+                TerminalAction::Resync,
+                TerminalRequest::Resync {
+                    terminal: terminal.clone(),
+                },
+            ),
+            (
+                TerminalAction::Resize,
+                TerminalRequest::Resize {
+                    terminal: terminal.clone(),
+                    geometry: TerminalGeometry { cols: 40, rows: 12 },
+                },
+            ),
+        ] {
+            let response = call_on_wire(
+                &mut runtime,
+                connection,
+                client,
+                action,
+                request,
+                SnapshotWire::ScreenCheckpoint,
+            );
+            let snapshot = response.get("snapshot").unwrap_or(&response);
+            assert!(snapshot["replay"].is_null(), "no raw tail on revision 2");
+            assert_eq!(
+                snapshot["screen"]["schema_version"].as_u64(),
+                Some(u64::from(usagi_core::usecase::vt_screen::SCHEMA_VERSION))
+            );
+            assert_eq!(snapshot["base_offset"], snapshot["output_offset"]);
+            // The envelope geometry and the screen it carries always agree.
+            assert_eq!(
+                snapshot["geometry"]["rows"].as_u64(),
+                snapshot["screen"]["geometry"]["rows"].as_u64()
+            );
+            assert_eq!(
+                snapshot["geometry"]["cols"].as_u64(),
+                snapshot["screen"]["geometry"]["cols"].as_u64()
+            );
+        }
+
+        // Resume stays incremental on both revisions: raw suffix plus liveness.
+        let resumed = call_on_wire(
+            &mut runtime,
+            connection,
+            client,
+            TerminalAction::Resume,
+            TerminalRequest::Resume {
+                terminal,
+                after_offset: 0,
+            },
+            SnapshotWire::ScreenCheckpoint,
+        );
+        assert!(resumed["output"].is_array());
+        assert_eq!(resumed["exited"], false);
+    }
+
+    #[test]
+    fn a_geometry_beyond_the_screen_bounds_is_rejected_before_any_effect() {
+        let (mut runtime, terminal) = launched_runtime();
+        for size in [
+            TerminalGeometry { cols: 1, rows: 0 },
+            TerminalGeometry { cols: 0, rows: 1 },
+            TerminalGeometry {
+                cols: 1,
+                rows: u16::try_from(ROWS_MAX).unwrap() + 1,
+            },
+            TerminalGeometry {
+                cols: u16::try_from(COLS_MAX).unwrap() + 1,
+                rows: 1,
+            },
+        ] {
+            assert_eq!(
+                runtime
+                    .request(
+                        ConnectionId::new(),
+                        ClientId::new(),
+                        RequestId::new(),
+                        TerminalAction::Resize,
+                        serde_json::to_value(TerminalRequest::Resize {
+                            terminal: terminal.clone(),
+                            geometry: size,
+                        })
+                        .unwrap(),
+                        SnapshotWire::RawTail,
+                    )
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidArgument,
+                "geometry {size:?}"
+            );
+        }
+        // The largest supported geometry is accepted.
+        assert!(
+            geometry(TerminalGeometry {
+                cols: u16::try_from(COLS_MAX).unwrap(),
+                rows: u16::try_from(ROWS_MAX).unwrap(),
+            })
+            .is_ok()
+        );
+        assert!(runtime.pty.resized.is_empty());
     }
 
     #[test]
@@ -1018,6 +1235,7 @@ mod tests {
                 RequestId::new(),
                 TerminalAction::Attach,
                 json!({"unknown": true}),
+                SnapshotWire::RawTail,
             )
             .unwrap_err();
         assert_eq!(malformed.code, ErrorCode::InvalidArgument);
@@ -1028,6 +1246,7 @@ mod tests {
                 RequestId::new(),
                 TerminalAction::Launch,
                 serde_json::to_value(TerminalRequest::Attach { terminal }).unwrap(),
+                SnapshotWire::RawTail,
             )
             .unwrap_err();
         assert_eq!(mismatch.code, ErrorCode::InvalidArgument);
@@ -1039,6 +1258,7 @@ mod tests {
         );
 
         let errors = [
+            GenericTerminalError::Terminal(RegistryError::CheckpointUnavailable),
             GenericTerminalError::Terminal(RegistryError::PtyResizeFailed),
             GenericTerminalError::SpawnFailed,
             GenericTerminalError::UnknownTerminal,
@@ -1053,6 +1273,7 @@ mod tests {
             GenericTerminalError::TerminalAlreadyExists,
         ];
         let expected = [
+            ErrorCode::ResourceExhausted,
             ErrorCode::Unavailable,
             ErrorCode::Unavailable,
             ErrorCode::StaleTarget,
