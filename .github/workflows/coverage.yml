@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
 
     # exclusion lint と閾値は scripts/coverage.sh を SSoT とする。
     - name: Load coverage config (SSoT)
