@@ -873,6 +873,8 @@ mod tests {
                 target: Some(target),
                 available: true,
                 reason: ProviderResumeReason::ExplicitResumeAvailable,
+                provider: Some(usagi_core::domain::agent::ProviderKind::Claude),
+                last_known_phase: None,
             }],
         };
         assert!(

@@ -619,11 +619,21 @@ impl AgentRuntime {
             .map(|record| {
                 let target = resume_target(record);
                 let (available, reason) = self.resume_source_availability(record, &records);
+                // Only the closed provider/phase vocabulary is projected. The
+                // provider-native ID stays inside the durable record.
                 AgentResumableInventoryItem {
                     runtime_id: record.runtime.agent_runtime_id,
                     target,
                     available,
                     reason,
+                    provider: record
+                        .provider_resume
+                        .as_ref()
+                        .map(|reference| reference.provider),
+                    last_known_phase: record
+                        .provider_resume
+                        .as_ref()
+                        .and_then(|reference| reference.last_known_phase),
                 }
             })
             .collect();
@@ -3236,6 +3246,39 @@ mod tests {
                 })
                 .count(),
             3
+        );
+        // The safe provider vocabulary lets a client label an interrupted tab
+        // per provider; it is absent exactly when no metadata was retained, and
+        // it never travels with the provider-native ID.
+        assert_eq!(
+            inventory
+                .resumable
+                .iter()
+                .filter(|item| item.provider == Some(ProviderKind::Claude))
+                .count(),
+            3
+        );
+        assert_eq!(
+            inventory
+                .resumable
+                .iter()
+                .filter(|item| item.provider == Some(ProviderKind::Codex))
+                .count(),
+            1
+        );
+        assert_eq!(
+            inventory
+                .resumable
+                .iter()
+                .filter(|item| item.provider.is_none())
+                .count(),
+            1
+        );
+        assert!(
+            inventory
+                .resumable
+                .iter()
+                .all(|item| item.provider.is_some() == item.available)
         );
         let encoded = serde_json::to_string(&inventory).unwrap();
         assert!(!encoded.contains("inventory-codex-session"));

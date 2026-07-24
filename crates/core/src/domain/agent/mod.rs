@@ -379,6 +379,14 @@ pub struct AgentResumableInventoryItem {
     pub target: Option<AgentResumeTarget>,
     pub available: bool,
     pub reason: ProviderResumeReason,
+    /// Code-defined provider owning the retained conversation. It is display
+    /// vocabulary only and is absent when no provider metadata was retained;
+    /// the provider-native ID never accompanies it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderKind>,
+    /// Last durable non-sensitive phase, when one was retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_known_phase: Option<ProviderResumePhase>,
 }
 
 /// Safe state of one durable Agent runtime in workspace-wide inventory.
