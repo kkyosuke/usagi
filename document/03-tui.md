@@ -542,7 +542,7 @@ viewport に必要な行 window だけを右ペインへ投影するため、scr
 live の input cursor は現在セルを反転して表示する。output offset に gap があるとき、または daemon が
 resync を要求したときは local に継ぎ足さず、daemon の atomic snapshot（再 attach）で置き換えて、その後の出力取得を継続する。
 
-`Resume`（poll）と `Resize` は、attach / input を運ぶ接続とは別の**専用接続**で送り、その接続には 1 リクエストごとの read deadline を張る。両者は daemon 側で接続にも subscription にも紐づかない stateless な操作なので分離でき、daemon が一時的に応答できない間（例: dispatch 中に agent lock を保持している間）も poll は deadline で打ち切られ、描画ループが同期 IPC の応答待ちで固まらない。deadline で socket が desync するため poll 接続はエラー時に破棄して次回張り直す。attach / input / detach は従来どおり単一接続に載せ、この接続が返す `connection_epoch` だけを session に報告するため、poll 接続の破棄・再接続は input の subscription・exactly-once ledger・input sequence に影響しない。
+`Resume`（poll）は**描画スレッドでは行わない**。専用接続を持つ背景スレッド（poll pump）が、attach 済みの各 terminal を継続的に fetch して per-terminal の read-ahead バッファへ積み、描画スレッドは redraw ごとにそのバッファを**非ブロッキングに drain** するだけである。daemon が一時的に応答できない間（例: dispatch 中に agent lock を保持している間）に固まるのは背景スレッドの fetch だけで、描画・入力ループは即座に応答を続ける。attach で得た output offset を pump に登録し、再 attach（reconnect / resync）では新しい snapshot offset で登録し直してバッファと fetch offset をリセットする。`Resume` は daemon 側で接続にも subscription にも紐づかない stateless な操作なので、この専用接続の破棄・再接続は input の subscription・exactly-once ledger・input sequence に影響しない。`Resize` は attach / input とは別の deadline 付き接続で送る（低頻度なので描画スレッドから同期送信でよい）。attach / input / detach は従来どおり単一接続に載せ、この接続が返す `connection_epoch` だけを session に報告する。
 
 terminal pane の接続状態と footer feedback は `TerminalSession` の状態をそのまま投影する。
 
