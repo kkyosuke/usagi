@@ -12,6 +12,7 @@ use usagi_tui::usecase::application::EntryScreen;
 use super::{daemon, tui};
 
 #[coverage(off)]
+#[allow(clippy::too_many_lines)] // typed outcome を各実行面へ接続する 1 か所の dispatch。分割せず一望する。
 pub(crate) fn dispatch(
     args: Vec<std::ffi::OsString>,
     out: &mut dyn Write,
@@ -93,6 +94,11 @@ pub(crate) fn dispatch(
             }
         }
         RunOutcome::GuardWorkspace => guard_workspace(out),
+        RunOutcome::ClaudeSandbox {
+            mode,
+            writable_roots,
+            command,
+        } => claude_sandbox(&mode, writable_roots, &command, err),
         RunOutcome::DaemonRequest(request) => match daemon::client(ClientPolicy::cli()) {
             Ok(mut client) => write_daemon_outcome(client.request(request), out, err),
             Err(error) => {
@@ -124,6 +130,96 @@ fn guard_workspace(out: &mut dyn Write) -> std::io::Result<ExitCode> {
     let stdin = std::io::stdin();
     usagi_cli::cli::hooks::guard_workspace::evaluate(&mut stdin.lock(), out)?;
     Ok(ExitCode::SUCCESS)
+}
+
+// fail-closed な OS sandbox 内で Claude を起動する合成の縁。実 cwd / home の解決・macOS の
+// 継承 sandbox 判定・実プロセス起動を束ね、純粋な組み立て（run_in / platform_command）へ委ねる。
+// sandbox を用意できなければ Claude を無保護で起動せず FAILURE を返す。
+#[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=canonical_roots_resolve_symlinks_dedupe_and_reject_missing_paths
+fn claude_sandbox(
+    mode: &str,
+    mut writable_roots: Vec<std::path::PathBuf>,
+    command: &[std::ffi::OsString],
+    err: &mut dyn Write,
+) -> std::io::Result<ExitCode> {
+    use usagi_cli::cli::sandbox;
+
+    let result = (|| -> Result<(), String> {
+        // mode 文字列を検証する（session / root 以外は fail-closed で拒否）。cwd の扱いはどちらも同じ。
+        sandbox::Mode::parse(mode)?;
+        let cwd =
+            std::env::current_dir().map_err(|e| format!("failed to resolve sandbox cwd: {e}"))?;
+        // Claude は credential / 会話を、hook / MCP は usagi の state をここに書く。通常の一時領域も
+        // socket / lock / 一時ファイルのため writable にする。
+        let home =
+            dirs::home_dir().ok_or_else(|| "cannot resolve the home directory".to_string())?;
+        let claude_state = home.join(".claude");
+        std::fs::create_dir_all(&claude_state)
+            .map_err(|e| format!("failed to prepare Claude's sandbox state directory: {e}"))?;
+        writable_roots.push(claude_state);
+        writable_roots.push(home.join(".usagi"));
+        writable_roots.extend(sandbox::writable_temp_roots());
+        #[cfg(target_os = "macos")]
+        writable_roots.extend(sandbox::macos_keychain_roots(&home)?);
+        // cwd（session mode では session worktree、root mode では project root）は意図した作業領域。
+        writable_roots.push(cwd);
+
+        // usagi 自身が既に macOS sandbox 内で動いている場合、子は親の policy を継承するため、
+        // 二重に profile を張れない。その場合だけ Claude を直接起動して親の境界を保つ。
+        #[cfg(target_os = "macos")]
+        if macos_inherits_sandbox()? {
+            return run_inside_inherited_sandbox(command);
+        }
+
+        let writable_roots = sandbox::canonical_roots(writable_roots)?;
+        let plan = sandbox::platform_command(&writable_roots, command)?;
+        let status = std::process::Command::new(&plan.program)
+            .args(&plan.args)
+            .status()
+            .map_err(|e| format!("failed to start OS sandbox {}: {e}", plan.program.display()))?;
+        if !status.success() {
+            return Err(format!("sandboxed Claude exited with {status}"));
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => Ok(ExitCode::SUCCESS),
+        Err(error) => {
+            writeln!(err, "Claude sandbox refused: {error}")?;
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
+/// 現在のプロセスが既に macOS Seatbelt profile を持ち、nested な `sandbox-exec` を拒否するか。
+#[cfg(target_os = "macos")]
+#[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=nested_sandbox_probe_accepts_only_the_known_seatbelt_rejection
+fn macos_inherits_sandbox() -> Result<bool, String> {
+    let output = std::process::Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+        .output()
+        .map_err(|e| format!("failed to probe the macOS Claude sandbox: {e}"))?;
+    Ok(!output.status.success()
+        && usagi_cli::cli::sandbox::is_nested_sandbox_rejection(&output.stderr))
+}
+
+/// 親 profile を継承する子プロセスとして、二重 profile 無しで Claude を起動する。
+#[cfg(target_os = "macos")]
+#[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=macos_profile_allows_only_canonical_write_roots
+fn run_inside_inherited_sandbox(command: &[std::ffi::OsString]) -> Result<(), String> {
+    let (program, args) = command
+        .split_first()
+        .ok_or_else(|| "Claude sandbox refused an empty command".to_string())?;
+    let status = std::process::Command::new(program)
+        .args(args)
+        .status()
+        .map_err(|e| format!("failed to start Claude inside the inherited macOS sandbox: {e}"))?;
+    if !status.success() {
+        return Err(format!(
+            "Claude inside the inherited macOS sandbox exited with {status}"
+        ));
+    }
+    Ok(())
 }
 
 #[coverage(off)] // coverage: reason=composition owner=root-cli expires=2027-01-31 tests=cli_daemon_reply_contract_maps_stdout_stderr_and_exit_code

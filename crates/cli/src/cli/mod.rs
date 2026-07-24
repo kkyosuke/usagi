@@ -13,6 +13,7 @@
 
 pub mod commands;
 pub mod hooks;
+pub mod sandbox;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -60,6 +61,16 @@ pub enum RunOutcome {
     /// Claude `PreToolUse` hook の payload を stdin から読み、worktree を出る
     /// ツール呼び出しなら deny 判定を stdout へ書く。判定は純粋（daemon 不要）。
     GuardWorkspace,
+    /// fail-closed な platform OS sandbox 内で `command` を起動する。`writable_roots` と
+    /// 起動 cwd 以外への書き込みを OS が拒否する。backend 不在・未対応 platform では起動を拒否する。
+    ClaudeSandbox {
+        /// `session` / `root`。cwd を writable にする点は同じ（呼び出し側が writable root を渡す）。
+        mode: String,
+        /// 追加で canonicalize して writable にする root。
+        writable_roots: Vec<PathBuf>,
+        /// sandbox 内で実行するコマンドと引数。
+        command: Vec<OsString>,
+    },
     /// A managed session mutation to be sent by the composition root through
     /// the daemon client. It deliberately is not executed against local state.
     DaemonRequest(DaemonRequest),
@@ -160,6 +171,19 @@ pub enum Command {
     /// （ヘルプ非表示・内部）worktree の外へ出るツール呼び出しを拒否する（`PreToolUse` フックが呼ぶ）
     #[command(hide = true)]
     GuardWorkspace,
+    /// （ヘルプ非表示・内部）fail-closed な OS sandbox 内で Claude を起動する
+    #[command(hide = true)]
+    ClaudeSandbox {
+        /// `session` は cwd を、`root` は project root を writable にする
+        #[arg(long)]
+        mode: String,
+        /// 追加で canonicalize して writable にする root
+        #[arg(long = "writable-root")]
+        writable_roots: Vec<PathBuf>,
+        /// sandbox 内で実行するコマンドと引数（`--` の後ろ）
+        #[arg(last = true, required = true)]
+        command: Vec<OsString>,
+    },
 }
 
 /// daemon control plane が受理する閉じた lifecycle verb。
@@ -254,6 +278,15 @@ impl Command {
             Command::AgentPhase { phase } => Box::new(hooks::AgentPhase { phase }),
             Command::CodexSessionCapture => Box::new(hooks::CodexSessionCapture),
             Command::GuardWorkspace => Box::new(hooks::GuardWorkspace),
+            Command::ClaudeSandbox {
+                mode,
+                writable_roots,
+                command,
+            } => Box::new(sandbox::ClaudeSandbox {
+                mode,
+                writable_roots,
+                command,
+            }),
         }
     }
 }
