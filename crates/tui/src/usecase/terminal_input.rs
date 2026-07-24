@@ -448,11 +448,51 @@ fn function_key_bytes(number: u8) -> Vec<u8> {
     }
 }
 
+/// Bracketed-paste start marker (DECSET 2004). A program that requested the mode
+/// treats everything up to [`PASTE_END`] as one paste.
+const PASTE_START: &str = "\x1b[200~";
+/// Bracketed-paste end marker (DECSET 2004).
+const PASTE_END: &str = "\x1b[201~";
+
+/// Wrap a paste payload in bracketed-paste markers so a program that enabled
+/// bracketed paste (agent CLIs such as `claude` / `codex`) inserts the
+/// multi-line text as one block instead of submitting on every embedded newline.
+///
+/// Any [`PASTE_END`] marker inside `text` is removed first: leaving it in would
+/// let pasted content close the paste early and have its tail run as live
+/// keystrokes (paste injection), so — like real terminals — the embedded
+/// terminator is neutralised.
+#[must_use]
+pub fn encode_bracketed_paste(text: &str) -> Vec<u8> {
+    let body = text.replace(PASTE_END, "");
+    let mut out = Vec::with_capacity(PASTE_START.len() + body.len() + PASTE_END.len());
+    out.extend_from_slice(PASTE_START.as_bytes());
+    out.extend_from_slice(body.as_bytes());
+    out.extend_from_slice(PASTE_END.as_bytes());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const T0: Duration = Duration::ZERO;
+
+    #[test]
+    fn bracketed_paste_wraps_a_multi_line_payload_in_markers() {
+        assert_eq!(
+            encode_bracketed_paste("line1\nline2"),
+            b"\x1b[200~line1\nline2\x1b[201~".to_vec()
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_strips_embedded_end_markers_to_block_injection() {
+        assert_eq!(
+            encode_bracketed_paste("safe\x1b[201~rm -rf /\r"),
+            b"\x1b[200~saferm -rf /\r\x1b[201~".to_vec()
+        );
+    }
 
     fn key(code: KeyCode) -> LiveInput {
         LiveInput::Key(KeyEvent::new(

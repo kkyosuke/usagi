@@ -354,6 +354,13 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
 fn key_to_terminal_bytes(key: Key) -> Option<Vec<u8>> {
     let bytes = match key {
         Key::Passthrough(bytes) => return (!bytes.is_empty()).then(|| bytes.clone()),
+        // Forward a paste as one bracketed-paste block so an agent that requested
+        // the mode inserts the multi-line text instead of submitting on every
+        // embedded newline (the fix for pasting clipboard into the agent).
+        Key::Paste(text) => {
+            return (!text.is_empty())
+                .then(|| crate::usecase::terminal_input::encode_bracketed_paste(&text));
+        }
         Key::Char(ch) => ch.to_string().into_bytes(),
         Key::Enter => b"\r".to_vec(),
         Key::Backspace => b"\x7f".to_vec(),
@@ -1819,6 +1826,7 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
         | Key::Click { .. }
         | Key::Pointer(_)
         | Key::Passthrough(_)
+        | Key::Paste(_)
         | Key::TerminalCopy { .. }
         | Key::Other => WelcomeStep::Stay,
     }
@@ -1882,6 +1890,14 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
         }
         Key::Char(ch) => {
             form.insert_char(ch);
+            NewStep::Stay
+        }
+        // A bracketed paste inserts its text into the focused field verbatim, so
+        // a repository URL or path pastes as one block.
+        Key::Paste(text) => {
+            for ch in text.chars() {
+                form.insert_char(ch);
+            }
             NewStep::Stay
         }
         Key::Escape => NewStep::Back,
@@ -2053,6 +2069,13 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
         }
         Key::Char(ch) => {
             open.push_filter(ch);
+            OpenStep::Stay
+        }
+        // A bracketed paste appends its text to the filter one character at a time.
+        Key::Paste(text) => {
+            for ch in text.chars() {
+                open.push_filter(ch);
+            }
             OpenStep::Stay
         }
         Key::Live(_)
@@ -2421,6 +2444,10 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         // (Open Workspace only), and the caret/selection keys that have meaning
         // only inside a focused text field (End/Ctrl-E, Delete, Shift+arrows).
         Key::Passthrough(_)
+        // Home navigation and its overlay text fields (`:` palette, create-session
+        // name, tab rename) do not consume a bracketed paste; the live pane owns
+        // paste via `key_to_terminal_bytes`.
+        | Key::Paste(_)
         | Key::Pointer(_)
         | Key::Click { .. }
         | Key::CtrlD
@@ -4710,6 +4737,8 @@ mod tests {
         assert_eq!(app_event_from_key(Key::Other), Some(AppEvent::Tick));
         // Raw passthrough and terminal pointer drags never reach the Home reducer.
         assert_eq!(app_event_from_key(Key::Passthrough(vec![0x1b])), None);
+        // A bracketed paste is a live-pane concern; Home navigation ignores it.
+        assert_eq!(app_event_from_key(Key::Paste("x".to_owned())), None);
         // Sidebar clicks need the real runtime's injected monotonic timestamp.
         assert_eq!(app_event_from_key(Key::Click { column: 3, row: 4 }), None);
         // Left/Right reach the reducer to move the Yes/No confirmation focus; the
@@ -11507,6 +11536,39 @@ mod tests {
     }
 
     #[test]
+    fn step_new_paste_inserts_the_pasted_text_into_the_focused_field() {
+        let mut form = New::default();
+        step_new(&mut form, Key::Down); // focus the Url field
+        assert!(matches!(
+            step_new(
+                &mut form,
+                Key::Paste("https://example.com/repo.git".to_owned()),
+            ),
+            NewStep::Stay
+        ));
+        assert_eq!(form.url(), "https://example.com/repo.git");
+    }
+
+    #[test]
+    fn step_open_paste_appends_its_text_to_the_filter() {
+        let mut open = Open::new(vec![ws("alpha")]);
+        assert!(matches!(
+            step_open(&mut open, Key::Paste("alp".to_owned())),
+            OpenStep::Stay
+        ));
+        assert_eq!(open.filter(), "alp");
+    }
+
+    #[test]
+    fn step_welcome_ignores_a_bracketed_paste() {
+        let mut welcome = super::Welcome::new(Vec::new());
+        assert!(matches!(
+            super::step_welcome(&mut welcome, Key::Paste("x".to_owned())),
+            super::WelcomeStep::Stay
+        ));
+    }
+
+    #[test]
     fn step_new_enter_creates_once_every_required_field_is_present() {
         let mut form = New::default();
         step_new(&mut form, Key::Down); // Url
@@ -12252,6 +12314,13 @@ mod tests {
             key_to_terminal_bytes(Key::Passthrough(vec![0xff])),
             Some(vec![0xff])
         );
+        // A paste is wrapped in bracketed-paste markers so the agent inserts the
+        // multi-line text as one block; an empty paste sends nothing.
+        assert_eq!(
+            key_to_terminal_bytes(Key::Paste("a\nb".to_owned())),
+            Some(b"\x1b[200~a\nb\x1b[201~".to_vec())
+        );
+        assert_eq!(key_to_terminal_bytes(Key::Paste(String::new())), None);
         assert_eq!(key_to_terminal_bytes(Key::Quit), Some(vec![3]));
         assert_eq!(key_to_terminal_bytes(Key::CtrlQ), Some(vec![17]));
         assert_eq!(key_to_terminal_bytes(Key::CtrlD), Some(vec![4]));

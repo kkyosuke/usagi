@@ -574,7 +574,7 @@ Linux `xdg-open` / Windows `cmd /C start "" <url>`）を使い、未対応 platf
 pointer の release は PTY へ入力として転送しない。
 
 live terminal に focus がある間、leader が無い `Ctrl-C` / `Ctrl-Q` / `Ctrl-D` を除くすべての非 prefix キー入力（文字・修飾キー・paste・
-raw bytes・Enter・Backspace・Tab・矢印など）は management ではなく PTY へ送られる。矢印は対応する CSI 列、Enter は `CR` に符号化する。tab 巡回や Closeup/Switch の遷移は
+raw bytes・Enter・Backspace・Tab・矢印など）は management ではなく PTY へ送られる。矢印は対応する CSI 列、Enter は `CR` に符号化する。端末では bracketed paste（DECSET 2004）を有効にし、複数行の貼り付けを 1 つの paste イベントとして受け取る。PTY へは bracketed paste マーカー（`ESC[200~` … `ESC[201~`）で包んで転送し、bracketed paste を要求している agent が埋め込まれた改行ごとに 1 行ずつ実行せず 1 ブロックとして挿入できるようにする（貼り付け内に含まれる終了マーカーは注入対策として除去する）。tab 巡回や Closeup/Switch の遷移は
 `Ctrl-O` prefix（`Ctrl-O Ctrl-N` / `Ctrl-O Ctrl-P` / `Ctrl-O Ctrl-O`）だけが所有する。前面 modal や forced action modal がある間は
 その modal が入力を所有する。入力は subscription と単調増加する input sequence で fence し、同じ打鍵を二重送信しない。
 daemon の input ACK は `Written` だけを通常成功とする。`Failed` は 0 byte 適用を表示し、`Ambiguous` は

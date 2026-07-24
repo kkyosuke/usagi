@@ -12,7 +12,9 @@ use std::{sync::mpsc, thread};
 
 use chrono::Utc;
 use crossterm::cursor;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use crossterm::terminal::{
     self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -2033,7 +2035,14 @@ fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
         LiveInput::Text(text) if text == "\r" || text == "\n" => {
             return Key::Enter;
         }
-        LiveInput::Raw(_) | LiveInput::Text(_) | LiveInput::Paste(_) => {
+        // A bracketed paste is delivered as one block. Carry the text so the
+        // focused live pane wraps it in bracketed-paste markers before it reaches
+        // the PTY (agents insert it instead of submitting each embedded newline)
+        // and a management text input inserts it verbatim.
+        LiveInput::Paste(_) => {
+            return Key::Paste(String::from_utf8_lossy(&bytes).into_owned());
+        }
+        LiveInput::Raw(_) | LiveInput::Text(_) => {
             return Key::Passthrough(bytes);
         }
         LiveInput::Mouse { .. }
@@ -2297,6 +2306,10 @@ fn run_in_terminal(
         setup,
         EnterAlternateScreen,
         EnableMouseCapture,
+        // Capture pastes as a single `Event::Paste` so a multi-line paste reaches
+        // the focused pane as one block instead of a key stream whose embedded
+        // Enters each submit a line to the agent (see `passthrough_key`).
+        EnableBracketedPaste,
         terminal::DisableLineWrap,
         cursor::Hide
     ) {
@@ -2330,6 +2343,7 @@ fn run_in_terminal(
         cursor::Show,
         terminal::EnableLineWrap,
         DisableMouseCapture,
+        DisableBracketedPaste,
         LeaveAlternateScreen
     );
     let _ = disable_raw_mode();
@@ -3751,11 +3765,24 @@ mod tests {
     }
 
     #[test]
-    fn non_key_terminal_payloads_preserve_their_original_bytes() {
-        let payload = b"\x1b[200~paste\x1b[201~".to_vec();
+    fn a_paste_becomes_a_paste_key_while_raw_and_text_stay_passthrough() {
+        // A bracketed paste carries its decoded text so the focused pane can wrap
+        // it in bracketed-paste markers before forwarding it to the PTY.
+        let pasted = "line1\nline2".as_bytes().to_vec();
         assert_eq!(
-            passthrough_key(&LiveInput::Paste(payload.clone()), payload.clone()),
-            Key::Passthrough(payload)
+            passthrough_key(&LiveInput::Paste(pasted.clone()), pasted),
+            Key::Paste("line1\nline2".to_owned())
+        );
+        // Raw and text payloads keep their exact bytes as opaque passthrough.
+        let raw = b"\x1b[99~".to_vec();
+        assert_eq!(
+            passthrough_key(&LiveInput::Raw(raw.clone()), raw.clone()),
+            Key::Passthrough(raw)
+        );
+        let text = "xy".as_bytes().to_vec();
+        assert_eq!(
+            passthrough_key(&LiveInput::Text("xy".to_owned()), text.clone()),
+            Key::Passthrough(text)
         );
     }
 
