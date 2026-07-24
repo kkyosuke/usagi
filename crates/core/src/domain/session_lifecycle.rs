@@ -87,6 +87,29 @@ impl SessionLifecycle {
     }
 }
 
+/// A safe, client-facing projection of a managed session's lifecycle: the
+/// lifecycle state plus the failure summary a client shows for a `Failed` row.
+///
+/// Clients derive per-row capabilities from
+/// [`lifecycle.capabilities()`](SessionLifecycle::capabilities) rather than the
+/// daemon serializing [`LifecycleCapabilities`] onto the wire, so the wire
+/// surface stays the lifecycle token that is already published. It is a
+/// projection (not a persisted entity), so it deliberately carries no serde.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionLifecycleProjection {
+    pub lifecycle: SessionLifecycle,
+    pub failure_summary: Option<String>,
+}
+
+impl SessionLifecycleProjection {
+    /// Per-row capabilities for this lifecycle (attach/remove/…), derived on the
+    /// client from [`SessionLifecycle::capabilities`].
+    #[must_use]
+    pub const fn capabilities(&self) -> LifecycleCapabilities {
+        self.lifecycle.capabilities()
+    }
+}
+
 /// Immutable setup input captured before commands begin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetupPlan {
@@ -758,6 +781,13 @@ mod tests {
         assert!(SessionLifecycle::Initializing.capabilities().can_cancel);
         assert!(!SessionLifecycle::Deleting.capabilities().can_use);
         assert!(SessionLifecycle::Failed.capabilities().can_recover);
+        let failed = SessionLifecycleProjection {
+            lifecycle: SessionLifecycle::Failed,
+            failure_summary: Some("create failed".into()),
+        };
+        assert!(!failed.capabilities().can_use);
+        assert!(failed.capabilities().can_remove);
+        assert_eq!(failed.failure_summary.as_deref(), Some("create failed"));
         assert_eq!(
             format!("{}", LifecycleError::MissingOperation),
             "MissingOperation"

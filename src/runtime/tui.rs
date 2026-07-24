@@ -25,7 +25,7 @@ use usagi_core::domain::id::{SessionId, UserDecisionId, WorkspaceId};
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session::{SessionOrigin, SessionRecord};
-use usagi_core::domain::session_lifecycle::ManagedSession;
+use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycleProjection};
 use usagi_core::domain::settings::{LocalSettings, Settings};
 use usagi_core::domain::terminal_launch::{
     TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
@@ -1522,14 +1522,42 @@ struct LifecycleSnapshot {
 }
 
 impl LifecycleSnapshot {
-    fn available_sessions(&self) -> impl Iterator<Item = &ManagedSession> {
+    /// Sessions the sidebar lists: usable `Available` checkouts and `Failed`
+    /// reservations. A `Failed` row still owns its name, so listing it is what
+    /// lets a client see and remove it; capability gating (attach vs remove) is
+    /// derived per row from its lifecycle. Transient states (`Creating` /
+    /// `Initializing` / `Deleting`) are not surfaced as sidebar rows.
+    fn listed_sessions(&self) -> impl Iterator<Item = &ManagedSession> {
+        use usagi_core::domain::session_lifecycle::SessionLifecycle;
         self.sessions.iter().filter(|session| {
-            session.lifecycle == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
+            matches!(
+                session.lifecycle,
+                SessionLifecycle::Available | SessionLifecycle::Failed
+            )
         })
     }
 
+    /// Lifecycle projection for the listed rows, keyed by stable identity. A
+    /// `Failed` row carries its safe failure summary; other rows carry `None`.
+    fn session_lifecycles(&self) -> BTreeMap<SessionId, SessionLifecycleProjection> {
+        self.listed_sessions()
+            .map(|session| {
+                (
+                    session.session_id,
+                    SessionLifecycleProjection {
+                        lifecycle: session.lifecycle,
+                        failure_summary: session
+                            .failure
+                            .as_ref()
+                            .map(|failure| failure.summary.clone()),
+                    },
+                )
+            })
+            .collect()
+    }
+
     fn project(&self, workspace: &Workspace, legacy: &[SessionRecord]) -> Vec<SessionRecord> {
-        self.available_sessions()
+        self.listed_sessions()
             .map(|session| {
                 // Lifecycle is daemon-authoritative, but `state.json` remains
                 // the durable home of UI-only annotations.  Retain a matching
@@ -1758,8 +1786,11 @@ fn session_snapshot_result(
     snapshot: &LifecycleSnapshot,
     workspace: &Workspace,
 ) -> Result<SessionCommandResult, String> {
+    // Align the identities with the listed rows (`project` lists the same set),
+    // so a `Failed` row joins its stable ID and can be removed. Terminal/Agent
+    // scopes still filter to `Available` at their own call sites.
     let session_ids = snapshot
-        .available_sessions()
+        .listed_sessions()
         .map(|session| session.session_id)
         .collect();
     let legacy = match load_workspace_state(&workspace.path) {
@@ -1771,6 +1802,7 @@ fn session_snapshot_result(
         sessions: Some(snapshot.project(workspace, &legacy.sessions)),
         session_ids: Some(session_ids),
         agent_resumes: Some(snapshot.agent_resumes.clone()),
+        session_lifecycles: Some(snapshot.session_lifecycles()),
         revision: Some(snapshot.revision),
     })
 }
@@ -2191,10 +2223,13 @@ impl WorkspaceLoader for FsWorkspaceLoader {
         let mut state = load_workspace_state(&workspace.path)?;
         let lifecycle = request_lifecycle_snapshot().map_err(io_error)?;
         let workspace_id = lifecycle.workspace_id;
+        // Identities align with the listed rows (`project` lists the same set),
+        // so a `Failed` row shows on the first frame with a removable action.
         let session_ids = lifecycle
-            .available_sessions()
+            .listed_sessions()
             .map(|session| session.session_id)
             .collect();
+        let session_lifecycles = lifecycle.session_lifecycles();
         state.sessions = lifecycle.project(&workspace, &state.sessions);
         Ok(WorkspaceSnapshot::with_runtime_projection(
             workspace,
@@ -2202,6 +2237,7 @@ impl WorkspaceLoader for FsWorkspaceLoader {
             workspace_id,
             session_ids,
             lifecycle.agent_resumes,
+            session_lifecycles,
         ))
     }
 
@@ -3183,27 +3219,62 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_snapshot_excludes_failed_sessions_from_the_tui_projection() {
+    fn lifecycle_snapshot_lists_failed_sessions_with_their_lifecycle_projection() {
+        use usagi_core::domain::session_lifecycle::{Failure, FailureStage};
+        let workspace = Workspace::new("work", "/tmp/work");
         let mut available =
             ManagedSession::new_creating("available".into(), OperationId::new(), Utc::now());
         available.lifecycle = SessionLifecycle::Available;
         let mut failed =
             ManagedSession::new_creating("failed".into(), OperationId::new(), Utc::now());
         failed.lifecycle = SessionLifecycle::Failed;
+        failed.failure = Some(Failure {
+            stage: FailureStage::Create,
+            summary: "create failed".into(),
+        });
+        // A transient reservation is durable but not a sidebar row.
+        let creating =
+            ManagedSession::new_creating("creating".into(), OperationId::new(), Utc::now());
+        let available_id = available.session_id;
+        let failed_id = failed.session_id;
         let snapshot = LifecycleSnapshot {
             workspace_id: WorkspaceId::new(),
             root_worktree_id: usagi_core::domain::id::WorktreeId::new(),
             revision: 1,
-            sessions: vec![available, failed],
+            sessions: vec![available, failed, creating],
             agent_resumes: std::collections::BTreeMap::new(),
         };
 
+        // Available and Failed are listed; the transient Creating row is not.
         assert_eq!(
             snapshot
-                .available_sessions()
+                .listed_sessions()
                 .map(|session| session.name.as_str())
                 .collect::<Vec<_>>(),
-            ["available"]
+            ["available", "failed"]
+        );
+        // Both listed rows are projected, so a Failed row's name is visible.
+        assert_eq!(
+            snapshot
+                .project(&workspace, &[])
+                .iter()
+                .map(|record| record.name.clone())
+                .collect::<Vec<_>>(),
+            ["available", "failed"]
+        );
+        // The lifecycle projection carries each state and the Failed summary.
+        let lifecycles = snapshot.session_lifecycles();
+        assert_eq!(
+            lifecycles.get(&available_id).unwrap().lifecycle,
+            SessionLifecycle::Available
+        );
+        let failed_projection = lifecycles.get(&failed_id).unwrap();
+        assert_eq!(failed_projection.lifecycle, SessionLifecycle::Failed);
+        assert!(!failed_projection.capabilities().can_use);
+        assert!(failed_projection.capabilities().can_remove);
+        assert_eq!(
+            failed_projection.failure_summary.as_deref(),
+            Some("create failed")
         );
     }
 
@@ -4257,6 +4328,8 @@ mod tests {
             pr_summary: None,
             removing: false,
             agent_resume: None,
+            lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
+            failure_summary: None,
         };
         let frame = runtime.render(
             24,

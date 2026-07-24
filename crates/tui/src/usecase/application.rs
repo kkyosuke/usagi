@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use usagi_core::domain::agent::ProviderResumeProjection;
 use usagi_core::domain::id::{SessionId, WorkspaceId};
+use usagi_core::domain::session_lifecycle::SessionLifecycleProjection;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::domain::workspace_state::WorkspaceState;
 
@@ -63,6 +64,9 @@ pub struct WorkspaceSnapshot {
     pub session_ids: Vec<SessionId>,
     /// ID-free provider resume state keyed by stable daemon session identity.
     pub agent_resumes: BTreeMap<SessionId, ProviderResumeProjection>,
+    /// Per-session lifecycle projection keyed by stable daemon session identity,
+    /// so the initial Home sidebar shows `Failed` rows and gates their actions.
+    pub session_lifecycles: BTreeMap<SessionId, SessionLifecycleProjection>,
 }
 
 impl WorkspaceSnapshot {
@@ -76,6 +80,7 @@ impl WorkspaceSnapshot {
             workspace_id: WorkspaceId::new(),
             session_ids,
             agent_resumes: BTreeMap::new(),
+            session_lifecycles: BTreeMap::new(),
         }
     }
 
@@ -94,11 +99,12 @@ impl WorkspaceSnapshot {
             workspace_id,
             session_ids,
             agent_resumes: BTreeMap::new(),
+            session_lifecycles: BTreeMap::new(),
         }
     }
 
     /// Build a daemon-authoritative snapshot including the safe provider resume
-    /// projection used by the Home sidebar.
+    /// projection and per-session lifecycle used by the Home sidebar.
     #[must_use]
     pub fn with_runtime_projection(
         workspace: Workspace,
@@ -106,6 +112,7 @@ impl WorkspaceSnapshot {
         workspace_id: WorkspaceId,
         session_ids: Vec<SessionId>,
         agent_resumes: BTreeMap<SessionId, ProviderResumeProjection>,
+        session_lifecycles: BTreeMap<SessionId, SessionLifecycleProjection>,
     ) -> Self {
         Self {
             workspace,
@@ -113,6 +120,7 @@ impl WorkspaceSnapshot {
             workspace_id,
             session_ids,
             agent_resumes,
+            session_lifecycles,
         }
     }
 }
@@ -526,17 +534,26 @@ mod tests {
             resumable: true,
             reason: ProviderResumeReason::ExplicitResumeAvailable,
         };
+        let lifecycle = usagi_core::domain::session_lifecycle::SessionLifecycleProjection {
+            lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Failed,
+            failure_summary: Some("create failed".into()),
+        };
         let snapshot = WorkspaceSnapshot::with_runtime_projection(
             Workspace::new("work", "/tmp/work"),
             WorkspaceState::default(),
             workspace_id,
             vec![session_id],
             std::collections::BTreeMap::from([(session_id, resume)]),
+            std::collections::BTreeMap::from([(session_id, lifecycle.clone())]),
         );
 
         assert_eq!(snapshot.workspace_id, workspace_id);
         assert_eq!(snapshot.session_ids, vec![session_id]);
         assert_eq!(snapshot.agent_resumes.get(&session_id), Some(&resume));
+        assert_eq!(
+            snapshot.session_lifecycles.get(&session_id),
+            Some(&lifecycle)
+        );
     }
 
     #[test]

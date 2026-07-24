@@ -5,7 +5,7 @@
 //! [`BackendPort`] で effect を backend 固有の command に変換し、テストでは
 //! [`FakeBackend`] の command log と event queue を使う。
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 
 use usagi_core::domain::agent::{AgentProfileId, ModelSelector};
@@ -14,7 +14,7 @@ use usagi_core::domain::id::{
 };
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::pullrequest::PrLink;
-use usagi_core::domain::session_lifecycle::AgentPhase;
+use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
 use usagi_core::domain::user_decision::{UserDecision, UserDecisionAnswer, UserDecisionStatus};
 
 use crate::usecase::terminal_input::{KeyCode, KeyEventKind, LiveInput, RuntimeEvent};
@@ -673,6 +673,10 @@ pub struct AppState {
     /// 表示中 session の name。新規作成の同名 validation にだけ使う advisory copy で、
     /// authoritative な identity は [`sessions`](Self::sessions) が持つ。
     session_names: Vec<String>,
+    /// Per-session lifecycle by stable identity, used to gate actions by
+    /// capability (attach only when `can_use`). A session absent here is treated
+    /// as `Available`, so pre-lifecycle callers keep their behaviour.
+    session_lifecycles: BTreeMap<SessionId, SessionLifecycle>,
     selected: Selection,
     active: Target,
     notice: Option<Notice>,
@@ -717,6 +721,7 @@ impl AppState {
             workspace,
             sessions,
             session_names: Vec::new(),
+            session_lifecycles: BTreeMap::new(),
             selected: Selection::Target(root),
             active: root,
             notice: None,
@@ -820,6 +825,21 @@ impl AppState {
     #[must_use]
     pub fn session_names(&self) -> &[String] {
         &self.session_names
+    }
+    /// Per-session lifecycle by stable identity, for the runtime sync guard.
+    #[must_use]
+    pub fn session_lifecycles(&self) -> &BTreeMap<SessionId, SessionLifecycle> {
+        &self.session_lifecycles
+    }
+    /// Whether the session at this stable identity is a usable (attachable)
+    /// checkout. A session with no lifecycle projection — pre-lifecycle callers,
+    /// or a name-only fallback — is treated as usable so their behaviour is
+    /// unchanged. A `Failed` row reports `false`, so attach is not offered.
+    #[must_use]
+    fn session_can_use(&self, session: SessionId) -> bool {
+        self.session_lifecycles
+            .get(&session)
+            .is_none_or(|lifecycle| lifecycle.capabilities().can_use)
     }
     /// 最後の safe notice。
     #[must_use]
@@ -1274,6 +1294,11 @@ pub enum BackendEvent {
     /// 表示中 session の name。新規作成の同名 validation にだけ使う advisory copy で、
     /// [`Sessions`](Self::Sessions) の identity 同期とは独立に還流してよい。
     SessionNames(Vec<String>),
+    /// Per-session lifecycle keyed by stable identity, so the reducer can gate
+    /// actions by capability (a `Failed` row is not attachable but is removable).
+    /// A session absent here is treated as `Available`, so it refluxes
+    /// independently of [`Sessions`](Self::Sessions).
+    SessionLifecycles(BTreeMap<SessionId, SessionLifecycle>),
     /// backend が safe と保証した notice。
     Notice(Notice),
     /// A phase event for exactly one Agent runtime pane.
@@ -2221,6 +2246,10 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             if let Some(form) = state.create_session.as_mut() {
                 form.replace_existing(&state.session_names);
             }
+            Vec::new()
+        }
+        AppEvent::Backend(BackendEvent::SessionLifecycles(lifecycles)) => {
+            state.session_lifecycles = lifecycles;
             Vec::new()
         }
         AppEvent::Backend(BackendEvent::Notice(notice)) => {
@@ -3230,6 +3259,13 @@ fn update_pointer(
 
 fn activate_selected(state: &mut AppState) -> Vec<Effect> {
     match state.selected {
+        // A Failed row is not a usable checkout (`can_use=false`): it stays
+        // selected so it can be removed, but activation does not attach it or open
+        // its Closeup terminal surface. Usable targets and the workspace root are
+        // unaffected.
+        Selection::Target(Target::Session(session)) if !state.session_can_use(session) => {
+            Vec::new()
+        }
         Selection::Target(target) => {
             state.active = target;
             state.route = Route::Home(HomeMode::Closeup);
@@ -4918,6 +4954,60 @@ mod tests {
             }]
         );
         assert_eq!(state.selected(), Selection::Target(Target::Session(first)));
+    }
+
+    #[test]
+    fn failed_session_is_not_attachable_but_stays_removable() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        // The daemon reports the session as Failed.
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
+                session,
+                SessionLifecycle::Failed,
+            )]))),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        assert_eq!(
+            state.selected(),
+            Selection::Target(Target::Session(session))
+        );
+
+        // Activation does not attach a Failed row (`can_use=false`): no effect,
+        // the active target stays the root, and the route never enters Closeup.
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(state.active(), Target::Root(workspace));
+        assert!(matches!(state.route(), Route::Home(HomeMode::Switch)));
+
+        // Removal is still offered (`can_remove=true`).
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Char('x'))),
+            vec![Effect::RemoveSession {
+                workspace,
+                session,
+                force: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn an_available_session_stays_attachable_after_a_lifecycle_refresh() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
+                session,
+                SessionLifecycle::Available,
+            )]))),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        // An Available row attaches as before: the route enters Closeup and the
+        // session becomes the active target.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert_eq!(state.active(), Target::Session(session));
+        assert!(matches!(state.route(), Route::Home(HomeMode::Closeup)));
     }
 
     #[test]
