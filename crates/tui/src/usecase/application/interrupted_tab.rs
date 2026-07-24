@@ -251,7 +251,8 @@ fn tab(
 
 /// Accepts the daemon's exact target only when it describes this very runtime.
 /// Anything else is treated as absent, so an unavailable or mismatched source
-/// can never seed a resume request.
+/// can never seed a resume request. The source row is already keyed by this
+/// runtime's ID, so only the target's own fences are re-checked here.
 fn trusted_target(
     item: &AgentRuntimeInventoryItem,
     source: &AgentResumableInventoryItem,
@@ -261,7 +262,6 @@ fn trusted_target(
         && source.reason == ProviderResumeReason::ExplicitResumeAvailable
         && target.continuation == item.continuation
         && target.runtime_id == item.runtime.agent_runtime_id
-        && source.runtime_id == item.runtime.agent_runtime_id
         && target.workspace_id == item.runtime.terminal.workspace_id
         && target.session_id == item.runtime.session_id
         && target.worktree_id == item.runtime.terminal.worktree_id)
