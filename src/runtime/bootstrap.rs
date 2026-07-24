@@ -85,6 +85,29 @@ where
     }
 }
 
+/// Performs an explicitly selected cold replacement and reconnects only after
+/// the replacement endpoint advertises the expected artifact.
+///
+/// The composition root is responsible for limiting this destructive fallback
+/// to a runtime channel where losing process-owned terminals is acceptable.
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=runtime::bootstrap::tests
+pub(crate) fn restart_and_connect<S, C, R, B>(
+    mut connect: C,
+    mut restart: R,
+    expected_build: &BuildIdentity,
+    build_of: B,
+) -> Result<S, BootstrapError>
+where
+    C: FnMut() -> io::Result<S>,
+    R: FnMut() -> io::Result<()>,
+    B: Fn(&S) -> &BuildIdentity,
+{
+    restart().map_err(BootstrapError::Restart)?;
+    let stream = wait_for_ready(&mut connect).map_err(BootstrapError::Readiness)?;
+    require_expected_build(&stream, expected_build, &build_of)?;
+    Ok(stream)
+}
+
 /// Result of the composition root's lock- and identity-fenced stale-owner
 /// proof. `NotProven` is intentionally distinct from an error: live, replaced,
 /// or identity-unknown owners remain untouched and preserve the original
@@ -109,6 +132,7 @@ pub(crate) enum BootstrapError {
     Connect(io::Error),
     Recovery(io::Error),
     Start(io::Error),
+    Restart(io::Error),
     Readiness(io::Error),
     UnknownBuildIdentity,
     ReplacementBuildMismatch,
@@ -129,6 +153,10 @@ impl fmt::Display for BootstrapError {
             Self::Start(error) => {
                 let _ = error.kind();
                 f.write_str("daemon could not be started")
+            }
+            Self::Restart(error) => {
+                let _ = error.kind();
+                f.write_str("daemon generation could not be restarted")
             }
             Self::Readiness(error) => {
                 let _ = error.kind();
@@ -189,7 +217,7 @@ where
 #[cfg(test)]
 #[coverage(off)]
 mod tests {
-    use super::{BootstrapError, StaleRecovery, connect_or_start};
+    use super::{BootstrapError, StaleRecovery, connect_or_start, restart_and_connect};
     use std::cell::Cell;
     use std::io;
     use usagi_core::infrastructure::ipc::{BuildIdentity, build_rollover_trigger};
@@ -549,6 +577,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(stream.name, "same");
+    }
+
+    #[test]
+    fn selected_cold_restart_requires_the_expected_replacement_build() {
+        let expected = build("current");
+        let restarts = Cell::new(0);
+        let stream = restart_and_connect(
+            || Ok(endpoint("replacement", "current")),
+            || {
+                restarts.set(restarts.get() + 1);
+                Ok(())
+            },
+            &expected,
+            endpoint_build,
+        )
+        .unwrap();
+        assert_eq!(stream.name, "replacement");
+        assert_eq!(restarts.get(), 1);
+
+        let restart_error = restart_and_connect(
+            || Ok(endpoint("unused", "current")),
+            lifecycle_error,
+            &expected,
+            endpoint_build,
+        )
+        .unwrap_err();
+        assert!(matches!(restart_error, BootstrapError::Restart(_)));
+
+        let mismatch = restart_and_connect(
+            || Ok(endpoint("wrong", "old")),
+            || Ok(()),
+            &expected,
+            endpoint_build,
+        )
+        .unwrap_err();
+        assert!(matches!(mismatch, BootstrapError::ReplacementBuildMismatch));
     }
 
     #[test]

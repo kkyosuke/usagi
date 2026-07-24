@@ -4546,8 +4546,8 @@ fn run_inner(
 
 /// Connect to the daemon for this binary's isolated runtime channel. Every
 /// channel reuses an exact artifact. A different known artifact returns one
-/// deterministic, effect-free rollover trigger; it never stops the old daemon
-/// during ordinary bootstrap.
+/// deterministic rollover trigger. Development consumes it with a cold
+/// restart; other channels preserve the old daemon for a future safe handoff.
 pub(crate) fn client(
     policy: ClientPolicy,
 ) -> Result<IpcClient<std::os::unix::net::UnixStream>, ClientError> {
@@ -4558,7 +4558,7 @@ pub(crate) fn client(
     let _bootstrap_lock = acquire_bootstrap_lock(&data_dir)?;
     let expected_build = current_build();
     let channel = runtime_channel();
-    bootstrap::connect_or_start(
+    let connection = bootstrap::connect_or_start(
         || connect_client(&data_dir, policy, expected_build.clone()),
         || run_lifecycle(&exe, "start"),
         || recover_stale_client_endpoint(&data_dir),
@@ -4566,8 +4566,21 @@ pub(crate) fn client(
         channel,
         false,
         IpcClient::server_build,
-    )
-    .map_err(|error| match error {
+    );
+    let connection = match connection {
+        Err(bootstrap::BootstrapError::RolloverRequired(_))
+            if paths::runtime_mode() == paths::RuntimeMode::Development =>
+        {
+            bootstrap::restart_and_connect(
+                || connect_client(&data_dir, policy, expected_build.clone()),
+                || run_lifecycle(&exe, "restart"),
+                &expected_build,
+                IpcClient::server_build,
+            )
+        }
+        other => other,
+    };
+    connection.map_err(|error| match error {
         bootstrap::BootstrapError::RolloverRequired(trigger) => {
             ClientError::RolloverRequired(trigger)
         }
