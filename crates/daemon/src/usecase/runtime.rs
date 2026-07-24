@@ -235,12 +235,26 @@ pub trait RuntimeStore {
     fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()>;
 }
 /// Called exactly once by [`RuntimeCoordinator::launch`], before PTY spawn.
+/// A non-durable instruction to wrap the spawned child in an OS sandbox
+/// launcher.  When present, the composition-root spawner runs `program` (the
+/// `usagi` binary) with `prefix` (`claude-sandbox --mode … --writable-root … --`)
+/// in front of the product program, so Claude only ever runs confined.  Its host
+/// paths are deliberately kept out of the [`DurableLaunchSnapshot`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxLauncher {
+    /// The launcher executable actually spawned (the `usagi` binary).
+    pub program: String,
+    /// Arguments placed before the product program, ending in `--`.
+    pub prefix: Vec<String>,
+}
+
 /// Ephemeral, adapter-owned spawn inputs. This value is never copied into a
 /// [`DurableLaunchSnapshot`] or a runtime record.
 pub struct SpawnProvision {
     environment: BTreeMap<usagi_core::domain::agent::EnvironmentVariableName, String>,
     daemon_environment: BTreeMap<usagi_core::domain::agent::EnvironmentVariableName, String>,
     arguments: Vec<String>,
+    sandbox_launcher: Option<SandboxLauncher>,
 }
 
 /// The product-neutral inputs an adapter may use while materializing scoped
@@ -277,7 +291,21 @@ impl SpawnProvision {
             environment: environment.into_iter().collect(),
             daemon_environment: BTreeMap::new(),
             arguments,
+            sandbox_launcher: None,
         }
+    }
+
+    /// Wraps the spawned child in an OS sandbox launcher. The composition root
+    /// sets this for Claude so the product only ever runs confined; it stays
+    /// ephemeral and never reaches the durable snapshot.
+    pub fn set_sandbox_launcher(&mut self, launcher: SandboxLauncher) {
+        self.sandbox_launcher = Some(launcher);
+    }
+
+    /// The OS sandbox launcher wrapping this spawn, if any.
+    #[must_use]
+    pub fn sandbox_launcher(&self) -> Option<&SandboxLauncher> {
+        self.sandbox_launcher.as_ref()
     }
 
     #[must_use]
@@ -1231,6 +1259,21 @@ mod tests {
             TerminalId, WorkspaceId, WorktreeId,
         },
     };
+    #[test]
+    fn spawn_provision_carries_an_optional_ephemeral_sandbox_launcher() {
+        let mut provision = SpawnProvision::new([], Vec::new());
+        assert!(provision.sandbox_launcher().is_none());
+        let launcher = SandboxLauncher {
+            program: "/usr/bin/usagi".to_owned(),
+            prefix: vec!["claude-sandbox".to_owned(), "--".to_owned()],
+        };
+        provision.set_sandbox_launcher(launcher.clone());
+        assert_eq!(provision.sandbox_launcher(), Some(&launcher));
+        // derive された Debug / Clone / PartialEq を実行する。
+        assert_eq!(launcher.clone(), launcher);
+        assert!(format!("{launcher:?}").contains("claude-sandbox"));
+    }
+
     #[derive(Default)]
     struct Store(Vec<RuntimeStoreSnapshot>);
     impl RuntimeStore for Store {

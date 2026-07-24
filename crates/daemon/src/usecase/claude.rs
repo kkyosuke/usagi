@@ -156,6 +156,48 @@ impl<P: ClaudeProvisioner> AgentAdapter for ClaudeAdapter<P> {
     }
 }
 
+/// Claude Code の `--settings` に渡す hook 配線 JSON を組む。
+///
+/// `PreToolUse` にはライフサイクルの phase 報告（`usagi agent-phase running`）を差し込み、
+/// session 起動（`include_guard = true`）ではさらに `usagi guard-workspace` を並べて worktree を
+/// 出るツール呼び出しを deny する。root 起動では `guard-workspace` を差し込まず、書き込みの hard
+/// boundary を OS sandbox（`claude-sandbox`）に委ねる。`SessionStart` / `UserPromptSubmit` /
+/// `Notification` / `Stop` / `SessionEnd` の各ライフサイクル event は対応する phase を `agent-phase`
+/// で報告する。`usagi_command` はシェル経由で実行されるため単一引用符で quote する。
+#[must_use]
+pub fn scoped_settings_json(usagi_command: &str, include_guard: bool) -> String {
+    let quoted = shell_quote(usagi_command);
+    let phase_hook = |phase: &str| {
+        serde_json::json!({
+            "type": "command",
+            "command": format!("{quoted} agent-phase {phase}"),
+        })
+    };
+    let mut pre_tool_use = vec![phase_hook("running")];
+    if include_guard {
+        pre_tool_use.push(serde_json::json!({
+            "type": "command",
+            "command": format!("{quoted} guard-workspace"),
+        }));
+    }
+    serde_json::json!({
+        "hooks": {
+            "PreToolUse": [{ "hooks": pre_tool_use }],
+            "SessionStart": [{ "hooks": [phase_hook("ready")] }],
+            "UserPromptSubmit": [{ "hooks": [phase_hook("running")] }],
+            "Notification": [{ "hooks": [phase_hook("waiting")] }],
+            "Stop": [{ "hooks": [phase_hook("ended")] }],
+            "SessionEnd": [{ "hooks": [phase_hook("exited")] }],
+        }
+    })
+    .to_string()
+}
+
+/// シェルが解釈する hook command 用に、値を単一引用符で囲んで安全化する。
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r#"'"'"'"#))
+}
+
 fn render_plan(
     request: &LaunchRequest,
     profile: &AgentProfile,
@@ -420,6 +462,51 @@ mod tests {
                 LaunchValidationError::ProviderResumeMismatch
             ))
         ));
+    }
+
+    #[test]
+    fn session_settings_wire_guard_and_lifecycle_phase_hooks() {
+        let settings: serde_json::Value =
+            serde_json::from_str(&scoped_settings_json("/opt/my usagi", true)).unwrap();
+        let pre_tool_use = &settings["hooks"]["PreToolUse"][0]["hooks"];
+        // 空白を含むパスはシェル用に単一引用符で quote される。
+        assert_eq!(
+            pre_tool_use[0]["command"],
+            serde_json::json!("'/opt/my usagi' agent-phase running")
+        );
+        // session では phase 報告と guard-workspace が PreToolUse に並ぶ。
+        assert_eq!(
+            pre_tool_use[1]["command"],
+            serde_json::json!("'/opt/my usagi' guard-workspace")
+        );
+        assert_eq!(
+            settings["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+            serde_json::json!("'/opt/my usagi' agent-phase ready")
+        );
+        assert_eq!(
+            settings["hooks"]["Stop"][0]["hooks"][0]["command"],
+            serde_json::json!("'/opt/my usagi' agent-phase ended")
+        );
+    }
+
+    #[test]
+    fn root_settings_omit_guard_but_keep_phase_hooks() {
+        let json = scoped_settings_json("/usr/bin/usagi", false);
+        let settings: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let pre_tool_use = &settings["hooks"]["PreToolUse"][0]["hooks"];
+        // root では guard-workspace を差し込まない（OS sandbox に委ねる）。
+        assert_eq!(pre_tool_use.as_array().unwrap().len(), 1);
+        assert!(!json.contains("guard-workspace"));
+        // phase 報告は root でも残る。
+        assert_eq!(
+            settings["hooks"]["Notification"][0]["hooks"][0]["command"],
+            serde_json::json!("'/usr/bin/usagi' agent-phase waiting")
+        );
+    }
+
+    #[test]
+    fn shell_quote_escapes_embedded_single_quotes() {
+        assert_eq!(shell_quote("a'b"), r#"'a'"'"'b'"#);
     }
 
     #[test]

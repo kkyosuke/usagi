@@ -251,6 +251,13 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             .map_err(|()| ClaudeProvisionFailure::ExecutableUnavailable)?;
         let (working_directory, workspace_root) = working_directories(&self.sessions, context)
             .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
+        // NOTE(#530 第2段): the `--settings` hook payload and the OS sandbox
+        // launcher are implemented and unit-tested
+        // (`usagi_daemon::usecase::claude::scoped_settings_json`,
+        // `usagi_core::usecase::claude_sandbox`, `SpawnProvision::sandbox_launcher`)
+        // but not yet attached to the live spawn here. Flipping them on requires
+        // the E2E fixture backend seam / writable-root work tracked as the next
+        // stage; until then Claude launches exactly as before.
         Ok(ClaudeProvision {
             working_directory,
             environment_allowlist: mcp_environment_allowlist(context),
@@ -682,12 +689,23 @@ impl PtySpawner for AgentPty {
         // Product provisioning contributes global CLI options (MCP/config/hooks),
         // which must precede product subcommands and the optional prompt after
         // `--`.  The provision stays non-durable even though it is part of the
-        // one-time process invocation.
-        let mut argv = provision.arguments().to_vec();
+        // one-time process invocation.  When a sandbox launcher is present
+        // (Claude), the spawned child is the usagi binary running
+        // `claude-sandbox … -- <program> …`, so the product only ever runs
+        // confined; the durable snapshot still records the bare product program.
+        let (program, mut argv) = match provision.sandbox_launcher() {
+            Some(launcher) => {
+                let mut argv = launcher.prefix.clone();
+                argv.push(plan.program.clone());
+                (launcher.program.clone(), argv)
+            }
+            None => (plan.program.clone(), Vec::new()),
+        };
+        argv.extend(provision.arguments().iter().cloned());
         argv.extend(plan.argv.iter().cloned());
         let environment = provision.compose_environment(&self.environment);
         let pty = PtyTerminal::spawn_with(
-            &plan.program,
+            &program,
             &argv,
             &environment.into_iter().collect::<Vec<_>>(),
             &plan.working_directory,
