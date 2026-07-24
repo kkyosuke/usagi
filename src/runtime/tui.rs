@@ -859,6 +859,11 @@ fn unix_stream_closed(stream: &std::os::unix::net::UnixStream) -> bool {
 #[derive(Default)]
 struct DaemonAgentCommandPort {
     terminal: Option<IpcClient<std::os::unix::net::UnixStream>>,
+    /// Dedicated connection for the stateless `Resume` (poll) and `Resize`
+    /// actions, carrying a per-request read deadline. Kept separate from
+    /// `terminal` so a timed-out read only drops this lane and never disturbs
+    /// the attach/input connection's subscription or exactly-once ledger.
+    poll: Option<IpcClient<std::os::unix::net::UnixStream>>,
     terminal_epoch: u64,
     restore_connection: Option<DaemonRestoreConnectionPublisher>,
     terminal_watch_cancelled: Option<Arc<AtomicBool>>,
@@ -898,9 +903,16 @@ impl AgentTabIntentPort for UserAgentTabIntentPort {
 }
 
 impl DaemonAgentCommandPort {
+    /// Read deadline for one `Resume`/`Resize` request on the poll lane. Normal
+    /// polls answer in well under a millisecond; this only fires when the daemon
+    /// is momentarily unavailable (e.g. holding the agent lock during a
+    /// dispatch), so the render thread drops a stale frame instead of freezing.
+    const POLL_LANE_DEADLINE: Duration = Duration::from_millis(50);
+
     const fn new() -> Self {
         Self {
             terminal: None,
+            poll: None,
             terminal_epoch: 0,
             restore_connection: None,
             terminal_watch_cancelled: None,
@@ -968,6 +980,51 @@ impl DaemonAgentCommandPort {
             cancelled.store(true, Ordering::Release);
         }
         self.terminal = None;
+    }
+
+    /// Returns the deadline-bounded poll connection, opening it on first use.
+    /// `Resume`/`Resize` are stateless on the daemon (keyed only by terminal id
+    /// and offset), so this lane never attaches, never carries an input
+    /// subscription, and reports no `connection_epoch`.
+    #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
+    fn poll_client(
+        &mut self,
+    ) -> Result<&mut IpcClient<std::os::unix::net::UnixStream>, TerminalError> {
+        if self.poll.is_none() {
+            let client = crate::runtime::daemon::client(ClientPolicy::tui())
+                .map_err(|_| TerminalError::Unavailable)?;
+            // Bound each read so a momentarily busy daemon cannot stall the
+            // render thread. A timed-out read leaves an unread frame on the
+            // socket, so `poll_request` drops the lane on any error.
+            let _ = client
+                .transport()
+                .set_read_timeout(Some(Self::POLL_LANE_DEADLINE));
+            self.poll = Some(client);
+        }
+        Ok(self.poll.as_mut().expect("poll client was just set"))
+    }
+
+    /// Sends one `Resume`/`Resize` request over the deadline-bounded poll lane.
+    /// Any transport failure (including a read timeout) drops this lane only; the
+    /// attach/input connection and its exactly-once ledger are untouched.
+    #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
+    fn poll_request(
+        &mut self,
+        action: TerminalAction,
+        request: TerminalRequest,
+    ) -> Result<serde_json::Value, TerminalError> {
+        let payload = serde_json::to_value(request).expect("terminal request is serializable");
+        let reply = {
+            let client = self.poll_client()?;
+            client.request(DaemonRequest::Terminal { action, payload })
+        };
+        match reply {
+            Ok(DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. }) => Ok(body),
+            Err(error) => {
+                self.poll = None;
+                Err(map_terminal_error(&error))
+            }
+        }
     }
 }
 
@@ -1379,7 +1436,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         terminal: &usagi_core::domain::id::TerminalRef,
         geometry: Geometry,
     ) -> Result<(), TerminalError> {
-        self.terminal_request(
+        self.poll_request(
             TerminalAction::Resize,
             TerminalRequest::Resize {
                 terminal: terminal.clone(),
@@ -1397,7 +1454,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         terminal: &usagi_core::domain::id::TerminalRef,
         after_offset: u64,
     ) -> Result<Vec<TerminalChunk>, TerminalError> {
-        let body = self.terminal_request(
+        let body = self.poll_request(
             TerminalAction::Resume,
             TerminalRequest::Resume {
                 terminal: terminal.clone(),
@@ -2738,6 +2795,7 @@ mod tests {
         (
             DaemonAgentCommandPort {
                 terminal: Some(client),
+                poll: None,
                 terminal_epoch: 1,
                 restore_connection: None,
                 terminal_watch_cancelled: None,
@@ -3017,6 +3075,7 @@ mod tests {
         .unwrap();
         let mut port = DaemonAgentCommandPort {
             terminal: Some(client),
+            poll: None,
             terminal_epoch: 1,
             restore_connection: None,
             terminal_watch_cancelled: None,
