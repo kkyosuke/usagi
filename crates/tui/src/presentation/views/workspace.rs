@@ -141,8 +141,13 @@ fn pr_summary(prs: &[PrLink]) -> Option<String> {
 /// 毎フレーム投影入力として渡す。controller state（reducer）には持ち込まない。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TerminalViewProjection {
-    /// 選択中 live terminal tab の描画済み screen 行。
+    /// 選択中 live terminal tab の描画済み screen 行。`row_offset` から始まる
+    /// 可視 window だけを保持してよい。
     pub rows: Vec<String>,
+    /// `rows[0]` が retained terminal 全体の何行目か。
+    pub row_offset: usize,
+    /// window 化前の retained terminal の総行数。
+    pub total_rows: usize,
     /// viewport 下部に残す retained 行数。`0` は live 出力に追従する。
     pub scroll: usize,
     /// 端末操作に対する presentation-safe な feedback。footer に表示する。
@@ -887,13 +892,14 @@ fn with_footer_gap(mut rows: Vec<String>, height: usize, footer: String) -> Vec<
 /// identically on either render path.
 fn terminal_viewport_rows(
     rows: &[String],
+    row_offset: usize,
+    total_rows: usize,
     scroll: usize,
     width: usize,
     content_cap: usize,
 ) -> Vec<String> {
-    let start = rows
-        .len()
-        .saturating_sub(content_cap.saturating_add(scroll));
+    let retained_start = total_rows.saturating_sub(content_cap.saturating_add(scroll));
+    let start = retained_start.saturating_sub(row_offset);
     rows.iter()
         .skip(start)
         .take(content_cap)
@@ -1571,6 +1577,8 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         let content_cap = height.saturating_sub(rows.len() + 2);
         rows.extend(terminal_viewport_rows(
             &view.rows,
+            view.row_offset,
+            view.total_rows,
             view.scroll,
             width,
             content_cap,
@@ -3189,7 +3197,9 @@ mod tests {
         )
         .with_pane(&pane)
         .with_terminal_view(Some(TerminalViewProjection {
+            total_rows: view_rows.len(),
             rows: view_rows,
+            row_offset: 0,
             scroll: 0,
             feedback: Some("copied 3 lines".to_owned()),
         }));
@@ -3268,7 +3278,9 @@ mod tests {
         )
         .with_pane(&pane)
         .with_terminal_view(Some(TerminalViewProjection {
+            total_rows: rows.len(),
             rows,
+            row_offset: 0,
             scroll: 2,
             feedback: None,
         }));
