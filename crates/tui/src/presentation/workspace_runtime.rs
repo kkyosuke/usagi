@@ -1293,6 +1293,57 @@ mod tests {
     }
 
     #[test]
+    fn double_click_switches_to_an_append_restored_session_with_live_input_focus() {
+        let workspace = WorkspaceId::new();
+        let first_session = SessionId::new();
+        let second_session = SessionId::new();
+        let first_terminal = terminal_ref(workspace, first_session);
+        let second_terminal = terminal_ref(workspace, second_session);
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![first_session, second_session]);
+        let (interaction, revision) = runtime.restore_fence();
+
+        assert!(runtime.append_restore_snapshot(
+            interaction,
+            revision,
+            vec![
+                PaneRestoreTarget {
+                    target: Target::Session(first_session),
+                    panes: vec![LivePane {
+                        terminal: first_terminal,
+                        kind: PaneKind::Terminal,
+                    }],
+                    selected: None,
+                },
+                PaneRestoreTarget {
+                    target: Target::Session(second_session),
+                    panes: vec![LivePane {
+                        terminal: second_terminal.clone(),
+                        kind: PaneKind::Agent,
+                    }],
+                    selected: None,
+                },
+            ],
+        ));
+        let _ = runtime.apply_event(AppEvent::Resize {
+            width: 100,
+            height: 30,
+        });
+        for at in [1_000, 1_100] {
+            let _ = runtime.apply_event(AppEvent::Pointer {
+                column: 5,
+                row: 6,
+                at: std::time::Duration::from_millis(at),
+            });
+        }
+
+        assert_eq!(runtime.state().active(), Target::Session(second_session));
+        assert_eq!(runtime.panes().active(), Target::Session(second_session));
+        assert_eq!(runtime.focused_terminal(), Some(second_terminal));
+        assert!(runtime.wants_live_input());
+        assert_eq!(runtime.state().overlay(), None);
+    }
+
+    #[test]
     fn pane_lifecycle_tracks_live_availability() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
