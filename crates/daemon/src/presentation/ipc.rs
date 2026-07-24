@@ -404,7 +404,10 @@ mod tests {
         )
     }
     fn hello() -> Bootstrap {
-        Bootstrap::ClientHello(ClientHello {
+        Bootstrap::ClientHello(client_hello())
+    }
+    fn client_hello() -> ClientHello {
+        ClientHello {
             client_id: ClientId("client".into()),
             connection_nonce: "n".into(),
             expected_daemon_generation: None,
@@ -421,7 +424,7 @@ mod tests {
                 target: "test".into(),
                 artifact: "client-artifact".into(),
             },
-        })
+        }
     }
     fn request() -> Envelope {
         Envelope {
@@ -568,9 +571,7 @@ mod tests {
                 SnapshotWire::ScreenCheckpoint,
             ),
         ] {
-            let Bootstrap::ClientHello(mut client) = hello() else {
-                panic!("fixture client hello");
-            };
+            let mut client = client_hello();
             client.supported_protocols = vec![ProtocolRange {
                 generation: TERMINAL_WIRE_GENERATION,
                 min_revision: 0,

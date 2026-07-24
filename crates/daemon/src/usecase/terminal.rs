@@ -171,6 +171,26 @@ pub enum SnapshotContent {
     Screen { screen: Box<ScreenCheckpoint> },
 }
 
+impl SnapshotContent {
+    /// The raw tail, or `None` when this payload is a checkpoint.
+    #[must_use]
+    pub fn replay(&self) -> Option<&[u8]> {
+        match self {
+            Self::RawTail { replay } => Some(replay),
+            Self::Screen { .. } => None,
+        }
+    }
+
+    /// The semantic screen, or `None` when this payload is a raw tail.
+    #[must_use]
+    pub fn screen(&self) -> Option<&ScreenCheckpoint> {
+        match self {
+            Self::Screen { screen } => Some(screen),
+            Self::RawTail { .. } => None,
+        }
+    }
+}
+
 /// A [`Snapshot`] narrowed to one negotiated wire revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SnapshotFrame {
@@ -972,10 +992,11 @@ mod tests {
 
     /// The screen a client reconstructs from a revision 2 frame.
     fn restored(frame: &SnapshotFrame) -> VtScreen {
-        let SnapshotContent::Screen { screen } = &frame.content else {
-            panic!("a revision 2 frame carries a screen checkpoint");
-        };
-        VtScreen::from_checkpoint(screen).expect("the daemon emits a decodable checkpoint")
+        let checkpoint = frame
+            .content
+            .screen()
+            .expect("a revision 2 frame carries a screen checkpoint");
+        VtScreen::from_checkpoint(checkpoint).expect("the daemon emits a decodable checkpoint")
     }
 
     #[test]
@@ -1030,7 +1051,11 @@ mod tests {
                 replay: b"208m".to_vec()
             }
         );
+        assert_eq!(raw.content.replay(), Some(&b"208m"[..]));
         assert_eq!(raw.base_offset + 4, raw.output_offset);
+        // Each payload exposes only its own shape.
+        assert!(raw.content.screen().is_none());
+        assert!(checkpoint.content.replay().is_none());
 
         // Wire selection follows the negotiated revision.
         assert_eq!(SnapshotWire::for_revision(0), SnapshotWire::RawTail);
@@ -1103,9 +1128,7 @@ mod tests {
         // No frame ever mixes geometries: the envelope and the screen it carries
         // always agree, so a client detects the fence by comparing either one.
         for frame in [&before, &after] {
-            let SnapshotContent::Screen { screen } = &frame.content else {
-                panic!("checkpoint frame");
-            };
+            let screen = frame.content.screen().expect("checkpoint frame");
             assert_eq!(u32::from(frame.geometry.rows), screen.geometry.rows);
             assert_eq!(u32::from(frame.geometry.cols), screen.geometry.cols);
         }
@@ -1137,9 +1160,7 @@ mod tests {
 
     /// Rows a checkpoint's primary buffer retains (visible grid plus history).
     fn retained_rows(frame: &SnapshotFrame) -> usize {
-        let SnapshotContent::Screen { screen } = &frame.content else {
-            panic!("checkpoint frame");
-        };
+        let screen = frame.content.screen().expect("checkpoint frame");
         screen.primary.grid.len() + screen.primary.scrollback.len()
     }
     /// Registers `count` terminals and feeds each of them `lines` rows.
@@ -1243,9 +1264,7 @@ mod tests {
             .snapshot(&r)
             .unwrap()
             .into_frame(SnapshotWire::ScreenCheckpoint);
-        let SnapshotContent::Screen { screen } = &frame.content else {
-            panic!("checkpoint frame");
-        };
+        let screen = frame.content.screen().expect("checkpoint frame");
         assert!(serde_json::to_vec(screen).unwrap().len() <= 2048);
         let trimmed_once = output_pipeline_counters().checkpoint_trimmed_rows;
         assert!(trimmed_once > before.checkpoint_trimmed_rows);
