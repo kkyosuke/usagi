@@ -7,7 +7,7 @@ labels: [review, v2, epic, tui, daemon, agent, recovery]
 dependson: [504]
 related: [209, 350, 388, 492, 503]
 created_at: 2026-07-21T21:20:29.599700+00:00
-updated_at: 2026-07-21T21:30:20.512145+00:00
+updated_at: 2026-07-24T21:41:55.959245+00:00
 ---
 
 ## レビュー結果
@@ -71,3 +71,20 @@ in-process coordinator の再構築だけで完了とせず、shipping binary、
 実装時に [TUI](../../document/03-tui.md)、[IPC](../../document/04-ipc.md)、[daemon](../../document/05-daemon.md)、[workspace pane restore proposal](../../document/proposals/11-workspace-restore-panes.md) を、上記 failure-mode matrix に合わせて更新する。
 
 daemon crash 後も同じ PTY master fd を維持する broker / FD handoff は #221 の将来設計であり、本 epic の非目標とする。crash / reboot は provider-native explicit resume による新 runtime 復帰を保証する。
+
+## 進捗（2026-07-25 時点）
+
+epic は未完である。子 issue の状況は次のとおり。
+
+| 子 issue | 状況 |
+|---|---|
+| #506 live tab intent の durable 化 | done |
+| #509 interrupted runtime の exact-target resume contract | done |
+| #504 Codex structured capture の production 配線 | done |
+| #510 interrupted tab 単位の選択 resume | 進行中。projection / 明示 resume 検証 reducer と daemon の safe provider vocabulary が landed（`crates/tui/src/usecase/application/interrupted_tab.rs`）。pane registry / tab strip / resume worker への配線と product E2E が残る |
+| #507 planned restart の active/draining rollover | 未着手。依存 #508 が未完 |
+| #508 draining generation inventory と owner routing | 未着手。依存 #518 → #516（cross-process generation registry）が未実装のため、この epic の planned-restart 受入条件は現時点で達成できない |
+
+したがって受入条件のうち「shipping `daemon restart` 後も旧 generation の Agent tab に双方向 IO できる」「old generation は最後の
+owned terminal 終了後だけ回収される」は #516 → #518 → #508 → #507 の順序で解消する必要がある。crash / cold restart 側
+（interrupted tab の表示と明示 resume）は #510 で閉じる。
