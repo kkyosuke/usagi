@@ -464,6 +464,16 @@ impl WorkspaceRuntime {
             && matches!(self.panes.input_owner(), PaneInputOwner::Tab)
     }
 
+    /// Whether shell-level right-pane controls may mutate their pane state.
+    ///
+    /// Closeup keeps pending and ready tabs controllable before they own PTY
+    /// input. Switch and foreground overlays leave the pane visible but inert.
+    #[must_use]
+    pub fn wants_pane_control_input(&self) -> bool {
+        matches!(self.state.route(), Route::Home(HomeMode::Closeup))
+            && self.state.overlay().is_none()
+    }
+
     /// The terminal the active pane's selected tab attaches to, if the selection
     /// is a live tab. The shell polls this terminal for the viewport and forwards
     /// passthrough bytes to it.
@@ -1188,10 +1198,12 @@ mod tests {
         let _ = runtime.focus_terminal(target, terminal);
         // A focused live pane owns input until the action modal opens over it.
         assert!(runtime.wants_live_input());
+        assert!(runtime.wants_pane_control_input());
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::OpenCloseupModal));
         assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
         assert!(runtime.closeup_modal().is_some());
         assert!(!runtime.wants_live_input());
+        assert!(!runtime.wants_pane_control_input());
         // #355: Escape dismisses the forced modal and leaves Closeup for Switch
         // (rather than handing input back to the live pane), so live passthrough
         // stays disarmed until the session is re-activated.
@@ -1203,6 +1215,7 @@ mod tests {
         assert_eq!(runtime.state().overlay(), None);
         assert!(runtime.closeup_modal().is_none());
         assert!(!runtime.wants_live_input());
+        assert!(!runtime.wants_pane_control_input());
     }
 
     #[test]

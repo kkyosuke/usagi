@@ -172,7 +172,7 @@ pre-commit は、**workspace root のチェックアウト（`.usagi/sessions/` 
 
 - 判定はブランチ名チェックの免除と同じく「worktree パスが `.usagi/sessions/` 配下か」で行う。`.usagi/sessions/<name>/` 配下の worktree のコミットは通す。
 - 誤検知を避けるため、対象は root に `.usagi/` を持つ usagi 管理ワークスペースに限る。usagi をライブラリとして使うだけの一般リポジトリの root コミットは妨げない。
-- これは backstop であり、一次防壁は MCP 書き込み拒否と guard-workspace（Agent 経由の repo 変更を止める）。ローカル hook は迂回可能なため、`main` 側のブランチ保護（[enforce-pr-base.yml](#cigithub-actions)）と併せて多層で守る。
+- これは backstop であり、MCP 書き込み拒否と `main` 側のブランチ保護（[enforce-pr-base.yml](#cigithub-actions)）と併せて守る。ローカル hook は迂回可能なため、Agent による直接のファイル変更を完全に防ぐ境界ではない。
 - 緊急脱出は従来どおり `LEFTHOOK=0 git commit ...` / `--no-verify`（原則使わない）。
 
 ## CI（GitHub Actions）
