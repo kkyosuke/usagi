@@ -14,6 +14,9 @@
 //!   welcome 画面向け recent overview の構築。
 //! - [`workspace_guard`] — エージェントのツール呼び出しを cwd（session / root モード）に応じて
 //!   許可判定する純粋ロジック。Claude の `PreToolUse` フックが呼ぶ `guard-workspace` の中身。
+//! - [`vt_screen`] — raw PTY バイト列を `rows × cols` の文字グリッドへ解釈する純粋な
+//!   VT parser（`VtScreen`）。TUI と daemon が共有する単一 parser authority で、
+//!   描画（selection / link / cursor marker）は presentation 側に残す。
 
 pub mod agent;
 pub mod claude_sandbox;
@@ -25,5 +28,6 @@ pub mod note;
 pub mod pr_inventory;
 pub mod session;
 pub mod settings;
+pub mod vt_screen;
 pub mod workspace;
 pub mod workspace_guard;
