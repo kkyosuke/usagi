@@ -2785,10 +2785,10 @@ mod tests {
         TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
         TerminalSnapshotMode, agent_inventory_request, classify_terminal_input,
         created_session_hook, daemon_error_reason, decode_agent_admission, decode_attach_screen,
-        decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
-        exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
-        load_workspace_state, map_terminal_error, passthrough_key, probe_path,
-        provider_resume_projection, session_snapshot_result, terminal_copy_key,
+        decode_exact_agent_resume, decode_terminal_input_ack, decode_terminal_inventory,
+        decode_terminal_poll, exact_agent_resume_request, lifecycle_snapshot,
+        load_screen_graph_data, load_workspace_state, map_terminal_error, passthrough_key,
+        probe_path, provider_resume_projection, session_snapshot_result, terminal_copy_key,
         terminal_inventory_matches_scope, validate_workspace_directory,
     };
     use crate::runtime::terminal_pump::TerminalPollPump;
@@ -3559,6 +3559,59 @@ mod tests {
             )
             .unwrap_err(),
             "agent launch returned an invalid continuation"
+        );
+    }
+
+    /// #510: the exact-target resume answer carries the daemon's own lineage and
+    /// source-to-replacement relation, and never infers either.
+    #[test]
+    fn exact_agent_resume_decodes_the_daemon_relation_or_leaves_it_absent() {
+        use usagi_core::domain::agent::AgentResumeRelation;
+        use usagi_core::domain::id::{AgentResumeSourceId, AgentRuntimeId};
+
+        let workspace = WorkspaceId::new();
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: None,
+            worktree_id: WorktreeId::new(),
+        };
+        let continuation = AgentContinuationRef::new();
+        let relation = AgentResumeRelation {
+            source: AgentResumeSourceId::new(),
+            replacement_runtime: AgentRuntimeId::new(),
+            replacement_terminal: terminal.clone(),
+        };
+
+        let resume = decode_exact_agent_resume(&json!({
+            "terminal": terminal,
+            "continuation": continuation,
+            "resume_relation": relation,
+        }))
+        .unwrap();
+        assert_eq!(resume.terminal, terminal);
+        assert_eq!(resume.continuation, Some(continuation));
+        assert_eq!(resume.relation, Some(relation));
+
+        // A body without a decodable relation or lineage yields none of either,
+        // so the TUI refuses the replacement instead of assuming one.
+        let bare = decode_exact_agent_resume(&json!({
+            "terminal": terminal,
+            "continuation": null,
+            "resume_relation": "provider-native-id",
+        }))
+        .unwrap();
+        assert_eq!(bare.continuation, None);
+        assert_eq!(bare.relation, None);
+
+        assert_eq!(
+            decode_exact_agent_resume(&json!({})).unwrap_err(),
+            "provider resume returned no terminal"
+        );
+        assert_eq!(
+            decode_exact_agent_resume(&json!({"terminal": "bad"})).unwrap_err(),
+            "provider resume returned an invalid terminal"
         );
     }
 

@@ -688,6 +688,11 @@ mod tests {
                 follow_up: key(KeyCode::Char('\u{18}')),
                 action: LiveTerminalAction::CloseTab,
             },
+            // The only explicit per-tab provider resume (#510).
+            Case {
+                follow_up: key(KeyCode::Char('r')),
+                action: LiveTerminalAction::ResumeTab,
+            },
             Case {
                 follow_up: key(KeyCode::Char(']')),
                 action: LiveTerminalAction::MoveTabNext,

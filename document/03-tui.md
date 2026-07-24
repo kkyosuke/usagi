@@ -255,7 +255,8 @@ identity は保持しない。
 | `Ctrl-O` `]` | MoveTabNext | 選択 tab を次の表示 slot へ移動し、Agent 順序を commit する |
 | `Ctrl-O` `[` | MoveTabPrevious | 選択 tab を前の表示 slot へ移動し、Agent 順序を commit する |
 | macOS: Command+C / Linux: Ctrl+Shift+C / Windows: Ctrl+C | Copy selected output | 保持中の terminal 出力選択を OS clipboard へ再コピーする |
-| `Ctrl-O` `x` / `Ctrl-O` `Ctrl-X` | CloseTab | 選択中の tab を閉じる（live なら subscription を detach、pending なら起動待ちを取消） |
+| `Ctrl-O` `x` / `Ctrl-O` `Ctrl-X` | CloseTab | 選択中の tab を閉じる（live なら subscription を detach、pending なら起動待ちを取消、[interrupted](#interrupted-agent-の-tab-投影と明示-resume) なら lineage を dismiss） |
+| `Ctrl-O` `r` | ResumeTab | 選択中の [interrupted tab](#interrupted-agent-の-tab-投影と明示-resume) を明示 resume する（他の tab は変更しない） |
 | `Ctrl-O` `u` / `↑` | ScrollUp | 右ペインの scrollback を 1 行古い方向へ |
 | `Ctrl-O` `d` / `↓` | ScrollDown | 右ペインの scrollback を 1 行 live bottom 方向へ |
 
@@ -868,6 +869,34 @@ planned restart は resume request を作らない。要求は選択中の exact
 同じ tab に対する重複操作（double click）は in-flight な operation へ収束し、2 つ目の request も spawn も作らない。
 拒否・失敗は interrupted tab をそのまま残し、provider ID を含まない safe reason と retry 可否だけを表示する。
 他の tab、他の history、selection、provider conversation、runtime record は変更しない。
+
+### tab strip の表示と操作
+
+投影された interrupted tab は live tab と同じ tab strip に並ぶ。target ごとの pane registry entry に入るため、
+root と managed session の history は互いに混ざらない。live restore は live membership だけを所有し、
+interrupted tab の membership・順序・selection は projection だけが所有する。
+
+| 状態 | tab label | 選択時の body |
+|---|---|---|
+| resume 可能 | `Claude (interrupted)` / `Codex (interrupted)`（metadata 無しは `Agent (interrupted)`） | `interrupted — Ctrl-O r resumes it` |
+| resume 不可 | 同上 | 当該 [safe reason](#投影規則)（provider ID を含まない 1 行） |
+| resume 中 | `Claude (resuming)` | `resuming this conversation` |
+
+操作は次の順に進む。
+
+1. `Ctrl-O r` が選択 tab の opaque `AgentResumeTarget` と新しい `OperationId` を daemon へ送り、**その tab だけ**を
+   resume 中にする。tab の位置・selection・他 tab は変わらない。
+2. 応答が[明示 resume の検証](#明示-resume-の検証)をすべて満たしたときだけ、同じ slot の tab を新しい exact
+   `TerminalRef` の live Agent tab へ置き換える。foreground だった tab だけが attach / resync する。
+3. 置換した lineage は #506 の slot intent へ新しい `TerminalRef` として commit するので、次の observation でも
+   同じ位置に残る。
+4. 拒否・失敗は tab を interrupted のまま残して safe feedback を出す。in-flight な operation を持つ tab は、
+   inventory から source が消えても消滅しない（利用者の request が答えを受け取るまで tab が残る）。
+5. `Ctrl-O x` は tab を閉じるだけで、provider conversation も runtime record も削除しない。閉じた lineage は
+   #506 の continuation-scoped dismissal に入り、`reopen` の明示操作だけが再表示する。
+
+resume 不可の tab、選択されていない tab、および interrupted tab を持たない selection に対する `Ctrl-O r` は
+daemon request を作らない。inventory refresh・reconnect・workspace open・planned restart も同様である。
 
 planned な `daemon restart` は旧 generation の PTY を保持したまま control authority だけを移す別 failure mode であり、
 その rollover と owner routing は [#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md) /

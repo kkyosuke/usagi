@@ -488,9 +488,15 @@ pub enum PaneEvent {
         continuation: AgentContinuationRef,
         terminal: TerminalRef,
     },
-    /// One resume failed. The interrupted tab stays, carrying safe feedback.
+    /// One resume failed or was refused. The interrupted tab stays, carrying safe
+    /// feedback.
+    ///
+    /// `operation` clears the in-flight marker only when it is the operation that
+    /// is actually in flight, so a repeated activation refused as a duplicate can
+    /// never un-pend the request it converged to.
     ResumeFailed {
         continuation: AgentContinuationRef,
+        operation: Option<OperationId>,
         message: String,
     },
 }
@@ -550,8 +556,9 @@ pub fn reduce(state: &mut PaneState, event: PaneEvent) -> Vec<PaneEffect> {
         } => resume_replaced(state, continuation, &terminal),
         PaneEvent::ResumeFailed {
             continuation,
+            operation,
             message,
-        } => resume_failed(state, continuation, message),
+        } => resume_failed(state, continuation, operation, message),
     }
 }
 
@@ -687,12 +694,15 @@ fn resume_replaced(
 fn resume_failed(
     state: &mut PaneState,
     continuation: AgentContinuationRef,
+    operation: Option<OperationId>,
     message: String,
 ) -> Vec<PaneEffect> {
     let Some(pane) = interrupted_mut(state, continuation) else {
         return Vec::new();
     };
-    pane.resuming = None;
+    if pane.resuming == operation {
+        pane.resuming = None;
+    }
     state.error = Some(message);
     Vec::new()
 }
@@ -2092,6 +2102,421 @@ mod tests {
         assert_eq!(
             ready.selected(),
             &PaneSelection::Tab(TabSelection::Ready(second))
+        );
+    }
+
+    /// One projected interrupted lineage for `target`, resumable unless
+    /// `resumable` is false.
+    fn interrupted(target: Target, resumable: bool) -> InterruptedTab {
+        use usagi_core::domain::agent::{ProviderKind, ProviderResumePhase, ProviderResumeReason};
+        use usagi_core::domain::id::{AgentResumeSourceId, AgentRuntimeId};
+
+        let terminal = terminal(target);
+        let continuation = AgentContinuationRef::new();
+        let runtime_id = AgentRuntimeId::new();
+        InterruptedTab {
+            continuation,
+            session_id: terminal.session_id,
+            provider: Some(ProviderKind::Claude),
+            last_known_phase: Some(ProviderResumePhase::Interrupted),
+            reason: if resumable {
+                ProviderResumeReason::ExplicitResumeAvailable
+            } else {
+                ProviderResumeReason::ProviderMetadataUnavailable
+            },
+            target: resumable.then(|| usagi_core::domain::agent::AgentResumeTarget {
+                continuation,
+                source: AgentResumeSourceId::new(),
+                workspace_id: terminal.workspace_id,
+                session_id: terminal.session_id,
+                worktree_id: terminal.worktree_id,
+                runtime_id,
+                adapter_revision: 3,
+            }),
+            last_terminal: terminal,
+        }
+    }
+
+    fn interrupted_tabs(state: &PaneState) -> Vec<AgentContinuationRef> {
+        state
+            .tabs()
+            .iter()
+            .filter_map(|tab| match tab {
+                PaneTab::Interrupted(pane) => Some(pane.tab.continuation),
+                PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_) => None,
+            })
+            .collect()
+    }
+
+    fn resuming(state: &PaneState, continuation: AgentContinuationRef) -> Option<OperationId> {
+        state.tabs().iter().find_map(|tab| match tab {
+            PaneTab::Interrupted(pane) if pane.tab.continuation == continuation => pane.resuming,
+            PaneTab::Interrupted(_)
+            | PaneTab::Pending(_)
+            | PaneTab::Live(_)
+            | PaneTab::Ready(_) => None,
+        })
+    }
+
+    #[test]
+    fn interrupted_projection_adds_refreshes_and_dedupes_history_tabs() {
+        let target = target();
+        let mut state = PaneState::new(PaneSelection::Target(target));
+        let first = interrupted(target, true);
+        let second = interrupted(target, true);
+
+        assert!(
+            reduce(
+                &mut state,
+                PaneEvent::RestoreInterrupted {
+                    // A duplicated inventory row must not create a second tab.
+                    tabs: vec![first.clone(), second.clone(), first.clone()],
+                },
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            interrupted_tabs(&state),
+            vec![first.continuation, second.continuation]
+        );
+
+        // A refresh replaces display material in place, keeping both slots.
+        let mut refreshed = first.clone();
+        refreshed.reason = usagi_core::domain::agent::ProviderResumeReason::SourceAlreadySuperseded;
+        refreshed.target = None;
+        let _ = reduce(
+            &mut state,
+            PaneEvent::RestoreInterrupted {
+                tabs: vec![refreshed, second.clone()],
+            },
+        );
+        assert_eq!(
+            interrupted_tabs(&state),
+            vec![first.continuation, second.continuation]
+        );
+        assert!(matches!(
+            &state.tabs()[0],
+            PaneTab::Interrupted(pane) if !pane.tab.resumable()
+        ));
+    }
+
+    #[test]
+    fn interrupted_projection_drops_absent_history_but_keeps_an_in_flight_resume() {
+        let target = target();
+        let mut state = PaneState::new(PaneSelection::Target(target));
+        let kept = interrupted(target, true);
+        let dropped = interrupted(target, true);
+        let _ = reduce(
+            &mut state,
+            PaneEvent::RestoreInterrupted {
+                tabs: vec![kept.clone(), dropped.clone()],
+            },
+        );
+        let operation = OperationId::new();
+        let _ = reduce(
+            &mut state,
+            PaneEvent::ResumeStarted {
+                continuation: kept.continuation,
+                operation,
+            },
+        );
+
+        let _ = reduce(
+            &mut state,
+            PaneEvent::RestoreInterrupted { tabs: Vec::new() },
+        );
+
+        // The user's own in-flight request keeps its tab; the untouched lineage
+        // the projection no longer lists loses its tab.
+        assert_eq!(interrupted_tabs(&state), vec![kept.continuation]);
+        assert_eq!(resuming(&state, kept.continuation), Some(operation));
+    }
+
+    #[test]
+    fn a_removed_interrupted_selection_falls_back_to_a_tab_then_to_its_target() {
+        let target = target();
+        let mut state = PaneState::new(PaneSelection::Target(target));
+        let live = terminal(target);
+        let history = interrupted(target, true);
+        let _ = reduce(
+            &mut state,
+            PaneEvent::Restore(LivePane {
+                terminal: live.clone(),
+                kind: PaneKind::Agent,
+            }),
+        );
+        let _ = reduce(
+            &mut state,
+            PaneEvent::RestoreInterrupted {
+                tabs: vec![history.clone()],
+            },
+        );
+        let _ = reduce(
+            &mut state,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Interrupted(
+                history.continuation,
+            ))),
+        );
+
+        let _ = reduce(
+            &mut state,
+            PaneEvent::RestoreInterrupted { tabs: Vec::new() },
+        );
+        assert_eq!(
+            state.selected(),
+            &PaneSelection::Tab(TabSelection::Live(live.clone()))
+        );
+
+        // Without any other tab the selection returns to the lineage's own scope.
+        let mut only = PaneState::new(PaneSelection::Target(target));
+        let _ = reduce(
+            &mut only,
+            PaneEvent::RestoreInterrupted {
+                tabs: vec![history.clone()],
+            },
+        );
+        let _ = reduce(
+            &mut only,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Interrupted(
+                history.continuation,
+            ))),
+        );
+        let _ = reduce(
+            &mut only,
+            PaneEvent::RestoreInterrupted { tabs: Vec::new() },
+        );
+        assert_eq!(only.selected(), &PaneSelection::Target(target));
+        assert!(!only.has_tabs());
+    }
+
+    #[test]
+    fn a_root_history_tab_belongs_to_the_root_target_and_a_live_restore_keeps_it() {
+        let workspace = WorkspaceId::new();
+        let root = Target::Root(workspace);
+        let history = interrupted(root, true);
+        assert_eq!(target_for_interrupted(&history), root);
+
+        let mut registry = PaneRegistry::new(root);
+        // An interrupted batch for another target cannot touch this entry.
+        assert!(
+            reduce_registry(
+                &mut registry,
+                PaneRegistryEvent::Pane {
+                    target: Target::Session(SessionId::new()),
+                    event: PaneEvent::RestoreInterrupted {
+                        tabs: vec![history.clone()],
+                    },
+                },
+            )
+            .is_empty()
+        );
+        assert!(!registry.active_pane().has_tabs());
+
+        let _ = reduce_registry(
+            &mut registry,
+            PaneRegistryEvent::Pane {
+                target: root,
+                event: PaneEvent::RestoreInterrupted {
+                    tabs: vec![history.clone()],
+                },
+            },
+        );
+        let live = terminal(root);
+        let _ = reduce_registry(
+            &mut registry,
+            PaneRegistryEvent::Pane {
+                target: root,
+                event: PaneEvent::RestoreBatch {
+                    panes: vec![LivePane {
+                        terminal: live.clone(),
+                        kind: PaneKind::Agent,
+                    }],
+                    selected: Some(live),
+                    replace_order: true,
+                },
+            },
+        );
+        // A live restore owns live membership only: the history tab survives it.
+        assert_eq!(
+            interrupted_tabs(registry.active_pane()),
+            vec![history.continuation]
+        );
+    }
+
+    #[test]
+    fn a_selected_interrupted_tab_is_replaced_in_place_and_attaches_only_in_foreground() {
+        let target = target();
+        let mut state = PaneState::new(PaneSelection::Target(target));
+        let other = interrupted(target, true);
+        let resumed = interrupted(target, true);
+        let _ = reduce(
+            &mut state,
+            PaneEvent::RestoreInterrupted {
+                tabs: vec![other.clone(), resumed.clone()],
+            },
+        );
+        let _ = reduce(
+            &mut state,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Interrupted(
+                resumed.continuation,
+            ))),
+        );
+        let replacement = terminal(target);
+
+        assert_eq!(
+            reduce(
+                &mut state,
+                PaneEvent::ResumeReplaced {
+                    continuation: resumed.continuation,
+                    terminal: replacement.clone(),
+                },
+            ),
+            vec![PaneEffect::Attach(replacement.clone())]
+        );
+        assert_eq!(
+            state.selected(),
+            &PaneSelection::Tab(TabSelection::Live(replacement.clone()))
+        );
+        // The replacement took the history tab's own slot; the other tab is
+        // untouched.
+        assert!(matches!(
+            &state.tabs()[1],
+            PaneTab::Live(live) if live.terminal == replacement && live.kind == PaneKind::Agent
+        ));
+        assert_eq!(interrupted_tabs(&state), vec![other.continuation]);
+
+        // A background success stays a live tab without attaching.
+        let background = terminal(target);
+        assert!(
+            reduce(
+                &mut state,
+                PaneEvent::ResumeReplaced {
+                    continuation: other.continuation,
+                    terminal: background,
+                },
+            )
+            .is_empty()
+        );
+        assert!(interrupted_tabs(&state).is_empty());
+    }
+
+    #[test]
+    fn resume_progress_for_an_unknown_lineage_changes_nothing() {
+        let target = target();
+        let mut state = PaneState::new(PaneSelection::Target(target));
+        let absent = AgentContinuationRef::new();
+        let before = state.clone();
+
+        for event in [
+            PaneEvent::ResumeStarted {
+                continuation: absent,
+                operation: OperationId::new(),
+            },
+            PaneEvent::ResumeReplaced {
+                continuation: absent,
+                terminal: terminal(target),
+            },
+            PaneEvent::ResumeFailed {
+                continuation: absent,
+                operation: None,
+                message: "ignored".to_owned(),
+            },
+        ] {
+            assert!(reduce(&mut state, event).is_empty());
+        }
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn a_failed_resume_keeps_the_history_tab_and_shows_safe_feedback() {
+        let target = target();
+        let mut state = PaneState::new(PaneSelection::Target(target));
+        let history = interrupted(target, true);
+        let _ = reduce(
+            &mut state,
+            PaneEvent::RestoreInterrupted {
+                tabs: vec![history.clone()],
+            },
+        );
+        let operation = OperationId::new();
+        let _ = reduce(
+            &mut state,
+            PaneEvent::ResumeStarted {
+                continuation: history.continuation,
+                operation,
+            },
+        );
+
+        // A refusal that does not name the in-flight operation reports feedback
+        // without releasing the pending request.
+        let _ = reduce(
+            &mut state,
+            PaneEvent::ResumeFailed {
+                continuation: history.continuation,
+                operation: None,
+                message: "This conversation is already being resumed".to_owned(),
+            },
+        );
+        assert_eq!(resuming(&state, history.continuation), Some(operation));
+
+        assert!(
+            reduce(
+                &mut state,
+                PaneEvent::ResumeFailed {
+                    continuation: history.continuation,
+                    operation: Some(operation),
+                    message: "This conversation cannot be resumed".to_owned(),
+                },
+            )
+            .is_empty()
+        );
+        assert_eq!(interrupted_tabs(&state), vec![history.continuation]);
+        assert_eq!(resuming(&state, history.continuation), None);
+        assert_eq!(state.error(), Some("This conversation cannot be resumed"));
+    }
+
+    #[test]
+    fn closing_a_selected_history_tab_removes_only_that_tab() {
+        let target = target();
+        let mut registry = PaneRegistry::new(target);
+        let first = interrupted(target, true);
+        let second = interrupted(target, true);
+        let _ = reduce_registry(
+            &mut registry,
+            PaneRegistryEvent::Pane {
+                target,
+                event: PaneEvent::RestoreInterrupted {
+                    tabs: vec![first.clone(), second.clone()],
+                },
+            },
+        );
+        let _ = reduce_registry(
+            &mut registry,
+            PaneRegistryEvent::Pane {
+                target,
+                event: PaneEvent::Select(PaneSelection::Tab(TabSelection::Interrupted(
+                    first.continuation,
+                ))),
+            },
+        );
+
+        let _ = route_tab_command(&mut registry, PaneTabCommand::Close);
+        assert_eq!(
+            interrupted_tabs(registry.active_pane()),
+            vec![second.continuation]
+        );
+
+        // Closing the last one returns to the target's Closeup surface.
+        assert_eq!(
+            route_tab_command(&mut registry, PaneTabCommand::Close),
+            vec![PaneRegistryEffect::Pane {
+                target,
+                effect: PaneEffect::ReturnToCloseup,
+            }]
+        );
+        assert_eq!(
+            registry.active_pane().selected(),
+            &PaneSelection::Target(target)
         );
     }
 }

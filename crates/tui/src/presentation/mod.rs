@@ -3897,7 +3897,7 @@ fn apply_exact_resume(
     let resume = match result {
         Ok(resume) => resume,
         Err(message) => {
-            runtime.fail_tab_resume(continuation, message);
+            runtime.fail_tab_resume(continuation, Some(operation), message);
             return;
         }
     };
@@ -13365,5 +13365,361 @@ mod tests {
                 .to_string(),
             "write failed"
         );
+    }
+
+    // ---- #510: interrupted Agent tabs and their explicit per-tab resume ----
+
+    use super::{ExactAgentResume, InterruptedTab};
+    use usagi_core::domain::agent::{AgentResumeRelation, AgentResumeTarget};
+
+    /// A daemon port whose exact-target resume answers with a scripted result and
+    /// counts how many requests it received.
+    struct ScriptedExactResumePort {
+        answers: Vec<Result<ExactAgentResume, String>>,
+        requests: Arc<Mutex<Vec<(AgentResumeTarget, OperationId)>>>,
+    }
+
+    impl AgentCommandPort for ScriptedExactResumePort {
+        fn launch(
+            &mut self,
+            _workspace: WorkspaceId,
+            _session: Option<SessionId>,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<AgentPaneAdmission, String> {
+            Err("agent launch is unavailable".to_owned())
+        }
+
+        fn resume_exact(
+            &mut self,
+            target: AgentResumeTarget,
+            operation_id: OperationId,
+        ) -> Result<ExactAgentResume, String> {
+            self.requests.lock().unwrap().push((target, operation_id));
+            if self.answers.is_empty() {
+                return Err("no scripted answer".to_owned());
+            }
+            self.answers.remove(0)
+        }
+    }
+
+    /// One interrupted lineage of `session`, resumable unless `resumable` is false.
+    fn interrupted_history(
+        workspace: WorkspaceId,
+        session: Option<SessionId>,
+        resumable: bool,
+    ) -> InterruptedTab {
+        use usagi_core::domain::agent::{ProviderKind, ProviderResumePhase, ProviderResumeReason};
+        use usagi_core::domain::id::{AgentResumeSourceId, AgentRuntimeId, WorktreeId};
+
+        let continuation = AgentContinuationRef::new();
+        let worktree_id = WorktreeId::new();
+        InterruptedTab {
+            continuation,
+            session_id: session,
+            last_terminal: TerminalRef {
+                daemon_generation: DaemonGeneration::new(),
+                terminal_id: TerminalId::new(),
+                workspace_id: workspace,
+                session_id: session,
+                worktree_id,
+            },
+            provider: Some(ProviderKind::Claude),
+            last_known_phase: Some(ProviderResumePhase::Interrupted),
+            reason: if resumable {
+                ProviderResumeReason::ExplicitResumeAvailable
+            } else {
+                ProviderResumeReason::ProviderMetadataUnavailable
+            },
+            target: resumable.then(|| AgentResumeTarget {
+                continuation,
+                source: AgentResumeSourceId::new(),
+                workspace_id: workspace,
+                session_id: session,
+                worktree_id,
+                runtime_id: AgentRuntimeId::new(),
+                adapter_revision: 3,
+            }),
+        }
+    }
+
+    /// The accepted answer one resume of `history` would produce.
+    fn exact_resume_answer(history: &InterruptedTab) -> ExactAgentResume {
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: history.last_terminal.workspace_id,
+            session_id: history.session_id,
+            worktree_id: history.last_terminal.worktree_id,
+        };
+        ExactAgentResume {
+            terminal: terminal.clone(),
+            continuation: Some(history.continuation),
+            relation: Some(AgentResumeRelation {
+                source: history.target.as_ref().unwrap().source,
+                replacement_runtime: usagi_core::domain::id::AgentRuntimeId::new(),
+                replacement_terminal: terminal,
+            }),
+        }
+    }
+
+    /// A shell driven into Closeup on `session` whose pane holds `history` as its
+    /// selected interrupted tab.
+    fn closeup_with_history(
+        workspace: WorkspaceId,
+        session: SessionId,
+        history: Vec<InterruptedTab>,
+        port: Box<dyn AgentCommandPort>,
+    ) -> (WorkspaceUi, WorkspaceRuntime) {
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(workspace, vec![session], port)
+            .with_agent_tab_intent(
+                workspace,
+                BTreeSet::from([session]),
+                Box::new(MemoryIntentPort {
+                    state: Arc::new(Mutex::new(AgentTabIntent::empty(workspace))),
+                    mutations: Arc::new(Mutex::new(Vec::new())),
+                }),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.handle_key(Key::Down);
+        let _ = runtime.handle_key(Key::Enter);
+        let (interaction, revision) = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            interaction,
+            revision,
+            vec![super::PaneRestoreTarget {
+                target: Target::Session(session),
+                panes: Vec::new(),
+                selected: None,
+                interrupted: history,
+            }],
+        ));
+        let _ = runtime.select_tab(TabDirection::Next);
+        (ui, runtime)
+    }
+
+    #[test]
+    fn interrupted_history_joins_its_own_scope_in_the_restore_projection() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let other = SessionId::new();
+        let root_history = interrupted_history(workspace, None, true);
+        let session_history = interrupted_history(workspace, Some(session), true);
+        let second_session_history = interrupted_history(workspace, Some(session), false);
+
+        let targets = super::pane_restore_targets(
+            workspace,
+            &BTreeSet::from([session, other]),
+            AgentTabProjection::default(),
+            &[],
+            None,
+            vec![
+                root_history.clone(),
+                session_history.clone(),
+                second_session_history.clone(),
+            ],
+        );
+
+        let root = targets
+            .iter()
+            .find(|target| target.target == Target::Root(workspace))
+            .unwrap();
+        assert_eq!(
+            root.interrupted
+                .iter()
+                .map(|tab| tab.continuation)
+                .collect::<Vec<_>>(),
+            vec![root_history.continuation]
+        );
+        let managed = targets
+            .iter()
+            .find(|target| target.target == Target::Session(session))
+            .unwrap();
+        // Several histories in one scope stay separate tabs, in projection order.
+        assert_eq!(
+            managed
+                .interrupted
+                .iter()
+                .map(|tab| tab.continuation)
+                .collect::<Vec<_>>(),
+            vec![
+                session_history.continuation,
+                second_session_history.continuation
+            ]
+        );
+        // A session without history keeps an empty entry rather than borrowing
+        // another scope's tabs.
+        let empty = targets
+            .iter()
+            .find(|target| target.target == Target::Session(other))
+            .unwrap();
+        assert!(empty.interrupted.is_empty());
+    }
+
+    #[test]
+    fn one_explicit_resume_sends_one_request_and_turns_only_that_tab_live() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let resumed = interrupted_history(workspace, Some(session), true);
+        let untouched = interrupted_history(workspace, Some(session), true);
+        let answer = exact_resume_answer(&resumed);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (mut ui, mut runtime) = closeup_with_history(
+            workspace,
+            session,
+            vec![resumed.clone(), untouched.clone()],
+            Box::new(ScriptedExactResumePort {
+                answers: vec![Ok(answer.clone())],
+                requests: Arc::clone(&requests),
+            }),
+        );
+        let mut pending = std::collections::HashMap::new();
+
+        // Nothing has asked the daemon to resume anything yet.
+        assert!(requests.lock().unwrap().is_empty());
+        super::resume_focused_interrupted_tab(&mut ui, &mut runtime, &mut pending);
+        assert_eq!(ui.pane_launches.len(), 1);
+        // A repeated activation converges to the in-flight request.
+        super::resume_focused_interrupted_tab(&mut ui, &mut runtime, &mut pending);
+        assert_eq!(ui.pane_launches.len(), 1);
+
+        super::drain_pane_launches(&mut ui, terminal_geometry(20, 80));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        super::drain_pane_completions_into_runtime(
+            &mut ui,
+            &mut runtime,
+            &mut pending,
+            terminal_geometry(20, 80),
+        );
+
+        // Exactly one daemon request, carrying the daemon's own opaque target.
+        let requests = requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, *resumed.target.as_ref().unwrap());
+        assert_eq!(runtime.focused_terminal(), Some(answer.terminal));
+        // The other history tab is unchanged and still unresumed.
+        assert_eq!(runtime.active_pane().tabs().len(), 2);
+        assert_eq!(
+            runtime
+                .active_pane()
+                .tabs()
+                .iter()
+                .filter(|tab| matches!(tab, PaneTab::Interrupted(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_refused_or_failed_resume_keeps_the_history_tab_with_safe_feedback() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let history = interrupted_history(workspace, Some(session), true);
+        let mut relationless = exact_resume_answer(&history);
+        relationless.relation = None;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (mut ui, mut runtime) = closeup_with_history(
+            workspace,
+            session,
+            vec![history.clone()],
+            Box::new(ScriptedExactResumePort {
+                answers: vec![
+                    Err("provider resume failed; refresh Agent inventory".to_owned()),
+                    Ok(relationless),
+                ],
+                requests: Arc::clone(&requests),
+            }),
+        );
+        let mut pending = std::collections::HashMap::new();
+
+        for _ in 0..2 {
+            super::resume_focused_interrupted_tab(&mut ui, &mut runtime, &mut pending);
+            super::drain_pane_launches(&mut ui, terminal_geometry(20, 80));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            super::drain_pane_completions_into_runtime(
+                &mut ui,
+                &mut runtime,
+                &mut pending,
+                terminal_geometry(20, 80),
+            );
+            // The tab survives every refusal, and no live pane is invented.
+            assert_eq!(runtime.active_pane().tabs().len(), 1);
+            assert!(matches!(
+                runtime.active_pane().tabs()[0],
+                PaneTab::Interrupted(_)
+            ));
+            assert!(runtime.focused_terminal().is_none());
+            assert!(runtime.active_pane().error().is_some());
+        }
+        // A transport failure and a relation-less answer are both retryable, so
+        // both requests reached the daemon.
+        assert_eq!(requests.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn an_unresumable_history_tab_never_reaches_the_daemon() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let history = interrupted_history(workspace, Some(session), false);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (mut ui, mut runtime) = closeup_with_history(
+            workspace,
+            session,
+            vec![history],
+            Box::new(ScriptedExactResumePort {
+                answers: Vec::new(),
+                requests: Arc::clone(&requests),
+            }),
+        );
+        let mut pending = std::collections::HashMap::new();
+
+        super::resume_focused_interrupted_tab(&mut ui, &mut runtime, &mut pending);
+        super::drain_pane_launches(&mut ui, terminal_geometry(20, 80));
+        assert!(ui.pane_launches.is_empty());
+        assert!(requests.lock().unwrap().is_empty());
+        assert_eq!(
+            runtime.active_pane().error(),
+            Some(
+                crate::usecase::application::interrupted_tab::ResumeRejection::NotResumable
+                    .safe_message()
+            )
+        );
+    }
+
+    #[test]
+    fn closing_a_history_tab_dismisses_its_lineage_without_resuming_anything() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let history = interrupted_history(workspace, Some(session), true);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (mut ui, mut runtime) = closeup_with_history(
+            workspace,
+            session,
+            vec![history.clone()],
+            Box::new(ScriptedExactResumePort {
+                answers: Vec::new(),
+                requests: Arc::clone(&requests),
+            }),
+        );
+        let mut pending = std::collections::HashMap::new();
+        // Seed the saved slot so the dismissal has a lineage to attach to.
+        ui.mutate_agent_intent(AgentTabIntentMutation::Upsert {
+            session_id: Some(session),
+            continuation: history.continuation,
+            terminal: history.last_terminal.clone(),
+            select: false,
+        })
+        .unwrap();
+        assert_eq!(ui.agent_slot_order(), vec![history.continuation]);
+
+        super::close_focused_terminal_pane(&mut ui, &mut runtime, &mut pending);
+
+        assert!(!runtime.active_pane().has_tabs());
+        assert!(ui.agent_dismissed().contains(&history.continuation));
+        // A dismissed lineage is offered for reopen and no provider resume ran.
+        assert_eq!(ui.agent_reopen_choices().len(), 1);
+        assert!(requests.lock().unwrap().is_empty());
+        assert!(ui.pane_launches.is_empty());
     }
 }

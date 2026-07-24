@@ -735,7 +735,9 @@ impl WorkspaceRuntime {
                 Ok(command)
             }
             Err(rejection) => {
-                self.fail_tab_resume(continuation, rejection.safe_message().to_owned());
+                // A duplicate activation must keep the operation it converged
+                // to, so nothing is cleared here.
+                self.fail_tab_resume(continuation, None, rejection.safe_message().to_owned());
                 Err(rejection)
             }
         }
@@ -790,16 +792,28 @@ impl WorkspaceRuntime {
                 Ok(effects)
             }
             Err(rejection) => {
-                self.fail_tab_resume(continuation, rejection.safe_message().to_owned());
+                self.fail_tab_resume(
+                    continuation,
+                    Some(in_flight),
+                    rejection.safe_message().to_owned(),
+                );
                 Err(rejection)
             }
         }
     }
 
     /// Leave one interrupted tab in place after a refused or failed resume and
-    /// show `message`. The tab becomes activatable again so an explicit retry is
-    /// possible.
-    pub fn fail_tab_resume(&mut self, continuation: AgentContinuationRef, message: String) {
+    /// show `message`.
+    ///
+    /// `operation` releases the tab for an explicit retry only when it is the
+    /// operation actually in flight; `None` reports feedback without releasing
+    /// anything.
+    pub fn fail_tab_resume(
+        &mut self,
+        continuation: AgentContinuationRef,
+        operation: Option<OperationId>,
+        message: String,
+    ) {
         let target = self.panes.active();
         let _ = reduce_registry(
             &mut self.panes,
@@ -807,6 +821,7 @@ impl WorkspaceRuntime {
                 target,
                 event: PaneEvent::ResumeFailed {
                     continuation,
+                    operation,
                     message,
                 },
             },
@@ -1038,15 +1053,16 @@ fn tab_selection(tab: &PaneTab) -> TabSelection {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseOutcome, PaneEvent, PaneKind, PaneRestoreTarget, PaneTab, TabSelection,
-        WorkspaceRuntime, tab_selection,
+        AgentResumeRelation, CloseOutcome, PaneEvent, PaneKind, PaneRegistryEffect,
+        PaneRestoreTarget, PaneTab, ResumeRejection, TabSelection, WorkspaceRuntime, tab_selection,
     };
     use crate::usecase::application::Key;
     use crate::usecase::application::controller::{
         AppEvent, AppKey, Effect, HomeMode, Overlay, Route, Selection, TabDirection, Target,
     };
     use crate::usecase::application::pane::{
-        LivePane, PaneRegistry, PaneRegistryEvent, PaneSelection, PendingPane, reduce_registry,
+        LivePane, PaneEffect, PaneRegistry, PaneRegistryEvent, PaneSelection, PendingPane,
+        reduce_registry,
     };
     use crate::usecase::terminal_input::LiveTerminalAction;
     use chrono::Utc;
@@ -2207,5 +2223,309 @@ mod tests {
         // ...but the completion did not steal focus into it: the selection stays
         // off the freshly live tab, so no live terminal is focused.
         assert!(runtime.focused_terminal().is_none());
+    }
+
+    /// One interrupted lineage of `session` in `workspace`, with a trustworthy
+    /// exact target unless `resumable` is false.
+    fn interrupted_tab(
+        workspace: WorkspaceId,
+        session: SessionId,
+        resumable: bool,
+    ) -> super::InterruptedTab {
+        use usagi_core::domain::agent::{
+            AgentResumeTarget, ProviderKind, ProviderResumePhase, ProviderResumeReason,
+        };
+        use usagi_core::domain::id::{AgentResumeSourceId, AgentRuntimeId};
+
+        let terminal = terminal_ref(workspace, session);
+        let continuation = usagi_core::domain::id::AgentContinuationRef::new();
+        super::InterruptedTab {
+            continuation,
+            session_id: Some(session),
+            provider: Some(ProviderKind::Codex),
+            last_known_phase: Some(ProviderResumePhase::Interrupted),
+            reason: if resumable {
+                ProviderResumeReason::ExplicitResumeAvailable
+            } else {
+                ProviderResumeReason::ProviderMetadataUnavailable
+            },
+            target: resumable.then(|| AgentResumeTarget {
+                continuation,
+                source: AgentResumeSourceId::new(),
+                workspace_id: workspace,
+                session_id: Some(session),
+                worktree_id: terminal.worktree_id,
+                runtime_id: AgentRuntimeId::new(),
+                adapter_revision: 3,
+            }),
+            last_terminal: terminal,
+        }
+    }
+
+    /// The replacement one accepted resume of `tab` would produce.
+    fn replacement(tab: &super::InterruptedTab) -> (AgentResumeRelation, TerminalRef) {
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: tab.last_terminal.workspace_id,
+            session_id: tab.session_id,
+            worktree_id: tab.last_terminal.worktree_id,
+        };
+        (
+            AgentResumeRelation {
+                source: tab.target.as_ref().unwrap().source,
+                replacement_runtime: usagi_core::domain::id::AgentRuntimeId::new(),
+                replacement_terminal: terminal.clone(),
+            },
+            terminal,
+        )
+    }
+
+    /// Seed one target's interrupted history through the restore fence and select
+    /// the first tab, as the shell does after a coherent observation.
+    fn with_history(
+        runtime: &mut WorkspaceRuntime,
+        target: Target,
+        tabs: Vec<super::InterruptedTab>,
+    ) {
+        let (interaction, revision) = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            interaction,
+            revision,
+            vec![PaneRestoreTarget {
+                target,
+                panes: Vec::new(),
+                selected: None,
+                interrupted: tabs,
+            }],
+        ));
+    }
+
+    #[test]
+    fn a_restored_history_tab_owns_no_terminal_and_closes_without_daemon_work() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        let history = interrupted_tab(workspace, session, true);
+        with_history(
+            &mut runtime,
+            Target::Session(session),
+            vec![history.clone()],
+        );
+
+        assert_eq!(
+            tab_selection(&runtime.active_pane().tabs()[0]),
+            TabSelection::Interrupted(history.continuation)
+        );
+        // A history tab is not a live pane: nothing to attach, poll, or resize.
+        assert!(!runtime.state().has_live_pane());
+        let _ = runtime.select_tab(TabDirection::Next);
+        assert_eq!(
+            runtime.focused_interrupted().map(|tab| tab.continuation),
+            Some(history.continuation)
+        );
+        assert!(runtime.focused_terminal().is_none());
+        assert_eq!(runtime.terminal_after_close(), None);
+        assert_eq!(
+            runtime.terminal_after_select(TabDirection::Next),
+            Some(None)
+        );
+        assert!(
+            runtime
+                .terminal_order_after_reorder(TabDirection::Next)
+                .is_empty()
+        );
+
+        assert_eq!(runtime.close_focused_pane(), CloseOutcome::default());
+        assert!(!runtime.active_pane().has_tabs());
+    }
+
+    #[test]
+    fn an_explicit_resume_pends_one_tab_and_a_validated_replacement_turns_it_live() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        let resumed = interrupted_tab(workspace, session, true);
+        let other = interrupted_tab(workspace, session, true);
+        with_history(
+            &mut runtime,
+            Target::Session(session),
+            vec![resumed.clone(), other.clone()],
+        );
+        let _ = runtime.select_tab(TabDirection::Next);
+
+        let command = runtime.resume_selected_tab(OperationId::new()).unwrap();
+        assert_eq!(command.target, *resumed.target.as_ref().unwrap());
+        // A repeated activation converges to the in-flight operation instead of
+        // sending a second request.
+        assert_eq!(
+            runtime.resume_selected_tab(OperationId::new()),
+            Err(ResumeRejection::AlreadyResuming)
+        );
+
+        let (relation, terminal) = replacement(&resumed);
+        let effects = runtime
+            .complete_tab_resume(
+                resumed.continuation,
+                command.operation,
+                Some(resumed.continuation),
+                Some(&relation),
+                &terminal,
+            )
+            .unwrap();
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            PaneRegistryEffect::Pane { effect: PaneEffect::Attach(attached), .. }
+                if *attached == terminal
+        )));
+        assert_eq!(runtime.focused_terminal(), Some(terminal));
+        assert!(runtime.state().has_live_pane());
+        // The other history tab is untouched.
+        assert_eq!(
+            runtime.active_pane().tabs().len(),
+            2,
+            "{:?}",
+            runtime.active_pane().tabs()
+        );
+    }
+
+    #[test]
+    fn resume_refuses_a_tab_without_a_target_a_missing_selection_and_a_stale_answer() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+
+        // No interrupted tab is selected at all.
+        assert_eq!(
+            runtime.resume_selected_tab(OperationId::new()),
+            Err(ResumeRejection::NotResumable)
+        );
+
+        let unresumable = interrupted_tab(workspace, session, false);
+        let resumable = interrupted_tab(workspace, session, true);
+        with_history(
+            &mut runtime,
+            Target::Session(session),
+            vec![unresumable.clone(), resumable.clone()],
+        );
+        let _ = runtime.select_tab(TabDirection::Next);
+        assert_eq!(
+            runtime.resume_selected_tab(OperationId::new()),
+            Err(ResumeRejection::NotResumable)
+        );
+        assert_eq!(
+            runtime.active_pane().error(),
+            Some(ResumeRejection::NotResumable.safe_message())
+        );
+
+        // An answer for a lineage nobody is resuming is refused, and so is one
+        // whose operation does not match the in-flight request.
+        let (relation, terminal) = replacement(&resumable);
+        assert_eq!(
+            runtime.complete_tab_resume(
+                usagi_core::domain::id::AgentContinuationRef::new(),
+                OperationId::new(),
+                Some(resumable.continuation),
+                Some(&relation),
+                &terminal,
+            ),
+            Err(ResumeRejection::NotResumable)
+        );
+        assert_eq!(
+            runtime.complete_tab_resume(
+                resumable.continuation,
+                OperationId::new(),
+                Some(resumable.continuation),
+                Some(&relation),
+                &terminal,
+            ),
+            Err(ResumeRejection::OperationMismatch)
+        );
+
+        let _ = runtime.select_tab(TabDirection::Next);
+        let command = runtime.resume_selected_tab(OperationId::new()).unwrap();
+        // A daemon answer without the source-to-replacement relation leaves the
+        // history tab in place and shows safe feedback.
+        assert_eq!(
+            runtime.complete_tab_resume(
+                resumable.continuation,
+                command.operation,
+                Some(resumable.continuation),
+                None,
+                &terminal,
+            ),
+            Err(ResumeRejection::RelationMissing)
+        );
+        assert_eq!(
+            runtime.active_pane().error(),
+            Some(ResumeRejection::RelationMissing.safe_message())
+        );
+        assert_eq!(runtime.active_pane().tabs().len(), 2);
+        assert!(!runtime.state().has_live_pane());
+
+        // The refusal cleared the in-flight marker, so an explicit retry works.
+        let retry = runtime.resume_selected_tab(OperationId::new()).unwrap();
+        assert_ne!(retry.operation, command.operation);
+    }
+
+    #[test]
+    fn a_root_history_tab_resumes_with_the_same_ux_as_a_managed_session() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        // Move back to the workspace root and open its Closeup surface.
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::CtrlO));
+        let _ = runtime.handle_key(Key::Up);
+        let _ = runtime.handle_key(Key::Enter);
+        assert_eq!(runtime.panes().active(), Target::Root(workspace));
+
+        let mut history = interrupted_tab(workspace, session, true);
+        history.session_id = None;
+        history.last_terminal.session_id = None;
+        let target = history.target.as_mut().unwrap();
+        target.session_id = None;
+        let history = history;
+        with_history(&mut runtime, Target::Root(workspace), vec![history.clone()]);
+        let _ = runtime.select_tab(TabDirection::Next);
+
+        let command = runtime.resume_selected_tab(OperationId::new()).unwrap();
+        let (relation, terminal) = replacement(&history);
+        assert!(
+            runtime
+                .complete_tab_resume(
+                    history.continuation,
+                    command.operation,
+                    Some(history.continuation),
+                    Some(&relation),
+                    &terminal,
+                )
+                .is_ok()
+        );
+        assert_eq!(runtime.focused_terminal(), Some(terminal));
+    }
+
+    #[test]
+    fn fail_tab_resume_reports_a_transport_failure_without_touching_other_tabs() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        let history = interrupted_tab(workspace, session, true);
+        with_history(
+            &mut runtime,
+            Target::Session(session),
+            vec![history.clone()],
+        );
+        let _ = runtime.select_tab(TabDirection::Next);
+        let command = runtime.resume_selected_tab(OperationId::new()).unwrap();
+
+        runtime.fail_tab_resume(
+            history.continuation,
+            Some(command.operation),
+            "daemon request failed".to_owned(),
+        );
+        assert_eq!(runtime.active_pane().error(), Some("daemon request failed"));
+        assert_eq!(runtime.active_pane().tabs().len(), 1);
+        // Resumable again after the failure.
+        assert!(runtime.resume_selected_tab(OperationId::new()).is_ok());
     }
 }
