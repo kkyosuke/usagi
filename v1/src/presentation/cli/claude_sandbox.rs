@@ -55,6 +55,20 @@ pub fn run(
         .context("failed to prepare Claude's sandbox temporary directory")?;
     extra_writable_roots.push(claude_state);
     extra_writable_roots.push(usagi_state);
+    // Claude Code creates a per-invocation scratchpad under a fixed per-user OS
+    // temp root (`/tmp/claude-<uid>`) that it derives itself and does *not* take
+    // from `TMPDIR`. Every Bash tool call creates that scratchpad before running,
+    // so a sandbox that denies it fails the whole tool — git included — with
+    // EPERM. Allow exactly that Claude-owned temp root, created up front so
+    // canonicalization can resolve it. (Setting `TMPDIR` below is kept for the
+    // rest of Claude's temporary files, which do honor it.)
+    #[cfg(unix)]
+    {
+        let scratch = claude_scratch_root();
+        std::fs::create_dir_all(&scratch)
+            .context("failed to prepare Claude's scratchpad directory")?;
+        extra_writable_roots.push(scratch);
+    }
     #[cfg(target_os = "macos")]
     extra_writable_roots.extend(macos_keychain_roots(&home)?);
 
@@ -82,6 +96,20 @@ pub fn run(
                 .with_context(|| format!("failed to start OS sandbox {}", program.display()))
         },
     )
+}
+
+/// Claude Code's per-user scratchpad root (`/tmp/claude-<uid>`).
+///
+/// Claude derives this path itself and does not read `TMPDIR`, so the sandbox
+/// has to allow it explicitly: the scratchpad Claude creates before every Bash
+/// tool call lives here, and denying it makes each tool call — git included —
+/// fail with EPERM. On macOS `/tmp` canonicalizes to `/private/tmp`, matching
+/// the `/private/tmp/claude-<uid>/…` path Claude uses in practice.
+#[cfg(unix)]
+fn claude_scratch_root() -> PathBuf {
+    // SAFETY: `getuid` is always successful and has no preconditions.
+    let uid = unsafe { libc::getuid() };
+    PathBuf::from("/tmp").join(format!("claude-{uid}"))
 }
 
 /// Writable roots that keep the macOS Keychain usable inside the sandbox.
@@ -267,6 +295,19 @@ mod tests {
         assert_eq!(Mode::parse("session").unwrap(), Mode::Session);
         assert_eq!(Mode::parse("root").unwrap(), Mode::Root);
         assert!(Mode::parse("unknown").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_scratch_root_is_the_per_user_claude_temp_dir() {
+        // Claude Code's scratchpad root is `/tmp/claude-<uid>`, where `<uid>` is
+        // the current user's numeric id. The sandbox allows exactly this path so
+        // the scratchpad created before every Bash tool call is writable.
+        let root = claude_scratch_root();
+        assert_eq!(root.parent(), Some(Path::new("/tmp")));
+        let name = root.file_name().unwrap().to_string_lossy();
+        let uid = name.strip_prefix("claude-").expect("prefixed with claude-");
+        assert!(!uid.is_empty() && uid.chars().all(|c| c.is_ascii_digit()));
     }
 
     #[test]
