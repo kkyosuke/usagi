@@ -227,8 +227,13 @@ pub enum Key {
     /// [`LiveInputClassifier`]: crate::usecase::terminal_input::LiveInputClassifier
     Live(crate::usecase::terminal_input::LiveTerminalAction),
     /// Exact bytes classified as ordinary live-pane input.  This preserves
-    /// paste and backend-native encodings for the focused daemon terminal.
+    /// backend-native key encodings for the focused daemon terminal.
     Passthrough(Vec<u8>),
+    /// A bracketed paste delivered as one block. A focused live pane wraps it in
+    /// bracketed-paste markers before forwarding it to the PTY so a multi-line
+    /// paste is inserted as one block instead of submitting on every embedded
+    /// newline; a management text input inserts the text verbatim.
+    Paste(String),
     /// An OS-native terminal copy shortcut. A focused live pane copies its
     /// selection; `fallback` reaches the PTY when there is no selection.
     TerminalCopy { fallback: Vec<u8> },
@@ -484,7 +489,8 @@ mod tests {
             Key::Char('o'),
             Key::Click { column: 3, row: 4 },
             Key::Live(LiveTerminalAction::Switch),
-            Key::Passthrough(b"paste".to_vec()),
+            Key::Passthrough(b"passthrough".to_vec()),
+            Key::Paste("multi\nline".to_owned()),
             Key::Other,
         ];
         for key in keys {
