@@ -13,6 +13,7 @@ use usagi_core::{
         ProviderResumeStatus, ProviderSessionId,
     },
     domain::id::OperationId,
+    domain::session_lifecycle::AGENT_PHASE_HOOK_EVENTS,
     usecase::agent::{AgentProfileCatalog, validate_request, validate_snapshot},
 };
 
@@ -158,39 +159,31 @@ impl<P: ClaudeProvisioner> AgentAdapter for ClaudeAdapter<P> {
 
 /// Claude Code の `--settings` に渡す hook 配線 JSON を組む。
 ///
-/// `PreToolUse` にはライフサイクルの phase 報告（`usagi agent-phase running`）を差し込み、
-/// session 起動（`include_guard = true`）ではさらに `usagi guard-workspace` を並べて worktree を
-/// 出るツール呼び出しを deny する。root 起動では `guard-workspace` を差し込まず、書き込みの hard
-/// boundary を OS sandbox（`claude-sandbox`）に委ねる。`SessionStart` / `UserPromptSubmit` /
-/// `Notification` / `Stop` / `SessionEnd` の各ライフサイクル event は対応する phase を `agent-phase`
-/// で報告する。`usagi_command` はシェル経由で実行されるため単一引用符で quote する。
+/// ライフサイクル event と phase の対応は core の [`AGENT_PHASE_HOOK_EVENTS`] が正本で、
+/// この関数はその表をそのまま `usagi agent-phase <phase>` へ写す。報告を受ける側の検証も
+/// 同じ表を使うため、配線と検証が分岐しない。session 起動（`include_guard = true`）では
+/// `PreToolUse` に `usagi guard-workspace` を並べて worktree を出るツール呼び出しを deny する。
+/// root 起動では `guard-workspace` を差し込まず、書き込みの hard boundary を OS sandbox
+/// （`claude-sandbox`）に委ねる。`usagi_command` はシェル経由で実行されるため単一引用符で
+/// quote する。
 #[must_use]
 pub fn scoped_settings_json(usagi_command: &str, include_guard: bool) -> String {
     let quoted = shell_quote(usagi_command);
-    let phase_hook = |phase: &str| {
-        serde_json::json!({
+    let mut hooks = serde_json::Map::new();
+    for (event, phase) in AGENT_PHASE_HOOK_EVENTS {
+        let mut entries = vec![serde_json::json!({
             "type": "command",
-            "command": format!("{quoted} agent-phase {phase}"),
-        })
-    };
-    let mut pre_tool_use = vec![phase_hook("running")];
-    if include_guard {
-        pre_tool_use.push(serde_json::json!({
-            "type": "command",
-            "command": format!("{quoted} guard-workspace"),
-        }));
-    }
-    serde_json::json!({
-        "hooks": {
-            "PreToolUse": [{ "hooks": pre_tool_use }],
-            "SessionStart": [{ "hooks": [phase_hook("ready")] }],
-            "UserPromptSubmit": [{ "hooks": [phase_hook("running")] }],
-            "Notification": [{ "hooks": [phase_hook("waiting")] }],
-            "Stop": [{ "hooks": [phase_hook("ended")] }],
-            "SessionEnd": [{ "hooks": [phase_hook("exited")] }],
+            "command": format!("{quoted} agent-phase {}", phase.as_token()),
+        })];
+        if include_guard && event == "PreToolUse" {
+            entries.push(serde_json::json!({
+                "type": "command",
+                "command": format!("{quoted} guard-workspace"),
+            }));
         }
-    })
-    .to_string()
+        hooks.insert(event.to_owned(), serde_json::json!([{ "hooks": entries }]));
+    }
+    serde_json::json!({ "hooks": hooks }).to_string()
 }
 
 /// シェルが解釈する hook command 用に、値を単一引用符で囲んで安全化する。
@@ -486,6 +479,18 @@ mod tests {
         assert_eq!(
             settings["hooks"]["Stop"][0]["hooks"][0]["command"],
             serde_json::json!("'/opt/my usagi' agent-phase ended")
+        );
+        // 配線は core の表そのままで、event を落とさない。
+        for (event, phase) in AGENT_PHASE_HOOK_EVENTS {
+            assert_eq!(
+                settings["hooks"][event][0]["hooks"][0]["command"],
+                serde_json::json!(format!("'/opt/my usagi' agent-phase {}", phase.as_token())),
+                "{event}"
+            );
+        }
+        assert_eq!(
+            settings["hooks"].as_object().unwrap().len(),
+            AGENT_PHASE_HOOK_EVENTS.len()
         );
     }
 

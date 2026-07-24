@@ -17,6 +17,7 @@ use crate::domain::agent::{
 use crate::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use crate::domain::id::{AgentId, SessionId, TerminalRef, WorkspaceId};
 use crate::domain::pr_inventory::{PrEntry, PrInventory};
+use crate::domain::session_lifecycle::AgentPhase;
 use crate::domain::terminal_launch::{
     TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
 };
@@ -63,6 +64,14 @@ pub enum DaemonRequest {
     /// runtime, session, path, or provider themselves.
     CodexSessionCapture {
         native_session_id: ProviderSessionId,
+        caller_context: McpCallerContext,
+    },
+    /// Private agent lifecycle phase report delivered by a documented provider
+    /// hook. The opaque credential binds the report to one live daemon runtime;
+    /// callers cannot name a runtime, session, path, or provider themselves,
+    /// and the phase itself is a closed non-sensitive vocabulary.
+    AgentPhaseReport {
+        phase: AgentPhase,
         caller_context: McpCallerContext,
     },
     /// Read the safe Agent runtime and interrupted-source inventory for one
@@ -1079,9 +1088,9 @@ impl RetryEligibility {
             DaemonRequest::Agent { .. }
             | DaemonRequest::ResumeAgent { .. }
             | DaemonRequest::Dispatch { .. } => Self::DurableOperation,
-            DaemonRequest::Terminal { .. } | DaemonRequest::CodexSessionCapture { .. } => {
-                Self::NoCrossConnectionEvidence
-            }
+            DaemonRequest::Terminal { .. }
+            | DaemonRequest::CodexSessionCapture { .. }
+            | DaemonRequest::AgentPhaseReport { .. } => Self::NoCrossConnectionEvidence,
         }
     }
 
@@ -2156,6 +2165,12 @@ mod deadline_and_retry_tests {
             DaemonRequest::Terminal {
                 action: TerminalAction::Input,
                 payload: session_payload(),
+            },
+            DaemonRequest::AgentPhaseReport {
+                phase: AgentPhase::Waiting,
+                caller_context: McpCallerContext {
+                    credential: "runtime-secret".into(),
+                },
             },
         ];
         for request in &ineligible {

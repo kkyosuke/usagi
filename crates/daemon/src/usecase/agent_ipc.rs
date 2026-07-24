@@ -24,6 +24,7 @@ use std::path::PathBuf;
 use chrono::Utc;
 use serde_json::{Value, json};
 use usagi_core::{
+    domain::session_lifecycle::AgentPhase,
     domain::{
         agent::{
             AgentCapability, AgentInventory, AgentProfileId, AgentResumableInventoryItem,
@@ -232,6 +233,10 @@ pub struct AgentRuntime {
     locator: Box<dyn ExecutableLocator>,
     operations: BTreeMap<String, AgentOperation>,
     mcp_callers: BTreeMap<String, McpCaller>,
+    /// Last phase each live runtime reported through its own lifecycle hook.
+    /// Like the caller credentials, it is in-memory only: a phase report refines
+    /// a live runtime's projection and must fail closed across daemon restart.
+    reported_phases: BTreeMap<AgentRuntimeId, AgentPhase>,
 }
 
 impl AgentRuntime {
@@ -320,6 +325,7 @@ impl AgentRuntime {
             locator: Box::new(locator),
             operations: BTreeMap::new(),
             mcp_callers: BTreeMap::new(),
+            reported_phases: BTreeMap::new(),
         }
     }
 
@@ -373,8 +379,10 @@ impl AgentRuntime {
             dispatch,
             locator: Box::new(locator),
             operations,
-            // Credentials intentionally fail closed across daemon restart.
+            // Credentials and reported phases intentionally fail closed across
+            // daemon restart.
             mcp_callers: BTreeMap::new(),
+            reported_phases: BTreeMap::new(),
         })
     }
 
@@ -441,7 +449,13 @@ impl AgentRuntime {
             .and_then(|record| record.runtime.session_id)
     }
 
-    /// Returns the durable runtime phase projected for one session.
+    /// Returns the runtime phase projected for one session.
+    ///
+    /// The daemon-observed [`RuntimeState`](super::runtime::RuntimeState) is the
+    /// authority: a phase an agent reported through its own lifecycle hook
+    /// refines the projection only while that exact runtime is still `Running`.
+    /// A report therefore never makes a reserved, interrupted, or exited runtime
+    /// look alive, and never hides an interruption.
     #[must_use]
     pub fn session_phase(&self, session: SessionId) -> &'static str {
         self.coordinator
@@ -449,9 +463,54 @@ impl AgentRuntime {
             .records
             .into_iter()
             .filter(|record| record.runtime.session_id == Some(session))
-            .map(|record| runtime_phase(record.state))
+            .map(|record| self.record_phase(&record))
             .max_by_key(|(priority, _)| *priority)
             .map_or("none", |(_, phase)| phase)
+    }
+
+    fn record_phase(&self, record: &super::runtime::DurableRuntimeRecord) -> (u8, &'static str) {
+        if record.state == super::runtime::RuntimeState::Running
+            && let Some(phase) = self.reported_phases.get(&record.runtime.agent_runtime_id)
+        {
+            return reported_phase(*phase);
+        }
+        runtime_phase(record.state)
+    }
+
+    /// Accepts one agent lifecycle phase report bound to a live runtime by the
+    /// daemon-minted credential in that process's provision.
+    ///
+    /// The caller names neither a runtime, session, worktree, nor path: the
+    /// credential is the only selector, and an unknown or no longer live
+    /// credential is refused without recording anything.  The reported phase
+    /// refines the runtime projection, and additionally the durable safe phase
+    /// of provider resume metadata when that mapping cannot claim process death
+    /// (see [`durable_provider_phase`]).
+    pub fn report_agent_phase(
+        &mut self,
+        credential: &str,
+        phase: AgentPhase,
+    ) -> Result<(), ProtocolError> {
+        let caller = self.mcp_callers.get(credential).cloned().ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "agent runtime credential is unknown",
+            )
+        })?;
+        if self.mcp_caller(credential).is_none() {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "agent runtime credential is not live",
+            ));
+        }
+        if let Some(durable) = durable_provider_phase(phase) {
+            self.coordinator
+                .record_provider_phase(&caller.runtime, durable, &mut *self.store)
+                .map_err(map_runtime_error)?;
+        }
+        self.reported_phases
+            .insert(caller.runtime.agent_runtime_id, phase);
+        Ok(())
     }
 
     /// Sends to a running Agent PTY or records a durable next-launch prompt.
@@ -2262,6 +2321,39 @@ const fn runtime_phase(state: super::runtime::RuntimeState) -> (u8, &'static str
     }
 }
 
+/// Projection weight of a phase an agent reported for a still live runtime.
+///
+/// A report only refines a `Running` record, so every weight here sits above the
+/// coarse live states it replaces.  Their relative order mirrors the Home
+/// aggregation (`done > waiting > running > ready`), so the most
+/// human-actionable runtime of a session wins the session-wide projection.
+const fn reported_phase(phase: AgentPhase) -> (u8, &'static str) {
+    match phase {
+        AgentPhase::Exited => (8, "exited"),
+        AgentPhase::Ended => (7, "ended"),
+        AgentPhase::Waiting => (6, "waiting"),
+        AgentPhase::Running => (5, "running"),
+        AgentPhase::Ready => (3, "ready"),
+    }
+}
+
+/// Maps a reported phase onto the durable safe phase of provider resume
+/// metadata, or `None` when the report must not touch it.
+///
+/// `exited` means the agent's own lifecycle ended, which is not proof that the
+/// daemon-owned process died: only the observed PTY exit writes that.  Mapping
+/// it here would durably record `Ended` for a runtime the daemon still owns, so
+/// the durable phase is deliberately left to the exit observation.
+const fn durable_provider_phase(phase: AgentPhase) -> Option<ProviderResumePhase> {
+    match phase {
+        AgentPhase::Ready => Some(ProviderResumePhase::Starting),
+        AgentPhase::Running | AgentPhase::Waiting | AgentPhase::Ended => {
+            Some(ProviderResumePhase::Running)
+        }
+        AgentPhase::Exited => None,
+    }
+}
+
 fn map_scope_error(error: ScopeResolveError) -> ProtocolError {
     match error {
         ScopeResolveError::Unavailable => ProtocolError::new(
@@ -2663,6 +2755,13 @@ mod tests {
         )
     }
 
+    fn durable_phase(runtime: &AgentRuntime) -> Option<ProviderResumePhase> {
+        runtime.coordinator.snapshot().records[0]
+            .provider_resume
+            .as_ref()
+            .and_then(|reference| reference.last_known_phase)
+    }
+
     fn store_mut(runtime: &mut AgentRuntime) -> &mut Store {
         runtime.store.as_any_mut().downcast_mut::<Store>().unwrap()
     }
@@ -2709,6 +2808,114 @@ mod tests {
     }
 
     // ---- tests ---------------------------------------------------------------
+
+    #[test]
+    fn reported_phase_refines_a_live_projection_but_never_outranks_observation() {
+        let mut runtime = runtime();
+        let session = SessionId::new();
+        let launch_intent = AgentLaunchIntent {
+            workspace: WorkspaceId::new(),
+            session: Some(session),
+            profile: None,
+        };
+        let launched = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &launch_intent,
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let credential = runtime.mcp_callers.keys().next().cloned().unwrap();
+        assert_eq!(runtime.session_phase(session), "running");
+
+        // Only the daemon-minted credential selects the reporting runtime.
+        assert_eq!(
+            runtime
+                .report_agent_phase("unknown-credential", AgentPhase::Waiting)
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+        assert_eq!(runtime.session_phase(session), "running");
+
+        for (phase, expected) in [
+            (AgentPhase::Ready, "ready"),
+            (AgentPhase::Running, "running"),
+            (AgentPhase::Waiting, "waiting"),
+            (AgentPhase::Ended, "ended"),
+            (AgentPhase::Exited, "exited"),
+        ] {
+            runtime.report_agent_phase(&credential, phase).unwrap();
+            assert_eq!(runtime.session_phase(session), expected, "{phase:?}");
+        }
+
+        // `exited` proves no process death, so the durable safe phase keeps the
+        // last value a live report could justify.
+        assert_eq!(
+            durable_phase(&runtime),
+            Some(ProviderResumePhase::Running),
+            "reported exit must not write a durable end"
+        );
+
+        // An unchanged durable phase does not rewrite the snapshot; a changed one does.
+        let saves = store_mut(&mut runtime).saves;
+        runtime
+            .report_agent_phase(&credential, AgentPhase::Running)
+            .unwrap();
+        assert_eq!(store_mut(&mut runtime).saves, saves);
+        runtime
+            .report_agent_phase(&credential, AgentPhase::Ready)
+            .unwrap();
+        assert_eq!(durable_phase(&runtime), Some(ProviderResumePhase::Starting));
+        assert_eq!(store_mut(&mut runtime).saves, saves + 1);
+
+        // The observed exit outranks the last report, and the credential dies
+        // with the runtime it was minted for.
+        runtime
+            .report_agent_phase(&credential, AgentPhase::Running)
+            .unwrap();
+        runtime.exit(&launched.terminal, 0).unwrap();
+        assert_eq!(runtime.session_phase(session), "ended");
+        assert_eq!(
+            runtime
+                .report_agent_phase(&credential, AgentPhase::Running)
+                .unwrap_err()
+                .code,
+            ErrorCode::OwnershipUnknown
+        );
+    }
+
+    #[test]
+    fn phase_report_without_provider_metadata_refines_only_the_projection() {
+        let mut runtime = codex_runtime();
+        let session = SessionId::new();
+        let launch_intent = AgentLaunchIntent {
+            workspace: WorkspaceId::new(),
+            session: Some(session),
+            profile: Some(AgentProfileId::new("codex").unwrap()),
+        };
+        runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &launch_intent,
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let credential = runtime.mcp_callers.keys().next().cloned().unwrap();
+        // Codex has no provider metadata before its structured capture, so the
+        // report has nothing durable to refine and still must not fail.
+        assert!(
+            runtime.coordinator.snapshot().records[0]
+                .provider_resume
+                .is_none()
+        );
+        let saves = store_mut(&mut runtime).saves;
+        runtime
+            .report_agent_phase(&credential, AgentPhase::Waiting)
+            .unwrap();
+        assert_eq!(runtime.session_phase(session), "waiting");
+        assert_eq!(store_mut(&mut runtime).saves, saves);
+    }
 
     #[test]
     #[allow(clippy::too_many_lines)] // One end-to-end test keeps capture, exit, resume, replay, and live rejection visibly ordered.

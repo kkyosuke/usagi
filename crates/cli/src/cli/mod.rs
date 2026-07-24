@@ -58,6 +58,12 @@ pub enum RunOutcome {
     LaunchMcp,
     /// Codex `SessionStart` hook の structured payload を daemon へ渡す。
     CaptureCodexSession,
+    /// エージェントのライフサイクルフックが名乗る phase を daemon へ報告する。
+    /// 報告元 runtime は daemon 発行 credential だけで束縛する。
+    ReportAgentPhase {
+        /// フックが引数で渡した phase token（closed vocabulary は core が持つ）。
+        phase: String,
+    },
     /// Claude `PreToolUse` hook の payload を stdin から読み、worktree を出る
     /// ツール呼び出しなら deny 判定を stdout へ書く。判定は純粋（daemon 不要）。
     GuardWorkspace,
@@ -159,7 +165,7 @@ pub enum Command {
         #[command(subcommand)]
         command: SessionCommand,
     },
-    /// （ヘルプ非表示・内部）エージェントのライフサイクル phase を記録する（Stop フックが呼ぶ）
+    /// （ヘルプ非表示・内部）エージェントのライフサイクル phase を daemon へ報告する（ライフサイクルフックが呼ぶ）
     #[command(hide = true)]
     AgentPhase {
         /// フックが報告する phase（例: `ended`）

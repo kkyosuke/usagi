@@ -99,6 +99,33 @@ pub(crate) fn dispatch(
                 }
             }
         }
+        RunOutcome::ReportAgentPhase { phase } => {
+            let stdin = std::io::stdin();
+            let mut input = stdin.lock();
+            let credential = std::env::var("USAGI_MCP_CALLER_CREDENTIAL").ok();
+            let request = match usagi_cli::cli::hooks::agent_phase::request_from_hook(
+                &mut input, &phase, credential,
+            ) {
+                Ok(request) => request,
+                Err(error) => {
+                    writeln!(err, "agent phase report failed: {error}")?;
+                    return Ok(ExitCode::FAILURE);
+                }
+            };
+            match daemon::policy_client(ClientPolicy::cli()) {
+                Ok(mut client) => match client.request(request) {
+                    Ok(_) => Ok(ExitCode::SUCCESS),
+                    Err(error) => {
+                        write_client_error(err, "agent phase report failed", &error)?;
+                        Ok(ExitCode::FAILURE)
+                    }
+                },
+                Err(error) => {
+                    write_client_error(err, "agent phase report failed", &error)?;
+                    Ok(ExitCode::FAILURE)
+                }
+            }
+        }
         RunOutcome::GuardWorkspace => guard_workspace(out),
         RunOutcome::ClaudeSandbox {
             mode,
