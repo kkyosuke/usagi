@@ -588,7 +588,7 @@ pub fn wiring_for_launch(
 ) -> AgentWiring {
     let mut sandbox_writable_roots = base.sandbox_writable_roots.clone();
     sandbox_writable_roots.push(crate::usecase::session::workspace_root(dir).join(STATE_DIR));
-    let is_root = !is_session_worktree(dir);
+    let is_root = !crate::usecase::workspace_guard::is_session_worktree(dir);
     sandbox_writable_roots.extend(resolve_git_common_dir(dir));
     AgentWiring {
         model,
@@ -596,19 +596,6 @@ pub fn wiring_for_launch(
         sandbox_writable_roots,
         ..base.clone()
     }
-}
-
-fn is_session_worktree(dir: &Path) -> bool {
-    let names: Vec<&std::ffi::OsStr> = dir
-        .components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(name) => Some(name),
-            _ => None,
-        })
-        .collect();
-    names
-        .windows(2)
-        .any(|pair| pair[0] == ".usagi" && pair[1] == "sessions")
 }
 
 #[cfg(test)]

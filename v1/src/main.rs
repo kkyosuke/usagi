@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser, Subcommand};
 
@@ -254,6 +255,22 @@ enum Commands {
     },
     /// Show which usagi features each agent CLI supports
     Feature,
+    /// Deny an agent tool call that escapes its session worktree (invoked by a Claude PreToolUse hook)
+    #[command(hide = true)]
+    GuardWorkspace,
+    /// Run Claude inside the required platform OS sandbox
+    #[command(hide = true)]
+    ClaudeSandbox {
+        /// `session` makes cwd writable; `root` keeps it read-only
+        #[arg(long)]
+        mode: String,
+        /// Additional canonicalizable writable roots
+        #[arg(long = "writable-root")]
+        writable_roots: Vec<PathBuf>,
+        /// Command and arguments to execute inside the sandbox
+        #[arg(last = true, required = true)]
+        command: Vec<OsString>,
+    },
     /// Hop into the usagi welcome screen
     Hop,
     /// Print the square-pixel usagi marks (flip / half)
@@ -359,6 +376,20 @@ fn main() -> anyhow::Result<()> {
         Commands::Config { edit } => usagi::presentation::cli::config::run(edit),
         Commands::Doctor { fix } => usagi::presentation::cli::doctor::run(fix),
         Commands::Feature => usagi::presentation::cli::feature::run(),
+        Commands::GuardWorkspace => {
+            let stdin = std::io::stdin();
+            let stdout = std::io::stdout();
+            usagi::presentation::cli::guard_workspace::run(stdin.lock(), stdout.lock())
+        }
+        Commands::ClaudeSandbox {
+            mode,
+            writable_roots,
+            command,
+        } => usagi::presentation::cli::claude_sandbox::run(
+            usagi::presentation::cli::claude_sandbox::Mode::parse(&mode)?,
+            writable_roots,
+            command,
+        ),
         Commands::Hop => {
             // Materialise usagi's shipped skills under the data dir before the TUI
             // launches any agent, so each session worktree's `.claude/skills`
@@ -435,6 +466,8 @@ fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Config { .. } => Some("config"),
         Commands::Doctor { .. } => Some("doctor"),
         Commands::Feature => Some("feature"),
+        Commands::GuardWorkspace => Some("guard-workspace"),
+        Commands::ClaudeSandbox { .. } => Some("claude-sandbox"),
         Commands::Hop => Some("hop"),
         Commands::Icon { .. } => Some("icon"),
         Commands::Init { .. } => Some("init"),

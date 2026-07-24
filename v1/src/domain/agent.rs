@@ -212,6 +212,8 @@ pub trait Agent: Send + Sync {
     /// stale session worktrees with no human at the keyboard. Because nobody is
     /// there to answer them, each adapter passes its CLI's permission-bypass flag
     /// so the agent can act (delete worktrees, run git) without approval prompts.
+    /// Adapters that use such a flag must still retain an unattended hard
+    /// boundary; Claude wraps both launch surfaces in usagi's OS sandbox.
     ///
     /// The result is a single `sh -c`-ready line, mirroring `launch_command`'s
     /// contract: every interpolated value — the `prompt` and the `wiring` paths —
