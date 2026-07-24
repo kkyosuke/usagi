@@ -1,6 +1,6 @@
 [package]
 name = "usagi"
-version = "2.8.1"
+version = "2.8.2"
 edition = "2021"
 repository = "https://github.com/KKyosuke/usagi"
 license = "MIT"
