@@ -12,6 +12,8 @@
 //!   （create / remove）と state 操作（list / get / touch / record / `remove_record`）。
 //! - [`workspace`] — global registry 上の workspace open（path 解決・登録・touch）と、
 //!   welcome 画面向け recent overview の構築。
+//! - [`workspace_guard`] — エージェントのツール呼び出しを cwd（session / root モード）に応じて
+//!   許可判定する純粋ロジック。Claude の `PreToolUse` フックが呼ぶ `guard-workspace` の中身。
 
 pub mod agent;
 pub mod client;
@@ -23,3 +25,4 @@ pub mod pr_inventory;
 pub mod session;
 pub mod settings;
 pub mod workspace;
+pub mod workspace_guard;
