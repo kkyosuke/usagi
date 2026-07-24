@@ -4674,11 +4674,11 @@ fn recover_stale_client_endpoint_with(
         return Ok(bootstrap::StaleRecovery::NotProven);
     }
     match ExactProcessControl.observe(&expected) {
-        DaemonProcessObservation::Gone => {}
+        DaemonProcessObservation::Gone | DaemonProcessObservation::IdentityMismatch => {}
         DaemonProcessObservation::Exact => {
             return Ok(bootstrap::StaleRecovery::OwnerActive);
         }
-        DaemonProcessObservation::IdentityMismatch | DaemonProcessObservation::Unknown => {
+        DaemonProcessObservation::Unknown => {
             return Ok(bootstrap::StaleRecovery::NotProven);
         }
     }
@@ -5636,7 +5636,7 @@ mod tests {
         // The PID is deliberately live (this test process), modelling PID
         // reuse. Acquiring daemon.lock proves that this live process is not the
         // daemon owner, and recovery never sends it a signal.
-        let record = usagi_core::domain::daemon::DaemonRecord::new(std::process::id());
+        let record = DaemonRecord::identified(std::process::id(), "reused-process");
         store.save(&record).unwrap();
 
         assert_eq!(
@@ -5675,7 +5675,7 @@ mod tests {
         });
         // Model PID reuse: this process is alive, but it does not own the
         // daemon singleton. Recovery must use daemon.lock rather than the PID.
-        let record = usagi_core::domain::daemon::DaemonRecord::new(std::process::id());
+        let record = DaemonRecord::identified(std::process::id(), "reused-process");
         store.save(&record).unwrap();
 
         // A locator hardlink forces retirement to stop after its socket-first
@@ -5752,7 +5752,7 @@ mod tests {
         let store = DaemonRecordStore::new(FsRecordFile {
             path: daemon.join("daemon.json"),
         });
-        let record = usagi_core::domain::daemon::DaemonRecord::new(4242);
+        let record = DaemonRecord::identified(4242, "gone-process");
         store.save(&record).unwrap();
 
         assert_eq!(
@@ -5828,7 +5828,7 @@ mod tests {
         let store = DaemonRecordStore::new(FsRecordFile {
             path: daemon.join("daemon.json"),
         });
-        let record = usagi_core::domain::daemon::DaemonRecord::new(4242);
+        let record = DaemonRecord::identified(4242, "gone-process");
         store.save(&record).unwrap();
         let current_lock = daemon.join("current.lock");
         std::fs::set_permissions(&current_lock, std::fs::Permissions::from_mode(0o644)).unwrap();
