@@ -53,6 +53,8 @@ use usagi_core::{
 };
 
 use crate::presentation::ipc::TerminalOwner;
+use crate::usecase::terminal_visibility_ipc::SharedTerminalVisibility;
+use usagi_core::domain::terminal_visibility::VisibilityOutcome;
 
 use super::{
     orchestration::{AdapterRegistry, OrchestrationError, Orchestrator, RuntimeAuthorization},
@@ -170,6 +172,13 @@ pub trait AgentTerminalActor {
         &self,
         scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
     ) -> Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry>;
+    /// Lists the Agent runtime tombstones this actor holds in the exact
+    /// requested scope (#525). `SharedTerminalOwner` merges this with the
+    /// generic owner and stamps each entry's authoritative visibility.
+    fn completed_inventory(
+        &self,
+        scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+    ) -> Vec<usagi_core::domain::terminal_visibility::CompletedTerminalEntry>;
     fn disconnect(&mut self, connection: ConnectionId);
 }
 
@@ -1887,6 +1896,13 @@ impl AgentTerminalActor for AgentRuntime {
         self.coordinator.inventory(scope)
     }
 
+    fn completed_inventory(
+        &self,
+        scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+    ) -> Vec<usagi_core::domain::terminal_visibility::CompletedTerminalEntry> {
+        self.coordinator.completed_inventory(scope)
+    }
+
     fn disconnect(&mut self, connection: ConnectionId) {
         self.coordinator.disconnect(connection);
     }
@@ -1898,12 +1914,37 @@ impl AgentTerminalActor for AgentRuntime {
 pub struct SharedTerminalOwner<G, A> {
     agent: A,
     generic: G,
+    visibility: SharedTerminalVisibility,
 }
 
 impl<G, A> SharedTerminalOwner<G, A> {
+    /// Builds an owner over a fresh, connection-local visibility authority.
+    /// Production shares one authority across connections via
+    /// [`with_visibility`](Self::with_visibility).
     pub fn new(agent: A, generic: G) -> Self {
-        Self { agent, generic }
+        Self::with_visibility(agent, generic, SharedTerminalVisibility::new())
     }
+
+    /// Builds an owner bound to a shared visibility authority so every client
+    /// connection converges on the same workspace-global tombstone state.
+    pub fn with_visibility(agent: A, generic: G, visibility: SharedTerminalVisibility) -> Self {
+        Self {
+            agent,
+            generic,
+            visibility,
+        }
+    }
+}
+
+/// Encodes a compare-and-swap visibility outcome for the wire. `applied` marks
+/// a state raise, `conflict` marks a stale-revision retry that a client merges
+/// from `visibility` and re-sends.
+fn visibility_response(outcome: VisibilityOutcome) -> Value {
+    json!({
+        "visibility": outcome.snapshot(),
+        "applied": matches!(outcome, VisibilityOutcome::Applied(_)),
+        "conflict": !outcome.is_success(),
+    })
 }
 
 impl<G: TerminalOwner, A: AgentTerminalActor> TerminalOwner for SharedTerminalOwner<G, A> {
@@ -1930,6 +1971,51 @@ impl<G: TerminalOwner, A: AgentTerminalActor> TerminalOwner for SharedTerminalOw
             let mut entries = self.generic.inventory(&scope);
             entries.extend(self.agent.terminal_inventory(&scope));
             return Ok(json!({ "terminals": entries }));
+        }
+        // CompletedInventory (like Inventory) addresses no single terminal: it
+        // merges both owners' exited tombstones and stamps each with the
+        // authoritative workspace-global visibility (#525).
+        if matches!(action, TerminalAction::CompletedInventory) {
+            let Ok(TerminalRequest::CompletedInventory { scope }) =
+                serde_json::from_value::<TerminalRequest>(payload.clone())
+            else {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "invalid completed terminal inventory scope",
+                ));
+            };
+            let mut entries = self.generic.completed_inventory(&scope);
+            entries.extend(self.agent.completed_inventory(&scope));
+            self.visibility.stamp(&mut entries);
+            return Ok(json!({ "entries": entries }));
+        }
+        // Observe / Dismiss mutate only the workspace-global visibility ledger,
+        // never the terminal or its process. They are compare-and-swap and
+        // return the authoritative snapshot so a client merges monotonically.
+        if matches!(action, TerminalAction::Observe | TerminalAction::Dismiss) {
+            let request = serde_json::from_value::<TerminalRequest>(payload).map_err(|_| {
+                ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "invalid terminal visibility request",
+                )
+            })?;
+            let outcome = match request {
+                TerminalRequest::Observe {
+                    terminal,
+                    expected_revision,
+                } => self.visibility.observe(&terminal, expected_revision),
+                TerminalRequest::Dismiss {
+                    terminal,
+                    expected_revision,
+                } => self.visibility.dismiss(&terminal, expected_revision),
+                _ => {
+                    return Err(ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "terminal action does not match its payload",
+                    ));
+                }
+            };
+            return Ok(visibility_response(outcome));
         }
         let routed = match serde_json::from_value::<TerminalRequest>(payload.clone()) {
             Ok(request) => self
@@ -1959,7 +2045,14 @@ fn terminal_of(request: &TerminalRequest) -> Option<&TerminalRef> {
         | TerminalRequest::Input { terminal, .. }
         | TerminalRequest::Resize { terminal, .. }
         | TerminalRequest::Detach { terminal, .. } => Some(terminal),
-        TerminalRequest::Launch { .. } | TerminalRequest::Inventory { .. } => None,
+        // Launch has no current terminal; Inventory / CompletedInventory /
+        // Observe / Dismiss are intercepted by the shared owner and never
+        // routed to a single-terminal handler.
+        TerminalRequest::Launch { .. }
+        | TerminalRequest::Inventory { .. }
+        | TerminalRequest::CompletedInventory { .. }
+        | TerminalRequest::Observe { .. }
+        | TerminalRequest::Dismiss { .. } => None,
     }
 }
 
@@ -2446,6 +2539,7 @@ mod tests {
         requests: usize,
         disconnects: usize,
         inventory: Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry>,
+        completed: Vec<usagi_core::domain::terminal_visibility::CompletedTerminalEntry>,
     }
     impl TerminalOwner for FakeGeneric {
         fn request(
@@ -2464,6 +2558,12 @@ mod tests {
             _: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
         ) -> Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry> {
             self.inventory.clone()
+        }
+        fn completed_inventory(
+            &self,
+            _: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+        ) -> Vec<usagi_core::domain::terminal_visibility::CompletedTerminalEntry> {
+            self.completed.clone()
         }
         fn disconnect(&mut self, _: ConnectionId) {
             self.disconnects += 1;
@@ -5109,6 +5209,258 @@ mod tests {
                 client,
                 RequestId::new(),
                 TerminalAction::Inventory,
+                json!({ "operation": "bogus" }),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One fixture covers merge, stamping, and CAS.
+    fn shared_owner_completed_inventory_merges_and_stamps_visibility() {
+        use usagi_core::domain::terminal_launch::{TerminalKind, TerminalLaunchScope};
+        use usagi_core::domain::terminal_visibility::{
+            CompletedTerminalEntry, TerminalVisibility, TerminalVisibilityState,
+        };
+
+        let mut agent = runtime();
+        let operation = OperationId::new().to_string();
+        let admission = agent
+            .launch(&operation, &intent(None), &FakeScope(Ok(scope())))
+            .unwrap();
+        let agent_terminal = admission.terminal.clone();
+        // Exit the Agent so it becomes an exited tombstone, not a live runtime.
+        agent.exit(&agent_terminal, 0).unwrap();
+        let query_scope = TerminalLaunchScope {
+            workspace_id: agent_terminal.workspace_id,
+            session_id: agent_terminal.session_id,
+            worktree_id: agent_terminal.worktree_id,
+        };
+        let generic_terminal = TerminalRef {
+            daemon_generation: agent_terminal.daemon_generation,
+            terminal_id: TerminalId::new(),
+            workspace_id: agent_terminal.workspace_id,
+            session_id: agent_terminal.session_id,
+            worktree_id: agent_terminal.worktree_id,
+        };
+        let generic = FakeGeneric {
+            completed: vec![CompletedTerminalEntry {
+                terminal: generic_terminal.clone(),
+                kind: TerminalKind::Terminal,
+                exit_status: 3,
+                base_offset: 0,
+                final_output_offset: 12,
+                visibility: TerminalVisibility::unobserved(),
+            }],
+            ..FakeGeneric::default()
+        };
+        let mut owner = SharedTerminalOwner::new(agent, generic);
+        let connection = ConnectionId::new();
+        let client = ClientId::new();
+        let query = |owner: &mut SharedTerminalOwner<_, _>| -> Vec<CompletedTerminalEntry> {
+            let reply = owner
+                .request(
+                    connection,
+                    client,
+                    RequestId::new(),
+                    TerminalAction::CompletedInventory,
+                    serde_json::to_value(TerminalRequest::CompletedInventory {
+                        scope: query_scope.clone(),
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            serde_json::from_value(reply["entries"].clone()).unwrap()
+        };
+
+        let entries = query(&mut owner);
+        assert_eq!(entries.len(), 2);
+        assert!(
+            entries
+                .iter()
+                .all(|entry| { entry.visibility.state == TerminalVisibilityState::Unobserved })
+        );
+        let agent_entry = entries
+            .iter()
+            .find(|entry| entry.kind == TerminalKind::Agent)
+            .unwrap();
+        assert!(agent_entry.terminal.fences(&agent_terminal));
+
+        // Observe the generic tombstone and re-query: only that exact ref rises.
+        let observed = owner
+            .request(
+                connection,
+                client,
+                RequestId::new(),
+                TerminalAction::Observe,
+                serde_json::to_value(TerminalRequest::Observe {
+                    terminal: generic_terminal.clone(),
+                    expected_revision: 0,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(observed["applied"], serde_json::json!(true));
+        assert_eq!(observed["conflict"], serde_json::json!(false));
+
+        let entries = query(&mut owner);
+        let generic_entry = entries
+            .iter()
+            .find(|entry| entry.terminal.fences(&generic_terminal))
+            .unwrap();
+        assert_eq!(
+            generic_entry.visibility.state,
+            TerminalVisibilityState::Observed
+        );
+        assert_eq!(generic_entry.exit_status, 3);
+        // The Agent tombstone's independent visibility is untouched.
+        let agent_entry = entries
+            .iter()
+            .find(|entry| entry.kind == TerminalKind::Agent)
+            .unwrap();
+        assert_eq!(
+            agent_entry.visibility.state,
+            TerminalVisibilityState::Unobserved
+        );
+
+        // An invalid completed-inventory payload is a safe rejection.
+        let error = owner
+            .request(
+                connection,
+                client,
+                RequestId::new(),
+                TerminalAction::CompletedInventory,
+                json!({ "operation": "bogus" }),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One fixture covers observe/dismiss CAS, conflict, and rejection.
+    fn shared_owner_observe_and_dismiss_are_cas_and_do_not_touch_the_process() {
+        use usagi_core::domain::terminal_visibility::{
+            TerminalVisibility, TerminalVisibilityState,
+        };
+
+        let mut owner = SharedTerminalOwner::new(runtime(), FakeGeneric::default());
+        let connection = ConnectionId::new();
+        let client = ClientId::new();
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+        };
+        let visibility = |value: &Value| -> TerminalVisibility {
+            serde_json::from_value(value["visibility"].clone()).unwrap()
+        };
+        let send = |owner: &mut SharedTerminalOwner<_, _>,
+                    action: TerminalAction,
+                    request: TerminalRequest|
+         -> Value {
+            owner
+                .request(
+                    connection,
+                    client,
+                    RequestId::new(),
+                    action,
+                    serde_json::to_value(request).unwrap(),
+                )
+                .unwrap()
+        };
+
+        let observed = send(
+            &mut owner,
+            TerminalAction::Observe,
+            TerminalRequest::Observe {
+                terminal: terminal.clone(),
+                expected_revision: 0,
+            },
+        );
+        assert_eq!(
+            visibility(&observed).state,
+            TerminalVisibilityState::Observed
+        );
+        assert_eq!(visibility(&observed).revision, 1);
+
+        // A stale dismiss conflicts and returns the authoritative snapshot.
+        let conflict = send(
+            &mut owner,
+            TerminalAction::Dismiss,
+            TerminalRequest::Dismiss {
+                terminal: terminal.clone(),
+                expected_revision: 0,
+            },
+        );
+        assert_eq!(conflict["applied"], serde_json::json!(false));
+        assert_eq!(conflict["conflict"], serde_json::json!(true));
+        assert_eq!(
+            visibility(&conflict).state,
+            TerminalVisibilityState::Observed
+        );
+
+        // Merging to the authoritative revision succeeds.
+        let dismissed = send(
+            &mut owner,
+            TerminalAction::Dismiss,
+            TerminalRequest::Dismiss {
+                terminal: terminal.clone(),
+                expected_revision: 1,
+            },
+        );
+        assert_eq!(dismissed["applied"], serde_json::json!(true));
+        assert_eq!(
+            visibility(&dismissed).state,
+            TerminalVisibilityState::Dismissed
+        );
+
+        // A stale observe never lowers the dismissed state (idempotent no-op).
+        let idempotent = send(
+            &mut owner,
+            TerminalAction::Observe,
+            TerminalRequest::Observe {
+                terminal,
+                expected_revision: 0,
+            },
+        );
+        assert_eq!(idempotent["applied"], serde_json::json!(false));
+        assert_eq!(idempotent["conflict"], serde_json::json!(false));
+        assert_eq!(
+            visibility(&idempotent).state,
+            TerminalVisibilityState::Dismissed
+        );
+
+        // A well-formed but non-visibility payload under a visibility action is
+        // a safe rejection, never routed to a terminal handler.
+        let mismatch = owner
+            .request(
+                connection,
+                client,
+                RequestId::new(),
+                TerminalAction::Observe,
+                serde_json::to_value(TerminalRequest::Attach {
+                    terminal: TerminalRef {
+                        daemon_generation: DaemonGeneration::new(),
+                        terminal_id: TerminalId::new(),
+                        workspace_id: WorkspaceId::new(),
+                        session_id: None,
+                        worktree_id: WorktreeId::new(),
+                    },
+                })
+                .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(mismatch.code, ErrorCode::InvalidArgument);
+
+        // A malformed visibility payload is a safe rejection.
+        let error = owner
+            .request(
+                connection,
+                client,
+                RequestId::new(),
+                TerminalAction::Observe,
                 json!({ "operation": "bogus" }),
             )
             .unwrap_err();

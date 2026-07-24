@@ -328,6 +328,17 @@ pub enum TerminalAction {
     Input,
     Resize,
     Detach,
+    /// List exited tombstones in a scope with their final replay locator, exit
+    /// status, and workspace-global visibility. It never changes the liveness
+    /// contract of [`Inventory`](Self::Inventory); it is an additive query for
+    /// terminals that have already exited (#525).
+    CompletedInventory,
+    /// Raise an exact tombstone's workspace-global visibility to at least
+    /// `Observed` under compare-and-swap.
+    Observe,
+    /// Raise an exact tombstone's workspace-global visibility to `Dismissed`
+    /// under compare-and-swap. It does not touch the terminal or its process.
+    Dismiss,
 }
 
 /// Product-neutral generic terminal launch vocabulary.  It deliberately
@@ -381,6 +392,24 @@ pub enum TerminalRequest {
     Detach {
         terminal: TerminalRef,
         subscription: u64,
+    },
+    /// Query exited tombstones in a scope (#525). The response body is
+    /// `{"entries": [CompletedTerminalEntry]}`.
+    CompletedInventory {
+        scope: TerminalLaunchScope,
+    },
+    /// Compare-and-swap the exact tombstone's visibility to at least `Observed`.
+    /// The response body is `{"visibility": TerminalVisibility, "applied": bool,
+    /// "conflict": bool}`.
+    Observe {
+        terminal: TerminalRef,
+        expected_revision: u64,
+    },
+    /// Compare-and-swap the exact tombstone's visibility to `Dismissed`. Same
+    /// response body shape as [`Observe`](Self::Observe).
+    Dismiss {
+        terminal: TerminalRef,
+        expected_revision: u64,
     },
 }
 

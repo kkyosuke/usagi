@@ -27,14 +27,17 @@ use usagi_core::domain::id::{
     ClientId, ConnectionId, DaemonGeneration, OperationId, RequestId, SessionId, TerminalId,
     TerminalRef, WorkspaceId, WorktreeId,
 };
+use usagi_core::domain::terminal_launch::TerminalLaunchScope;
+use usagi_core::domain::terminal_visibility::{CompletedTerminalEntry, TerminalVisibilityState};
 use usagi_core::infrastructure::ipc::ErrorCode;
 use usagi_core::infrastructure::store::dispatch::DispatchStore;
 use usagi_core::usecase::agent::AgentProfileCatalog;
 use usagi_core::usecase::client::{AgentLaunchIntent, TerminalAction, TerminalRequest};
 use usagi_daemon::infrastructure::pty::PtyTerminal;
+use usagi_daemon::presentation::ipc::TerminalOwner;
 use usagi_daemon::usecase::agent_ipc::{
     AgentRuntime, AgentTerminalActor, ResolvedAgentScope, ScopeResolveError, SessionScopeResolver,
-    TerminalOutcome,
+    SharedTerminalOwner, TerminalOutcome,
 };
 use usagi_daemon::usecase::claude::{
     ClaudeAdapter, ClaudeProvision, ClaudeProvisionFailure, ClaudeProvisioner,
@@ -50,6 +53,26 @@ use usagi_daemon::usecase::runtime::{
 use usagi_daemon::usecase::terminal::{Geometry, Output, PtyWriteError, PtyWriter, SpawnFailure};
 
 // ---- shared fakes -----------------------------------------------------------
+
+/// A generic terminal owner that holds nothing, so a `SharedTerminalOwner` can
+/// route Agent-only scenarios without a real generic PTY runtime.
+struct EmptyGeneric;
+impl TerminalOwner for EmptyGeneric {
+    fn request(
+        &mut self,
+        _: ConnectionId,
+        _: ClientId,
+        _: RequestId,
+        _: TerminalAction,
+        _: Value,
+    ) -> Result<Value, usagi_core::infrastructure::ipc::ProtocolError> {
+        Err(usagi_core::infrastructure::ipc::ProtocolError::new(
+            ErrorCode::NotFound,
+            "no generic terminal",
+        ))
+    }
+    fn disconnect(&mut self, _: ConnectionId) {}
+}
 
 #[derive(Default)]
 struct MemoryStore(Vec<RuntimeStoreSnapshot>);
@@ -411,6 +434,80 @@ fn agent_real_pty_rebuilds_the_allowlisted_environment_and_commits_exit() {
     assert_eq!(
         bytes,
         b"unset|/public/bin|/public/home|adapter-present|adapter|daemon-present"
+    );
+
+    // #525: after the real PTY exits, the tombstone is reachable through the
+    // completed inventory with the real exit status and final replay locator,
+    // and observe/dismiss converge its workspace-global visibility without
+    // resurrecting or removing it.
+    let query_scope = TerminalLaunchScope {
+        workspace_id: terminal.workspace_id,
+        session_id: terminal.session_id,
+        worktree_id: terminal.worktree_id,
+    };
+    let mut owner = SharedTerminalOwner::new(runtime, EmptyGeneric);
+    let completed_inventory = |owner: &mut SharedTerminalOwner<EmptyGeneric, AgentRuntime>| {
+        let response = owner
+            .request(
+                connection,
+                client,
+                RequestId::new(),
+                TerminalAction::CompletedInventory,
+                serde_json::to_value(TerminalRequest::CompletedInventory {
+                    scope: query_scope.clone(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        serde_json::from_value::<Vec<CompletedTerminalEntry>>(response["entries"].clone()).unwrap()
+    };
+
+    let entries = completed_inventory(&mut owner);
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].terminal.fences(&terminal));
+    assert_eq!(entries[0].exit_status, 0);
+    assert_eq!(entries[0].final_output_offset, bytes.len() as u64);
+    assert_eq!(
+        entries[0].visibility.state,
+        TerminalVisibilityState::Unobserved
+    );
+
+    let observed = owner
+        .request(
+            connection,
+            client,
+            RequestId::new(),
+            TerminalAction::Observe,
+            serde_json::to_value(TerminalRequest::Observe {
+                terminal: terminal.clone(),
+                expected_revision: 0,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(observed["applied"], serde_json::json!(true));
+    let dismissed = owner
+        .request(
+            connection,
+            client,
+            RequestId::new(),
+            TerminalAction::Dismiss,
+            serde_json::to_value(TerminalRequest::Dismiss {
+                terminal: terminal.clone(),
+                expected_revision: 1,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(dismissed["applied"], serde_json::json!(true));
+
+    // A second query still returns the retained tombstone (never resurrected as
+    // a fresh entry, never removed) and reports the converged Dismissed state.
+    let entries = completed_inventory(&mut owner);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].visibility.state,
+        TerminalVisibilityState::Dismissed
     );
 }
 

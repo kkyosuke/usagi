@@ -316,6 +316,12 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
     ) -> Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry> {
         self.coordinator.inventory(scope)
     }
+    fn completed_inventory(
+        &self,
+        scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+    ) -> Vec<usagi_core::domain::terminal_visibility::CompletedTerminalEntry> {
+        self.coordinator.completed_inventory(scope)
+    }
     fn disconnect(&mut self, connection: ConnectionId) {
         self.coordinator.disconnect(connection);
     }
@@ -1136,10 +1142,22 @@ mod tests {
         };
         assert!(TerminalOwner::inventory(&runtime, &foreign).is_empty());
 
+        // Before exit the terminal is not a completed tombstone.
+        assert!(TerminalOwner::completed_inventory(&runtime, &scope).is_empty());
+
         // After the terminal exits it is no longer attachable (`live == false`).
         runtime.exit(&terminal, 0).unwrap();
         let exited = TerminalOwner::inventory(&runtime, &scope);
         assert_eq!(exited.len(), 1);
         assert!(!exited[0].live);
+
+        // The exited terminal now appears as a completed tombstone (#525) with
+        // its exit status; a foreign scope still sees none.
+        let completed = TerminalOwner::completed_inventory(&runtime, &scope);
+        assert_eq!(completed.len(), 1);
+        assert!(completed[0].terminal.fences(&terminal));
+        assert_eq!(completed[0].kind, TerminalKind::Terminal);
+        assert_eq!(completed[0].exit_status, 0);
+        assert!(TerminalOwner::completed_inventory(&runtime, &foreign).is_empty());
     }
 }

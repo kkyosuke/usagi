@@ -19,6 +19,7 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 - [Codex structured capture request](#codex-structured-capture-request)
 - [dispatch request](#dispatch-request)
 - [generic terminal request](#generic-terminal-request)
+- [exited tombstone visibility](#exited-tombstone-visibility)
 
 ## identity と fence
 
@@ -337,6 +338,51 @@ daemon restart 後も `inventory` は `terminals.json` から復元した generi
 `identity_unknown`、`live: false` となる。旧 ref の attach、resume、resync、input、resize、detach は
 typed safe error となり、別 terminal の PTY effect や暗黙の replacement spawn を起こさない。restart 時の
 永続化・破損時の扱いは [5. daemon](05-daemon.md#daemon-data-directory) を正本とする。
+
+## exited tombstone visibility
+
+`inventory` の liveness 契約（`live: true` は attach 可能な running のみ）は変えない。exited した
+terminal/Agent の tombstone へ fresh TUI が到達するための query/command を additive に追加する
+（正本は [5. daemon の terminal ownership](05-daemon.md#terminal-ownership)）。terminal request kind に次の
+3 action を加える。scope は generic の `inventory` と同じ `WorkspaceId` / optional `SessionId`（None=root）/
+`WorktreeId` の完全一致である。
+
+| action | payload | response |
+|---|---|---|
+| `completed_inventory` | `scope` | `{"entries": [CompletedTerminalEntry]}` |
+| `observe` | `terminal`（完全な `TerminalRef`）, `expected_revision` | `{"visibility", "applied", "conflict"}` |
+| `dismiss` | `terminal`, `expected_revision` | 同上 |
+
+`completed_inventory` は generic owner と Agent owner の両方の **exited** record だけを merge し、各 entry に
+authoritative な workspace-global visibility を付けて返す。running / reserved / reconcile 中 / reclaimed は
+含めない（これらは `inventory` の `live` 契約が扱う）。`CompletedTerminalEntry` は次を持ち、argv・
+environment 値・secret・provider transcript は含めない。
+
+| field | 意味 |
+|---|---|
+| `terminal` | tombstone を一意に決める完全な `TerminalRef`（retention identity も兼ねる） |
+| `kind` | `terminal` / `agent` |
+| `exit_status` | PTY 終了時に記録した exit status |
+| `base_offset` / `final_output_offset` | bounded final replay window の locator（`[base_offset, final_output_offset)`） |
+| `visibility` | 後述の workspace-global visibility（`state` と `revision`） |
+
+visibility は client-local ではなく、同じ local user の **workspace-global durable state** であり、daemon が
+唯一の authority として全 client connection を収束させる。state は `unobserved < observed < dismissed` の
+monotonic lattice で、`revision` を伴う。
+
+- `observe` / `dismiss` は expected `revision` を伴う compare-and-swap である。state が上がるときだけ
+  `expected_revision` を照合し `revision` を増やす（`applied: true`）。
+- 要求した state が現在値を上げない同値・下位 retry は idempotent な no-op で、`applied: false` / `conflict: false`
+  と現在の authoritative snapshot を返す。late `observe` は `dismissed` を下げない。
+- state を上げる必要があるのに `expected_revision` が stale な場合は `conflict: true` と authoritative snapshot を
+  返す。client はそれを max-state へ merge し、返った `revision` で再送する。
+- 別 exact `TerminalRef` の visibility は完全に独立する。out-of-order / duplicate な write は completed entry を
+  復活させない。`dismiss` は visibility だけを変え、terminal や process には触れない。
+
+client は `completed_inventory` が返した exact `TerminalRef` の visibility だけを操作し、名前・pane・
+continuation で別 incarnation へ fallback しない。TUI の projection 契約は
+[3. TUI](03-tui.md) を正本とする。aggregate retention / GC は
+[#526](../.usagi/issues/526-fix-daemon-terminal-agent-tombstone-retention-aggregate-bound-gc.md) の責務である。
 
 ## Unix transport
 

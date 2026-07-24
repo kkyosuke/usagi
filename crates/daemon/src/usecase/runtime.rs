@@ -1019,6 +1019,41 @@ impl RuntimeCoordinator {
             })
             .collect()
     }
+    /// Lists exited Agent-runtime tombstones in the exact requested scope with
+    /// their exit status and bounded final-replay locator (#525). The
+    /// visibility field is a placeholder; the shared owner overwrites it from
+    /// the authoritative workspace-global ledger. Only `Exited` records appear.
+    #[must_use]
+    pub fn completed_inventory(
+        &self,
+        scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+    ) -> Vec<usagi_core::domain::terminal_visibility::CompletedTerminalEntry> {
+        use usagi_core::domain::{
+            terminal_launch::TerminalKind,
+            terminal_visibility::{CompletedTerminalEntry, TerminalVisibility},
+        };
+        self.records
+            .values()
+            .filter(|record| {
+                record.runtime.terminal.workspace_id == scope.workspace_id
+                    && record.runtime.terminal.session_id == scope.session_id
+                    && record.runtime.terminal.worktree_id == scope.worktree_id
+                    && matches!(record.state, RuntimeState::Exited)
+            })
+            .filter_map(|record| {
+                let snapshot = self.terminals.snapshot(&record.runtime.terminal).ok()?;
+                let exit_status = snapshot.exited?;
+                Some(CompletedTerminalEntry {
+                    terminal: record.runtime.terminal.clone(),
+                    kind: TerminalKind::Agent,
+                    exit_status,
+                    base_offset: snapshot.base_offset,
+                    final_output_offset: snapshot.output_offset,
+                    visibility: TerminalVisibility::unobserved(),
+                })
+            })
+            .collect()
+    }
     /// Returns the immutable record only when the complete runtime reference
     /// fences it.  This exposes no ephemeral provision or terminal output.
     pub fn record_for(

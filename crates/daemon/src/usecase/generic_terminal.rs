@@ -411,6 +411,39 @@ impl GenericTerminalCoordinator {
             })
             .collect()
     }
+    /// Lists exited generic-terminal tombstones in the exact requested scope
+    /// with their exit status and bounded final-replay locator (#525). The
+    /// visibility field is a placeholder; the shared owner overwrites it from
+    /// the authoritative workspace-global ledger. Running / reserved /
+    /// reconcile-required / reclaimed records are excluded.
+    #[must_use]
+    pub fn completed_inventory(
+        &self,
+        scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+    ) -> Vec<usagi_core::domain::terminal_visibility::CompletedTerminalEntry> {
+        use usagi_core::domain::terminal_visibility::{CompletedTerminalEntry, TerminalVisibility};
+        self.records
+            .values()
+            .filter(|record| {
+                record.terminal.workspace_id == scope.workspace_id
+                    && record.terminal.session_id == scope.session_id
+                    && record.terminal.worktree_id == scope.worktree_id
+                    && matches!(record.state, TerminalRuntimeState::Exited)
+            })
+            .filter_map(|record| {
+                let snapshot = self.terminals.snapshot(&record.terminal).ok()?;
+                let exit_status = snapshot.exited?;
+                Some(CompletedTerminalEntry {
+                    terminal: record.terminal.clone(),
+                    kind: TerminalKind::Terminal,
+                    exit_status,
+                    base_offset: snapshot.base_offset,
+                    final_output_offset: snapshot.output_offset,
+                    visibility: TerminalVisibility::unobserved(),
+                })
+            })
+            .collect()
+    }
     #[must_use]
     pub fn occupied_slots(&self) -> usize {
         self.records
@@ -776,6 +809,52 @@ mod tests {
             b"done"
         );
     }
+    #[test]
+    fn completed_inventory_lists_only_exited_in_scope_tombstones() {
+        use usagi_core::domain::terminal_launch::TerminalKind;
+        let request = request();
+        let (terminal, fence) = refs(&request);
+        let mut coordinator = GenericTerminalCoordinator::new(4, 64, 1);
+        let mut store = Store::default();
+        coordinator
+            .launch(
+                &request,
+                terminal.clone(),
+                fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver,
+                &mut store,
+                &mut Spawner(Ok(process())),
+            )
+            .unwrap();
+        // A running terminal is not a completed tombstone.
+        assert!(coordinator.completed_inventory(&request.scope).is_empty());
+
+        coordinator
+            .output(&terminal, b"final output".to_vec())
+            .unwrap();
+        coordinator.exit(&terminal, 5, &mut store).unwrap();
+
+        let completed = coordinator.completed_inventory(&request.scope);
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].kind, TerminalKind::Terminal);
+        assert!(completed[0].terminal.fences(&terminal));
+        assert_eq!(completed[0].exit_status, 5);
+        assert_eq!(completed[0].base_offset, 0);
+        assert_eq!(
+            completed[0].final_output_offset,
+            "final output".len() as u64
+        );
+
+        // Another scope does not see this tombstone.
+        let other_scope = usagi_core::domain::terminal_launch::TerminalLaunchScope {
+            workspace_id: WorkspaceId::new(),
+            session_id: None,
+            worktree_id: WorktreeId::new(),
+        };
+        assert!(coordinator.completed_inventory(&other_scope).is_empty());
+    }
+
     #[test]
     fn ambiguity_blocks_replacement_until_verified_exit_or_gone() {
         let request = request();
