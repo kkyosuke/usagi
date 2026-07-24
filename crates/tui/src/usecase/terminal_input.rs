@@ -126,7 +126,8 @@ pub enum LiveInput {
     WheelUp,
     /// Pointer wheel moved toward newer terminal output.
     WheelDown,
-    /// Drag lifecycle for terminal-output selection. It never reaches the PTY.
+    /// Pointer lifecycle for terminal-output click/selection. It never reaches
+    /// the PTY.
     Pointer(PointerEvent),
 }
 
@@ -139,6 +140,7 @@ pub struct PointerEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PointerKind {
+    Down,
     Drag,
     Up,
 }

@@ -36,7 +36,7 @@ use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::usecase::client::DaemonMetrics;
 
-use crate::presentation::live_terminal::LiveTerminalControls;
+use crate::presentation::live_terminal::{LiveTerminalControls, PointerRelease};
 use crate::presentation::metrics::{MetricsBackend, MetricsProjection};
 use crate::presentation::theme::{Color, Style};
 use crate::presentation::views::config::{self, AvailableAgentModels, Config};
@@ -3139,12 +3139,10 @@ fn surface_agent_tab_intent_error(runtime: &mut WorkspaceRuntime, error: AgentTa
     ))));
 }
 
-/// Drive a terminal-output pointer gesture. A drag begins or extends a selection
-/// against the visible cells. A release copies a non-empty selection to the OS
-/// clipboard; a plain click that produced no selection instead opens the
-/// `http(s)` URL under the pointer in the browser (#389) — the two gestures are
-/// mutually exclusive, so a drag-to-copy never also opens a link. `rows_len` /
-/// `scroll` describe the frame's projected viewport so the pointer maps back to
+/// Drive the complete terminal-output pointer gesture in one place. Down records
+/// a snapshot and anchor without selecting, the first Drag promotes it to a text
+/// selection, and Up resolves to exactly one of copy or link-open. `rows_len` /
+/// `scroll` describe the frame's projected viewport so every phase maps back to
 /// the exact retained cell.
 #[allow(clippy::too_many_arguments)]
 fn handle_terminal_pointer(
@@ -3158,46 +3156,58 @@ fn handle_terminal_pointer(
     rows_len: usize,
     scroll: usize,
     pointer: PointerEvent,
-) {
+) -> bool {
     match pointer.kind {
-        PointerKind::Drag => {
-            let Some(terminal) = runtime.focused_terminal() else {
-                return;
-            };
+        PointerKind::Down => {
+            if !runtime.wants_live_input() {
+                return false;
+            }
+            let terminal = runtime
+                .focused_terminal()
+                .expect("live input ownership requires a selected live terminal");
             let Some(point) =
                 terminal_point_at(height, width, rows_len, scroll, pointer.column, pointer.row)
             else {
-                return;
+                return false;
             };
-            if controls.is_dragging() {
-                controls.extend_selection(point);
-            } else if let Some(cells) = ui.terminal_cells(&terminal) {
-                controls.begin_selection(TerminalSelection::begin(cells, point));
-            }
+            let Some(cells) = ui.terminal_cells(&terminal) else {
+                return false;
+            };
+            controls.press_pointer(TerminalSelection::begin(cells, point));
         }
-        PointerKind::Up => {
-            // Releasing the mouse copies the selection but keeps it highlighted:
-            // the range stays on screen until a new drag replaces it.
-            if let Some(text) = controls.finish_drag() {
+        PointerKind::Drag => {
+            if runtime.focused_terminal().is_none() {
+                return true;
+            }
+            let Some(point) =
+                terminal_point_at(height, width, rows_len, scroll, pointer.column, pointer.row)
+            else {
+                return true;
+            };
+            controls.drag_pointer(point);
+        }
+        PointerKind::Up => match controls.release_pointer() {
+            PointerRelease::Copy(text) => {
                 let result = term.copy_text(&text);
                 controls.record_copy(&text, result);
-                return;
             }
-            // No selection was drawn, so this release is a plain click: open the
-            // link under it, if any. A click off any link is a harmless no-op.
-            let Some(terminal) = runtime.focused_terminal() else {
-                return;
-            };
-            let Some(point) =
-                terminal_point_at(height, width, rows_len, scroll, pointer.column, pointer.row)
-            else {
-                return;
-            };
-            if let Some(cells) = ui.terminal_cells(&terminal) {
-                controls.open_link_at(&cells, point, browser);
+            PointerRelease::Click => {
+                let Some(terminal) = runtime.focused_terminal() else {
+                    return true;
+                };
+                let Some(point) =
+                    terminal_point_at(height, width, rows_len, scroll, pointer.column, pointer.row)
+                else {
+                    return true;
+                };
+                if let Some(cells) = ui.terminal_cells(&terminal) {
+                    controls.open_link_at(&cells, point, browser);
+                }
             }
-        }
+            PointerRelease::None => {}
+        },
     }
+    true
 }
 
 /// Copy the retained terminal selection, if any, and leave its highlight in
@@ -3214,39 +3224,6 @@ fn copy_terminal_selection(controls: &mut LiveTerminalControls, term: &mut dyn T
     }
     let result = term.copy_text(&text);
     controls.record_copy(&text, result);
-}
-
-/// Begin a terminal selection when a normal left click lands in the live
-/// terminal's rendered content viewport. This records the press cell as the
-/// drag anchor, before crossterm delivers the first [`PointerKind::Drag`] event.
-/// Sidebar, chrome, modal, and out-of-content clicks retain their existing
-/// ownership and handling.
-#[allow(clippy::too_many_arguments)]
-fn begin_terminal_selection_on_click(
-    ui: &WorkspaceUi,
-    runtime: &WorkspaceRuntime,
-    controls: &mut LiveTerminalControls,
-    height: usize,
-    width: usize,
-    rows_len: usize,
-    scroll: usize,
-    pointer: (u16, u16),
-) -> bool {
-    if !runtime.wants_live_input() {
-        return false;
-    }
-    let terminal = runtime
-        .focused_terminal()
-        .expect("live input ownership requires a selected live terminal");
-    let Some(point) = terminal_point_at(height, width, rows_len, scroll, pointer.0, pointer.1)
-    else {
-        return false;
-    };
-    let Some(cells) = ui.terminal_cells(&terminal) else {
-        return false;
-    };
-    controls.begin_selection(TerminalSelection::begin(cells, point));
-    true
 }
 
 /// Intercept the live-terminal view controls the Home reducer does not own —
@@ -3312,20 +3289,26 @@ fn intercept_live_terminal_control(
             }
         }
         Key::Pointer(pointer) => {
-            handle_terminal_pointer(
+            return handle_terminal_pointer(
                 ui, runtime, controls, term, browser, height, width, rows_len, scroll, *pointer,
             );
         }
         Key::Click { column, row } => {
-            return begin_terminal_selection_on_click(
+            return handle_terminal_pointer(
                 ui,
                 runtime,
                 controls,
+                term,
+                browser,
                 height,
                 width,
                 rows_len,
                 scroll,
-                (*column, *row),
+                PointerEvent {
+                    kind: PointerKind::Down,
+                    column: *column,
+                    row: *row,
+                },
             );
         }
         _ => return false,
@@ -4563,12 +4546,12 @@ mod tests {
         UnavailableEnvironmentStore, UnavailableExternalTerminalPort, UnavailablePrSnapshotPort,
         UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory, WelcomeStep,
         WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
-        app_event_from_key, begin_terminal_selection_on_click, close_exited_panes,
-        controller_terminal_view, copy_terminal_selection, drain_controller_host_actions,
-        drain_session_completions, forward_live_terminal_input, handle_terminal_pointer,
-        intercept_live_terminal_control, key_to_terminal_bytes, new_project_notice,
-        play_startup_splash, poll_and_project_terminals, render_controller_frame,
-        render_home_snapshot, restore_open_panes, run as run_from_start, run_with_settings,
+        app_event_from_key, close_exited_panes, controller_terminal_view, copy_terminal_selection,
+        drain_controller_host_actions, drain_session_completions, forward_live_terminal_input,
+        handle_terminal_pointer, intercept_live_terminal_control, key_to_terminal_bytes,
+        new_project_notice, play_startup_splash, poll_and_project_terminals,
+        render_controller_frame, render_home_snapshot, restore_open_panes, run as run_from_start,
+        run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
@@ -10144,17 +10127,23 @@ mod tests {
             column,
             row: 5,
         };
-        assert!(begin_terminal_selection_on_click(
+        assert!(handle_terminal_pointer(
             &ui,
             &runtime,
             &mut controls,
+            &mut term,
+            &mut browser,
             20,
             80,
             rows_len,
             0,
-            (37, 5),
+            PointerEvent {
+                kind: PointerKind::Down,
+                column: 37,
+                row: 5,
+            },
         ));
-        assert!(controls.has_selection());
+        assert!(!controls.has_selection());
         // The next drag report lands at the final "o". The press cell above is
         // still part of the copied range, so this must yield all of "hello".
         handle_terminal_pointer(
@@ -10383,37 +10372,55 @@ mod tests {
                 },
             );
         }
-        assert!(!begin_terminal_selection_on_click(
+        assert!(!handle_terminal_pointer(
             &ui,
             &inactive,
             &mut controls,
+            &mut term,
+            &mut browser,
             20,
             80,
             1,
             0,
-            (40, 5),
+            PointerEvent {
+                kind: PointerKind::Down,
+                column: 40,
+                row: 5,
+            },
         ));
-        assert!(!begin_terminal_selection_on_click(
+        assert!(!handle_terminal_pointer(
             &ui,
             &runtime,
             &mut controls,
+            &mut term,
+            &mut browser,
             20,
             80,
             1,
             0,
-            (0, 0),
+            PointerEvent {
+                kind: PointerKind::Down,
+                column: 0,
+                row: 0,
+            },
         ));
         let empty_view = WorkspaceView::with_runtime_ids(ws("empty"), state("empty"), vec![]);
         let empty_ui = WorkspaceUi::new(empty_view, Box::new(UnavailableSessionCommandPort));
-        assert!(!begin_terminal_selection_on_click(
+        assert!(!handle_terminal_pointer(
             &empty_ui,
             &runtime,
             &mut controls,
+            &mut term,
+            &mut browser,
             20,
             80,
             1,
             0,
-            (40, 5),
+            PointerEvent {
+                kind: PointerKind::Down,
+                column: 40,
+                row: 5,
+            },
         ));
         let mut empty_controls = LiveTerminalControls::default();
         for kind in [PointerKind::Drag, PointerKind::Up] {
@@ -10477,11 +10484,11 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_click_on_a_terminal_link_opens_it_without_touching_the_pty() {
+    fn a_down_up_click_on_a_terminal_link_opens_it_without_touching_the_pty() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let terminal = live_terminal_ref(workspace, session);
-        let (ui, runtime) = focused_live_pane(
+        let (mut ui, mut runtime) = focused_live_pane(
             workspace,
             session,
             terminal.clone(),
@@ -10500,54 +10507,85 @@ mod tests {
         let mut term = FakeTerminal::default();
         let mut browser = RecordingBrowser::default();
         let mut controls = LiveTerminalControls::default();
+        let mut pending_targets = std::collections::HashMap::new();
         controls.sync_focus(Some(&terminal));
 
         // A press-release with no drag: the URL starts at content column 4, so
-        // frame column 37 + 4 = 41 lands on it. The click opens the whole link.
-        handle_terminal_pointer(
-            &ui,
-            &runtime,
+        // frame column 37 + 4 = 41 lands on it. Down must not create the
+        // one-cell selection that previously stole the release from link-open.
+        assert!(intercept_live_terminal_control(
+            &Key::Click { column: 41, row: 5 },
+            &mut ui,
+            &mut runtime,
             &mut controls,
             &mut term,
             &mut browser,
+            &mut pending_targets,
             20,
             80,
             rows_len,
             0,
-            PointerEvent {
+        ));
+        assert!(!controls.has_selection());
+        assert!(intercept_live_terminal_control(
+            &Key::Pointer(PointerEvent {
                 kind: PointerKind::Up,
                 column: 41,
                 row: 5,
-            },
-        );
+            }),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending_targets,
+            20,
+            80,
+            rows_len,
+            0,
+        ));
         assert_eq!(browser.opened, vec!["https://example.com/x".to_owned()]);
         // A pointer release is not keyboard input, so nothing was forwarded to the
         // child PTY, and the clipboard was left alone.
         assert!(term.copied.is_empty());
 
-        // A click on the leading prose (frame column 37 = content column 0) opens
-        // nothing.
-        handle_terminal_pointer(
-            &ui,
-            &runtime,
+        // A complete click on the leading prose (frame column 37 = content
+        // column 0) opens nothing.
+        assert!(intercept_live_terminal_control(
+            &Key::Click { column: 37, row: 5 },
+            &mut ui,
+            &mut runtime,
             &mut controls,
             &mut term,
             &mut browser,
+            &mut pending_targets,
             20,
             80,
             rows_len,
             0,
-            PointerEvent {
+        ));
+        assert!(intercept_live_terminal_control(
+            &Key::Pointer(PointerEvent {
                 kind: PointerKind::Up,
                 column: 37,
                 row: 5,
-            },
-        );
+            }),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending_targets,
+            20,
+            80,
+            rows_len,
+            0,
+        ));
         assert_eq!(browser.opened.len(), 1);
     }
 
     #[test]
-    fn a_terminal_press_anchors_a_drag_at_its_start_cell() {
+    fn a_terminal_press_waits_for_drag_and_then_anchors_at_its_start_cell() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let terminal = live_terminal_ref(workspace, session);
@@ -10572,16 +10610,42 @@ mod tests {
         // The right pane starts at column 37 and terminal content at row 5. The
         // press anchors the selection at the first "h", before the first drag
         // report reaches the controller.
-        assert!(begin_terminal_selection_on_click(
+        let mut term = FakeTerminal::default();
+        let mut browser = RecordingBrowser::default();
+        assert!(handle_terminal_pointer(
             &ui,
             &runtime,
             &mut controls,
+            &mut term,
+            &mut browser,
             20,
             80,
             rows_len,
             0,
-            (37, 5),
+            PointerEvent {
+                kind: PointerKind::Down,
+                column: 37,
+                row: 5,
+            },
         ));
+        assert!(!controls.is_dragging());
+        assert!(!controls.has_selection());
+        handle_terminal_pointer(
+            &ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            20,
+            80,
+            rows_len,
+            0,
+            PointerEvent {
+                kind: PointerKind::Drag,
+                column: 38,
+                row: 5,
+            },
+        );
         assert!(controls.is_dragging());
         assert_eq!(
             controls.selection().expect("selection started").anchor(),
@@ -10590,15 +10654,21 @@ mod tests {
 
         // A left-sidebar click remains with sidebar navigation; the terminal
         // interceptor must not consume it.
-        assert!(!begin_terminal_selection_on_click(
+        assert!(!handle_terminal_pointer(
             &ui,
             &runtime,
             &mut controls,
+            &mut term,
+            &mut browser,
             20,
             80,
             rows_len,
             0,
-            (5, 2),
+            PointerEvent {
+                kind: PointerKind::Down,
+                column: 5,
+                row: 2,
+            },
         ));
     }
 

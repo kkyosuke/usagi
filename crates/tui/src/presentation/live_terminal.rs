@@ -33,6 +33,10 @@ pub struct LiveTerminalControls {
     /// The furthest the current viewport can scroll, recomputed each frame from
     /// the retained rows so `scroll_up` cannot run past the top.
     max_scroll: usize,
+    /// A left-button press that has not moved yet. Keeping this separate from
+    /// `selection` is what distinguishes a click from a one-cell drag: the
+    /// selection becomes visible and copyable only after the first drag event.
+    pointer_press: Option<TerminalSelection>,
     /// The drag selection, snapshotted at its anchor. It is retained after the
     /// mouse is released so the highlighted range stays on screen (and copyable)
     /// until a new drag replaces it or focus changes.
@@ -56,6 +60,7 @@ impl LiveTerminalControls {
         self.focused = terminal.cloned();
         self.scroll = 0;
         self.max_scroll = 0;
+        self.pointer_press = None;
         self.selection = None;
         self.dragging = false;
         self.feedback = None;
@@ -74,9 +79,49 @@ impl LiveTerminalControls {
     /// Begin a drag selection, replacing any earlier (including finished) one,
     /// and surface that a selection has started.
     pub fn begin_selection(&mut self, selection: TerminalSelection) {
+        self.pointer_press = None;
         self.selection = Some(selection);
         self.dragging = true;
         self.feedback = Some("terminal selection started".to_owned());
+    }
+
+    /// Record a pointer press without starting a text selection. A subsequent
+    /// drag promotes the snapshotted viewport and anchor into `selection`; a
+    /// release before that remains a plain click.
+    pub fn press_pointer(&mut self, selection: TerminalSelection) {
+        self.pointer_press = Some(selection);
+        self.dragging = false;
+    }
+
+    /// Promote a pending press into a drag selection and extend it to `focus`.
+    /// Returns `false` for a stray drag that had no preceding press.
+    pub fn drag_pointer(&mut self, focus: TerminalPoint) -> bool {
+        if !self.dragging {
+            let Some(selection) = self.pointer_press.take() else {
+                return false;
+            };
+            self.selection = Some(selection);
+            self.dragging = true;
+            self.feedback = Some("terminal selection started".to_owned());
+        }
+        self.extend_selection(focus);
+        true
+    }
+
+    /// Complete the current pointer gesture.
+    ///
+    /// A press released before any drag is a click. A promoted drag returns its
+    /// selected text for copying. A release without a matching press is inert.
+    pub fn release_pointer(&mut self) -> PointerRelease {
+        if self.dragging {
+            return self
+                .finish_drag()
+                .map_or(PointerRelease::None, PointerRelease::Copy);
+        }
+        if self.pointer_press.take().is_some() {
+            return PointerRelease::Click;
+        }
+        PointerRelease::None
     }
 
     /// Extend the in-progress selection to `focus`; a no-op without a selection.
@@ -128,11 +173,10 @@ impl LiveTerminalControls {
         }
     }
 
-    /// Drop a retained selection after an ordinary click in the terminal
-    /// viewport. This is deliberately separate from [`Self::sync_focus`]: a
-    /// click clears only text selection, preserving scroll position and the
-    /// focused terminal.
+    /// Explicitly drop a retained selection while preserving scroll position
+    /// and the focused terminal.
     pub fn clear_selection(&mut self) {
+        self.pointer_press = None;
         self.selection = None;
         self.dragging = false;
         self.feedback = Some("terminal selection cleared".to_owned());
@@ -201,10 +245,21 @@ impl LiveTerminalControls {
     }
 }
 
+/// Result of completing one terminal pointer gesture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PointerRelease {
+    /// No matching pointer press was active.
+    None,
+    /// The pointer was released without a drag.
+    Click,
+    /// A drag selection completed with non-empty text.
+    Copy(String),
+}
+
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
-    use super::LiveTerminalControls;
+    use super::{LiveTerminalControls, PointerRelease};
     use crate::usecase::application::pr::BrowserOpener;
     use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
     use usagi_core::domain::id::{
@@ -298,6 +353,30 @@ mod tests {
         // A stray release without a live drag must not re-copy the retained text.
         assert!(controls.finish_drag().is_none());
         assert!(controls.has_selection());
+    }
+
+    #[test]
+    fn pointer_gesture_distinguishes_click_from_drag_before_selecting() {
+        let viewport = vec!["hello".to_owned()];
+        let anchor = TerminalPoint { row: 0, column: 0 };
+        let mut controls = LiveTerminalControls::default();
+
+        controls.press_pointer(TerminalSelection::begin(viewport.clone(), anchor));
+        assert!(!controls.has_selection());
+        assert!(!controls.is_dragging());
+        assert_eq!(controls.release_pointer(), PointerRelease::Click);
+
+        controls.press_pointer(TerminalSelection::begin(viewport, anchor));
+        assert!(controls.drag_pointer(TerminalPoint { row: 0, column: 4 }));
+        assert!(controls.has_selection());
+        assert!(controls.is_dragging());
+        assert_eq!(
+            controls.release_pointer(),
+            PointerRelease::Copy("hello".to_owned())
+        );
+        assert!(controls.has_selection());
+        assert!(!controls.is_dragging());
+        assert_eq!(controls.release_pointer(), PointerRelease::None);
     }
 
     #[test]
