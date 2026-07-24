@@ -1,6 +1,6 @@
 # 11. workspace open 時の pane 復元（live Agent/Terminal の再投影）
 
-> [設計提案一覧](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [workspace-root scope](10-workspace-root-scope.md)
+> [設計提案一覧](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [workspace-root scope](10-workspace-root-scope.md) ｜ 次へ → [terminal VT snapshot](12-terminal-vt-snapshot.md)
 
 workspace を開き直したときに、その workspace/session/root scope に属する **生存中の** daemon-owned
 Agent / Terminal runtime を、stable identity と durable Agent display intent で pane tab に復元する設計。
