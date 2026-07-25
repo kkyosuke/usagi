@@ -14,6 +14,7 @@ pub mod agent_ipc;
 pub mod claude;
 pub mod codex;
 pub mod control;
+pub mod custody;
 pub mod generation;
 pub mod generic_terminal;
 pub mod metrics;

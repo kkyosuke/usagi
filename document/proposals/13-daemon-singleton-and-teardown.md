@@ -3,10 +3,12 @@
 > [設計提案一覧](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [terminal VT snapshot](12-terminal-vt-snapshot.md)
 
 本書は、v2 daemon の**単一インスタンス保証**と**session teardown の実行位置**についての設計である。
-このうち [設計 3: teardown worker と resume 契約](#設計-3-teardown-worker-と-resume-契約) は実装済みで、
-契約の正本は [5. daemon の session teardown worker](../05-daemon.md#session-teardown-worker) と
+このうち [設計 1: custody 喪失による self-shutdown](#設計-1-custody-喪失による-self-shutdown) と
+[設計 3: teardown worker と resume 契約](#設計-3-teardown-worker-と-resume-契約) は実装済みで、契約の正本は
+[5. daemon の custody 喪失による self-shutdown](../05-daemon.md#custody-喪失による-self-shutdown)、
+[5. daemon の session teardown worker](../05-daemon.md#session-teardown-worker)、
 [7. MCP サーバの session lifecycle の受理契約](../07-mcp.md#session-lifecycle-の受理契約) に移った。
-本書に残るのは、その採用理由と却下した代替案である。設計 1 / 2 は未実装である。
+本書に残るのは、その採用理由と却下した代替案である。設計 2 は未実装である。
 実地調査で 3 つの独立した欠陥を確認し、実装 issue
 [#540](../../.usagi/issues/540-fix-daemon-daemon-serve-self-shutdown-test-fixture-workspace.md) /
 [#542](../../.usagi/issues/542-fix-daemon-fence-workspace-mode-home.md) /
@@ -45,7 +47,7 @@ PID 25529  PPID 1  ELAPSED 01:48:04
 
 | # | 欠陥 | 実装上の所在 | 状態 |
 |---|---|---|---|
-| 1 | daemon に「権威を失ったら終了する」自衛が無い | `SignalShutdown::wait` の shutdown 条件は signal と IPC flag だけ | 実測で確認（残留 20 プロセス） |
+| 1 | daemon に「権威を失ったら終了する」自衛が無い | `SignalShutdown::wait` の shutdown 条件は signal と IPC flag だけ | 実測で確認（残留 20 プロセス）。#540 で修正済み |
 | 2 | fence の単位が mode 別 data directory であり、daemon が所有する workspace と一致しない | `FileInstanceLock` は `<data_dir>/daemon/daemon.lock`、権威は `current_dir()` 由来の repo root | コード調査で確定（潜在） |
 | 3 | session teardown が IPC request handler 内で同期実行される | `perform_remove` の 3 段が `usagi-ipc-client` thread 上で直列 | 修正済み（#543。即時受理 + teardown worker） |
 
@@ -70,29 +72,24 @@ PID 25529  PPID 1  ELAPSED 01:48:04
    v2 出荷時に mode 切り替え運用（task run / dev / prd）で確実に踏む。
 ```
 
-残る実装順序は **#540 → #542** である（#542 の test は #540 が入れる fixture workspace helper を前提にする）。
-#543 は独立に実装済みだが、その受入条件のうち「巨大 `target/` の削除が完了する」は、残留 daemon が worktree を
-握らないこと、すなわち #540 に実質的に依存する（削除は再開され続けるが、握られている間は完了しない）。
+残る実装順序は **#540 → #542** であり、#542 の test は #540 が入れた fixture workspace helper
+（`tests/support/daemon.rs`）を前提にする。#543 は独立に実装済みだが、その受入条件のうち「巨大 `target/` の
+削除が完了する」は、残留 daemon が worktree を握らないこと、すなわち #540 に実質的に依存する（削除は再開され
+続けるが、握られている間は完了しない）。
 
 ## 設計 1: custody 喪失による self-shutdown
 
-**採用する終了条件は「custody（権威）の喪失」である。** daemon は次の 2 つの invariant を周期的に検証し、
-どちらかが崩れたら graceful shutdown を要求する。
-
-| invariant | 検証内容 | 崩れた意味 |
-|---|---|---|
-| lock custody | 保持中の lock fd の `(dev, ino)` と、lock path を `stat` した結果が一致する | path が消えた／別 inode に置き換わった。この process はもうその data directory の singleton ではない |
-| record custody | `daemon.json` が今もこの pid と OS の process-start identity を記録している | 権威が retire された、または別 owner に置き換わった |
+**採用した終了条件は「custody（権威）の喪失」である。** 実装済みの invariant・周期・cleanup 契約は
+[5. daemon の custody 喪失による self-shutdown](../05-daemon.md#custody-喪失による-self-shutdown) が正本である。
+本節に残すのは設計判断だけである。
 
 - 検証語彙は既存の `verify_private_lock_path` と exact process-owner record（[5. daemon の daemon data
-  directory](../05-daemon.md#daemon-data-directory) が正本）をそのまま再利用する。新しい identity 概念を導入しない。
-- 周期は 1 秒程度の tick とし、既存の PR refresh worker と同型の worker から回す。
-- 喪失時は既存の `shutdown: AtomicBool` を立てる。SIGTERM と同じ経路を通るため、endpoint retire と cleanup の
-  契約は変わらない。data directory がすでに消えている場合の cleanup は **no-op として成功**しなければならない
-  （block も panic もしない）。
-- 判定は注入した port に対する純関数として usecase 層に置く。実 `stat` / `fstat` の薄いラッパだけが合成ルート側の
-  real IO であり、`#[coverage(off)]` を使う場合の許可理由は `real_io`（[6. 開発規約の `coverage(off)`
-  例外](../06-conventions.md#coverageoff-例外)）である。
+  directory](../05-daemon.md#daemon-data-directory) が正本）をそのまま再利用し、新しい identity 概念を導入しない。
+- 喪失時は既存の `shutdown: AtomicBool` を立てて SIGTERM と同じ経路を通す。endpoint retire と cleanup の契約を
+  分岐させないためである。data directory がすでに消えている場合の cleanup は、block も panic もせず
+  no-op として成功する必要がある。
+- 判定は注入した port に対する純関数として usecase 層（`crates/daemon/src/usecase/custody.rs`）に置き、実
+  `stat` / `fstat` と record 読み取りの薄いラッパだけを合成ルートに置く。
 
 `process_group(0)` による detached 起動（`ServeLauncher`）は**維持する**。前景の hangup や launcher の終了で
 daemon-owned PTY を失わせないための設計であり、正しい。連動して死ぬべきなのは「親が生きているか」ではなく
