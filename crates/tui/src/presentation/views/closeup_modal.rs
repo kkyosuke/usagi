@@ -537,6 +537,26 @@ mod tests {
     }
 
     #[test]
+    fn an_action_without_subcommands_neither_expands_nor_completes_arguments() {
+        // `diff` takes no arguments, so it has no picker rows and its argument
+        // text is outside every completion vocabulary.
+        let mut modal = CloseupModal::new("s");
+        while modal.selected_action().name != "diff" {
+            modal.select_next();
+        }
+        modal.expand_selected();
+        assert_eq!(modal.submission(), "diff");
+        assert!(!joined(&modal).contains("-m"));
+
+        let mut prompt = CloseupModal::with_selection_mode("s", ModalSelectionMode::Prompt);
+        for character in "diff s".chars() {
+            prompt.insert_char(character);
+        }
+        prompt.complete_selected();
+        assert_eq!(prompt.submission(), "diff s");
+    }
+
+    #[test]
     fn tab_completes_the_agent_model_flag_and_only_installed_clis() {
         let models = AvailableModels::new([DefaultModel::Claude, DefaultModel::SakanaAi]);
         let complete = |input: &str| {
