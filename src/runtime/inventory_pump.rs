@@ -449,9 +449,9 @@ impl TerminalInventoryPump {
             while !thread_stop.load(Ordering::Acquire) {
                 run_round(&thread_shared.state, started.elapsed(), &mut fetch);
                 let interval = lock(&thread_shared.state).next_wait(started.elapsed());
-                if thread_stop.load(Ordering::Acquire) {
-                    break;
-                }
+                // Shutdown needs no second check here: dropping the pump sets the
+                // stop flag *and* signals, so a wait started after it returns at
+                // once and the loop condition ends the thread.
                 wait_for_next_round(&thread_shared, interval);
             }
         });
