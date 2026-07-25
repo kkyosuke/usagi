@@ -396,6 +396,16 @@ checkpoint 経路の判定は capability を真実源とし、client 側の収�
 
 限定表示の内容は [3. TUI#snapshot-negotiation-と-legacy-限定表示](03-tui.md#snapshot-negotiation-と-legacy-限定表示) が正本である。
 
+snapshot は **client 側の view を作り直すだけ**であり、PTY の lifecycle には触れない。attach / detach / disconnect と
+再 attach を挟んでも daemon は child を respawn せず、child PID と spawn 回数は不変である。attach / resync / resize /
+exit 後の final snapshot は Agent 面と generic 面で同一の payload 契約（revision 2 では `screen` checkpoint と
+`base_offset == output_offset`）に従う。
+
+`screen` の生成は保持中の screen に比例するため、**offset だけが必要な経路は snapshot を取らない**。受理した
+output chunk の journal 追記、`Resume` の liveness 判定、exited tombstone 一覧（`CompletedInventory` の
+`base_offset` / `final_output_offset`）は retained window と exit status を読むだけの経路を使い、PTY chunk ごとや
+tombstone ごとに screen capture を払わない。
+
 snapshot の `geometry` と `screen.geometry` は常に一致し、片方だけ新しい frame は存在しない。resize は
 preflight → PTY effect → geometry commit → screen reshape を terminal actor の排他区間で行い `revision` を
 1 つ進めるため、checkpoint の生成前後に resize が割り込んでも client は `revision` / `geometry` の
