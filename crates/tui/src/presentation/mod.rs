@@ -13402,6 +13402,28 @@ mod tests {
         }
     }
 
+    /// Wait until the scripted port has received `expected` exact-resume
+    /// requests. The worker runs off-thread, so the count is polled rather than
+    /// sampled after a fixed sleep.
+    fn await_requests(
+        requests: &Arc<Mutex<Vec<(AgentResumeTarget, OperationId)>>>,
+        expected: usize,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let observed = requests.lock().unwrap().len();
+            assert!(observed <= expected, "more resume requests than expected");
+            if observed == expected {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the resume worker did not reach {expected} requests"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     /// One interrupted lineage of `session`, resumable unless `resumable` is false.
     fn interrupted_history(
         workspace: WorkspaceId,
@@ -13721,5 +13743,201 @@ mod tests {
         assert_eq!(ui.agent_reopen_choices().len(), 1);
         assert!(requests.lock().unwrap().is_empty());
         assert!(ui.pane_launches.is_empty());
+    }
+
+    #[test]
+    fn the_resume_chord_drives_the_selected_history_tab_through_the_live_surface() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let history = interrupted_history(workspace, Some(session), true);
+        let answer = exact_resume_answer(&history);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (mut ui, mut runtime) = closeup_with_history(
+            workspace,
+            session,
+            vec![history.clone()],
+            Box::new(ScriptedExactResumePort {
+                answers: vec![Ok(answer.clone())],
+                requests: Arc::clone(&requests),
+            }),
+        );
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        let mut browser = UnavailableBrowserOpener;
+        let mut pending_targets = std::collections::HashMap::new();
+
+        // `Ctrl-O r` is a pane-only control: it is consumed by the Closeup pane.
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::ResumeTab),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending_targets,
+            20,
+            80,
+            0,
+            0,
+        ));
+        assert_eq!(ui.pane_launches.len(), 1);
+
+        super::drain_pane_launches(&mut ui, terminal_geometry(20, 80));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        super::drain_pane_completions_into_runtime(
+            &mut ui,
+            &mut runtime,
+            &mut pending_targets,
+            terminal_geometry(20, 80),
+        );
+        assert_eq!(runtime.focused_terminal(), Some(answer.terminal));
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_queued_resume_waits_for_the_daemon_port_and_never_duplicates_its_request() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let first = interrupted_history(workspace, Some(session), true);
+        let second = interrupted_history(workspace, Some(session), true);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (mut ui, mut runtime) = closeup_with_history(
+            workspace,
+            session,
+            vec![first.clone(), second.clone()],
+            Box::new(ScriptedExactResumePort {
+                answers: vec![
+                    Ok(exact_resume_answer(&first)),
+                    Ok(exact_resume_answer(&second)),
+                ],
+                requests: Arc::clone(&requests),
+            }),
+        );
+        let mut pending = std::collections::HashMap::new();
+
+        // Resume both history tabs before either answer arrives.
+        super::resume_focused_interrupted_tab(&mut ui, &mut runtime, &mut pending);
+        let _ = runtime.select_tab(TabDirection::Next);
+        super::resume_focused_interrupted_tab(&mut ui, &mut runtime, &mut pending);
+        assert_eq!(ui.pane_launches.len(), 2);
+
+        // Only one worker may own the stateful daemon port: the second request
+        // stays queued instead of starting a second concurrent resume.
+        super::drain_pane_launches(&mut ui, terminal_geometry(20, 80));
+        assert_eq!(ui.pane_launches.len(), 1);
+        super::drain_pane_launches(&mut ui, terminal_geometry(20, 80));
+        assert_eq!(ui.pane_launches.len(), 1);
+        await_requests(&requests, 1);
+
+        // Once the port returns with the first answer the queued one runs.
+        for _ in 0..2 {
+            super::drain_pane_launches(&mut ui, terminal_geometry(20, 80));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            super::drain_pane_completions_into_runtime(
+                &mut ui,
+                &mut runtime,
+                &mut pending,
+                terminal_geometry(20, 80),
+            );
+        }
+        await_requests(&requests, 2);
+        assert!(
+            runtime
+                .active_pane()
+                .tabs()
+                .iter()
+                .all(|tab| matches!(tab, PaneTab::Live(_)))
+        );
+    }
+
+    #[test]
+    fn a_resume_without_an_agent_context_or_a_selected_history_tab_does_nothing() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut pending = std::collections::HashMap::new();
+
+        // No daemon Agent context at all.
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut bare = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        super::resume_focused_interrupted_tab(&mut bare, &mut runtime, &mut pending);
+        assert!(bare.pane_launches.is_empty());
+
+        // An Agent context whose selected tab is live, not interrupted.
+        let history = interrupted_history(workspace, Some(session), true);
+        let (mut ui, mut runtime) = closeup_with_history(
+            workspace,
+            session,
+            vec![history],
+            Box::new(ScriptedExactResumePort {
+                answers: Vec::new(),
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }),
+        );
+        let live = live_terminal_ref(workspace, session);
+        let operation = OperationId::new();
+        let _ = runtime.request_pane(Target::Session(session), operation, PaneKind::Agent);
+        let _ = runtime.complete_pane(Target::Session(session), operation, live.clone());
+        let _ = runtime.focus_terminal(Target::Session(session), live);
+        super::resume_focused_interrupted_tab(&mut ui, &mut runtime, &mut pending);
+        assert!(ui.pane_launches.is_empty());
+    }
+
+    #[test]
+    fn an_accepted_resume_whose_display_intent_cannot_be_saved_surfaces_a_typed_notice() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let history = interrupted_history(workspace, Some(session), true);
+        let answer = exact_resume_answer(&history);
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(ScriptedExactResumePort {
+                    answers: vec![Ok(answer.clone())],
+                    requests: Arc::new(Mutex::new(Vec::new())),
+                }),
+            )
+            .with_agent_tab_intent(
+                workspace,
+                BTreeSet::from([session]),
+                Box::new(FailingIntentPort {
+                    state: Arc::new(Mutex::new(AgentTabIntent::empty(workspace))),
+                    error: AgentTabIntentError::Unavailable,
+                    attempts: Arc::new(AtomicUsize::new(0)),
+                }),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.handle_key(Key::Down);
+        let _ = runtime.handle_key(Key::Enter);
+        let (interaction, revision) = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            interaction,
+            revision,
+            vec![super::PaneRestoreTarget {
+                target: Target::Session(session),
+                panes: Vec::new(),
+                selected: None,
+                interrupted: vec![history],
+            }],
+        ));
+        let _ = runtime.select_tab(TabDirection::Next);
+        let mut pending = std::collections::HashMap::new();
+
+        super::resume_focused_interrupted_tab(&mut ui, &mut runtime, &mut pending);
+        super::drain_pane_launches(&mut ui, terminal_geometry(20, 80));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        super::drain_pane_completions_into_runtime(
+            &mut ui,
+            &mut runtime,
+            &mut pending,
+            terminal_geometry(20, 80),
+        );
+
+        // The replacement is live because the daemon accepted it; the failed
+        // display-intent save is reported as a typed notice, not as a lost tab.
+        assert_eq!(runtime.focused_terminal(), Some(answer.terminal));
+        assert!(runtime.state().notice().is_some());
     }
 }

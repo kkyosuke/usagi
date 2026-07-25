@@ -1010,6 +1010,13 @@ impl WorkspaceRuntime {
             .iter()
             .any(|tab| matches!(tab, PaneTab::Live(_)));
         let _ = update(&mut self.state, AppEvent::LivePaneAvailability(live));
+        // A target that owns any tab shows its tab strip, so the action
+        // launcher steps aside and a non-live tab (an interrupted Agent history)
+        // can be selected and resumed.
+        let _ = update(
+            &mut self.state,
+            AppEvent::PaneTabAvailability(self.panes.active_pane().has_tabs()),
+        );
     }
 
     /// Build the Home frame from the controller state, pane strip, and the
@@ -2381,12 +2388,7 @@ mod tests {
         assert_eq!(runtime.focused_terminal(), Some(terminal));
         assert!(runtime.state().has_live_pane());
         // The other history tab is untouched.
-        assert_eq!(
-            runtime.active_pane().tabs().len(),
-            2,
-            "{:?}",
-            runtime.active_pane().tabs()
-        );
+        assert_eq!(runtime.active_pane().tabs().len(), 2);
     }
 
     #[test]
@@ -2417,6 +2419,14 @@ mod tests {
             runtime.active_pane().error(),
             Some(ResumeRejection::NotResumable.safe_message())
         );
+        // Selecting the second history skips the first tab while resolving the
+        // selection, and finds the resumable lineage.
+        let _ = runtime.select_tab(TabDirection::Next);
+        assert_eq!(
+            runtime.focused_interrupted().map(|tab| tab.continuation),
+            Some(resumable.continuation)
+        );
+        let _ = runtime.select_tab(TabDirection::Previous);
 
         // An answer for a lineage nobody is resuming is refused, and so is one
         // whose operation does not match the in-flight request.
