@@ -554,9 +554,28 @@ poll する terminal は高々 1 件であり、その foreground terminal の e
 分離する scheduler は [#527](../.usagi/issues/527-perf-tui-terminal-polling-ui-loop-foreground-cadence.md)、IPC request の実効
 deadline は [#521](../.usagi/issues/521-fix-ipc-clientpolicy-request-deadline-reconnect-budget.md) が所有する。
 
-Agent / terminal の launch は session create と同じく worker で実行し、daemon port は completion とともに UI へ返す。したがって
-request を受け付けたフレームから completion まで pending chip は既存の共有 shimmer wave を表示し続け、入力は block されない。
-completion が到着した後の次フレームでは、request 受付後に入力がなかった場合だけ同じ stable identity の live / document tab を選択する。
+### pane launch の command worker と常駐 stream の分離
+
+Agent / terminal の launch は session create と同じく worker で実行する。ただし **launch command の client と常駐する terminal
+stream の client は別物**である。worker は共有された launch client を借りるだけで、live pane の subscription・poll・input・
+resize・detach を担う stream client には触れない。したがって launch が遅い・応答しない・panic する間も既存 pane の IO と TUI の
+入力・終了はそのまま続き、focus 中のキーストロークが busy で失われることはない。pending chip は request を受け付けたフレームから
+completion まで既存の共有 shimmer wave を表示し続ける。completion が到着した後の次フレームでは、request 受付後に入力が
+なかった場合だけ同じ stable identity の live / document tab を選択する。
+
+launch の admission と失敗の収束は次の規則で bound する。Agent / generic terminal、workspace root / session、foreground /
+background のいずれも同じ規則に従う。
+
+| 事象 | 規則 |
+|---|---|
+| 同時 launch | launch client を使う worker は同時に 1 件だけで、残りは可視の pending tab として queue に並び completion 後に着手する |
+| queue 上限の超過 | daemon へ送らず、その 1 pane を typed Busy completion で即座に完了させる（pending tab を無制限に積み上げない） |
+| worker panic | catch して同じ pane を safe failure completion へ収束させる。client は借用されただけなので失われず、次の launch は通る |
+| completion channel の消失（workspace exit） | worker の送信は無害に捨てられ、stream client も launch client も worker と一緒に失われない |
+| late / 重複 / 未 admit の completion | launch fence が一致した completion だけが admission slot を解放し、operation fence が一致した pane だけを完了させる |
+
+hung request 自体の deadline は本節の責務ではなく、[#521](../.usagi/issues/521-fix-ipc-clientpolicy-request-deadline-reconnect-budget.md)
+の IPC request deadline が所有する。
 
 ### live terminal の出力表示と入力
 
@@ -825,7 +844,7 @@ identity は daemon-issued `AgentContinuationRef` だけである。表示名、
 ## exited terminal の completed entry
 
 live restore（[workspace open 時の pane 復元](#workspace-open-時の-pane-復元)）が `live` runtime だけを tab へ
-戻すのに対し、TUI 不在中・launch worker が port を手放している間・一時切断中に exit した Agent / generic Terminal の
+戻すのに対し、TUI 不在中・一時切断中に exit した Agent / generic Terminal の
 tombstone へは、fresh TUI が **completed / read-only entry** として到達する。daemon が tombstone を retain し、
 [`completed_inventory`](04-ipc.md#exited-tombstone-visibility) で final replay locator・exit status・workspace-global
 visibility を返す（daemon 側の正本は [5. daemon](05-daemon.md#terminal-ownership)）。接続中に exit したときも、

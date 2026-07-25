@@ -61,8 +61,8 @@ use usagi_tui::presentation::{
     self, AgentCommandPort, AgentPaneAdmission, BannerScreenRunner, ControllerBackendComposition,
     ControllerBackendFactory, ControllerHost, DecisionCommandPort, DesktopNotificationPort,
     EnvironmentStorePort, ExactAgentResume, Exit, ExternalTerminalPort, MetricsPort,
-    RestoreConnectionPort, SessionCommandPort, SessionCommandResult, Start, WorkspaceLoader,
-    WorkspaceSnapshot,
+    RestoreConnectionPort, SerializedPaneLaunchPort, SessionCommandPort, SessionCommandResult,
+    Start, WorkspaceLoader, WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::agent_tab_intent::{
     AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabIntentPort,
@@ -636,6 +636,14 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             backend,
             session_commands: Box::new(DaemonSessionCommandPort),
             agent_commands: Box::new(DaemonAgentCommandPort::new(spawn_poll_pump())),
+            // A third daemon client, dedicated to pane launches. Keeping it out
+            // of the resident stream client is what lets a slow or hung launch
+            // leave existing panes' poll / input / resize / detach untouched.
+            // It attaches to nothing, so its poll pump stays idle and is joined
+            // when the workspace's composition drops.
+            pane_launch_commands: Box::new(SerializedPaneLaunchPort::new(Box::new(
+                DaemonAgentCommandPort::new(spawn_poll_pump()),
+            ))),
             restore_commands: Box::new(
                 DaemonAgentCommandPort::new(spawn_poll_pump())
                     .with_restore_connection(restore_publisher),
