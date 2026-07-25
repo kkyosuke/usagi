@@ -74,7 +74,11 @@ use usagi_daemon::usecase::runtime::{
 };
 use usagi_daemon::usecase::serve::DaemonRecordPort;
 use usagi_daemon::usecase::session_runtime::{
-    SessionRuntime, SessionRuntimeError, SystemGit, perform_create, perform_remove,
+    SessionRuntime, SessionRuntimeError, SharedSessionTeardown, SystemGit, WorktreeTeardown,
+    perform_create, perform_remove,
+};
+use usagi_daemon::usecase::session_teardown::{
+    TeardownEffect, TeardownJournal, TeardownSignal, drain_pending_teardowns,
 };
 use usagi_daemon::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
 use usagi_daemon::usecase::supervisor_runtime::{
@@ -1176,6 +1180,11 @@ const PR_REFRESH_TICK: Duration = Duration::from_millis(250);
 const PR_REFRESH_FRESHNESS_MS: u64 = 60_000;
 const PR_REFRESH_PER_TICK: usize = 2;
 
+/// How long the teardown worker waits for an admitted removal before deriving
+/// the pending set again anyway. An admission wakes it immediately, so this only
+/// bounds the retry of a teardown whose durable finalization failed.
+const SESSION_TEARDOWN_TICK: Duration = Duration::from_secs(1);
+
 struct ProductionRefreshClock {
     started: Instant,
 }
@@ -1400,10 +1409,12 @@ fn spawn_ipc_server(
         .map_err(|error| std::io::Error::other(error.message))?;
     start_decision_maintenance(Arc::clone(&decisions))?;
     start_pr_refresh_worker(Arc::clone(&pr_inventory), Arc::clone(&shutdown))?;
+    let teardown = start_session_teardown_worker(Arc::clone(&runtime), Arc::clone(&shutdown))?;
     start_ipc_accept_loop(
         listener,
         server,
         runtime,
+        teardown,
         terminal,
         agent,
         pr_inventory,
@@ -1495,6 +1506,71 @@ where
                 while !shutdown.load(Ordering::Acquire) && Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(10));
                 }
+            }
+        })
+}
+
+/// Starts the only production session teardown worker and returns the signal an
+/// admitted removal uses to wake it.
+///
+/// The worker is what makes `session remove` answer inside a client's attempt
+/// deadline: the IPC handler only marks the session `Deleting`, and this thread
+/// owns the unbounded `git worktree remove` plus `remove_dir_all` afterwards.
+/// Its work list is derived from durable state, so it also resumes a teardown
+/// that a previous daemon was interrupted in.
+fn start_session_teardown_worker(
+    sessions: SharedSessionRuntime,
+    shutdown: Arc<AtomicBool>,
+) -> std::io::Result<Arc<TeardownSignal>> {
+    let signal = Arc::new(TeardownSignal::new());
+    spawn_session_teardown_worker(
+        SharedSessionTeardown::new(sessions),
+        WorktreeTeardown::new(SystemGit),
+        Arc::clone(&signal),
+        shutdown,
+        SESSION_TEARDOWN_TICK,
+    )?;
+    Ok(signal)
+}
+
+fn spawn_session_teardown_worker<J, E>(
+    journal: J,
+    effect: E,
+    signal: Arc<TeardownSignal>,
+    shutdown: Arc<AtomicBool>,
+    tick: Duration,
+) -> std::io::Result<std::thread::JoinHandle<()>>
+where
+    J: TeardownJournal + Send + 'static,
+    E: TeardownEffect + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("usagi-session-teardown".to_string())
+        .spawn(move || {
+            let cancel = Arc::clone(&shutdown);
+            let cancelled = move || cancel.load(Ordering::Acquire);
+            while !shutdown.load(Ordering::Acquire) {
+                for report in drain_pending_teardowns(&journal, &effect, &cancelled) {
+                    if let Some(error) = report.effect_error {
+                        ErrorLog::record(&format!(
+                            "session teardown failed for \"{}\": {error}",
+                            report.name
+                        ));
+                    }
+                    if let Some(error) = report.finalize_error {
+                        ErrorLog::record(&format!(
+                            "session teardown outcome could not be recorded for \"{}\": {error}",
+                            report.name
+                        ));
+                    }
+                }
+                if shutdown.load(Ordering::Acquire) {
+                    break;
+                }
+                // An admitted removal wakes this immediately; the tick only
+                // re-derives the pending set so a teardown whose finalization
+                // failed is retried without another request.
+                signal.wait(tick);
             }
         })
 }
@@ -1714,6 +1790,7 @@ fn start_ipc_accept_loop(
     listener: SecureUnixListener,
     server: usagi_core::infrastructure::ipc::ServerProtocol,
     runtime: SharedSessionRuntime,
+    teardown: Arc<TeardownSignal>,
     terminal: SharedTerminalRuntime,
     agent: SharedAgentRuntime,
     pr_inventory: SharedPrInventory,
@@ -1744,6 +1821,7 @@ fn start_ipc_accept_loop(
                         let server = server.clone();
                         let session = Arc::clone(&runtime);
                         let scope_sessions = Arc::clone(&runtime);
+                        let teardown = Arc::clone(&teardown);
                         let terminal = Arc::clone(&terminal);
                         let visibility = visibility.clone();
                         let agent_owner = Arc::clone(&agent);
@@ -1777,7 +1855,7 @@ fn start_ipc_accept_loop(
                                         .get("kind")
                                         .and_then(serde_json::Value::as_str)
                                     {
-                                        Some("session") => dispatch_session(&session, &agent_launch, &pr_inventory, request_id, &body, hello),
+                                        Some("session") => dispatch_session(&session, &teardown, &agent_launch, &pr_inventory, request_id, &body, hello),
                                         Some("agent" | "agent_inventory" | "resume_agent") => dispatch_agent(&agent_launch, &scope_sessions, request_id, &body, hello),
                                         Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, request_id, &body, hello),
                                         Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, request_id, &body, hello),
@@ -2999,6 +3077,7 @@ fn dispatch_metrics(
 
 fn dispatch_session(
     session: &SharedSessionRuntime,
+    teardown: &TeardownSignal,
     agent: &SharedAgentRuntime,
     pr_inventory: &SharedPrInventory,
     request_id: usagi_core::infrastructure::ipc::RequestId,
@@ -3021,6 +3100,7 @@ fn dispatch_session(
     };
     let result = dispatch_session_action(
         session,
+        teardown,
         agent,
         pr_inventory,
         action,
@@ -3126,6 +3206,7 @@ fn session_response_envelope(
 #[allow(clippy::too_many_lines)]
 fn dispatch_session_action(
     sessions: &SharedSessionRuntime,
+    teardown: &TeardownSignal,
     agent: &SharedAgentRuntime,
     pr_inventory: &SharedPrInventory,
     action: usagi_core::usecase::client::SessionAction,
@@ -3565,13 +3646,17 @@ fn dispatch_session_action(
                 serde_json::json!({"name": name, "session_id": id, "created": created.body, "delivered_to": delivery.delivered_to, "queued": delivery.queued}),
             )
         }
-        // Create and Remove run their heavy Git worktree build/teardown with the
-        // shared session lock released, so a long `git worktree add`/`remove`
-        // never freezes concurrent readers (session list, terminal poll,
-        // user-decision list) on the daemon. The fast durable transitions still
-        // run under the lock inside `perform_*`.
+        // Create runs its heavy Git worktree build with the shared session lock
+        // released, so a long `git worktree add` never freezes concurrent
+        // readers (session list, terminal poll, user-decision list) on the
+        // daemon. The fast durable transitions still run under the lock.
         SessionAction::Create => perform_create(sessions, &SystemGit, operation_id, payload),
-        SessionAction::Remove => perform_remove(sessions, &SystemGit, operation_id, payload),
+        // Remove goes further: it answers as soon as the session is durably
+        // `Deleting` and hands the unbounded worktree teardown to the daemon's
+        // teardown worker. Keeping the teardown on this connection would hold
+        // the reply past every client attempt deadline for a session with a
+        // multi-gigabyte `target/`.
+        SessionAction::Remove => perform_remove(sessions, teardown, operation_id, payload),
         _ => sessions
             .lock()
             .map_err(|_| SessionRuntimeError::Storage)?
@@ -6595,6 +6680,102 @@ mod tests {
         .unwrap();
         handle.join().unwrap();
         assert_eq!(cancelled_calls.load(Ordering::Acquire), 0);
+    }
+
+    /// A teardown journal whose pending set drains as it is finalized, plus a
+    /// scripted effect failure, so the worker's logging arms are both exercised.
+    struct FakeTeardownJournal {
+        pending: Arc<Mutex<Vec<usagi_daemon::usecase::session_teardown::PendingTeardown>>>,
+        finalize_error: Option<String>,
+    }
+    impl TeardownJournal for FakeTeardownJournal {
+        fn pending(&self) -> Vec<usagi_daemon::usecase::session_teardown::PendingTeardown> {
+            self.pending.lock().unwrap().clone()
+        }
+        fn finish(
+            &self,
+            teardown: &usagi_daemon::usecase::session_teardown::PendingTeardown,
+            _outcome: Result<(), String>,
+        ) -> Result<(), String> {
+            self.pending
+                .lock()
+                .unwrap()
+                .retain(|pending| pending.name != teardown.name);
+            self.finalize_error.clone().map_or(Ok(()), Err)
+        }
+    }
+
+    struct FakeTeardownEffect {
+        torn_down: Arc<Mutex<Vec<String>>>,
+        shutdown: Arc<AtomicBool>,
+    }
+    impl TeardownEffect for FakeTeardownEffect {
+        fn tear_down(
+            &self,
+            teardown: &usagi_daemon::usecase::session_teardown::PendingTeardown,
+        ) -> Result<(), String> {
+            self.torn_down.lock().unwrap().push(teardown.name.clone());
+            // End the worker as soon as it has taken the admitted work, so the
+            // test observes exactly one drain.
+            self.shutdown.store(true, Ordering::Release);
+            Err("worktree is busy".into())
+        }
+    }
+
+    #[test]
+    fn production_teardown_worker_drains_an_admitted_removal_and_honors_shutdown() {
+        let pending = Arc::new(Mutex::new(vec![
+            usagi_daemon::usecase::session_teardown::PendingTeardown {
+                session_id: SessionId::new(),
+                operation_id: usagi_core::domain::id::OperationId::new(),
+                name: "one".into(),
+                session_root: PathBuf::from("/repo/.usagi/sessions/one"),
+                force: false,
+            },
+        ]));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let torn_down = Arc::new(Mutex::new(Vec::new()));
+        let signal = Arc::new(TeardownSignal::new());
+
+        let handle = spawn_session_teardown_worker(
+            FakeTeardownJournal {
+                pending: Arc::clone(&pending),
+                finalize_error: Some("session lifecycle owner is unavailable".into()),
+            },
+            FakeTeardownEffect {
+                torn_down: Arc::clone(&torn_down),
+                shutdown: Arc::clone(&shutdown),
+            },
+            Arc::clone(&signal),
+            Arc::clone(&shutdown),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(torn_down.lock().unwrap().as_slice(), ["one"]);
+        assert!(pending.lock().unwrap().is_empty());
+
+        // A worker started under shutdown takes no work at all.
+        let already_stopped = Arc::new(AtomicBool::new(true));
+        let untouched = Arc::new(Mutex::new(Vec::new()));
+        spawn_session_teardown_worker(
+            FakeTeardownJournal {
+                pending: Arc::clone(&pending),
+                finalize_error: None,
+            },
+            FakeTeardownEffect {
+                torn_down: Arc::clone(&untouched),
+                shutdown: Arc::clone(&already_stopped),
+            },
+            signal,
+            already_stopped,
+            Duration::from_millis(1),
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+        assert!(untouched.lock().unwrap().is_empty());
     }
 
     fn session_test_hello() -> usagi_core::infrastructure::ipc::ServerHello {

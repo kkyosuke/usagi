@@ -2617,6 +2617,12 @@ fn project_controller_sessions(ui: &WorkspaceUi) -> Vec<ProjectedSession> {
                 projected
                     .failure_summary
                     .clone_from(&projection.failure_summary);
+                // The daemon accepts a removal before its worktree teardown
+                // runs, so a `Deleting` row is authoritatively still being
+                // removed — by a worker that outlives this request and even this
+                // process. Keep showing the removal affordance for as long as
+                // the daemon says so, not only until the local command returns.
+                projected.removing |= projection.lifecycle == SessionLifecycle::Deleting;
             }
             projected
         })
@@ -5204,6 +5210,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].lifecycle, SessionLifecycle::Failed);
         assert_eq!(rows[0].failure_summary.as_deref(), Some("create failed"));
+        assert!(!rows[0].removing);
 
         // The reducer receives the lifecycle so it can gate attach by capability.
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
@@ -5212,6 +5219,29 @@ mod tests {
             runtime.state().session_lifecycles().get(&session).copied(),
             Some(SessionLifecycle::Failed)
         );
+    }
+
+    #[test]
+    fn a_deleting_lifecycle_keeps_the_row_marked_removing_without_a_local_command() {
+        use usagi_core::domain::session_lifecycle::{SessionLifecycle, SessionLifecycleProjection};
+        let session = SessionId::new();
+        let mut view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        view.set_session_lifecycles(std::collections::BTreeMap::from([(
+            session,
+            SessionLifecycleProjection {
+                lifecycle: SessionLifecycle::Deleting,
+                failure_summary: None,
+            },
+        )]));
+        let ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+
+        // The daemon accepts a removal before its worktree teardown runs, so the
+        // row stays marked as being removed on the strength of the daemon's
+        // lifecycle alone — this TUI never issued the command.
+        let rows = super::project_controller_sessions(&ui);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].lifecycle, SessionLifecycle::Deleting);
+        assert!(rows[0].removing);
     }
 
     #[test]
@@ -7005,6 +7035,22 @@ mod tests {
         ));
     }
 
+    /// The attach payload a daemon at `geometry` returns after producing
+    /// `bytes`: the daemon is the grid authority, so it parses every byte and
+    /// hands back a semantic checkpoint instead of the raw tail.
+    fn attach_checkpoint(
+        bytes: &[u8],
+        geometry: Geometry,
+    ) -> crate::usecase::application::terminal_session::TerminalAttachScreen {
+        use usagi_core::usecase::vt_screen::VtScreen;
+
+        let mut screen = VtScreen::new(usize::from(geometry.rows), usize::from(geometry.cols));
+        screen.advance(bytes);
+        crate::usecase::application::terminal_session::TerminalAttachScreen::Checkpoint(Box::new(
+            screen.checkpoint(),
+        ))
+    }
+
     /// A streaming agent port whose PTY attaches live from `replay`, then reports
     /// the configured safe error on poll. It records each detach so the auto-close
     /// path can be asserted end to end.
@@ -7033,13 +7079,14 @@ mod tests {
         fn attach_terminal(
             &mut self,
             _terminal: &TerminalRef,
-            _geometry: Geometry,
+            geometry: Geometry,
         ) -> Result<TerminalAttach, TerminalError> {
             Ok(TerminalAttach {
                 subscription: self.subscription,
                 connection_epoch: 1,
+                revision: 1,
                 output_offset: self.replay.len() as u64,
-                replay: self.replay.clone(),
+                screen: attach_checkpoint(&self.replay, geometry),
                 exited: false,
             })
         }
@@ -7493,13 +7540,14 @@ mod tests {
         fn attach_terminal(
             &mut self,
             _terminal: &TerminalRef,
-            _geometry: Geometry,
+            geometry: Geometry,
         ) -> Result<TerminalAttach, TerminalError> {
             Ok(TerminalAttach {
                 subscription: 1,
                 connection_epoch: 1,
+                revision: 1,
                 output_offset: 0,
-                replay: Vec::new(),
+                screen: attach_checkpoint(&[], geometry),
                 exited: false,
             })
         }

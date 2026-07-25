@@ -14,7 +14,7 @@
 
 use std::collections::HashSet;
 
-use usagi_core::usecase::vt_screen::{Cell, VtScreen};
+use usagi_core::usecase::vt_screen::{Cell, CheckpointError, ScreenCheckpoint, VtScreen};
 
 use super::terminal_link::scan_links;
 use super::terminal_selection::TerminalPoint;
@@ -40,6 +40,21 @@ impl TerminalScreen {
         Self {
             screen: VtScreen::new(rows, cols),
         }
+    }
+
+    /// Restores a screen from the daemon's semantic checkpoint.
+    ///
+    /// This is the only way an attaching pane rebuilds retained history: the
+    /// daemon is the grid authority, so its checkpoint — not a raw byte tail fed
+    /// to a blank parser — carries the cursor, SGR, scroll region, alternate and
+    /// saved primary buffer established before the retained window.
+    ///
+    /// # Errors
+    ///
+    /// Returns the core [`CheckpointError`] when the checkpoint violates a
+    /// bound; the caller keeps its current screen and requests a resync.
+    pub fn from_checkpoint(checkpoint: &ScreenCheckpoint) -> Result<Self, CheckpointError> {
+        VtScreen::from_checkpoint(checkpoint).map(|screen| Self { screen })
     }
 
     /// Feeds a chunk of raw PTY output into the shared parser.

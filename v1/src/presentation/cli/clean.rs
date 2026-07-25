@@ -12,11 +12,17 @@
 //! deleting anything. `--agent <name>` overrides the configured default CLI for
 //! this run.
 //!
+//! Before handing over, `usagi clean` finishes any session removal a crash left
+//! mid-transaction (see
+//! [`resume_pending_removals`](crate::usecase::session::resume_pending_removals)):
+//! such a removal still owns its session name, so neither the agent nor a new
+//! `session create` can make progress on it.
+//!
 //! The orchestration here (resolving the workspace, settings and binary path,
-//! building the prompt and command) is pure once the one genuine side effect —
-//! spawning the detached process — is injected: [`run`] takes a `spawn` function,
-//! so the whole flow is unit-tested with a recording stub while `main` wires in
-//! the real detached spawn.
+//! building the prompt and command) is pure once the genuine side effects —
+//! spawning the detached process and resuming interrupted removals — are
+//! injected: [`run`] takes them as functions, so the whole flow is unit-tested
+//! with stubs while `main` wires in the real ones.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -26,24 +32,35 @@ use anyhow::{Context, Result};
 use crate::domain::agent::LaunchMode;
 use crate::domain::settings::AgentCli;
 use crate::infrastructure::repo_paths::STATE_DIR;
+use crate::usecase::session::ResumedRemoval;
 
 /// The log file (under the workspace's `.usagi/`) the background agent's output
 /// is appended to.
 const CLEAN_LOG: &str = "clean.log";
 
 /// Entry point for `usagi clean`. Resolves the workspace and the agent to run,
-/// builds the cleanup prompt, and spawns the agent headlessly in the background
-/// via `spawn`, returning immediately. `dry_run` makes the agent report without
-/// deleting; `agent` overrides the configured default CLI for this run.
+/// finishes any session removal a crash left mid-transaction, builds the cleanup
+/// prompt, and spawns the agent headlessly in the background via `spawn`,
+/// returning immediately. `dry_run` makes the agent report without deleting;
+/// `agent` overrides the configured default CLI for this run.
 ///
 /// `spawn` runs `<command>` detached with the given working directory, appending
 /// its output to the given log path (the production `spawn_detached` in `main`);
 /// it is a parameter so the resolution and command-building above are exercised
 /// in tests without launching a real process.
+///
+/// `resume_removals` finishes interrupted session removals for the resolved
+/// workspace (the production
+/// [`session::resume_pending_removals`](crate::usecase::session::resume_pending_removals),
+/// wired in `main`). It is injected for the same reason `spawn` is, and for one
+/// more: these tests run from inside a usagi session worktree, so the resolved
+/// workspace root is the developer's *real* workspace. A stub keeps `cargo test`
+/// from deleting real session trees.
 pub fn run(
     dry_run: bool,
     agent: Option<String>,
     spawn: impl Fn(&str, &Path, &Path) -> Result<()>,
+    resume_removals: impl Fn(&Path, &dyn crate::domain::agent::Agent) -> Vec<ResumedRemoval>,
 ) -> Result<()> {
     let cwd = env::current_dir()?;
     let root = crate::usecase::session::workspace_root(&cwd);
@@ -58,6 +75,27 @@ pub fn run(
 
     let agent_cli = resolve_agent_cli(settings.agent_cli, agent.as_deref())?;
     let adapter = crate::infrastructure::agent::agent_for(agent_cli);
+
+    // Finish removals a crashed `session remove` left mid-transaction before
+    // handing over to the agent. Their durable tombstones still own the session
+    // names, so an interrupted teardown keeps blocking reuse of the name and the
+    // agent cannot clean it up either. Skipped under `--dry-run`, which promises
+    // no deletions, and best-effort: a wedged removal is reported, not fatal.
+    if !dry_run {
+        for resumed in resume_removals(&root, adapter.as_ref()) {
+            match resumed.error {
+                None => println!(
+                    "中断していたセッション \"{}\" の削除を完了しました。",
+                    resumed.name
+                ),
+                Some(error) => eprintln!(
+                    "警告: セッション \"{}\" の削除を再開できませんでした: {error}",
+                    resumed.name
+                ),
+            }
+        }
+    }
+
     let wiring = crate::usecase::agent::wiring_for_launch(
         &settings.agent_wiring(&usagi_bin),
         None,
@@ -156,6 +194,13 @@ mod tests {
         })
     }
 
+    /// A resume sweep that does nothing. These tests resolve the developer's real
+    /// workspace root (they run from inside a session worktree), so the real
+    /// sweep must never be wired in here.
+    fn no_resume(_root: &Path, _agent: &dyn crate::domain::agent::Agent) -> Vec<ResumedRemoval> {
+        Vec::new()
+    }
+
     fn last_command() -> Option<String> {
         SPAWN.with(|s| s.borrow().0.clone())
     }
@@ -165,7 +210,7 @@ mod tests {
         SPAWN.with(|s| *s.borrow_mut() = (None, Ok(())));
         // With no `--agent` override and the default (non-dry-run) mode the agent
         // is launched headlessly on the deletion prompt.
-        run(false, None, recording_spawn).unwrap();
+        run(false, None, recording_spawn, no_resume).unwrap();
         assert!(last_command().is_some());
     }
 
@@ -173,7 +218,7 @@ mod tests {
     fn run_honors_a_dry_run_and_an_agent_override() {
         SPAWN.with(|s| *s.borrow_mut() = (None, Ok(())));
         // `--agent gemini` overrides the default and `--dry-run` is reported.
-        run(true, Some("gemini".to_string()), recording_spawn).unwrap();
+        run(true, Some("gemini".to_string()), recording_spawn, no_resume).unwrap();
         assert!(last_command().is_some());
     }
 
@@ -181,7 +226,7 @@ mod tests {
     fn run_errors_on_an_unknown_agent_override() {
         SPAWN.with(|s| *s.borrow_mut() = (None, Ok(())));
         // A typo'd `--agent` is surfaced before anything is spawned.
-        let err = run(false, Some("nope".to_string()), recording_spawn).unwrap_err();
+        let err = run(false, Some("nope".to_string()), recording_spawn, no_resume).unwrap_err();
         assert!(err.to_string().contains("unknown agent CLI: nope"));
     }
 
@@ -189,7 +234,9 @@ mod tests {
     fn run_propagates_a_spawn_failure() {
         SPAWN.with(|s| *s.borrow_mut() = (None, Err("spawn failed")));
         assert_eq!(
-            run(false, None, recording_spawn).unwrap_err().to_string(),
+            run(false, None, recording_spawn, no_resume)
+                .unwrap_err()
+                .to_string(),
             "spawn failed"
         );
     }

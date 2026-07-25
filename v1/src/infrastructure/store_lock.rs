@@ -61,7 +61,13 @@ impl StoreLock {
     /// short one. Polls a non-blocking `try_lock` rather than blocking forever, so
     /// a holder wedged mid-operation surfaces as an error the caller can report
     /// instead of hanging the UI.
-    fn acquire_with_timeout(dir: &Path, timeout: Duration) -> Result<Self> {
+    ///
+    /// Callers that must *not* wait out a holder use this directly with a short
+    /// budget: a session removal's per-session teardown lock can be held for
+    /// minutes while a multi-gigabyte session tree is deleted, so the right answer
+    /// is to report "already in progress" rather than block (see
+    /// [`crate::usecase::session::remove`]).
+    pub(crate) fn acquire_with_timeout(dir: &Path, timeout: Duration) -> Result<Self> {
         fs::create_dir_all(dir).context(format!("failed to create {}", dir.display()))?;
         let path = Self::path(dir);
         let file = Self::open_lock_file(&path)?;

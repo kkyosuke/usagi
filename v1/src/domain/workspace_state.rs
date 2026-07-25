@@ -718,6 +718,13 @@ pub struct PendingSessionRemoval {
     /// Ownership evidence copied from the session record before teardown.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provenance: Vec<WorktreeProvenance>,
+    /// Whether the removal that opened this transaction was allowed to discard
+    /// uncommitted work. Recorded so a resumed removal keeps the decision the
+    /// operator already made instead of silently losing it (a forced teardown
+    /// that was interrupted must stay forced). Absent in files written before the
+    /// field existed, which read as `false` — the safe, context-preserving side.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force: bool,
     /// Last durably committed teardown boundary.
     pub phase: SessionRemovalPhase,
 }
