@@ -594,6 +594,56 @@ fn remove_worktree_deletes_a_clean_one_and_needs_force_when_dirty() {
 }
 
 #[test]
+fn ensure_worktree_removable_answers_what_remove_would_have_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+
+    // A path git never registered is a no-op for `worktree remove`, so there is
+    // nothing to refuse here either.
+    ensure_worktree_removable(dir.path(), &dir.path().join("ghost"), false).unwrap();
+
+    // A clean worktree passes with or without force.
+    let clean = dir.path().join("clean");
+    add_worktree(dir.path(), &clean, "clean", None).unwrap();
+    ensure_worktree_removable(dir.path(), &clean, false).unwrap();
+
+    // Untracked work is refused unless the caller forces it — the same answer
+    // `git worktree remove` gives, but before anything has been moved or deleted.
+    let dirty = dir.path().join("dirty");
+    add_worktree(dir.path(), &dirty, "dirty", None).unwrap();
+    std::fs::write(dirty.join("scratch"), "z").unwrap();
+    let refusal = ensure_worktree_removable(dir.path(), &dirty, false).unwrap_err();
+    assert!(refusal
+        .to_string()
+        .contains("uncommitted changes or untracked files"));
+    ensure_worktree_removable(dir.path(), &dirty, true).unwrap();
+    assert!(dirty.join("scratch").exists());
+
+    // A locked worktree is refused even with force: git wants `--force` twice for
+    // one, which is a decision only the operator makes.
+    let locked = dir.path().join("locked");
+    add_worktree(dir.path(), &locked, "locked", None).unwrap();
+    run(dir.path(), &["worktree", "lock", locked.to_str().unwrap()]);
+    for force in [false, true] {
+        let refusal = ensure_worktree_removable(dir.path(), &locked, force).unwrap_err();
+        assert!(refusal.to_string().contains("git reports it locked"));
+    }
+    run(
+        dir.path(),
+        &["worktree", "unlock", locked.to_str().unwrap()],
+    );
+    ensure_worktree_removable(dir.path(), &locked, false).unwrap();
+}
+
+#[test]
+fn ensure_worktree_removable_reports_a_path_that_is_not_a_repository() {
+    let plain = tempfile::tempdir().unwrap();
+    // The registration cannot be read at all, which is neither "removable" nor
+    // "refused" — it is a failure the caller has to see.
+    assert!(ensure_worktree_removable(plain.path(), &plain.path().join("wt"), true).is_err());
+}
+
+#[test]
 fn remove_worktree_is_a_noop_for_an_unregistered_path() {
     let dir = tempfile::tempdir().unwrap();
     init_repo(dir.path());

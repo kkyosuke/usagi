@@ -29,15 +29,19 @@
 //!    writes of `state.json` across usagi processes.
 //!
 //! [`create`] holds the store lock across its whole build. [`remove`] must not:
-//! its teardown deletes a session tree that can be gigabytes and run for
-//! minutes, so it holds the store lock only for the durable transitions and
-//! relies on the removal lock plus a durable tombstone for safety in between.
+//! its teardown works on a session tree that can be gigabytes, so it holds the
+//! store lock only for the durable transitions and relies on the removal lock
+//! plus a durable tombstone for safety in between.
 //! [`resume_pending_removals`] finishes tombstones a crash left behind.
+//!
+//! Removing a session does not erase its tree either — it renames it into
+//! `.usagi/trash/`, which costs the same at any size, and [`sweep_trash`] deletes
+//! it later, away from the caller that asked for the removal.
 
 mod reconcile;
 mod tree;
 
-pub use reconcile::{reconcile, ReconcileOutcome};
+pub use reconcile::{reconcile, sweep_trash, ReclaimedTree, ReconcileOutcome};
 
 use std::ffi::OsStr;
 use std::fs;
@@ -1443,15 +1447,33 @@ pub struct RemovalOutcome {
 /// untouched and the dirty worktrees are returned for the caller to warn about.
 /// With `force`, those changes are discarded.
 ///
+/// # Why this returns quickly
+///
+/// It does not delete the session tree. Once the teardown has proven ownership
+/// and checked everything git would have checked, it *retires* the tree by
+/// renaming it into `.usagi/trash/`
+/// ([`discard_session`](reconcile::discard_session)) — one move, the same cost
+/// whether the session holds a README or a multi-gigabyte `target/`. So the
+/// duration of a removal is now the ownership proof, a rename, a prune, a branch
+/// delete and three short state writes, none of which scale with the session's
+/// size. It used to be however long it took to erase the tree, which in practice
+/// meant minutes and, for an agent calling this over MCP, a tool-call timeout on
+/// a removal that had actually succeeded.
+///
+/// What the caller gives up is the guarantee that the disk is free when this
+/// returns. Reclaiming it is [`sweep_trash`], which runs from the maintenance
+/// entry points ([`reconcile`](reconcile()), `usagi clean`) and, on the
+/// long-lived surfaces, from [`spawn_trash_sweep`]. Nothing durable refers to a
+/// retired tree, so a sweep that never runs costs disk and nothing else.
+///
 /// # Locking
 ///
 /// The workspace store lock is held only for the *durable state transitions* —
 /// writing the removal tombstone, advancing its phase, and dropping the record.
-/// The heavy work between them (`git worktree remove`, deleting a session tree
-/// whose `target/` can be several gigabytes, pruning, dropping the branch, and
-/// the per-worktree context cleanup) runs with the store lock released, so a
-/// removal that takes minutes no longer makes every other usagi process fail on
-/// the store lock's acquire timeout.
+/// The work between them (proving ownership against every repository, retiring
+/// the tree, pruning, dropping the branch, and the per-worktree context cleanup)
+/// runs with the store lock released, so a slow teardown no longer makes every
+/// other usagi process fail on the store lock's acquire timeout.
 ///
 /// What keeps that safe is the pair of locks:
 ///
@@ -1566,6 +1588,25 @@ fn resume_removal(workspace_root: &Path, name: &str, force: bool, agent: &dyn Ag
         ),
         BeginOutcome::Ready(plan) => run_removal(workspace_root, &plan, agent).map(|_| ()),
     }
+}
+
+/// Reclaim `workspace_root`'s trash on a background thread, so a surface that
+/// must stay responsive can still be the one that pays for it.
+///
+/// [`remove`] deliberately leaves the retired session tree on disk: renaming it
+/// aside is what makes the removal itself independent of the tree's size, and
+/// deleting it inline afterwards would hand the minutes straight back to the
+/// caller (see [`sweep_trash`]). The long-lived surfaces — the TUI, whose removal
+/// runs on a worker, and the `usagi mcp` server, whose tool call must return —
+/// therefore start the deletion here and do not wait for it. A process that exits
+/// before the thread finishes simply leaves the rest for the next sweep; every
+/// entry is deleted independently and nothing durable points at it.
+///
+/// The handle is returned rather than swallowed so a caller (in practice: a test)
+/// can join it; production callers drop it.
+pub fn spawn_trash_sweep(workspace_root: &Path) -> std::thread::JoinHandle<Vec<ReclaimedTree>> {
+    let workspace_root = workspace_root.to_path_buf();
+    std::thread::spawn(move || sweep_trash(&workspace_root))
 }
 
 /// Directory under `.usagi/` holding one lock directory per session whose
@@ -2147,8 +2188,10 @@ fn run_removal(
     Ok(retained_branches)
 }
 
-/// Remove the managed worktrees, the session tree and the session branch. This
-/// is the minutes-long stage — it runs with **no** store lock held.
+/// Retire the session tree and drop the managed worktrees and the session
+/// branch. It runs with **no** store lock held: it shells out to git once per
+/// repository, which is slow enough to keep out of the locked window even though
+/// the tree itself now leaves in a single rename.
 fn execute_teardown(
     workspace_root: &Path,
     plan: &RemovalPlan,
@@ -2166,6 +2209,7 @@ fn execute_teardown(
         &plan.provenance,
         &repo_worktrees,
         plan.force,
+        &reconcile::trash_dir(workspace_root),
     );
     match discard {
         Ok(outcome) => Ok(outcome),
@@ -4051,7 +4095,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_retries_a_multi_repo_partial_teardown_without_touching_context() {
+    fn remove_aborts_a_multi_repo_teardown_on_a_locked_worktree_and_retries_after_unlock() {
         let _guard = crate::test_support::process_env_guard();
         let home = tempfile::tempdir().unwrap();
         std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
@@ -4080,7 +4124,11 @@ mod tests {
         let error = remove(root.path(), "partial", false, noop_agent().as_ref()).unwrap_err();
 
         assert!(error.to_string().contains("pending at git_teardown"));
-        assert!(!first_worktree.exists());
+        // The whole session tree leaves in one rename, so git's refusals are
+        // checked for *every* worktree before any of them moves: one locked
+        // worktree aborts the teardown with nothing torn down at all, rather than
+        // leaving the session half destroyed for the retry to finish.
+        assert!(first_worktree.exists());
         assert!(locked_worktree.exists());
         assert_eq!(sessions_of(root.path()), vec!["partial"]);
         assert_eq!(
@@ -4204,6 +4252,7 @@ mod tests {
             &provenance,
             &repo_worktrees,
             false,
+            &reconcile::trash_dir(root.path()),
         )
         .unwrap();
 
@@ -4248,9 +4297,10 @@ mod tests {
             &provenance,
             &repo_worktrees,
             false,
+            &reconcile::trash_dir(root.path()),
         )
         .unwrap_err();
-        assert!(err.to_string().contains("git worktree remove failed"));
+        assert!(err.to_string().contains("refusing to retire worktree"));
         assert!(created.root.exists());
         assert!(created.root.join("scratch.txt").exists());
 
@@ -4261,9 +4311,202 @@ mod tests {
             &provenance,
             &repo_worktrees,
             true,
+            &reconcile::trash_dir(root.path()),
         )
         .unwrap();
         assert!(!created.root.exists());
+    }
+
+    /// Every entry currently sitting in `workspace_root`'s trash directory.
+    fn trash_entries(workspace_root: &Path) -> Vec<PathBuf> {
+        let mut entries: Vec<PathBuf> = fs::read_dir(reconcile::trash_dir(workspace_root))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        entries.sort();
+        entries
+    }
+
+    #[test]
+    fn remove_retires_the_session_tree_and_a_later_sweep_reclaims_it() {
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+        // A removal must not wait on the disk: the session tree is renamed into
+        // `.usagi/trash/` (an O(1) move whatever it holds — in a real session, a
+        // `target/` of several gigabytes) and deleted by a later sweep.
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "bulky").unwrap();
+        fs::write(created.root.join("build-output.bin"), "x".repeat(4096)).unwrap();
+
+        assert!(
+            remove(root.path(), "bulky", true, noop_agent().as_ref())
+                .unwrap()
+                .removed
+        );
+
+        // The session path is free and the record is gone the moment `remove`
+        // returns — but the bytes are still on disk, under the trash.
+        assert!(!created.root.exists());
+        assert!(sessions_of(root.path()).is_empty());
+        assert!(pending_of(root.path(), "bulky").is_none());
+        let retired = trash_entries(root.path());
+        assert_eq!(retired.len(), 1);
+        assert!(retired[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("bulky-"));
+        assert!(retired[0].join("build-output.bin").exists());
+
+        let reclaimed = sweep_trash(root.path());
+
+        assert_eq!(reclaimed.len(), 1);
+        assert_eq!(reclaimed[0].error, None);
+        assert_eq!(reclaimed[0].path, retired[0]);
+        assert!(trash_entries(root.path()).is_empty());
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn a_session_name_is_reusable_before_its_retired_tree_is_reclaimed() {
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+        // Deferring the deletion must not defer the name: the retired tree lives
+        // under a different directory with a different name, so recreating the
+        // session immediately is an ordinary create — and the sweep that follows
+        // still knows the difference between the old tree and the new session.
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let first = create(root.path(), "reused").unwrap();
+        fs::write(first.root.join("old-note.txt"), "first generation").unwrap();
+        assert!(
+            remove(root.path(), "reused", true, noop_agent().as_ref())
+                .unwrap()
+                .removed
+        );
+        assert_eq!(trash_entries(root.path()).len(), 1);
+
+        let second = create(root.path(), "reused").unwrap();
+
+        assert_eq!(second.root, first.root);
+        assert!(second.root.exists());
+        assert!(!second.root.join("old-note.txt").exists());
+        assert_eq!(sessions_of(root.path()), vec!["reused"]);
+
+        assert!(sweep_trash(root.path())
+            .iter()
+            .all(|entry| entry.error.is_none()));
+        assert!(trash_entries(root.path()).is_empty());
+        assert!(second.root.exists());
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn a_session_tree_that_cannot_be_renamed_is_deleted_in_place() {
+        // A trash directory on another filesystem makes the rename fail with
+        // `EXDEV`. The teardown still has to leave the session path free, so it
+        // falls back to erasing the tree — slower, but the same end state.
+        let root = tempfile::tempdir().unwrap();
+        let session = root.path().join("wip");
+        fs::create_dir_all(session.join("nested")).unwrap();
+        fs::write(session.join("nested/file.txt"), "work").unwrap();
+        let trash = reconcile::trash_dir(root.path());
+
+        let retirement = reconcile::retire_session_tree_with(&session, &trash, |_, _| {
+            Err(std::io::Error::other("EXDEV: cross-device link"))
+        })
+        .unwrap();
+
+        assert_eq!(retirement, reconcile::Retirement::Deleted);
+        assert!(!session.exists());
+        assert!(trash_entries(root.path()).is_empty());
+    }
+
+    #[test]
+    fn a_retired_tree_is_named_after_its_session_within_the_portable_length_limit() {
+        // The readable half of the name is the session's, truncated on a character
+        // boundary: a session name may fill almost the whole 255-byte `NAME_MAX`
+        // by itself, and what has to stay is the id that makes the directory
+        // unique among concurrent removals.
+        assert_eq!(reconcile::retired_component("wip", "id"), "wip-id");
+        let long = "あ".repeat(MAX_SESSION_NAME_BYTES / 3);
+        let component = reconcile::retired_component(&long, "id");
+        assert!(component.len() < 96, "{} bytes", component.len());
+        assert!(long.starts_with(component.trim_end_matches("-id")));
+    }
+
+    #[test]
+    fn the_trash_is_reclaimed_by_reconcile_and_never_quarantined_as_a_stray() {
+        // Retired trees live beside `sessions/`, not in it, so reconcile's stray
+        // scan cannot mistake one for a session whose record went missing — it
+        // reclaims them instead. Loose files are reclaimed too; a symlink planted
+        // there is unlinked without following it.
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(STATE_DIR).join(SESSIONS_DIR)).unwrap();
+        let trash = reconcile::trash_dir(root.path());
+        fs::create_dir_all(trash.join("old-1/nested")).unwrap();
+        fs::write(trash.join("old-1/nested/heavy.bin"), "x".repeat(1024)).unwrap();
+        fs::write(trash.join("loose-file"), "stray").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("keep.txt"), "not the trash's to delete").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), trash.join("escape")).unwrap();
+
+        let outcome = reconcile(root.path(), noop_agent().as_ref()).unwrap();
+
+        assert!(outcome.quarantined.is_empty());
+        assert!(outcome.resumed.is_empty());
+        assert!(outcome.reclaimed.iter().all(|entry| entry.error.is_none()));
+        assert!(trash_entries(root.path()).is_empty());
+        assert!(outside.path().join("keep.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_retired_tree_that_resists_deletion_is_reported_and_left_for_the_next_sweep() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Reclaiming is housekeeping with nothing durable behind it, so a tree
+        // that cannot be deleted right now is reported and retried later rather
+        // than turned into an error the caller has to handle.
+        let root = tempfile::tempdir().unwrap();
+        let trash = reconcile::trash_dir(root.path());
+        let stuck = trash.join("stuck-1");
+        fs::create_dir_all(&stuck).unwrap();
+        fs::write(stuck.join("held.txt"), "x").unwrap();
+        let original = fs::metadata(&stuck).unwrap().permissions().mode();
+        fs::set_permissions(&stuck, fs::Permissions::from_mode(0o500)).unwrap();
+
+        let reclaimed = sweep_trash(root.path());
+
+        assert_eq!(reclaimed.len(), 1);
+        assert!(reclaimed[0].error.is_some());
+        assert!(stuck.exists());
+
+        // Once the fault is repaired the next sweep finishes the job.
+        fs::set_permissions(&stuck, fs::Permissions::from_mode(original)).unwrap();
+        assert_eq!(sweep_trash(root.path())[0].error, None);
+        assert!(trash_entries(root.path()).is_empty());
+    }
+
+    #[test]
+    fn the_background_sweep_reclaims_the_trash_off_the_callers_thread() {
+        // The long-lived surfaces (the TUI worker, the MCP server) start the
+        // deletion this way so the removal they just ran can return without it.
+        let root = tempfile::tempdir().unwrap();
+        let trash = reconcile::trash_dir(root.path());
+        fs::create_dir_all(trash.join("old-1")).unwrap();
+
+        let reclaimed = spawn_trash_sweep(root.path()).join().unwrap();
+
+        assert_eq!(reclaimed.len(), 1);
+        assert_eq!(reclaimed[0].error, None);
+        assert!(trash_entries(root.path()).is_empty());
     }
 
     #[test]
@@ -5176,9 +5419,15 @@ mod tests {
             repo: fs::canonicalize(root.path()).unwrap(),
             worktree: fs::canonicalize(&session_root).unwrap(),
         }];
-        let outcome =
-            reconcile::discard_session(&session_root, "odd", &provenance, &repo_worktrees, true)
-                .unwrap();
+        let outcome = reconcile::discard_session(
+            &session_root,
+            "odd",
+            &provenance,
+            &repo_worktrees,
+            true,
+            &reconcile::trash_dir(root.path()),
+        )
+        .unwrap();
 
         assert_eq!(outcome.retained_branches, vec!["other".to_string()]);
         assert!(!session_root.exists());
@@ -5207,10 +5456,13 @@ mod tests {
         let error = remove(root.path(), "owned", true, noop_agent().as_ref()).unwrap_err();
 
         assert!(error.to_string().contains("ownership proof"));
-        // Nothing destructive ran: both worktrees and the branch survive.
+        // Nothing destructive ran: both worktrees and the branch survive, and the
+        // session tree was not retired either — an unproven session is not moved
+        // aside any more than it is deleted.
         assert!(created.root.exists());
         assert!(external.exists());
         assert!(branch_exists(root.path(), "usagi/owned"));
+        assert!(trash_entries(root.path()).is_empty());
         assert_eq!(
             pending_of(root.path(), "owned"),
             Some(SessionRemovalPhase::Orphaned)
@@ -5518,6 +5770,7 @@ mod tests {
             &provenance,
             &repo_worktrees,
             true,
+            &reconcile::trash_dir(root.path()),
         )
         .unwrap_err();
 
@@ -5824,6 +6077,7 @@ mod tests {
             &provenance,
             &repo_worktrees,
             false,
+            &reconcile::trash_dir(root.path()),
         )
         .unwrap();
 

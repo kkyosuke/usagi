@@ -297,6 +297,77 @@ pub fn remove_worktree(repo: &Path, worktree: &Path, force: bool) -> Result<()> 
     bail!("git worktree remove failed: {}", stderr.trim());
 }
 
+/// Refuse now exactly what `git worktree remove` would refuse later — without
+/// deleting anything.
+///
+/// Session teardown does not hand the session tree to `git worktree remove`
+/// any more: deleting a worktree whose `target/` is several gigabytes takes
+/// minutes, so the tree is renamed aside in one O(1) move and git's now-dangling
+/// registration is cleared by [`prune_worktrees`]
+/// ([`discard_session`](crate::usecase::session) owns that sequence). Moving the
+/// directory is unconditional once it starts, so the refusals git applies before
+/// *it* deletes anything have to be applied here instead, ahead of the move:
+///
+/// | Condition | Refused |
+/// |---|---|
+/// | The path is not a registered worktree | No — `git worktree remove` treats it as a no-op, and so does teardown |
+/// | git reports the worktree locked | Always — a locked worktree needs `--force` twice, which teardown never passes |
+/// | Uncommitted changes or untracked files, without `force` | Yes — the same `git status --porcelain --ignore-submodules=none` probe git itself runs |
+///
+/// A status that cannot be read at all counts as *not* provably clean, so an
+/// unreadable worktree is refused rather than silently discarded.
+pub fn ensure_worktree_removable(repo: &Path, worktree: &Path, force: bool) -> Result<()> {
+    let Some(locked) = worktree_registration(repo, worktree)? else {
+        return Ok(());
+    };
+    if locked {
+        bail!(
+            "refusing to retire worktree {}: git reports it locked, and unlocking it is an \
+             explicit decision usagi will not make; run `git worktree unlock` and retry",
+            worktree.display()
+        );
+    }
+    if !force && !worktree_clean_ignoring_submodule_config(worktree) {
+        bail!(
+            "refusing to retire worktree {}: it has uncommitted changes or untracked files that \
+             git worktree remove would not discard without --force",
+            worktree.display()
+        );
+    }
+    Ok(())
+}
+
+/// Whether `repo` registers a worktree at `worktree` and, when it does, whether
+/// git reports that registration locked. `None` means the path is not one of
+/// this repository's worktrees at all.
+///
+/// Paths are compared canonically where they resolve (git prints the path it
+/// recorded, which may differ from the caller's spelling through a symlinked
+/// parent) and literally where they do not.
+fn worktree_registration(repo: &Path, worktree: &Path) -> Result<Option<bool>> {
+    let stdout = git_capture(repo, &["worktree", "list", "--porcelain"])?
+        .ok_or_else(|| anyhow!("{} is not a git repository", repo.display()))?;
+    let target = canonical_or_literal(worktree);
+
+    let mut registration = None;
+    let mut in_target = false;
+    for line in stdout.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            in_target = canonical_or_literal(Path::new(path)) == target;
+            if in_target {
+                registration = Some(false);
+            }
+        } else if in_target && (line == "locked" || line.starts_with("locked ")) {
+            registration = Some(true);
+        }
+    }
+    Ok(registration)
+}
+
+fn canonical_or_literal(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Whether the worktree at `path` — and every submodule under it — has **no**
 /// uncommitted change, checked so the answer does not depend on the user's
 /// `submodule.<name>.ignore` / `diff.ignoreSubmodules` config.

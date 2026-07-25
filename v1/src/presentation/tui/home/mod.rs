@@ -3082,6 +3082,12 @@ fn removed_session_line(name: &str, retained_branches: &[String]) -> String {
 /// removal carries the refreshed sessions and the session root whose pooled
 /// shell to evict; a session with uncommitted changes (without `--force`) only
 /// logs how to discard them. The `bool` is whether it removed the session.
+///
+/// The removal itself only renames the session tree into `.usagi/trash/`, so this
+/// worker finishes — and the sidebar updates — without waiting on the disk. The
+/// deletion it deferred is started on a second, detached thread rather than here:
+/// erasing a session's `target/` can take minutes, and holding the worker open
+/// for it would put that wait right back in front of the user.
 fn run_remove(
     root: &Path,
     name: &str,
@@ -3089,7 +3095,9 @@ fn run_remove(
     agent: &dyn crate::domain::agent::Agent,
     focus: Option<tasks::AutoFocus>,
 ) -> (bool, tasks::Completion) {
-    match crate::usecase::session::remove(root, name, force, agent) {
+    let removal = crate::usecase::session::remove(root, name, force, agent);
+    drop(crate::usecase::session::spawn_trash_sweep(root));
+    match removal {
         Ok(outcome) if outcome.removed => (
             true,
             tasks::Completion {

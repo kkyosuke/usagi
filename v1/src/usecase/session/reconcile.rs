@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use super::tree;
 use crate::domain::agent::Agent;
@@ -15,7 +15,7 @@ use crate::domain::workspace_state::{
     WorktreeProvenance,
 };
 use crate::infrastructure::git;
-use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR};
+use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR, TRASH_DIR};
 use crate::infrastructure::workspace_store::WorkspaceStore;
 
 /// Reconcile the on-disk session tree under `.usagi/sessions/` with the sessions
@@ -26,7 +26,7 @@ use crate::infrastructure::workspace_store::WorkspaceStore;
 /// established safely. Loose files are left untouched.
 ///
 /// Returns the stray directories newly quarantined by this pass, together with
-/// every interrupted removal it resumed.
+/// every interrupted removal it resumed and every retired tree it reclaimed.
 ///
 /// This is the public, self-locking entry point. It acquires the workspace store
 /// lock for the duration of the scan-and-quarantine so it never races a
@@ -40,6 +40,11 @@ use crate::infrastructure::workspace_store::WorkspaceStore;
 /// across their own durable transitions and call [`reconcile_locked`] directly
 /// instead, so the load-and-quarantine here cannot mistake a worktree another
 /// process has built but not yet recorded for a stray.
+///
+/// Finally it reclaims the trash: the session trees earlier removals renamed
+/// aside instead of deleting inline ([`sweep_trash`]). This is the maintenance
+/// entry point, so it is where the deletion those removals deferred is actually
+/// paid for.
 pub fn reconcile(workspace_root: &Path, agent: &dyn Agent) -> Result<ReconcileOutcome> {
     let store = WorkspaceStore::new(workspace_root);
     let quarantined = {
@@ -49,6 +54,7 @@ pub fn reconcile(workspace_root: &Path, agent: &dyn Agent) -> Result<ReconcileOu
     Ok(ReconcileOutcome {
         quarantined,
         resumed: super::resume_pending_removals(workspace_root, agent),
+        reclaimed: sweep_trash(workspace_root),
     })
 }
 
@@ -59,6 +65,8 @@ pub struct ReconcileOutcome {
     pub quarantined: Vec<PathBuf>,
     /// Interrupted removals this pass attempted to finish.
     pub resumed: Vec<super::ResumedRemoval>,
+    /// Retired session trees this pass tried to delete from the trash.
+    pub reclaimed: Vec<ReclaimedTree>,
 }
 
 /// Reconcile assuming the caller already holds the workspace store lock (see
@@ -130,6 +138,85 @@ pub(super) fn reconcile_locked(workspace_root: &Path) -> Result<Vec<PathBuf>> {
     state.updated_at = chrono::Utc::now();
     store.save(&state)?;
     Ok(quarantined)
+}
+
+/// Where `workspace_root`'s retired session trees wait to be deleted:
+/// `<workspace>/.usagi/trash/`. See [`TRASH_DIR`] for why teardown renames a
+/// session tree here instead of deleting it inline.
+pub fn trash_dir(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(STATE_DIR).join(TRASH_DIR)
+}
+
+/// One retired session tree a [`sweep_trash`] pass tried to delete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReclaimedTree {
+    /// The entry under `.usagi/trash/`.
+    pub path: PathBuf,
+    /// `None` when the entry is gone. Otherwise why it survived this pass; the
+    /// next sweep retries it, and nothing else depends on it being gone.
+    pub error: Option<String>,
+}
+
+/// Delete every tree retired under `<workspace>/.usagi/trash/`, reclaiming the
+/// disk that [`discard_session`] deliberately did not wait for.
+///
+/// This is the slow half of a removal — deleting a session's `target/` can take
+/// minutes — so it deliberately runs *outside* [`remove`](super::remove), which
+/// returns as soon as the tree is renamed aside. Callers pick when to pay:
+/// [`reconcile`] and `usagi clean` run it synchronously as maintenance, and the
+/// long-lived surfaces (the TUI's removal worker, the MCP server) hand it to a
+/// background thread ([`spawn_trash_sweep`](super::spawn_trash_sweep)).
+///
+/// Never fails the caller: reclaiming is pure housekeeping with no tombstone
+/// behind it, so a stubborn entry is reported and left for the next pass rather
+/// than turned into an error the caller has to handle. It is fail-closed about
+/// *what* it deletes, though — an entry is removed only once it canonically
+/// resolves to a direct child of the canonical trash directory, so a symlink
+/// planted there unlinks the link and never reaches its target.
+pub fn sweep_trash(workspace_root: &Path) -> Vec<ReclaimedTree> {
+    let trash = trash_dir(workspace_root);
+    // No trash directory (the common case) means nothing was ever retired here.
+    let Ok(canonical_trash) = fs::canonicalize(&trash) else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(&trash) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            ReclaimedTree {
+                error: reclaim_entry(&canonical_trash, &path)
+                    .err()
+                    .map(|error| format!("{error:#}")),
+                path,
+            }
+        })
+        .collect()
+}
+
+/// Delete one entry of the trash directory, refusing anything that does not
+/// prove to be a direct child of it.
+fn reclaim_entry(canonical_trash: &Path, path: &Path) -> Result<()> {
+    let metadata =
+        fs::symlink_metadata(path).with_context(|| format!("cannot inspect {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        // A symlink is unlinked, never followed: whatever it points at is not
+        // this directory's to delete. A loose file is simply removed.
+        return fs::remove_file(path).with_context(|| format!("cannot remove {}", path.display()));
+    }
+    let canonical = fs::canonicalize(path)
+        .with_context(|| format!("cannot canonicalize {}", path.display()))?;
+    if canonical.parent() != Some(canonical_trash) {
+        bail!(
+            "refusing to reclaim {}: it resolves to {}, which is not directly inside {}",
+            path.display(),
+            canonical.display(),
+            canonical_trash.display()
+        );
+    }
+    fs::remove_dir_all(&canonical).with_context(|| format!("cannot remove {}", canonical.display()))
 }
 
 /// Each source repository under `workspace_root` paired with its worktrees,
@@ -349,20 +436,33 @@ pub(super) struct DiscardOutcome {
 /// it is never what *proves* ownership, because a session's worktree may
 /// legitimately have moved to another branch since creation.
 /// With `force`, a dirty worktree may be discarded. Infrastructure failures
-/// (including locked worktrees) still abort before the directory is deleted so
+/// (including locked worktrees) still abort before the directory is touched so
 /// the durable caller can retain context and retry. Already-absent components
 /// remain successful, making partial teardown idempotent.
+///
+/// The session tree is **retired, not deleted**: once every candidate has passed
+/// both the ownership proof and git's own removal refusals
+/// ([`git::ensure_worktree_removable`]), the whole tree is renamed into `trash`
+/// in one move and the now-dangling worktree registrations are cleared by the
+/// prune below. That is what makes teardown independent of how big the session
+/// grew — deleting a `target/` of several gigabytes, whether through
+/// `git worktree remove` or `remove_dir_all`, is the minutes-long part, and it
+/// now happens later and off the caller's path ([`sweep_trash`]). A rename that
+/// cannot be done (a trash directory on another filesystem, say) falls back to
+/// deleting the tree inline, which is slower but equally correct.
 ///
 /// Used by [`remove`](super::remove); reconcile quarantines unowned strays and
 /// therefore never calls this destructive primitive.
 /// `repo_worktrees` is each source repository paired with its worktrees, from
-/// [`list_repo_worktrees`].
+/// [`list_repo_worktrees`]; `trash` is [`trash_dir`] for the workspace this
+/// session belongs to.
 pub(super) fn discard_session(
     root: &Path,
     branch: &str,
     provenance: &[WorktreeProvenance],
     repo_worktrees: &[(PathBuf, Vec<git::WorktreeInfo>)],
     force: bool,
+    trash: &Path,
 ) -> Result<DiscardOutcome> {
     if provenance.is_empty() {
         return Err(ownership_error(format!(
@@ -573,20 +673,24 @@ pub(super) fn discard_session(
         }
     }
 
+    // Ask git what it would refuse *before* anything moves. Retiring the tree is
+    // a single rename over every worktree at once, so there is no per-worktree
+    // point left at which git could decline: an unforced teardown that would have
+    // been stopped by `git worktree remove` on a dirty worktree must be stopped
+    // here instead, with the session still intact and the removal retryable.
     for (repo, worktree, _) in &targets {
-        git::remove_worktree(repo, worktree, force)?;
+        git::ensure_worktree_removable(repo, worktree, force)?;
     }
 
-    // Delete the session tree *before* pruning and dropping the branch below.
+    // Retire the session tree *before* pruning and dropping the branch below.
     // This ordering is what keeps the name reusable: a worktree whose directory
-    // vanished out-of-band (a crash, a manual `rm`, an external cleanup) — or one
-    // a forced/locked `worktree remove` above failed to unregister — leaves a
+    // vanished out-of-band (a crash, a manual `rm`, an external cleanup) leaves a
     // registration that still holds the session branch checked out, which makes
-    // `git branch -D` refuse. Removing the directory first turns that into a
-    // prunable registration, so the prune clears it and the branch is no longer
-    // checked out anywhere; only then can it actually be deleted.
+    // `git branch -D` refuse. Moving the directory away turns every one of them
+    // into a prunable registration, so the prune clears them and the branch is no
+    // longer checked out anywhere; only then can it actually be deleted.
     if root.exists() {
-        fs::remove_dir_all(root).context(format!("failed to remove {}", root.display()))?;
+        retire_session_tree(root, trash)?;
     }
 
     // Only the *recorded* branch is deleted. A branch the session moved onto
@@ -600,4 +704,75 @@ pub(super) fn discard_session(
     retained_branches.sort();
     retained_branches.dedup();
     Ok(DiscardOutcome { retained_branches })
+}
+
+/// How a session tree left the sessions directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Retirement {
+    /// Renamed into the trash directory, to be deleted by a later
+    /// [`sweep_trash`]. The O(1) path taken whenever the rename is possible.
+    Retired(PathBuf),
+    /// Deleted in place because the rename was not possible — the trash sits on
+    /// another filesystem (`EXDEV`), or could not be created at all. Correct,
+    /// but as slow as the tree is big.
+    Deleted,
+}
+
+/// Move `root` out of the sessions directory, falling back to deleting it.
+///
+/// Either way the session path is free the moment this returns, which is what
+/// the teardown ordering (and reusing the name) depends on.
+fn retire_session_tree(root: &Path, trash: &Path) -> Result<Retirement> {
+    // Wrapped rather than passed as `fs::rename` directly: the generic function
+    // item only satisfies the higher-ranked bound through a closure.
+    retire_session_tree_with(root, trash, |from, to| fs::rename(from, to))
+}
+
+/// [`retire_session_tree`] with the rename injected, so both branches — the
+/// O(1) one and the fallback taken when the filesystem cannot rename — are
+/// exercised on every platform the tests run on.
+pub(super) fn retire_session_tree_with(
+    root: &Path,
+    trash: &Path,
+    rename: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<Retirement> {
+    if let Some(name) = root.file_name().and_then(|name| name.to_str()) {
+        let destination = trash.join(retired_component(name, &removal_id()));
+        if fs::create_dir_all(trash).is_ok() && rename(root, &destination).is_ok() {
+            return Ok(Retirement::Retired(destination));
+        }
+    }
+    fs::remove_dir_all(root).context(format!("failed to remove {}", root.display()))?;
+    Ok(Retirement::Deleted)
+}
+
+/// Longest prefix of a session name kept in its trash directory's name. A
+/// session name may be up to 250 bytes (`MAX_SESSION_NAME_BYTES`), which leaves
+/// no room for the removal id inside the portable 255-byte `NAME_MAX`, so the
+/// readable part is capped and the id — not the name — is what makes the
+/// component unique.
+const RETIRED_NAME_PREFIX_BYTES: usize = 64;
+
+/// The directory component a session tree named `name` is retired to, labelled
+/// so an operator looking in `.usagi/trash/` can tell what a leftover was.
+pub(super) fn retired_component(name: &str, id: &str) -> String {
+    let mut end = name.len().min(RETIRED_NAME_PREFIX_BYTES);
+    while end > 0 && !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}-{id}", &name[..end])
+}
+
+/// An identifier unique to one retirement: the wall clock pins it in time for a
+/// human reading the directory listing, while the process id and the counter
+/// keep two removals in the same millisecond — or in two usagi processes — from
+/// choosing the same name.
+fn removal_id() -> String {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!(
+        "{}-{}-{sequence}",
+        chrono::Utc::now().format("%Y%m%d%H%M%S%3f"),
+        std::process::id()
+    )
 }

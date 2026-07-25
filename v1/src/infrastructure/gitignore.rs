@@ -98,7 +98,7 @@ fn is_legacy_root_ignore_line(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infrastructure::{markdown_store, store_lock};
+    use crate::infrastructure::{markdown_store, repo_paths, store_lock};
 
     #[test]
     fn gitignore_covers_the_derived_and_lock_files() {
@@ -109,6 +109,21 @@ mod tests {
         assert!(USAGI_GITIGNORE.contains(markdown_store::INDEX_FILE));
         assert!(USAGI_GITIGNORE.contains(markdown_store::DIRTY_FILE));
         assert!(USAGI_GITIGNORE.contains(store_lock::LOCK_FILE_NAME));
+    }
+
+    #[test]
+    fn gitignore_keeps_machine_local_session_directories_out_of_git() {
+        // `/*` ignores everything under `.usagi/` and only the listed paths are
+        // re-included, so a directory added later — `sessions/`, and now the
+        // `trash/` a removal renames a session tree into — is ignored without a
+        // rule of its own. What would leak one is a new negation; assert none of
+        // them names these directories, which is the mistake this catches.
+        assert!(USAGI_GITIGNORE.starts_with("/*\n"));
+        for machine_local in [repo_paths::SESSIONS_DIR, repo_paths::TRASH_DIR] {
+            assert!(!USAGI_GITIGNORE
+                .lines()
+                .any(|line| line.starts_with('!') && line.contains(machine_local)));
+        }
     }
 
     #[test]

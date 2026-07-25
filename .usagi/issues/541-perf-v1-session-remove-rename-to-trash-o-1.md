@@ -1,13 +1,13 @@
 ---
 number: 541
 title: perf(v1/session): remove を rename-to-trash + 遅延回収にして応答を O(1) にする
-status: todo
+status: in-progress
 priority: medium
 labels: [v1, session, performance]
 dependson: [538]
 related: [539]
 created_at: 2026-07-24T22:38:50.347251+00:00
-updated_at: 2026-07-24T22:38:50.347251+00:00
+updated_at: 2026-07-25T11:43:42.269025+00:00
 ---
 
 ## 問題・影響
