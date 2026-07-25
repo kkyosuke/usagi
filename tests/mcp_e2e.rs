@@ -81,6 +81,38 @@ fn production_session_create_reaches_daemon_and_durable_lifecycle() {
     assert!(lifecycle.contains("mcp-e2e-session"));
 }
 
+/// `session_remove` returns an acceptance and the daemon's own teardown worker
+/// finishes the worktree removal afterwards. The wiring is what matters here: a
+/// removal that only completed while the MCP request was still open would hold
+/// the caller past its deadline for a session with a large `target/`.
+#[test]
+fn production_session_remove_is_accepted_before_the_daemon_tears_the_worktree_down() {
+    let mut mcp = McpHarness::start();
+    assert!(mcp.tool("session_create", &json!({"name":"teardown-target"}))["error"].is_null());
+    let session_root = mcp.workspace().join(".usagi/sessions/teardown-target");
+    assert!(session_root.join(".git").exists());
+
+    let accepted = mcp.tool("session_remove", &json!({"name":"teardown-target"}));
+    assert!(accepted.get("error").is_none(), "{accepted}");
+    assert!(
+        accepted["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("accepted operation")
+    );
+
+    // The daemon-owned worker finishes the teardown without another request:
+    // the row leaves the durable snapshot and the worktree leaves the disk.
+    wait_until(|| {
+        !tool_text(&mcp.tool("session_list", &json!({})))["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|session| session["name"] == "teardown-target")
+    });
+    assert!(!session_root.exists());
+}
+
 #[test]
 fn production_session_prompt_is_durable_and_status_observes_the_session() {
     let mut mcp = McpHarness::start();

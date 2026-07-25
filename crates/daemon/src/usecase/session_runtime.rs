@@ -10,6 +10,7 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use serde_json::{Value, json};
@@ -30,6 +31,10 @@ use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::usecase::client::SessionAction;
+
+use crate::usecase::session_teardown::{
+    PendingTeardown, TeardownEffect, TeardownJournal, TeardownSignal,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionReply {
@@ -148,21 +153,20 @@ struct SessionCreateInFlight {
     branch: String,
 }
 
-/// Outcome of [`SessionRuntime::begin_remove`]: an idempotent replay resolved
-/// under the lock, or a pending worktree teardown to run with the lock released.
+/// Outcome of [`SessionRuntime::begin_remove`].
+///
+/// Both variants are a complete reply the caller can return right away; they
+/// differ only in whether this request is the one that admitted a new teardown.
 enum SessionRemoveStep {
-    Done(SessionReply),
-    Pending(SessionRemoveInFlight),
-}
-
-/// The marked-deleting state of a remove, carried across the lock release so
-/// [`SessionRuntime::execute_remove`] can tear down the worktree without the
-/// shared session lock held.
-struct SessionRemoveInFlight {
-    operation_id: OperationId,
-    fence: CompletionFence,
-    session_root: PathBuf,
-    force: bool,
+    /// Fully resolved under the lock: an idempotent replay of a finished
+    /// operation, or a removal that is already in flight.
+    Settled(SessionReply),
+    /// The session is now durably `Deleting`. The reply is the acceptance; the
+    /// teardown worker owns the worktree effect from here.
+    Accepted {
+        reply: SessionReply,
+        pending: PendingTeardown,
+    },
 }
 
 /// Creates a session while holding the shared session lock only for the fast
@@ -175,7 +179,7 @@ struct SessionRemoveInFlight {
 ///
 /// Returns a typed safe error when the request cannot be admitted or completed.
 pub fn perform_create(
-    runtime: &std::sync::Mutex<SessionRuntime>,
+    runtime: &Mutex<SessionRuntime>,
     git: &dyn GitRunner,
     operation_id: &str,
     payload: &Value,
@@ -196,17 +200,21 @@ pub fn perform_create(
     }
 }
 
-/// Removes a session while holding the shared session lock only for the fast
-/// durable transitions. The heavy Git worktree teardown runs with the lock
-/// released so concurrent reads stay responsive during a remove — the daemon no
-/// longer freezes the TUI for the duration of `git worktree remove`.
+/// Admits a removal and answers immediately.
+///
+/// Only the fast durable transition (validation, `Deleting`, the durable
+/// `DeletePlan`) runs here, under the shared session lock. The unbounded
+/// worktree teardown is left to the daemon's teardown worker, which this
+/// function wakes: a session holding a multi-gigabyte `target/` would otherwise
+/// hold the requesting connection past every client attempt deadline (TUI 2 s /
+/// CLI 10 s / MCP 30 s) and block the other requests queued on that connection.
 ///
 /// # Errors
 ///
-/// Returns a typed safe error when the request cannot be admitted or completed.
+/// Returns a typed safe error when the request cannot be admitted.
 pub fn perform_remove(
-    runtime: &std::sync::Mutex<SessionRuntime>,
-    git: &dyn GitRunner,
+    runtime: &Mutex<SessionRuntime>,
+    teardown: &TeardownSignal,
     operation_id: &str,
     payload: &Value,
 ) -> Result<SessionReply, SessionRuntimeError> {
@@ -215,14 +223,81 @@ pub fn perform_remove(
         .map_err(|_| SessionRuntimeError::Storage)?
         .begin_remove(operation_id, payload)?;
     match step {
-        SessionRemoveStep::Done(reply) => Ok(reply),
-        SessionRemoveStep::Pending(in_flight) => {
-            let result = SessionRuntime::execute_remove(git, &in_flight);
-            runtime
-                .lock()
-                .map_err(|_| SessionRuntimeError::Storage)?
-                .finish_remove(in_flight, result)
+        SessionRemoveStep::Settled(reply) => Ok(reply),
+        SessionRemoveStep::Accepted { reply, .. } => {
+            // The admitted teardown is not handed over here: the worker derives
+            // it from the durable state this admission just wrote, which is what
+            // makes a crashed daemon resume it. Waking the worker only avoids
+            // waiting for its next tick.
+            teardown.notify();
+            Ok(reply)
         }
+    }
+}
+
+/// The teardown journal backed by the daemon's shared session runtime.
+///
+/// Both halves take the shared session lock only for a fast durable read or
+/// write, so the worker never holds it across the worktree effect.
+pub struct SharedSessionTeardown {
+    runtime: Arc<Mutex<SessionRuntime>>,
+}
+
+impl SharedSessionTeardown {
+    #[must_use]
+    pub const fn new(runtime: Arc<Mutex<SessionRuntime>>) -> Self {
+        Self { runtime }
+    }
+}
+
+impl TeardownJournal for SharedSessionTeardown {
+    fn pending(&self) -> Vec<PendingTeardown> {
+        self.runtime
+            .lock()
+            .ok()
+            .and_then(|runtime| runtime.pending_teardowns().ok())
+            .unwrap_or_default()
+    }
+
+    fn finish(
+        &self,
+        teardown: &PendingTeardown,
+        outcome: Result<(), String>,
+    ) -> Result<(), String> {
+        match self
+            .runtime
+            .lock()
+            .map_err(|_| "session lifecycle owner is unavailable".to_owned())?
+            .finish_teardown(teardown, outcome)
+        {
+            // A recorded teardown failure *is* a successful finalization: the
+            // durable row now carries the reason and is no longer pending. Only
+            // a persistence error means the outcome could not be recorded, and
+            // only that must leave the teardown for the next drain.
+            Ok(_) | Err(SessionRuntimeError::DurableFailure(_)) => Ok(()),
+            Err(error) => Err(error.safe_message()),
+        }
+    }
+}
+
+/// The real worktree teardown: nested linked worktrees are removed with Git
+/// before the session tree itself. `NotFound` counts as success, so a resumed
+/// teardown can safely re-run over a partially removed tree.
+pub struct WorktreeTeardown<G: GitRunner> {
+    git: G,
+}
+
+impl<G: GitRunner> WorktreeTeardown<G> {
+    #[must_use]
+    pub const fn new(git: G) -> Self {
+        Self { git }
+    }
+}
+
+impl<G: GitRunner> TeardownEffect for WorktreeTeardown<G> {
+    fn tear_down(&self, teardown: &PendingTeardown) -> Result<(), String> {
+        remove_session_tree(&self.git, &teardown.session_root, teardown.force)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -602,7 +677,7 @@ impl SessionRuntime {
             .sessions
             .last()
             .ok_or(SessionRuntimeError::Rejected)?;
-        let fence = fence(&reserved, session, operation_id);
+        let fence = fence(&reserved, session, operation_id).ok_or(SessionRuntimeError::Rejected)?;
         Ok(SessionCreateStep::Pending(SessionCreateInFlight {
             operation_id,
             fence,
@@ -690,24 +765,28 @@ impl SessionRuntime {
         }
     }
 
+    /// Removes a session synchronously: admit, tear down, finalize, all on this
+    /// thread. The IPC path uses [`perform_remove`] plus the teardown worker
+    /// instead, so no client connection waits for the worktree effect.
     fn remove(
         &mut self,
         operation_id: &str,
         payload: &Value,
     ) -> Result<SessionReply, SessionRuntimeError> {
         match self.begin_remove(operation_id, payload)? {
-            SessionRemoveStep::Done(reply) => Ok(reply),
-            SessionRemoveStep::Pending(in_flight) => {
-                let result = Self::execute_remove(self.git.as_ref(), &in_flight);
-                self.finish_remove(in_flight, result)
+            SessionRemoveStep::Settled(reply) => Ok(reply),
+            SessionRemoveStep::Accepted { pending, .. } => {
+                let outcome =
+                    remove_session_tree(self.git.as_ref(), &pending.session_root, pending.force)
+                        .map_err(|error| error.to_string());
+                self.finish_teardown(&pending, outcome)
             }
         }
     }
 
-    /// Validates the request and marks the session deleting, computing the
-    /// worktree teardown plan. Runs under the shared session lock; the heavy Git
-    /// teardown is deferred to [`Self::execute_remove`] so the lock can be
-    /// released (see [`perform_remove`]).
+    /// Validates the request and marks the session `Deleting` with a durable
+    /// delete plan. Runs under the shared session lock and performs no worktree
+    /// effect, so the caller can answer as soon as it returns.
     fn begin_remove(
         &mut self,
         operation_id: &str,
@@ -727,13 +806,28 @@ impl SessionRuntime {
             if existing.semantic_key != semantic_key {
                 return Err(SessionRuntimeError::IdempotencyConflict);
             }
-            return self.replay(&before, existing).map(SessionRemoveStep::Done);
+            return self
+                .replay(&before, existing)
+                .map(SessionRemoveStep::Settled);
         }
         let session = before
             .sessions
             .iter()
             .find(|session| session.name == name)
             .ok_or(SessionRuntimeError::UnknownSession)?;
+        // A removal already in flight owns the worktree effect. Reporting its
+        // operation instead of admitting a second one is what keeps a repeated
+        // request (an impatient client, a retry with a fresh operation ID) from
+        // running the teardown twice.
+        if let Some(in_progress) = session.operation_id.filter(|_| {
+            session.lifecycle == usagi_core::domain::session_lifecycle::SessionLifecycle::Deleting
+        }) {
+            return Ok(SessionRemoveStep::Settled(SessionReply {
+                operation_id: in_progress.to_string(),
+                revision: before.state_revision,
+                body: snapshot(&before, self.root_worktree_id),
+            }));
+        }
         let session_id = session.session_id;
         let operation = journal(operation_id, self.generation, semantic_key);
         let removing = self
@@ -751,50 +845,99 @@ impl SessionRuntime {
                 Utc::now(),
             )
             .map_err(|_| SessionRuntimeError::Rejected)?;
-        let session = removing
+        // The teardown carries the stable identity, not a fence captured here:
+        // the completion fence is recomputed when the worker finalizes, because
+        // this revision is routinely stale by then (see `finish_teardown`).
+        Ok(SessionRemoveStep::Accepted {
+            reply: SessionReply {
+                operation_id: operation_id.to_string(),
+                revision: removing.state_revision,
+                body: snapshot(&removing, self.root_worktree_id),
+            },
+            pending: PendingTeardown {
+                session_id,
+                operation_id,
+                session_root: self.session_root(&name),
+                name,
+                force,
+            },
+        })
+    }
+
+    /// Every unfinished teardown, derived from durable state: a `Deleting`
+    /// record that carries both its admitting operation and its delete plan.
+    ///
+    /// This derivation is the whole queue. A daemon that died mid-teardown
+    /// resumes from it on the next start, and there is no separate file that
+    /// could disagree with the lifecycle state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable lifecycle state cannot be read.
+    pub fn pending_teardowns(&self) -> Result<Vec<PendingTeardown>, SessionRuntimeError> {
+        let state = self.state()?;
+        Ok(state
             .sessions
             .iter()
-            .find(|session| session.session_id == session_id)
-            .ok_or(SessionRuntimeError::Rejected)?;
-        let fence = fence(&removing, session, operation_id);
-        let path = self
-            .repo_root
-            .join(STATE_DIR)
-            .join(SESSIONS_DIR)
-            .join(&name);
-        Ok(SessionRemoveStep::Pending(SessionRemoveInFlight {
-            operation_id,
-            fence,
-            session_root: path,
-            force,
-        }))
+            .filter(|session| {
+                session.lifecycle
+                    == usagi_core::domain::session_lifecycle::SessionLifecycle::Deleting
+            })
+            .filter_map(|session| {
+                let plan = session.delete_plan.as_ref()?;
+                Some(PendingTeardown {
+                    session_id: session.session_id,
+                    operation_id: session.operation_id?,
+                    session_root: self.session_root(&session.name),
+                    name: session.name.clone(),
+                    force: plan.force,
+                })
+            })
+            .collect())
     }
 
-    /// Tears down the deleting session's worktree. Pure Git/filesystem work that
-    /// runs with the shared session lock released.
-    fn execute_remove(
-        git: &dyn GitRunner,
-        in_flight: &SessionRemoveInFlight,
-    ) -> anyhow::Result<()> {
-        remove_session_tree(git, &in_flight.session_root, in_flight.force)
-    }
-
-    /// Records the durable outcome of a remove whose worktree teardown already
-    /// ran. Runs under the shared session lock.
-    // Any teardown failure maps to one safe durable message, so `result`'s error
-    // is deliberately not read; the Ok/Err arms mirror the original `remove`.
-    #[allow(clippy::single_match_else, clippy::needless_pass_by_value)]
-    fn finish_remove(
+    /// Records the durable outcome of a teardown whose worktree effect already
+    /// ran. Runs under the shared session lock, and only briefly.
+    ///
+    /// The completion fence is recomputed from the state observed here rather
+    /// than captured at admission: the teardown runs concurrently with other
+    /// lifecycle work, so the revision it was admitted at is routinely stale by
+    /// the time it finishes. Identity is still fenced by the session
+    /// incarnation, its attempt, and the admitting operation, so a record that a
+    /// later attempt replaced is never completed by an older teardown.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionRuntimeError::DurableFailure`] carrying the safe failure
+    /// summary when the teardown failed, or [`SessionRuntimeError::Storage`]
+    /// when the outcome cannot be persisted.
+    pub fn finish_teardown(
         &mut self,
-        in_flight: SessionRemoveInFlight,
-        result: anyhow::Result<()>,
+        pending: &PendingTeardown,
+        outcome: Result<(), String>,
     ) -> Result<SessionReply, SessionRuntimeError> {
-        let SessionRemoveInFlight {
-            operation_id,
-            fence,
-            ..
-        } = in_flight;
-        match result {
+        let state = self.state()?;
+        let Some(fence) = state
+            .sessions
+            .iter()
+            .find(|session| {
+                session.session_id == pending.session_id
+                    && session.operation_id == Some(pending.operation_id)
+                    && session.lifecycle
+                        == usagi_core::domain::session_lifecycle::SessionLifecycle::Deleting
+            })
+            .and_then(|session| fence(&state, session, pending.operation_id))
+        else {
+            // The teardown is no longer the record's live operation: a restart
+            // already finalized it, or the record moved on. Report the current
+            // durable truth instead of writing a stale outcome.
+            return Ok(SessionReply {
+                operation_id: pending.operation_id.to_string(),
+                revision: state.state_revision,
+                body: snapshot(&state, self.root_worktree_id),
+            });
+        };
+        match outcome {
             Ok(()) => {
                 let completed = self
                     .store
@@ -805,15 +948,20 @@ impl SessionRuntime {
                     )
                     .map_err(|_| SessionRuntimeError::Storage)?;
                 Ok(SessionReply {
-                    operation_id: operation_id.to_string(),
+                    operation_id: pending.operation_id.to_string(),
                     revision: completed.state_revision,
                     body: snapshot(&completed, self.root_worktree_id),
                 })
             }
-            Err(_) => {
-                let failure = SessionRuntimeError::DurableFailure(
-                    "could not remove the session worktree; see the daemon log for details".into(),
-                );
+            Err(error) => {
+                // Keep the actionable reason: without it a `Failed` row only
+                // says the removal failed, and the operator cannot tell a busy
+                // worktree from a permission problem without the daemon log.
+                let failure = SessionRuntimeError::DurableFailure(format!(
+                    "could not remove the session worktree \"{}\": {}",
+                    pending.name,
+                    worktree_failure_detail(&error)
+                ));
                 let _ = self.store.apply(
                     self.generation,
                     LifecycleEvent::Failed {
@@ -828,6 +976,10 @@ impl SessionRuntime {
                 Err(failure)
             }
         }
+    }
+
+    fn session_root(&self, name: &str) -> PathBuf {
+        self.repo_root.join(STATE_DIR).join(SESSIONS_DIR).join(name)
     }
 
     fn replay(
@@ -926,6 +1078,16 @@ impl SessionRuntime {
         })
     }
 
+    /// Reconciles work an earlier daemon left unfinished.
+    ///
+    /// An interrupted create cannot be resumed: its worktree effect is not
+    /// reversible and its completion cannot be proven, so it becomes a safe
+    /// failure awaiting explicit recovery. An interrupted **delete** is
+    /// different — the teardown is idempotent (a missing tree counts as
+    /// removed) and its delete plan is durable — so it is left `Deleting` and
+    /// resumed by the teardown worker, which derives it from exactly that
+    /// state. Failing it here instead is what used to leave a half-removed
+    /// worktree behind a record that kept owning the session name.
     fn reconcile(&mut self) -> Result<(), SessionRuntimeError> {
         let state = self.state()?;
         for session in state.sessions.into_iter().filter(|session| {
@@ -933,18 +1095,10 @@ impl SessionRuntime {
                 session.lifecycle,
                 usagi_core::domain::session_lifecycle::SessionLifecycle::Creating
                     | usagi_core::domain::session_lifecycle::SessionLifecycle::Initializing
-                    | usagi_core::domain::session_lifecycle::SessionLifecycle::Deleting
             )
         }) {
             let Some(operation_id) = session.operation_id else {
                 continue;
-            };
-            let failure_stage = if session.lifecycle
-                == usagi_core::domain::session_lifecycle::SessionLifecycle::Deleting
-            {
-                FailureStage::Delete
-            } else {
-                FailureStage::Create
             };
             self.store
                 .apply(
@@ -952,7 +1106,7 @@ impl SessionRuntime {
                     LifecycleEvent::ReconcileInterrupted {
                         session_id: session.session_id,
                         operation_id,
-                        stage: failure_stage,
+                        stage: FailureStage::Create,
                     },
                     Utc::now(),
                 )
@@ -1230,25 +1384,27 @@ fn semantic_key(action: SessionAction, name: &str) -> String {
     format!("{action:?}:{name}").to_ascii_lowercase()
 }
 
+/// The completion fence for one session operation, taken from the journal entry
+/// rather than from this daemon's own generation: a teardown resumed after a
+/// restart must complete the operation its predecessor journaled.
 fn fence(
     state: &WorkspaceLifecycleState,
     session: &usagi_core::domain::session_lifecycle::ManagedSession,
     operation_id: OperationId,
-) -> CompletionFence {
-    CompletionFence {
+) -> Option<CompletionFence> {
+    let operation = state
+        .operations
+        .iter()
+        .find(|operation| operation.operation_id == operation_id)?;
+    Some(CompletionFence {
         workspace_id: state.workspace_id,
         session_id: Some(session.session_id),
         operation_id,
-        owner_daemon_generation: state
-            .operations
-            .iter()
-            .find(|operation| operation.operation_id == operation_id)
-            .map(|operation| operation.owner_daemon_generation)
-            .expect("reserved operation exists"),
-        execution_attempt: 1,
+        owner_daemon_generation: operation.owner_daemon_generation,
+        execution_attempt: operation.execution_attempt,
         lifecycle_attempt: session.attempt,
         expected_revision: state.state_revision,
-    }
+    })
 }
 
 fn snapshot(state: &WorkspaceLifecycleState, root_worktree_id: WorktreeId) -> Value {
@@ -1272,10 +1428,8 @@ fn snapshot(state: &WorkspaceLifecycleState, root_worktree_id: WorktreeId) -> Va
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use crate::usecase::session_teardown::drain_pending_teardowns;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycle};
@@ -1390,6 +1544,15 @@ mod tests {
             })
         }
     }
+    /// A teardown that always refuses, standing in for a worktree Git will not
+    /// remove (dirty, busy, or permission-denied).
+    struct FailingTeardown;
+    impl TeardownEffect for FailingTeardown {
+        fn tear_down(&self, _: &PendingTeardown) -> Result<(), String> {
+            Err("fatal: 'one' contains modified or untracked files".into())
+        }
+    }
+
     fn runtime(git: FakeGit) -> (TempDir, SessionRuntime) {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join(".git")).unwrap();
@@ -2499,7 +2662,7 @@ mod tests {
     }
 
     #[test]
-    fn perform_remove_releases_the_session_lock_while_tearing_down_the_worktree() {
+    fn perform_remove_accepts_without_touching_the_worktree_and_hands_it_to_the_worker() {
         let (tmp, rt) = runtime(FakeGit::ok());
         let runtime = Arc::new(Mutex::new(rt));
         perform_create(
@@ -2509,21 +2672,254 @@ mod tests {
             &json!({"name":"one"}),
         )
         .unwrap();
-        // Materialize a linked worktree so the teardown actually invokes Git.
+        // Materialize a linked worktree so a teardown would have to invoke Git.
         let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
         std::fs::create_dir_all(&session_root).unwrap();
         std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
-        let observed_unlocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let git = LockProbeGit {
-            runtime: Arc::downgrade(&runtime),
-            observed_unlocked: Arc::clone(&observed_unlocked),
-        };
-        let reply = perform_remove(&runtime, &git, &operation(), &json!({"name":"one"})).unwrap();
-        assert!(
-            observed_unlocked.load(std::sync::atomic::Ordering::SeqCst),
-            "the session lock must be released while `git worktree remove` runs"
+        let signal = TeardownSignal::new();
+
+        let reply =
+            perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
+
+        // The reply is the acceptance: the row is `deleting`, the tree is still
+        // there, and the worker was woken.
+        assert_eq!(reply.body["sessions"][0]["name"], "one");
+        assert_eq!(reply.body["sessions"][0]["lifecycle"], "deleting");
+        assert!(session_root.exists());
+        assert!(signal.wait(std::time::Duration::from_millis(1)));
+
+        // The pending teardown is derived from that durable state alone.
+        let pending = runtime.lock().unwrap().pending_teardowns().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].name, "one");
+        assert_eq!(pending[0].session_root, session_root);
+
+        // Draining it removes the tree and retires the record.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let reports = drain_pending_teardowns(
+            &SharedSessionTeardown::new(Arc::clone(&runtime)),
+            &WorktreeTeardown::new(CountingGit {
+                calls: Arc::clone(&calls),
+            }),
+            &|| false,
         );
-        assert!(reply.body.get("sessions").is_some());
+        assert_eq!(reports[0].effect_error, None);
+        assert_eq!(reports[0].finalize_error, None);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(!session_root.exists());
+        assert!(
+            runtime.lock().unwrap().snapshot().unwrap()["sessions"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            runtime
+                .lock()
+                .unwrap()
+                .pending_teardowns()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_second_remove_of_a_deleting_session_returns_the_operation_already_in_flight() {
+        let (_tmp, rt) = runtime(FakeGit::ok());
+        let runtime = Arc::new(Mutex::new(rt));
+        perform_create(
+            &runtime,
+            &FakeGit::ok(),
+            &operation(),
+            &json!({"name":"one"}),
+        )
+        .unwrap();
+        let signal = TeardownSignal::new();
+        let accepted =
+            perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
+
+        // A retry with a fresh operation ID must not admit a second teardown.
+        let again =
+            perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
+
+        assert_eq!(again.operation_id, accepted.operation_id);
+        assert_eq!(again.revision, accepted.revision);
+        assert_eq!(
+            runtime.lock().unwrap().pending_teardowns().unwrap().len(),
+            1
+        );
+        assert_eq!(runtime.lock().unwrap().state().unwrap().operations.len(), 2);
+    }
+
+    #[test]
+    fn a_teardown_failure_records_the_reason_on_a_failed_row_and_frees_the_name_after_removal() {
+        let (_tmp, rt) = runtime(FakeGit::ok());
+        let runtime = Arc::new(Mutex::new(rt));
+        perform_create(
+            &runtime,
+            &FakeGit::ok(),
+            &operation(),
+            &json!({"name":"one"}),
+        )
+        .unwrap();
+        let signal = TeardownSignal::new();
+        perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
+
+        let reports = drain_pending_teardowns(
+            &SharedSessionTeardown::new(Arc::clone(&runtime)),
+            &FailingTeardown,
+            &|| false,
+        );
+
+        assert!(reports[0].effect_error.is_some());
+        assert_eq!(reports[0].finalize_error, None);
+        let listed = runtime.lock().unwrap().snapshot().unwrap();
+        assert_eq!(listed["sessions"][0]["lifecycle"], "failed");
+        let summary = listed["sessions"][0]["failure"]["summary"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(summary.contains("could not remove the session worktree \"one\""));
+        assert!(summary.contains("contains modified or untracked files"));
+        // The failed row still owns the name; removing it frees it again.
+        assert!(
+            runtime
+                .lock()
+                .unwrap()
+                .pending_teardowns()
+                .unwrap()
+                .is_empty()
+        );
+        perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
+        drain_pending_teardowns(
+            &SharedSessionTeardown::new(Arc::clone(&runtime)),
+            &WorktreeTeardown::new(FakeGit::ok()),
+            &|| false,
+        );
+        assert!(
+            perform_create(
+                &runtime,
+                &FakeGit::ok(),
+                &operation(),
+                &json!({"name":"one"})
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_interrupted_teardown_is_resumed_after_restart_instead_of_failing() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        let state_dir = tmp.path().join("daemon");
+        let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
+        let first = Arc::new(Mutex::new(
+            SessionRuntime::open(
+                tmp.path().to_path_buf(),
+                &state_dir,
+                DaemonGeneration::new(),
+                FakeGit::ok(),
+            )
+            .unwrap(),
+        ));
+        perform_create(&first, &FakeGit::ok(), &operation(), &json!({"name":"one"})).unwrap();
+        std::fs::create_dir_all(&session_root).unwrap();
+        std::fs::write(session_root.join("file"), "work").unwrap();
+        let signal = TeardownSignal::new();
+        perform_remove(&first, &signal, &operation(), &json!({"name":"one"})).unwrap();
+        // The daemon dies here: the record stays `Deleting` with its durable
+        // delete plan, and the worktree is still on disk.
+        drop(first);
+
+        let restarted = Arc::new(Mutex::new(
+            SessionRuntime::open(
+                tmp.path().to_path_buf(),
+                &state_dir,
+                DaemonGeneration::new(),
+                FakeGit::ok(),
+            )
+            .unwrap(),
+        ));
+
+        // Restart does not fail the interrupted delete: it is pending again.
+        let listed = restarted.lock().unwrap().snapshot().unwrap();
+        assert_eq!(listed["sessions"][0]["lifecycle"], "deleting");
+        let pending = restarted.lock().unwrap().pending_teardowns().unwrap();
+        assert_eq!(pending.len(), 1);
+
+        // The new daemon's worker completes the operation the previous
+        // generation journaled.
+        drain_pending_teardowns(
+            &SharedSessionTeardown::new(Arc::clone(&restarted)),
+            &WorktreeTeardown::new(FakeGit::ok()),
+            &|| false,
+        );
+        assert!(!session_root.exists());
+        assert!(
+            restarted.lock().unwrap().snapshot().unwrap()["sessions"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn finalizing_a_teardown_twice_reports_durable_truth_without_a_stale_write() {
+        let (_tmp, rt) = runtime(FakeGit::ok());
+        let runtime = Arc::new(Mutex::new(rt));
+        perform_create(
+            &runtime,
+            &FakeGit::ok(),
+            &operation(),
+            &json!({"name":"one"}),
+        )
+        .unwrap();
+        let signal = TeardownSignal::new();
+        perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
+        let pending = runtime.lock().unwrap().pending_teardowns().unwrap()[0].clone();
+
+        let completed = runtime
+            .lock()
+            .unwrap()
+            .finish_teardown(&pending, Ok(()))
+            .unwrap();
+        // The record is gone, so a duplicate finalization is a no-op that
+        // reports the current state rather than writing a stale outcome.
+        let repeated = runtime
+            .lock()
+            .unwrap()
+            .finish_teardown(&pending, Ok(()))
+            .unwrap();
+
+        assert_eq!(repeated.revision, completed.revision);
+        assert!(repeated.body["sessions"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_shared_teardown_journal_reports_an_unavailable_session_owner() {
+        let (_tmp, rt) = runtime(FakeGit::ok());
+        let shared = Arc::new(Mutex::new(rt));
+        perform_create(
+            &shared,
+            &FakeGit::ok(),
+            &operation(),
+            &json!({"name":"one"}),
+        )
+        .unwrap();
+        let signal = TeardownSignal::new();
+        perform_remove(&shared, &signal, &operation(), &json!({"name":"one"})).unwrap();
+        let journal = SharedSessionTeardown::new(Arc::clone(&shared));
+        let pending = journal.pending();
+        assert_eq!(pending.len(), 1);
+        poison_lock(&shared);
+
+        // A poisoned session lock leaves the record `Deleting`, so the next
+        // drain retries it instead of losing the teardown.
+        assert_eq!(
+            journal.finish(&pending[0], Ok(())),
+            Err("session lifecycle owner is unavailable".into())
+        );
+        assert!(journal.pending().is_empty(), "the poisoned read is empty");
     }
 
     #[test]
@@ -2537,10 +2933,16 @@ mod tests {
             perform_create(&runtime, &FakeGit::ok(), &create_op, &json!({"name":"one"})).unwrap();
         assert_eq!(created.body, replayed_create.body);
 
+        let signal = TeardownSignal::new();
         let remove_op = operation();
-        perform_remove(&runtime, &FakeGit::ok(), &remove_op, &json!({"name":"one"})).unwrap();
+        perform_remove(&runtime, &signal, &remove_op, &json!({"name":"one"})).unwrap();
+        drain_pending_teardowns(
+            &SharedSessionTeardown::new(Arc::clone(&runtime)),
+            &WorktreeTeardown::new(FakeGit::ok()),
+            &|| false,
+        );
         let replayed_remove =
-            perform_remove(&runtime, &FakeGit::ok(), &remove_op, &json!({"name":"one"})).unwrap();
+            perform_remove(&runtime, &signal, &remove_op, &json!({"name":"one"})).unwrap();
         assert!(replayed_remove.body.get("sessions").is_some());
     }
 
@@ -2574,38 +2976,19 @@ mod tests {
 
     #[test]
     fn perform_remove_maps_a_poisoned_session_lock_to_storage() {
-        // Poisoned before begin: the first re-lock fails.
+        // The admission is the only lock this path takes, so a poisoned session
+        // lock is the one way it fails without reaching the reducer.
         let (_tmp, rt) = runtime(FakeGit::ok());
         let shared = Arc::new(Mutex::new(rt));
         poison_lock(&shared);
+
         assert!(matches!(
             perform_remove(
                 &shared,
-                &FakeGit::ok(),
+                &TeardownSignal::new(),
                 &operation(),
                 &json!({"name":"one"})
             ),
-            Err(SessionRuntimeError::Storage)
-        ));
-
-        // Poisoned mid-teardown: begin succeeds, the finish re-lock fails.
-        let (tmp, rt) = runtime(FakeGit::ok());
-        let shared = Arc::new(Mutex::new(rt));
-        perform_create(
-            &shared,
-            &FakeGit::ok(),
-            &operation(),
-            &json!({"name":"one"}),
-        )
-        .unwrap();
-        let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
-        std::fs::create_dir_all(&session_root).unwrap();
-        std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
-        let git = PoisoningGit {
-            runtime: Arc::downgrade(&shared),
-        };
-        assert!(matches!(
-            perform_remove(&shared, &git, &operation(), &json!({"name":"one"})),
             Err(SessionRuntimeError::Storage)
         ));
     }

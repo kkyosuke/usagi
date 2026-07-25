@@ -186,15 +186,30 @@ snapshot を読み直す。slow subscriber は bounded queue で coalesce/drop �
 
 ## managed session request
 
-`session` kind の `create`、`remove`、`list`、`overview`、legacy `resume_agent` は daemon が所有する durable lifecycle / Agent runtime に届く。create / remove / resume_agent は producer-issued `OperationId` を accepted response に返し、list / overview は同じ revision 付き workspace snapshot を返す。create / remove の accepted response は snapshot とともに safe final hook を返す。hook は `kind`（`session.created` または `session.removed`）、`operation_id`、`revision` を持ち、TUI は create skeleton を同じ operation の `session.created` hook でだけ終了する。`OperationId` の再送は action と canonical session target が一致するときだけ同じ operation を返し、異なれば `idempotency_conflict` で拒否する。
+`session` kind の `create`、`remove`、`list`、`overview`、legacy `resume_agent` は daemon が所有する durable lifecycle / Agent runtime に届く。create / remove / resume_agent は producer-issued `OperationId` を accepted response に返し、list / overview は同じ revision 付き workspace snapshot を返す。create / remove の accepted response は snapshot とともに safe final hook を返す。hook は `kind`（`session.created` または `session.removed`）、`operation_id`、`revision` を持ち、TUI は create skeleton を同じ operation の `session.created` hook でだけ終了する。remove の hook は受理を意味し、worktree 撤去の完了ではない（下表）。`OperationId` の再送は action と canonical session target が一致するときだけ同じ operation を返し、異なれば `idempotency_conflict` で拒否する。
 
-create / remove の durable outcome と wire response / hook の対応は次の表を正本とする。同じ semantic operation の再送は daemon restart の前後を問わず同じ行を replay し、filesystem / Git effect を再実行しない。
+create の durable outcome と wire response / hook の対応は次の表を正本とする。同じ semantic operation の再送は daemon restart の前後を問わず同じ行を replay し、filesystem / Git effect を再実行しない。
 
 | durable outcome | IPC outcome | final hook |
 |---|---|---|
-| `succeeded` | `accepted`（同じ `operation_id` / final revision / snapshot） | create は `session.created`、remove は `session.removed` |
+| `succeeded` | `accepted`（同じ `operation_id` / final revision / snapshot） | `session.created` |
 | `failed`（effect failure または interrupted reconcile） | safe `error` | なし |
 | 同じ `OperationId`、異なる action / canonical target | `idempotency_conflict` | なし |
+
+**remove の応答は durable outcome ではなく受理の時点で返る**（[5. daemon の session teardown
+worker](05-daemon.md#session-teardown-worker) が正本）。worktree 撤去は daemon 所有 worker が続けるため、応答が返った
+時点では session は snapshot 上に `deleting` として存在する。
+
+| remove request | IPC outcome | final hook |
+|---|---|---|
+| 受理（`available` / `failed` な session を `deleting` へ遷移） | `accepted`（`operation_id` / 遷移後 revision / `deleting` を含む snapshot） | `session.removed`（＝受理。撤去完了ではない） |
+| すでに `deleting` な session への新しい `OperationId` | `accepted`（**進行中 operation の** `operation_id` と現在の revision / snapshot） | `session.removed` |
+| 受理済み operation の同一 `OperationId` 再送 | teardown 成功なら `accepted` の replay、失敗なら safe `error`（保存済み summary） | 成功時のみ |
+| 未知の session、不正な `force`、非 canonical `OperationId` | safe `error` | なし |
+| 同じ `OperationId`、異なる action / canonical target | `idempotency_conflict` | なし |
+
+teardown 自体の結果は、この応答ではなく後続の `list` / `overview` snapshot で観測する（`deleting` 行の消滅＝完了、
+`failed` 行＝失敗と理由）。
 
 snapshot の session は `WorkspaceId`、`SessionId`、`WorktreeId`、lifecycle を含み、workspace 全体の **root `WorktreeId`**（`⌂ root` の scope 識別子）も含む。agent / terminal 起動用の checkout path は、daemon が available の完全一致 scope（managed session、または `session_id` を持たない workspace root）からだけ解決する。client が name または path を渡して scope を再探索する wire contract はない。
 

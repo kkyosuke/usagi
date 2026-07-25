@@ -346,8 +346,14 @@ scope/revision 不一致は安全な error として収束し、provider の las
 sidebar は daemon snapshot の `available` session に加えて、名前を占有し続ける `failed` session も
 `failed` の状態と失敗理由付きで表示する。`failed` 行は使用不可（`can_use=false`）なので attach を提示せず、
 削除可能（`can_remove=true`）なので `x` / `X` の remove をそのまま受け付ける。各行の可否は snapshot の lifecycle
-から client 側で導出する（`SessionLifecycle::capabilities` が正本）。過渡状態（`creating` / `deleting` など）は
-一覧に出さず、attach 対象を広げないため scope 解決は引き続き `available` だけを対象とする。
+から client 側で導出する（`SessionLifecycle::capabilities` が正本）。`deleting` session も表示し、削除中の行
+（Danger の `✂` と wave）として描く。daemon は remove を受理した時点で応答し、worktree の撤去は daemon 所有の
+worker が続けるため（[5. daemon の session teardown worker](05-daemon.md#session-teardown-worker)）、この行は
+撤去が終わるまで（巨大な `target/` では分オーダー）残り、完了で消える。`deleting` は使用不可かつ削除不可
+（`can_use=false` / `can_remove=false`）なので、attach も再 remove も提示しない。この表示は daemon の lifecycle だけを
+根拠にするため、削除を要求していない別の TUI や再起動後の TUI でも同じ行が削除中として見える。reservation 状態
+（`creating` / `initializing`）は 1 request で完結し、作成中 skeleton という固有の表現を持つため一覧に出さない。
+いずれの場合も attach 対象は広がらず、scope 解決は引き続き `available` だけを対象とする。
 
 `env` は現在 active な target（workspace root か session）の environment editor を開き、その target の
 永続化済み環境変数を読み込んで表示する。正本は notes・todos・decisions と同じ repository の `state.json`
