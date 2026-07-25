@@ -11,8 +11,8 @@
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::{TextInput, modal};
 use crate::presentation::workspace_runtime::AgentReopenChoice;
-use crate::usecase::closeup;
-use usagi_core::domain::settings::ModalSelectionMode;
+use crate::usecase::{agent_command, closeup};
+use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
 
 /// モーダルの枠の内側（内容）幅。
 const INNER_WIDTH: usize = 50;
@@ -28,6 +28,11 @@ pub struct CloseupModal {
     expanded: bool,
     selected_subcommand: usize,
     reopen_choices: Vec<AgentReopenChoice>,
+    /// Agent CLIs installed on this machine. The `agent` picker and its Tab
+    /// completion offer only these, so a selection is always runnable.
+    available_models: AvailableModels,
+    /// The configured provider an `agent` without `-m` launches.
+    default_model: DefaultModel,
 }
 
 impl CloseupModal {
@@ -51,6 +56,8 @@ impl CloseupModal {
             expanded: false,
             selected_subcommand: 0,
             reopen_choices: Vec::new(),
+            available_models: AvailableModels::all(),
+            default_model: DefaultModel::default(),
         }
     }
 
@@ -58,6 +65,18 @@ impl CloseupModal {
     #[must_use]
     pub fn with_reopen_choices(mut self, choices: Vec<AgentReopenChoice>) -> Self {
         self.reopen_choices = choices;
+        self.selected_subcommand = self
+            .selected_subcommand
+            .min(self.subcommands().len().saturating_sub(1));
+        self
+    }
+
+    /// Constrain the `agent -m` picker and completion to the installed CLIs and
+    /// mark the configured default.
+    #[must_use]
+    pub fn with_agent_models(mut self, available: AvailableModels, default: DefaultModel) -> Self {
+        self.available_models = available;
+        self.default_model = default;
         self.selected_subcommand = self
             .selected_subcommand
             .min(self.subcommands().len().saturating_sub(1));
@@ -255,6 +274,13 @@ impl CloseupModal {
             return Vec::new();
         };
         match action.name {
+            "agent" => agent_command::model_choices(self.available_models, self.default_model)
+                .into_iter()
+                .map(|choice| ModalSubcommand {
+                    label: choice.label,
+                    value: choice.value,
+                })
+                .collect(),
             "close" => vec![ModalSubcommand::plain("--force")],
             "reopen" => self
                 .reopen_choices
@@ -273,12 +299,26 @@ impl CloseupModal {
     }
 
     fn subcommand_completion(&self) -> Option<String> {
-        let input = self.input.value();
+        let input = self.input.value().trim_start();
+        // The command name itself is complete only once a separator follows it;
+        // before that, command-name completion owns the input.
+        let separator = input.find(char::is_whitespace)?;
+        let (command, arguments) = input.split_at(separator);
+        // `agent` owns a multi-token grammar (`-m <cli>`), so it completes from
+        // its own vocabulary rather than this single-token rule.
+        if command == "agent" {
+            let mut candidates =
+                agent_command::completions(arguments, self.available_models).into_iter();
+            let candidate = candidates.next()?;
+            return candidates
+                .next()
+                .is_none()
+                .then(|| format!("{command} {candidate}"));
+        }
         if input.ends_with(char::is_whitespace) {
             return None;
         }
-        let mut tokens = input.split_whitespace();
-        let command = tokens.next()?;
+        let mut tokens = arguments.split_whitespace();
         let prefix = tokens.next()?;
         if tokens.next().is_some() {
             return None;
@@ -351,7 +391,7 @@ fn body(state: &CloseupModal) -> Vec<String> {
                     state.input.selection(),
                 ),
                 String::new(),
-                modal::footer("Enter: run   Esc: back"),
+                modal::footer("Tab: complete   Enter: run   Esc: back"),
             ],
             BODY_HEIGHT,
         );
@@ -418,7 +458,7 @@ pub fn render_over(
 mod tests {
     use super::{CloseupModal, render, render_over};
     use crate::presentation::widgets::{display_width, strip_ansi};
-    use usagi_core::domain::settings::ModalSelectionMode;
+    use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
 
     #[test]
     fn action_selection_keeps_the_closeup_box_height_stable() {
@@ -461,11 +501,70 @@ mod tests {
             assert!(joined(&modal).contains(subcommand));
         }
 
-        // `agent` carries no subcommands, so expanding it is inert.
+        // `agent` expands into its installed `-m` choices, not `close`'s flags.
         let mut agent = CloseupModal::new("daemon");
         assert_eq!(agent.selected_action().name, "agent");
         agent.expand_selected();
         assert!(!joined(&agent).contains("--force"));
+        assert!(joined(&agent).contains("-m codex"));
+    }
+
+    #[test]
+    fn agent_expands_only_installed_clis_and_marks_the_configured_default() {
+        let mut modal = CloseupModal::new("daemon").with_agent_models(
+            AvailableModels::new([DefaultModel::OpenAi, DefaultModel::SakanaAi]),
+            DefaultModel::SakanaAi,
+        );
+        assert_eq!(modal.selected_action().name, "agent");
+        modal.expand_selected();
+        let frame = joined(&modal);
+        assert!(frame.contains("-m codex"));
+        assert!(frame.contains("-m sakana.ai  (default)"));
+        // An absent CLI is never offered.
+        assert!(!frame.contains("-m claude"));
+
+        // Confirming a row submits the selection as `agent` arguments.
+        assert_eq!(modal.submission(), "agent -m codex");
+        modal.select_next();
+        assert_eq!(modal.submission(), "agent -m sakana.ai");
+
+        // With no CLI installed the action carries no choices and cannot expand.
+        let mut none = CloseupModal::new("daemon")
+            .with_agent_models(AvailableModels::default(), DefaultModel::OpenAi);
+        none.expand_selected();
+        assert_eq!(none.submission(), "agent");
+        assert!(!joined(&none).contains("-m"));
+    }
+
+    #[test]
+    fn tab_completes_the_agent_model_flag_and_only_installed_clis() {
+        let models = AvailableModels::new([DefaultModel::Claude, DefaultModel::SakanaAi]);
+        let complete = |input: &str| {
+            let mut modal = CloseupModal::with_selection_mode("s", ModalSelectionMode::Prompt)
+                .with_agent_models(models, DefaultModel::Claude);
+            for character in input.chars() {
+                modal.insert_char(character);
+            }
+            modal.complete_selected();
+            modal.submission()
+        };
+
+        // A unique CLI prefix completes to its full selector.
+        assert_eq!(complete("agent -m sak"), "agent -m sakana.ai");
+        assert_eq!(complete("agent -m c"), "agent -m claude");
+        assert_eq!(complete("agent --model sak"), "agent --model sakana.ai");
+        // The flag itself completes from its unique prefix.
+        assert_eq!(complete("agent --"), "agent --model");
+        // An absent CLI has nothing to complete to, and neither has an unknown
+        // prefix or an already complete selection.
+        assert_eq!(complete("agent -m cod"), "agent -m cod");
+        assert_eq!(complete("agent -m zzz"), "agent -m zzz");
+        assert_eq!(complete("agent -m claude"), "agent -m claude");
+        // An ambiguous prefix leaves the input untouched.
+        assert_eq!(complete("agent -m "), "agent -m ");
+        // Other commands keep their own single-token completion.
+        assert_eq!(complete("terminal n"), "terminal new");
+        assert_eq!(complete("close --f"), "close --force");
     }
 
     #[test]

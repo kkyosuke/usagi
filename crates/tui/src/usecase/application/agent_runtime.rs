@@ -396,12 +396,21 @@ mod tests {
         let effects = runtime.update(AppEvent::Key(controller::AppKey::SubmitCloseup(
             "agent".to_owned(),
         )));
+        // The default `agent` resolves the configured provider (`codex`) rather
+        // than deferring to the daemon's own default.
         assert!(matches!(
             effects.as_slice(),
-            [Effect::LaunchAgent { profile: None, .. }]
+            [Effect::LaunchAgent { profile: Some(profile), .. }] if profile.as_str() == "codex"
         ));
         assert_eq!(runtime.host().port().launches.len(), 1);
-        assert_eq!(runtime.host().port().launches[0].1.profile, None);
+        assert_eq!(
+            runtime.host().port().launches[0]
+                .1
+                .profile
+                .as_ref()
+                .map(usagi_core::domain::agent::AgentProfileId::as_str),
+            Some("codex")
+        );
 
         // A successful submit closes the action modal, so re-open it before the
         // next launch. (The live resample no longer re-forces it; see #352.)
