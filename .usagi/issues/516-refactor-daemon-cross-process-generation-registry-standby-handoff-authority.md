@@ -4,11 +4,11 @@ title: refactor(daemon): cross-process generation registry と standby handoff a
 status: todo
 priority: high
 labels: [review, v2, daemon, lifecycle, ipc, generation, recovery]
-dependson: [514, 515, 528]
-related: [209, 221, 492, 507]
+dependson: [515, 528]
+related: [209, 221, 492, 507, 550]
 parent: 507
 created_at: 2026-07-22T11:30:17.999672+00:00
-updated_at: 2026-07-22T12:05:57.851198+00:00
+updated_at: 2026-07-25T13:20:33.599441+00:00
 ---
 
 ## 問題・根拠
@@ -35,9 +35,9 @@ cross-process の generation registry と admission fence を、#507 の shippin
 7. `active` だけが control operation と新規 spawn を受理する。`draining` は自 generation が所有する terminal の attach/input/resize/resync/exit/kill と必要な read/inventory だけを受理し、他 generation・新規作成・control mutation は effect zero で拒否する。`standby/retired` は mutation を受理しない。
 8. role 変更時は accept loop だけでなく、既存 connection、in-flight request、supervisor/decision/PR refresh 等の internal producer を fence する。active-only work は durable reservation より前に role/revision 付き RAII admission lease を取得し、external effect と durable commit の完了まで保持する。`active → draining` は新規 lease と active-only background worker を先に閉じ、既存 lease / worker が 0 になるまで待ってから registry / locator handoff を commit する。effect 後の再検証だけで既発生 spawn を取り消せるとは扱わない。owner-terminal PTY observer/command は別 lease で継続し、collection は lease 発行停止と 0 確認後だけ許可する。
 9. `retired` への遷移では既接続 stream handle を shutdown して frame read を解除し、保持した client worker JoinHandle をすべて join してから endpoint/process を回収する。client thread の JoinHandle を破棄したまま count だけ待たない。
-10. legacy single-generation state は、#514 の exact process identity と #515 の crash-safe locator 条件を満たす場合だけ active 1 件へ移行し、所有者を推測しない。
+10. legacy single-generation state は、main の exact process identity（`DaemonProcessObservation::Exact`）と #515 の crash-safe locator 条件を満たす場合だけ active 1 件へ移行し、所有者を推測しない。
 
-#514 の process identity、#515 の locator/temp recovery、#528 の canonical build artifact identity / safe trigger contract を前提にする。owner runtime の永続化方式と exit/capacity の移送は #518、client owner-generation routing は #508 で扱う。
+daemon owner process の exact identity（[依存の再判定](#依存の再判定)参照）、#515 の locator/temp recovery、#528 の canonical build artifact identity / safe trigger contract を前提にする。owner runtime の永続化方式と exit/capacity の移送は #518、client owner-generation routing は #508 で扱う。
 
 ## 非対象
 
@@ -79,7 +79,41 @@ cross-process の generation registry と admission fence を、#507 の shippin
 ## 依存関係
 
 ```text
-#514 exact process identity ─┐
-#515 locator recovery ───────┼─> 本 issue ─> #518 owner store/allocator ─> #508 routing ─> #507 shipping
-#528 artifact identity ──────┘
+#515 locator recovery ──┐
+                        ├─> 本 issue ─> #518 owner store/allocator ─> #508 routing ─> #507 shipping
+#528 artifact identity ─┘
 ```
+
+daemon owner の exact process identity は前提のままだが、issue 依存ではなく main の実装済み contract
+として参照する（次節）。
+
+## 依存の再判定
+
+`dependson` は `[514, 515, 528]` だった。#514（`fix(daemon): owner process identity で stop/restart signal を
+fence する`）の issue file は main に到達しないまま失われ（起票 `1fd28293` と退避 stash `bb45006a` にしか存在しない）、
+実装だけが merge された。宙吊り依存として本 issue が永久に ready にならなかったため、`[515, 528]` に整合させた。
+
+#514 の実装は次の 2 コミットで main に landed している（いずれも `origin/main` の ancestor）。
+
+| コミット | PR | 内容 |
+|---|---|---|
+| `3150ac3a` | #1241 | `DaemonRecord.process_start_identity`、`DaemonProcessObservation`（`Exact` / `Gone` / `IdentityMismatch` / `Unknown`）、`DaemonState::Unverified`、`LivenessProbe::observe(record)`、`Terminator::terminate(record)` |
+| `f1e68538` | #1234 | OS peer PID 束縛（Linux `SO_PEERCRED` / macOS `LOCAL_PEERPID`）、`verify_owner_binding`、Gone / Reused の lock 下 stale reclaim、`ConnectionRefused` からの通常 bootstrap recovery。PR 本文に `Backlog issue: #514` と明記 |
+
+本 issue が #514 に求めていたのは受入条件「legacy migration は exact identity/locator が検証できない場合に
+fail-closed となる」の primitive だけで、それは次のとおり main に存在する。
+
+- `usagi-core` domain: `classify(record, observation)` が `Exact` → `Alive`、`Gone` → `Stale`、それ以外を
+  `Unverified` に落とし、所有者を推測しない。
+- 合成ルート: `ExactProcessControl::observe` が OS process-start identity を照合し、`signal_exact_process` が
+  Linux では identity 検証済み pidfd、macOS では kill 直前の再検証を経てだけ signal する（raw PID fallback なし）。
+- `usagi-core` usecase: `verify_owner_binding` が OS peer PID・record・locator generation・`ServerHello`
+  の完全一致だけを owner authority とする。
+- `document/05-daemon.md` は「daemon owner process の exact identity と fenced SIGTERM は lifecycle record に
+  実装されている」と現在形で記載し、landing order も #528 + #515 → 本 issue → #518 → #508 → #507 として
+  #514 を含まない。
+
+なお #514 受入条件のうち「Gone / Reused の stop と start stale reclaim」だけは未達で、`daemon stop` /
+`start` / `restart` が PID 再利用 record（`IdentityMismatch`）を `Unverified` として拒否する一方、通常 client
+bootstrap の `recover_stale_client_endpoint_with` は `Gone | IdentityMismatch` を回収する非対称が残る。
+fail-closed であり本 issue の前提ではないため、依存には含めず #550 として分離した。

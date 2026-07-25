@@ -5,10 +5,10 @@ status: todo
 priority: high
 labels: [review, v2, daemon, lifecycle, recovery]
 dependson: [508]
-related: [209, 221, 275, 350, 492, 514, 515, 528]
+related: [209, 221, 275, 350, 492, 515, 528, 550]
 parent: 505
 created_at: 2026-07-21T21:20:49.574125+00:00
-updated_at: 2026-07-22T12:19:12.494535+00:00
+updated_at: 2026-07-25T13:22:11.243573+00:00
 ---
 
 ## 問題・影響
@@ -39,8 +39,7 @@ planned restart の state machine と owner fence は部分的に存在するが
 ## 依存分割と責務境界
 
 ```text
-#514 daemon owner identity ─┐
-#515 locator recovery ──────┼─> #516 generation registry / standby / admission
+#515 locator recovery ──────┬─> #516 generation registry / standby / admission
 #528 artifact identity ─────┘                         |
                                                       v
                                   #518 owner shards / allocator / event handoff
@@ -52,7 +51,7 @@ planned restart の state machine と owner fence は部分的に存在するが
                                   #507 shipping restart / stop / final E2E
 ```
 
-- #514 は daemon owner process の exact identity と shutdown primitive を担当する。terminal child identity は担当しない。
+- daemon owner process の exact identity と fenced shutdown primitive は main に実装済みで、issue 依存ではない（`DaemonProcessObservation` / `signal_exact_process` / `verify_owner_binding`。経緯は [#516 の依存の再判定](./516-refactor-daemon-cross-process-generation-registry-standby-handoff-authority.md#依存の再判定)）。terminal child identity はこの contract の対象外で、#518 が担当する。
 - #515 は locator temporary / secure atomic publish / crash recovery を担当する。generation CAS と handoff ordering は担当しない。
 - [#528](./528-fix-daemon-build-artifact-identity-safe-rollover-trigger.md) はcanonical artifact identity、release/development policy、old daemonを止めないsafe rollover triggerを担当する。
 - [#516](./516-refactor-daemon-cross-process-generation-registry-standby-handoff-authority.md) は cross-process role/CAS、private standby readiness、locator handoff、既接続 request と internal producer の admission lease を担当する。
@@ -106,4 +105,4 @@ restart 前後の active/draining PID と generation、Agent/generic child PID�
 
 ## docs / migration
 
-[daemon](../../document/05-daemon.md) と [IPC](../../document/04-ipc.md) は実装済みの現在形だけを記載する。#528 + #514/#515 → #516 → #518 → #508 → #507 の依存 DAG が未完了の間は、shipping restart が stop → fresh start で旧 PTY を継続しない事実、commit unknownでsame-version rebuildを検出できない制約、routing capability完了前はrolloverを有効化しない依存順を示す。legacy state は capability と exact identity を検証できる場合だけ移行し、unknown/corrupt registry や固定 child identity から owner を推測しない。
+[daemon](../../document/05-daemon.md) と [IPC](../../document/04-ipc.md) は実装済みの現在形だけを記載する。#528 + #515 → #516 → #518 → #508 → #507 の依存 DAG が未完了の間は、shipping restart が stop → fresh start で旧 PTY を継続しない事実、commit unknownでsame-version rebuildを検出できない制約、routing capability完了前はrolloverを有効化しない依存順を示す。legacy state は capability と exact identity を検証できる場合だけ移行し、unknown/corrupt registry や固定 child identity から owner を推測しない。
