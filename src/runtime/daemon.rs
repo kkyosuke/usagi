@@ -215,6 +215,9 @@ struct RootCodexProvisioner {
     readiness: Arc<dyn AgentReadinessProbe>,
     mcp_command: PathBuf,
     data_home: PathBuf,
+    /// The executable this profile launches: `codex`, or `codex-fugu` for the
+    /// Codex-compatible `sakana-ai` profile.
+    program: &'static str,
 }
 impl CodexProvisioner for RootCodexProvisioner {
     fn provision(
@@ -222,7 +225,7 @@ impl CodexProvisioner for RootCodexProvisioner {
         context: &ProvisionContext,
     ) -> Result<CodexProvision, CodexProvisionFailure> {
         self.readiness
-            .ready("codex")
+            .ready(self.program)
             .map_err(|()| CodexProvisionFailure::ExecutableUnavailable)?;
         let (working_directory, workspace_root) = working_directories(&self.sessions, context)
             .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
@@ -1446,6 +1449,14 @@ fn open_agent_runtime(
             readiness: Arc::clone(&readiness),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
+            program: "codex",
+        }),
+        CodexAdapter::sakana(RootCodexProvisioner {
+            sessions: Arc::clone(&sessions),
+            readiness: Arc::clone(&readiness),
+            mcp_command: mcp_command.clone(),
+            data_home: data_home.clone(),
+            program: "codex-fugu",
         }),
         ClaudeAdapter::new(RootClaudeProvisioner {
             sessions,

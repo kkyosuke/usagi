@@ -118,6 +118,63 @@ fn renders_public_interactive_argv_and_materializes_all_codex_artifacts_in_scope
 }
 
 #[test]
+fn sakana_profile_shares_the_codex_grammar_but_launches_its_own_executable() {
+    let mut adapter = CodexAdapter::sakana(FakeProvisioner::ready());
+    assert_eq!(adapter.profile().id.as_str(), "sakana-ai");
+    assert_eq!(adapter.profile().display_name, "sakana.ai");
+    assert_eq!(
+        adapter.profile().capabilities,
+        CodexAdapter::new(FakeProvisioner::ready())
+            .profile()
+            .capabilities
+    );
+
+    let mut request = request(LaunchMode::Interactive);
+    request.profile_id = AgentProfileId::new("sakana-ai").unwrap();
+    let resolved = adapter.resolve(&request).unwrap();
+
+    // Only the program differs: the argv grammar, model flag, and prompt
+    // handling stay identical to `codex`.
+    assert_eq!(resolved.snapshot.plan.program, "codex-fugu");
+    assert_eq!(resolved.snapshot.plan.profile_id.as_str(), "sakana-ai");
+    assert_eq!(
+        resolved.snapshot.plan.argv,
+        [
+            "--dangerously-bypass-hook-trust",
+            "--sandbox",
+            "workspace-write",
+            "--ask-for-approval",
+            "never",
+            "-m",
+            "gpt-5-codex",
+            "--",
+            "fix the test",
+        ]
+    );
+
+    // The `codex` profile ID is not accepted by the `sakana-ai` adapter, so a
+    // launch can never be routed to the wrong executable.
+    let mut sakana = CodexAdapter::sakana(FakeProvisioner::ready());
+    assert!(matches!(
+        sakana.resolve(&request_for("codex")),
+        Err(AdapterError::Validation(LaunchValidationError::UnknownProfile {
+            profile_id,
+        })) if profile_id.as_str() == "codex"
+    ));
+    // An explicit revision keeps the same product identity.
+    let pinned = CodexAdapter::sakana_with_revision(FakeProvisioner::ready(), 7);
+    assert_eq!(pinned.profile().revision, 7);
+    assert_eq!(pinned.profile().id.as_str(), "sakana-ai");
+}
+
+fn request_for(profile: &str) -> LaunchRequest {
+    LaunchRequest {
+        profile_id: AgentProfileId::new(profile).unwrap(),
+        ..request(LaunchMode::Interactive)
+    }
+}
+
+#[test]
 fn renders_resume_only_without_an_initial_prompt() {
     let mut request = request(LaunchMode::Interactive);
     request.resume = true;

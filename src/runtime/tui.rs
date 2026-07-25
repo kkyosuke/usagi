@@ -2575,8 +2575,14 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
     Ok(())
 }
 
+/// Probe every model provider in the shared vocabulary, so the Config screen and
+/// the Closeup `agent -m` picker offer exactly the CLIs installed here.
 fn available_agent_models() -> AvailableAgentModels {
-    AvailableAgentModels::new(cli_is_available("claude"), cli_is_available("codex"))
+    AvailableAgentModels::new(
+        usagi_core::domain::settings::DefaultModel::ALL
+            .into_iter()
+            .filter(|model| cli_is_available(model.command())),
+    )
 }
 
 fn cli_is_available(program: &str) -> bool {

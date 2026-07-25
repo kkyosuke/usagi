@@ -25,6 +25,12 @@ mod fixture;
 
 const PROFILE_NAME: &str = "codex";
 const PROFILE_REVISION: u32 = 1;
+/// Sakana AI ships a Codex-compatible CLI: the same argv grammar, resume form,
+/// and `-c` overrides behind its own executable and rollout store. It is
+/// therefore a second profile over this adapter rather than a second adapter.
+const SAKANA_PROFILE_NAME: &str = "sakana-ai";
+const SAKANA_PROGRAM: &str = "codex-fugu";
+const CODEX_PROGRAM: &str = "codex";
 
 /// The non-secret outcome that the renderer may use to build a durable plan.
 pub struct CodexProvision {
@@ -61,11 +67,16 @@ pub trait CodexProvisioner {
     ) -> Result<CodexProvision, CodexProvisionFailure>;
 }
 
-/// An [`AgentAdapter`] for the code-defined `codex` profile.
+/// An [`AgentAdapter`] for the code-defined `codex` and `sakana-ai` profiles.
+///
+/// One instance serves exactly one profile: `program` is the executable that
+/// profile launches, so the rendered plan never depends on a product-name
+/// switch downstream.
 #[derive(Debug)]
 pub struct CodexAdapter<P> {
     provisioner: P,
     profile: AgentProfile,
+    program: &'static str,
 }
 
 impl<P> CodexAdapter<P> {
@@ -74,17 +85,49 @@ impl<P> CodexAdapter<P> {
         Self::with_revision(provisioner, PROFILE_REVISION)
     }
 
+    /// Builds the `sakana-ai` profile over the same Codex CLI grammar, launching
+    /// `codex-fugu`.
+    #[must_use]
+    pub fn sakana(provisioner: P) -> Self {
+        Self::sakana_with_revision(provisioner, PROFILE_REVISION)
+    }
+
     /// # Panics
     ///
     /// Panics only if the hard-coded `codex` profile ID stops satisfying the
     /// core contract, which is a programmer error.
     #[must_use]
     pub fn with_revision(provisioner: P, revision: u32) -> Self {
+        Self::build(provisioner, revision, PROFILE_NAME, "Codex", CODEX_PROGRAM)
+    }
+
+    /// # Panics
+    ///
+    /// Panics only if the hard-coded `sakana-ai` profile ID stops satisfying the
+    /// core contract, which is a programmer error.
+    #[must_use]
+    pub fn sakana_with_revision(provisioner: P, revision: u32) -> Self {
+        Self::build(
+            provisioner,
+            revision,
+            SAKANA_PROFILE_NAME,
+            "sakana.ai",
+            SAKANA_PROGRAM,
+        )
+    }
+
+    fn build(
+        provisioner: P,
+        revision: u32,
+        profile_name: &str,
+        display_name: &str,
+        program: &'static str,
+    ) -> Self {
         Self {
             provisioner,
             profile: AgentProfile::new(
-                AgentProfileId::new(PROFILE_NAME).expect("literal profile ID is canonical"),
-                "Codex",
+                AgentProfileId::new(profile_name).expect("literal profile ID is canonical"),
+                display_name,
                 revision,
                 [
                     AgentCapability::Resume,
@@ -95,6 +138,7 @@ impl<P> CodexAdapter<P> {
                 ],
                 [LaunchMode::Interactive, LaunchMode::Headless],
             ),
+            program,
         }
     }
 
@@ -152,7 +196,8 @@ impl<P: CodexProvisioner> AgentAdapter for CodexAdapter<P> {
                 reference.native_session_id.expose_sensitive().to_owned(),
             ]);
         }
-        let plan = render_plan(request, &profile, &provision).map_err(AdapterError::Validation)?;
+        let plan = render_plan(request, &profile, &provision, self.program)
+            .map_err(AdapterError::Validation)?;
         let mut durable_request = request.clone();
         durable_request.provider_resume = None;
         Ok(ResolvedLaunch {
@@ -167,6 +212,7 @@ fn render_plan(
     request: &LaunchRequest,
     profile: &AgentProfile,
     provision: &CodexProvision,
+    program: &str,
 ) -> Result<LaunchPlan, LaunchValidationError> {
     let mut argv = match request.mode {
         LaunchMode::Interactive => vec![
@@ -190,7 +236,7 @@ fn render_plan(
     LaunchPlan::new(
         profile.id.clone(),
         profile.revision,
-        "codex",
+        program,
         argv,
         provision.environment_allowlist.clone(),
         provision.working_directory.clone(),

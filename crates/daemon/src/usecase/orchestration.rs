@@ -53,15 +53,21 @@ impl AdapterRegistry {
     /// Registers the supported product adapters with the same orchestration
     /// port. Product-specific behavior remains behind each adapter; callers
     /// select it solely by the typed profile ID in a launch request.
+    ///
+    /// `sakana` is a second Codex-grammar profile (`sakana-ai`) with its own
+    /// executable, so it registers through the same adapter type.
     pub fn register_supported<
         C: CodexProvisioner + Send + 'static,
+        S: CodexProvisioner + Send + 'static,
         L: ClaudeProvisioner + Send + 'static,
     >(
         &mut self,
         codex: CodexAdapter<C>,
+        sakana: CodexAdapter<S>,
         claude: ClaudeAdapter<L>,
     ) -> Result<(), RegistryError> {
         self.register(codex.profile().clone(), Box::new(codex))?;
+        self.register(sakana.profile().clone(), Box::new(sakana))?;
         self.register(claude.profile().clone(), Box::new(claude))
     }
 
