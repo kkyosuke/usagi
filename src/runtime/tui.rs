@@ -34,6 +34,7 @@ use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::git::{clone as git_clone, diff_status};
+use usagi_core::infrastructure::ipc::TerminalSnapshotMode;
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
@@ -45,6 +46,7 @@ use usagi_core::usecase::client::{
 use usagi_core::usecase::environment as environment_usecase;
 use usagi_core::usecase::note::Target as StoreTarget;
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
+use usagi_core::usecase::vt_screen::ScreenCheckpoint;
 use usagi_core::usecase::workspace as workspace_usecase;
 use usagi_daemon::usecase::session_runtime::SystemGit;
 use usagi_tui::infrastructure::metrics::MetricsHook;
@@ -74,7 +76,7 @@ use usagi_tui::usecase::application::daemon_backend::{
 use usagi_tui::usecase::application::pane_runtime::Geometry;
 use usagi_tui::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
 use usagi_tui::usecase::application::terminal_session::{
-    TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
+    TerminalAttach, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::overview;
@@ -1122,6 +1124,36 @@ fn decode_terminal_inventory(
         .collect()
 }
 
+/// Decode the screen an attach / resync snapshot carries, according to the
+/// contract the connection negotiated.
+///
+/// On the checkpoint path the frame must satisfy `base_offset == output_offset`
+/// (a checkpoint is complete at `output_offset`, so it has no tail) and carry a
+/// checkpoint this build accepts; anything else is refused rather than displayed.
+/// On the legacy path the retained `replay` tail is **not read at all**: a tail
+/// cut mid UTF-8 / CSI / OSC must never reach a parser, so the client fails
+/// closed to a history-less view and renders only output after `output_offset`.
+fn decode_attach_screen(
+    mode: TerminalSnapshotMode,
+    snapshot: &serde_json::Value,
+    base_offset: u64,
+    output_offset: u64,
+) -> Result<TerminalAttachScreen, TerminalError> {
+    match mode {
+        TerminalSnapshotMode::Checkpoint => {
+            if base_offset != output_offset {
+                return Err(TerminalError::Unavailable);
+            }
+            // The frame is already bounded by the negotiated IPC frame limit;
+            // the checkpoint's own bounds are enforced when it is restored.
+            let checkpoint: ScreenCheckpoint = serde_json::from_value(snapshot["screen"].clone())
+                .map_err(|_| TerminalError::Unavailable)?;
+            Ok(TerminalAttachScreen::Checkpoint(Box::new(checkpoint)))
+        }
+        TerminalSnapshotMode::LegacyFailClosed => Ok(TerminalAttachScreen::HistoryUnavailable),
+    }
+}
+
 fn terminal_inventory_matches_scope(
     entries: &[usagi_core::domain::terminal_launch::TerminalInventoryEntry],
     scope: &TerminalLaunchScope,
@@ -1404,6 +1436,10 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         terminal: &usagi_core::domain::id::TerminalRef,
         _geometry: Geometry,
     ) -> Result<TerminalAttach, TerminalError> {
+        // The negotiated connection decides the snapshot contract before the
+        // request is sent, so a daemon without the checkpoint capability can
+        // never have its raw tail decoded into a screen.
+        let mode = self.terminal_client()?.terminal_snapshot_mode();
         let body = self.terminal_request(
             TerminalAction::Attach,
             TerminalRequest::Attach {
@@ -1420,13 +1456,10 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         let base_offset = snapshot["base_offset"]
             .as_u64()
             .ok_or(TerminalError::Unavailable)?;
-        let replay: Vec<u8> =
-            serde_json::from_value(snapshot["replay"].clone()).unwrap_or_default();
-        if base_offset.checked_add(u64::try_from(replay.len()).unwrap_or(u64::MAX))
-            != Some(output_offset)
-        {
-            return Err(TerminalError::Unavailable);
-        }
+        let revision = snapshot["revision"]
+            .as_u64()
+            .ok_or(TerminalError::Unavailable)?;
+        let screen = decode_attach_screen(mode, snapshot, base_offset, output_offset)?;
         // `exited` is `Option<i32>`: null while the process is still running.
         let exited = !snapshot["exited"].is_null();
         // Resume polling for this terminal on the background pump from the
@@ -1436,8 +1469,9 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         Ok(TerminalAttach {
             subscription,
             connection_epoch: self.terminal_epoch,
+            revision,
             output_offset,
-            replay,
+            screen,
             exited,
         })
     }
@@ -2718,8 +2752,9 @@ mod tests {
         DaemonAgentCommandPort, DaemonDecisionCommandPort, DaemonRestoreConnectionPort,
         EnvironmentStorePort, FsWorkspaceLoader, Geometry, LifecycleSnapshot,
         PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore, Start,
-        TerminalChunk, TerminalError, TerminalInputOutcome, agent_inventory_request,
-        classify_terminal_input, created_session_hook, daemon_error_reason, decode_agent_admission,
+        TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
+        TerminalSnapshotMode, agent_inventory_request, classify_terminal_input,
+        created_session_hook, daemon_error_reason, decode_agent_admission, decode_attach_screen,
         decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
         exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
         load_workspace_state, map_terminal_error, passthrough_key, probe_path,
@@ -2774,12 +2809,39 @@ mod tests {
         }
     }
 
+    /// The serialized checkpoint a daemon at `rows`×`cols` produces after
+    /// receiving `bytes`. Mirrors the daemon's grid authority in one value.
+    fn screen_checkpoint_value(bytes: &[u8], rows: usize, cols: usize) -> serde_json::Value {
+        use usagi_core::usecase::vt_screen::VtScreen;
+
+        let mut screen = VtScreen::new(rows, cols);
+        screen.advance(bytes);
+        serde_json::to_value(screen.checkpoint()).expect("checkpoint serializes")
+    }
+
     #[cfg(unix)]
     fn terminal_input_port(
         replies: Vec<(
             usagi_core::infrastructure::ipc::ResponseOutcome,
             serde_json::Value,
         )>,
+    ) -> (
+        DaemonAgentCommandPort,
+        std::thread::JoinHandle<Vec<serde_json::Value>>,
+    ) {
+        terminal_input_port_with(replies, |_| {})
+    }
+
+    /// Same scripted daemon, with `adjust` narrowing what the server advertises
+    /// so the client's snapshot negotiation can be exercised against an older
+    /// daemon (absent capability, or a lower `max_revision`).
+    #[cfg(unix)]
+    fn terminal_input_port_with(
+        replies: Vec<(
+            usagi_core::infrastructure::ipc::ResponseOutcome,
+            serde_json::Value,
+        )>,
+        adjust: impl FnOnce(&mut usagi_core::infrastructure::ipc::ServerProtocol),
     ) -> (
         DaemonAgentCommandPort,
         std::thread::JoinHandle<Vec<serde_json::Value>>,
@@ -2800,12 +2862,13 @@ mod tests {
             target: "test".to_owned(),
             artifact: "test-artifact".to_owned(),
         };
-        let protocol = server_protocol(
+        let mut protocol = server_protocol(
             DaemonGeneration("input-ack-test".to_owned()),
             "input-ack-connection".to_owned(),
             build.clone(),
             usagi_core::domain::daemon::DaemonRecord::identified(2, "test-process"),
         );
+        adjust(&mut protocol);
         let server = std::thread::spawn(move || {
             let mut reader = server_stream.try_clone().unwrap();
             let mut writer = server_stream;
@@ -3005,9 +3068,10 @@ mod tests {
         let valid_attach = json!({
             "subscription": 8,
             "snapshot": {
+                "revision": 3,
                 "output_offset": 0,
                 "base_offset": 0,
-                "replay": [],
+                "screen": screen_checkpoint_value(b"", 3, 20),
                 "exited": null
             }
         });
@@ -3055,6 +3119,135 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(input_sequences, vec![0, 1]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_attach_uses_checkpoints_and_never_parses_a_legacy_tail() {
+        use usagi_core::infrastructure::ipc::{
+            ProtocolRange, ResponseOutcome, TERMINAL_SCREEN_CHECKPOINT_CAPABILITY,
+            TERMINAL_WIRE_GENERATION,
+        };
+        use usagi_tui::presentation::AgentCommandPort;
+
+        type Adjust = fn(&mut usagi_core::infrastructure::ipc::ServerProtocol);
+
+        // A raw tail cut mid-CSI. Whatever the negotiation outcome, no path may
+        // decode these bytes into a screen.
+        let truncated_tail = b"\x1b[31mred\x1b[".to_vec();
+        let snapshot = |replay: &[u8]| {
+            json!({
+                "subscription": 4,
+                "snapshot": {
+                    "revision": 2,
+                    "base_offset": 0,
+                    "output_offset": 0,
+                    "screen": screen_checkpoint_value(b"hi", 3, 20),
+                    "replay": replay,
+                    "exited": null
+                }
+            })
+        };
+
+        let cases: [(&str, Adjust, bool); 3] = [
+            // New client × new daemon: capability present, common revision 2.
+            ("checkpoint", |_| {}, true),
+            // New client × new-enough revision but no capability advertised:
+            // the capability is the truth source, so this stays legacy.
+            (
+                "capability absent",
+                |protocol| {
+                    protocol
+                        .capabilities
+                        .retain(|capability| capability != TERMINAL_SCREEN_CHECKPOINT_CAPABILITY);
+                },
+                false,
+            ),
+            // New client × old daemon: the common revision falls back to 1.
+            (
+                "revision 1 daemon",
+                |protocol| {
+                    protocol.supported_protocols = vec![ProtocolRange {
+                        generation: TERMINAL_WIRE_GENERATION,
+                        min_revision: 0,
+                        max_revision: 1,
+                    }];
+                },
+                false,
+            ),
+        ];
+
+        for (name, adjust, expects_checkpoint) in cases {
+            let (mut port, server) = terminal_input_port_with(
+                vec![(ResponseOutcome::Ok, snapshot(&truncated_tail))],
+                adjust,
+            );
+            let attach = port
+                .attach_terminal(&input_terminal_ref(), Geometry { cols: 20, rows: 3 })
+                .expect("scripted attach decodes");
+
+            match attach.screen {
+                TerminalAttachScreen::Checkpoint(checkpoint) => {
+                    assert!(
+                        expects_checkpoint,
+                        "{name} must not use the checkpoint path"
+                    );
+                    assert_eq!(checkpoint.geometry.rows, 3);
+                    assert_eq!(checkpoint.geometry.cols, 20);
+                }
+                TerminalAttachScreen::HistoryUnavailable => {
+                    assert!(!expects_checkpoint, "{name} must use the checkpoint path");
+                }
+            }
+            assert_eq!(attach.revision, 2, "{name}");
+            drop(port);
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn attach_screen_decoder_fails_closed_on_an_unusable_checkpoint_frame() {
+        let checkpoint = screen_checkpoint_value(b"ok", 2, 4);
+        let frame = |base: u64, screen: serde_json::Value| json!({ "revision": 1, "base_offset": base, "output_offset": 9, "screen": screen });
+
+        // A checkpoint is complete at `output_offset`; a frame that also claims a
+        // tail is refused instead of being restored and then double-fed.
+        assert_eq!(
+            decode_attach_screen(
+                TerminalSnapshotMode::Checkpoint,
+                &frame(0, checkpoint.clone()),
+                0,
+                9,
+            ),
+            Err(TerminalError::Unavailable)
+        );
+        // A missing or malformed checkpoint is refused rather than approximated.
+        for screen in [json!(null), json!({ "schema_version": 1 })] {
+            assert_eq!(
+                decode_attach_screen(TerminalSnapshotMode::Checkpoint, &frame(9, screen), 9, 9),
+                Err(TerminalError::Unavailable)
+            );
+        }
+        assert!(matches!(
+            decode_attach_screen(
+                TerminalSnapshotMode::Checkpoint,
+                &frame(9, checkpoint),
+                9,
+                9
+            ),
+            Ok(TerminalAttachScreen::Checkpoint(_))
+        ));
+        // The legacy path ignores the frame entirely: an offset mismatch or a
+        // mid-escape tail can never turn into parsed screen state.
+        assert_eq!(
+            decode_attach_screen(
+                TerminalSnapshotMode::LegacyFailClosed,
+                &json!({ "replay": b"\x1b[31m".to_vec() }),
+                0,
+                9,
+            ),
+            Ok(TerminalAttachScreen::HistoryUnavailable)
+        );
     }
 
     #[test]

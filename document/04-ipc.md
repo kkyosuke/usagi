@@ -362,12 +362,24 @@ negotiated revision で決まる。
 | 2 | `screen`（semantic checkpoint） | `base_offset == output_offset`（tail 長 0） | `output_offset` 時点の完全な screen state |
 
 daemon は generation 1 の `max_revision` を 2 として広告し、`ServerHello.capabilities` に
-`terminal.screen-checkpoint.v1` を含める。共通 revision が 1 に落ちる旧 client には従来どおり raw tail を
-返すため、両 revision が同じ daemon で同時に成立する。revision 2 の `screen` は schema version・
+`terminal.screen-checkpoint.v1` を含める。client も `max_revision` 2 を広告し、共通 revision が 1 に落ちる旧 client には
+従来どおり raw tail を返すため、両 revision が同じ daemon で同時に成立する。revision 2 の `screen` は schema version・
 geometry・active buffer・primary（常に存在）と alternate（active のときだけ）の grid / scrollback /
 cursor / saved cursor / scroll region、interned style table、decoder の途中状態を持つ。client は
 checkpoint から screen を復元し、`output_offset` からの raw suffix を同じ parser へ feed する。
 raw tail を blank parser へ流すことに起因する UTF-8 / CSI / OSC の切断は revision 2 では起こらない。
+
+checkpoint 経路の判定は capability を真実源とし、client 側の収束先は次のとおりである。
+
+| client | daemon | capability | 共通 revision | 収束先 |
+|---|---|---|---|---|
+| new | new | 有 | 2 | checkpoint から復元し suffix を feed |
+| new | old | 無 | 1 | client が限定表示へ fail closed（raw tail を parse しない） |
+| new | new | 無（広告漏れ） | 2 | 同じく限定表示（capability を真実源とする） |
+| old | new | 有 | 1 | daemon が revision 1 の raw tail を返し、旧 client の既存挙動を保つ |
+| new | new | 有 | 共通 range 無し | typed `protocol_mismatch` で handshake を拒否する |
+
+限定表示の内容は [3. TUI#snapshot-negotiation-と-legacy-限定表示](03-tui.md#snapshot-negotiation-と-legacy-限定表示) が正本である。
 
 snapshot の `geometry` と `screen.geometry` は常に一致し、片方だけ新しい frame は存在しない。resize は
 preflight → PTY effect → geometry commit → screen reshape を terminal actor の排他区間で行い `revision` を

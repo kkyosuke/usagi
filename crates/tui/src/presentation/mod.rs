@@ -7002,6 +7002,22 @@ mod tests {
         ));
     }
 
+    /// The attach payload a daemon at `geometry` returns after producing
+    /// `bytes`: the daemon is the grid authority, so it parses every byte and
+    /// hands back a semantic checkpoint instead of the raw tail.
+    fn attach_checkpoint(
+        bytes: &[u8],
+        geometry: Geometry,
+    ) -> crate::usecase::application::terminal_session::TerminalAttachScreen {
+        use usagi_core::usecase::vt_screen::VtScreen;
+
+        let mut screen = VtScreen::new(usize::from(geometry.rows), usize::from(geometry.cols));
+        screen.advance(bytes);
+        crate::usecase::application::terminal_session::TerminalAttachScreen::Checkpoint(Box::new(
+            screen.checkpoint(),
+        ))
+    }
+
     /// A streaming agent port whose PTY attaches live from `replay`, then reports
     /// the configured safe error on poll. It records each detach so the auto-close
     /// path can be asserted end to end.
@@ -7030,13 +7046,14 @@ mod tests {
         fn attach_terminal(
             &mut self,
             _terminal: &TerminalRef,
-            _geometry: Geometry,
+            geometry: Geometry,
         ) -> Result<TerminalAttach, TerminalError> {
             Ok(TerminalAttach {
                 subscription: self.subscription,
                 connection_epoch: 1,
+                revision: 1,
                 output_offset: self.replay.len() as u64,
-                replay: self.replay.clone(),
+                screen: attach_checkpoint(&self.replay, geometry),
                 exited: false,
             })
         }
@@ -7490,13 +7507,14 @@ mod tests {
         fn attach_terminal(
             &mut self,
             _terminal: &TerminalRef,
-            _geometry: Geometry,
+            geometry: Geometry,
         ) -> Result<TerminalAttach, TerminalError> {
             Ok(TerminalAttach {
                 subscription: 1,
                 connection_epoch: 1,
+                revision: 1,
                 output_offset: 0,
-                replay: Vec::new(),
+                screen: attach_checkpoint(&[], geometry),
                 exited: false,
             })
         }

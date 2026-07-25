@@ -534,15 +534,49 @@ completion が到着した後の次フレームでは、request 受付後に入�
 
 選択中の foreground live terminal tab は、daemon が所有する PTY の出力を右ペインへ描画し、キー入力をその PTY へ
 そのまま送る。TUI が使う同期 IPC client は push される stream event を受け取れないため、出力は **poll** で
-取得する: foreground 化したときに一度 attach して保持済みの replay と output offset を受け取り、以降は redraw ごとに
-`Resume { after_offset }` で offset 以降の出力だけを取得する。取得したバイト列は最小の VT screen（印字・
-`CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去・scroll region を含む画面スクロール・SGR の色と属性・alternate screen buffer）へ流し込み、
+取得する: foreground 化したときに一度 attach して daemon の **semantic screen checkpoint** と output offset を
+受け取り、以降は redraw ごとに `Resume { after_offset }` で offset 以降の出力だけを取得する。attach では
+checkpoint から screen を復元し（履歴の control byte を再生しない）、以降の suffix を**その復元済み parser**へ
+feed する。screen は最小の VT screen（印字・
+`CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去・scroll region を含む画面スクロール・SGR の色と属性・alternate screen buffer）で、
 その screen 行を右ペインへ clip して表示する。描画済み retained 行は output・resize・接続状態が変わったときだけ更新し、各 frame は現在の
 viewport に必要な行 window だけを右ペインへ投影するため、scrollback の増加は idle redraw や scroll 操作の描画量を増やさない。
 live の input cursor は現在セルを反転して表示する。output offset に gap があるとき、または daemon が
 resync を要求したときは local に継ぎ足さず、daemon の atomic snapshot（再 attach）で置き換えて、その後の出力取得を継続する。
 
+checkpoint は `output_offset` 時点の完全な screen state（可視 grid・scrollback・cursor・saved cursor・
+scroll region・SGR・alternate と背景 primary buffer・decoder の途中状態）を含むため、retention の先頭が
+UTF-8 / CSI / OSC / SGR / alternate の途中でも reconnect 前後で可視セル・cursor・style が一致し、
+`cells_with_scrollback` を使う selection / copy history も untrimmed な参照と一致する。
+
 `Resume`（poll）は**描画スレッドでは行わない**。専用接続を持つ背景スレッド（poll pump）が、attach 済みの各 terminal を継続的に fetch して per-terminal の read-ahead バッファへ積み、描画スレッドは redraw ごとにそのバッファを**非ブロッキングに drain** するだけである。daemon が一時的に応答できない間（例: dispatch 中に agent lock を保持している間）に固まるのは背景スレッドの fetch だけで、描画・入力ループは即座に応答を続ける。attach で得た output offset を pump に登録し、再 attach（reconnect / resync）では新しい snapshot offset で登録し直してバッファと fetch offset をリセットする。`Resume` は daemon 側で接続にも subscription にも紐づかない stateless な操作なので、この専用接続の破棄・再接続は input の subscription・exactly-once ledger・input sequence に影響しない。`Resize` は attach / input とは別の deadline 付き接続で送る（低頻度なので描画スレッドから同期送信でよい）。attach / input / detach は従来どおり単一接続に載せ、この接続が返す `connection_epoch` だけを session に報告する。
+
+#### snapshot negotiation と legacy 限定表示
+
+TUI は checkpoint 経路を **capability と negotiated revision の両方**で判定する（wire 契約の正本は
+[4. daemon IPC#snapshot payload と revision](04-ipc.md#snapshot-payload-と-revision)）。
+
+| daemon | client が使う経路 | 表示 |
+|---|---|---|
+| `terminal.screen-checkpoint.v1` を広告し共通 revision が 2 | checkpoint から復元し、suffix を feed | 履歴を含む通常表示 |
+| capability 不在、または共通 revision が 1 | **legacy raw tail を parser へ流さない** | 履歴復元不可の限定表示。空の screen から `output_offset` 以降の live 出力だけを描画し、footer に履歴が復元できない旨を表示する |
+
+任意の byte 境界で切られた raw tail は UTF-8 / CSI / OSC の途中から始まり得るため、限定表示では tail を
+**一切 decode しない**（escape を文字として露出させない）。capability を真実源とするので、revision だけが
+2 に見えても capability を広告しない daemon は限定表示へ fail closed する。
+
+#### geometry / revision fence
+
+復元は次の 2 つの fence を通す。どちらも old / new state を混在させず、失敗した snapshot は表示しない。
+
+| fence | 条件 | 挙動 |
+|---|---|---|
+| geometry | pane の geometry を daemon へ同期できた attach で、checkpoint の geometry が pane と異なる（resize が capture に割り込んだ） | その snapshot を破棄して subscription を外し、同一 attach 内で 1 度だけ atomic snapshot を再取得する。なお不一致なら typed resync（`Reconnecting` + backoff）へ落とし、直前の screen をそのまま残す |
+| revision | snapshot の terminal `revision` が既に適用した revision より小さい（stale snapshot） | 同じく破棄・再取得・typed resync |
+
+bound 違反で reject された checkpoint（未知 schema version・範囲外 geometry など）も同じ経路で fail closed する。
+resize が daemon へ届かなかった attach には突き合わせる geometry が無いため、daemon 権威の geometry で復元し、
+viewport 同期の失敗だけを feedback に表示する（attach 可能な terminal を隠さない）。
 
 terminal pane の接続状態と footer feedback は `TerminalSession` の状態をそのまま投影する。
 
@@ -554,7 +588,8 @@ terminal pane の接続状態と footer feedback は `TerminalSession` の状態
 | `Orphaned` | typed failure として拒否 | ownership unknown の終端で、自動 retry しない |
 | `Exited` | typed failure として拒否 | 最終画面を保持し、自動 retry しない |
 
-一時的な `unavailable` と input effect unknown が `Reconnecting` へ遷移する。再 attach 成功時は backoff をresetし、新しい
+一時的な `unavailable`、input effect unknown、および
+[geometry / revision fence](#geometry--revision-fence) が拒否した snapshot が `Reconnecting` へ遷移する。再 attach 成功時は backoff をresetし、新しい
 connection-owned subscriptionを使う。input sequenceはclient-local connection epochが変わった場合だけ0へresetし、
 同じepoch上のcursor-gap/resync/detach→reattachではdaemon ledgerに合わせてnext sequenceを保持する。
 tab close / detach は予約済み retry を取り消す。
@@ -562,7 +597,7 @@ retry 中に replacement terminal を spawn せず、stale / orphaned / exited �
 
 primary screen から押し出された行は 10,000 行を上限とする local scrollback として保持し、right pane は live bottom を基準に
 表示する。alternate screen のスクロールは現在の full-screen frame の一部であり、過去 frame を scrollback へ混在させない。ホイール上/下でそれぞれ古い出力方向／live bottom 方向へ 1 行移動する。新しい
-replay で履歴が短くなった場合は offset を有効範囲へ正規化する。`↑` / `↓` は scrollback 操作に予約せず、PTY の
+snapshot で履歴が短くなった場合は offset を有効範囲へ正規化する。`↑` / `↓` は scrollback 操作に予約せず、PTY の
 history navigation へそのまま送る。right pane の footer の直前には常に 1 行の空白を置く。
 
 出力は mouse drag により選択でき、drag 開始時の press cell から終点までを含めて、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。drag 中も
