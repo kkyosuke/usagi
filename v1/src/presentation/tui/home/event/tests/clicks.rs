@@ -394,6 +394,8 @@ fn a_right_click_on_a_overview_tab_opens_a_menu_and_runs_the_selected_action() {
     let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut broadcast_wake = noop_broadcast_wake as fn(&HomeState) -> usize;
+    let mut dispatch_recover =
+        |_: &Path, _: &str, _: crate::usecase::session::QuarantineRecovery| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -406,6 +408,7 @@ fn a_right_click_on_a_overview_tab_opens_a_menu_and_runs_the_selected_action() {
         set_label: &mut set_label_fake,
         reorder_session: &mut reorder,
         dispatch_remove: &mut remove,
+        dispatch_recover: &mut dispatch_recover,
         unite_resolve: &mut unite_resolve,
         dispatch_update: &mut dispatch_update,
         evict_pool: &mut evict,
@@ -524,6 +527,8 @@ fn run_overview_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMe
     let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut broadcast_wake = noop_broadcast_wake as fn(&HomeState) -> usize;
+    let mut dispatch_recover =
+        |_: &Path, _: &str, _: crate::usecase::session::QuarantineRecovery| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -536,6 +541,7 @@ fn run_overview_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMe
         set_label: &mut set_label_fake,
         reorder_session: &mut reorder,
         dispatch_remove: &mut remove,
+        dispatch_recover: &mut dispatch_recover,
         unite_resolve: &mut unite_resolve,
         dispatch_update: &mut dispatch_update,
         evict_pool: &mut evict,
@@ -702,6 +708,8 @@ fn right_click_tab_paths_cover_closeup_and_attached_modes() {
         let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
         let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
         let mut broadcast_wake = noop_broadcast_wake as fn(&HomeState) -> usize;
+        let mut dispatch_recover =
+            |_: &Path, _: &str, _: crate::usecase::session::QuarantineRecovery| {};
         let mut wiring = Wiring {
             interaction_epoch: 0,
             watch_sessions: false,
@@ -714,6 +722,7 @@ fn right_click_tab_paths_cover_closeup_and_attached_modes() {
             set_label: &mut set_label_fake,
             reorder_session: &mut reorder,
             dispatch_remove: &mut remove,
+            dispatch_recover: &mut dispatch_recover,
             unite_resolve: &mut unite_resolve,
             dispatch_update: &mut dispatch_update,
             evict_pool: &mut evict,

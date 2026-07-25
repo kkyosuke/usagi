@@ -100,6 +100,15 @@ mod tests {
         ) -> Result<session::RemovalOutcome, String> {
             Err("not removable in tests".to_string())
         }
+
+        fn recover(
+            &self,
+            _workspace_root: &Path,
+            _name: &str,
+            _recovery: session::QuarantineRecovery,
+        ) -> Result<session::QuarantineRecoveryOutcome, String> {
+            Err("not recoverable in tests".to_string())
+        }
     }
 
     /// A deterministic model probe for transport tests, where the catalog itself

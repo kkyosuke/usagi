@@ -23,6 +23,7 @@ use super::state::{LogLine, ModalSize};
 use crate::domain::history::HistoryEntry;
 use crate::domain::issue::Issue;
 use crate::domain::settings::AgentCli;
+use crate::usecase::session::QuarantineRecovery;
 
 /// A side effect a command asks the screen / event loop to perform, beyond
 /// appending its produced log lines.
@@ -49,6 +50,17 @@ pub enum Effect {
         workspace: Option<String>,
         name: String,
         force: bool,
+    },
+    /// Recover a session quarantined as an orphaned pending removal (the user ran
+    /// `session recover [workspace:]<name> --resume|--release`). `workspace` carries
+    /// the optional `workspace:` qualifier exactly as
+    /// [`RemoveSession`](Self::RemoveSession) does, and `recovery` is which
+    /// explicit recovery was asked for — the two are materially different
+    /// operations, so neither is a default.
+    RecoverSession {
+        workspace: Option<String>,
+        name: String,
+        recovery: QuarantineRecovery,
     },
     /// Open the session-removal modal (the user ran `session remove` without a
     /// name) to pick one or more sessions to delete at once. `force` carries the
@@ -167,6 +179,7 @@ impl Effect {
             | Effect::CreateSession(_)
             | Effect::OpenSessionModal
             | Effect::RemoveSession { .. }
+            | Effect::RecoverSession { .. }
             | Effect::OpenTerminal
             | Effect::OpenExternalTerminal
             | Effect::OpenAgent(_)

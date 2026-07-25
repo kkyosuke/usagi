@@ -487,6 +487,116 @@ fn session_remove_without_a_name_opens_the_removal_modal() {
 }
 
 #[test]
+fn session_recover_parses_a_name_and_exactly_one_recovery() {
+    for (input, recovery) in [
+        (
+            "session recover wedged --resume",
+            QuarantineRecovery::Resume,
+        ),
+        (
+            "session recover wedged --release",
+            QuarantineRecovery::Release,
+        ),
+        // The flag may come first — the name is whichever token is not a flag.
+        (
+            "session recover --resume wedged",
+            QuarantineRecovery::Resume,
+        ),
+    ] {
+        let result = registry().dispatch(input, &[], &[]);
+        assert!(result.lines.is_empty(), "{input}");
+        assert_eq!(
+            result.effect,
+            Effect::RecoverSession {
+                workspace: None,
+                name: "wedged".to_string(),
+                recovery,
+            },
+            "{input}"
+        );
+    }
+}
+
+#[test]
+fn session_recover_carries_a_workspace_qualifier_like_remove() {
+    let result = registry().dispatch("session recover app:wedged --release", &[], &[]);
+    assert_eq!(
+        result.effect,
+        Effect::RecoverSession {
+            workspace: Some("app".to_string()),
+            name: "wedged".to_string(),
+            recovery: QuarantineRecovery::Release,
+        }
+    );
+}
+
+#[test]
+fn session_recover_refuses_anything_ambiguous_instead_of_guessing() {
+    // The two recoveries are opposite operations (finish a deletion vs. cancel
+    // one), so a missing, doubled, misspelled, or unaccompanied flag is a usage
+    // error rather than a default — and each refusal spells both out.
+    for input in [
+        // No recovery named.
+        "session recover wedged",
+        // Both named, or the same one twice: not last-one-wins.
+        "session recover wedged --resume --release",
+        "session recover wedged --resume --resume",
+        // An unknown flag.
+        "session recover wedged --force",
+        // No name.
+        "session recover --resume",
+        "session recover",
+        // Two candidate names.
+        "session recover wedged other --resume",
+    ] {
+        let result = registry().dispatch(input, &[], &[]);
+        assert_eq!(result.effect, Effect::None, "{input}");
+        assert_eq!(result.lines.len(), 1, "{input}");
+        assert_eq!(result.lines[0].kind, LineKind::Error, "{input}");
+        let text = joined(&result);
+        assert!(text.contains("--resume"), "{input}: {text}");
+        assert!(text.contains("--release"), "{input}: {text}");
+    }
+}
+
+#[test]
+fn complete_offers_recover_and_its_two_recoveries() {
+    // `recover` is offered as a subcommand of `session`...
+    let sub = registry().complete("session rec", CommandScope::Workspace);
+    assert_eq!(sub.input, "session recover");
+
+    // ...it completes against the session names (a quarantined session is exactly
+    // what `remove` refuses, so the removable list is the wrong one)...
+    let names = ["feature-x", "wedged"];
+    let name =
+        registry().complete_with("session recover wed", CommandScope::Workspace, &names, &[]);
+    assert_eq!(name.input, "session recover wedged");
+
+    // ...and once a name is settled, only the two recovery flags remain.
+    let flags = registry().complete_with(
+        "session recover wedged --re",
+        CommandScope::Workspace,
+        &names,
+        &[],
+    );
+    assert!(flags.candidates.iter().any(|c| c == "--resume"));
+    assert!(flags.candidates.iter().any(|c| c == "--release"));
+    assert!(!flags.candidates.iter().any(|c| c == "wedged"));
+}
+
+#[test]
+fn recovering_a_session_closes_the_palette() {
+    // Like a removal, a recovery takes over the screen with background work, so the
+    // palette closes rather than staying open behind it.
+    assert!(Effect::RecoverSession {
+        workspace: None,
+        name: "wedged".to_string(),
+        recovery: QuarantineRecovery::Resume,
+    }
+    .closes_palette());
+}
+
+#[test]
 fn close_requests_the_close_session_effect() {
     // `close` is a session-scope command; it asks the event loop to remove the
     // focused session, mirroring `session remove <name>` unless `--force` is
@@ -1058,13 +1168,15 @@ fn suggest_shows_usage_and_examples_once_arguments_are_typed() {
             registry().suggest("session ", CommandScope::Workspace),
             Hint::Usage {
                 usage:
-                    "session [create|list|switch|remove] <name>  (remove in unite: workspace:name; aliases: create=c/new, list=ls, remove=rm)",
+                    "session [create|list|switch|remove] <name>  |  session recover <name> --resume|--release  (remove/recover in unite: workspace:name; aliases: create=c/new, list=ls, remove=rm)",
                 examples: &[
                     "session create feature-x",
                     "session switch feature-x",
                     "session ls",
                     "session rm feature-x",
                     "session rm app:feature-x  (unite: pick app's session)",
+                    "session recover feature-x --resume   (re-prove ownership, finish removal)",
+                    "session recover feature-x --release  (drop the quarantine)",
                 ],
             }
         );

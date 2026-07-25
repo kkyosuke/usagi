@@ -1636,9 +1636,350 @@ fn load_state(store: &WorkspaceStore) -> Result<WorkspaceState> {
         .ok_or_else(|| anyhow!("no sessions recorded for this workspace"))
 }
 
+/// Which pass quarantined a removal, phrased for an error message. Both origins
+/// land on the same [`SessionRemovalPhase::Orphaned`] phase from opposite evidence,
+/// so saying which one this is tells an operator where to look — and which
+/// recovery is even possible.
+fn quarantine_origin_note(origin: Option<QuarantineOrigin>) -> &'static str {
+    match origin {
+        Some(QuarantineOrigin::Reconcile) => {
+            " (quarantined by reconcile: no session record backs its directory)"
+        }
+        Some(QuarantineOrigin::Teardown) => {
+            " (quarantined by teardown: its recorded ownership evidence is complete \
+             but the worktrees on disk contradicted it)"
+        }
+        // A state file written before the origin was recorded. Read conservatively:
+        // no claim is made about which pass wrote it.
+        None => "",
+    }
+}
+
+/// How to get session `name` out of quarantine, tailored to what its origin makes
+/// possible. A reconcile stray has no recorded evidence, so re-proving ownership is
+/// not a thing that can be attempted at all; every other quarantine carries
+/// complete provenance and can be re-proven against today's repositories.
+///
+/// This is the "next move" half of every quarantine error message: the phase used
+/// to be a dead end whose only exit was hand-editing `state.json`.
+fn recovery_guidance(name: &str, origin: Option<QuarantineOrigin>) -> String {
+    if origin == Some(QuarantineOrigin::Reconcile) {
+        return format!(
+            "there is no recorded ownership evidence to re-prove, so usagi cannot delete the \
+             directory for you: inspect it, remove it yourself once you have confirmed what it \
+             is, then run `session recover {name} --release` to drop the quarantine"
+        );
+    }
+    format!(
+        "recover it explicitly: `session recover {name} --resume` re-proves the recorded \
+         ownership against today's repositories and resumes the teardown when it proves (and \
+         leaves the quarantine untouched when it does not), or `session recover {name} \
+         --release` withdraws the quarantine and returns the session to normal when its \
+         recorded worktrees are all still intact"
+    )
+}
+
+/// Which explicit recovery an operator asked usagi to perform on a removal
+/// quarantined as [`SessionRemovalPhase::Orphaned`].
+///
+/// Neither variant is ever chosen by usagi itself: `Orphaned` stays a state that
+/// only an operator's explicit instruction moves (the fail-closed rule quarantine
+/// exists to enforce), so `usagi clean` and
+/// [`resume_pending_removals`] keep skipping it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuarantineRecovery {
+    /// Re-prove the recorded ownership against today's repositories and, if it
+    /// proves, resume the ordinary teardown. Nothing destructive happens when the
+    /// proof fails — the removal is quarantined again, exactly as it was.
+    Resume,
+    /// Withdraw the quarantine, having confirmed the tombstone no longer describes
+    /// work usagi must do: a still-intact session goes back to being an ordinary
+    /// session, and a tombstone with no ownership evidence is dropped — along with
+    /// any record of that name — once the directory it points at is gone. Touches no
+    /// file either way.
+    Release,
+}
+
+impl QuarantineRecovery {
+    /// The stable spelling used by the command palette (`--resume` / `--release`)
+    /// and the MCP tool's `action` argument.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Resume => "resume",
+            Self::Release => "release",
+        }
+    }
+
+    /// Parse the spelling above, so both surfaces accept exactly one vocabulary.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "resume" => Some(Self::Resume),
+            "release" => Some(Self::Release),
+            _ => None,
+        }
+    }
+}
+
+/// What one [`recover_quarantine`] call did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuarantineRecoveryOutcome {
+    /// The session the recovery acted on.
+    pub name: String,
+    /// Which recovery ran.
+    pub recovery: QuarantineRecovery,
+    /// Whether the session is gone. True only for a
+    /// [`Resume`](QuarantineRecovery::Resume) whose re-proven teardown ran to
+    /// completion; a [`Release`](QuarantineRecovery::Release) never deletes
+    /// anything, so it is always false there.
+    pub removed: bool,
+    /// Branches a completed teardown kept because the session was not recorded as
+    /// owning them (see [`RemovalOutcome::retained_branches`]).
+    pub retained_branches: Vec<String>,
+    /// One line saying what was proven and what changed, for the surfaces to show
+    /// the operator who asked.
+    pub detail: String,
+}
+
+/// Act on a removal quarantined as [`SessionRemovalPhase::Orphaned`], on an
+/// operator's explicit instruction.
+///
+/// Quarantine is deliberately fail-closed: usagi refuses to guess at ownership it
+/// cannot prove, so it neither force-deletes a quarantined session nor sweeps it up
+/// in `usagi clean`. That safety used to come at the price of having no exit at all
+/// — a quarantined session could not be removed (even with `--force`), could not be
+/// recreated under the same name, and could only be rescued by hand-editing
+/// `state.json`. This is that missing exit, and it keeps the fail-closed rule: both
+/// recoveries *check* today's reality rather than overriding it, and refuse when the
+/// check fails.
+///
+/// | Recovery | What it does | What it requires |
+/// |---|---|---|
+/// | [`Resume`](QuarantineRecovery::Resume) | Lifts the quarantine back to `git_teardown` and runs the ordinary teardown, which re-proves ownership before issuing any effect | Recorded provenance to prove from, and a proof that succeeds — otherwise the teardown quarantines it again, unchanged |
+/// | [`Release`](QuarantineRecovery::Release) | Drops the tombstone (and, when there was no ownership evidence at all, the record too) — never a file | Either an intact session (every recorded worktree still present and registered), or an evidence-less tombstone whose directory is already gone |
+///
+/// The recorded `force` decision is preserved: a resumed teardown that was never
+/// forced still refuses to discard uncommitted work, and says so. Because the
+/// quarantine is lifted first, the operator can then simply run
+/// `session remove <name> --force`.
+///
+/// # Locking
+///
+/// Takes the session's removal lock for the whole call, before any store lock, so
+/// a recovery never races a concurrent teardown of the same session — the same
+/// ordering [`remove`] uses.
+pub fn recover_quarantine(
+    workspace_root: &Path,
+    name: &str,
+    recovery: QuarantineRecovery,
+    agent: &dyn Agent,
+) -> Result<QuarantineRecoveryOutcome> {
+    let _removal_lock = acquire_removal_lock(workspace_root, name)?;
+    match recovery {
+        QuarantineRecovery::Resume => {
+            lift_quarantine_for_resume(workspace_root, name)?;
+            // From here the tombstone is an ordinary interrupted removal, so the
+            // standard machinery drives it — including re-quarantining it (leaving
+            // it exactly as it was) if ownership still cannot be proven.
+            let plan = match begin_removal(workspace_root, name, false)? {
+                BeginOutcome::Ready(plan) => plan,
+                // Unreachable in practice: with a tombstone present, an unforced
+                // removal blocked by dirty worktrees is reported as an error by
+                // `begin_removal` rather than as `Blocked`. Handled rather than
+                // asserted so a future change cannot turn it into a panic.
+                BeginOutcome::Blocked(dirty) => bail!(
+                    "session \"{name}\" quarantine was lifted but its teardown is blocked by \
+                     uncommitted changes; retry with `session remove {name} --force`: {}",
+                    dirty
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            };
+            let retained_branches = run_removal(workspace_root, &plan, agent)?;
+            Ok(QuarantineRecoveryOutcome {
+                detail: format!(
+                    "re-proved the recorded ownership of session \"{name}\" and completed its \
+                     teardown"
+                ),
+                name: name.to_string(),
+                recovery,
+                removed: true,
+                retained_branches,
+            })
+        }
+        QuarantineRecovery::Release => Ok(QuarantineRecoveryOutcome {
+            detail: release_quarantine(workspace_root, name)?,
+            name: name.to_string(),
+            recovery,
+            removed: false,
+            retained_branches: Vec::new(),
+        }),
+    }
+}
+
+/// Check that session `name`'s quarantine is one whose ownership can be re-proven,
+/// and lift it back to [`SessionRemovalPhase::GitTeardown`] in one short locked
+/// write. Refuses without writing anything otherwise.
+///
+/// Lifting the quarantine *before* the teardown runs is what lets the ordinary
+/// machinery do the proving: `discard_session` re-checks every piece of recorded
+/// evidence against the live repositories and issues no effect until all of it
+/// holds, and `execute_teardown` puts the quarantine back when it does not. So the
+/// window this opens is not a hole in the fail-closed rule — the proof simply moved
+/// to where it always was.
+fn lift_quarantine_for_resume(workspace_root: &Path, name: &str) -> Result<()> {
+    let store = WorkspaceStore::new(workspace_root);
+    let _lock = store.lock()?;
+    let mut state = load_state(&store)?;
+    let index = quarantined_index(&state, name)?;
+    let pending = &state.pending_removals[index];
+    // A reconcile stray was quarantined *because* nothing recorded owns its
+    // directory. There is no evidence to re-prove, so this is not a proof usagi can
+    // attempt — not a proof it is being cautious about.
+    if pending.quarantine == Some(QuarantineOrigin::Reconcile) {
+        bail!(
+            "session \"{name}\" was quarantined by reconcile, which found no session record \
+             backing its directory, so there is no recorded ownership to re-prove; {}",
+            recovery_guidance(name, Some(QuarantineOrigin::Reconcile))
+        );
+    }
+    // The same answer, reached from the tombstone rather than from its origin label:
+    // a state file written before origins were recorded gets the honest check
+    // instead of the benefit of the doubt.
+    if pending.provenance.is_empty() {
+        bail!(
+            "session \"{name}\" quarantine records no worktree provenance, so there is no \
+             ownership evidence to re-prove; inspect its directory, remove it yourself once \
+             you have confirmed what it is, then run `session recover {name} --release`"
+        );
+    }
+    // A teardown quarantine always still has its record (the record is dropped only
+    // when the removal finishes). Missing means the state was edited by hand, and
+    // resuming would wedge the tombstone at `git_teardown` with nothing to tear
+    // down — so refuse while the quarantine still describes the situation.
+    if !state.sessions.iter().any(|session| session.name == name) {
+        bail!(
+            "session \"{name}\" quarantine has no session record to tear down; it cannot be \
+             resumed; remove its directory yourself once you have confirmed what it is, then \
+             run `session recover {name} --release`"
+        );
+    }
+    state.pending_removals[index].phase = SessionRemovalPhase::GitTeardown;
+    state.pending_removals[index].quarantine = None;
+    state.updated_at = Utc::now();
+    store.save(&state)
+}
+
+/// Withdraw session `name`'s quarantine, and report what that confirmed.
+///
+/// Which proof applies is decided by what the tombstone actually holds, not by the
+/// origin label — a state file written before origins were recorded gets the same
+/// honest check as a current one.
+///
+/// | Tombstone | Proof | What is dropped |
+/// |---|---|---|
+/// | A record plus ownership evidence | Every recorded worktree is still present and registered where the record says ([`reconcile::prove_live_session`]) | The quarantine only: it is an ordinary session again — removable, listable, no longer wedged |
+/// | No evidence to work from (a reconcile stray, or a record whose worktree creation never happened) | Its recorded directory does not exist | The quarantine and any record of that name, which described nothing on disk |
+///
+/// Both paths issue **no filesystem effect at all**; the only writes are to
+/// `state.json`. That is what makes the second path safe to include: with no
+/// recorded provenance there is no effect for usagi to authorize in the first
+/// place, and with the directory already gone there is nothing left to destroy —
+/// so forgetting state that describes nothing takes nothing away. usagi still
+/// refuses to delete the directory itself, because it never established that the
+/// directory is its to delete; the operator confirming and removing the path is
+/// precisely the evidence this path waits for. Dropping the tombstone any earlier
+/// would also be pointless: the next reconcile pass would quarantine the same
+/// directory again.
+///
+/// The whole check runs inside one store-lock window. The proof shells out to
+/// `git worktree list` per repository, which is far lighter than the work
+/// [`create`] already does under the same lock, and an explicit operator recovery
+/// is rare — so the simple, obviously-serialised version is the right trade here,
+/// unlike a teardown that can run for minutes.
+fn release_quarantine(workspace_root: &Path, name: &str) -> Result<String> {
+    let store = WorkspaceStore::new(workspace_root);
+    let _lock = store.lock()?;
+    let mut state = load_state(&store)?;
+    let index = quarantined_index(&state, name)?;
+    let pending = state.pending_removals[index].clone();
+    let recorded = state.sessions.iter().any(|session| session.name == name);
+
+    // Returning a session to *normal* needs both a record to put back and evidence
+    // to check it against. Without either, only the "described nothing" path below
+    // can apply.
+    let detail = if recorded && !pending.provenance.is_empty() {
+        let repo_worktrees = reconcile::list_repo_worktrees(workspace_root).map_err(|error| {
+            anyhow!(
+                "session \"{name}\" stays quarantined: its worktrees could not be checked \
+                 because repository access failed; repair it and retry: {error}"
+            )
+        })?;
+        reconcile::prove_live_session(&pending.root, &pending.provenance, &repo_worktrees)
+            .map_err(|error| {
+                anyhow!(
+                    "session \"{name}\" stays quarantined: it is not intact, so it cannot be \
+                     returned to normal; resume its teardown instead with `session recover \
+                     {name} --resume`: {error}"
+                )
+            })?;
+        format!(
+            "withdrew the quarantine of session \"{name}\": all {} recorded worktree(s) are \
+             present and registered where its record says, so it is an ordinary session again",
+            pending.provenance.len()
+        )
+    } else {
+        if pending.root.symlink_metadata().is_ok() {
+            bail!(
+                "session \"{name}\" stays quarantined: {} still exists and usagi has no \
+                 recorded ownership evidence for it, so usagi will not delete it for you; \
+                 inspect it, remove it yourself once you have confirmed what it is, then run \
+                 `session recover {name} --release` again",
+                pending.root.display()
+            );
+        }
+        state.sessions.retain(|session| session.name != name);
+        format!(
+            "withdrew the quarantine of session \"{name}\" and forgot it: {} does not exist \
+             and no ownership evidence was recorded for it, so no file was touched",
+            pending.root.display()
+        )
+    };
+
+    state
+        .pending_removals
+        .retain(|pending| pending.name != name);
+    state.updated_at = Utc::now();
+    store.save(&state)?;
+    Ok(detail)
+}
+
+/// Where session `name`'s quarantined removal sits in `state.pending_removals`, or
+/// an error explaining that there is nothing quarantined to recover. A removal
+/// still in flight is *not* a recovery target: it needs no operator instruction,
+/// and `usagi clean` (or a plain `session remove`) already resumes it.
+fn quarantined_index(state: &WorkspaceState, name: &str) -> Result<usize> {
+    let index = state
+        .pending_removals
+        .iter()
+        .position(|pending| pending.name == name)
+        .ok_or_else(|| anyhow!("session \"{name}\" has no pending removal to recover"))?;
+    let phase = state.pending_removals[index].phase;
+    if phase != SessionRemovalPhase::Orphaned {
+        bail!(
+            "session \"{name}\" removal is pending at {} rather than quarantined, so there is \
+             nothing to recover; it resumes on the next `usagi clean` or `session remove {name}`",
+            phase.as_str()
+        );
+    }
+    Ok(index)
+}
+
 /// The recorded session `name`, plus the phase of any pending removal for it.
 /// Refuses a removal quarantined as [`SessionRemovalPhase::Orphaned`]: its
-/// ownership is unproven, so usagi never force-deletes it on its own.
+/// ownership is unproven, so usagi never force-deletes it on its own. The refusal
+/// names the explicit recovery that does apply ([`recover_quarantine`]).
 fn removal_target(
     state: &WorkspaceState,
     name: &str,
@@ -1655,23 +1996,12 @@ fn removal_target(
         .find(|pending| pending.name == name);
     let pending_phase = pending.map(|pending| pending.phase);
     if pending_phase == Some(SessionRemovalPhase::Orphaned) {
-        // Both quarantine origins land on the same phase from opposite
-        // evidence, so say which one this is: it decides where an operator has
-        // to look.
-        let origin = match pending.and_then(|pending| pending.quarantine) {
-            Some(QuarantineOrigin::Reconcile) => {
-                " (quarantined by reconcile: no session record backs its directory)"
-            }
-            Some(QuarantineOrigin::Teardown) => {
-                " (quarantined by teardown: its recorded ownership evidence is complete \
-                  but the worktrees on disk contradicted it)"
-            }
-            None => "",
-        };
         bail!(
-            "session \"{name}\" is quarantined as an orphaned pending removal{origin}; \
+            "session \"{name}\" is quarantined as an orphaned pending removal{}; \
              its ownership is unknown, so usagi will not force-delete it automatically; \
-             inspect state.json and `git worktree list`, then clean up the confirmed paths manually"
+             {}",
+            quarantine_origin_note(pending.and_then(|pending| pending.quarantine)),
+            recovery_guidance(name, pending.and_then(|pending| pending.quarantine))
         );
     }
     Ok((session, pending_phase))
@@ -1852,8 +2182,8 @@ fn execute_teardown(
             })?;
             bail!(
                 "session \"{name}\" ownership is ambiguous and has been quarantined; \
-                 no automatic force-remove effect was issued; inspect state.json and \
-                 `git worktree list`, then clean up confirmed paths manually: {error}"
+                 no automatic force-remove effect was issued; {}: {error}",
+                recovery_guidance(name, Some(QuarantineOrigin::Teardown))
             );
         }
         Err(error) if error.downcast_ref::<reconcile::ProbeError>().is_some() => Err(anyhow!(
@@ -4242,6 +4572,558 @@ mod tests {
             pending_of(root.path(), "dup"),
             Some(SessionRemovalPhase::Orphaned)
         );
+    }
+
+    // --- quarantine recovery -----------------------------------------------
+
+    /// Quarantine session `name` exactly the way a teardown does: an `Orphaned`
+    /// tombstone carrying the record's *complete* ownership evidence, with the
+    /// session itself left untouched on disk.
+    ///
+    /// This is the state a teardown whose ownership proof failed leaves behind — the
+    /// shape a healthy session was wedged into before #546 fixed the proof, and the
+    /// one `recover_quarantine` exists to rescue. Writing it directly is what lets
+    /// these tests start from a quarantine without needing a broken teardown to
+    /// produce one.
+    fn quarantine_as_teardown(root: &Path, name: &str) {
+        let store = WorkspaceStore::new(root);
+        let mut state = store.load().unwrap().unwrap();
+        let session = state
+            .sessions
+            .iter()
+            .find(|session| session.name == name)
+            .cloned()
+            .unwrap();
+        state.pending_removals.push(PendingSessionRemoval {
+            branch: Some(recorded_branch(&session)),
+            quarantine: Some(QuarantineOrigin::Teardown),
+            name: name.to_string(),
+            root: session.root.clone(),
+            worktrees: session
+                .worktrees
+                .iter()
+                .map(|worktree| worktree_keyed_store::key(&worktree.path))
+                .collect(),
+            provenance: session.worktree_provenance.clone(),
+            force: false,
+            phase: SessionRemovalPhase::Orphaned,
+        });
+        store.save(&state).unwrap();
+    }
+
+    #[test]
+    fn recover_resume_reproves_a_teardown_quarantine_and_completes_the_removal() {
+        // A completed removal clears per-worktree files below the process-wide data
+        // directory, which other tests redirect.
+        let _guard = crate::test_support::process_env_guard();
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "wedged").unwrap();
+        quarantine_as_teardown(root.path(), "wedged");
+
+        // The quarantine is a dead end for every ordinary operation, and each
+        // refusal now names the way out instead of pointing at `state.json`.
+        let refused = remove(root.path(), "wedged", true, noop_agent().as_ref()).unwrap_err();
+        assert!(refused.to_string().contains("quarantined by teardown"));
+        assert!(refused
+            .to_string()
+            .contains("`session recover wedged --resume`"));
+        assert!(!refused.to_string().contains("state.json"));
+        assert!(create(root.path(), "wedged")
+            .unwrap_err()
+            .to_string()
+            .contains("already exists"));
+
+        let outcome = recover_quarantine(
+            root.path(),
+            "wedged",
+            QuarantineRecovery::Resume,
+            noop_agent().as_ref(),
+        )
+        .unwrap();
+
+        assert!(outcome.removed);
+        assert_eq!(outcome.recovery, QuarantineRecovery::Resume);
+        assert!(outcome.detail.contains("re-proved"));
+        // Everything the teardown owns is gone: the worktree, the session tree, the
+        // recorded branch, the record, and the tombstone.
+        assert!(!created.root.exists());
+        assert!(!branch_exists(root.path(), "usagi/wedged"));
+        assert!(sessions_of(root.path()).is_empty());
+        assert_eq!(pending_of(root.path(), "wedged"), None);
+        // And the name is reusable again, which the tombstone had been blocking.
+        assert!(create(root.path(), "wedged").is_ok());
+    }
+
+    #[test]
+    fn recover_release_returns_an_intact_quarantined_session_to_normal() {
+        let _guard = crate::test_support::process_env_guard();
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "alive").unwrap();
+        quarantine_as_teardown(root.path(), "alive");
+
+        let outcome = recover_quarantine(
+            root.path(),
+            "alive",
+            QuarantineRecovery::Release,
+            noop_agent().as_ref(),
+        )
+        .unwrap();
+
+        // Nothing was deleted — the point of a release is that the session survives.
+        assert!(!outcome.removed);
+        assert!(outcome.detail.contains("ordinary session again"));
+        assert!(created.root.exists());
+        assert!(branch_exists(root.path(), "usagi/alive"));
+        assert_eq!(sessions_of(root.path()), vec!["alive".to_string()]);
+        assert_eq!(pending_of(root.path(), "alive"), None);
+        // It is an ordinary session again, so it projects as one and removes cleanly.
+        assert!(statuses(root.path())
+            .unwrap()
+            .iter()
+            .all(|status| status.removal.is_none()));
+        assert!(
+            remove(root.path(), "alive", false, noop_agent().as_ref())
+                .unwrap()
+                .removed
+        );
+    }
+
+    #[test]
+    fn recover_resume_leaves_an_unprovable_session_quarantined_without_any_effect() {
+        let _guard = crate::test_support::process_env_guard();
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "contested").unwrap();
+        quarantine_as_teardown(root.path(), "contested");
+        // Break the evidence the way a genuine ownership conflict does: a second
+        // provenance entry naming the same repository, which the proof reads as
+        // duplicate (and therefore untrustworthy) recorded evidence.
+        let store = WorkspaceStore::new(root.path());
+        let mut state = store.load().unwrap().unwrap();
+        let index = state
+            .pending_removals
+            .iter()
+            .position(|pending| pending.name == "contested")
+            .unwrap();
+        let duplicate = state.pending_removals[index].provenance[0].clone();
+        state.pending_removals[index].provenance.push(duplicate);
+        store.save(&state).unwrap();
+
+        let error = recover_quarantine(
+            root.path(),
+            "contested",
+            QuarantineRecovery::Resume,
+            noop_agent().as_ref(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("has been quarantined"));
+        // Fail-closed: the session tree, its branch, and its record all survive, and
+        // the removal is quarantined again rather than left half-lifted.
+        assert!(created.root.exists());
+        assert!(branch_exists(root.path(), "usagi/contested"));
+        assert_eq!(sessions_of(root.path()), vec!["contested".to_string()]);
+        assert_eq!(
+            pending_of(root.path(), "contested"),
+            Some(SessionRemovalPhase::Orphaned)
+        );
+        assert_eq!(
+            quarantine_of(root.path(), "contested"),
+            Some(QuarantineOrigin::Teardown)
+        );
+    }
+
+    #[test]
+    fn recover_resume_refuses_a_reconcile_stray_which_has_nothing_to_re_prove() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let stray = create(root.path(), "stray").unwrap();
+        drop_record(root.path(), "stray");
+        reconcile(root.path(), noop_agent().as_ref()).unwrap();
+        assert_eq!(
+            quarantine_of(root.path(), "stray"),
+            Some(QuarantineOrigin::Reconcile)
+        );
+
+        let error = recover_quarantine(
+            root.path(),
+            "stray",
+            QuarantineRecovery::Resume,
+            noop_agent().as_ref(),
+        )
+        .unwrap_err();
+
+        // A stray carries no ownership evidence, so re-proving is not something usagi
+        // can attempt at all — and the message says which recovery does apply.
+        assert!(error
+            .to_string()
+            .contains("no recorded ownership to re-prove"));
+        assert!(error
+            .to_string()
+            .contains("`session recover stray --release`"));
+        assert!(stray.root.exists());
+        assert_eq!(
+            pending_of(root.path(), "stray"),
+            Some(SessionRemovalPhase::Orphaned)
+        );
+        assert_eq!(
+            quarantine_of(root.path(), "stray"),
+            Some(QuarantineOrigin::Reconcile)
+        );
+    }
+
+    #[test]
+    fn recover_release_of_a_stray_requires_the_operator_to_remove_its_directory_first() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let stray = create(root.path(), "leftover").unwrap();
+        drop_record(root.path(), "leftover");
+        reconcile(root.path(), noop_agent().as_ref()).unwrap();
+
+        // While the directory is still there, usagi refuses: it has no evidence that
+        // the directory is its to delete, and dropping the tombstone would only make
+        // the next reconcile pass quarantine it again.
+        let error = recover_quarantine(
+            root.path(),
+            "leftover",
+            QuarantineRecovery::Release,
+            noop_agent().as_ref(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("still exists"));
+        assert!(error.to_string().contains("remove it yourself"));
+        assert!(stray.root.exists());
+        assert_eq!(
+            pending_of(root.path(), "leftover"),
+            Some(SessionRemovalPhase::Orphaned)
+        );
+
+        // The operator reviews the path and removes it themselves; now the tombstone
+        // describes nothing, and withdrawing it is safe and stable.
+        fs::remove_dir_all(&stray.root).unwrap();
+        let outcome = recover_quarantine(
+            root.path(),
+            "leftover",
+            QuarantineRecovery::Release,
+            noop_agent().as_ref(),
+        )
+        .unwrap();
+
+        assert!(!outcome.removed);
+        assert!(outcome.detail.contains("does not exist"));
+        assert_eq!(pending_of(root.path(), "leftover"), None);
+        // Stable: with the directory gone there is no stray left to re-quarantine.
+        assert!(reconcile(root.path(), noop_agent().as_ref())
+            .unwrap()
+            .quarantined
+            .is_empty());
+        assert_eq!(pending_of(root.path(), "leftover"), None);
+    }
+
+    #[test]
+    fn recover_resume_refuses_a_quarantine_recording_no_provenance() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // A ghost session: teardown quarantined it with an origin but no evidence.
+        record_a_ghost(root.path(), "ghost");
+        remove(root.path(), "ghost", false, noop_agent().as_ref()).unwrap_err();
+        assert_eq!(
+            quarantine_of(root.path(), "ghost"),
+            Some(QuarantineOrigin::Teardown)
+        );
+
+        let error = recover_quarantine(
+            root.path(),
+            "ghost",
+            QuarantineRecovery::Resume,
+            noop_agent().as_ref(),
+        )
+        .unwrap_err();
+
+        // The origin label says "teardown", but the tombstone has nothing to prove
+        // from — so the honest check on the evidence itself refuses, not the label.
+        assert!(error.to_string().contains("records no worktree provenance"));
+        assert_eq!(
+            pending_of(root.path(), "ghost"),
+            Some(SessionRemovalPhase::Orphaned)
+        );
+    }
+
+    /// A record whose worktree creation never happened, so it has no ownership
+    /// evidence and nothing on disk — the "ghost session" `remove` quarantines.
+    fn record_a_ghost(root: &Path, name: &str) -> PathBuf {
+        use crate::domain::workspace_state::{BranchStatus, WorktreeState};
+
+        let store = WorkspaceStore::new(root);
+        let ghost_root = root.join(".usagi/sessions").join(name);
+        let mut state = store.load().unwrap().unwrap_or_default();
+        state.sessions.push(SessionRecord {
+            branch: None,
+            todos: Vec::new(),
+            decisions: Vec::new(),
+            name: name.to_string(),
+            display_name: None,
+            note: None,
+            label_id: None,
+            agent: Default::default(),
+            origin: Default::default(),
+            started_from: None,
+            root: ghost_root.clone(),
+            worktrees: vec![WorktreeState {
+                branch: None,
+                path: ghost_root.clone(),
+                head: String::new(),
+                primary: false,
+                upstream: None,
+                status: BranchStatus::Local,
+                diff: None,
+                ahead_behind: None,
+                pr: Vec::new(),
+                updated_at: Utc::now(),
+            }],
+            worktree_provenance: Vec::new(),
+            created_at: Utc::now(),
+            last_active: None,
+        });
+        store.save(&state).unwrap();
+        ghost_root
+    }
+
+    #[test]
+    fn recover_release_forgets_a_quarantine_that_describes_nothing_on_disk() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let ghost_root = record_a_ghost(root.path(), "ghost");
+        // `remove` quarantines it: there is no provenance to authorize any effect.
+        remove(root.path(), "ghost", false, noop_agent().as_ref()).unwrap_err();
+        assert!(!ghost_root.exists());
+
+        let outcome = recover_quarantine(
+            root.path(),
+            "ghost",
+            QuarantineRecovery::Release,
+            noop_agent().as_ref(),
+        )
+        .unwrap();
+
+        // With no evidence to authorize an effect and nothing on disk to destroy,
+        // forgetting the state takes nothing away — so the row finally goes, without
+        // usagi ever guessing at ownership.
+        assert!(!outcome.removed);
+        assert!(outcome.detail.contains("does not exist"));
+        assert!(outcome.detail.contains("no file was touched"));
+        assert_eq!(pending_of(root.path(), "ghost"), None);
+        assert!(sessions_of(root.path()).is_empty());
+        // And the name is free again.
+        assert!(create(root.path(), "ghost").is_ok());
+    }
+
+    #[test]
+    fn recover_release_refuses_an_evidence_less_quarantine_whose_directory_survives() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let ghost_root = record_a_ghost(root.path(), "occupied");
+        // This time something *is* at the recorded path, but usagi still has no
+        // evidence that it put it there.
+        fs::create_dir_all(&ghost_root).unwrap();
+        fs::write(ghost_root.join("someone-elses-work.txt"), "keep me").unwrap();
+        // Forced, so the uncommitted file cannot be what stops the removal: it is
+        // quarantined purely for lack of ownership evidence.
+        remove(root.path(), "occupied", true, noop_agent().as_ref()).unwrap_err();
+
+        let error = recover_quarantine(
+            root.path(),
+            "occupied",
+            QuarantineRecovery::Release,
+            noop_agent().as_ref(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("still exists"));
+        assert!(ghost_root.join("someone-elses-work.txt").exists());
+        assert_eq!(
+            pending_of(root.path(), "occupied"),
+            Some(SessionRemovalPhase::Orphaned)
+        );
+        assert_eq!(sessions_of(root.path()), vec!["occupied".to_string()]);
+    }
+
+    #[test]
+    fn recover_release_refuses_a_session_that_is_no_longer_intact() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "halfway").unwrap();
+        quarantine_as_teardown(root.path(), "halfway");
+        // A teardown that got partway: one recorded worktree is already gone.
+        fs::remove_dir_all(&created.root).unwrap();
+
+        let error = recover_quarantine(
+            root.path(),
+            "halfway",
+            QuarantineRecovery::Release,
+            noop_agent().as_ref(),
+        )
+        .unwrap_err();
+
+        // A half-torn-down session cannot be returned to normal, so the refusal sends
+        // the operator to the recovery that finishes the job instead.
+        assert!(error.to_string().contains("it is not intact"));
+        assert!(error
+            .to_string()
+            .contains("`session recover halfway --resume`"));
+        assert_eq!(
+            pending_of(root.path(), "halfway"),
+            Some(SessionRemovalPhase::Orphaned)
+        );
+    }
+
+    #[test]
+    fn recover_refuses_a_removal_that_is_not_quarantined() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "healthy").unwrap();
+
+        // Nothing pending at all.
+        let error = recover_quarantine(
+            root.path(),
+            "healthy",
+            QuarantineRecovery::Release,
+            noop_agent().as_ref(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no pending removal to recover"));
+
+        // An interrupted-but-not-quarantined removal needs no operator instruction:
+        // `usagi clean` and a plain `session remove` already resume it.
+        let store = WorkspaceStore::new(root.path());
+        let mut state = store.load().unwrap().unwrap();
+        let session = state.sessions[0].clone();
+        state.pending_removals.push(PendingSessionRemoval {
+            branch: Some(recorded_branch(&session)),
+            quarantine: None,
+            name: "healthy".to_string(),
+            root: session.root.clone(),
+            worktrees: Vec::new(),
+            provenance: session.worktree_provenance.clone(),
+            force: false,
+            phase: SessionRemovalPhase::GitTeardown,
+        });
+        store.save(&state).unwrap();
+
+        let error = recover_quarantine(
+            root.path(),
+            "healthy",
+            QuarantineRecovery::Resume,
+            noop_agent().as_ref(),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("pending at git_teardown rather than quarantined"));
+    }
+
+    #[test]
+    fn recover_resume_refuses_a_quarantine_whose_record_was_hand_removed() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "recordless").unwrap();
+        quarantine_as_teardown(root.path(), "recordless");
+        // Hand-edited state: the tombstone keeps its evidence but the record it
+        // describes is gone, so there is nothing left to tear down.
+        drop_record(root.path(), "recordless");
+
+        let error = recover_quarantine(
+            root.path(),
+            "recordless",
+            QuarantineRecovery::Resume,
+            noop_agent().as_ref(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("no session record to tear down"));
+        assert_eq!(
+            pending_of(root.path(), "recordless"),
+            Some(SessionRemovalPhase::Orphaned)
+        );
+    }
+
+    #[test]
+    fn resume_pending_removals_still_skips_a_quarantine() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "wedged").unwrap();
+        quarantine_as_teardown(root.path(), "wedged");
+
+        // The automatic sweep stays fail-closed: it never touches a quarantine, so
+        // `usagi clean` cannot turn one into a force-delete.
+        assert!(resume_pending_removals(root.path(), noop_agent().as_ref()).is_empty());
+
+        assert!(created.root.exists());
+        assert_eq!(
+            pending_of(root.path(), "wedged"),
+            Some(SessionRemovalPhase::Orphaned)
+        );
+        assert_eq!(
+            quarantine_of(root.path(), "wedged"),
+            Some(QuarantineOrigin::Teardown)
+        );
+    }
+
+    #[test]
+    fn quarantine_recovery_names_round_trip_and_reject_anything_else() {
+        for recovery in [QuarantineRecovery::Resume, QuarantineRecovery::Release] {
+            assert_eq!(
+                QuarantineRecovery::from_name(recovery.as_str()),
+                Some(recovery)
+            );
+        }
+        assert_eq!(QuarantineRecovery::Resume.as_str(), "resume");
+        assert_eq!(QuarantineRecovery::Release.as_str(), "release");
+        assert_eq!(QuarantineRecovery::from_name("force"), None);
+        assert_eq!(QuarantineRecovery::from_name(""), None);
+    }
+
+    #[test]
+    fn a_stray_quarantine_error_never_suggests_re_proving_ownership() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "ghosted").unwrap();
+        drop_record(root.path(), "ghosted");
+        reconcile(root.path(), noop_agent().as_ref()).unwrap();
+        // Re-record a session under the same name so `removal_target` gets past its
+        // "no such session" check and reaches the quarantine refusal, exercising the
+        // reconcile-origin wording of the guidance.
+        let store = WorkspaceStore::new(root.path());
+        let mut state = store.load().unwrap().unwrap();
+        let pending = state.pending_removals[0].clone();
+        state.sessions.push(SessionRecord {
+            branch: None,
+            todos: Vec::new(),
+            decisions: Vec::new(),
+            name: "ghosted".to_string(),
+            display_name: None,
+            note: None,
+            label_id: None,
+            agent: Default::default(),
+            origin: Default::default(),
+            started_from: None,
+            root: pending.root.clone(),
+            worktrees: Vec::new(),
+            worktree_provenance: Vec::new(),
+            created_at: Utc::now(),
+            last_active: None,
+        });
+        store.save(&state).unwrap();
+
+        let error = remove(root.path(), "ghosted", true, noop_agent().as_ref()).unwrap_err();
+
+        assert!(error.to_string().contains("quarantined by reconcile"));
+        assert!(error
+            .to_string()
+            .contains("`session recover ghosted --release`"));
+        assert!(!error.to_string().contains("--resume"));
     }
 
     #[test]

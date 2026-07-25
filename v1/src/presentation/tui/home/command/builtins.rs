@@ -13,6 +13,7 @@ use crate::presentation::tui::widgets;
 use crate::usecase::issue::{
     annotate_all, dependency_tree, gantt, list_line, stats_line, IssueStats, ListedIssue,
 };
+use crate::usecase::session::QuarantineRecovery;
 
 /// Line-width budget for the `issue gantt` chart. It renders in the large,
 /// terminal-filling modal (like `man`), so the budget matches that box's widest
@@ -214,6 +215,10 @@ impl Command for QuitCommand {
 ///   checklist of sessions to delete in one go. In 統合(unite) mode the name may
 ///   be qualified as `workspace:session` to pick a session that shares a name
 ///   across workspaces.
+/// - `session recover <name> --resume|--release` gets a session out of the
+///   orphaned quarantine a fail-closed removal left it in. The two recoveries do
+///   materially different things (re-prove ownership and finish the teardown vs.
+///   withdraw the quarantine), so exactly one must be named — there is no default.
 pub(super) struct SessionCommand;
 
 impl Command for SessionCommand {
@@ -226,7 +231,7 @@ impl Command for SessionCommand {
     }
 
     fn usage(&self) -> &'static str {
-        "session [create|list|switch|remove] <name>  (remove in unite: workspace:name; aliases: create=c/new, list=ls, remove=rm)"
+        "session [create|list|switch|remove] <name>  |  session recover <name> --resume|--release  (remove/recover in unite: workspace:name; aliases: create=c/new, list=ls, remove=rm)"
     }
 
     fn examples(&self) -> &'static [&'static str] {
@@ -236,6 +241,8 @@ impl Command for SessionCommand {
             "session ls",
             "session rm feature-x",
             "session rm app:feature-x  (unite: pick app's session)",
+            "session recover feature-x --resume   (re-prove ownership, finish removal)",
+            "session recover feature-x --release  (drop the quarantine)",
         ]
     }
 
@@ -301,6 +308,7 @@ impl Command for SessionCommand {
                     },
                 }
             }
+            "recover" => recover(rest),
             _ => CommandResult::line(LogLine::error(format!("usage: {}", self.usage()))),
         }
     }
@@ -317,7 +325,7 @@ impl Command for SessionCommand {
 
         match head.first().map(|sub| session_subcommand(sub)) {
             // Still on the subcommand word: offer the canonical subcommands.
-            None => ["create", "list", "switch", "remove"]
+            None => ["create", "list", "switch", "remove", "recover"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
@@ -338,6 +346,21 @@ impl Command for SessionCommand {
                         .collect()
                 };
                 candidates.push("--force".to_string());
+                candidates
+            }
+            // `session recover [workspace:]<name> --resume|--release`: the target is
+            // a *quarantined* session, which is exactly the set `remove` refuses, so
+            // the same removable-name list is the wrong one — but the screen does not
+            // separately track quarantined names, so offer every session name until
+            // one is chosen, then the two recovery flags (never a default).
+            Some("recover") => {
+                let mut candidates: Vec<String> = if name_chosen() {
+                    Vec::new()
+                } else {
+                    session_names().collect()
+                };
+                candidates.push("--resume".to_string());
+                candidates.push("--release".to_string());
                 candidates
             }
             // Other subcommands take a free-form name with nothing to complete.
@@ -510,6 +533,56 @@ fn session_subcommand(sub: &str) -> &str {
         "list" | "ls" => "list",
         "remove" | "rm" => "remove",
         other => other,
+    }
+}
+
+/// The usage line for `session recover`, quoted by every way of getting it wrong so
+/// the two recoveries are always spelled out together.
+const RECOVER_USAGE: &str = "usage: session recover [workspace:]<name> --resume|--release  \
+     (--resume re-proves the recorded ownership and finishes the removal; --release withdraws \
+     the quarantine)";
+
+/// `session recover [workspace:]<name> --resume|--release`: ask the event loop to
+/// run one explicit recovery on a session quarantined as an orphaned pending
+/// removal ([`Effect::RecoverSession`]).
+///
+/// Exactly one recovery must be named. They are not two intensities of the same
+/// action — one finishes a deletion, the other cancels it — so neither is a safe
+/// default and naming both is a contradiction rather than a last-one-wins choice.
+fn recover(rest: &str) -> CommandResult {
+    let usage = || CommandResult::line(LogLine::error(RECOVER_USAGE.to_string()));
+    let mut target = None;
+    let mut recovery = None;
+    for tok in rest.split_whitespace() {
+        match tok {
+            "--resume" | "--release" => {
+                let asked = QuarantineRecovery::from_name(tok.trim_start_matches('-'));
+                // Both flags at once, or the same one twice: refuse rather than pick.
+                if recovery.is_some() {
+                    return usage();
+                }
+                recovery = asked;
+            }
+            _ if tok.starts_with('-') => return usage(),
+            _ if target.is_none() => target = Some(tok.to_string()),
+            // A second bare token means the command was mistyped; guessing which
+            // one is the session would be worse than saying so.
+            _ => return usage(),
+        }
+    }
+    match (target, recovery) {
+        (Some(token), Some(recovery)) => {
+            let (workspace, name) = split_workspace_qualifier(&token);
+            CommandResult {
+                lines: Vec::new(),
+                effect: Effect::RecoverSession {
+                    workspace,
+                    name,
+                    recovery,
+                },
+            }
+        }
+        _ => usage(),
     }
 }
 

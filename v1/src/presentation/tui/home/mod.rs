@@ -1381,6 +1381,38 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             track_worker(&remove_workers, worker);
         };
 
+    // Recovering a session out of the orphaned quarantine runs on a background
+    // thread for the same reason a removal does: `--resume` re-proves ownership and
+    // then deletes the whole session tree. It takes the same op-lock, so a recovery
+    // and a create/remove never interleave.
+    let recover_tasks = tasks.clone();
+    let recover_lock = op_lock.clone();
+    let recover_agent = agent.clone();
+    let recover_workers = workers.clone();
+    let mut dispatch_recover =
+        move |root: &Path, name: &str, recovery: crate::usecase::session::QuarantineRecovery| {
+            let id = recover_tasks.begin(tasks::TaskKind::RecoverSession, name);
+            let handle = recover_tasks.clone();
+            let root = root.to_path_buf();
+            let name = name.to_string();
+            let lock = recover_lock.clone();
+            let agent = recover_agent.clone();
+            let worker = std::thread::spawn(move || {
+                complete_or_record_panic(
+                    &handle,
+                    id,
+                    tasks::TaskKind::RecoverSession,
+                    &root,
+                    &name,
+                    || {
+                        let _guard = lock_session_ops(&lock);
+                        run_recover(&root, &name, recovery, agent.as_ref())
+                    },
+                );
+            });
+            track_worker(&recover_workers, worker);
+        };
+
     // Evict a removed session's still-running shell from the pool so a session
     // later recreated at the same path starts fresh instead of re-attaching to
     // this run's agent and its history. Run by the event loop when it drains a
@@ -2533,6 +2565,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         set_label: &mut set_label,
         reorder_session: &mut reorder_session,
         dispatch_remove: &mut dispatch_remove,
+        dispatch_recover: &mut dispatch_recover,
         unite_resolve: &mut unite_resolve,
         dispatch_update: &mut dispatch_update,
         evict_pool: &mut evict_pool,
@@ -3112,6 +3145,68 @@ fn run_remove(
             },
         ),
     }
+}
+
+/// Run one explicit recovery of a quarantined session on a worker thread and build
+/// the [`Completion`](tasks::Completion) the event loop applies.
+///
+/// Both recoveries change the session list (one finishes a removal, the other
+/// un-wedges a session), so a success always carries the refreshed sessions. Only
+/// the recovery that actually deleted the session evicts its pooled shell — a
+/// withdrawn quarantine leaves a live session whose shell must keep working.
+fn run_recover(
+    root: &Path,
+    name: &str,
+    recovery: crate::usecase::session::QuarantineRecovery,
+    agent: &dyn crate::domain::agent::Agent,
+) -> (bool, tasks::Completion) {
+    match crate::usecase::session::recover_quarantine(root, name, recovery, agent) {
+        Ok(outcome) => (
+            true,
+            tasks::Completion {
+                line: LogLine::output(recovered_session_line(&outcome)),
+                sessions: reload_sessions(root),
+                target_root: Some(root.to_path_buf()),
+                evict: outcome.removed.then(|| {
+                    root.join(crate::infrastructure::repo_paths::STATE_DIR)
+                        .join(crate::infrastructure::repo_paths::SESSIONS_DIR)
+                        .join(name)
+                }),
+                focus: None,
+                created: None,
+                removed: None,
+            },
+        ),
+        // A refused recovery is the fail-closed outcome, not a bug: the message says
+        // what could not be proven and what to try instead, so it is logged as-is.
+        Err(e) => (
+            false,
+            tasks::Completion {
+                line: LogLine::error(format!("session recover failed: {e}")),
+                sessions: None,
+                target_root: Some(root.to_path_buf()),
+                evict: None,
+                focus: None,
+                created: None,
+                removed: None,
+            },
+        ),
+    }
+}
+
+/// The log line for a completed recovery: what it proved, and — when it finished a
+/// teardown — which branches survived it, on the same reasoning as
+/// [`removed_session_line`].
+fn recovered_session_line(outcome: &crate::usecase::session::QuarantineRecoveryOutcome) -> String {
+    let mark = if outcome.removed { "🧹" } else { "🐇" };
+    if outcome.retained_branches.is_empty() {
+        return format!("{} {mark}", outcome.detail);
+    }
+    format!(
+        "{} {mark} (kept branch(es) it was not recorded as owning: {})",
+        outcome.detail,
+        outcome.retained_branches.join(", ")
+    )
 }
 
 /// The effective settings (project-local overrides on top of the global

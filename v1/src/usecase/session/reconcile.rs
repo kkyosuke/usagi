@@ -205,6 +205,127 @@ fn canonical_git_common_dir(path: &Path) -> Result<PathBuf> {
     })
 }
 
+/// Prove that the session rooted at `root` is **still intact**: every worktree it
+/// recorded owning exists on disk, is an unambiguous directory canonically inside
+/// `root`, and is registered in the repository the record names — matched by
+/// canonical repository path and Git common dir, never by branch label.
+///
+/// This is the read-only counterpart of [`discard_session`]'s preflight and issues
+/// no effect whatsoever, so a caller may run it to *decide* something without
+/// risking a partial teardown. It deliberately does not share that preflight's
+/// tolerance for an already-absent worktree: `discard_session` treats a missing
+/// target as an idempotent partial teardown, while this proof answers "may this
+/// session be returned to normal?" — and a half-torn-down session may not be. An
+/// absent recorded worktree is therefore an ownership failure here, which points
+/// the operator at resuming the teardown instead.
+///
+/// Used by [`release_quarantine`](super::release_quarantine) to check that
+/// withdrawing a quarantine leaves a session usagi can go on managing.
+pub(super) fn prove_live_session(
+    root: &Path,
+    provenance: &[WorktreeProvenance],
+    repo_worktrees: &[(PathBuf, Vec<git::WorktreeInfo>)],
+) -> Result<()> {
+    if provenance.is_empty() {
+        return Err(ownership_error(format!(
+            "session {} has no recorded worktree provenance to check",
+            root.display()
+        )));
+    }
+    let root_metadata = fs::symlink_metadata(root).map_err(|error| {
+        // A session that is supposed to still be live must have its directory.
+        // Absent is an ownership answer; unreadable is a probe fault.
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ownership_error(format!("session root {} no longer exists", root.display()))
+        } else {
+            probe_error(format!(
+                "cannot inspect session root {}: {error}",
+                root.display()
+            ))
+        }
+    })?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(ownership_error(format!(
+            "session root {} is not an unambiguous directory",
+            root.display()
+        )));
+    }
+    let root_canon = fs::canonicalize(root).map_err(|error| {
+        probe_error(format!(
+            "cannot canonicalize session root {}: {error}",
+            root.display()
+        ))
+    })?;
+
+    let mut seen: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for recorded in provenance {
+        let repo = fs::canonicalize(&recorded.repo).map_err(|error| {
+            probe_error(format!(
+                "cannot canonicalize recorded repository {}: {error}",
+                recorded.repo.display()
+            ))
+        })?;
+        let repo_common = canonical_git_common_dir(&recorded.repo)?;
+        let metadata = fs::symlink_metadata(&recorded.worktree).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ownership_error(format!(
+                    "recorded worktree {} no longer exists",
+                    recorded.worktree.display()
+                ))
+            } else {
+                probe_error(format!(
+                    "cannot inspect recorded worktree {}: {error}",
+                    recorded.worktree.display()
+                ))
+            }
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(ownership_error(format!(
+                "recorded worktree {} is not an unambiguous directory",
+                recorded.worktree.display()
+            )));
+        }
+        let worktree = fs::canonicalize(&recorded.worktree).map_err(|error| {
+            probe_error(format!(
+                "cannot canonicalize recorded worktree {}: {error}",
+                recorded.worktree.display()
+            ))
+        })?;
+        if !worktree.starts_with(&root_canon) {
+            return Err(ownership_error(format!(
+                "recorded worktree {} escapes session root {}",
+                worktree.display(),
+                root_canon.display()
+            )));
+        }
+        if seen
+            .iter()
+            .any(|(known_repo, known_worktree)| *known_repo == repo || *known_worktree == worktree)
+        {
+            return Err(ownership_error("duplicate recorded worktree provenance"));
+        }
+        // A candidate repository usagi cannot read is simply not a match; the
+        // failure surfaces below as "not registered" rather than as a probe fault,
+        // because an unreadable *other* repository says nothing about this one.
+        let registered = repo_worktrees.iter().any(|(candidate, worktrees)| {
+            fs::canonicalize(candidate).is_ok_and(|candidate_canon| candidate_canon == repo)
+                && canonical_git_common_dir(candidate).is_ok_and(|common| common == repo_common)
+                && worktrees
+                    .iter()
+                    .any(|wt| fs::canonicalize(&wt.path).is_ok_and(|path| path == worktree))
+        });
+        if !registered {
+            return Err(ownership_error(format!(
+                "recorded worktree {} is not registered in its recorded repository {}",
+                recorded.worktree.display(),
+                recorded.repo.display()
+            )));
+        }
+        seen.push((repo, worktree));
+    }
+    Ok(())
+}
+
 /// What one [`discard_session`] left behind that the caller should mention.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct DiscardOutcome {

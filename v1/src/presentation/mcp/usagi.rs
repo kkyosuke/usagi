@@ -583,6 +583,21 @@ mod tests {
                 dirty: Vec::new(),
             })
         }
+
+        fn recover(
+            &self,
+            _workspace_root: &Path,
+            name: &str,
+            recovery: crate::usecase::session::QuarantineRecovery,
+        ) -> Result<crate::usecase::session::QuarantineRecoveryOutcome, String> {
+            Ok(crate::usecase::session::QuarantineRecoveryOutcome {
+                name: name.to_string(),
+                recovery,
+                removed: true,
+                retained_branches: Vec::new(),
+                detail: "delegated".to_string(),
+            })
+        }
     }
 
     fn server_at(root: &Path) -> UsagiMcpServer {
@@ -687,8 +702,8 @@ mod tests {
         );
         let tools = res["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        // 6 issue + 4 memory + 15 session + 2 composite orchestration tools.
-        assert_eq!(names.len(), 27);
+        // 6 issue + 4 memory + 16 session + 2 composite orchestration tools.
+        assert_eq!(names.len(), 28);
         assert!(names.contains(&"issue_create"));
         assert!(names.contains(&"issue_to_prompt"));
         assert!(names.contains(&"issue_search"));
@@ -700,6 +715,7 @@ mod tests {
         assert!(names.contains(&"session_complete"));
         assert!(names.contains(&"session_pr"));
         assert!(names.contains(&"session_remove"));
+        assert!(names.contains(&"session_recover"));
         assert!(names.contains(&"session_note_get"));
         assert!(names.contains(&"session_note_update"));
         assert!(names.contains(&"session_todo_list"));
@@ -842,6 +858,24 @@ mod tests {
             body,
             json!({"name":"gone","removed":true,"dirty":[],"retained_branches":[]})
         );
+    }
+
+    #[test]
+    fn session_recover_routes_through_to_the_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The quarantine recovery is reachable from a coordinating agent too, not
+        // only from the TUI palette, so the unified server must route it.
+        let result = call(
+            &server_at(tmp.path()),
+            "session_recover",
+            json!({"name":"wedged","action":"release"}),
+        );
+        assert_eq!(result["isError"], false);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let body: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(body["name"], "wedged");
+        assert_eq!(body["action"], "release");
+        assert_eq!(body["detail"], "delegated");
     }
 
     #[test]

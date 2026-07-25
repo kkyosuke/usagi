@@ -139,6 +139,10 @@ pub(super) type SessionLastActive = (String, DateTime<Utc>);
 
 type RemoveDispatch<'a> = dyn FnMut(&Path, &str, bool, Option<super::tasks::AutoFocus>) + 'a;
 
+/// Dispatch an explicit recovery of a quarantined session. See
+/// [`Wiring::dispatch_recover`].
+type RecoverDispatch<'a> = dyn FnMut(&Path, &str, crate::usecase::session::QuarantineRecovery) + 'a;
+
 /// The outcome of dispatching a background pane launch (see
 /// [`Wiring::start_pending_spawn`]).
 pub(super) enum StartPending {
@@ -227,6 +231,13 @@ pub(super) struct Wiring<'a> {
     /// by `close`, which wants to land on a neighbouring session if the user does
     /// nothing else while removal runs.
     pub dispatch_remove: &'a mut RemoveDispatch<'a>,
+    /// Dispatch `session recover <name> --resume|--release` to a background worker,
+    /// in the workspace rooted at the given path. Separate from `dispatch_remove`
+    /// because a recovery is not a removal: `--release` deliberately *keeps* the
+    /// session, so it must not evict its pooled shell or clear its sidebar row.
+    /// Like a removal it can run for minutes (a re-proven teardown deletes the whole
+    /// session tree), so it goes to a worker rather than blocking the loop.
+    pub dispatch_recover: &'a mut RecoverDispatch<'a>,
     /// Resolve a registered workspace by name and load it into a [`GroupSource`]
     /// to stack into the 統合(unite) view (`unite add <name>`), or an error message
     /// to log when no such workspace is registered.
@@ -2047,6 +2058,8 @@ pub(crate) fn event_loop_compat(
     // the recorded command text); adapt it to the production entry-shaped hook so
     // the loop's `Wiring` stays uniform.
     let mut persist_entry = |entry: &crate::domain::history::HistoryEntry| persist(&entry.command);
+    let mut dispatch_recover =
+        |_: &Path, _: &str, _: crate::usecase::session::QuarantineRecovery| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -2059,6 +2072,7 @@ pub(crate) fn event_loop_compat(
         set_label: &mut set_label_w,
         reorder_session: &mut reorder_session,
         dispatch_remove: &mut dispatch_remove,
+        dispatch_recover: &mut dispatch_recover,
         unite_resolve: &mut unite_resolve,
         dispatch_update: &mut dispatch_update,
         evict_pool: &mut evict_pool,

@@ -18,9 +18,9 @@ use usagi::usecase::session;
 /// `agent_live_prompt_store`, which a currently running TUI drains into the
 /// session's existing agent pane.
 ///
-/// `remove` resolves the workspace's effective agent CLI (so the removed
-/// session's persisted conversation is discarded with the right adapter) and
-/// delegates to [`session::remove`].
+/// `remove` and `recover` resolve the workspace's effective agent CLI (so a torn
+/// down session's persisted conversation is discarded with the right adapter) and
+/// delegate to [`session::remove`] / [`session::recover_quarantine`].
 struct CliAgentBackend;
 
 impl AgentBackend for CliAgentBackend {
@@ -101,13 +101,34 @@ impl AgentBackend for CliAgentBackend {
         name: &str,
         force: bool,
     ) -> Result<session::RemovalOutcome, String> {
-        let storage =
-            usagi::infrastructure::storage::Storage::open_default().map_err(|e| e.to_string())?;
-        let settings = usagi::usecase::settings::effective(&storage, workspace_root)
-            .map_err(|e| e.to_string())?;
-        let agent = usagi::infrastructure::agent::agent_for(settings.agent_cli);
+        let agent = configured_agent(workspace_root)?;
         session::remove(workspace_root, name, force, agent.as_ref()).map_err(|e| e.to_string())
     }
+
+    fn recover(
+        &self,
+        workspace_root: &Path,
+        name: &str,
+        recovery: session::QuarantineRecovery,
+    ) -> Result<session::QuarantineRecoveryOutcome, String> {
+        let agent = configured_agent(workspace_root)?;
+        session::recover_quarantine(workspace_root, name, recovery, agent.as_ref())
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// The agent adapter for the workspace's effective CLI, so a teardown discards the
+/// right agent's persisted conversation. Shared by the two backend operations that
+/// can delete a session's context ([`AgentBackend::remove`] and
+/// [`AgentBackend::recover`]).
+fn configured_agent(
+    workspace_root: &Path,
+) -> Result<std::sync::Arc<dyn usagi::domain::agent::Agent>, String> {
+    let storage =
+        usagi::infrastructure::storage::Storage::open_default().map_err(|e| e.to_string())?;
+    let settings =
+        usagi::usecase::settings::effective(&storage, workspace_root).map_err(|e| e.to_string())?;
+    Ok(usagi::infrastructure::agent::agent_for(settings.agent_cli))
 }
 
 /// The longest a single `ollama run` may take before it is killed and the call
