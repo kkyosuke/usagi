@@ -14,6 +14,7 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 - [envelope とエラー](#envelope-とエラー)
 - [Unix transport](#unix-transport)
 - [client の失敗処理](#client-の失敗処理)
+  - [stream connection の共有と subscription の無効化](#stream-connection-の共有と-subscription-の無効化)
 - [managed session request](#managed-session-request)
 - [daemon metrics subscription](#daemon-metrics-subscription)
 - [PR inventory snapshot](#pr-inventory-snapshot)
@@ -682,6 +683,26 @@ response bodyのlocal decode failureは同じclient connectionとinput ledgerを
 変わった場合だけresetする。同じconnectionでのsnapshot reattachは
 subscriptionが変わってもnext input sequenceを保持する。`stale_target`、`ownership_unknown`、exited は retry 対象ではなく、detach / tab
 close も pending retry を解除する。どの失敗経路も replacement launch を行わない。
+
+### stream connection の共有と subscription の無効化
+
+daemon は subscription を `attach` した connection に所有させ、connection が終わるとその connection の
+attachment をすべて解放する。input ledger（`input_seq` の期待値）も connection ごとの client identity に
+紐づく。したがって 1 本の connection を複数 pane で共有する client では、connection の入れ替えが**その
+connection 上の全 subscription を同時に無効化**する。
+
+| client 側の観測 | 共有 connection | 全 subscription | 次に送るもの |
+|---|---|---|---|
+| 完全に受信した error response（`resync_required` / `stale_target` など）、decode できない `Ok` body、非終端の `Accepted` | 保持する | 有効なまま | 当該 pane の resync / typed failure だけ |
+| transport 破断（EOF、frame 破損、write 失敗） | drop して次回に開き直す | 無効 | 各 ref の `attach` を、その ref の `resume` / `input` より先に |
+
+無効化された subscription で `input` を送っても daemon は attachment を見つけられず、`stale_target` で effect zero に拒否する。
+client はそれを送る前に `attach` し直すため、recovery 後の最初の入力も一度だけ書かれる。old connection の
+subscription に対する `detach` は送らない（daemon がすでに解放しているため、現在の connection では
+未知の subscription として `stale_target` になるだけである）。ある `TerminalRef` に対する新しい `attach` の後に届く superseded
+subscription の `detach` も、その新しい attachment を解除しない。
+
+client 側の epoch の持ち方と pane ごとの再 attach 順序は [3. TUI#connection epoch と subscription 無効化](03-tui.md#connection-epoch-と-subscription-無効化) を正本とする。
 
 terminal input は Live な connection-owned subscription がある場合だけ送る。非 Live、subscription 不在、または
 request を書く前の definitive failure は typed failure であり、client は success として捨てず未配送 feedback を表示する。
