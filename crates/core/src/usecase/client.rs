@@ -1594,10 +1594,14 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::PermissionDenied);
         assert_eq!(error.side_effect(), SideEffect::None);
         assert_eq!(error.retry_mode(), RetryMode::Never);
-        let ClientError::Protocol(surfaced) = error else {
-            panic!("the refusal must stay a typed protocol error");
-        };
-        assert_eq!(surfaced, refusal);
+        let mut surfaced = None;
+        if let ClientError::Protocol(error) = error {
+            surfaced = Some(error);
+        }
+        assert_eq!(
+            surfaced.expect("the refusal stays a typed protocol error"),
+            refusal
+        );
     }
 
     #[test]

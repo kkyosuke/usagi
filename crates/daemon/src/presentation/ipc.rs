@@ -853,11 +853,13 @@ mod tests {
         // client working in another one.
         assert_eq!(terminal.requests, 0);
         let mut replies = Cursor::new(output);
-        let Some(Bootstrap::Error(refusal)) =
+        let mut refused = None;
+        if let Some(Bootstrap::Error(error)) =
             read_json_frame::<Bootstrap>(&mut replies, 1024).unwrap()
-        else {
-            panic!("a foreign workspace must be answered with a typed error frame");
-        };
+        {
+            refused = Some(error);
+        }
+        let refusal = refused.expect("a foreign workspace is answered with a typed error frame");
         assert!(is_workspace_mismatch(&refusal));
         assert!(refusal.message.contains(TRUSTED_ROOT), "{refusal:?}");
         assert_eq!(
