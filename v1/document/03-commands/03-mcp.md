@@ -37,12 +37,14 @@
 - [`session_remove` の挙動](#session_remove-の挙動)
 - [ルートでの書き込みガードレール](#ルートでの書き込みガードレール)
 - [JSON-RPC プロトコル](#json-rpc-プロトコル)
+- [同時実行モデル](#同時実行モデル)
 - [エラーハンドリング](#エラーハンドリング)
 - [設計上の選択](#設計上の選択)
 
 ## 概要
 
-- **トランスポート**: stdio（標準入出力）上の **JSON-RPC 2.0**。1 メッセージ = 1 行の JSON。
+- **トランスポート**: stdio（標準入出力）上の **JSON-RPC 2.0**。1 メッセージ = 1 行の JSON。リクエストの読み取りは
+  逐次ですが、実行は上限付きスレッドプールで**並行**に行い、応答は完了順に返します（[同時実行モデル](#同時実行モデル)）。
 - **対象リポジトリ / ワークスペース**: `usagi mcp` を起動したカレントディレクトリから解決します。
   **issue / memory はカレントの worktree**（`.usagi/issues/` と `.usagi/memory/`）を対象にし、
   **session は workspace root**（`.usagi/sessions/` と `state.json`）を対象にします。カレントディレクトリが
@@ -102,8 +104,11 @@ MCP 層は「プロトコルの解釈」と「stdio の入出力」を分離し�
 AIエージェント ⇄ (stdio JSON-RPC)
         │
         ▼
-presentation/cli/mcp.rs    … stdin ループ + エージェント CLI バックエンド（薄い I/O ラッパ。カバレッジ対象外）
-        │  handle_line(line) ごとに委譲
+presentation/cli/mcp.rs    … stdio の束ね + エージェント CLI バックエンド（薄い I/O ラッパ。カバレッジ対象外）
+        │
+        ▼
+presentation/mcp/mod.rs    … serve：1 行ずつ読み、リクエストを上限付きスレッドプールへ渡す
+        │  リクエストごとに（worker スレッド上で）委譲
         ▼
 presentation/mcp/usagi.rs  … UsagiMcpServer：issue/memory サーバと session サーバを合成し tool をマージ。
         │                        さらに合成層だけの session_delegate_issue / session_delegate_brief（既存 tool を順に呼ぶ）を追加
@@ -125,7 +130,7 @@ infrastructure/{issue_store, memory_store} … <repo>/.usagi/{issues,memory}/ �
 | モジュール | 役割 |
 |---|---|
 | `main.rs` / `presentation/cli/mcp.rs` | `usagi mcp` の合成ルートと stdio エントリ。カレントディレクトリ（issue / memory 用）とそこから解決した workspace root（`usecase/session::workspace_root`。session 用）を `UsagiMcpServer` に渡し、stdin の JSON-RPC を処理する。本番 `AgentBackend` はプロンプトキュー・[live-pane マーカー](../data/01-global.md#agent-live-panes)・session 削除を担う。モデル検証は `main.rs` が `usecase/agent` の本番 `CliAgentModelProbe` を構築して注入するだけに留め、transport は両 port の fake でユニットテストする。 |
-| `presentation/mcp/mod.rs` | JSON-RPC 2.0 の共有フレーミング（`dispatch_line` / レスポンス整形 / `McpService` トレイト）。各サーバが共有。 |
+| `presentation/mcp/mod.rs` | JSON-RPC 2.0 の共有フレーミング（`dispatch_line` / レスポンス整形 / `McpService` トレイト）と stdio ループ `serve`。各サーバが共有。`serve` は 1 行ずつ読みつつ、応答を要するリクエストを上限付きスレッドプールへ渡し、応答は書き込みロックで 1 行ずつ直列に書く（[同時実行モデル](#同時実行モデル)）。並行実行のため `McpService` 実装は `Send + Sync`（注入する `AgentBackend` / `CommandRunner` / `AgentModelProbe` / `LlmBackend` も同様）。 |
 | `presentation/mcp/usagi.rs` | `usagi` サーバの `UsagiMcpServer`。issue/memory サーバと session サーバを合成し、`tool_schemas` / `call_tool` で両者の tool をマージ・振り分けて 1 サーバで公開する。両サーバにまたがる `session_delegate_issue`（issue のプロンプト化→セッション作成→プロンプト投入）と `session_delegate_brief`（セッション作成→ブリーフのキュー投入）はこの合成層が持つ。root での書き込みガードレール（[ルートでの書き込みガードレール](#ルートでの書き込みガードレール)）もこの層が振り分け前に判定する。ユニットテストで網羅。 |
 | `presentation/mcp/issue/` | issue tool を提供する `McpServer`。`tool_schemas` / `call_tool` で `presentation/mcp/memory.rs` の memory tool をマージする。 |
 | `presentation/mcp/memory.rs` | memory tool の実装（スキーマ・引数パース・`usecase/memory` への委譲）。issue サーバから呼ばれる。 |
@@ -553,6 +558,35 @@ commit・PR に載せ、内容が保全されたことを確認してから root
 
 `notifications/initialized` などの通知（`id` なし）は受理しますが、応答は返しません。
 
+## 同時実行モデル
+
+**リクエストの読み取りは逐次、実行は並行**です。`usagi mcp` は 1 行ずつ読みますが、応答を要するリクエストは
+上限付きのスレッドプールへ渡して実行します。数分かかる tool 呼び出し（巨大な worktree に対する
+`session_remove` など）が、同じ接続の後続リクエスト（`issue_search` のような読み取り専用の tool も含む）を
+待たせないためです。
+
+| 項目 | 挙動 |
+|---|---|
+| 並行数 | 同時に実行される tool 呼び出しは最大 8 件 |
+| 背圧 | さらに 64 件までは queue に受け付け、それを超えるリクエストは `-32000` で明示的に断る |
+| 応答順序 | **リクエスト順とは一致しない**。完了した順に返るため、対応付けは JSON-RPC の `id` で行う |
+| 応答の framing | 1 応答 = 1 行。書き込みは直列化されるため、行が混ざることはない |
+| 通知 | `id` を持たず応答も返さないため、worker も queue も消費しない（断られることもない） |
+| framing 段のエラー応答 | `-32700` / `-32600` は tool を要さないため、読み取り側がそのまま書き返す |
+| 終了 | 標準入力の EOF（または書き込みエラー）後、実行中のリクエストの完了を待ってから終了する |
+
+- **クライアント側の前提**: MCP クライアントは `id` で応答を対応付けるため、順序の入れ替わりは想定内です。
+  ワイヤプロトコルは変わりません。
+- **`initialize`**: クライアントは応答を待ってから次のリクエストを送るため、プールを通しても順序上の問題は
+  ありません（専用の追い越し経路は設けていません）。
+- **データ競合が増えないこと**: ストアを書き換える tool は、ストアごとの `.lock` に対するプロセス間排他ロックで
+  すでに直列化されています（[issue ストア](../data/03-issues.md)・[memory ストア](../data/04-memory.md)）。
+  このロックは開いたファイルごとに取るため、別プロセス同士と同じように 1 プロセス内のスレッド同士も直列化します。
+- **書き込み系 tool 同士はロック待ちになる**: 逐次実行だった従来は同一プロセス内でストアロックが競合しませんでしたが、
+  並行実行では同じストアを触る tool が待たされます。ロックの保持区間は read-modify-write 1 回分に収めてあり
+  （数ギガバイトの worktree 削除のような長時間の処理はストアロックではなく session ごとの teardown ロックが担う）、
+  待ち時間の上限を超えた場合は「別プロセスがロックを保持している可能性がある」旨を tool 実行エラーとして返します。
+
 ## エラーハンドリング
 
 エラーは 2 種類に分けて扱います。
@@ -564,6 +598,7 @@ commit・PR に載せ、内容が保全されたことを確認してから root
   | `-32600` | `method` の無い不正なリクエスト |
   | `-32601` | 未知のメソッド |
   | `-32602` | `tools/call` に tool 名が無い |
+  | `-32000` | 実行中・queue 済みのリクエストが上限に達している（[同時実行モデル](#同時実行モデル)）。同じリクエストを再送すれば処理される |
 - **tool 実行エラー**: `tools/call` の結果として `isError: true` を立てて返します（プロトコルエラーには
   しません）。これによりエージェントがエラー内容をテキストで受け取り、自己修復できます。
   - 例: 不正な引数（必須項目の欠落・型不一致）、未知の tool 名、`issue_update` の対象が存在しない、
@@ -572,9 +607,11 @@ commit・PR に載せ、内容が保全されたことを確認してから root
 ## 設計上の選択
 
 - **自前実装（依存追加なし）**: MCP の SDK（`rmcp` 等）は tokio など非同期スタックを要しますが、本
-  サーバは `serde_json` のみで同期的に実装しています。usagi の「依存を最小に保つ」「テストカバレッジ
+  サーバは `serde_json` のみで実装しています。usagi の「依存を最小に保つ」「テストカバレッジ
   100%」という方針に合わせ、protocol 分岐を純粋関数（`handle_line`）に閉じ込めてユニットテストで
-  網羅し、テスト不能な stdin ループだけをカバレッジ対象外にしています。
+  網羅しています。並行化も非同期ランタイムを持ち込まず、標準ライブラリのスレッドと channel だけで
+  上限付きプールを組んでいます（[同時実行モデル](#同時実行モデル)）。tool 1 件の処理は同期関数のままなので、
+  並行化してもテストのしやすさは変わりません。
 - **protocolVersion**: `2024-11-05` を返します。
 - **状態を持たない**: サーバは内部状態を保持せず、各 tool 呼び出しが `.usagi/issues/` / `.usagi/memory/` /
   `state.json` を直接読み書きします。CLI・TUI と MCP を混在して使っても整合します。

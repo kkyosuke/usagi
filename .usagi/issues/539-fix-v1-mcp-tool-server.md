@@ -1,13 +1,13 @@
 ---
 number: 539
 title: fix(v1/mcp): 長い tool 呼び出しが同一 server の後続要求を止めないようにする
-status: todo
+status: in-progress
 priority: high
 labels: [v1, mcp, concurrency, ux]
 dependson: []
 related: [538]
 created_at: 2026-07-24T22:38:13.057302+00:00
-updated_at: 2026-07-24T22:38:13.057302+00:00
+updated_at: 2026-07-25T05:34:58.685453+00:00
 ---
 
 ## 問題・影響

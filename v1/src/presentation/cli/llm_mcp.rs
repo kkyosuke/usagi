@@ -26,7 +26,7 @@ pub fn run(
     backend: Box<dyn LlmBackend>,
     model: String,
     input: impl BufRead,
-    output: impl Write,
+    output: impl Write + Send,
 ) -> Result<()> {
     let server = LlmMcpServer::new(backend, model);
     crate::presentation::mcp::serve(&server, input, output)?;

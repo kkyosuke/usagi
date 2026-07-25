@@ -153,8 +153,8 @@ impl UsagiMcpServer {
         worktree: PathBuf,
         workspace_root: PathBuf,
         backend: Box<dyn AgentBackend>,
-        runner: Box<dyn CommandRunner>,
-        model_probe: Box<dyn AgentModelProbe>,
+        runner: Box<dyn CommandRunner + Send + Sync>,
+        model_probe: Box<dyn AgentModelProbe + Send + Sync>,
     ) -> Self {
         let store_mutation_context = store_mutation_context(&worktree, &workspace_root);
         Self {
@@ -504,13 +504,11 @@ mod tests {
     use crate::presentation::mcp::session::{AgentBackend, LaunchPromptDelivery};
     use crate::presentation::mcp::PROTOCOL_VERSION;
     use crate::usecase::agent::ModelAvailability;
+    use crate::usecase::doctor::CommandRunner;
     use serde_json::json;
-    use std::cell::RefCell;
     use std::fs;
     use std::path::Path;
-    use std::rc::Rc;
-
-    use crate::usecase::doctor::CommandRunner;
+    use std::sync::{Arc, Mutex};
 
     /// A runner that reports a fixed allowlist of programs as available.
     struct FakeRunner(Vec<&'static str>);
@@ -545,7 +543,7 @@ mod tests {
     /// A backend that returns a fixed reply, so the unified server's routing of
     /// session prompt/send routing to the session server can be exercised without a real
     /// agent.
-    type PromptDeliveryLog = Rc<RefCell<Vec<LaunchPromptDelivery>>>;
+    type PromptDeliveryLog = Arc<Mutex<Vec<LaunchPromptDelivery>>>;
 
     #[derive(Default)]
     struct StubBackend {
@@ -559,7 +557,7 @@ mod tests {
             _prompt: &str,
             delivery: LaunchPromptDelivery,
         ) -> Result<String, String> {
-            self.prompt_deliveries.borrow_mut().push(delivery);
+            self.prompt_deliveries.lock().unwrap().push(delivery);
             Ok("delegated".to_string())
         }
 
@@ -916,7 +914,7 @@ mod tests {
         assert_eq!(body["session"], "issue-1");
         assert_eq!(body["delivered_to"], "queue");
         assert_eq!(
-            *prompt_deliveries.borrow(),
+            *prompt_deliveries.lock().unwrap(),
             vec![LaunchPromptDelivery::FreshLaunch]
         );
 

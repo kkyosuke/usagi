@@ -42,9 +42,9 @@ use crate::usecase::session;
 /// exercised in tests without shelling out to a real agent CLI.
 pub fn run(
     backend: Box<dyn AgentBackend>,
-    model_probe: Box<dyn AgentModelProbe>,
+    model_probe: Box<dyn AgentModelProbe + Send + Sync>,
     input: impl BufRead,
-    output: impl Write,
+    output: impl Write + Send,
 ) -> Result<()> {
     let worktree = std::env::current_dir()?;
     let workspace_root = session::workspace_root(&worktree);
