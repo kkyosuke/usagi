@@ -25,6 +25,8 @@ use usagi_core::usecase::client::{
 };
 use usagi_daemon::infrastructure::unix_transport::{connect_current, ensure_private_dir_all};
 
+use super::daemon::{Channel, reap, usagi_command};
+
 /// Claude は必ず OS sandbox launcher の中で起動するため、`bwrap` を持たない Linux CI では
 /// fail-closed で起動が拒否される。この debug ビルド専用 seam は launcher と `--settings` フックの
 /// live 配線をそのまま通したまま拘束だけを外し、E2E を platform 非依存にする
@@ -144,16 +146,9 @@ impl McpHarness {
             fixture_bin.display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let mut child = Command::new(env!("CARGO_BIN_EXE_usagi"))
-            .arg("mcp")
-            .current_dir(&cwd)
-            .env("USAGI_HOME", home.path())
+        let mut child = usagi_command(home.path(), Channel::Local, &cwd, &["mcp".as_ref()])
             .env("PATH", path)
             .env(SANDBOX_PASSTHROUGH, "1")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_COMMON_DIR")
-            .env_remove("GIT_INDEX_FILE")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -330,22 +325,20 @@ impl McpHarness {
             self.fixture_bin.display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let mut child = Command::new(env!("CARGO_BIN_EXE_usagi"))
-            .arg("mcp")
-            .current_dir(self.workspace.path())
-            .env("USAGI_HOME", self.home.path())
-            .env("USAGI_MCP_CALLER_CREDENTIAL", credential)
-            .env("PATH", path)
-            .env(SANDBOX_PASSTHROUGH, "1")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_COMMON_DIR")
-            .env_remove("GIT_INDEX_FILE")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child = usagi_command(
+            self.home.path(),
+            Channel::Local,
+            self.workspace.path(),
+            &["mcp".as_ref()],
+        )
+        .env("USAGI_MCP_CALLER_CREDENTIAL", credential)
+        .env("PATH", path)
+        .env(SANDBOX_PASSTHROUGH, "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
         self.process = McpProcess {
             stdin: child.stdin.take().unwrap(),
             stdout: BufReader::new(child.stdout.take().unwrap()),
@@ -397,13 +390,9 @@ impl Drop for McpHarness {
     fn drop(&mut self) {
         let _ = self.process.child.kill();
         let _ = self.process.child.wait();
-        let _ = Command::new(env!("CARGO_BIN_EXE_usagi"))
-            .args(["daemon", "stop"])
-            .current_dir(self.workspace.path())
-            .env("USAGI_HOME", self.home.path())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        // graceful stop がタイムアウトしても、record の exact incarnation まで落として
+        // MCP 経由で autostart した daemon を残さない。
+        reap(self.home.path());
     }
 }
 
