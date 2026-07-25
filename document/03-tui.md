@@ -349,13 +349,30 @@ sidebar は daemon snapshot の `available` session に加えて、名前を占�
 から client 側で導出する（`SessionLifecycle::capabilities` が正本）。過渡状態（`creating` / `deleting` など）は
 一覧に出さず、attach 対象を広げないため scope 解決は引き続き `available` だけを対象とする。
 
-`env` は現在 active な target（workspace root か session）の environment editor を開き、その target の
-永続化済み環境変数を読み込んで表示する。正本は notes・todos・decisions と同じ repository の `state.json`
-（workspace state store）で、root と各 session が独立した `name → value` の集合を持つ。editor では変数の
-追加・編集・削除ができ、保存すると集合全体が `state.json` に書き戻される（保存は差分ではなく全置換で、
-消した変数は取り除かれる）。読み込み中と保存中はその状態を表示し、保存中の再保存は受け付けない
-（二重送信の防止）。読み込みや保存が失敗した場合は editor に留まり、入力を失わずに安全な error を表示して
-再試行できる。`env` は引数を取らないため、余分な引数を与えた場合は editor を開かず安全な notice で拒否する。
+### env editor
+
+`env` は環境変数の editor を開く。引数なし（または `workspace`）でこの workspace のスコープ、`global` で
+全 workspace 共通のスコープを編集し、それ以外の引数は editor を開かず安全な notice で拒否する。保存場所・
+スコープの合成・secret の解決・注入は [9. 環境変数設定](09-env.md) が正本で、ここでは editor の操作だけを
+述べる。
+
+| 入力 | 動作 |
+|---|---|
+| 文字 / `Backspace` | `NAME=value` の入力行を編集する |
+| `Enter`（入力行あり） | その binding を追加・置換する。値が空なら削除する |
+| `Enter`（入力行が空） | 編集中のスコープを保存する |
+| `Tab` | 編集対象スコープを workspace ⇄ global で切り替える |
+| `Esc` | editor を閉じる |
+
+- **workspace を編集しているときは global の binding を read-only で併記**し、workspace 側が同名を持つ
+  ものは上書き済みとして示す。global スコープは継承元を持たないため併記しない。
+- 保存は差分ではなく編集中スコープの全置換で、消した変数は取り除かれる。相手スコープの binding は
+  変わらない。
+- 読み込み中と保存中はその状態を表示し、保存中の再保存・編集・スコープ切り替えは受け付けない
+  （二重送信の防止）。
+- 入力行が `NAME=value` の形でない、または名前が移植可能な識別子でない場合は、入力を保持したまま
+  安全な error を表示する。読み込みや保存の失敗も editor に留まり、入力を失わずに再試行できる。
+- `Tab` でスコープを切り替えると相手スコープを読み直す。切り替え前の未保存の編集は破棄される。
 
 ## PR modal と browser effect
 

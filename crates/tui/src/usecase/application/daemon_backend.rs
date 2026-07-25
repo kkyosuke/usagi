@@ -24,6 +24,7 @@ use usagi_core::domain::id::{
 };
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::user_decision::UserDecisionAnswer;
+use usagi_core::usecase::env::EnvScope;
 
 use super::controller::{
     AppEvent, Effect, EnvironmentEntry, PendingToken, SessionCreateIntent, TabDirection, Target,
@@ -159,22 +160,25 @@ pub trait AgentPort {
     fn select_tab(&mut self, direction: TabDirection);
 }
 
-/// Notes and environment persistence for a stable target.
+/// Scratchpad persistence for a stable target, and environment persistence for a
+/// settings scope.
 ///
 /// Reads and writes return through [`Completions`] as the matching
 /// `BackendEvent` (`NotesLoaded` / `NotesError` / `EnvironmentLoaded` /
 /// `EnvironmentError`), so a save failure never discards the editor's values.
+/// A scratchpad belongs to one target (workspace root or session); an
+/// environment belongs to one [`EnvScope`] (this workspace, or every workspace).
 pub trait TargetStorePort {
     /// Read a target's scratchpad.
     fn load_notes(&mut self, target: Target, completions: Completions);
     /// Persist an edited scratchpad.
     fn save_notes(&mut self, target: Target, scratchpad: Scratchpad, completions: Completions);
-    /// Read a target's environment values.
-    fn load_environment(&mut self, target: Target, completions: Completions);
-    /// Persist edited environment values.
+    /// Read one scope's environment bindings, plus what it inherits.
+    fn load_environment(&mut self, scope: EnvScope, completions: Completions);
+    /// Persist one scope's environment bindings.
     fn save_environment(
         &mut self,
-        target: Target,
+        scope: EnvScope,
         entries: Vec<EnvironmentEntry>,
         completions: Completions,
     );
@@ -401,12 +405,12 @@ impl DaemonBackend {
                 self.store
                     .save_notes(target, scratchpad, self.completions());
             }
-            Effect::LoadEnvironment { target } => {
-                self.store.load_environment(target, self.completions());
+            Effect::LoadEnvironment { scope } => {
+                self.store.load_environment(scope, self.completions());
             }
-            Effect::SaveEnvironment { target, entries } => {
+            Effect::SaveEnvironment { scope, entries } => {
                 self.store
-                    .save_environment(target, entries, self.completions());
+                    .save_environment(scope, entries, self.completions());
             }
             Effect::WorkspaceCommand { workspace, command } => {
                 self.workspace_commands
@@ -567,8 +571,8 @@ mod tests {
     struct FakeStore {
         loaded_notes: Vec<Target>,
         saved_notes: Vec<(Target, Scratchpad)>,
-        loaded_env: Vec<Target>,
-        saved_env: Vec<(Target, Vec<EnvironmentEntry>)>,
+        loaded_env: Vec<EnvScope>,
+        saved_env: Vec<(EnvScope, Vec<EnvironmentEntry>)>,
     }
 
     impl TargetStorePort for FakeStore {
@@ -591,26 +595,30 @@ mod tests {
             }));
         }
 
-        fn load_environment(&mut self, target: Target, completions: Completions) {
-            self.loaded_env.push(target);
+        fn load_environment(&mut self, scope: EnvScope, completions: Completions) {
+            self.loaded_env.push(scope);
             completions.emit(AppEvent::Backend(BackendEvent::EnvironmentLoaded {
-                target,
+                scope,
                 entries: vec![EnvironmentEntry {
                     name: "KEY".to_owned(),
                     value: "value".to_owned(),
+                }],
+                inherited: vec![EnvironmentEntry {
+                    name: "GLOBAL".to_owned(),
+                    value: "inherited".to_owned(),
                 }],
             }));
         }
 
         fn save_environment(
             &mut self,
-            target: Target,
+            scope: EnvScope,
             entries: Vec<EnvironmentEntry>,
             completions: Completions,
         ) {
-            self.saved_env.push((target, entries));
+            self.saved_env.push((scope, entries));
             completions.emit(AppEvent::Backend(BackendEvent::EnvironmentError {
-                target,
+                scope,
                 error: SafeError {
                     message: SafeMessage::new("permission denied"),
                     error_id: "env-save".to_owned(),
@@ -829,21 +837,25 @@ mod tests {
     #[test]
     fn load_and_save_environment_reflux_backend_events() {
         let mut backend = backend();
-        let target = Target::Session(SessionId::new());
-        backend.dispatch(Effect::LoadEnvironment { target });
+        backend.dispatch(Effect::LoadEnvironment {
+            scope: EnvScope::Workspace,
+        });
         assert!(matches!(
             backend.drain_events().as_slice(),
-            [AppEvent::Backend(BackendEvent::EnvironmentLoaded { entries, .. })]
-                if entries.len() == 1
+            [AppEvent::Backend(BackendEvent::EnvironmentLoaded {
+                scope,
+                entries,
+                inherited,
+            })] if *scope == EnvScope::Workspace && entries.len() == 1 && inherited.len() == 1
         ));
         backend.dispatch(Effect::SaveEnvironment {
-            target,
+            scope: EnvScope::Global,
             entries: Vec::new(),
         });
         assert!(matches!(
             backend.drain_events().as_slice(),
-            [AppEvent::Backend(BackendEvent::EnvironmentError { target: failed, .. })]
-                if *failed == target
+            [AppEvent::Backend(BackendEvent::EnvironmentError { scope: failed, .. })]
+                if *failed == EnvScope::Global
         ));
     }
 

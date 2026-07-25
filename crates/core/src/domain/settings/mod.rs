@@ -4,11 +4,20 @@
 //! directory, plus workspace settings persisted beside a project. Theme and
 //! modal interaction stay global; Agent, Issue, and Memory values are copied to
 //! a workspace when it is registered and may then be changed independently.
+//! Environment bindings ([`env`]) exist in both scopes and merge, so a workspace
+//! adds to — or overrides — what every workspace inherits.
 //!
 //! Enum-valued settings degrade an unrecognised stored token to a sensible
 //! default rather than failing the whole file, so a value written by a newer
 //! usagi — or a hand-edited typo — never blocks loading. [`Theme`] does this with
 //! `#[serde(other)]` on [`Theme::System`] (unknown → follow the OS).
+
+mod env;
+
+pub use env::{
+    EnvBindings, SECRET_REFERENCE_PREFIX, format_env_bindings, is_secret_reference,
+    is_valid_env_name, parse_env_bindings, valid_bindings,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -82,6 +91,11 @@ pub struct Settings {
     pub issue_enabled: bool,
     /// Whether durable-memory MCP tools are available to agents.
     pub memory_enabled: bool,
+    /// Environment bindings injected into every workspace's Agent and terminal
+    /// children. The key is the variable name, the value a literal or a
+    /// `op://…` secret reference; a workspace adds to or overrides them through
+    /// [`LocalSettings::env`]. Read the usable ones with [`Self::env_bindings`].
+    pub env: EnvBindings,
 }
 
 impl Default for Settings {
@@ -92,13 +106,19 @@ impl Default for Settings {
             default_model: DefaultModel::default(),
             issue_enabled: true,
             memory_enabled: true,
+            // No environment is injected unless it is configured explicitly.
+            env: EnvBindings::new(),
         }
     }
 }
 
 impl Settings {
-    /// Apply workspace-owned Agent, Issue, and Memory values over this global
-    /// baseline. Theme and modal interaction always remain global.
+    /// Apply workspace-owned Agent, Issue, Memory, and environment values over
+    /// this global baseline. Theme and modal interaction always remain global.
+    ///
+    /// Environment bindings accumulate rather than replace: the workspace map is
+    /// layered on top of the global one, so a same-named binding takes the
+    /// workspace value and everything else stays inherited.
     #[must_use]
     pub fn with_local(mut self, local: &LocalSettings) -> Self {
         if let Some(model) = local.default_model {
@@ -110,7 +130,16 @@ impl Settings {
         if let Some(enabled) = local.memory_enabled {
             self.memory_enabled = enabled;
         }
+        for (name, value) in valid_bindings(&local.env) {
+            self.env.insert(name.to_owned(), value.to_owned());
+        }
         self
+    }
+
+    /// The bindings usable for injection, with invalid names and blank values
+    /// dropped.
+    pub fn env_bindings(&self) -> impl Iterator<Item = (&str, &str)> {
+        valid_bindings(&self.env)
     }
 }
 
@@ -128,15 +157,37 @@ pub struct LocalSettings {
     pub default_model: Option<DefaultModel>,
     pub issue_enabled: Option<bool>,
     pub memory_enabled: Option<bool>,
+    /// Environment bindings this workspace adds to the global ones. An empty map
+    /// means the workspace uses exactly what it inherits.
+    pub env: EnvBindings,
+}
+
+impl LocalSettings {
+    /// Replace the Agent, Issue, and Memory choices with `settings`, keeping this
+    /// workspace's own environment bindings.
+    ///
+    /// The Config surface edits a merged [`Settings`] view, which carries the
+    /// *inherited* environment; writing that view back verbatim would copy every
+    /// global binding into the workspace file. Config saves therefore go through
+    /// here so the workspace keeps owning only what it declared itself.
+    #[must_use]
+    pub fn with_config(mut self, settings: &Settings) -> Self {
+        self.default_model = Some(settings.default_model);
+        self.issue_enabled = Some(settings.issue_enabled);
+        self.memory_enabled = Some(settings.memory_enabled);
+        self
+    }
+
+    /// The bindings usable for injection, with invalid names and blank values
+    /// dropped.
+    pub fn env_bindings(&self) -> impl Iterator<Item = (&str, &str)> {
+        valid_bindings(&self.env)
+    }
 }
 
 impl From<&Settings> for LocalSettings {
     fn from(settings: &Settings) -> Self {
-        Self {
-            default_model: Some(settings.default_model),
-            issue_enabled: Some(settings.issue_enabled),
-            memory_enabled: Some(settings.memory_enabled),
-        }
+        Self::default().with_config(settings)
     }
 }
 

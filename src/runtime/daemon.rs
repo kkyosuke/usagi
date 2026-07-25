@@ -25,6 +25,7 @@ use usagi_core::infrastructure::daemon::{
     DaemonLauncher, DaemonReady, DaemonRecordStore, InstanceLock, LivenessProbe,
     ProcessIdentitySource, RecordFile, ShutdownSignal, Sleeper, Terminator,
 };
+use usagi_core::infrastructure::env_resolver::OpCli;
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::ipc::{
     BuildArtifactDecision, BuildIdentity, BuildRolloverTrigger, build_artifact_decision,
@@ -88,8 +89,19 @@ use usagi_daemon::usecase::terminal_ipc::{
 };
 use usagi_daemon::usecase::terminal_profile::{LoginShellProfile, TERMINAL_ENVIRONMENT_VARIABLES};
 
+use crate::runtime::user_env::{self, UserEnvironment};
+
+/// The daemon's configured-environment reader, shared by the Agent adapters and
+/// the terminal profile resolver.
+type SharedUserEnvironment = UserEnvironment<OpCli>;
+
 struct TrustedLoginShell {
     profile: LoginShellProfile,
+    /// The configured environment for this daemon's repository, resolved at launch
+    /// time. `None` in tests that exercise only the shell profile.
+    environment: Option<Arc<SharedUserEnvironment>>,
+    /// The repository the configured workspace bindings belong to.
+    workspace_root: PathBuf,
 }
 
 impl TerminalProfileResolver for TrustedLoginShell {
@@ -100,8 +112,34 @@ impl TerminalProfileResolver for TrustedLoginShell {
         usagi_core::domain::terminal_launch::ResolvedTerminalLaunch,
         usagi_core::domain::terminal_launch::TerminalLaunchValidationError,
     > {
-        self.profile.resolve(request)
+        let resolved = self.profile.resolve(request)?;
+        let Some(environment) = self.environment.as_ref() else {
+            return Ok(resolved);
+        };
+        with_user_environment(resolved, &environment.resolved(&self.workspace_root))
     }
+}
+
+/// Add the configured environment to a resolved terminal launch.
+///
+/// Configured bindings win over the inherited terminal characteristics, which is
+/// what makes a workspace able to override an ambient value. Their **names** join
+/// the durable allowlist (values and secrets never do), because that allowlist is
+/// what the launch boundary validates the ephemeral environment against.
+fn with_user_environment(
+    resolved: usagi_core::domain::terminal_launch::ResolvedTerminalLaunch,
+    user: &BTreeMap<String, String>,
+) -> Result<
+    usagi_core::domain::terminal_launch::ResolvedTerminalLaunch,
+    usagi_core::domain::terminal_launch::TerminalLaunchValidationError,
+> {
+    let mut snapshot = resolved.snapshot;
+    let mut environment = resolved.environment;
+    for (name, value) in user_env::typed(user) {
+        snapshot.environment_allowlist.insert(name.clone());
+        environment.insert(name, value.clone());
+    }
+    usagi_core::domain::terminal_launch::ResolvedTerminalLaunch::new(snapshot, environment)
 }
 
 fn terminal_environment() -> BTreeMap<String, String> {
@@ -215,6 +253,9 @@ struct RootCodexProvisioner {
     readiness: Arc<dyn AgentReadinessProbe>,
     mcp_command: PathBuf,
     data_home: PathBuf,
+    /// The configured environment injected into the Agent child. `None` in tests
+    /// that exercise only the MCP wiring.
+    environment: Option<Arc<SharedUserEnvironment>>,
 }
 impl CodexProvisioner for RootCodexProvisioner {
     fn provision(
@@ -226,12 +267,16 @@ impl CodexProvisioner for RootCodexProvisioner {
             .map_err(|()| CodexProvisionFailure::ExecutableUnavailable)?;
         let (working_directory, workspace_root) = working_directories(&self.sessions, context)
             .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
+        let user = configured_environment(self.environment.as_ref(), &workspace_root);
         Ok(CodexProvision {
             working_directory,
-            environment_allowlist: mcp_environment_allowlist(context),
+            environment_allowlist: launch_allowlist(context, &user),
             spawn: SpawnProvision::new(
-                mcp_environment(context, &self.data_home, &workspace_root)
-                    .map_err(|()| CodexProvisionFailure::MaterializationFailed)?,
+                launch_environment(
+                    &user,
+                    mcp_environment(context, &self.data_home, &workspace_root)
+                        .map_err(|()| CodexProvisionFailure::MaterializationFailed)?,
+                ),
                 context
                     .inject_mcp
                     .then(|| codex_integration_arguments(&self.mcp_command))
@@ -247,6 +292,9 @@ struct RootClaudeProvisioner {
     readiness: Arc<dyn AgentReadinessProbe>,
     mcp_command: PathBuf,
     data_home: PathBuf,
+    /// The configured environment injected into the Agent child. `None` in tests
+    /// that exercise only the sandbox and MCP wiring.
+    environment: Option<Arc<SharedUserEnvironment>>,
     /// E2E テスト専用 seam（[`claude_sandbox::passthrough_requested`]）。true のとき launcher の子へ
     /// 同じ opt-in を伝え、backend の無い環境でも live 起動経路を通す。release ビルドでは常に false。
     sandbox_passthrough: bool,
@@ -275,9 +323,13 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             claude_settings_arguments(&self.mcp_command, mode)
                 .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?,
         );
+        let user = configured_environment(self.environment.as_ref(), &workspace_root);
         let mut spawn = SpawnProvision::new(
-            mcp_environment(context, &self.data_home, &workspace_root)
-                .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?,
+            launch_environment(
+                &user,
+                mcp_environment(context, &self.data_home, &workspace_root)
+                    .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?,
+            ),
             arguments,
         );
         spawn.set_sandbox_launcher(
@@ -297,7 +349,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         }
         Ok(ClaudeProvision {
             working_directory,
-            environment_allowlist: mcp_environment_allowlist(context),
+            environment_allowlist: launch_allowlist(context, &user),
             spawn,
         })
     }
@@ -364,6 +416,41 @@ fn claude_settings_arguments(usagi: &Path, mode: SandboxMode) -> Result<Vec<Stri
         "--settings".to_owned(),
         scoped_settings_json(usagi, mode == SandboxMode::Session),
     ])
+}
+
+/// The configured environment for a launch in `workspace_root`, or nothing when
+/// no reader is wired (tests that exercise only the MCP / sandbox wiring).
+fn configured_environment(
+    environment: Option<&Arc<SharedUserEnvironment>>,
+    workspace_root: &Path,
+) -> BTreeMap<String, String> {
+    environment.map_or_else(BTreeMap::new, |environment| {
+        environment.resolved(workspace_root)
+    })
+}
+
+/// The durable allowlist for a launch: the MCP names plus the configured
+/// variable names. Only names are durable — values and secrets stay in the
+/// ephemeral spawn provision.
+fn launch_allowlist(
+    context: &ProvisionContext,
+    user: &BTreeMap<String, String>,
+) -> BTreeSet<EnvironmentVariableName> {
+    let mut allowlist = mcp_environment_allowlist(context);
+    allowlist.extend(user_env::allowlist(user));
+    allowlist
+}
+
+/// The ephemeral spawn environment: the configured bindings first, then the
+/// daemon's own MCP wiring, so a configured binding can never displace the
+/// values that connect the child back to this daemon.
+fn launch_environment(
+    user: &BTreeMap<String, String>,
+    mcp: Vec<(EnvironmentVariableName, String)>,
+) -> Vec<(EnvironmentVariableName, String)> {
+    let mut environment = user_env::typed(user);
+    environment.extend(mcp);
+    environment
 }
 
 fn mcp_environment_allowlist(context: &ProvisionContext) -> BTreeSet<EnvironmentVariableName> {
@@ -1266,12 +1353,17 @@ fn spawn_ipc_server(
     ))));
     let pipeline_metrics = Arc::new(TerminalPipelineMetrics::default());
     let (pty, observations) = DaemonPty::new(Arc::clone(&pipeline_metrics));
+    let workspace_root = trusted_repository_root(&runtime)?;
+    // One reader for the whole daemon: Agent adapters and the terminal profile
+    // resolve the same configured environment and share its secret cache.
+    let user_environment = Arc::new(UserEnvironment::new(data_dir.to_path_buf(), OpCli));
     let terminal = new_terminal_runtime(
         data_dir,
         daemon_generation,
-        trusted_repository_root(&runtime)?,
+        workspace_root,
         pty,
         Arc::clone(&runtime),
+        Arc::clone(&user_environment),
     )?;
     start_terminal_observer(
         Arc::clone(&terminal),
@@ -1287,6 +1379,7 @@ fn spawn_ipc_server(
         Arc::clone(&runtime),
         agent_pty,
         mcp_command,
+        user_environment,
     )?;
     let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(&data_dir.join("daemon"))));
     if let Ok(runtime) = supervisor.lock()
@@ -1428,6 +1521,7 @@ fn open_agent_runtime(
     sessions: SharedSessionRuntime,
     pty: AgentPty,
     mcp_command: PathBuf,
+    environment: Arc<SharedUserEnvironment>,
 ) -> std::io::Result<SharedAgentRuntime> {
     let mut store = FileRuntimeStore(data_dir.join("daemon").join("agents.json"));
     let snapshot = store.reconcile_after_restart()?;
@@ -1446,12 +1540,14 @@ fn open_agent_runtime(
             readiness: Arc::clone(&readiness),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
+            environment: Some(Arc::clone(&environment)),
         }),
         ClaudeAdapter::new(RootClaudeProvisioner {
             sessions,
             readiness,
             mcp_command,
             data_home,
+            environment: Some(environment),
             // E2E テスト専用 seam。release ビルドでは `cfg!(debug_assertions)` が false になるため、
             // 配布バイナリは常に拘束された Claude だけを起動する。
             sandbox_passthrough: claude_sandbox::passthrough_requested(
@@ -1551,6 +1647,7 @@ fn new_terminal_runtime(
     repo_root: PathBuf,
     pty: DaemonPty,
     sessions: SharedSessionRuntime,
+    environment: Arc<SharedUserEnvironment>,
 ) -> std::io::Result<SharedTerminalRuntime> {
     let mut store = FileTerminalStore(data_dir.join("daemon").join("terminals.json"));
     let (snapshot, interrupted) = store.load_reconciled()?;
@@ -1562,7 +1659,9 @@ fn new_terminal_runtime(
     let runtime = GenericTerminalRuntime::from_snapshot(
         generation,
         TrustedLoginShell {
-            profile: LoginShellProfile::new(terminal_environment(), repo_root),
+            profile: LoginShellProfile::new(terminal_environment(), repo_root.clone()),
+            environment: Some(environment),
+            workspace_root: repo_root,
         },
         store,
         pty,
@@ -6878,6 +6977,8 @@ mod tests {
         };
         let launch = TrustedLoginShell {
             profile: LoginShellProfile::new(BTreeMap::new(), directory.path().to_path_buf()),
+            environment: None,
+            workspace_root: PathBuf::new(),
         }
         .resolve(&request)
         .unwrap();
@@ -7153,6 +7254,8 @@ mod tests {
             DaemonGeneration::new(),
             TrustedLoginShell {
                 profile: LoginShellProfile::new(BTreeMap::new(), directory.path().to_path_buf()),
+                environment: None,
+                workspace_root: PathBuf::new(),
             },
             TestTerminalStore,
             pty,
@@ -7404,6 +7507,8 @@ mod tests {
             DaemonGeneration::new(),
             TrustedLoginShell {
                 profile: LoginShellProfile::new(BTreeMap::new(), dir.path().to_path_buf()),
+                environment: None,
+                workspace_root: PathBuf::new(),
             },
             FileTerminalStore(path.clone()),
             RestartPty(Arc::clone(&first_effects)),
@@ -7446,6 +7551,8 @@ mod tests {
             DaemonGeneration::new(),
             TrustedLoginShell {
                 profile: LoginShellProfile::new(BTreeMap::new(), dir.path().to_path_buf()),
+                environment: None,
+                workspace_root: PathBuf::new(),
             },
             second_store,
             RestartPty(Arc::clone(&second_effects)),

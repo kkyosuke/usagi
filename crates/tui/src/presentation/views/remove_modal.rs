@@ -217,7 +217,6 @@ mod tests {
             last_active: None,
             notes: Scratchpad::default(),
             prs: Vec::new(),
-            environment: std::collections::BTreeMap::new(),
         }
     }
 
