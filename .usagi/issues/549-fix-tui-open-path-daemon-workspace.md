@@ -1,13 +1,13 @@
 ---
 number: 549
 title: fix(tui): open した path と daemon の workspace の不整合を閉じる
-status: todo
+status: done
 priority: medium
 labels: [v2, tui, ipc, daemon, correctness]
 dependson: []
 related: [548, 542]
 created_at: 2026-07-25T06:54:25.075274+00:00
-updated_at: 2026-07-25T06:54:25.075274+00:00
+updated_at: 2026-07-25T13:00:32.295084+00:00
 ---
 
 ## 問題・根拠
