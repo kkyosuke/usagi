@@ -237,6 +237,83 @@ fn workspace_fence_admits_the_trusted_tree_and_refuses_every_other_declaration()
 }
 
 #[test]
+fn a_selected_workspace_is_admitted_only_when_this_daemon_serves_exactly_it() {
+    let selected = |root: &str| ClientWorkspace::Selected { root: root.into() };
+
+    // The one workspace this daemon serves, in either spelling.
+    for admitted in [
+        selected(TRUSTED_ROOT),
+        selected(&format!("{TRUSTED_ROOT}/")),
+    ] {
+        assert!(
+            workspace_admission(Some(&admitted), TRUSTED_ROOT).is_ok(),
+            "{admitted:?}"
+        );
+    }
+
+    for refused in [
+        // A subdirectory and a session worktree are the same tree to *run* in, so
+        // a bound declaration is admitted there. Opening them is different: the
+        // screen would carry that directory's workspace name over this daemon's
+        // session list, which is exactly the inconsistency this variant closes.
+        selected(&format!("{TRUSTED_ROOT}/crates/core")),
+        selected(&format!("{TRUSTED_ROOT}/.usagi/sessions/issue-549")),
+        // A sibling, a look-alike prefix, and the parent are all other workspaces.
+        selected("/workspace/other"),
+        selected(&format!("{TRUSTED_ROOT}-2")),
+        selected("/workspace"),
+        // Roots that cannot be compared fail closed, as for a bound client.
+        selected(""),
+        selected("relative/root"),
+    ] {
+        let error = workspace_admission(Some(&refused), TRUSTED_ROOT).unwrap_err();
+        assert!(is_workspace_mismatch(&error), "{refused:?}");
+        assert_eq!(error.retry_mode, RetryMode::Never, "{refused:?}");
+        assert_eq!(error.side_effect, SideEffect::None, "{refused:?}");
+        // The client renders this verbatim, so the message must name the
+        // workspace the daemon does serve.
+        assert!(error.message.contains(TRUSTED_ROOT), "{}", error.message);
+    }
+
+    // A daemon that cannot spell its own root compares nothing and admits no
+    // selection either.
+    assert!(is_workspace_mismatch(
+        &workspace_admission(Some(&selected(TRUSTED_ROOT)), "").unwrap_err()
+    ));
+}
+
+#[test]
+fn the_selected_declaration_is_a_stable_wire_shape() {
+    assert_eq!(
+        serde_json::to_value(ClientWorkspace::Selected {
+            root: TRUSTED_ROOT.into(),
+        })
+        .unwrap(),
+        json!({"scope": "selected", "root": TRUSTED_ROOT})
+    );
+}
+
+#[test]
+fn negotiation_refuses_a_selected_workspace_this_daemon_does_not_serve() {
+    // The TUI declares the workspace it was asked to open, so the refusal has to
+    // arrive during negotiation — before any session list can be answered.
+    let mut elsewhere = hello();
+    elsewhere.workspace = Some(ClientWorkspace::Selected {
+        root: "/workspace/other".into(),
+    });
+    assert!(is_workspace_mismatch(
+        &negotiate(&elsewhere, &server()).unwrap_err()
+    ));
+
+    // The same client selecting this daemon's workspace negotiates normally.
+    let mut here = hello();
+    here.workspace = Some(ClientWorkspace::Selected {
+        root: TRUSTED_ROOT.into(),
+    });
+    assert!(negotiate(&here, &server()).is_ok());
+}
+
+#[test]
 fn negotiation_refuses_a_foreign_workspace_before_protocol_and_capability() {
     // The fence is part of negotiation, not a separate layer a caller can skip.
     let mut elsewhere = hello();

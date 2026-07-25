@@ -372,15 +372,15 @@ fn menu_lines(
 }
 
 /// メニュー下の一時通知行。通知が無くても必ず 1 行（空行）返し、出現・消滅でレイアウトが
-/// ずれないようにする。
+/// ずれないようにする。1 行に収まらない通知（開けなかった理由と復帰手順）は折り返して
+/// 全文を出す。末尾を切ると肝心の手順が消えるためである。
 fn notice_lines(width: usize, notice: Option<&str>) -> Vec<String> {
     match notice {
         None => vec![String::new()],
-        Some(text) => vec![mascot_screen::centered_line(
-            width,
-            text,
-            Role::Warning.style(),
-        )],
+        Some(text) => widgets::wrap_to_width(text, width)
+            .iter()
+            .map(|line| mascot_screen::centered_line(width, line, Role::Warning.style()))
+            .collect(),
     }
 }
 

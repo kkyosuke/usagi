@@ -42,6 +42,7 @@ pub struct Open {
     cleanup_confirming: bool,
     unregistering_path: Option<std::path::PathBuf>,
     unregister_confirmation: ConfirmationModal,
+    notice: Option<String>,
 }
 
 impl Open {
@@ -80,6 +81,7 @@ impl Open {
             cleanup_confirming: false,
             unregistering_path: None,
             unregister_confirmation: ConfirmationModal::new(),
+            notice: None,
         }
     }
 
@@ -146,6 +148,18 @@ impl Open {
     #[must_use]
     pub const fn unregister_confirmation(&self) -> ConfirmationModal {
         self.unregister_confirmation
+    }
+
+    /// 一覧の下に出す一時通知（開けなかった理由など）。
+    #[must_use]
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
+    }
+
+    /// 通知を差し替える。開こうとした workspace が daemon の serve 対象でないときに、
+    /// この画面を保ったまま理由と復帰手順を出すために使う。
+    pub fn set_notice(&mut self, notice: Option<String>) {
+        self.notice = notice;
     }
 
     /// Append one character to the filter and return selection to its first hit.
@@ -312,8 +326,9 @@ impl Open {
             .unwrap_or_default();
     }
 
-    /// 選択を 1 つ下へ（末尾から先頭へ回り込む）。空一覧では何もしない。
+    /// 選択を 1 つ下へ（末尾から先頭へ回り込む）。空一覧では何もしない。移動で通知は消える。
     pub fn select_next(&mut self) {
+        self.notice = None;
         if self.filtered().is_empty() {
             return;
         }
@@ -321,8 +336,9 @@ impl Open {
         self.selected_index = (self.selected_index + 1) % len;
     }
 
-    /// 選択を 1 つ上へ（先頭から末尾へ回り込む）。空一覧では何もしない。
+    /// 選択を 1 つ上へ（先頭から末尾へ回り込む）。空一覧では何もしない。移動で通知は消える。
     pub fn select_prev(&mut self) {
+        self.notice = None;
         if self.filtered().is_empty() {
             return;
         }
@@ -438,13 +454,31 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
     lines
 }
 
+/// 一覧の下に置く一時通知。開けなかった理由と復帰手順は 1 行に収まらないので、一覧と同じ
+/// ブロック幅で折り返す。通知が無いときは行を足さない（一覧の見た目を変えない）。
+fn notice_lines(width: usize, notice: Option<&str>) -> Vec<String> {
+    let Some(notice) = notice else {
+        return Vec::new();
+    };
+    let left_pad = " ".repeat(widgets::centered_padding(width, BLOCK_WIDTH));
+    let mut lines = vec![String::new()];
+    lines.extend(
+        widgets::wrap_to_width(notice, BLOCK_WIDTH)
+            .iter()
+            .map(|line| format!("{left_pad}{}", Role::Warning.style().paint(line))),
+    );
+    lines
+}
+
 /// 生の端末サイズ `raw_height`×`raw_width` に対する Open 画面 1 フレーム分の行。
 /// マスコット・タイトル・フッタの配置は共通の [`mascot_screen`] レイアウトに任せ、この関数は
-/// ボディ（workspace 一覧）だけを組む。`now` は相対時刻に使うので呼び出し側が渡す。
+/// ボディ（workspace 一覧＋通知）だけを組む。`now` は相対時刻に使うので呼び出し側が渡す。
 #[must_use]
 pub fn render(raw_height: usize, raw_width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
     mascot_screen::render(raw_height, raw_width, TITLE, FOOTER, |width| {
-        body_lines(width, open, now)
+        let mut body = body_lines(width, open, now);
+        body.extend(notice_lines(width, open.notice()));
+        body
     })
 }
 
@@ -530,6 +564,48 @@ mod tests {
         assert_eq!(open.selected_index(), 1);
         open.select_prev();
         assert_eq!(open.selected_index(), 0);
+    }
+
+    #[test]
+    fn a_notice_is_rendered_below_the_list_and_cleared_by_moving() {
+        let mut open = Open::new(vec![workspace("alpha", 5), workspace("beta", 10)]);
+        assert_eq!(open.notice(), None);
+        let plain = |open: &Open| {
+            render(40, 90, open, now())
+                .iter()
+                .map(|line| crate::presentation::widgets::strip_ansi(line))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let without_notice = plain(&open);
+
+        // The refusal is long, so it is wrapped instead of clipped: both the
+        // reason and the recovery step have to reach the reader.
+        open.set_notice(Some(
+            "cannot open /tmp/beta: this daemon does not serve the selected workspace; \
+             this daemon serves the workspace /tmp/alpha. \
+             Stop it with `usagi daemon stop`, then start usagi in /tmp/beta."
+                .to_owned(),
+        ));
+        let rendered = plain(&open);
+        let squeezed = rendered.split_whitespace().collect::<String>();
+        assert!(
+            squeezed.contains("thisdaemonservestheworkspace/tmp/alpha."),
+            "{rendered}"
+        );
+        assert!(squeezed.contains("usagidaemonstop"), "{rendered}");
+        assert_eq!(
+            rendered.lines().count(),
+            without_notice.lines().count(),
+            "the frame keeps the terminal's height"
+        );
+
+        // Moving the selection dismisses it: the notice belongs to the attempt.
+        open.select_next();
+        assert_eq!(open.notice(), None);
+        open.set_notice(Some("refused".to_owned()));
+        open.select_prev();
+        assert_eq!(open.notice(), None);
     }
 
     #[test]
