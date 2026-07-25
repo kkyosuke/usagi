@@ -72,7 +72,9 @@ v2 ではこの 4 分割をクレートとして表現し、「TUI が daemon �
 │   │       ├── presentation/    # daemon サーバ入口（daemon verb と IPC request の dispatch・応答整形）
 │   │       │   └── ipc.rs       # handshake 後の IPC protocol handler
 │   │       ├── usecase/         # daemon 専用ロジック（lifecycle verb、terminal/runtime・orchestration）
+│   │       │   └── authority/   # cross-process generation authority（registry・handoff・admission）
 │   │       └── infrastructure/  # daemon 専用の外部接続（Unix socket transport）
+│   │           ├── generation_registry.rs # generation registry document と current locator の実 IO adapter
 │   │           └── unix_transport.rs # generation locator と peer credential を検証する Unix transport
 │   └── tui/              # usagi-tui: TUI 面
 │       └── src/
