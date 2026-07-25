@@ -2125,28 +2125,84 @@ fn session_snapshot_result(
     })
 }
 
+/// Why a lifecycle snapshot could not be read.
+///
+/// Every surface but one shows a single line ([`LifecycleRequestError::reason`]).
+/// Opening a workspace is the exception: it must tell a daemon that refuses the
+/// declared workspace apart from a daemon that is merely unavailable, because
+/// only the first one is a workspace the user has to switch to.
+enum LifecycleRequestError {
+    Connect(ClientError),
+    Request(ClientError),
+    Decode(String),
+}
+
+impl LifecycleRequestError {
+    fn reason(self) -> String {
+        match self {
+            Self::Connect(error) => format!("daemon unavailable: {error}"),
+            Self::Request(error) => daemon_error_reason(error),
+            Self::Decode(reason) => reason,
+        }
+    }
+
+    /// The workspace-fence refusal behind this failure, if the daemon answered
+    /// that it does not serve the workspace this client declared.
+    fn workspace_refusal(&self) -> Option<&usagi_core::infrastructure::ipc::ProtocolError> {
+        let (Self::Connect(ClientError::Protocol(error))
+        | Self::Request(ClientError::Protocol(error))) = self
+        else {
+            return None;
+        };
+        usagi_core::infrastructure::ipc::is_workspace_mismatch(error).then_some(error)
+    }
+}
+
 /// Overview の session command port を workspace 起動ごとに新しく作る合成側 factory。
 ///
 /// screen graph（Welcome→Open / Recent）は 1 ループで複数の workspace を順に開くため、
 /// daemon の revision state を持ち越さないよう port を都度生成する。
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_session_completion_contract
-fn request_lifecycle_snapshot() -> Result<LifecycleSnapshot, String> {
+fn request_lifecycle_snapshot() -> Result<LifecycleSnapshot, LifecycleRequestError> {
     let mut client =
         crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
-            .map_err(|error| format!("daemon unavailable: {error}"))?;
+            .map_err(LifecycleRequestError::Connect)?;
     match client
         .request(DaemonRequest::Session {
             action: SessionAction::List,
             operation_id: usagi_core::domain::id::OperationId::new().to_string(),
             payload: serde_json::json!({}),
         })
-        .map_err(daemon_error_reason)?
+        .map_err(LifecycleRequestError::Request)?
     {
-        DaemonReply::Ok(value) => lifecycle_snapshot(&value),
-        DaemonReply::Accepted { .. } => {
-            Err("daemon returned an invalid lifecycle snapshot response".to_owned())
-        }
+        DaemonReply::Ok(value) => lifecycle_snapshot(&value).map_err(LifecycleRequestError::Decode),
+        DaemonReply::Accepted { .. } => Err(LifecycleRequestError::Decode(
+            "daemon returned an invalid lifecycle snapshot response".to_owned(),
+        )),
     }
+}
+
+/// The error [`WorkspaceLoader::open`] reports when the daemon cannot describe
+/// the workspace being opened.
+///
+/// A workspace-fence refusal becomes [`std::io::ErrorKind::PermissionDenied`],
+/// which is the entry screen's contract for "this daemon does not serve that
+/// workspace": it stays on the current screen and shows this message instead of
+/// tearing the TUI down. The message keeps the daemon's own wording — it names
+/// the workspace that *is* served — and adds the one recovery step, because a
+/// data directory has one daemon and that daemon has one workspace.
+fn workspace_open_error(error: LifecycleRequestError, opened: &Path) -> std::io::Error {
+    if let Some(refusal) = error.workspace_refusal() {
+        return std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "cannot open {opened}: {message}. Stop it with `usagi daemon stop`, then start usagi in {opened}.",
+                opened = opened.display(),
+                message = refusal.message,
+            ),
+        );
+    }
+    io_error(error.reason())
 }
 
 /// Render only the user-actionable daemon reason in the TUI.  Error codes and
@@ -2531,6 +2587,15 @@ impl FsWorkspaceLoader {
 impl WorkspaceLoader for FsWorkspaceLoader {
     fn open(&mut self, path: &Path) -> std::io::Result<WorkspaceSnapshot> {
         validate_workspace_directory(path)?;
+        // Declare the workspace being opened before anything else touches the
+        // daemon: a daemon that serves another workspace then refuses this
+        // connection instead of answering with its own sessions, and a cold start
+        // binds the workspace being opened rather than this process's directory.
+        // The refusal lands before any registry write or recent-list update, so a
+        // workspace that cannot be shown is not recorded as opened either.
+        let opened = crate::runtime::daemon::declare_opened_workspace(path)?;
+        let lifecycle =
+            request_lifecycle_snapshot().map_err(|error| workspace_open_error(error, &opened))?;
         let workspace =
             workspace_usecase::open(&self.storage, path, Utc::now()).map_err(io_error)?;
         // New workspaces copy Global's Agent / Issue / Memory defaults. For a
@@ -2539,7 +2604,6 @@ impl WorkspaceLoader for FsWorkspaceLoader {
         // never overwrites an existing workspace file.
         self.initialize_workspace_settings(&workspace.path)?;
         let mut state = load_workspace_state(&workspace.path)?;
-        let lifecycle = request_lifecycle_snapshot().map_err(io_error)?;
         let workspace_id = lifecycle.workspace_id;
         // Identities align with the listed rows (`project` lists the same set),
         // so a `Failed` row shows on the first frame with a removable action.
@@ -2707,21 +2771,26 @@ fn run_in_terminal(
 /// Keeps the daemon metrics observer alive for exactly one interactive TUI
 /// lifetime.  A fresh connection-local subscription is created on every TUI
 /// launch; orderly teardown explicitly unregisters it.
+///
+/// The subscription is display-only diagnostics, so it uses the observation
+/// client: it declares no workspace and never starts a daemon. An entry screen
+/// has not chosen a workspace yet, and cold-starting one here would bind the
+/// daemon to the launch directory and make every later open refuse. For the same
+/// reason a missing or refusing daemon only means "no metrics" — never a TUI that
+/// will not start.
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=metrics_hook_registration_contract
 fn run_with_metrics_hook(run: impl FnOnce() -> std::io::Result<Exit>) -> std::io::Result<Exit> {
-    let mut hook = MetricsHook::default();
-    let mut client =
-        crate::runtime::daemon::policy_client(ClientPolicy::tui()).map_err(io_error)?;
-    hook.connect(&mut client).map_err(io_error)?;
+    let mut observer = crate::runtime::daemon::observation_client(ClientPolicy::tui())
+        .ok()
+        .and_then(|mut client| {
+            let mut hook = MetricsHook::default();
+            hook.connect(&mut client).ok().map(|()| (hook, client))
+        });
     let result = run();
-    let cleanup = hook.shutdown(&mut client).map_err(io_error);
-    match result {
-        Ok(exit) => cleanup.map(|()| exit),
-        Err(error) => {
-            let _ = cleanup;
-            Err(error)
-        }
+    if let Some((hook, client)) = observer.as_mut() {
+        let _ = hook.shutdown(client);
     }
+    result
 }
 
 #[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=screen_graph_production_port_harness
@@ -2881,17 +2950,30 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Opening a workspace is the only entry that needs a daemon before the screen
+/// appears, and the declaration has to be in place first so that a cold start
+/// binds the workspace being opened.
+///
+/// Welcome / Open / New read local stores only. Probing daemon readiness there
+/// would cold-start a daemon bound to whatever directory the TUI was launched
+/// from, and that daemon would then refuse every workspace the switcher can open.
+/// The workspace-bound connections those screens make when a workspace is chosen
+/// carry their own declaration and bootstrap the daemon there.
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=other_entries_route_to_their_banner_screens
 fn with_daemon_ready(
     out: &mut dyn Write,
     info: &AppInfo,
     entry: &EntryScreen,
 ) -> std::io::Result<()> {
-    if !matches!(entry, EntryScreen::Config | EntryScreen::Doctor)
-        && let Err(error) = crate::runtime::daemon::ensure_ready()
-    {
-        writeln!(std::io::stderr(), "daemon unavailable: {error}")?;
-        return Ok(());
+    if let EntryScreen::Workspace { path } = entry {
+        // A path that cannot be declared is reported by `launch_workspace` as the
+        // workspace error it is, not as an unavailable daemon.
+        if crate::runtime::daemon::declare_opened_workspace(path).is_ok()
+            && let Err(error) = crate::runtime::daemon::ensure_ready()
+        {
+            writeln!(std::io::stderr(), "daemon unavailable: {error}")?;
+            return Ok(());
+        }
     }
     launch_ready(out, info, entry)
 }
@@ -2908,12 +2990,21 @@ fn launch_ready(out: &mut dyn Write, info: &AppInfo, entry: &EntryScreen) -> std
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=other_entries_route_to_their_banner_screens
 pub(crate) fn launch(
     out: &mut dyn Write,
     info: &AppInfo,
     entry: &EntryScreen,
 ) -> std::io::Result<()> {
-    with_daemon_ready(out, info, entry)
+    match with_daemon_ready(out, info, entry) {
+        // Opening a workspace this daemon does not serve is a refusal to present,
+        // not a crash: the message already names the workspace that is served and
+        // the step that switches to the one that was asked for.
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            writeln!(std::io::stderr(), "{error}")
+        }
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -2925,8 +3016,8 @@ mod tests {
 
     use super::{
         DaemonAgentCommandPort, DaemonDecisionCommandPort, DaemonRestoreConnectionPort, EnvScope,
-        EnvironmentStorePort, FsWorkspaceLoader, Geometry, LifecycleSnapshot,
-        PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore,
+        EnvironmentStorePort, FsWorkspaceLoader, Geometry, LifecycleRequestError,
+        LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore,
         SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen, TerminalChunk,
         TerminalError, TerminalInputOutcome, TerminalSnapshotMode, TerminalSubscription,
         agent_inventory_request, classify_terminal_input, created_session_hook,
@@ -2935,7 +3026,7 @@ mod tests {
         decode_terminal_poll, exact_agent_resume_request, lifecycle_snapshot,
         load_screen_graph_data, load_workspace_state, map_terminal_error, passthrough_key,
         probe_path, provider_resume_projection, session_snapshot_result, terminal_copy_key,
-        terminal_inventory_matches_scope, validate_workspace_directory,
+        terminal_inventory_matches_scope, validate_workspace_directory, workspace_open_error,
     };
     use crate::runtime::terminal_pump::TerminalPollPump;
     use chrono::Utc;
@@ -2955,6 +3046,7 @@ mod tests {
     use usagi_core::infrastructure::paths::project_data_dir;
     use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
     use usagi_core::infrastructure::store::workspace::Storage;
+    use usagi_core::usecase::client::ClientError;
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
     use usagi_tui::presentation::views::workspace::ProjectedSession;
     use usagi_tui::presentation::workspace_runtime::WorkspaceRuntime;
@@ -4759,6 +4851,71 @@ mod tests {
             validate_workspace_directory(&missing).unwrap_err().kind(),
             std::io::ErrorKind::NotFound
         );
+    }
+
+    #[test]
+    fn opening_a_workspace_this_daemon_does_not_serve_is_a_presentable_refusal() {
+        let opened = std::path::Path::new("/workspace/other");
+        let refusal = usagi_core::infrastructure::ipc::workspace_admission(
+            Some(
+                &usagi_core::infrastructure::ipc::ClientWorkspace::Selected {
+                    root: opened.display().to_string(),
+                },
+            ),
+            "/workspace/root",
+        )
+        .unwrap_err();
+
+        // The handshake refusal arrives while connecting, and it becomes the one
+        // error kind the entry screens present in place.
+        let error = workspace_open_error(
+            LifecycleRequestError::Connect(ClientError::Protocol(refusal.clone())),
+            opened,
+        );
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        let message = error.to_string();
+        // The daemon's own wording (which names the workspace that *is* served),
+        // the workspace that was asked for, and the one recovery step.
+        assert!(message.contains(&refusal.message), "{message}");
+        assert!(message.contains("/workspace/root"), "{message}");
+        assert!(message.contains("/workspace/other"), "{message}");
+        assert!(message.contains("usagi daemon stop"), "{message}");
+
+        // A refusal that arrives on the request instead is the same refusal.
+        assert_eq!(
+            workspace_open_error(
+                LifecycleRequestError::Request(ClientError::Protocol(refusal)),
+                opened,
+            )
+            .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+
+        // Everything else keeps the single-line reason every other surface shows,
+        // and must not be mistaken for a workspace the user can switch to.
+        for (error, expected) in [
+            (
+                LifecycleRequestError::Connect(ClientError::Unavailable("offline".into())),
+                "daemon unavailable: Unavailable: offline",
+            ),
+            (
+                LifecycleRequestError::Request(ClientError::Protocol(
+                    usagi_core::infrastructure::ipc::ProtocolError::new(
+                        usagi_core::infrastructure::ipc::ErrorCode::StaleTarget,
+                        "workspace is no longer available",
+                    ),
+                )),
+                "workspace is no longer available",
+            ),
+            (
+                LifecycleRequestError::Decode("daemon returned an invalid snapshot".to_owned()),
+                "daemon returned an invalid snapshot",
+            ),
+        ] {
+            let error = workspace_open_error(error, opened);
+            assert_ne!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            assert_eq!(error.to_string(), expected);
+        }
     }
 
     #[test]

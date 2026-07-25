@@ -10,6 +10,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 
 - [画面と入力](#画面と入力)
 - [settings scope と workspace entry](#settings-scope-と-workspace-entry)
+- [workspace の選択と daemon](#workspace-の選択と-daemon)
 - [Home と target](#home-と-target)
 - [Session sidebar rows](#session-sidebar-rows)
 - [Overview と modal](#overview-と-modal)
@@ -121,6 +122,38 @@ settings port を毎回束縛し直す。次に Global とその workspace の L
 Overview / Closeup を生成する Home runtime へ渡す。この束縛は workspace entry ごとの lifecycle であり、直前に
 開いた workspace の port や modal state を次の workspace へ持ち越さない。Config へ入るたびにも現在の束縛から
 両 scope を読み直すため、保存後の再 entry とプロセス再起動で同じ値になる。
+
+## workspace の選択と daemon
+
+session 一覧・scope・PR inventory は daemon が権威であり、**daemon が serve する workspace は起動時に確定した
+1 つだけ**である（[5. daemon](05-daemon.md#daemon-process-lifecycle)）。一方 TUI が開く workspace は、起動した
+directory ではなく利用者の選択（`usagi open <path>` / `usagi <path>`、Welcome の Recent、Open 一覧、New の作成
+成功）で決まる。この節はその 2 つを一致させる契約の正本であり、wire の申告と admit 条件は
+[4. daemon IPC#workspace fence](04-ipc.md#workspace-fence) が正本である。
+
+**TUI は開いた workspace を申告する**。workspace 画面のために daemon へ出す最初の request の前に、選択した root を
+canonical 化して `selected` として申告するため、daemon は「serve していない workspace の一覧を返す」ことができない。
+したがって *ある workspace の title の下に別 workspace の session 一覧* は表示されない。
+
+| 状況 | 挙動 |
+|---|---|
+| daemon が動いていない | 選択した workspace で daemon を起動する（起動する lifecycle child の cwd が選択した root になる）。起動した directory に束縛された daemon は作らない |
+| daemon が選択した workspace を serve している | そのまま開く。TUI の起動 directory は問わない（workspace 内・subdirectory・session worktree・workspace 外のいずれでもよい） |
+| daemon が別の workspace を serve している | 開かずに拒否し、serve している workspace root と復帰手順（`usagi daemon stop` して目的の workspace で起動する）を提示する。registry への登録も Recent の更新も行わない |
+
+拒否の提示先は入口ごとに異なるが、内容は同じ 1 つの message である。
+
+| 入口 | 提示 |
+|---|---|
+| Welcome の Recent、Open 一覧 | その画面に留まり notice に出す。折り返して全文を表示するので理由と手順が切れない。続けて serve されている workspace を選べる |
+| New の作成成功後の open | draft を保ったまま同画面の notice に出す |
+| `usagi open <path>` / `usagi <path>` | TUI を開かず stderr へ 1 行で出す |
+
+entry 画面（Welcome・Open・New・Config）は **daemon を必要としない**。表示に使うのは registry と Recent という
+local store だけであり、workspace 切り替え画面はどの directory からでも開ける必要がある。ここで daemon の readiness を
+確かめると、起動 directory に束縛された daemon を作ってしまい、その後のどの workspace の open も拒否されることに
+なるため、daemon 接続は workspace を開く時点まで遅らせる。表示専用の daemon metrics も同じ理由で daemon を起動せず、
+daemon が居なければ metrics 無しで動作する。
 
 ## Production screen graph harness
 

@@ -5315,19 +5315,61 @@ fn bound_workspace_root(daemon_dir: &Path, candidate: PathBuf) -> std::io::Resul
         .map_err(|error| std::io::Error::other(format!("{error:#}")))
 }
 
+/// The workspace this process opened, once a surface has selected one.
+///
+/// A TUI can open a workspace that is not the directory it was started from, and
+/// `usagi hop` opens several in sequence within one process, so the selection is
+/// process state rather than a start-up constant. It is the most accurate answer
+/// to "whose resources will this connection touch", so it outranks both the
+/// injected root and the working directory in [`client_workspace`].
+static OPENED_WORKSPACE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Record the workspace a surface is opening and return its canonical root.
+///
+/// Every daemon connection this process makes afterwards declares that root, so
+/// the daemon can refuse to answer with another workspace's sessions, and a cold
+/// start puts the new daemon in the workspace being opened
+/// ([`run_lifecycle`]). A root that cannot be canonicalized is reported here
+/// instead of being declared as spelled: the surface has an explicit path to
+/// complain about, unlike an ambient working directory.
+pub(crate) fn declare_opened_workspace(root: &Path) -> std::io::Result<PathBuf> {
+    let canonical = paths::canonical_workspace_root(root)
+        .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+    *OPENED_WORKSPACE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(canonical.clone());
+    Ok(canonical)
+}
+
+fn opened_workspace() -> Option<PathBuf> {
+    OPENED_WORKSPACE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 /// The workspace a client process declares in its handshake.
 ///
-/// The daemon-injected trusted root wins, so a provisioned MCP child declares
-/// the daemon's own workspace instead of whatever directory the provider left it
-/// in. Every other surface declares its canonical working directory: the daemon
-/// admits that directory when it is the trusted root or below it, which covers
-/// subdirectories and session worktrees without running Git per client start.
-/// A directory that cannot be canonicalized is declared as spelled, so the
-/// daemon refuses it rather than this client guessing that it matches.
-fn bound_client_workspace(
+/// An opened workspace wins: that is the workspace whose sessions, scopes, and
+/// PR inventory the surface is about to display, and the daemon must serve
+/// exactly it. Otherwise the daemon-injected trusted root wins, so a provisioned
+/// MCP child declares the daemon's own workspace instead of whatever directory
+/// the provider left it in. Every remaining surface declares its canonical
+/// working directory: the daemon admits that directory when it is the trusted
+/// root or below it, which covers subdirectories and session worktrees without
+/// running Git per client start. A directory that cannot be canonicalized is
+/// declared as spelled, so the daemon refuses it rather than this client
+/// guessing that it matches.
+fn declared_client_workspace(
+    opened: Option<PathBuf>,
     injected: Option<std::ffi::OsString>,
     cwd: std::io::Result<PathBuf>,
 ) -> ClientWorkspace {
+    if let Some(opened) = opened {
+        return ClientWorkspace::Selected {
+            root: paths::wire_workspace_root(opened),
+        };
+    }
     let candidate = injected
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -5338,9 +5380,10 @@ fn bound_client_workspace(
     ClientWorkspace::Bound { root }
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=bound_client_workspace_prefers_the_injected_trusted_root
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=the_declared_workspace_prefers_the_opened_one_then_the_injected_root
 fn client_workspace() -> ClientWorkspace {
-    bound_client_workspace(
+    declared_client_workspace(
+        opened_workspace(),
         std::env::var_os(paths::WORKSPACE_ROOT_ENV),
         std::env::current_dir(),
     )
@@ -5538,6 +5581,34 @@ pub(crate) fn policy_client(policy: ClientPolicy) -> Result<impl DaemonClient, C
     Ok(PolicyClient::new(clock, policy, reconnect, Some(initial)))
 }
 
+/// A daemon client for display-only observation: the TUI's metrics subscription.
+///
+/// It declares no workspace (the samples are process diagnostics, not workspace
+/// state) and it never bootstraps, so an entry screen that has not chosen a
+/// workspace yet cannot cold-start a daemon bound to whatever directory the TUI
+/// happens to have been launched from. Without a running daemon there are simply
+/// no metrics.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=cli_tui_pty
+pub(crate) fn observation_client(policy: ClientPolicy) -> Result<impl DaemonClient, ClientError> {
+    let clock = SystemClock::new();
+    let data_dir =
+        paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let build = current_build();
+    let connect = move |clock: SystemClock, budget_ms: u64| {
+        connect_deadline_client(
+            &data_dir,
+            policy,
+            build.clone(),
+            ClientWorkspace::Unbound,
+            clock,
+            budget_ms,
+        )
+        .map_err(|error| ClientError::Unavailable(error.to_string()))
+    };
+    let initial = connect(clock, policy.timeout_ms)?;
+    Ok(PolicyClient::new(clock, policy, connect, Some(initial)))
+}
+
 /// Requests intentional replacement of the currently running daemon artifact.
 /// This only creates the deterministic trigger; it never sends a stop signal or
 /// spawns a second daemon. Cross-process generation admission consumes the
@@ -5687,13 +5758,28 @@ fn connect_client(
     )
     .map_err(std::io::Error::other)
 }
-fn run_lifecycle(exe: &Path, command: &str) -> std::io::Result<()> {
-    let status = std::process::Command::new(exe)
+/// Build the lifecycle child that starts (or restarts) the daemon.
+///
+/// A daemon takes authority over the workspace of its start-up working directory
+/// ([5. daemon](../../document/05-daemon.md)), so a client that is opening a
+/// workspace starts the daemon *in* that workspace. Without this, opening
+/// `~/project` from `~` would cold-start a daemon bound to `~` and then be
+/// refused by the very fence that connection declares.
+fn lifecycle_command(exe: &Path, command: &str, opened: Option<PathBuf>) -> std::process::Command {
+    let mut child = std::process::Command::new(exe);
+    child
         .args(["daemon", command])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()?;
+        .stderr(std::process::Stdio::null());
+    if let Some(opened) = opened {
+        child.current_dir(opened);
+    }
+    child
+}
+
+fn run_lifecycle(exe: &Path, command: &str) -> std::io::Result<()> {
+    let status = lifecycle_command(exe, command, opened_workspace()).status()?;
     status
         .success()
         .then_some(())
@@ -6759,18 +6845,21 @@ mod tests {
     }
 
     #[test]
-    fn bound_client_workspace_prefers_the_injected_trusted_root() {
+    fn the_declared_workspace_prefers_the_opened_one_then_the_injected_root() {
         let directory = tempfile::tempdir_in("/tmp").unwrap();
         let workspace = directory.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
+        let canonical_root =
+            paths::wire_workspace_root(paths::canonical_workspace_root(&workspace).unwrap());
         let canonical = ClientWorkspace::Bound {
-            root: paths::wire_workspace_root(paths::canonical_workspace_root(&workspace).unwrap()),
+            root: canonical_root.clone(),
         };
 
         // A daemon-provisioned child declares the trusted root the daemon
         // injected, not whatever directory the provider left it in.
         assert_eq!(
-            bound_client_workspace(
+            declared_client_workspace(
+                None,
                 Some(workspace.clone().into_os_string()),
                 Ok(directory.path().join("elsewhere")),
             ),
@@ -6781,7 +6870,8 @@ mod tests {
         // subdirectory spelling still resolves onto the one comparable root. An
         // empty injection is ignored rather than treated as a root.
         assert_eq!(
-            bound_client_workspace(
+            declared_client_workspace(
+                None,
                 Some(std::ffi::OsString::new()),
                 Ok(workspace.join(".").join("..").join("workspace")),
             ),
@@ -6792,7 +6882,7 @@ mod tests {
         // refuses it rather than this client assuming that it matches.
         let missing = workspace.join("absent");
         assert_eq!(
-            bound_client_workspace(None, Ok(missing.clone())),
+            declared_client_workspace(None, None, Ok(missing.clone())),
             ClientWorkspace::Bound {
                 root: paths::wire_workspace_root(&missing),
             }
@@ -6801,10 +6891,102 @@ mod tests {
         // With no working directory at all there is nothing to declare, and an
         // empty root is refused by every daemon.
         assert_eq!(
-            bound_client_workspace(None, Err(std::io::Error::other("no working directory"))),
+            declared_client_workspace(
+                None,
+                None,
+                Err(std::io::Error::other("no working directory"))
+            ),
             ClientWorkspace::Bound {
                 root: String::new(),
             }
+        );
+
+        // An opened workspace outranks both: it is the workspace whose sessions
+        // the surface is about to show, so the daemon must serve exactly it. The
+        // injected root and the working directory would both be admitted here
+        // (they are the trusted root and a directory below it), which is how the
+        // title and the session list used to disagree.
+        let opened = directory.path().join("other");
+        std::fs::create_dir(&opened).unwrap();
+        let opened_canonical = paths::canonical_workspace_root(&opened).unwrap();
+        assert_eq!(
+            declared_client_workspace(
+                Some(opened_canonical.clone()),
+                Some(workspace.clone().into_os_string()),
+                Ok(workspace.join("crates")),
+            ),
+            ClientWorkspace::Selected {
+                root: paths::wire_workspace_root(&opened_canonical),
+            }
+        );
+    }
+
+    #[test]
+    fn declaring_the_opened_workspace_selects_it_for_every_later_connection() {
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+
+        let canonical = declare_opened_workspace(&workspace).unwrap();
+        assert_eq!(
+            canonical,
+            paths::canonical_workspace_root(&workspace).unwrap()
+        );
+        assert_eq!(opened_workspace().as_deref(), Some(canonical.as_path()));
+        assert_eq!(
+            client_workspace(),
+            ClientWorkspace::Selected {
+                root: paths::wire_workspace_root(&canonical),
+            }
+        );
+
+        // `usagi hop` opens several workspaces in one process, so the latest
+        // selection replaces the previous one.
+        let second = directory.path().join("second");
+        std::fs::create_dir(&second).unwrap();
+        let second_canonical = declare_opened_workspace(&second).unwrap();
+        assert_eq!(
+            client_workspace(),
+            ClientWorkspace::Selected {
+                root: paths::wire_workspace_root(&second_canonical),
+            }
+        );
+
+        // A path that cannot be resolved is reported instead of being declared,
+        // and it leaves the previous selection untouched.
+        assert!(declare_opened_workspace(&directory.path().join("absent")).is_err());
+        assert_eq!(
+            opened_workspace().as_deref(),
+            Some(second_canonical.as_path())
+        );
+
+        *OPENED_WORKSPACE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    #[test]
+    fn a_lifecycle_start_runs_in_the_workspace_being_opened() {
+        let exe = PathBuf::from("/usr/bin/usagi");
+        let start = lifecycle_command(&exe, "start", None);
+        // Without a selection the child inherits this process's directory, which
+        // is what a plain `usagi daemon start` means.
+        assert_eq!(start.get_current_dir(), None);
+        assert_eq!(
+            start.get_args().collect::<Vec<_>>(),
+            vec!["daemon", "start"]
+        );
+
+        // A daemon takes authority over the workspace of its start-up directory,
+        // so a client opening a workspace must start it there — otherwise the
+        // fresh daemon would bind this process's directory and then refuse the
+        // very connection that started it.
+        let opened = PathBuf::from("/workspace/root");
+        let restart = lifecycle_command(&exe, "restart", Some(opened.clone()));
+        assert_eq!(restart.get_current_dir(), Some(opened.as_path()));
+        assert_eq!(
+            restart.get_args().collect::<Vec<_>>(),
+            vec!["daemon", "restart"]
         );
     }
 

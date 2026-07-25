@@ -1045,6 +1045,82 @@ fn the_running_daemon_admits_only_clients_inside_its_own_workspace() {
     );
 }
 
+/// One data directory has one daemon, and that daemon serves one workspace. So
+/// the workspace a TUI opens — not the directory it was launched from — is what
+/// the handshake declares: opening `<path>` starts the daemon *for* `<path>`,
+/// keeps working from any directory, and is refused with the served workspace
+/// once a different one is being served (#549). Before this, the refused case
+/// silently rendered `<path>`'s title over the served workspace's session list.
+#[test]
+fn opening_a_workspace_binds_the_daemon_to_it_and_refuses_the_ones_it_does_not_serve() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let opened = daemon_fixture::short_dir("usagi-opened-");
+    let elsewhere = daemon_fixture::short_dir("usagi-elsewhere-");
+    let opened_root = usagi_core::infrastructure::paths::canonical_workspace_root(opened.path())
+        .expect("the opened workspace resolves");
+
+    // No daemon yet. Opening a workspace from an unrelated directory must start a
+    // daemon for the workspace being opened; a daemon bound to the launch
+    // directory would then refuse the very connection that started it.
+    let output = home.run_at(
+        elsewhere.path(),
+        &[OsStr::new("open"), opened.path().as_os_str()],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains(
+            opened_root
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .expect("the fixture directory has a name")
+        )
+    );
+    let recorded: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(channel_data_dir(home.path()).join("daemon/sessions.json"))
+            .expect("the started daemon recorded its lifecycle state"),
+    )
+    .expect("the lifecycle state is JSON");
+    assert_eq!(
+        recorded["repository_root"].as_str(),
+        Some(opened_root.to_str().expect("a UTF-8 fixture path")),
+    );
+
+    // That daemon cannot describe a second workspace, so the open is refused with
+    // the workspace it does serve and the step that switches to the other one.
+    // Nothing of the refused workspace is rendered.
+    let refused = home.run_at(
+        opened.path(),
+        &[OsStr::new("open"), elsewhere.path().as_os_str()],
+    );
+    let message = stderr(&refused);
+    assert!(
+        message.contains(&format!(
+            "this daemon serves the workspace {}",
+            opened_root.display()
+        )),
+        "{message}"
+    );
+    assert!(message.contains("usagi daemon stop"), "{message}");
+    assert!(
+        !stdout(&refused).contains("Sessions"),
+        "{}",
+        stdout(&refused)
+    );
+
+    // The served workspace still opens, from any directory: the declaration
+    // follows the selection, not the working directory.
+    let output = home.run_at(
+        elsewhere.path(),
+        &[OsStr::new("open"), opened.path().as_os_str()],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_daemon_running(&home);
+    stop_daemon(&home);
+}
+
 #[test]
 fn mcp_autostarts_without_manual_daemon_start() {
     let _guard = DAEMON_LIFECYCLE_LOCK

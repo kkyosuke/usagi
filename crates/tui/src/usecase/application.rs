@@ -141,6 +141,12 @@ pub trait WorkspaceLoader {
     /// # Errors
     ///
     /// workspace の解決・登録・更新・state 読み込みに失敗した場合、そのエラーを返す。
+    ///
+    /// [`io::ErrorKind::PermissionDenied`] は「daemon がこの workspace を serve
+    /// していない」という 1 つの意味に固定する。daemon が権威を持つ workspace は 1 つだけなので、
+    /// 別 workspace の snapshot を返す代わりにこれを返す。entry 画面はこのエラーだけは
+    /// 画面を保ったまま理由を表示し（[`open_refusal_notice`]）、他のエラーは従来どおり
+    /// 呼び出し元へ伝播する。
     fn open(&mut self, path: &Path) -> io::Result<WorkspaceSnapshot>;
 
     /// Remove entries that no longer point at directories and return the paths
@@ -179,6 +185,18 @@ pub trait WorkspaceLoader {
         &mut self,
         request: &controller::NewRequest,
     ) -> io::Result<WorkspaceSnapshot>;
+}
+
+/// entry 画面が [`WorkspaceLoader::open`] の失敗をその場で提示できるか判定する。
+///
+/// [`io::ErrorKind::PermissionDenied`] は「daemon がその workspace を serve していない」という
+/// port の宣言なので、workspace 切り替え画面（Welcome の Recent・Open 一覧）はその画面に留まり、
+/// 理由と復帰手順を notice として出す。開けない workspace のために TUI 全体を畳む必要はなく、
+/// 利用者は同じ画面で serve されている workspace を選び直せる。ほかの失敗は画面を保っても
+/// 解決しないため、呼び出し元へ伝播させる。
+#[must_use]
+pub fn open_refusal_notice(error: &io::Error) -> Option<String> {
+    (error.kind() == io::ErrorKind::PermissionDenied).then(|| error.to_string())
 }
 
 /// TUI をどの画面から開始するかを表す。
@@ -364,7 +382,9 @@ pub fn run(entry: &EntryScreen, runner: &mut dyn ScreenRunner) -> io::Result<()>
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
-    use super::{EntryScreen, Key, ScreenRunner, Terminal, WorkspaceSnapshot, run};
+    use super::{
+        EntryScreen, Key, ScreenRunner, Terminal, WorkspaceSnapshot, open_refusal_notice, run,
+    };
     use std::io;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
@@ -560,6 +580,32 @@ mod tests {
             snapshot.session_lifecycles.get(&session_id),
             Some(&lifecycle)
         );
+    }
+
+    #[test]
+    fn only_a_permission_denied_open_is_presentable_on_the_entry_screen() {
+        // The one refusal an entry screen can act on: this daemon serves another
+        // workspace, so the switcher shows the reason and stays open.
+        let refusal = io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "cannot open /tmp/other: this daemon serves the workspace /tmp/served.",
+        );
+        assert_eq!(
+            open_refusal_notice(&refusal).as_deref(),
+            Some("cannot open /tmp/other: this daemon serves the workspace /tmp/served.")
+        );
+
+        // Anything else is a failure the screen cannot resolve, so it propagates.
+        for other in [
+            io::Error::other("open failed"),
+            io::Error::new(io::ErrorKind::NotFound, "no such workspace"),
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "workspace path is not a directory",
+            ),
+        ] {
+            assert_eq!(open_refusal_notice(&other), None, "{other}");
+        }
     }
 
     #[test]

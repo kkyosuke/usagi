@@ -101,16 +101,23 @@ daemon が権威を持つ workspace root は起動時に 1 つだけ確定する
 
 | 申告 | wire | 意味 |
 |---|---|---|
-| bound | `{"scope":"bound","root":"<絶対 canonical path>"}` | この client は `root` を含む workspace で作業する |
-| unbound | `{"scope":"unbound"}` | workspace resource を一切扱わない接続（request を送らない） |
+| bound | `{"scope":"bound","root":"<絶対 canonical path>"}` | この client は `root` を含む workspace で作業する（process の文脈） |
+| selected | `{"scope":"selected","root":"<絶対 canonical path>"}` | この client は `root` の workspace そのものを操作する（TUI が開いた workspace） |
+| unbound | `{"scope":"unbound"}` | workspace resource を一切扱わない接続 |
 | 欠落 | field 省略 | fence 以前の client。typed error で拒否する |
 
-admit の条件は次のとおりで、比較は path component 単位である（`<root>-2` は `<root>` の子ではない）。
+admit の条件は次のとおりで、比較は path component 単位である（`<root>-2` は `<root>` の子ではない。末尾スラッシュや `.` / `..` の綴り差は同じ root になる）。
 
 | 判定 | 条件 |
 |---|---|
-| admit | `unbound`、または `bound` の root が trusted root と一致するか **その配下**（subdirectory・session worktree `<root>/.usagi/sessions/<name>` を含む） |
-| refuse | 別 workspace の root、trusted root の親、比較できない root（相対 path、非 UTF-8 が畳まれた空 root）、daemon 側の trusted root が空、申告の欠落 |
+| admit | `unbound`、`bound` の root が trusted root と一致するか **その配下**（subdirectory・session worktree `<root>/.usagi/sessions/<name>` を含む）、`selected` の root が trusted root と **完全一致** |
+| refuse | 別 workspace の root、trusted root の親、`selected` が trusted root の配下（subdirectory・session worktree）、比較できない root（相対 path、非 UTF-8 が畳まれた空 root）、daemon 側の trusted root が空、申告の欠落 |
+
+`bound` と `selected` の違いは「どこで動いているか」と「何を操作するか」である。subdirectory や session worktree は
+**動く場所**としては同じ workspace なので `bound` では admit するが、**開く対象**としては別 workspace であり、そこを
+`selected` として admit すると「その directory の workspace 名の下に daemon の workspace の session 一覧」を出して
+しまう。したがって `selected` は完全一致だけを admit する（[3. TUI#workspace-の選択と-daemon](03-tui.md#workspace-の選択と-daemon) が
+選択側の正本）。
 
 拒否は `permission_denied` / `error_id = workspace-mismatch` / `retry_mode = never` / `side_effect = none` の
 typed `ProtocolError` であり、message は **serve している workspace root** を含む。client はこれを
@@ -120,20 +127,25 @@ daemon の cold start、stale endpoint recovery、rollover、cold restart のい
 
 client は申告する root を次の順で決める。git を client 起動ごとに実行しない。
 
-| 優先 | 出所 | 対象 |
-|---|---|---|
-| 1 | `USAGI_WORKSPACE_ROOT`（daemon が provision した child に注入する trusted root） | MCP child、agent hook |
-| 2 | process の canonical working directory | TUI・CLI・手動起動の `usagi mcp` |
+| 優先 | 出所 | 申告 | 対象 |
+|---|---|---|---|
+| 1 | 開いた workspace（TUI が `usagi open <path>` / Recent / Open 一覧で選んだ root を canonical 化した値） | selected | workspace 画面とその全 request |
+| 2 | `USAGI_WORKSPACE_ROOT`（daemon が provision した child に注入する trusted root） | bound | MCP child、agent hook |
+| 3 | process の canonical working directory | bound | CLI・手動起動の `usagi mcp` |
 
-`bound` を申告する client は `workspace.fence.v1` capability を必須にする。fence を持たない daemon は
-どの workspace の client も admit してしまうため、capability の無い peer は handshake で拒否する
+開いた workspace が最優先なのは、それが「この接続がこれから表示・変更する workspace」だからである。cwd や注入
+された root は同じ process の別の事実に過ぎず、TUI は cwd 以外の workspace を開ける。
+
+root を申告する client（`bound` / `selected`）は `workspace.fence.v1` capability を必須にする。fence を持たない
+daemon はどの workspace の client も admit してしまうため、capability の無い peer は handshake で拒否する
 （`build.artifact.v1` と同じ形の双方向 fence）。
 
-**免除する経路**は「request を 1 件も送らない接続」だけであり、`unbound` を申告する。
+**免除する経路**は「workspace resource を一切名指さない接続」だけであり、`unbound` を申告する。
 
 | 経路 | 理由 |
 |---|---|
-| client readiness（TUI の entry screen: `usagi hop` の Recent、`usagi open <path>` の起動前確認） | daemon の存在確認だけで workspace state を読まない。workspace 切り替え画面はどの directory からでも開ける必要がある |
+| client readiness（`usagi open <path>` の起動前確認） | daemon の存在確認だけで workspace state を読まない |
+| daemon metrics subscription（[daemon metrics subscription](#daemon-metrics-subscription)） | daemon process の表示専用 sample であり、workspace の state を読まない。加えてこの接続は daemon を起動しない（entry 画面が workspace を選ぶ前に、起動 directory へ束縛された daemon を作らないため） |
 | `usagi daemon replace` | 広告された build identity を読む lifecycle 観測であり、workspace に紐づかない |
 
 この fence は**同一 UID の協調する peer 同士の一貫性 fence**であり、authorization boundary ではない
@@ -141,10 +153,12 @@ client は申告する root を次の順で決める。git を client 起動ご�
 per-request の権限判定ではなく、「workspace 作業をしない」という申告である。
 
 data directory ごとに daemon は 1 つ、その daemon が serve する workspace も 1 つなので、
-**別 workspace を同時に扱うことはできない**。別 workspace で作業する場合は、その daemon を停止してから
-目的の workspace で起動する。TUI が daemon の workspace と異なる path を `usagi open <path>` で開いた場合、
-表示 title だけが別 workspace になり session 一覧は daemon の workspace のものになる。この不整合は
-[#549](../.usagi/issues/549-fix-tui-open-path-daemon-workspace.md) で追跡する。
+**別 workspace を同時に扱うことはできない**。この制約は選択の申告として表に出る。daemon が動いていない状態で
+workspace を開くと、その workspace を serve する daemon が起動する（起動する lifecycle child の cwd が開く
+workspace になる。[5. daemon](05-daemon.md#daemon-process-lifecycle) が startup cwd = workspace root の正本）。
+既に別 workspace を serve している daemon に対する選択は typed refusal になり、TUI は理由（serve している
+workspace）と復帰手順を提示して、別 workspace の session 一覧を別 workspace の title で表示することはない
+（[3. TUI#workspace-の選択と-daemon](03-tui.md#workspace-の選択と-daemon)）。
 
 ## attempt deadline と reconnect budget
 

@@ -667,11 +667,15 @@ impl<S: Read + Write> IpcClient<S> {
         if expected_owner.is_some() {
             required_capabilities.push("daemon.owner-identity.v1".into());
         }
-        // A workspace-bound client requires the fence itself: a daemon that does
+        // A client that names a workspace at all — the tree it runs in, or the
+        // workspace it opened — requires the fence itself: a daemon that does
         // not enforce it would admit this connection and answer with another
         // workspace's sessions, which is exactly the silent outcome the
         // declaration exists to end.
-        if matches!(workspace, ClientWorkspace::Bound { .. }) {
+        if matches!(
+            workspace,
+            ClientWorkspace::Bound { .. } | ClientWorkspace::Selected { .. }
+        ) {
             required_capabilities.push(WORKSPACE_FENCE_CAPABILITY.into());
         }
         let hello = Bootstrap::ClientHello(ClientHello {
@@ -969,6 +973,12 @@ pub struct DeadlineStream<Cl, C> {
     clock: Cl,
     inner: C,
     deadline_ms: u64,
+    /// Whether a read / write deadline is currently in effect on the transport.
+    /// Set by the first successful arm, which happens while the peer is still
+    /// connected, and never cleared: the deadline it installed keeps bounding
+    /// this attempt even if a later re-arm is refused.
+    read_armed: bool,
+    write_armed: bool,
 }
 
 impl<Cl: MonotonicClock, C: DeadlineConnection> DeadlineStream<Cl, C> {
@@ -976,10 +986,54 @@ impl<Cl: MonotonicClock, C: DeadlineConnection> DeadlineStream<Cl, C> {
     #[must_use]
     pub fn new(clock: Cl, inner: C, budget_ms: u64) -> Self {
         let deadline_ms = clock.now_ms().saturating_add(budget_ms);
-        Self {
+        let mut stream = Self {
             clock,
             inner,
             deadline_ms,
+            read_armed: false,
+            write_armed: false,
+        };
+        // Arm both directions immediately, while the peer is certainly still
+        // connected. This is what makes a later re-arm safe to skip, and it is
+        // best effort: a transport that refuses it here simply arms on first use.
+        stream.arm_read().ok();
+        stream.arm_write().ok();
+        stream
+    }
+
+    /// Install the remaining budget for reads.
+    ///
+    /// A peer that answers and immediately closes makes `setsockopt` fail on some
+    /// platforms (macOS returns `EINVAL` for a disconnected socket) even though
+    /// the bytes it already sent are buffered and readable. Failing the read
+    /// there would turn a definitive typed answer — the workspace-fence refusal
+    /// is exactly such an answer, sent right before the daemon closes — into "the
+    /// daemon is unavailable". So a refused re-arm keeps the deadline that is
+    /// already in effect, and only a transport that has never been armed
+    /// propagates the failure.
+    fn arm_read(&mut self) -> io::Result<()> {
+        let remaining = self.remaining()?;
+        match self.inner.set_read_deadline(remaining) {
+            Ok(()) => {
+                self.read_armed = true;
+                Ok(())
+            }
+            Err(_) if self.read_armed => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Install the remaining budget for writes, under the same contract as
+    /// [`Self::arm_read`].
+    fn arm_write(&mut self) -> io::Result<()> {
+        let remaining = self.remaining()?;
+        match self.inner.set_write_deadline(remaining) {
+            Ok(()) => {
+                self.write_armed = true;
+                Ok(())
+            }
+            Err(_) if self.write_armed => Ok(()),
+            Err(error) => Err(error),
         }
     }
 
@@ -1009,16 +1063,14 @@ impl<Cl: MonotonicClock, C: DeadlineConnection> DeadlineStream<Cl, C> {
 
 impl<Cl: MonotonicClock, C: DeadlineConnection> Read for DeadlineStream<Cl, C> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let remaining = self.remaining()?;
-        self.inner.set_read_deadline(remaining)?;
+        self.arm_read()?;
         self.inner.read(buf)
     }
 }
 
 impl<Cl: MonotonicClock, C: DeadlineConnection> Write for DeadlineStream<Cl, C> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let remaining = self.remaining()?;
-        self.inner.set_write_deadline(remaining)?;
+        self.arm_write()?;
         self.inner.write(buf)
     }
 
@@ -1555,6 +1607,40 @@ mod tests {
         assert_eq!(sent["workspace"], serde_json::json!({"scope": "unbound"}));
         assert!(
             !sent["required_capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(WORKSPACE_FENCE_CAPABILITY))
+        );
+
+        // A client that selected a workspace to open declares that workspace and
+        // requires the fence for the same reason: without it the daemon would
+        // answer with the sessions of the workspace it happens to serve.
+        let selected = IpcClient::connect(
+            bootstrap_script(&Bootstrap::ServerHello(owner_hello(
+                &DaemonRecord::identified(1, "process-start"),
+                &DaemonGeneration("generation".into()),
+            ))),
+            "client".into(),
+            "nonce".into(),
+            ClientPolicy::tui(),
+            client_build(),
+            ClientWorkspace::Selected {
+                root: "/workspace".into(),
+            },
+        )
+        .unwrap();
+        let sent = read_json_frame::<serde_json::Value>(
+            &mut Cursor::new(selected.transport().output.clone()),
+            1_048_576,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            sent["workspace"],
+            serde_json::json!({"scope": "selected", "root": "/workspace"})
+        );
+        assert!(
+            sent["required_capabilities"]
                 .as_array()
                 .unwrap()
                 .contains(&serde_json::json!(WORKSPACE_FENCE_CAPABILITY))
@@ -2717,6 +2803,83 @@ mod deadline_and_retry_tests {
         assert_eq!(stream.get_ref().written, b"ab\x09");
     }
 
+    #[test]
+    fn a_transport_that_refuses_to_rearm_keeps_the_answer_it_already_holds() {
+        /// A connection that accepts the first arm and refuses every later one,
+        /// like a Unix socket whose peer answered and closed (macOS returns
+        /// `EINVAL` from `setsockopt` once the socket is disconnected, while the
+        /// bytes it already sent stay readable).
+        struct ClosesAfterAnswering {
+            readable: Cursor<Vec<u8>>,
+            arms: usize,
+            arms_allowed: usize,
+        }
+        impl Read for ClosesAfterAnswering {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                self.readable.read(buf)
+            }
+        }
+        impl Write for ClosesAfterAnswering {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl DeadlineConnection for ClosesAfterAnswering {
+            fn set_read_deadline(&mut self, _timeout: Duration) -> io::Result<()> {
+                self.arms += 1;
+                if self.arms > self.arms_allowed {
+                    return Err(io::Error::from_raw_os_error(22));
+                }
+                Ok(())
+            }
+            fn set_write_deadline(&mut self, timeout: Duration) -> io::Result<()> {
+                self.set_read_deadline(timeout)
+            }
+        }
+
+        // The construction arm succeeds, so the deadline it installed still bounds
+        // this attempt and the refused re-arm must not discard the peer's answer.
+        let clock = FakeClock::default();
+        let mut stream = DeadlineStream::new(
+            clock.clone(),
+            ClosesAfterAnswering {
+                readable: Cursor::new(b"refused".to_vec()),
+                arms: 0,
+                arms_allowed: 2,
+            },
+            100,
+        );
+        let mut buf = [0u8; 7];
+        assert_eq!(stream.read(&mut buf).unwrap(), 7);
+        assert_eq!(&buf, b"refused");
+        assert_eq!(stream.write(b"x").unwrap(), 1);
+
+        // The deadline itself still applies: an exhausted budget fails closed
+        // rather than reading without one.
+        clock.advance(200);
+        assert_eq!(
+            stream.read(&mut buf).unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+
+        // A transport that could never be armed has no deadline in effect, so the
+        // failure propagates instead of leaving an unbounded read.
+        let mut never = DeadlineStream::new(
+            FakeClock::default(),
+            ClosesAfterAnswering {
+                readable: Cursor::new(b"refused".to_vec()),
+                arms: 0,
+                arms_allowed: 0,
+            },
+            100,
+        );
+        assert_eq!(never.read(&mut buf).unwrap_err().raw_os_error(), Some(22),);
+        assert_eq!(never.write(b"x").unwrap_err().raw_os_error(), Some(22));
+    }
+
     // ---- Real UnixStream pair + real clock --------------------------------
 
     #[cfg(unix)]
@@ -2800,6 +2963,41 @@ mod deadline_and_retry_tests {
             assert!(matches!(result, Err(ClientError::Unavailable(_))));
             assert!(started.elapsed() < Duration::from_secs(5));
             // `_server_sock` is held open until here so the write side is not a broken pipe.
+        }
+
+        /// The workspace-fence refusal is written immediately before the daemon
+        /// closes the connection, so the client reads it off a socket whose peer
+        /// is already gone. On macOS re-arming the read deadline of such a socket
+        /// fails, which used to turn this definitive answer into "the daemon is
+        /// unavailable" — and with it every workspace-mismatch message.
+        #[test]
+        fn a_refusal_written_just_before_the_peer_closes_is_still_read() {
+            let refusal = crate::infrastructure::ipc::workspace_admission(
+                Some(&ClientWorkspace::Selected {
+                    root: "/workspace/other".into(),
+                }),
+                "/workspace/root",
+            )
+            .unwrap_err();
+
+            let (client_sock, server_sock) = UnixStream::pair().unwrap();
+            let clock = RealClock {
+                origin: Instant::now(),
+            };
+            // Armed while the peer is connected, exactly as a client does right
+            // after connecting and before it writes its hello.
+            let mut stream = DeadlineStream::new(clock, UnixDeadline(client_sock), 200);
+
+            let mut server = server_sock;
+            write_json_frame(&mut server, &Bootstrap::Error(refusal.clone()), 1_048_576).unwrap();
+            drop(server);
+
+            let answer = read_json_frame::<Bootstrap>(&mut stream, 1_048_576).unwrap();
+            let mut surfaced = None;
+            if let Some(Bootstrap::Error(error)) = answer {
+                surfaced = Some(error);
+            }
+            assert_eq!(surfaced, Some(refusal));
         }
 
         #[test]

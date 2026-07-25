@@ -869,6 +869,75 @@ mod tests {
     }
 
     #[test]
+    fn a_client_opening_another_workspace_is_refused_before_any_request_reaches_a_runtime() {
+        // A TUI that opens a workspace declares that workspace, so a daemon that
+        // serves a different one must refuse instead of answering the session list
+        // it would then show under the opened workspace's name (#549). A
+        // subdirectory of the served root is refused for the same reason: it is a
+        // different workspace to open.
+        for selected in [
+            "/workspace/other",
+            &format!("{TRUSTED_ROOT}/crates"),
+            &format!("{TRUSTED_ROOT}/.usagi/sessions/issue-549"),
+        ] {
+            let mut elsewhere = client_hello();
+            elsewhere.workspace = Some(ClientWorkspace::Selected {
+                root: selected.to_string(),
+            });
+            let mut input = Vec::new();
+            write_json_frame(&mut input, &Bootstrap::ClientHello(elsewhere), 1024).unwrap();
+            write_json_frame(&mut input, &request(), 1024).unwrap();
+
+            let mut output = Vec::new();
+            let mut terminal = RecordingTerminal::default();
+            handle_connection_with_terminal_and(
+                &mut Cursor::new(input),
+                &mut output,
+                &server(),
+                &mut terminal,
+                &mut test_dispatch,
+            )
+            .unwrap();
+
+            assert_eq!(terminal.requests, 0, "{selected}");
+            let mut replies = Cursor::new(output);
+            let mut refused = None;
+            if let Some(Bootstrap::Error(error)) =
+                read_json_frame::<Bootstrap>(&mut replies, 1024).unwrap()
+            {
+                refused = Some(error);
+            }
+            let refusal = refused.expect("an unserved workspace is answered with a typed error");
+            assert!(is_workspace_mismatch(&refusal), "{selected}");
+            assert!(refusal.message.contains(TRUSTED_ROOT), "{refusal:?}");
+        }
+
+        // Selecting the workspace this daemon serves reaches the runtime as usual.
+        let mut here = client_hello();
+        here.workspace = Some(ClientWorkspace::Selected {
+            root: TRUSTED_ROOT.to_owned(),
+        });
+        let mut input = Vec::new();
+        write_json_frame(&mut input, &Bootstrap::ClientHello(here), 1024).unwrap();
+        write_json_frame(
+            &mut input,
+            &terminal_request(usagi_core::domain::id::RequestId::new().to_string()),
+            1024,
+        )
+        .unwrap();
+        let mut terminal = RecordingTerminal::default();
+        handle_connection_with_terminal_and(
+            &mut Cursor::new(input),
+            &mut Vec::new(),
+            &server(),
+            &mut terminal,
+            &mut test_dispatch,
+        )
+        .unwrap();
+        assert_eq!(terminal.requests, 1);
+    }
+
+    #[test]
     fn connection_rejects_client_event_after_handshake() {
         let mut input = Vec::new();
         write_json_frame(&mut input, &hello(), 1024).unwrap();
