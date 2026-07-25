@@ -410,14 +410,18 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::LlmMcp { model } => {
             let stdin = std::io::stdin();
-            let stdout = std::io::stdout();
             usagi::presentation::cli::llm_mcp::run(
                 Box::new(OllamaBackend {
                     model: model.clone(),
                 }),
                 model,
                 stdin.lock(),
-                stdout.lock(),
+                // The unlocked handle, not `stdout.lock()`: replies are written
+                // from the MCP dispatch pool's threads and a `StdoutLock` cannot
+                // cross threads. `Stdout` takes the same lock per write, and the
+                // server serialises whole replies itself, so lines stay intact
+                // (see `presentation::mcp::serve`).
+                std::io::stdout(),
             )
         }
         Commands::Mcp => {
@@ -426,12 +430,12 @@ fn main() -> anyhow::Result<()> {
             // materialise it here so the target exists. Best-effort.
             let _ = usagi::infrastructure::skills::materialize_default();
             let stdin = std::io::stdin();
-            let stdout = std::io::stdout();
             usagi::presentation::cli::mcp::run(
                 Box::new(CliAgentBackend),
                 Box::new(usagi::usecase::agent::CliAgentModelProbe),
                 stdin.lock(),
-                stdout.lock(),
+                // The unlocked handle, not `stdout.lock()`: see the `llm-mcp` arm.
+                std::io::stdout(),
             )
         }
         Commands::Run { n } => usagi::presentation::cli::run::run(n),

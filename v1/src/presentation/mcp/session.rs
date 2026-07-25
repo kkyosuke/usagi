@@ -178,7 +178,10 @@ pub enum LaunchPromptDelivery {
 /// Abstracted so the server's
 /// protocol handling can be tested with a fake backend that never touches the
 /// filesystem or a real agent.
-pub trait AgentBackend {
+///
+/// `Send + Sync` because [`crate::presentation::mcp::serve`] runs tool calls on a
+/// bounded thread pool, so one server is shared by every dispatch worker.
+pub trait AgentBackend: Send + Sync {
     /// Persist `prompt` in the launch queue rooted at `worktree`, returning a
     /// confirmation message (`Ok`) or an error message to surface to the agent
     /// (`Err`). `delivery` preserves whether the caller explicitly requested a
@@ -244,10 +247,10 @@ pub struct SessionMcpServer {
     /// (over either delivery channel) and its live-pane detection.
     backend: Box<dyn AgentBackend>,
     /// Probes external tools (like checking if an agent CLI is installed on the PATH).
-    pub(crate) runner: Box<dyn CommandRunner>,
+    pub(crate) runner: Box<dyn CommandRunner + Send + Sync>,
     /// Checks an explicit model against the models currently available to its
     /// effective agent CLI. A failed or unsupported probe is fail-closed.
-    model_probe: Box<dyn AgentModelProbe>,
+    model_probe: Box<dyn AgentModelProbe + Send + Sync>,
 }
 
 impl SessionMcpServer {
@@ -260,8 +263,8 @@ impl SessionMcpServer {
         workspace_root: PathBuf,
         worktree: &Path,
         backend: Box<dyn AgentBackend>,
-        runner: Box<dyn CommandRunner>,
-        model_probe: Box<dyn AgentModelProbe>,
+        runner: Box<dyn CommandRunner + Send + Sync>,
+        model_probe: Box<dyn AgentModelProbe + Send + Sync>,
     ) -> Self {
         let current_session = derive_current_session(worktree, &workspace_root);
         Self {
@@ -1343,15 +1346,14 @@ mod tests {
     use crate::infrastructure::pr_link_store;
     use crate::presentation::mcp::PROTOCOL_VERSION;
     use crate::usecase::agent::ModelAvailability;
-    use std::cell::RefCell;
     use std::fs;
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
-    type CallLog = Rc<RefCell<Vec<(PathBuf, String)>>>;
-    type PromptDeliveryLog = Rc<RefCell<Vec<LaunchPromptDelivery>>>;
-    type RemoveLog = Rc<RefCell<Vec<(PathBuf, String, bool)>>>;
-    type RecoverLog = Rc<RefCell<Vec<(PathBuf, String, session::QuarantineRecovery)>>>;
-    type ModelProbeLog = Rc<RefCell<Vec<(AgentCli, String)>>>;
+    type CallLog = Arc<Mutex<Vec<(PathBuf, String)>>>;
+    type PromptDeliveryLog = Arc<Mutex<Vec<LaunchPromptDelivery>>>;
+    type RemoveLog = Arc<Mutex<Vec<(PathBuf, String, bool)>>>;
+    type RecoverLog = Arc<Mutex<Vec<(PathBuf, String, session::QuarantineRecovery)>>>;
+    type ModelProbeLog = Arc<Mutex<Vec<(AgentCli, String)>>>;
 
     /// A runner that reports a fixed allowlist of programs as available.
     struct FakeRunner(Vec<&'static str>);
@@ -1388,7 +1390,7 @@ mod tests {
 
     impl RecordingModelProbe {
         fn new(result: ModelAvailability) -> (Self, ModelProbeLog) {
-            let calls = Rc::new(RefCell::new(Vec::new()));
+            let calls = Arc::new(Mutex::new(Vec::new()));
             (
                 Self {
                     result,
@@ -1401,15 +1403,15 @@ mod tests {
 
     impl AgentModelProbe for RecordingModelProbe {
         fn probe_model(&self, cli: AgentCli, model: &str) -> ModelAvailability {
-            self.calls.borrow_mut().push((cli, model.to_string()));
+            self.calls.lock().unwrap().push((cli, model.to_string()));
             self.result.clone()
         }
     }
 
     /// A backend that records the calls it received and returns a scripted
     /// result, so the server's dispatch can be tested without a real agent. The
-    /// call logs are shared via `Rc` so a test can inspect them after the backend
-    /// is moved into the server.
+    /// call logs are shared via `Arc<Mutex<_>>` so a test can inspect them after
+    /// the backend is moved into the server.
     struct FakeBackend {
         result: Result<String, String>,
         calls: CallLog,
@@ -1427,8 +1429,8 @@ mod tests {
         fn ok(reply: &str) -> Self {
             Self {
                 result: Ok(reply.to_string()),
-                calls: Rc::new(RefCell::new(Vec::new())),
-                prompt_deliveries: Rc::new(RefCell::new(Vec::new())),
+                calls: Arc::new(Mutex::new(Vec::new())),
+                prompt_deliveries: Arc::new(Mutex::new(Vec::new())),
                 // A clean removal by default; tests that exercise the remove tool
                 // override this with `with_remove`.
                 remove_result: Ok(session::RemovalOutcome {
@@ -1436,7 +1438,7 @@ mod tests {
                     retained_branches: Vec::new(),
                     dirty: Vec::new(),
                 }),
-                remove_calls: Rc::new(RefCell::new(Vec::new())),
+                remove_calls: Arc::new(Mutex::new(Vec::new())),
                 recover_result: Ok(session::QuarantineRecoveryOutcome {
                     name: "s".to_string(),
                     recovery: session::QuarantineRecovery::Resume,
@@ -1444,7 +1446,7 @@ mod tests {
                     retained_branches: Vec::new(),
                     detail: "recovered".to_string(),
                 }),
-                recover_calls: Rc::new(RefCell::new(Vec::new())),
+                recover_calls: Arc::new(Mutex::new(Vec::new())),
                 live: false,
             }
         }
@@ -1452,16 +1454,16 @@ mod tests {
         fn err(message: &str) -> Self {
             Self {
                 result: Err(message.to_string()),
-                calls: Rc::new(RefCell::new(Vec::new())),
-                prompt_deliveries: Rc::new(RefCell::new(Vec::new())),
+                calls: Arc::new(Mutex::new(Vec::new())),
+                prompt_deliveries: Arc::new(Mutex::new(Vec::new())),
                 remove_result: Ok(session::RemovalOutcome {
                     removed: true,
                     retained_branches: Vec::new(),
                     dirty: Vec::new(),
                 }),
-                remove_calls: Rc::new(RefCell::new(Vec::new())),
+                remove_calls: Arc::new(Mutex::new(Vec::new())),
                 recover_result: Err(message.to_string()),
-                recover_calls: Rc::new(RefCell::new(Vec::new())),
+                recover_calls: Arc::new(Mutex::new(Vec::new())),
                 live: false,
             }
         }
@@ -1496,15 +1498,17 @@ mod tests {
             delivery: LaunchPromptDelivery,
         ) -> Result<String, String> {
             self.calls
-                .borrow_mut()
+                .lock()
+                .unwrap()
                 .push((worktree.to_path_buf(), prompt.to_string()));
-            self.prompt_deliveries.borrow_mut().push(delivery);
+            self.prompt_deliveries.lock().unwrap().push(delivery);
             self.result.clone()
         }
 
         fn send(&self, worktree: &Path, prompt: &str) -> Result<String, String> {
             self.calls
-                .borrow_mut()
+                .lock()
+                .unwrap()
                 .push((worktree.to_path_buf(), prompt.to_string()));
             self.result.clone()
         }
@@ -1519,7 +1523,7 @@ mod tests {
             name: &str,
             force: bool,
         ) -> Result<session::RemovalOutcome, String> {
-            self.remove_calls.borrow_mut().push((
+            self.remove_calls.lock().unwrap().push((
                 workspace_root.to_path_buf(),
                 name.to_string(),
                 force,
@@ -1533,7 +1537,7 @@ mod tests {
             name: &str,
             recovery: session::QuarantineRecovery,
         ) -> Result<session::QuarantineRecoveryOutcome, String> {
-            self.recover_calls.borrow_mut().push((
+            self.recover_calls.lock().unwrap().push((
                 workspace_root.to_path_buf(),
                 name.to_string(),
                 recovery,
@@ -1584,7 +1588,7 @@ mod tests {
     fn server_at_with_model_probe(
         root: &Path,
         backend: FakeBackend,
-        model_probe: Box<dyn AgentModelProbe>,
+        model_probe: Box<dyn AgentModelProbe + Send + Sync>,
     ) -> SessionMcpServer {
         let runner = Box::new(FakeRunner(vec!["claude", "codex", "codex-fugu"]));
         SessionMcpServer::new(
@@ -1604,7 +1608,7 @@ mod tests {
         root: &Path,
         name: &str,
         backend: FakeBackend,
-        model_probe: Box<dyn AgentModelProbe>,
+        model_probe: Box<dyn AgentModelProbe + Send + Sync>,
     ) -> SessionMcpServer {
         let worktree = root.join(".usagi").join("sessions").join(name);
         let runner = Box::new(FakeRunner(vec!["claude", "codex", "codex-fugu"]));
@@ -1735,11 +1739,11 @@ mod tests {
         assert_eq!(body["reported_to"], "parent");
         assert_eq!(body["delivered_to"], "live");
         assert_eq!(
-            calls.borrow()[0].0,
+            calls.lock().unwrap()[0].0,
             root.path().join(".usagi/sessions/parent")
         );
         assert_eq!(
-            calls.borrow()[0].1,
+            calls.lock().unwrap()[0].1,
             "Session \"child\" completed:\n\nPR #42 is ready; tests pass."
         );
     }
@@ -1774,9 +1778,9 @@ mod tests {
         );
 
         assert_eq!(result["isError"], true);
-        assert!(backend_calls.borrow().is_empty());
+        assert!(backend_calls.lock().unwrap().is_empty());
         assert_eq!(
-            *probe_calls.borrow(),
+            *probe_calls.lock().unwrap(),
             vec![(AgentCli::Codex, "gpt-old".to_string())]
         );
         assert_eq!(
@@ -1824,9 +1828,9 @@ mod tests {
         );
 
         assert_eq!(result["isError"], false);
-        assert_eq!(backend_calls.borrow().len(), 1);
+        assert_eq!(backend_calls.lock().unwrap().len(), 1);
         assert_eq!(
-            *probe_calls.borrow(),
+            *probe_calls.lock().unwrap(),
             vec![(AgentCli::Claude, "legacy-model".to_string())]
         );
         let parent = session::list(root.path())
@@ -1857,7 +1861,7 @@ mod tests {
         let body = tool_json(&result);
         assert_eq!(body["reported_to"], ROOT_TARGET);
         assert_eq!(body["delivered_to"], "queue");
-        assert_eq!(calls.borrow()[0].0, root.path());
+        assert_eq!(calls.lock().unwrap()[0].0, root.path());
 
         let outside = call(
             &root_server,
@@ -2158,7 +2162,7 @@ mod tests {
 
         // The backend was invoked once with the session's worktree root and the
         // prompt text verbatim.
-        let calls = calls.borrow();
+        let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, root.path().join(".usagi/sessions/work"));
         assert_eq!(calls[0].1, "add a test");
@@ -2192,9 +2196,9 @@ mod tests {
             body["agent"],
             json!({"cli":"codex-fugu","model":"fugu-ultra"})
         );
-        assert_eq!(calls.borrow().len(), 1);
+        assert_eq!(calls.lock().unwrap().len(), 1);
         assert_eq!(
-            *prompt_deliveries.borrow(),
+            *prompt_deliveries.lock().unwrap(),
             vec![LaunchPromptDelivery::FreshLaunch]
         );
 
@@ -2233,9 +2237,9 @@ mod tests {
         let error = result["content"][0]["text"].as_str().unwrap();
         assert!(error.contains("gpt-missing"), "{error}");
         assert!(error.contains("gpt-available"), "{error}");
-        assert!(backend_calls.borrow().is_empty());
+        assert!(backend_calls.lock().unwrap().is_empty());
         assert_eq!(
-            *probe_calls.borrow(),
+            *probe_calls.lock().unwrap(),
             vec![(AgentCli::Codex, "gpt-missing".to_string())]
         );
         let stored = session::list(root.path()).unwrap().remove(0).agent;
@@ -2272,7 +2276,7 @@ mod tests {
             error.contains("clear the explicit model override"),
             "{error}"
         );
-        assert!(backend_calls.borrow().is_empty());
+        assert!(backend_calls.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -2300,8 +2304,8 @@ mod tests {
         );
 
         assert_eq!(result["isError"], false);
-        assert!(probe_calls.borrow().is_empty());
-        assert_eq!(backend_calls.borrow().len(), 1);
+        assert!(probe_calls.lock().unwrap().is_empty());
+        assert_eq!(backend_calls.lock().unwrap().len(), 1);
         let stored = session::list(root.path()).unwrap().remove(0).agent;
         assert_eq!(stored.cli, Some(AgentCli::Codex));
         assert_eq!(stored.model, None);
@@ -2332,9 +2336,9 @@ mod tests {
         );
 
         assert_eq!(result["isError"], true);
-        assert!(backend_calls.borrow().is_empty());
+        assert!(backend_calls.lock().unwrap().is_empty());
         assert_eq!(
-            *probe_calls.borrow(),
+            *probe_calls.lock().unwrap(),
             vec![(AgentCli::Codex, "gpt-old".to_string())]
         );
         // Revalidation does not erase the user's stored choice; the caller can
@@ -2370,9 +2374,9 @@ mod tests {
         );
 
         assert_eq!(result["isError"], true);
-        assert!(backend_calls.borrow().is_empty());
+        assert!(backend_calls.lock().unwrap().is_empty());
         assert_eq!(
-            *probe_calls.borrow(),
+            *probe_calls.lock().unwrap(),
             vec![(AgentCli::Codex, "gpt-old".to_string())]
         );
         assert_eq!(
@@ -2406,9 +2410,9 @@ mod tests {
         );
 
         assert_eq!(result["isError"], true);
-        assert!(backend_calls.borrow().is_empty());
+        assert!(backend_calls.lock().unwrap().is_empty());
         assert_eq!(
-            *probe_calls.borrow(),
+            *probe_calls.lock().unwrap(),
             vec![(AgentCli::Codex, "gpt-old".to_string())]
         );
     }
@@ -2453,7 +2457,7 @@ mod tests {
 
         assert_eq!(result["isError"], false);
         assert_eq!(
-            *probe_calls.borrow(),
+            *probe_calls.lock().unwrap(),
             vec![(AgentCli::Claude, "default-cli-model".to_string())]
         );
         let stored = session::list(root.path()).unwrap().remove(0).agent;
@@ -2492,9 +2496,9 @@ mod tests {
         );
 
         assert_eq!(result["isError"], false);
-        assert_eq!(backend_calls.borrow().len(), 1);
+        assert_eq!(backend_calls.lock().unwrap().len(), 1);
         assert_eq!(
-            *probe_calls.borrow(),
+            *probe_calls.lock().unwrap(),
             vec![(AgentCli::Claude, "legacy-model".to_string())]
         );
         let stored = session::list(root.path()).unwrap().remove(0).agent;
@@ -2599,7 +2603,7 @@ mod tests {
             .contains("not installed or not MCP-capable"));
 
         // Both errors happen before anything reaches a prompt queue.
-        assert!(calls.borrow().is_empty());
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -2620,7 +2624,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("no such session"));
-        assert!(calls.borrow().is_empty());
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[cfg(unix)]
@@ -2650,7 +2654,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("failed to create"));
-        assert!(calls.borrow().is_empty());
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -2681,7 +2685,7 @@ mod tests {
             )
             .unwrap_err();
         assert!(err.contains("session_prompt prompt is too large"), "{err}");
-        assert!(calls.borrow().is_empty());
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -2704,7 +2708,7 @@ mod tests {
         assert_eq!(body["delivered_to"], "live");
         assert_eq!(body["detail"], "sent");
 
-        let calls = calls.borrow();
+        let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, root.path().join(".usagi/sessions/work"));
         assert_eq!(calls[0].1, "continue here");
@@ -2730,7 +2734,7 @@ mod tests {
         );
         assert_eq!(tool_json(&queued)["delivered_to"], "queue");
         assert_eq!(
-            *queued_deliveries.borrow(),
+            *queued_deliveries.lock().unwrap(),
             vec![LaunchPromptDelivery::FreshLaunch]
         );
 
@@ -2772,7 +2776,7 @@ mod tests {
         );
         assert!(message.contains("mode=\"auto\""), "{message}");
         // Nothing was appended to any queue.
-        assert!(deliveries.borrow().is_empty());
+        assert!(deliveries.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -2798,7 +2802,7 @@ mod tests {
 
         // The report was addressed to the workspace root itself (the root row's
         // working dir), not any `.usagi/sessions/<name>` path.
-        let calls = calls.borrow();
+        let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, root.path());
         assert_eq!(calls[0].1, "issue #101 done, PR #123 opened");
@@ -2825,11 +2829,11 @@ mod tests {
         assert_eq!(result["isError"], false);
         let body = tool_json(&result);
         assert_eq!(body["delivered_to"], "queue");
-        let calls = calls.borrow();
+        let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, root.path());
         assert_eq!(
-            *prompt_deliveries.borrow(),
+            *prompt_deliveries.lock().unwrap(),
             vec![LaunchPromptDelivery::ReuseLiveAgent]
         );
     }
@@ -2886,7 +2890,7 @@ mod tests {
             "{text}"
         );
         // Rejected before the backend, so nothing was persisted to the launch queue.
-        assert!(calls.borrow().is_empty());
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -2906,8 +2910,8 @@ mod tests {
             json!({"name":"w","prompt":at_limit}),
         );
         assert_eq!(result["isError"], false);
-        assert_eq!(calls.borrow().len(), 1);
-        assert_eq!(calls.borrow()[0].1.len(), MAX_PROMPT_BYTES);
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        assert_eq!(calls.lock().unwrap()[0].1.len(), MAX_PROMPT_BYTES);
     }
 
     #[test]
@@ -3107,7 +3111,7 @@ mod tests {
 
         // The backend was invoked once with the workspace root, the session name,
         // and force defaulted to false.
-        let calls = calls.borrow();
+        let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, root.path());
         assert_eq!(calls[0].1, "feature-x");
@@ -3164,7 +3168,7 @@ mod tests {
             "session_remove",
             json!({"name":"wip","force":true}),
         );
-        assert!(calls.borrow()[0].2);
+        assert!(calls.lock().unwrap()[0].2);
     }
 
     #[test]
@@ -3212,7 +3216,7 @@ mod tests {
                 "detail": "re-proved ownership",
             })
         );
-        let recorded = calls.borrow();
+        let recorded = calls.lock().unwrap();
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].0, root.path());
         assert_eq!(recorded[0].1, "wedged");
@@ -3241,7 +3245,10 @@ mod tests {
         // A release keeps the session, so the caller must not read it as a removal.
         assert_eq!(body["action"], "release");
         assert_eq!(body["removed"], false);
-        assert_eq!(calls.borrow()[0].2, session::QuarantineRecovery::Release);
+        assert_eq!(
+            calls.lock().unwrap()[0].2,
+            session::QuarantineRecovery::Release
+        );
     }
 
     #[test]
@@ -3271,7 +3278,7 @@ mod tests {
         ] {
             assert_eq!(call(&server, "session_recover", arguments)["isError"], true);
         }
-        assert!(calls.borrow().is_empty());
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -14,10 +14,15 @@
 //!
 //! All speak JSON-RPC 2.0 with newline-delimited messages and implement the
 //! small subset MCP needs (`initialize`, `tools/list`, `tools/call`, `ping`)
-//! directly over `serde_json` — no async runtime, so dispatch stays synchronous
-//! and unit-testable. The framing (parsing, method dispatch, response shaping)
-//! is identical between them and lives here; each server only supplies the
-//! parts that differ via [`McpService`].
+//! directly over `serde_json` — no async runtime, so each request is handled by
+//! a plain synchronous, unit-testable function. The framing (parsing, method
+//! dispatch, response shaping) is identical between them and lives here; each
+//! server only supplies the parts that differ via [`McpService`].
+//!
+//! [`serve`] reads requests sequentially but runs them on a small bounded thread
+//! pool, so one slow tool call (`session_remove` on a large worktree takes
+//! minutes) does not stall every following request on the same connection. See
+//! [`serve`] for the concurrency model.
 
 pub mod issue;
 pub mod llm;
@@ -28,6 +33,9 @@ pub mod usagi;
 use std::backtrace::Backtrace;
 use std::io::{BufRead, Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Mutex, MutexGuard};
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -47,6 +55,23 @@ const MAX_REQUEST_LINE_BYTES: u64 = 64 * 1024 * 1024;
 /// Arguments are local diagnostics, not client-facing output, but prompts can be
 /// large; keep one panic from producing an unbounded error-log entry.
 const MAX_PANIC_ARGUMENT_CHARS: usize = 8 * 1024;
+
+/// How many requests [`serve`] runs at once. Requests are mostly IO-bound (git,
+/// the filesystem, an agent CLI), and an agent drives one connection with a
+/// handful of tools in flight, so a small pool covers real use while keeping the
+/// thread count and the number of concurrent store mutations predictable.
+const DISPATCH_WORKERS: usize = 8;
+
+/// How many further requests [`serve`] admits while every worker is busy. Bounds
+/// the queue so a client that keeps sending while a slow tool runs is refused
+/// explicitly instead of making the server buffer without bound.
+const DISPATCH_QUEUE: usize = 64;
+
+/// JSON-RPC error code returned when the bounded dispatch pool is saturated.
+/// `-32000` is inside the implementation-defined server-error range reserved by
+/// JSON-RPC 2.0 (`-32000..=-32099`); it is not a protocol violation by the
+/// client, so it must not reuse one of the predefined codes.
+const SERVER_BUSY_CODE: i64 = -32000;
 
 /// The outcome of reading one capped request line (see [`read_capped_line`]).
 enum LineRead {
@@ -118,45 +143,136 @@ pub(crate) fn into_schema_array(value: Value) -> Vec<Value> {
     }
 }
 
-/// Run the MCP read/write loop for `service` over the given streams: read
-/// newline-delimited JSON-RPC requests, skip blank lines, and write each reply
-/// back, flushing per line. Generic over its streams so it is driven by stdio in
-/// production and by in-memory buffers in tests.
-pub fn serve(
-    service: &dyn McpService,
-    input: impl BufRead,
-    output: impl Write,
-) -> std::io::Result<()> {
-    serve_capped(service, input, output, MAX_REQUEST_LINE_BYTES)
+/// Tunables for [`serve`]'s read loop and its bounded dispatch pool, so tests can
+/// drive the too-long-line and saturation paths with small budgets instead of a
+/// 64 MiB input and 72 concurrent requests.
+struct ServeLimits {
+    /// Bytes buffered for a single request line before refusing it.
+    max_line_bytes: u64,
+    /// Requests executed concurrently.
+    workers: usize,
+    /// Requests admitted beyond `workers` while every worker is busy.
+    queue: usize,
 }
 
-/// [`serve`] with an explicit per-line byte cap, so tests can drive the
-/// too-long-line path with a small budget instead of a 64 MiB input.
-fn serve_capped(
-    service: &dyn McpService,
+impl Default for ServeLimits {
+    fn default() -> Self {
+        Self {
+            max_line_bytes: MAX_REQUEST_LINE_BYTES,
+            workers: DISPATCH_WORKERS,
+            queue: DISPATCH_QUEUE,
+        }
+    }
+}
+
+/// Run the MCP loop for `service` over the given streams: read newline-delimited
+/// JSON-RPC requests, skip blank lines, and write each reply back, flushing per
+/// line. Generic over its streams so it is driven by stdio in production and by
+/// in-memory buffers in tests.
+///
+/// # Concurrency model
+///
+/// Reading is sequential, but a request that expects a reply is handed to a
+/// bounded pool of [`DISPATCH_WORKERS`] threads instead of being run on the
+/// reading thread. A tool call that takes minutes (`session_remove` on a large
+/// worktree) therefore no longer stalls every following request on the same
+/// connection.
+///
+/// | Aspect | Behaviour |
+/// |---|---|
+/// | Concurrency | Up to [`DISPATCH_WORKERS`] tool calls run at once |
+/// | Back pressure | [`DISPATCH_QUEUE`] further requests are admitted; beyond that a request is refused with [`SERVER_BUSY_CODE`] |
+/// | Reply order | Not the request order — replies come out as each request finishes, correlated by JSON-RPC `id` |
+/// | Reply framing | One reply per line: writes are serialised, so lines never interleave |
+/// | Notifications | Have no `id` and take no reply, so they never occupy a worker or a queue slot |
+/// | Parse-level replies | `-32700` / `-32600` need no tool, so the reading thread writes them directly |
+/// | Shutdown | On EOF (or a write error) the loop stops reading and waits for in-flight requests to finish before returning |
+///
+/// Concurrent tool calls do not add data races: mutations of the shared markdown
+/// stores already serialise behind the cross-process advisory lock in
+/// [`crate::infrastructure::store_lock`], which is taken per open file and so
+/// serialises threads of one process just as it does separate processes.
+pub fn serve(
+    service: &(dyn McpService + Sync),
+    input: impl BufRead,
+    output: impl Write + Send,
+) -> std::io::Result<()> {
+    serve_with_limits(service, input, output, &ServeLimits::default())
+}
+
+/// [`serve`] with explicit [`ServeLimits`].
+fn serve_with_limits(
+    service: &(dyn McpService + Sync),
     mut input: impl BufRead,
-    mut output: impl Write,
+    output: impl Write + Send,
+    limits: &ServeLimits,
+) -> std::io::Result<()> {
+    let writer = ResponseWriter::new(output);
+    let admission = Admission::new(limits.workers + limits.queue);
+    let (sender, receiver) = mpsc::channel::<PendingRequest>();
+    let receiver = Mutex::new(receiver);
+
+    let read_result = std::thread::scope(|scope| {
+        for _ in 0..limits.workers {
+            scope.spawn(|| dispatch_worker(service, &receiver, &writer, &admission));
+        }
+        let result = read_requests(
+            &mut input,
+            &writer,
+            &admission,
+            &sender,
+            limits.max_line_bytes,
+        );
+        // Moves `sender` into this closure so it is gone before the scope joins
+        // the workers: that disconnect is what tells them no more requests are
+        // coming once the queue drains.
+        drop(sender);
+        result
+    });
+
+    // A read error (e.g. a broken pipe on stdin) is the primary failure; a write
+    // error recorded by a worker is reported when reading itself ended cleanly.
+    read_result?;
+    match writer.into_error() {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Read request lines from `input` until EOF, replying directly to the ones that
+/// need no tool and handing the rest to the dispatch pool through `sender`.
+fn read_requests<W: Write>(
+    input: &mut impl BufRead,
+    writer: &ResponseWriter<W>,
+    admission: &Admission,
+    sender: &Sender<PendingRequest>,
     max_line_bytes: u64,
 ) -> std::io::Result<()> {
     // Read raw bytes and decode lossily rather than using `BufRead::lines`, which
     // yields an `Err` on a line containing invalid UTF-8 — propagating that would
     // let one malformed byte sequence from a misbehaving client terminate the
     // whole server. A non-UTF-8 line instead becomes replacement characters that
-    // fail to parse as JSON, so [`dispatch_line`] returns a `-32700 parse error`
+    // fail to parse as JSON, so [`classify_line`] yields a `-32700 parse error`
     // and the loop keeps going. A genuine IO error (e.g. a broken pipe) still
     // propagates and ends the loop.
     let mut raw = Vec::new();
     loop {
-        match read_capped_line(&mut input, &mut raw, max_line_bytes)? {
+        // Once a write has failed every further reply is undeliverable, so stop
+        // reading rather than running more tools for a client that is gone.
+        if writer.failed() {
+            break;
+        }
+        match read_capped_line(input, &mut raw, max_line_bytes)? {
             LineRead::Eof => break,
             // A pathologically long line (a wedged/hostile producer) is refused
             // with a parse error rather than buffered without bound; the loop
             // keeps serving the next request.
             LineRead::TooLong => {
-                let response =
-                    error_response(Value::Null, -32700, "parse error: request too large");
-                writeln!(output, "{response}")?;
-                output.flush()?;
+                writer.write_line(&error_response(
+                    Value::Null,
+                    -32700,
+                    "parse error: request too large",
+                ));
                 continue;
             }
             LineRead::Line => {}
@@ -166,12 +282,177 @@ fn serve_capped(
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(response) = dispatch_line(service, line) {
-            writeln!(output, "{response}")?;
-            output.flush()?;
+        match classify_line(line) {
+            // A notification carries no id and takes no reply, so it neither
+            // occupies a worker nor can be refused for lack of one.
+            Incoming::Ignored => {}
+            Incoming::Immediate(response) => writer.write_line(&response),
+            Incoming::Request(request) => {
+                // `initialize` / `ping` / `tools/list` go through the pool too:
+                // a client waits for `initialize` before sending anything else,
+                // so nothing depends on them bypassing it, and one code path is
+                // easier to reason about than a fast lane beside it.
+                dispatch_or_refuse(request, writer, admission, sender);
+            }
         }
     }
     Ok(())
+}
+
+/// Queue `request` for the dispatch pool, or refuse it when the pool's bounded
+/// capacity is already taken by requests in flight.
+fn dispatch_or_refuse<W: Write>(
+    request: PendingRequest,
+    writer: &ResponseWriter<W>,
+    admission: &Admission,
+    sender: &Sender<PendingRequest>,
+) {
+    if !admission.try_admit() {
+        // Refuse loudly. Silently queueing would reproduce the very stall this
+        // pool exists to remove, only with an unbounded memory cost.
+        writer.write_line(&error_response(
+            request.id,
+            SERVER_BUSY_CODE,
+            &format!(
+                "server busy: {} requests already in flight; retry this request",
+                admission.capacity
+            ),
+        ));
+        return;
+    }
+    // The receiver is owned by `serve_with_limits`, whose scope outlives this
+    // loop, so the channel cannot be disconnected here. Assert that rather than
+    // dropping the request, which would leave the client waiting forever.
+    sender
+        .send(request)
+        .expect("mcp dispatch queue receiver outlives the read loop");
+}
+
+/// One dispatch-pool thread: take the next request, run it, write its reply.
+fn dispatch_worker<W: Write>(
+    service: &dyn McpService,
+    receiver: &Mutex<Receiver<PendingRequest>>,
+    writer: &ResponseWriter<W>,
+    admission: &Admission,
+) {
+    loop {
+        // Hold the receiver lock only while taking the next request: exactly one
+        // worker waits on the channel and the others wait on the mutex, so a
+        // long-running tool never blocks the hand-off of the next request.
+        let taken = {
+            let queue = receiver.lock().expect("mcp dispatch queue lock");
+            queue.recv()
+        };
+        // The read loop dropped its sender and the queue is drained: shut down.
+        let Ok(request) = taken else { break };
+        writer.write_line(&run_request(service, request));
+        admission.release();
+    }
+}
+
+/// Bounds how many requests may be in flight — queued or running — at once.
+///
+/// A slot is taken when a request is admitted and released once its reply has
+/// been written, so admission never depends on whether a worker has already
+/// picked the request up. That makes the refusal boundary a property of the
+/// server's load rather than of thread scheduling.
+struct Admission {
+    in_flight: AtomicUsize,
+    capacity: usize,
+}
+
+impl Admission {
+    fn new(capacity: usize) -> Self {
+        Self {
+            in_flight: AtomicUsize::new(0),
+            capacity,
+        }
+    }
+
+    /// Take a slot, or report that the server is saturated.
+    fn try_admit(&self) -> bool {
+        // Compare-and-swap rather than a plain `fetch_add` + undo: the count must
+        // never transiently exceed the capacity, or two threads racing at the
+        // boundary could each see room that only one of them has.
+        let mut in_flight = self.in_flight.load(Ordering::SeqCst);
+        loop {
+            if in_flight >= self.capacity {
+                return false;
+            }
+            match self.in_flight.compare_exchange_weak(
+                in_flight,
+                in_flight + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return true,
+                // Another thread moved the count first; retry against its value.
+                Err(current) => in_flight = current,
+            }
+        }
+    }
+
+    /// Give back a slot taken by [`try_admit`].
+    fn release(&self) {
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Serialises replies onto the output stream so concurrently-dispatched requests
+/// each produce one whole line, never interleaved fragments.
+///
+/// The first write error is remembered instead of being propagated out of
+/// whichever worker hit it, so the read loop can stop and [`serve`] can return
+/// it from the one place that owns the stream.
+struct ResponseWriter<W> {
+    state: Mutex<WriterState<W>>,
+}
+
+struct WriterState<W> {
+    output: W,
+    error: Option<std::io::Error>,
+}
+
+impl<W: Write> ResponseWriter<W> {
+    fn new(output: W) -> Self {
+        Self {
+            state: Mutex::new(WriterState {
+                output,
+                error: None,
+            }),
+        }
+    }
+
+    /// Write one reply as a single line and flush it. Once a write has failed
+    /// every further reply is dropped: the stream is gone, and [`serve`] is
+    /// already on its way to returning that error.
+    fn write_line(&self, response: &str) {
+        let mut state = self.lock();
+        if state.error.is_some() {
+            return;
+        }
+        let outcome = writeln!(state.output, "{response}").and_then(|()| state.output.flush());
+        if let Err(error) = outcome {
+            state.error = Some(error);
+        }
+    }
+
+    /// Whether a write has failed, so the read loop can stop early.
+    fn failed(&self) -> bool {
+        self.lock().error.is_some()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, WriterState<W>> {
+        self.state.lock().expect("mcp response writer lock")
+    }
+
+    /// The first write error, once every worker has finished writing.
+    fn into_error(self) -> Option<std::io::Error> {
+        self.state
+            .into_inner()
+            .expect("mcp response writer lock")
+            .error
+    }
 }
 
 /// The per-server behaviour an MCP server must supply. The JSON-RPC framing is
@@ -195,13 +476,34 @@ pub trait McpService {
     fn call_tool(&self, name: &str, arguments: Value) -> Result<String, String>;
 }
 
-/// Handle one JSON-RPC message (a single line of input) for `service`. Returns
-/// the JSON response to write back, or `None` for notifications (which carry no
-/// id and take no reply).
-pub fn dispatch_line(service: &dyn McpService, line: &str) -> Option<String> {
+/// A JSON-RPC request that expects a reply, carried from the reading thread to a
+/// dispatch worker.
+#[derive(Debug)]
+struct PendingRequest {
+    method: String,
+    params: Option<Value>,
+    id: Value,
+}
+
+/// What one line of input turns into, decided by [`classify_line`] before any
+/// tool runs so [`serve`] knows whether it must occupy a dispatch worker.
+enum Incoming {
+    /// A notification: acted on without a reply, so there is nothing to send and
+    /// nothing to dispatch.
+    Ignored,
+    /// A reply determined by framing alone (parse error, malformed request). It
+    /// needs no tool, so the reading thread writes it directly.
+    Immediate(String),
+    /// A request whose handler may block for minutes, so it runs on the pool.
+    Request(PendingRequest),
+}
+
+/// Classify one JSON-RPC message (a single line of input): parse it and decide
+/// whether it needs a reply, and whether producing that reply needs a tool.
+fn classify_line(line: &str) -> Incoming {
     let value: Value = match serde_json::from_str(line) {
         Ok(value) => value,
-        Err(_) => return Some(error_response(Value::Null, -32700, "parse error")),
+        Err(_) => return Incoming::Immediate(error_response(Value::Null, -32700, "parse error")),
     };
 
     let method = value.get("method").and_then(Value::as_str);
@@ -211,7 +513,7 @@ pub fn dispatch_line(service: &dyn McpService, line: &str) -> Option<String> {
         // the client's id so it can correlate the error with its in-flight
         // request — per JSON-RPC the response id is null only when the id cannot
         // be detected, which is not the case here.
-        (None, Some(id)) => Some(error_response(
+        (None, Some(id)) => Incoming::Immediate(error_response(
             id,
             -32600,
             "invalid request: missing method",
@@ -219,11 +521,34 @@ pub fn dispatch_line(service: &dyn McpService, line: &str) -> Option<String> {
         // No id means a notification: act on it but send no reply. A message with
         // neither method nor id is a malformed notification and likewise gets none
         // (there is no id to correlate a reply against).
-        (Some(_), None) | (None, None) => None,
-        (Some(method), Some(id)) => {
-            Some(dispatch_request(service, method, value.get("params"), id))
-        }
+        (Some(_), None) | (None, None) => Incoming::Ignored,
+        (Some(method), Some(id)) => Incoming::Request(PendingRequest {
+            method: method.to_string(),
+            params: value.get("params").cloned(),
+            id,
+        }),
     }
+}
+
+/// Handle one JSON-RPC message (a single line of input) for `service`. Returns
+/// the JSON response to write back, or `None` for notifications (which carry no
+/// id and take no reply).
+pub fn dispatch_line(service: &dyn McpService, line: &str) -> Option<String> {
+    match classify_line(line) {
+        Incoming::Ignored => None,
+        Incoming::Immediate(response) => Some(response),
+        Incoming::Request(request) => Some(run_request(service, request)),
+    }
+}
+
+/// Run a classified request through `service`, producing its reply.
+fn run_request(service: &dyn McpService, request: PendingRequest) -> String {
+    dispatch_request(
+        service,
+        &request.method,
+        request.params.as_ref(),
+        request.id,
+    )
 }
 
 /// Dispatch a request (one that expects a reply) to its handler.
@@ -346,6 +671,12 @@ fn initialize_result(name: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Condvar};
+    use std::time::{Duration, Instant};
+
+    /// How long a concurrency test waits for replies before failing. Generous:
+    /// exceeding it means a request was stalled, not that the machine is slow.
+    const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
     /// A minimal service: every tool call echoes its name back, so the loop's
     /// framing can be exercised without any real business logic.
@@ -384,6 +715,244 @@ mod tests {
             }
             Ok(format!("called {name}"))
         }
+    }
+
+    /// A service whose `slow` tool blocks until the test releases it, so a test
+    /// can prove that a later request is answered while an earlier one is still
+    /// running. Every other tool name returns immediately.
+    struct GatedService {
+        /// Signalled once per `slow` call, as soon as that call has begun.
+        started: Mutex<Sender<()>>,
+        /// Flipped by [`GatedService::release`] to let `slow` calls return.
+        open: Mutex<bool>,
+        opened: Condvar,
+    }
+
+    impl GatedService {
+        /// The service plus the stream of "a `slow` call started" signals.
+        fn new() -> (Self, Receiver<()>) {
+            let (started, starts) = mpsc::channel();
+            (
+                Self {
+                    started: Mutex::new(started),
+                    open: Mutex::new(false),
+                    opened: Condvar::new(),
+                },
+                starts,
+            )
+        }
+
+        /// Let every blocked (and every later) `slow` call return.
+        fn release(&self) {
+            *self.open.lock().expect("gate lock") = true;
+            self.opened.notify_all();
+        }
+    }
+
+    impl McpService for GatedService {
+        fn server_name(&self) -> &str {
+            "gated"
+        }
+
+        fn tool_schemas(&self) -> Value {
+            json!([])
+        }
+
+        fn call_tool(&self, name: &str, _arguments: Value) -> Result<String, String> {
+            if name != "slow" {
+                return Ok(format!("called {name}"));
+            }
+            self.started
+                .lock()
+                .expect("start lock")
+                .send(())
+                .expect("the test watches for starts");
+            let mut open = self.open.lock().expect("gate lock");
+            while !*open {
+                open = self.opened.wait(open).expect("gate wait");
+            }
+            Ok("called slow".to_string())
+        }
+    }
+
+    /// A [`Read`] fed one line at a time from a channel, so a test can hold back a
+    /// later request until an earlier one is known to be running. EOF arrives only
+    /// when the sending half is dropped, which keeps `serve` reading in between.
+    struct ChannelReader {
+        lines: Receiver<String>,
+        pending: Vec<u8>,
+    }
+
+    impl Read for ChannelReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.pending.is_empty() {
+                let Ok(line) = self.lines.recv() else {
+                    return Ok(0);
+                };
+                self.pending = line.into_bytes();
+            }
+            let taken = self.pending.len().min(buf.len());
+            buf[..taken].copy_from_slice(&self.pending[..taken]);
+            self.pending.drain(..taken);
+            Ok(taken)
+        }
+    }
+
+    /// The sending half of a [`ChannelReader`]: feeds request lines to a `serve`
+    /// running on another thread, and closes the stream when dropped.
+    struct RequestFeed(Sender<String>);
+
+    impl RequestFeed {
+        fn new() -> (Self, std::io::BufReader<ChannelReader>) {
+            let (sender, lines) = mpsc::channel();
+            (
+                Self(sender),
+                std::io::BufReader::new(ChannelReader {
+                    lines,
+                    pending: Vec::new(),
+                }),
+            )
+        }
+
+        /// Send a `tools/call` for `tool` carrying JSON-RPC id `id`.
+        fn call(&self, id: i64, tool: &str) {
+            self.send(&format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{tool}","arguments":{{}}}}}}"#
+            ));
+        }
+
+        fn send(&self, line: &str) {
+            self.0.send(format!("{line}\n")).expect("serve is reading");
+        }
+    }
+
+    /// Captures replies into a shared buffer so a test can inspect them while
+    /// `serve` is still running on another thread.
+    #[derive(Clone)]
+    struct SharedOutput(Arc<Mutex<Vec<u8>>>);
+
+    impl SharedOutput {
+        fn new() -> Self {
+            Self(Arc::new(Mutex::new(Vec::new())))
+        }
+
+        fn push(&self, bytes: &[u8]) {
+            self.0
+                .lock()
+                .expect("captured output lock")
+                .extend_from_slice(bytes);
+        }
+
+        /// The replies written so far, each parsed from its own line. A line that
+        /// fails to parse means two replies were interleaved.
+        fn replies(&self) -> Vec<Value> {
+            let bytes = self.0.lock().expect("captured output lock").clone();
+            String::from_utf8(bytes)
+                .expect("replies are utf-8")
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("one whole reply per line"))
+                .collect()
+        }
+
+        /// Wait until a reply carrying `id` has been written, and return it.
+        fn wait_for_id(&self, id: i64) -> Value {
+            let deadline = Instant::now() + REPLY_TIMEOUT;
+            loop {
+                let replies = self.replies();
+                let found = replies
+                    .iter()
+                    .find(|reply| reply["id"] == json!(id))
+                    .cloned();
+                if let Some(reply) = found {
+                    return reply;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for a reply to id {id}, got {replies:?}"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        /// Wait until at least `count` replies have been written.
+        fn wait_for(&self, count: usize) -> Vec<Value> {
+            let deadline = Instant::now() + REPLY_TIMEOUT;
+            loop {
+                let replies = self.replies();
+                if replies.len() >= count || Instant::now() >= deadline {
+                    assert!(
+                        replies.len() >= count,
+                        "timed out waiting for {count} replies, got {replies:?}"
+                    );
+                    return replies;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+
+    impl Write for SharedOutput {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.push(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A writer that accepts only a few bytes per call and yields the thread
+    /// between them, so a server that did not serialise its writes would visibly
+    /// split one reply across lines. Captures into a [`SharedOutput`].
+    #[derive(Clone)]
+    struct ChunkedOutput(SharedOutput);
+
+    impl Write for ChunkedOutput {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            std::thread::yield_now();
+            let chunk = buf.len().min(4);
+            self.0.push(&buf[..chunk]);
+            Ok(chunk)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A writer whose every write fails, standing in for a client that closed the
+    /// other end of the pipe.
+    struct FailingOutput;
+
+    impl Write for FailingOutput {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "closed",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// [`ServeLimits`] with the production line cap and an explicit pool shape.
+    fn limits(workers: usize, queue: usize) -> ServeLimits {
+        ServeLimits {
+            workers,
+            queue,
+            ..ServeLimits::default()
+        }
+    }
+
+    /// The ids of `replies`, in the order they were written.
+    fn ids(replies: &[Value]) -> Vec<i64> {
+        replies
+            .iter()
+            .map(|reply| reply["id"].as_i64().expect("an integer id"))
+            .collect()
     }
 
     #[test]
@@ -482,7 +1051,16 @@ mod tests {
         let input = format!("{overlong}{{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}}\n");
         let mut output = Vec::new();
 
-        serve_capped(&EchoService, input.as_bytes(), &mut output, 128).unwrap();
+        serve_with_limits(
+            &EchoService,
+            input.as_bytes(),
+            &mut output,
+            &ServeLimits {
+                max_line_bytes: 128,
+                ..ServeLimits::default()
+            },
+        )
+        .unwrap();
 
         let response = String::from_utf8(output).unwrap();
         assert!(response.contains("\"code\":-32700"), "{response}");
@@ -540,18 +1118,23 @@ mod tests {
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(replies.len(), 2);
-        assert_eq!(replies[0]["id"], json!(1));
-        assert_eq!(replies[0]["result"]["isError"], json!(true));
-        assert!(replies[0]["result"]["content"][0]["text"]
+        // Replies are looked up by id, not by position: requests are dispatched
+        // concurrently, so the order they complete in is not the request order.
+        let by_id = |wanted: i64| {
+            replies
+                .iter()
+                .find(|reply| reply["id"] == json!(wanted))
+                .expect("a reply carrying the requested id")
+        };
+        let panicked = by_id(1);
+        assert_eq!(panicked["result"]["isError"], json!(true));
+        assert!(panicked["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
             .contains("tool `explode` panicked"));
-        assert_eq!(replies[1]["id"], json!(2));
-        assert_eq!(replies[1]["result"]["isError"], json!(false));
-        assert_eq!(
-            replies[1]["result"]["content"][0]["text"],
-            json!("called after")
-        );
+        let after = by_id(2);
+        assert_eq!(after["result"]["isError"], json!(false));
+        assert_eq!(after["result"]["content"][0]["text"], json!("called after"));
     }
 
     #[test]
@@ -654,6 +1237,212 @@ mod tests {
 
         let opaque: Box<dyn std::any::Any + Send> = Box::new(123_u32);
         assert_eq!(panic_payload_message(&*opaque), "non-string panic payload");
+    }
+
+    #[test]
+    fn a_slow_tool_call_does_not_stall_a_later_request_on_the_same_stream() {
+        // The regression this whole pool exists for: `session_remove` took minutes
+        // and every following request on the same stdio connection — including
+        // read-only ones — waited for it. The slow call stays blocked while a later
+        // request is answered.
+        let (service, starts) = GatedService::new();
+        let (feed, input) = RequestFeed::new();
+        let output = SharedOutput::new();
+        let pool = limits(2, 8);
+
+        std::thread::scope(|scope| {
+            let server = scope.spawn(|| serve_with_limits(&service, input, output.clone(), &pool));
+
+            feed.call(1, "slow");
+            starts.recv().expect("the slow call started");
+            feed.call(2, "fast");
+
+            // Answered while id 1 is still inside the gate, so replies come out in
+            // completion order rather than request order.
+            let replies = output.wait_for(1);
+            assert_eq!(ids(&replies), vec![2]);
+
+            service.release();
+            drop(feed);
+            server
+                .join()
+                .expect("the serve thread finished")
+                .expect("serve succeeded");
+        });
+
+        assert_eq!(ids(&output.replies()), vec![2, 1]);
+    }
+
+    #[test]
+    fn out_of_order_replies_keep_their_own_request_ids() {
+        // Every request calls a differently-named tool, so each reply proves it
+        // carries the id of the request that produced *it* — not merely that some
+        // reply arrived for every id.
+        let (service, _starts) = GatedService::new();
+        let (feed, input) = RequestFeed::new();
+        let output = SharedOutput::new();
+        let pool = limits(4, 16);
+
+        std::thread::scope(|scope| {
+            let server = scope.spawn(|| serve_with_limits(&service, input, output.clone(), &pool));
+            for id in 1..=12 {
+                feed.call(id, &format!("tool{id}"));
+            }
+            drop(feed);
+            server
+                .join()
+                .expect("the serve thread finished")
+                .expect("serve succeeded");
+        });
+
+        // `serve` returned, so every in-flight request has been answered.
+        let replies = output.replies();
+        assert_eq!(replies.len(), 12);
+        for reply in &replies {
+            let id = reply["id"].as_i64().expect("an integer id");
+            assert_eq!(
+                reply["result"]["content"][0]["text"],
+                json!(format!("called tool{id}"))
+            );
+        }
+        let mut seen = ids(&replies);
+        seen.sort_unstable();
+        assert_eq!(seen, (1..=12).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn requests_beyond_the_bounded_pool_are_refused_and_the_server_keeps_serving() {
+        // One worker plus one queue slot admits two requests; a third is refused
+        // explicitly instead of being buffered without bound. The bound counts
+        // admitted-but-unfinished requests, so the refusal does not depend on
+        // whether a worker has picked the queued request up yet.
+        let (service, starts) = GatedService::new();
+        let (feed, input) = RequestFeed::new();
+        let output = SharedOutput::new();
+        let pool = limits(1, 1);
+
+        std::thread::scope(|scope| {
+            let server = scope.spawn(|| serve_with_limits(&service, input, output.clone(), &pool));
+
+            feed.call(1, "slow");
+            starts.recv().expect("the first slow call started");
+            feed.call(2, "slow");
+            feed.call(3, "slow");
+
+            // The refusal is written by the reading thread, so it lands while both
+            // admitted requests are still in flight.
+            let replies = output.wait_for(1);
+            assert_eq!(ids(&replies), vec![3]);
+            assert_eq!(replies[0]["error"]["code"], json!(SERVER_BUSY_CODE));
+            assert!(
+                replies[0]["error"]["message"]
+                    .as_str()
+                    .expect("an error message")
+                    .contains("server busy: 2 requests already in flight"),
+                "{replies:?}"
+            );
+
+            // The server survived the refusal: with the gate open the admitted
+            // requests drain and a later request is served normally. `-32000` asks
+            // the client to resend, and a resend can itself race the release of the
+            // slot it needs, so retry the way a real client would.
+            service.release();
+            let mut id = 4;
+            let served = loop {
+                feed.call(id, "fast");
+                let reply = output.wait_for_id(id);
+                if reply["error"]["code"] != json!(SERVER_BUSY_CODE) {
+                    break reply;
+                }
+                id += 1;
+            };
+            assert_eq!(served["result"]["content"][0]["text"], json!("called fast"));
+
+            drop(feed);
+            server
+                .join()
+                .expect("the serve thread finished")
+                .expect("serve succeeded");
+        });
+
+        // Both admitted requests ran to completion despite the refusal beside them.
+        for admitted in [1, 2] {
+            assert_eq!(
+                output.wait_for_id(admitted)["result"]["content"][0]["text"],
+                json!("called slow")
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_replies_are_written_as_whole_lines() {
+        // The output takes only 4 bytes per call and yields the thread between
+        // them, so a server that did not serialise its writes would split replies
+        // across lines. `replies` parses every line, so any interleaving fails here.
+        let (service, _starts) = GatedService::new();
+        let (feed, input) = RequestFeed::new();
+        let captured = SharedOutput::new();
+        let output = ChunkedOutput(captured.clone());
+        let pool = limits(8, 16);
+
+        std::thread::scope(|scope| {
+            let server = scope.spawn(|| serve_with_limits(&service, input, output.clone(), &pool));
+            for id in 1..=16 {
+                feed.call(id, &format!("tool{id}"));
+            }
+            drop(feed);
+            server
+                .join()
+                .expect("the serve thread finished")
+                .expect("serve succeeded");
+        });
+
+        assert_eq!(captured.replies().len(), 16);
+    }
+
+    #[test]
+    fn serve_stops_reading_once_a_reply_cannot_be_written() {
+        // The parse error for the first line is written by the reading thread
+        // itself, so the failure is recorded before the next line is read. The loop
+        // then stops even though the input stream is still open — no further tools
+        // run for a client that is gone — and `serve` reports the write error.
+        let (feed, input) = RequestFeed::new();
+
+        let error = std::thread::scope(|scope| {
+            let server = scope.spawn(|| serve(&EchoService, input, FailingOutput));
+            feed.send("not json");
+            server.join().expect("the serve thread finished")
+        })
+        .expect_err("the write error is reported");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn response_writer_keeps_the_first_write_error_and_drops_later_replies() {
+        let writer = ResponseWriter::new(FailingOutput);
+
+        writer.write_line("{}");
+        assert!(writer.failed());
+        // A reply after the failure is dropped rather than retried: the stream is
+        // gone, and the first error is the one `serve` reports.
+        writer.write_line("{}");
+
+        let error = writer.into_error().expect("the write error was kept");
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn admission_bounds_requests_in_flight_and_reuses_released_slots() {
+        let admission = Admission::new(2);
+
+        assert!(admission.try_admit());
+        assert!(admission.try_admit());
+        // Saturated: the next request is refused rather than queued.
+        assert!(!admission.try_admit());
+
+        admission.release();
+        assert!(admission.try_admit());
     }
 
     #[test]

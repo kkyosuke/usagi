@@ -117,8 +117,8 @@ codex -c 'mcp_servers.usagi.command=usagi' -c 'mcp_servers.usagi.args=["mcp"]' \
 クラウド Agent ⇄ (stdio JSON-RPC)
         │
         ▼
-presentation/cli/llm_mcp.rs   … stdin ループ + Ollama バックエンド（テスト不能・カバレッジ対象外）
-        │  handle_line(line) ごとに委譲
+presentation/cli/llm_mcp.rs   … stdio の束ね + Ollama バックエンド（テスト不能・カバレッジ対象外）
+        │  リクエストごとに（mcp/mod.rs の serve が上限付きプール上で）委譲
         ▼
 presentation/mcp/llm.rs       … LlmMcpServer：tool 実装（JSON-RPC フレーミングは mcp/mod.rs と共有・100% テスト）
         │  LlmBackend::ask 経由
@@ -128,7 +128,7 @@ presentation/mcp/llm.rs       … LlmMcpServer：tool 実装（JSON-RPC フレ�
 
 | モジュール | 役割 |
 |---|---|
-| `presentation/cli/llm_mcp.rs` | `usagi llm-mcp` のエントリ。stdin ループと `ollama` へのシェルアウト。`mcp` 同様カバレッジ対象外。 |
+| `presentation/cli/llm_mcp.rs` | `usagi llm-mcp` のエントリ。stdio の受け渡しと `ollama` へのシェルアウト。`mcp` 同様カバレッジ対象外。読み書きループと並行 dispatch は `mcp/mod.rs` の `serve` が担う（[同時実行モデル](03-mcp.md#同時実行モデル)）。 |
 | `presentation/mcp/llm.rs` | `LlmMcpServer`。`McpService` を実装し `local_llm_ask` tool を提供（JSON-RPC フレーミングは `mcp/mod.rs` と共有）。`LlmBackend` トレイトでモデル呼び出しを抽象化。ユニットテストで網羅。 |
 | `usecase/local_llm.rs` | `ollama` / モデルの有無判定とインストール、および Ollama サーバの起動確認・自動起動（`doctor::CommandRunner` を再利用）。 |
 
@@ -136,6 +136,7 @@ presentation/mcp/llm.rs       … LlmMcpServer：tool 実装（JSON-RPC フレ�
 
 - **HTTP 依存を増やさない**: Ollama の HTTP API ではなく `ollama` CLI へシェルアウトすることで、
   `reqwest` 等の追加依存を避け、usagi の「依存を最小に保つ」方針に合わせています。
-- **issue MCP と同じ最小実装**: `serde_json` のみで同期的に JSON-RPC を処理し、
-  テスト不能な stdin ループ・シェルアウトだけをカバレッジ対象外にしています（[03-mcp.md](03-mcp.md) と同方針）。
+- **issue MCP と同じ最小実装**: `serde_json` のみで JSON-RPC を処理し、テスト不能な stdio の束ね・
+  シェルアウトだけをカバレッジ対象外にしています。読み書きループと上限付き並行 dispatch も共有のため、
+  ローカルモデルの長い応答が同じ接続の後続リクエストを止めません（[03-mcp.md](03-mcp.md#同時実行モデル) と同方針）。
 - **オプトイン**: 既定は無効。有効化・資材導入はすべてユーザー操作（config / `doctor --fix`）が起点です。

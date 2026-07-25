@@ -20,7 +20,10 @@ const TOOL_NAMES: [&str; 1] = ["local_llm_ask"];
 
 /// Runs a prompt against the local model. Abstracted so the server's protocol
 /// handling can be tested with a fake backend that never shells out.
-pub trait LlmBackend {
+///
+/// `Send + Sync` because [`crate::presentation::mcp::serve`] runs tool calls on a
+/// bounded thread pool, so one server is shared by every dispatch worker.
+pub trait LlmBackend: Send + Sync {
     /// Ask the model `prompt` (optionally prefixed with a `system` instruction),
     /// returning its completion text (`Ok`) or an error message to surface to
     /// the agent (`Err`).
@@ -110,27 +113,27 @@ struct AskArgs {
 mod tests {
     use super::*;
     use crate::presentation::mcp::PROTOCOL_VERSION;
-    use std::cell::RefCell;
+    use std::sync::Mutex;
 
     /// A backend that records the calls it received and returns a scripted
     /// result, so the server's dispatch can be tested without a real model.
     struct FakeBackend {
         result: Result<String, String>,
-        calls: RefCell<Vec<(String, Option<String>)>>,
+        calls: Mutex<Vec<(String, Option<String>)>>,
     }
 
     impl FakeBackend {
         fn ok(reply: &str) -> Self {
             Self {
                 result: Ok(reply.to_string()),
-                calls: RefCell::new(Vec::new()),
+                calls: Mutex::new(Vec::new()),
             }
         }
 
         fn err(message: &str) -> Self {
             Self {
                 result: Err(message.to_string()),
-                calls: RefCell::new(Vec::new()),
+                calls: Mutex::new(Vec::new()),
             }
         }
     }
@@ -138,7 +141,8 @@ mod tests {
     impl LlmBackend for FakeBackend {
         fn ask(&self, prompt: &str, system: Option<&str>) -> Result<String, String> {
             self.calls
-                .borrow_mut()
+                .lock()
+                .unwrap()
                 .push((prompt.to_string(), system.map(str::to_string)));
             self.result.clone()
         }
