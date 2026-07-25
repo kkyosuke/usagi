@@ -51,8 +51,9 @@ use crate::domain::agent::Agent;
 use crate::domain::agent_phase::AgentPhase;
 use crate::domain::settings::LocalSettings;
 use crate::domain::workspace_state::{
-    BranchStatus, PendingSessionRemoval, PrLink, SessionAgent, SessionDecision, SessionOrigin,
-    SessionRecord, SessionRemovalPhase, SessionTodo, WorkspaceState, WorktreeProvenance,
+    BranchStatus, PendingSessionRemoval, PrLink, QuarantineOrigin, SessionAgent, SessionDecision,
+    SessionOrigin, SessionRecord, SessionRemovalPhase, SessionTodo, WorkspaceState,
+    WorktreeProvenance,
 };
 use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR};
 use crate::infrastructure::store_lock::StoreLock;
@@ -88,6 +89,22 @@ pub const MAX_SESSION_NAME_BYTES: usize = 250;
 /// [`remove`]/[`reconcile`] (dropping it), and the TUI's live-create validation.
 pub fn branch_name(name: &str) -> String {
     format!("{BRANCH_PREFIX}{name}")
+}
+
+/// The branch a recorded session owns: the one it durably recorded at creation,
+/// or — for a record written before usagi persisted it — the branch
+/// [`branch_name`] derives from its name, which is exactly what that record was
+/// created with.
+///
+/// Removal resolves the branch through here instead of calling [`branch_name`]
+/// directly, so a session whose worktree has since moved to another branch
+/// (`git switch -c`, `git branch -m`) still tears down the branch it actually
+/// owns rather than one guessed from its name.
+fn recorded_branch(session: &SessionRecord) -> String {
+    session
+        .branch
+        .clone()
+        .unwrap_or_else(|| branch_name(&session.name))
 }
 
 /// The outcome of creating a session.
@@ -373,6 +390,7 @@ fn create_with_setup_runner(
         &store,
         workspace_root,
         name,
+        &branch,
         &dest_root,
         &worktrees,
         SessionMetadata {
@@ -613,6 +631,7 @@ fn record(
     store: &WorkspaceStore,
     workspace_root: &Path,
     name: &str,
+    branch: &str,
     root: &Path,
     worktrees: &[PathBuf],
     metadata: SessionMetadata,
@@ -645,6 +664,9 @@ fn record(
 
     let now = Utc::now();
     state.sessions.push(SessionRecord {
+        // Persist the branch the worktrees were actually cut on, so removal
+        // matches this session's own record instead of re-deriving a name.
+        branch: Some(branch.to_string()),
         todos: Vec::new(),
         decisions: Vec::new(),
         name: name.to_string(),
@@ -1389,11 +1411,24 @@ pub struct RemovalOutcome {
     /// Worktrees with uncommitted changes that blocked a non-forced removal.
     /// Empty when the session was removed.
     pub dirty: Vec<PathBuf>,
+    /// Branches left behind because the session had moved off the branch it
+    /// recorded (`git switch -c`, `git branch -m`) and usagi deletes only the
+    /// branch it recorded creating. Empty for the ordinary removal; when it is
+    /// not, the caller should say so — those branches still hold whatever the
+    /// session committed to them.
+    pub retained_branches: Vec<String>,
 }
 
 /// Remove session `name` under `workspace_root`: delete every repository's
-/// worktree and session branch, drop any copied files, clear each worktree's
-/// agent chat history and running-state, and forget it in `state.json`.
+/// worktree and the branch the session recorded creating, drop any copied files,
+/// clear each worktree's agent chat history and running-state, and forget it in
+/// `state.json`.
+///
+/// A worktree that has moved off that branch since creation is still torn down —
+/// its ownership is established by the recorded provenance, not by the branch it
+/// happens to have checked out — but the branch it moved *to* is kept and
+/// reported in [`RemovalOutcome::retained_branches`], because usagi has no record
+/// of creating it.
 ///
 /// `agent` is the session's configured agent CLI: its persisted conversation for
 /// each worktree (e.g. Claude's transcript directory) is discarded so the chat
@@ -1446,12 +1481,14 @@ pub fn remove(
         BeginOutcome::Blocked(dirty) => Ok(RemovalOutcome {
             removed: false,
             dirty,
+            retained_branches: Vec::new(),
         }),
         BeginOutcome::Ready(plan) => {
-            run_removal(workspace_root, &plan, agent)?;
+            let retained_branches = run_removal(workspace_root, &plan, agent)?;
             Ok(RemovalOutcome {
                 removed: true,
                 dirty: Vec::new(),
+                retained_branches,
             })
         }
     }
@@ -1527,7 +1564,7 @@ fn resume_removal(workspace_root: &Path, name: &str, force: bool, agent: &dyn Ag
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        BeginOutcome::Ready(plan) => run_removal(workspace_root, &plan, agent),
+        BeginOutcome::Ready(plan) => run_removal(workspace_root, &plan, agent).map(|_| ()),
     }
 }
 
@@ -1572,7 +1609,8 @@ struct RemovalPlan {
     name: String,
     /// The session tree Git teardown owns.
     root: PathBuf,
-    /// The session's branch in every source repository.
+    /// The branch this session recorded owning, in every source repository. The
+    /// only branch teardown may delete; see [`recorded_branch`].
     branch: String,
     /// Ownership evidence the teardown must prove before issuing any effect.
     provenance: Vec<WorktreeProvenance>,
@@ -1611,14 +1649,27 @@ fn removal_target(
         .find(|s| s.name == name)
         .cloned()
         .ok_or_else(|| anyhow!("no such session: \"{name}\""))?;
-    let pending_phase = state
+    let pending = state
         .pending_removals
         .iter()
-        .find(|pending| pending.name == name)
-        .map(|pending| pending.phase);
+        .find(|pending| pending.name == name);
+    let pending_phase = pending.map(|pending| pending.phase);
     if pending_phase == Some(SessionRemovalPhase::Orphaned) {
+        // Both quarantine origins land on the same phase from opposite
+        // evidence, so say which one this is: it decides where an operator has
+        // to look.
+        let origin = match pending.and_then(|pending| pending.quarantine) {
+            Some(QuarantineOrigin::Reconcile) => {
+                " (quarantined by reconcile: no session record backs its directory)"
+            }
+            Some(QuarantineOrigin::Teardown) => {
+                " (quarantined by teardown: its recorded ownership evidence is complete \
+                  but the worktrees on disk contradicted it)"
+            }
+            None => "",
+        };
         bail!(
-            "session \"{name}\" is quarantined as an orphaned pending removal; \
+            "session \"{name}\" is quarantined as an orphaned pending removal{origin}; \
              its ownership is unknown, so usagi will not force-delete it automatically; \
              inspect state.json and `git worktree list`, then clean up the confirmed paths manually"
         );
@@ -1690,6 +1741,11 @@ fn begin_removal(workspace_root: &Path, name: &str, force: bool) -> Result<Begin
     {
         None => {
             state.pending_removals.push(PendingSessionRemoval {
+                // Copy the session's own branch into the tombstone: the record
+                // is dropped when the removal finishes, so a resumed teardown
+                // reads the branch from here.
+                branch: Some(recorded_branch(&session)),
+                quarantine: None,
                 name: name.to_string(),
                 root: session.root.clone(),
                 worktrees: session
@@ -1720,7 +1776,14 @@ fn begin_removal(workspace_root: &Path, name: &str, force: bool) -> Result<Begin
     Ok(BeginOutcome::Ready(RemovalPlan {
         name: name.to_string(),
         root: session.root.clone(),
-        branch: branch_name(name),
+        // The tombstone is authoritative once written (it survives the record),
+        // then the session's own record, then — for state files written before
+        // either carried a branch — the name-derived branch those removals
+        // always used.
+        branch: pending
+            .branch
+            .clone()
+            .unwrap_or_else(|| recorded_branch(&session)),
         provenance: pending.provenance.clone(),
         worktrees: pending.worktrees.clone(),
         force: pending.force,
@@ -1730,10 +1793,15 @@ fn begin_removal(workspace_root: &Path, name: &str, force: bool) -> Result<Begin
 
 /// Drive a prepared removal to completion: the heavy stages run with the store
 /// lock released, each durable boundary takes it back for one short write.
-fn run_removal(workspace_root: &Path, plan: &RemovalPlan, agent: &dyn Agent) -> Result<()> {
+fn run_removal(
+    workspace_root: &Path,
+    plan: &RemovalPlan,
+    agent: &dyn Agent,
+) -> Result<Vec<String>> {
     let name = plan.name.as_str();
+    let mut retained_branches = Vec::new();
     if plan.phase == SessionRemovalPhase::GitTeardown {
-        execute_teardown(workspace_root, plan)?;
+        retained_branches = execute_teardown(workspace_root, plan)?.retained_branches;
         commit_teardown(workspace_root, name)?;
     }
     execute_context_cleanup(plan, agent)?;
@@ -1746,12 +1814,15 @@ fn run_removal(workspace_root: &Path, plan: &RemovalPlan, agent: &dyn Agent) -> 
         )
         .with_detail(name),
     );
-    Ok(())
+    Ok(retained_branches)
 }
 
 /// Remove the managed worktrees, the session tree and the session branch. This
 /// is the minutes-long stage — it runs with **no** store lock held.
-fn execute_teardown(workspace_root: &Path, plan: &RemovalPlan) -> Result<()> {
+fn execute_teardown(
+    workspace_root: &Path,
+    plan: &RemovalPlan,
+) -> Result<reconcile::DiscardOutcome> {
     let name = plan.name.as_str();
     let repo_worktrees = reconcile::list_repo_worktrees(workspace_root).map_err(|error| {
         anyhow!(
@@ -1766,10 +1837,18 @@ fn execute_teardown(workspace_root: &Path, plan: &RemovalPlan) -> Result<()> {
         &repo_worktrees,
         plan.force,
     );
-    if let Err(error) = discard {
-        if error.downcast_ref::<reconcile::OwnershipError>().is_some() {
+    match discard {
+        Ok(outcome) => Ok(outcome),
+        // Quarantine only what a retry cannot resolve: recorded evidence that
+        // genuinely conflicts with the live repositories. A probe that merely
+        // could not be *read* (and any other infrastructure failure) leaves the
+        // removal retryable at `git_teardown` — losing a session's name to a
+        // transient permission error would need the same manual recovery as a
+        // real ownership conflict, for no safety gain.
+        Err(error) if error.downcast_ref::<reconcile::OwnershipError>().is_some() => {
             update_pending(workspace_root, name, |pending| {
-                pending.phase = SessionRemovalPhase::Orphaned
+                pending.phase = SessionRemovalPhase::Orphaned;
+                pending.quarantine = Some(QuarantineOrigin::Teardown);
             })?;
             bail!(
                 "session \"{name}\" ownership is ambiguous and has been quarantined; \
@@ -1777,12 +1856,17 @@ fn execute_teardown(workspace_root: &Path, plan: &RemovalPlan) -> Result<()> {
                  `git worktree list`, then clean up confirmed paths manually: {error}"
             );
         }
-        return Err(anyhow!(
+        Err(error) if error.downcast_ref::<reconcile::ProbeError>().is_some() => Err(anyhow!(
+            "session \"{name}\" removal is pending at git_teardown; context is \
+             preserved; ownership could not be verified because a filesystem probe \
+             failed, so nothing was quarantined; repair access and retry session \
+             remove: {error}"
+        )),
+        Err(error) => Err(anyhow!(
             "session \"{name}\" removal is pending at git_teardown; context is \
              preserved; repair locked/dirty worktrees and retry session remove: {error}"
-        ));
+        )),
     }
-    Ok(())
 }
 
 /// Commit the `git_teardown` → `context_cleanup` boundary once every managed Git
@@ -2008,6 +2092,7 @@ mod tests {
 
     fn inventory_session(root: PathBuf, agent: SessionAgent) -> SessionRecord {
         SessionRecord {
+            branch: None,
             name: "work".into(),
             display_name: None,
             note: None,
@@ -3452,6 +3537,17 @@ mod tests {
         })
     }
 
+    /// Which pass quarantined `name`'s pending removal, if any.
+    fn quarantine_of(root: &Path, name: &str) -> Option<QuarantineOrigin> {
+        WorkspaceStore::new(root).load().unwrap().and_then(|state| {
+            state
+                .pending_removals
+                .into_iter()
+                .find(|pending| pending.name == name)
+                .and_then(|pending| pending.quarantine)
+        })
+    }
+
     /// A throwaway agent for the `remove` tests. Gemini keeps no conversation
     /// store, so its `forget_session` is a no-op — removal touches no real files
     /// outside the workspace.
@@ -3757,6 +3853,8 @@ mod tests {
         let mut state = store.load().unwrap().unwrap();
         let provenance = state.sessions[0].worktree_provenance.clone();
         state.pending_removals.push(PendingSessionRemoval {
+            branch: None,
+            quarantine: None,
             name: "crashed".into(),
             root: created.root.clone(),
             worktrees: created
@@ -3910,6 +4008,7 @@ mod tests {
         let ghost_root = root.path().join(".usagi/sessions/ghost");
         let mut state = store.load().unwrap().unwrap_or_default();
         state.sessions.push(SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: "ghost".to_string(),
@@ -4013,6 +4112,19 @@ mod tests {
             pending_of(root.path(), "stray"),
             Some(SessionRemovalPhase::Orphaned)
         );
+        // Recorded as reconcile's quarantine: unlike teardown's, it carries no
+        // ownership evidence at all, because there was no record to copy any from.
+        assert_eq!(
+            quarantine_of(root.path(), "stray"),
+            Some(QuarantineOrigin::Reconcile)
+        );
+        assert!(WorkspaceStore::new(root.path())
+            .load()
+            .unwrap()
+            .unwrap()
+            .pending_removals
+            .iter()
+            .all(|pending| pending.provenance.is_empty() && pending.branch.is_none()));
         // ...while the tracked session and its branch survive untouched.
         assert!(kept.root.exists());
         assert_eq!(head_branch(&kept.root), "usagi/keep");
@@ -4161,7 +4273,11 @@ mod tests {
     }
 
     #[test]
-    fn discard_session_rejects_a_recorded_path_on_an_unexpected_branch() {
+    fn discard_session_accepts_a_recorded_path_on_an_unexpected_branch() {
+        // The branch a worktree currently has checked out is a *label*, not
+        // evidence of who owns it: the recorded provenance already proves that.
+        // A worktree sitting on an unexpected branch is therefore torn down —
+        // and its unrecorded branch reported, not deleted.
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
         let session_root = root.path().join(".usagi/sessions/odd");
@@ -4178,12 +4294,245 @@ mod tests {
             repo: fs::canonicalize(root.path()).unwrap(),
             worktree: fs::canonicalize(&session_root).unwrap(),
         }];
-        let error =
+        let outcome =
             reconcile::discard_session(&session_root, "odd", &provenance, &repo_worktrees, true)
-                .unwrap_err();
+                .unwrap();
+
+        assert_eq!(outcome.retained_branches, vec!["other".to_string()]);
+        assert!(!session_root.exists());
+        assert!(branch_exists(root.path(), "other"));
+    }
+
+    #[test]
+    fn discard_session_still_rejects_a_branch_match_without_recorded_identity() {
+        // The mirror image of the test above, and the one that must stay
+        // fail-closed: an *unrecorded* worktree that merely carries the session's
+        // branch is somebody else's, and destroying it is exactly the mistake the
+        // ownership rules exist to prevent.
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "owned").unwrap();
+        let external_parent = tempfile::tempdir().unwrap();
+        let external = external_parent.path().join("same-branch");
+        assert!(git_cmd(root.path())
+            .args(["worktree", "add", "--force", "--force"])
+            .arg(&external)
+            .arg("usagi/owned")
+            .status()
+            .unwrap()
+            .success());
+
+        let error = remove(root.path(), "owned", true, noop_agent().as_ref()).unwrap_err();
 
         assert!(error.to_string().contains("ownership proof"));
-        assert!(session_root.exists());
+        // Nothing destructive ran: both worktrees and the branch survive.
+        assert!(created.root.exists());
+        assert!(external.exists());
+        assert!(branch_exists(root.path(), "usagi/owned"));
+        assert_eq!(
+            pending_of(root.path(), "owned"),
+            Some(SessionRemovalPhase::Orphaned)
+        );
+        // ...and the quarantine records that teardown — not reconcile — wrote it,
+        // so recovery knows the ownership evidence is complete.
+        assert_eq!(
+            quarantine_of(root.path(), "owned"),
+            Some(QuarantineOrigin::Teardown)
+        );
+        // A retry names the origin so an operator knows where to look.
+        let retry = remove(root.path(), "owned", true, noop_agent().as_ref()).unwrap_err();
+        assert!(retry
+            .to_string()
+            .contains("quarantined as an orphaned pending removal (quarantined by teardown"));
+    }
+
+    #[test]
+    fn remove_completes_for_a_session_that_switched_to_another_branch() {
+        // A completed removal clears per-worktree files below the process-wide
+        // data directory. Other tests temporarily redirect that directory, so hold
+        // the shared environment guard while this runs.
+        let _guard = crate::test_support::process_env_guard();
+        // The regression this issue is about: an agent working in the session
+        // cuts a new branch, which used to quarantine the live session forever.
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "issue-525").unwrap();
+        assert!(git_cmd(&created.root)
+            .args(["switch", "-q", "-c", "usagi/issue-525-tui"])
+            .status()
+            .unwrap()
+            .success());
+
+        let outcome = remove(root.path(), "issue-525", false, noop_agent().as_ref()).unwrap();
+
+        assert!(outcome.removed);
+        assert!(!created.root.exists());
+        assert!(sessions_of(root.path()).is_empty());
+        // Not quarantined, and no tombstone left owning the name.
+        assert_eq!(pending_of(root.path(), "issue-525"), None);
+        // The recorded branch is dropped; the one the session moved to is kept
+        // and reported, because usagi never recorded creating it.
+        assert!(!branch_exists(root.path(), "usagi/issue-525"));
+        assert!(branch_exists(root.path(), "usagi/issue-525-tui"));
+        assert_eq!(
+            outcome.retained_branches,
+            vec!["usagi/issue-525-tui".to_string()]
+        );
+        // The name is free again.
+        create(root.path(), "issue-525").unwrap();
+    }
+
+    #[test]
+    fn remove_keeps_the_new_name_when_the_recorded_branch_was_renamed_away() {
+        // A completed removal clears per-worktree files below the process-wide
+        // data directory. Other tests temporarily redirect that directory, so hold
+        // the shared environment guard while this runs.
+        let _guard = crate::test_support::process_env_guard();
+        // `git branch -m` leaves *no* branch under the recorded name, so the
+        // teardown has nothing to delete — and must not fall back to deleting the
+        // rename target, which it has no record of creating.
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "issue-525").unwrap();
+        assert!(git_cmd(&created.root)
+            .args(["branch", "-m", "usagi/issue-525-tui"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(!branch_exists(root.path(), "usagi/issue-525"));
+
+        let outcome = remove(root.path(), "issue-525", false, noop_agent().as_ref()).unwrap();
+
+        assert!(outcome.removed);
+        assert!(!created.root.exists());
+        assert_eq!(pending_of(root.path(), "issue-525"), None);
+        assert!(branch_exists(root.path(), "usagi/issue-525-tui"));
+        assert_eq!(
+            outcome.retained_branches,
+            vec!["usagi/issue-525-tui".to_string()]
+        );
+    }
+
+    #[test]
+    fn remove_falls_back_to_the_name_derived_branch_for_a_record_without_one() {
+        // A completed removal clears per-worktree files below the process-wide
+        // data directory. Other tests temporarily redirect that directory, so hold
+        // the shared environment guard while this runs.
+        let _guard = crate::test_support::process_env_guard();
+        // A `state.json` written before sessions recorded their branch: the key is
+        // absent, and the removal must behave exactly as it always did.
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "legacy").unwrap();
+        let state_path = WorkspaceStore::new(root.path()).state_path();
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        assert!(raw["sessions"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("branch")
+            .is_some());
+        fs::write(&state_path, serde_json::to_string(&raw).unwrap()).unwrap();
+        assert_eq!(
+            WorkspaceStore::new(root.path())
+                .load()
+                .unwrap()
+                .unwrap()
+                .sessions[0]
+                .branch,
+            None
+        );
+
+        let outcome = remove(root.path(), "legacy", false, noop_agent().as_ref()).unwrap();
+
+        assert!(outcome.removed);
+        assert!(outcome.retained_branches.is_empty());
+        assert!(!created.root.exists());
+        assert!(!branch_exists(root.path(), "usagi/legacy"));
+        assert!(sessions_of(root.path()).is_empty());
+    }
+
+    #[test]
+    fn a_resumed_teardown_uses_the_branch_the_tombstone_recorded() {
+        // A completed removal clears per-worktree files below the process-wide
+        // data directory. Other tests temporarily redirect that directory, so hold
+        // the shared environment guard while this runs.
+        let _guard = crate::test_support::process_env_guard();
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "wip").unwrap();
+        assert!(git_cmd(&created.root)
+            .args(["switch", "-q", "-c", "usagi/wip-2"])
+            .status()
+            .unwrap()
+            .success());
+        interrupt_removal(root.path(), "wip", SessionRemovalPhase::GitTeardown, false);
+
+        let resumed = resume_pending_removals(root.path(), noop_agent().as_ref());
+
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0].error, None);
+        assert!(!created.root.exists());
+        assert_eq!(pending_of(root.path(), "wip"), None);
+        assert!(!branch_exists(root.path(), "usagi/wip"));
+        assert!(branch_exists(root.path(), "usagi/wip-2"));
+    }
+
+    #[test]
+    fn a_resumed_teardown_falls_back_to_the_record_for_a_tombstone_without_a_branch() {
+        // A completed removal clears per-worktree files below the process-wide
+        // data directory. Other tests temporarily redirect that directory, so hold
+        // the shared environment guard while this runs.
+        let _guard = crate::test_support::process_env_guard();
+        // A tombstone written before it carried a branch resolves through the
+        // session record instead, so an interrupted legacy removal still finishes.
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "half").unwrap();
+        interrupt_removal(root.path(), "half", SessionRemovalPhase::GitTeardown, false);
+        update_pending(root.path(), "half", |pending| pending.branch = None).unwrap();
+
+        let resumed = resume_pending_removals(root.path(), noop_agent().as_ref());
+
+        assert_eq!(resumed[0].error, None);
+        assert!(!created.root.exists());
+        assert!(!branch_exists(root.path(), "usagi/half"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_stays_retryable_when_an_ownership_probe_cannot_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // A completed removal clears per-worktree files below the process-wide
+        // data directory. Other tests temporarily redirect that directory, so hold
+        // the shared environment guard while this runs.
+        let _guard = crate::test_support::process_env_guard();
+        // An unreadable session tree is not an ownership *conflict* — the evidence
+        // simply cannot be read right now. Quarantining on it would cost the
+        // session's name to a transient permission error, so the removal stays at
+        // `git_teardown` and a retry (after the fault is repaired) completes it.
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "locked").unwrap();
+        let sessions_dir = created.root.parent().unwrap().to_path_buf();
+        let original = fs::metadata(&sessions_dir).unwrap().permissions().mode();
+        fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let error = remove(root.path(), "locked", true, noop_agent().as_ref()).unwrap_err();
+
+        fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(original)).unwrap();
+        assert!(error.to_string().contains("a filesystem probe failed"));
+        assert_eq!(
+            pending_of(root.path(), "locked"),
+            Some(SessionRemovalPhase::GitTeardown)
+        );
+        assert_eq!(quarantine_of(root.path(), "locked"), None);
+
+        // Repaired, the same removal goes through.
+        let outcome = remove(root.path(), "locked", true, noop_agent().as_ref()).unwrap();
+        assert!(outcome.removed);
+        assert!(!created.root.exists());
     }
 
     #[test]
@@ -4366,6 +4715,9 @@ mod tests {
             .expect("the interrupted session must still be recorded")
             .clone();
         state.pending_removals.push(PendingSessionRemoval {
+            // Copied from the record, exactly as `begin_removal` writes it.
+            branch: session.branch.clone(),
+            quarantine: None,
             name: name.to_string(),
             root: session.root.clone(),
             worktrees: session

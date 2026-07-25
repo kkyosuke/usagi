@@ -579,6 +579,7 @@ mod tests {
         ) -> Result<crate::usecase::session::RemovalOutcome, String> {
             Ok(crate::usecase::session::RemovalOutcome {
                 removed: true,
+                retained_branches: Vec::new(),
                 dirty: Vec::new(),
             })
         }
@@ -837,7 +838,10 @@ mod tests {
         assert_eq!(result["isError"], false);
         let text = result["content"][0]["text"].as_str().unwrap();
         let body: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(body, json!({"name":"gone","removed":true,"dirty":[]}));
+        assert_eq!(
+            body,
+            json!({"name":"gone","removed":true,"dirty":[],"retained_branches":[]})
+        );
     }
 
     #[test]

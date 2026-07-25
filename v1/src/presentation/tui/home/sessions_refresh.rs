@@ -206,6 +206,7 @@ mod tests {
 
     fn sessions(name: &str) -> Vec<SessionRecord> {
         vec![SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: name.to_string(),

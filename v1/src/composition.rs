@@ -55,6 +55,7 @@ mod tests {
         WorkspaceStore::new(workspace.path())
             .save(&WorkspaceState {
                 sessions: vec![SessionRecord {
+                    branch: None,
                     name: "work".into(),
                     display_name: None,
                     note: None,

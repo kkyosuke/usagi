@@ -502,6 +502,7 @@ fn workspace_group_from_sessions_collapses_rows_with_labels_and_notes() {
     use crate::domain::workspace_state::{SessionOrigin, SessionRecord};
     let session = |name: &str, label: Option<&str>, note: Option<&str>, origin: SessionOrigin| {
         SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             label_id: None,
@@ -543,6 +544,7 @@ fn workspace_group_from_sessions_collapses_rows_with_labels_and_notes() {
 fn workspace_group_nests_sessions_under_their_started_from_parent() {
     use crate::domain::workspace_state::SessionRecord;
     let session = |name: &str, parent: Option<&str>| SessionRecord {
+        branch: None,
         todos: Vec::new(),
         decisions: Vec::new(),
         label_id: None,

@@ -3030,6 +3030,20 @@ fn run_create(root: &Path, name: &str, interaction_epoch: u64) -> (bool, tasks::
     }
 }
 
+/// The log line for a completed removal. A session that moved off the branch it
+/// was created on leaves that branch behind — usagi deletes only the branch it
+/// recorded creating — so the line names what survived instead of letting the
+/// user assume the whole session went away.
+fn removed_session_line(name: &str, retained_branches: &[String]) -> String {
+    if retained_branches.is_empty() {
+        return format!("Removed session \"{name}\" 🧹");
+    }
+    format!(
+        "Removed session \"{name}\" 🧹 (kept branch(es) it was not recorded as owning: {})",
+        retained_branches.join(", ")
+    )
+}
+
 /// Remove a session on a worker thread: run the git / filesystem work and build
 /// the [`Completion`](tasks::Completion) the event loop applies. A successful
 /// removal carries the refreshed sessions and the session root whose pooled
@@ -3046,7 +3060,7 @@ fn run_remove(
         Ok(outcome) if outcome.removed => (
             true,
             tasks::Completion {
-                line: LogLine::output(format!("Removed session \"{name}\" 🧹")),
+                line: LogLine::output(removed_session_line(name, &outcome.retained_branches)),
                 sessions: reload_sessions(root),
                 target_root: Some(root.to_path_buf()),
                 evict: Some(
@@ -3136,9 +3150,9 @@ mod tests {
     use super::terminal::pool::MonitorSnapshot;
     use super::{
         autostart_slots_remaining, classify_launch_queue, persisted_session_agent_for,
-        prepare_launch, queued_prompt_action, requeue_launch_failure, state_fingerprint,
-        AutostartPrompts, LaunchQueuePoll, LaunchRequest, LaunchSource, QueuedPromptAction,
-        SharedEnv,
+        prepare_launch, queued_prompt_action, removed_session_line, requeue_launch_failure,
+        state_fingerprint, AutostartPrompts, LaunchQueuePoll, LaunchRequest, LaunchSource,
+        QueuedPromptAction, SharedEnv,
     };
     use std::collections::{BTreeMap, HashSet};
     use std::path::{Path, PathBuf};
@@ -3150,6 +3164,21 @@ mod tests {
         std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, dir.path());
         body(dir.path());
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn a_removal_names_the_branches_it_deliberately_kept() {
+        // The ordinary removal reads exactly as before...
+        assert_eq!(
+            removed_session_line("wip", &[]),
+            "Removed session \"wip\" 🧹"
+        );
+        // ...while a session that moved off its recorded branch says what
+        // survived, so the branch is not silently assumed gone with the session.
+        assert_eq!(
+            removed_session_line("wip", &["usagi/wip-tui".to_string()]),
+            "Removed session \"wip\" 🧹 (kept branch(es) it was not recorded as owning: usagi/wip-tui)"
+        );
     }
 
     #[test]
@@ -3350,6 +3379,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let root = workspace.path().join(".usagi/sessions/work");
         let record = SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: "work".to_string(),

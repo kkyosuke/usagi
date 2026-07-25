@@ -222,6 +222,7 @@ mod tests {
 
     fn session_record(name: &str, worktrees: usize) -> SessionRecord {
         SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: name.to_string(),

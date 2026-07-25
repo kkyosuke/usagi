@@ -559,6 +559,7 @@ fn state_with_sessions(names: &[&str]) -> HomeState {
     let sessions = names
         .iter()
         .map(|n| SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: n.to_string(),

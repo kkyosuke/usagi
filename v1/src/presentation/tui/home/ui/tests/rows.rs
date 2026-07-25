@@ -1408,6 +1408,7 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
 #[test]
 fn left_pane_draws_child_sessions_nested_under_the_parent_that_created_them() {
     let record = |name: &str, parent: Option<&str>| SessionRecord {
+        branch: None,
         todos: Vec::new(),
         decisions: Vec::new(),
         name: name.to_string(),
@@ -1467,6 +1468,7 @@ fn left_pane_draws_child_sessions_nested_under_the_parent_that_created_them() {
 #[test]
 fn left_pane_keeps_child_session_indented_while_renaming_it() {
     let record = |name: &str, parent: Option<&str>| SessionRecord {
+        branch: None,
         todos: Vec::new(),
         decisions: Vec::new(),
         name: name.to_string(),
@@ -1521,6 +1523,7 @@ fn left_pane_keeps_child_session_indented_while_renaming_it() {
 #[test]
 fn left_pane_keeps_child_session_indented_while_removing_it() {
     let record = |name: &str, parent: Option<&str>| SessionRecord {
+        branch: None,
         todos: Vec::new(),
         decisions: Vec::new(),
         name: name.to_string(),
@@ -2034,6 +2037,7 @@ fn row_select_click_works_in_unite_mode() {
         root_path: PathBuf::from("/wsB"),
         root_note: None,
         sessions: vec![SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: "b1".to_string(),
@@ -2066,6 +2070,7 @@ fn row_select_click_works_in_unite_mode() {
 fn unite_with_prs() -> HomeState {
     let mut state = HomeState::new("usagi", Vec::new(), None);
     state.restore_sessions(vec![SessionRecord {
+        branch: None,
         todos: Vec::new(),
         decisions: Vec::new(),
         name: "main".to_string(),
@@ -2086,6 +2091,7 @@ fn unite_with_prs() -> HomeState {
         root_path: PathBuf::from("/wsB"),
         root_note: None,
         sessions: vec![SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: "b1".to_string(),
@@ -2132,6 +2138,7 @@ fn sidebar_pr_badge_at_skips_an_empty_earlier_unite_group() {
         root_path: PathBuf::from("/wsB"),
         root_note: None,
         sessions: vec![SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: "b1".to_string(),
