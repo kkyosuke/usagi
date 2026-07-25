@@ -29,6 +29,18 @@ pub const LOCAL_DIR: &str = "local";
 /// session: `<repo>/.usagi/sessions/<name>`.
 pub const SESSIONS_DIR: &str = "sessions";
 
+/// The directory under [`STATE_DIR`] holding the workspace-scoped daemon fence.
+///
+/// It is a sibling of the runtime-mode children rather than a child of one,
+/// because the workspace it guards is shared by every mode. Unlike [`STATE_DIR`]
+/// itself — user-visible project metadata — this directory is daemon-private
+/// (`0700`), which is what lets the fence node reuse the private lock-node
+/// contract. See [`workspace_fence_path`].
+pub const WORKSPACE_FENCE_DIR: &str = "daemon";
+
+/// The workspace-scoped single-daemon fence node's file name.
+pub const WORKSPACE_FENCE_FILE: &str = "daemon.lock";
+
 /// Environment variable that overrides the default data directory.
 pub const DATA_DIR_ENV: &str = "USAGI_HOME";
 /// Environment variable selecting the isolated runtime state mode.
@@ -111,6 +123,45 @@ pub fn project_data_dir(project_root: impl AsRef<Path>) -> PathBuf {
     channel_data_dir(project_root.as_ref().join(STATE_DIR))
 }
 
+/// Resolve the workspace-scoped daemon fence node for `workspace_root`:
+/// `<workspace_root>/.usagi/daemon/daemon.lock`.
+///
+/// This deliberately does **not** go through [`channel_data_dir`]: the fence
+/// guards the workspace's physical resources (its git worktrees, branches, and
+/// session names), which every runtime mode shares. Placing it under a
+/// mode-selected child would let `production` and `local` each take their own
+/// lock over the same worktrees.
+#[must_use]
+pub fn workspace_fence_path(workspace_root: impl AsRef<Path>) -> PathBuf {
+    workspace_root
+        .as_ref()
+        .join(STATE_DIR)
+        .join(WORKSPACE_FENCE_DIR)
+        .join(WORKSPACE_FENCE_FILE)
+}
+
+/// Resolve `candidate` to the workspace identity the daemon fences on.
+///
+/// Canonicalization only settles *spelling*: it collapses `.`, `..`, a trailing
+/// separator, and symlinked ancestors (on macOS, the `/tmp` → `/private/tmp`
+/// firmlink) onto one path, so two daemons cannot address the same workspace by
+/// two names. Exclusion itself comes from the fence node's inode, which no
+/// spelling can duplicate.
+///
+/// # Errors
+///
+/// Returns an error when `candidate` cannot be resolved (it does not exist, or a
+/// component is not traversable).
+pub fn canonical_workspace_root(candidate: impl AsRef<Path>) -> Result<PathBuf> {
+    let candidate = candidate.as_ref();
+    std::fs::canonicalize(candidate).with_context(|| {
+        format!(
+            "could not resolve the workspace root {}",
+            candidate.display()
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +185,54 @@ mod tests {
             std::env::remove_var(DATA_DIR_ENV);
         }
         assert!(data_dir().unwrap().to_string_lossy().contains(".usagi"));
+    }
+
+    #[test]
+    fn workspace_fence_path_ignores_the_runtime_mode() {
+        let _guard = crate::test_support::process_env_guard();
+        let expected = PathBuf::from("/project/.usagi/daemon/daemon.lock");
+        for mode in ["production", "development", "local", "bogus"] {
+            unsafe { std::env::set_var(RUNTIME_MODE_ENV, mode) };
+            // Every mode must land on the same node: the workspace's worktrees
+            // are shared, so a mode-scoped fence would not exclude anything.
+            assert_eq!(workspace_fence_path("/project"), expected);
+        }
+        unsafe { std::env::remove_var(RUNTIME_MODE_ENV) };
+        assert_eq!(workspace_fence_path("/project"), expected);
+        assert_ne!(
+            workspace_fence_path("/project"),
+            project_data_dir("/project")
+        );
+    }
+
+    #[test]
+    fn canonical_workspace_root_collapses_spellings_and_reports_missing_paths() {
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let nested = root.path().join("workspace");
+        std::fs::create_dir(&nested).unwrap();
+        let canonical = canonical_workspace_root(&nested).unwrap();
+
+        // A trailing separator, a `.` component, and a `..` round trip all name
+        // the same workspace.
+        assert_eq!(
+            canonical_workspace_root(nested.join(".")).unwrap(),
+            canonical
+        );
+        assert_eq!(
+            canonical_workspace_root(nested.join("..").join("workspace")).unwrap(),
+            canonical
+        );
+
+        // So does reaching it through a symlinked ancestor.
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&nested, &link).unwrap();
+        assert_eq!(canonical_workspace_root(&link).unwrap(), canonical);
+
+        let error = canonical_workspace_root(nested.join("absent")).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("could not resolve the workspace root"),
+            "{error:#}"
+        );
     }
 
     #[test]

@@ -494,6 +494,72 @@ fn a_daemon_whose_data_directory_is_deleted_exits_without_re_creating_it() {
     );
 }
 
+/// A daemon's authority is a workspace: its git worktrees, `usagi/<name>`
+/// branches, and session names. The instance lock only fences a *data directory*,
+/// which the environment selects — so re-spelling `USAGI_RUNTIME_MODE` or
+/// `$USAGI_HOME` reaches a free instance lock every time. The workspace fence is
+/// what makes the second start refuse instead of becoming a rival authority over
+/// the same worktrees.
+#[test]
+fn a_second_daemon_for_the_same_workspace_is_refused_across_modes_and_data_homes() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let owner_home = short_home();
+    let owner = owner_home.spawn_serve();
+    let daemon_dir = owner_home.path().join("daemon");
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            daemon_dir.join("daemon.json").is_file() && daemon_dir.join("current.json").is_file()
+        }),
+        "daemon did not publish its production endpoint"
+    );
+    let workspace =
+        usagi_core::infrastructure::paths::canonical_workspace_root(owner_home.workspace())
+            .unwrap();
+    let expected = format!(
+        "another daemon already owns this workspace ({}, pid {})",
+        workspace.display(),
+        owner.pid()
+    );
+
+    // Same workspace, different runtime mode: `<home>/local` has its own free
+    // instance lock, and the fence is the only thing that can refuse this.
+    let refused = owner_home.run(&[OsStr::new("daemon"), OsStr::new("serve")]);
+    assert!(refused.status.success(), "{}", stderr(&refused));
+    assert!(stdout(&refused).contains(&expected), "{}", stdout(&refused));
+
+    // Same workspace, different `$USAGI_HOME`: likewise a free instance lock in a
+    // wholly separate data directory, and likewise refused.
+    let other_home = short_home();
+    let refused = other_home
+        .command_at(
+            Channel::Local,
+            owner_home.workspace(),
+            &[OsStr::new("daemon"), OsStr::new("serve")],
+        )
+        .output()
+        .expect("usagi バイナリを起動できる");
+    assert!(refused.status.success(), "{}", stderr(&refused));
+    assert!(stdout(&refused).contains(&expected), "{}", stdout(&refused));
+
+    // Fencing is per workspace, not global: a daemon for a different workspace
+    // still starts, so parallel workspaces (and parallel tests) keep working.
+    let mut elsewhere = other_home.spawn_serve_in(Channel::Local);
+    let elsewhere_dir = other_home.data_dir().join("daemon");
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            elsewhere_dir.join("daemon.json").is_file()
+        }),
+        "a daemon for a different workspace was refused"
+    );
+    elsewhere.kill_and_reap();
+
+    // Every refusal left the owner and its endpoint untouched.
+    assert!(daemon_dir.join("daemon.json").is_file());
+    assert!(daemon_dir.join("current.json").is_file());
+}
+
 /// The daemon's workspace root is its startup directory, so a test that starts
 /// one without a fixture cwd binds it to the developer's checkout and blocks
 /// that worktree's removal. Every start goes through the fixture, and the root

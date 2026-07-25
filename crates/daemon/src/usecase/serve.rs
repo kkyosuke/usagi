@@ -3,6 +3,9 @@
 //! `serve` is the daemon process itself (a hidden subcommand; `usagi daemon`
 //! with no subcommand runs it too). It owns its record's lifecycle:
 //!
+//! 0. **workspace guard** — acquire the [`WorkspaceFence`]; if another daemon
+//!    already owns this workspace (under any `$USAGI_HOME` or runtime mode),
+//!    refuse rather than become a second authority over its worktrees;
 //! 1. **single-instance guard** — acquire the [`InstanceLock`]; if another
 //!    daemon holds it, refuse rather than start a second one;
 //! 2. **prepare** — arrange shutdown delivery before any worker is spawned;
@@ -17,11 +20,19 @@
 //!    unlink the endpoint, then conditionally clear this exact lifecycle record.
 //!    The lock is released by the OS when the process exits.
 //!
-//! The lock is the authoritative guard: because it waits briefly for a departing
-//! holder, a `restart` hands off cleanly, and because the OS drops it on death it
-//! also excludes a crashed daemon's leftovers. The record is only how clients
-//! discover the pid, so `serve` reads it (without probing) to name the holder
-//! when refused.
+//! The two locks are the authoritative guards: because they wait briefly for a
+//! departing holder, a `restart` hands off cleanly, and because the OS drops them
+//! on death they also exclude a crashed daemon's leftovers. The record is only
+//! how clients discover the pid, so `serve` reads it (without probing) to name
+//! the holder when refused.
+//!
+//! The two guards answer different questions and neither subsumes the other. The
+//! workspace fence asks "does another daemon already own these worktrees?" — it
+//! spans every data directory. The instance lock asks "does another daemon
+//! already own this data directory?" — it spans every workspace, since one data
+//! directory holds a single record, locator, endpoint, and durable state.
+//! Acquisition order is fixed (workspace, then instance) so two starts racing in
+//! opposite directions cannot deadlock.
 //!
 //! The store's file seam, the shutdown signal, and the lock are injected, so
 //! this stays pure and fully testable; the synthesis root binds the real
@@ -32,7 +43,8 @@ use std::io::{self, Write};
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::daemon::DaemonRecord;
 use usagi_core::infrastructure::daemon::{
-    DaemonReady, DaemonRecordStore, InstanceLock, ProcessIdentitySource, RecordFile, ShutdownSignal,
+    DaemonReady, DaemonRecordStore, InstanceLock, ProcessIdentitySource, RecordFile,
+    ShutdownSignal, WorkspaceFence, WorkspaceFenceOutcome,
 };
 
 /// Type-erased durable record port used by the production composition and
@@ -77,24 +89,42 @@ impl<F: RecordFile> DaemonRecordPort for DaemonRecordStore<F> {
 ///
 /// # Errors
 ///
-/// Returns the lock's acquire error, the store's load / save / clear error, the
-/// shutdown preparation / wait error, the endpoint publish / quiesce / retire
-/// error, or an `out` write error.
+/// Returns the workspace fence's or instance lock's acquire error, the store's
+/// load / save / clear error, the shutdown preparation / wait error, the endpoint
+/// publish / quiesce / retire error, or an `out` write error.
 // The daemon serve entry binds one seam per real-IO concern (record store,
-// endpoint readiness, shutdown, single-instance lock, process identity) plus its
-// own pid and app info; grouping them would only hide the composition wiring.
+// endpoint readiness, shutdown, workspace fence, single-instance lock, process
+// identity) plus its own pid and app info; grouping them would only hide the
+// composition wiring.
 #[allow(clippy::too_many_arguments)]
 pub fn serve(
     out: &mut dyn Write,
     store: &dyn DaemonRecordPort,
     ready: &dyn DaemonReady,
     shutdown: &dyn ShutdownSignal,
+    workspace: &dyn WorkspaceFence,
     lock: &dyn InstanceLock,
     identity: &dyn ProcessIdentitySource,
     pid: u32,
     info: &AppInfo,
 ) -> io::Result<()> {
     let describe = info.describe();
+
+    // The workspace fence comes first: a daemon that would become a second
+    // authority over these worktrees must not touch this data directory's
+    // record or endpoint on its way to being refused.
+    if let WorkspaceFenceOutcome::Held { workspace, owner } = workspace.acquire()? {
+        return match owner {
+            Some(owner) => writeln!(
+                out,
+                "{describe}: another daemon already owns this workspace ({workspace}, pid {owner})"
+            ),
+            None => writeln!(
+                out,
+                "{describe}: another daemon already owns this workspace ({workspace})"
+            ),
+        };
+    }
 
     if !lock.acquire()? {
         // Another daemon holds the lock. Name it from its record if we can; a
@@ -194,7 +224,8 @@ fn clear_after_retire(
 mod tests {
     use super::serve;
     use crate::test_support::{
-        FailingShutdown, FakeLock, FixedProbe, ImmediateShutdown, InMemoryRecordFile, NoopReady,
+        FailingShutdown, FakeLock, FakeWorkspaceFence, FixedProbe, ImmediateShutdown,
+        InMemoryRecordFile, NoopReady,
     };
     use std::cell::{Cell, RefCell};
     use std::io;
@@ -253,6 +284,7 @@ mod tests {
             store,
             &NoopReady,
             &ImmediateShutdown,
+            &FakeWorkspaceFence::Acquired,
             &FakeLock::Acquired,
             &FixedProbe(true),
             pid,
@@ -515,6 +547,7 @@ mod tests {
             &store,
             &ready,
             &shutdown,
+            &FakeWorkspaceFence::Acquired,
             &FakeLock::Acquired,
             &FixedProbe(true),
             2222,
@@ -543,6 +576,7 @@ mod tests {
                 &store,
                 &ready,
                 &ImmediateShutdown,
+                &FakeWorkspaceFence::Acquired,
                 &FakeLock::Acquired,
                 &FixedProbe(true),
                 2222,
@@ -559,6 +593,7 @@ mod tests {
             &store,
             &ready,
             &ImmediateShutdown,
+            &FakeWorkspaceFence::Acquired,
             &FakeLock::Acquired,
             &FixedProbe(true),
             2222,
@@ -587,6 +622,7 @@ mod tests {
             &store,
             &ready,
             &ImmediateShutdown,
+            &FakeWorkspaceFence::Acquired,
             &FakeLock::Acquired,
             &FixedProbe(true),
             2222,
@@ -617,6 +653,7 @@ mod tests {
                 &store,
                 &ready,
                 &ImmediateShutdown,
+                &FakeWorkspaceFence::Acquired,
                 &FakeLock::Acquired,
                 &FixedProbe(true),
                 2222,
@@ -643,6 +680,7 @@ mod tests {
             &store,
             &ready,
             &ImmediateShutdown,
+            &FakeWorkspaceFence::Acquired,
             &FakeLock::Acquired,
             &FixedProbe(true),
             2222,
@@ -664,6 +702,7 @@ mod tests {
                 &store,
                 &NoopReady,
                 &ConfigurableShutdown { fail_prepare: true },
+                &FakeWorkspaceFence::Acquired,
                 &FakeLock::Acquired,
                 &FixedProbe(true),
                 2222,
@@ -689,6 +728,7 @@ mod tests {
             &store,
             &ready,
             &ImmediateShutdown,
+            &FakeWorkspaceFence::Acquired,
             &FakeLock::Acquired,
             &FixedIdentity(Err("identity unavailable")),
             2222,
@@ -709,6 +749,7 @@ mod tests {
             &store,
             &NoopReady,
             &ImmediateShutdown,
+            &FakeWorkspaceFence::Acquired,
             &FakeLock::Acquired,
             &FixedIdentity(Ok("")),
             2222,
@@ -735,6 +776,7 @@ mod tests {
                 &store,
                 &quiesce_failure,
                 &ImmediateShutdown,
+                &FakeWorkspaceFence::Acquired,
                 &FakeLock::Acquired,
                 &FixedProbe(true),
                 2222,
@@ -760,6 +802,7 @@ mod tests {
                 &store,
                 &retire_failure,
                 &ImmediateShutdown,
+                &FakeWorkspaceFence::Acquired,
                 &FakeLock::Acquired,
                 &FixedProbe(true),
                 2222,
@@ -786,6 +829,7 @@ mod tests {
             &ConfigurableShutdown {
                 fail_prepare: false,
             },
+            &FakeWorkspaceFence::Acquired,
             &FakeLock::Acquired,
             &FixedProbe(true),
             2222,
@@ -804,6 +848,7 @@ mod tests {
             &refused,
             &refused_ready,
             &ImmediateShutdown,
+            &FakeWorkspaceFence::Acquired,
             &FakeLock::Held,
             &FixedProbe(true),
             2222,
@@ -826,6 +871,7 @@ mod tests {
             &store,
             &ready,
             &ImmediateShutdown,
+            &FakeWorkspaceFence::Acquired,
             &FakeLock::Acquired,
             &FixedProbe(true),
             2222,
@@ -852,6 +898,7 @@ mod tests {
                 &store,
                 &ready,
                 &ImmediateShutdown,
+                &FakeWorkspaceFence::Acquired,
                 &FakeLock::Acquired,
                 &FixedProbe(true),
                 2222,
@@ -881,6 +928,7 @@ mod tests {
                 &store,
                 &ready,
                 &ImmediateShutdown,
+                &FakeWorkspaceFence::Acquired,
                 &FakeLock::Acquired,
                 &FixedProbe(true),
                 2222,
@@ -915,6 +963,7 @@ mod tests {
             &store,
             &NoopReady,
             &ImmediateShutdown,
+            &FakeWorkspaceFence::Acquired,
             &FakeLock::Held,
             &FixedProbe(true),
             2222,
@@ -938,6 +987,7 @@ mod tests {
             &store,
             &NoopReady,
             &ImmediateShutdown,
+            &FakeWorkspaceFence::Acquired,
             &FakeLock::Held,
             &FixedProbe(true),
             2222,
@@ -950,6 +1000,72 @@ mod tests {
         );
     }
 
+    /// The refusal must land before this data directory's guard is touched, so
+    /// these cases pair the held fence with a lock that errors if acquired: an
+    /// `Ok` result is proof the instance lock was never reached.
+    fn serve_with_held_workspace(fence: &FakeWorkspaceFence) -> (String, bool) {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let existing = DaemonRecord::new(1111);
+        store.save(&existing).unwrap();
+        let mut buf = Vec::new();
+        serve(
+            &mut buf,
+            &store,
+            &NoopReady,
+            &ImmediateShutdown,
+            fence,
+            &FakeLock::Failing,
+            &FixedProbe(true),
+            2222,
+            &info(),
+        )
+        .unwrap();
+        // The other daemon lives in a different data directory, so this one's
+        // record must survive untouched.
+        let untouched = store.load().unwrap() == Some(existing);
+        (String::from_utf8(buf).unwrap(), untouched)
+    }
+
+    #[test]
+    fn refuses_and_names_the_owner_when_another_daemon_owns_the_workspace() {
+        let (line, record_untouched) = serve_with_held_workspace(&FakeWorkspaceFence::Held(7777));
+        assert_eq!(
+            line,
+            "usagi v0.1.0: another daemon already owns this workspace (/fixture/workspace, pid 7777)\n"
+        );
+        assert!(record_untouched);
+    }
+
+    #[test]
+    fn refuses_without_an_owner_pid_when_the_workspace_owner_is_unreadable() {
+        let (line, record_untouched) =
+            serve_with_held_workspace(&FakeWorkspaceFence::HeldAnonymously);
+        assert_eq!(
+            line,
+            "usagi v0.1.0: another daemon already owns this workspace (/fixture/workspace)\n"
+        );
+        assert!(record_untouched);
+    }
+
+    #[test]
+    fn propagates_workspace_fence_error_without_acquiring_the_instance_lock() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let error = serve(
+            &mut Vec::new(),
+            &store,
+            &NoopReady,
+            &ImmediateShutdown,
+            &FakeWorkspaceFence::Failing,
+            &FakeLock::Failing,
+            &FixedProbe(true),
+            2222,
+            &info(),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "workspace fence failed");
+        assert_eq!(store.load().unwrap(), None);
+    }
+
     #[test]
     fn propagates_lock_error() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
@@ -960,6 +1076,7 @@ mod tests {
                 &store,
                 &NoopReady,
                 &ImmediateShutdown,
+                &FakeWorkspaceFence::Acquired,
                 &FakeLock::Failing,
                 &FixedProbe(true),
                 2222,
@@ -979,6 +1096,7 @@ mod tests {
                 &store,
                 &NoopReady,
                 &FailingShutdown,
+                &FakeWorkspaceFence::Acquired,
                 &FakeLock::Acquired,
                 &FixedProbe(true),
                 2222,
@@ -999,6 +1117,7 @@ mod tests {
                 &store,
                 &NoopReady,
                 &ImmediateShutdown,
+                &FakeWorkspaceFence::Acquired,
                 &FakeLock::Held,
                 &FixedProbe(true),
                 2222,
@@ -1044,6 +1163,7 @@ mod tests {
                     &DaemonRecordStore::new(file),
                     &NoopReady,
                     &ImmediateShutdown,
+                    &FakeWorkspaceFence::Acquired,
                     &FakeLock::Acquired,
                     &FixedProbe(true),
                     2222,
@@ -1058,6 +1178,7 @@ mod tests {
                 &DaemonRecordStore::new(InMemoryRecordFile::default()),
                 &NoopReady,
                 &ImmediateShutdown,
+                &FakeWorkspaceFence::Acquired,
                 &FakeLock::Acquired,
                 &FixedProbe(true),
                 2222,

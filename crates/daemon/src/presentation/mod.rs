@@ -9,7 +9,7 @@ use std::io::Write;
 use usagi_core::domain::AppInfo;
 use usagi_core::infrastructure::daemon::{
     DaemonLauncher, DaemonReady, DaemonRecordStore, InstanceLock, LivenessProbe,
-    ProcessIdentitySource, RecordFile, ShutdownSignal, Sleeper, Terminator,
+    ProcessIdentitySource, RecordFile, ShutdownSignal, Sleeper, Terminator, WorkspaceFence,
 };
 
 use crate::usecase;
@@ -38,7 +38,7 @@ pub enum DaemonCommand {
 /// process-start identity 観測・fenced SIGTERM・signal 待受・detached spawn・sleep・単一インスタンスロック・
 /// 自プロセス pid）を束ねて構築し、テストは fake を差し込む。[`run`] にまとめて渡すことで、
 /// verb ごとに必要な seam が増えても entry point の引数を平らに保つ。
-pub struct DaemonEnv<'a, F, P, T, R, S, L, K, M> {
+pub struct DaemonEnv<'a, F, P, T, R, S, L, K, M, W> {
     /// `daemon.json` の read/write/incarnation-conditional clear。
     pub store: &'a DaemonRecordStore<F>,
     /// daemon owner の exact process identity 観測。
@@ -53,8 +53,11 @@ pub struct DaemonEnv<'a, F, P, T, R, S, L, K, M> {
     pub launcher: &'a L,
     /// `start` の登録確認と `stop` の owner cleanup 確認で待つ sleeper。
     pub sleeper: &'a K,
-    /// `serve` の単一インスタンスロック（多重起動を防ぐ権威）。
+    /// `serve` の単一インスタンスロック（同一 data directory の多重起動を防ぐ権威）。
     pub lock: &'a M,
+    /// `serve` の workspace fence（同一 workspace の多重所有を防ぐ権威）。mode や
+    /// `$USAGI_HOME` の表記差では回避できない。
+    pub workspace: &'a W,
     /// `serve` が register する自プロセスの pid。
     pub pid: u32,
 }
@@ -81,11 +84,12 @@ pub fn run<
     L: DaemonLauncher,
     K: Sleeper,
     M: InstanceLock,
+    W: WorkspaceFence,
 >(
     out: &mut dyn Write,
     command: DaemonCommand,
     info: &AppInfo,
-    env: &DaemonEnv<F, P, T, R, S, L, K, M>,
+    env: &DaemonEnv<F, P, T, R, S, L, K, M, W>,
 ) -> std::io::Result<()> {
     match command {
         DaemonCommand::Serve => usecase::serve::serve(
@@ -93,6 +97,7 @@ pub fn run<
             env.store,
             env.ready,
             env.shutdown,
+            env.workspace,
             env.lock,
             env.probe,
             env.pid,
@@ -137,8 +142,8 @@ pub fn run<
 mod tests {
     use super::{DaemonCommand, DaemonEnv, run};
     use crate::test_support::{
-        FakeLock, FixedProbe, ImmediateShutdown, InMemoryRecordFile, NoopReady, NoopSleeper,
-        RecordingTerminator, TestLauncher,
+        FakeLock, FakeWorkspaceFence, FixedProbe, ImmediateShutdown, InMemoryRecordFile, NoopReady,
+        NoopSleeper, RecordingTerminator, TestLauncher,
     };
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::daemon::DaemonRecord;
@@ -171,6 +176,7 @@ mod tests {
             launcher: &launcher,
             sleeper: &sleeper,
             lock: &FakeLock::Acquired,
+            workspace: &FakeWorkspaceFence::Acquired,
             pid: 4321,
         };
         let mut buf = Vec::new();
@@ -220,6 +226,7 @@ mod tests {
                 launcher: &launcher,
                 sleeper: &sleeper,
                 lock: &FakeLock::Acquired,
+                workspace: &FakeWorkspaceFence::Acquired,
                 pid: 4321,
             };
             let mut buf = Vec::new();
@@ -283,6 +290,7 @@ mod tests {
                 launcher: &launcher,
                 sleeper: &sleeper,
                 lock: &FakeLock::Acquired,
+                workspace: &FakeWorkspaceFence::Acquired,
                 pid: 4321,
             };
             let mut buf = Vec::new();

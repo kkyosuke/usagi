@@ -7,7 +7,8 @@ use std::io;
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::infrastructure::daemon::{
     DaemonLauncher, DaemonReady, DaemonRecordStore, InstanceLock, LivenessProbe,
-    ProcessIdentitySource, RecordFile, ShutdownSignal, Sleeper, Terminator,
+    ProcessIdentitySource, RecordFile, ShutdownSignal, Sleeper, Terminator, WorkspaceFence,
+    WorkspaceFenceOutcome,
 };
 
 use crate::usecase::serve::DaemonRecordPort;
@@ -280,6 +281,37 @@ impl InstanceLock for FakeLock {
             FakeLock::Acquired => Ok(true),
             FakeLock::Held => Ok(false),
             FakeLock::Failing => Err(io::Error::other("lock failed")),
+        }
+    }
+}
+
+/// A [`WorkspaceFence`] with a fixed outcome, so `serve` tests exercise owning a
+/// workspace, being refused by its current owner, and failing without touching a
+/// real workspace.
+pub enum FakeWorkspaceFence {
+    /// This process now owns the workspace.
+    Acquired,
+    /// Another daemon owns the workspace and published its pid.
+    Held(u32),
+    /// Another daemon owns the workspace but no pid hint is readable.
+    HeldAnonymously,
+    /// Acquiring the fence fails.
+    Failing,
+}
+
+impl WorkspaceFence for FakeWorkspaceFence {
+    fn acquire(&self) -> io::Result<WorkspaceFenceOutcome> {
+        match self {
+            Self::Acquired => Ok(WorkspaceFenceOutcome::Acquired),
+            Self::Held(owner) => Ok(WorkspaceFenceOutcome::Held {
+                workspace: "/fixture/workspace".to_owned(),
+                owner: Some(*owner),
+            }),
+            Self::HeldAnonymously => Ok(WorkspaceFenceOutcome::Held {
+                workspace: "/fixture/workspace".to_owned(),
+                owner: None,
+            }),
+            Self::Failing => Err(io::Error::other("workspace fence failed")),
         }
     }
 }

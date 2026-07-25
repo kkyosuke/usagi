@@ -337,9 +337,34 @@ impl SessionRuntime {
         Ok(self.repo_root.clone())
     }
 
+    /// The workspace root a later [`Self::open`] on `state_dir` will bind.
+    ///
+    /// The daemon must fence the workspace it is about to own *before* it opens
+    /// the runtime and publishes an endpoint, so the fence cannot read the root
+    /// off an opened runtime. This applies the same rule `open` does — a durable
+    /// `repository_root` wins over the startup candidate — so the fenced
+    /// workspace and the owned workspace are always the same one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionRuntimeError::Storage`] when the durable lifecycle state
+    /// cannot be read.
+    pub fn bound_workspace_root(
+        state_dir: &Path,
+        candidate_repo_root: PathBuf,
+    ) -> Result<PathBuf, SessionRuntimeError> {
+        Ok(DaemonLifecycleStore::new(state_dir)
+            .load_with_workspace()
+            .map_err(|_| SessionRuntimeError::Storage)?
+            .map_or(candidate_repo_root, |(repository_root, _)| repository_root))
+    }
+
     /// # Errors
     ///
     /// Returns an error when the lifecycle state cannot be loaded or initialized.
+    ///
+    /// The root this binds is the one [`Self::bound_workspace_root`] predicts for
+    /// the same `state_dir`; a fixture test pins the two together.
     pub fn open<G: GitRunner + Send + 'static>(
         candidate_repo_root: PathBuf,
         state_dir: &Path,
@@ -2583,6 +2608,56 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap(),
             "target\n"
+        );
+    }
+
+    #[test]
+    fn bound_workspace_root_predicts_the_root_open_binds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("daemon");
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+
+        // Fresh state: the prediction is the startup candidate, and `open` binds
+        // exactly that.
+        assert_eq!(
+            SessionRuntime::bound_workspace_root(&state_dir, first.clone()).unwrap(),
+            first
+        );
+        let runtime = SessionRuntime::open(
+            first.clone(),
+            &state_dir,
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+        )
+        .unwrap();
+        assert_eq!(runtime.repository_root(), first);
+        drop(runtime);
+
+        // Durable state: the stored root wins over a different candidate for the
+        // prediction and for `open` alike, so the fence cannot key a workspace
+        // the runtime will not own.
+        assert_eq!(
+            SessionRuntime::bound_workspace_root(&state_dir, second.clone()).unwrap(),
+            first
+        );
+        let reopened =
+            SessionRuntime::open(second, &state_dir, DaemonGeneration::new(), FakeGit::ok())
+                .unwrap();
+        assert_eq!(reopened.repository_root(), first);
+    }
+
+    #[test]
+    fn bound_workspace_root_reports_unreadable_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("daemon");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("sessions.json"), "not json").unwrap();
+        assert_eq!(
+            SessionRuntime::bound_workspace_root(&state_dir, tmp.path().to_path_buf()),
+            Err(SessionRuntimeError::Storage)
         );
     }
 
