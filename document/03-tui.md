@@ -596,7 +596,34 @@ scroll region・SGR・alternate と背景 primary buffer・decoder の途中状�
 UTF-8 / CSI / OSC / SGR / alternate の途中でも reconnect 前後で可視セル・cursor・style が一致し、
 `cells_with_scrollback` を使う selection / copy history も untrimmed な参照と一致する。
 
-`Resume`（poll）は**描画スレッドでは行わない**。専用接続を持つ背景スレッド（poll pump）が、attach 済みの各 terminal を継続的に fetch して per-terminal の read-ahead バッファへ積み、描画スレッドは redraw ごとにそのバッファを**非ブロッキングに drain** するだけである。daemon が一時的に応答できない間（例: dispatch 中に agent lock を保持している間）に固まるのは背景スレッドの fetch だけで、描画・入力ループは即座に応答を続ける。attach で得た output offset を pump に登録し、再 attach（reconnect / resync）では新しい snapshot offset で登録し直してバッファと fetch offset をリセットする。`Resume` は daemon 側で接続にも subscription にも紐づかない stateless な操作なので、この専用接続の破棄・再接続は input の subscription・exactly-once ledger・input sequence に影響しない。`Resize` は attach / input とは別の deadline 付き接続で送る（低頻度なので描画スレッドから同期送信でよい）。attach / input / detach は従来どおり単一接続に載せ、この接続が返す `connection_epoch` だけを session に報告する。
+`Resume`（poll）は**描画スレッドでは行わない**。専用接続を持つ背景スレッド（poll pump）が、attach 済みの各 terminal を継続的に fetch して per-terminal の read-ahead バッファへ積み、描画スレッドは redraw ごとにそのバッファを**非ブロッキングに drain** するだけである。daemon が一時的に応答できない間（例: dispatch 中に agent lock を保持している間）に固まるのは背景スレッドの fetch だけで、描画・入力ループは即座に応答を続ける。attach で得た output offset を pump に登録し、再 attach（reconnect / resync）では新しい snapshot offset で登録し直してバッファと fetch offset をリセットする。`Resume` は daemon 側で接続にも subscription にも紐づかない stateless な操作なので、この専用接続の破棄・再接続は input の subscription・exactly-once ledger・input sequence に影響しない。`Resize` は attach / input とは別の deadline 付き接続で送る（低頻度なので描画スレッドから同期送信でよい）。attach / input / detach は従来どおり単一接続に載せる。この共有接続の epoch と subscription 無効化は [connection epoch と subscription 無効化](#connection-epoch-と-subscription-無効化) が正本である。
+
+#### connection epoch と subscription 無効化
+
+attach / input / detach は**全 pane が 1 本の persistent connection を共有する**。daemon は connection が終わる
+とその connection の attachment をすべて解放するため、wire の subscription id だけでは attachment を特定できない。
+client は subscription を `{wire id, connection epoch}` として session に結び付け、epoch は**共有 transport を
+破棄した時点で**進める（次に開いた時点ではない。破棄と再接続の間に古い subscription を current と誤認しないため）。
+
+| 失敗 | 共有 connection | epoch | 他 pane への影響 |
+|---|---|---|---|
+| 完全に受信した protocol error（`resync_required` / `stale_target` など）、decode できない `Ok` body、非終端の `Accepted` | 保持する | 変わらない | 無い。当該 pane だけが resync / typed feedback へ進み、他 pane は subscription と ledger を保つ |
+| transport 破断（EOF、frame 破損、write 失敗） | 破棄する | 進む | 全 pane の subscription が同時に無効になる |
+| resize lane・poll pump の失敗 | 触らない | 変わらない | 無い。当該 lane だけを開き直し、attachment も input ledger も無効化しない |
+
+epoch が進んだ session は、`Resume` も `Input` も送る前に **fresh attach** を行う。したがって recovery 後の最初の
+打鍵は新しい subscription で一度だけ書かれ、解放済み attachment に対する effect-zero 拒否で失われない。
+無効化された subscription の `Input` は接続を開く前に client 内で拒否するため、effect は確定して 0 である。
+
+detach は次の 2 つを local no-op として扱う。どちらも現在の connection と、他 pane が持つ attachment を変えない。
+
+| local no-op にする detach | 理由 |
+|---|---|
+| old epoch の subscription | daemon はその attachment を connection とともに解放済みで、現在の connection には存在しない subscription の解放を要求することになる |
+| 同じ terminal の新しい attach に置き換えられた superseded subscription | 新しい attachment とその出力登録（poll pump）は置き換え後の subscription が所有する |
+
+epoch は attach ごとに新しい resource を作らず、client-local な transport の incarnation を数えるだけである。
+replacement terminal の spawn も generation 単位の routing も行わない。
 
 #### snapshot negotiation と legacy 限定表示
 
@@ -629,7 +656,7 @@ terminal pane の接続状態と footer feedback は `TerminalSession` の状態
 
 | 状態 | 入力 | poll / retry UX |
 |---|---|---|
-| `Live` | subscription と input sequence で送信 | output offset から継続取得する |
+| `Live` | subscription と input sequence で送信。subscription が[無効化された epoch](#connection-epoch-と-subscription-無効化) のものなら、送信前に fresh attach する | output offset から継続取得する。epoch が無効化されている場合は `Resume` の前に fresh attach する |
 | `Reconnecting` | 新しい入力は typed failure として拒否する。直前の ACK を失った場合はその入力を未配送と断定せず effect unknown を表示する | 100ms から始まり 2s を上限とする指数 backoff 後、同じ `TerminalRef` を attach して snapshot resync する |
 | `Disconnected` | typed failure として拒否 | stale target または明示的 detach の終端で、自動 retry しない |
 | `Orphaned` | typed failure として拒否 | ownership unknown の終端で、自動 retry しない |

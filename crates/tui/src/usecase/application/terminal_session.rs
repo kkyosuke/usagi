@@ -9,6 +9,14 @@
 //! sequence, and never spawns a local process — a transport failure only
 //! produces safe feedback.
 //!
+//! Panes of one TUI share a single persistent transport, so a subscription is
+//! identified by the port's connection epoch as well as its wire id
+//! ([`TerminalSubscription`]). When the port replaces that transport every
+//! subscription taken on the previous epoch becomes invalid at once — the daemon
+//! released those attachments with the connection — so each session attaches
+//! freshly before it sends the next `Resume` or `Input` instead of spending a
+//! keystroke on an attachment that no longer exists.
+//!
 //! Retained history is **only** rebuilt from a checkpoint. A daemon that cannot
 //! serve one offers a raw byte tail cut at an arbitrary boundary; parsing that
 //! would expose partial UTF-8 / CSI / OSC sequences and lose the cursor, SGR,
@@ -41,15 +49,30 @@ pub enum TerminalAttachScreen {
     HistoryUnavailable,
 }
 
+/// A connection-owned terminal subscription: the daemon's wire id together with
+/// the client-local epoch of the transport incarnation that issued it.
+///
+/// The daemon releases every attachment of a connection when that connection
+/// goes away, so a subscription id alone does not identify a usable attachment:
+/// panes of one shipping TUI share a single persistent transport, and replacing
+/// it invalidates every subscription taken on the previous epoch at once. Both
+/// halves therefore travel together, and a subscription from an earlier epoch is
+/// never equal to one taken after the replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalSubscription {
+    /// The daemon-issued wire id, valid only on `epoch`'s connection.
+    pub id: u64,
+    /// Client-local incarnation of the shared transport that issued `id`.
+    /// Reattach on the same epoch preserves the daemon's per-client input
+    /// sequence; a new epoch starts a fresh ledger at zero.
+    pub epoch: u64,
+}
+
 /// The atomic view returned by attaching to a daemon terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalAttach {
     /// The connection-owned subscription used to fence later input.
-    pub subscription: u64,
-    /// Client-local incarnation of the persistent transport. Reattach on the
-    /// same epoch preserves the daemon's per-client input sequence; a new
-    /// epoch starts a fresh ledger at zero.
-    pub connection_epoch: u64,
+    pub subscription: TerminalSubscription,
     /// The daemon terminal revision this view was taken at. It advances on
     /// geometry commit and exit, so it fences a stale snapshot.
     pub revision: u64,
@@ -158,6 +181,20 @@ pub enum TerminalError {
 /// the complete [`TerminalRef`]; implementations poll the daemon and must not
 /// substitute a local terminal on failure.
 pub trait TerminalStreamPort {
+    /// The epoch of the shared transport incarnation this port currently holds,
+    /// or `None` when it has no shared transport to invalidate against.
+    ///
+    /// A production port multiplexes every pane's attach / input / detach over
+    /// one persistent connection. Replacing that connection advances the epoch,
+    /// which invalidates every subscription taken on an earlier one: the daemon
+    /// released those attachments together with the connection, so a session
+    /// holding one must attach freshly before it sends any `Resume` or `Input`.
+    /// A port without a shared transport keeps the default, so nothing is ever
+    /// invalidated.
+    fn connection_epoch(&self) -> Option<u64> {
+        None
+    }
+
     /// Resize the daemon-owned PTY to match the pane viewport.
     ///
     /// # Errors
@@ -200,12 +237,17 @@ pub trait TerminalStreamPort {
     fn input(
         &mut self,
         terminal: &TerminalRef,
-        subscription: u64,
+        subscription: TerminalSubscription,
         input_seq: u64,
         bytes: &[u8],
     ) -> Result<TerminalInputOutcome, TerminalError>;
     /// Release only this subscription; it must not stop the daemon terminal.
-    fn detach(&mut self, terminal: &TerminalRef, subscription: u64);
+    ///
+    /// A subscription from a replaced epoch is released locally: the daemon
+    /// dropped that attachment with its connection, so the request must not be
+    /// re-sent on the current transport, where it would neither find the
+    /// subscription nor be allowed to disturb the attachments its peers hold.
+    fn detach(&mut self, terminal: &TerminalRef, subscription: TerminalSubscription);
 }
 
 /// The coordinator's connection status, rendered without leaking transport
@@ -335,9 +377,14 @@ pub struct TerminalSession {
     /// changes. Keeping this projection here avoids rebuilding and rescanning up
     /// to the full scrollback limit on every 16 ms UI tick.
     display_cache: Vec<String>,
-    subscription: Option<u64>,
+    subscription: Option<TerminalSubscription>,
     cursor: u64,
     input_seq: u64,
+    /// The transport epoch whose daemon-side input ledger `input_seq` belongs to.
+    ///
+    /// Kept apart from `subscription` because a failure may release the
+    /// subscription while the connection — and therefore the ledger the daemon
+    /// counts this client's input on — survives.
     connection_epoch: Option<u64>,
     /// Whether the current screen carries restored history.
     history: TerminalHistory,
@@ -499,6 +546,11 @@ impl TerminalSession {
             };
             match self.restore(&attach) {
                 Ok(()) => {
+                    // Release the superseded subscription only after the new one
+                    // exists. Both halves of the identity are compared, so a
+                    // reused wire id from another epoch still counts as
+                    // superseded, and releasing it must leave the attachment
+                    // just taken — and the transport carrying it — untouched.
                     if let Some(previous) = self.subscription
                         && previous != attach.subscription
                     {
@@ -536,6 +588,12 @@ impl TerminalSession {
     /// only after the capped exponential backoff expires.
     pub fn poll_at<P: TerminalStreamPort>(&mut self, port: &mut P, now: Instant) {
         match self.state {
+            // The shared transport was replaced, so this pane's attachment is
+            // gone: take a fresh one before asking the new connection for
+            // anything. Every pane does this independently, which is what keeps
+            // one pane's reconnect from leaving its peers streaming on a
+            // subscription the daemon has already released.
+            SessionState::Live if self.subscription_replaced(port) => self.connect_at(port, now),
             SessionState::Live => match port.poll(&self.terminal, self.cursor) {
                 Ok(chunks) => self.apply_at(port, chunks, now),
                 Err(TerminalError::ResyncRequired) => self.connect_at(port, now),
@@ -608,6 +666,13 @@ impl TerminalSession {
         bytes: &[u8],
         now: Instant,
     ) -> Result<(), TerminalInputError> {
+        // Re-attach before the first keystroke rather than spending it on a
+        // subscription the daemon released with the previous connection: that
+        // request would be rejected without effect, losing the key, and would
+        // drop the socket the other panes just attached on.
+        if self.state == SessionState::Live && self.subscription_replaced(port) {
+            self.connect_at(port, now);
+        }
         let (SessionState::Live, Some(subscription)) = (self.state, self.subscription) else {
             return Err(TerminalInputError::NotLive(self.state));
         };
@@ -734,10 +799,13 @@ impl TerminalSession {
         self.subscription = Some(attach.subscription);
         self.cursor = attach.output_offset;
         self.snapshot_revision = Some(attach.revision);
-        if self.connection_epoch != Some(attach.connection_epoch) {
+        // The daemon counts input per connection, so only a new epoch starts a
+        // fresh ledger. A resync that merely replaces the subscription on the
+        // same connection continues the sequence the daemon already expects.
+        if self.connection_epoch != Some(attach.subscription.epoch) {
             self.input_seq = 0;
         }
-        self.connection_epoch = Some(attach.connection_epoch);
+        self.connection_epoch = Some(attach.subscription.epoch);
         self.retry_attempt = 0;
         self.retry_at = None;
         self.state = if attach.exited {
@@ -756,6 +824,20 @@ impl TerminalSession {
                 Some(format!("{exit}; {HISTORY_UNAVAILABLE_MESSAGE}"))
             }
         });
+    }
+
+    /// Whether this session holds a subscription taken on a transport
+    /// incarnation the port has since replaced.
+    ///
+    /// Only a port that reports an epoch can invalidate anything, and only when
+    /// it differs from the one this subscription was issued on. A session
+    /// without a subscription has nothing to invalidate: it is already
+    /// reconnecting.
+    fn subscription_replaced<P: TerminalStreamPort>(&self, port: &P) -> bool {
+        matches!(
+            (self.subscription, port.connection_epoch()),
+            (Some(subscription), Some(current)) if subscription.epoch != current
+        )
     }
 
     /// Falls back to a typed resync after a refused snapshot: the previous
@@ -924,13 +1006,19 @@ mod tests {
         input: Option<TerminalError>,
         input_outcomes: Vec<TerminalInputOutcome>,
         inputs: Vec<(u64, u64, Vec<u8>)>,
-        detached: Vec<u64>,
+        detached: Vec<TerminalSubscription>,
         resized: Vec<Geometry>,
         resize_error: Option<TerminalError>,
         resize_count_at_attach: Vec<usize>,
         attached_terminals: Vec<TerminalRef>,
+        /// The shared transport epoch this port reports, when it models one.
+        epoch: Option<u64>,
     }
     impl TerminalStreamPort for FakePort {
+        fn connection_epoch(&self) -> Option<u64> {
+            self.epoch
+        }
+
         fn resize(&mut self, _: &TerminalRef, geometry: Geometry) -> Result<(), TerminalError> {
             self.resized.push(geometry);
             self.resize_error.take().map_or(Ok(()), Err)
@@ -951,21 +1039,22 @@ mod tests {
         fn input(
             &mut self,
             _: &TerminalRef,
-            subscription: u64,
+            subscription: TerminalSubscription,
             input_seq: u64,
             bytes: &[u8],
         ) -> Result<TerminalInputOutcome, TerminalError> {
             if let Some(error) = self.input {
                 return Err(error);
             }
-            self.inputs.push((subscription, input_seq, bytes.to_vec()));
+            self.inputs
+                .push((subscription.id, input_seq, bytes.to_vec()));
             if self.input_outcomes.is_empty() {
                 Ok(TerminalInputOutcome::Written)
             } else {
                 Ok(self.input_outcomes.remove(0))
             }
         }
-        fn detach(&mut self, _: &TerminalRef, subscription: u64) {
+        fn detach(&mut self, _: &TerminalRef, subscription: TerminalSubscription) {
             self.detached.push(subscription);
         }
     }
@@ -988,14 +1077,14 @@ mod tests {
         fn input(
             &mut self,
             _: &TerminalRef,
-            _: u64,
+            _: TerminalSubscription,
             _: u64,
             _: &[u8],
         ) -> Result<TerminalInputOutcome, TerminalError> {
             Err(TerminalError::Unavailable)
         }
 
-        fn detach(&mut self, _: &TerminalRef, _: u64) {}
+        fn detach(&mut self, _: &TerminalRef, _: TerminalSubscription) {}
     }
 
     /// The checkpoint a daemon at `geometry` produces after receiving `bytes`:
@@ -1004,6 +1093,11 @@ mod tests {
         let mut screen = VtScreen::new(usize::from(geometry.rows), usize::from(geometry.cols));
         screen.advance(bytes);
         TerminalAttachScreen::Checkpoint(Box::new(screen.checkpoint()))
+    }
+
+    /// A subscription on the default test epoch.
+    fn sub(id: u64) -> TerminalSubscription {
+        TerminalSubscription { id, epoch: 1 }
     }
 
     fn attach(subscription: u64, offset: u64, replay: &[u8], exited: bool) -> TerminalAttach {
@@ -1018,8 +1112,10 @@ mod tests {
         exited: bool,
     ) -> TerminalAttach {
         TerminalAttach {
-            subscription,
-            connection_epoch,
+            subscription: TerminalSubscription {
+                id: subscription,
+                epoch: connection_epoch,
+            },
             revision: 1,
             output_offset: offset,
             screen: checkpoint_of(replay, geometry()),
@@ -1048,10 +1144,10 @@ mod tests {
             Err(TerminalError::Unavailable)
         );
         assert_eq!(
-            default_port.input(&terminal(), 1, 0, b"x"),
+            default_port.input(&terminal(), sub(1), 0, b"x"),
             Err(TerminalError::Unavailable)
         );
-        default_port.detach(&terminal(), 1);
+        default_port.detach(&terminal(), sub(1));
         let mut port = FakePort {
             attach: vec![Ok(attach(7, 3, b"$ ", false))],
             polls: vec![Ok(vec![chunk(3, b"ls\r\n"), chunk(7, b"a.txt")])],
@@ -1339,6 +1435,94 @@ mod tests {
     }
 
     #[test]
+    fn a_replaced_connection_attaches_freshly_before_the_next_poll() {
+        let mut port = FakePort {
+            attach: vec![
+                Ok(attach_at(1, 1, 0, b"", false)),
+                Ok(attach_at(2, 2, 0, b"fresh", false)),
+            ],
+            // Consuming this would move the session off `Live`, so it fixes that
+            // no `Resume` is sent on the replaced attachment.
+            polls: vec![Err(TerminalError::Stale)],
+            epoch: Some(1),
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+        assert_eq!(session.send_input(&mut port, b"a"), Ok(()));
+
+        // The port replaced the shared transport, so the daemon released this
+        // pane's attachment together with the connection.
+        port.epoch = Some(2);
+        session.poll(&mut port);
+
+        assert_eq!(port.polls.len(), 1);
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(session.rows()[0], "fresh");
+        assert_eq!(
+            session.subscription,
+            Some(TerminalSubscription { id: 2, epoch: 2 })
+        );
+        // The superseded subscription is released with the epoch it was taken
+        // on, which is what lets the port keep the release local.
+        assert_eq!(port.detached, [TerminalSubscription { id: 1, epoch: 1 }]);
+        // A new connection means a new daemon-side ledger, so the sequence
+        // restarts instead of leaving a gap.
+        assert_eq!(session.send_input(&mut port, b"b"), Ok(()));
+        assert_eq!(
+            port.inputs,
+            vec![(1, 0, b"a".to_vec()), (2, 0, b"b".to_vec())]
+        );
+    }
+
+    #[test]
+    fn the_first_key_after_a_replaced_connection_is_written_once_on_a_fresh_subscription() {
+        let mut port = FakePort {
+            attach: vec![
+                Ok(attach_at(7, 1, 0, b"", false)),
+                Ok(attach_at(8, 2, 0, b"", false)),
+            ],
+            epoch: Some(7),
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+
+        // No poll intervenes: the keystroke itself finds the stale attachment.
+        port.epoch = Some(8);
+        assert_eq!(session.send_input(&mut port, b"x"), Ok(()));
+
+        // Written exactly once, on the subscription the fresh attach returned —
+        // never on the released one, which the daemon would reject without
+        // effect and which would cost the keystroke.
+        assert_eq!(port.inputs, vec![(2, 0, b"x".to_vec())]);
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(session.error(), None);
+    }
+
+    #[test]
+    fn a_replaced_connection_whose_attach_fails_reports_reconnecting_without_input() {
+        let mut port = FakePort {
+            attach: vec![
+                Ok(attach_at(1, 1, 0, b"", false)),
+                Err(TerminalError::Unavailable),
+            ],
+            epoch: Some(1),
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+
+        port.epoch = Some(2);
+        assert_eq!(
+            session.send_input(&mut port, b"x"),
+            Err(TerminalInputError::NotLive(SessionState::Reconnecting))
+        );
+        assert!(port.inputs.is_empty());
+        assert_eq!(session.state(), SessionState::Reconnecting);
+    }
+
+    #[test]
     fn input_failure_reports_safe_feedback() {
         let mut port = FakePort {
             attach: vec![Ok(attach(9, 0, b"", false))],
@@ -1537,10 +1721,10 @@ mod tests {
         session.connect(&mut port);
         session.detach(&mut port);
         assert_eq!(session.state(), SessionState::Disconnected);
-        assert_eq!(port.detached, vec![4]);
+        assert_eq!(port.detached, [4].map(sub));
         // A second detach without a subscription is a no-op on the port.
         session.detach(&mut port);
-        assert_eq!(port.detached, vec![4]);
+        assert_eq!(port.detached, [4].map(sub));
         session.connect(&mut port);
         assert_eq!(session.state(), SessionState::Live);
         assert_eq!(session.rows()[0], "back");
@@ -1716,14 +1900,14 @@ mod tests {
             fn input(
                 &mut self,
                 _: &TerminalRef,
-                _: u64,
+                _: TerminalSubscription,
                 _: u64,
                 _: &[u8],
             ) -> Result<TerminalInputOutcome, TerminalError> {
                 self.available().map(|()| TerminalInputOutcome::Written)
             }
 
-            fn detach(&mut self, _: &TerminalRef, _: u64) {
+            fn detach(&mut self, _: &TerminalRef, _: TerminalSubscription) {
                 let _ = self.available();
             }
         }
@@ -1785,8 +1969,7 @@ mod tests {
     fn a_daemon_without_checkpoints_shows_no_history_instead_of_parsing_a_tail() {
         let mut port = FakePort {
             attach: vec![Ok(TerminalAttach {
-                subscription: 3,
-                connection_epoch: 1,
+                subscription: TerminalSubscription { id: 3, epoch: 1 },
                 revision: 7,
                 output_offset: 64,
                 screen: TerminalAttachScreen::HistoryUnavailable,
@@ -1816,8 +1999,7 @@ mod tests {
     fn a_history_less_exited_attach_reports_both_facts() {
         let mut port = FakePort {
             attach: vec![Ok(TerminalAttach {
-                subscription: 3,
-                connection_epoch: 1,
+                subscription: TerminalSubscription { id: 3, epoch: 1 },
                 revision: 1,
                 output_offset: 0,
                 screen: TerminalAttachScreen::HistoryUnavailable,
@@ -1845,8 +2027,7 @@ mod tests {
             let (head, suffix) = complete.split_at(split);
             let mut port = FakePort {
                 attach: vec![Ok(TerminalAttach {
-                    subscription: 1,
-                    connection_epoch: 1,
+                    subscription: TerminalSubscription { id: 1, epoch: 1 },
                     revision: 1,
                     output_offset: head.len() as u64,
                     screen: checkpoint_of(head, geometry()),
@@ -1879,8 +2060,7 @@ mod tests {
         let suffix = b"\x1b[?1049lback";
         let mut port = FakePort {
             attach: vec![Ok(TerminalAttach {
-                subscription: 1,
-                connection_epoch: 1,
+                subscription: TerminalSubscription { id: 1, epoch: 1 },
                 revision: 1,
                 output_offset: head.len() as u64,
                 screen: checkpoint_of(head, geometry()),
@@ -1914,8 +2094,7 @@ mod tests {
     fn a_checkpoint_captured_at_another_geometry_retries_then_resyncs() {
         let interleaved = Geometry { cols: 40, rows: 4 };
         let stale = |subscription: u64| TerminalAttach {
-            subscription,
-            connection_epoch: 1,
+            subscription: sub(subscription),
             revision: 2,
             output_offset: 5,
             screen: checkpoint_at(b"wide", interleaved),
@@ -1942,7 +2121,7 @@ mod tests {
         // Both refused snapshots are released, then the previous subscription:
         // neither refused view is displayed, and the previous screen stays
         // intact rather than being mixed with the wider one.
-        assert_eq!(port.detached, vec![2, 3, 1]);
+        assert_eq!(port.detached, [2, 3, 1].map(sub));
         assert_eq!(session.state(), SessionState::Reconnecting);
         assert_eq!(session.rows()[0], "old");
         assert_eq!(session.subscription, None);
@@ -1962,8 +2141,7 @@ mod tests {
         let mut port = FakePort {
             attach: vec![
                 Ok(TerminalAttach {
-                    subscription: 1,
-                    connection_epoch: 1,
+                    subscription: TerminalSubscription { id: 1, epoch: 1 },
                     revision: 2,
                     output_offset: 4,
                     screen: checkpoint_at(b"wide", Geometry { cols: 40, rows: 4 }),
@@ -1980,7 +2158,7 @@ mod tests {
         assert_eq!(session.state(), SessionState::Live);
         assert_eq!(session.rows()[0], "paned");
         assert_eq!(session.error(), None);
-        assert_eq!(port.detached, vec![1]);
+        assert_eq!(port.detached, [1].map(sub));
         // Each attempt re-synchronizes the viewport before capturing.
         assert_eq!(port.resized, vec![geometry(), geometry()]);
     }
@@ -1990,8 +2168,7 @@ mod tests {
         let daemon_geometry = Geometry { cols: 40, rows: 4 };
         let mut port = FakePort {
             attach: vec![Ok(TerminalAttach {
-                subscription: 1,
-                connection_epoch: 1,
+                subscription: TerminalSubscription { id: 1, epoch: 1 },
                 revision: 1,
                 output_offset: 4,
                 screen: checkpoint_at(b"wide", daemon_geometry),
@@ -2020,8 +2197,7 @@ mod tests {
     #[test]
     fn a_snapshot_older_than_the_applied_revision_is_refused() {
         let stale = |subscription: u64| TerminalAttach {
-            subscription,
-            connection_epoch: 1,
+            subscription: sub(subscription),
             revision: 4,
             output_offset: 0,
             screen: checkpoint_of(b"rewound", geometry()),
@@ -2030,8 +2206,7 @@ mod tests {
         let mut port = FakePort {
             attach: vec![
                 Ok(TerminalAttach {
-                    subscription: 1,
-                    connection_epoch: 1,
+                    subscription: TerminalSubscription { id: 1, epoch: 1 },
                     revision: 9,
                     output_offset: 3,
                     screen: checkpoint_of(b"new", geometry()),
@@ -2050,7 +2225,7 @@ mod tests {
 
         assert_eq!(session.state(), SessionState::Reconnecting);
         assert_eq!(session.rows()[0], "new");
-        assert_eq!(port.detached, vec![2, 3, 1]);
+        assert_eq!(port.detached, [2, 3, 1].map(sub));
         let error = session.error().unwrap();
         assert!(error.contains("stale (revision 4 after 9)"), "{error}");
     }
@@ -2065,8 +2240,7 @@ mod tests {
             };
             checkpoint.schema_version += 1;
             TerminalAttach {
-                subscription,
-                connection_epoch: 1,
+                subscription: sub(subscription),
                 revision: 1,
                 output_offset: 0,
                 screen: TerminalAttachScreen::Checkpoint(checkpoint),

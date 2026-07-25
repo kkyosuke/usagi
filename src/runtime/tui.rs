@@ -80,6 +80,7 @@ use usagi_tui::usecase::application::pane_runtime::Geometry;
 use usagi_tui::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
 use usagi_tui::usecase::application::terminal_session::{
     TerminalAttach, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
+    TerminalSubscription,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::overview;
@@ -924,7 +925,20 @@ struct DaemonAgentCommandPort {
     /// connection, so the render thread only drains ready output and never
     /// blocks on the daemon. Attach registers a terminal here; detach removes it.
     pump: TerminalPollPump,
+    /// Client-local incarnation of the shared `terminal` connection.
+    ///
+    /// Every subscription this port issues carries the epoch it was taken on.
+    /// Dropping the connection advances the epoch, which is what invalidates all
+    /// of the panes' subscriptions at once: the daemon released those
+    /// attachments with the connection, so each session must attach again before
+    /// its next `Input`. The epoch advances at the drop rather than at the next
+    /// open so a subscription is never mistaken for current while the connection
+    /// that owned it is already gone.
     terminal_epoch: u64,
+    /// The subscription each attached terminal is currently fenced by, so a
+    /// superseded subscription's release cannot revoke the attachment — or the
+    /// pump registration — that replaced it.
+    attachments: Vec<(usagi_core::domain::id::TerminalRef, TerminalSubscription)>,
     restore_connection: Option<DaemonRestoreConnectionPublisher>,
     terminal_watch_cancelled: Option<Arc<AtomicBool>>,
 }
@@ -974,7 +988,8 @@ impl DaemonAgentCommandPort {
             terminal: None,
             poll: None,
             pump,
-            terminal_epoch: 0,
+            terminal_epoch: 1,
+            attachments: Vec::new(),
             restore_connection: None,
             terminal_watch_cancelled: None,
         }
@@ -1002,10 +1017,6 @@ impl DaemonAgentCommandPort {
                 self.terminal_watch_cancelled = Some(publisher.watch(stream));
             }
             self.terminal = Some(client);
-            self.terminal_epoch = self
-                .terminal_epoch
-                .checked_add(1)
-                .expect("terminal connection epoch exhausted");
         }
         Ok(self
             .terminal
@@ -1014,8 +1025,13 @@ impl DaemonAgentCommandPort {
     }
 
     /// Sends one terminal request over the persistent connection and returns its
-    /// success body.  A transport failure drops the connection so the next
-    /// attach reconnects instead of reusing a broken socket.
+    /// success body.
+    ///
+    /// Only a **transport** failure drops the connection: the stream's position
+    /// is then unknown, so it cannot be reused. A fully received protocol error
+    /// means the daemon answered on a healthy socket — that request is finished,
+    /// and one pane's `resync_required` / `stale_target` must not revoke the
+    /// attachments every other pane holds on the same connection.
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
     fn terminal_request(
         &mut self,
@@ -1030,17 +1046,59 @@ impl DaemonAgentCommandPort {
         match reply {
             Ok(DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. }) => Ok(body),
             Err(error) => {
-                self.reset_terminal();
+                if error.is_transport_failure() {
+                    self.reset_terminal();
+                }
                 Err(map_terminal_error(&error))
             }
         }
     }
 
+    /// Drops the shared connection and advances the epoch, invalidating every
+    /// subscription taken on it. The daemon releases those attachments when the
+    /// connection closes, so each session attaches freshly instead of fencing
+    /// its next input with an attachment that no longer exists.
     fn reset_terminal(&mut self) {
         if let Some(cancelled) = self.terminal_watch_cancelled.take() {
             cancelled.store(true, Ordering::Release);
         }
         self.terminal = None;
+        self.terminal_epoch = self
+            .terminal_epoch
+            .checked_add(1)
+            .expect("terminal connection epoch exhausted");
+    }
+
+    /// Records the subscription a fresh attach fenced `terminal` with, replacing
+    /// any superseded one.
+    fn record_attachment(
+        &mut self,
+        terminal: &usagi_core::domain::id::TerminalRef,
+        subscription: TerminalSubscription,
+    ) {
+        self.attachments
+            .retain(|(attached, _)| !attached.fences(terminal));
+        self.attachments.push((terminal.clone(), subscription));
+    }
+
+    /// Whether `subscription` is still the one fencing `terminal`, removing the
+    /// record when it is. A superseded subscription is not: a later attach
+    /// already replaced it, and releasing it must leave that attachment — and
+    /// the pump registration taken with it — in place.
+    fn release_attachment(
+        &mut self,
+        terminal: &usagi_core::domain::id::TerminalRef,
+        subscription: TerminalSubscription,
+    ) -> bool {
+        let current = self
+            .attachments
+            .iter()
+            .any(|(attached, held)| attached.fences(terminal) && *held == subscription);
+        if current {
+            self.attachments
+                .retain(|(attached, _)| !attached.fences(terminal));
+        }
+        current
     }
 
     /// Returns the deadline-bounded poll connection, opening it on first use.
@@ -1538,13 +1596,20 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         let screen = decode_attach_screen(mode, snapshot, base_offset, output_offset)?;
         // `exited` is `Option<i32>`: null while the process is still running.
         let exited = !snapshot["exited"].is_null();
+        // The snapshot was served by the connection this port currently holds, so
+        // the subscription belongs to its epoch. A transport failure would have
+        // advanced the epoch before returning, never after.
+        let subscription = TerminalSubscription {
+            id: subscription,
+            epoch: self.terminal_epoch,
+        };
+        self.record_attachment(terminal, subscription);
         // Resume polling for this terminal on the background pump from the
         // snapshot's output offset. Reattach (after a reconnect/resync) resets
         // the pump to the fresh offset, discarding any stale buffered output.
         self.pump.register(terminal, output_offset);
         Ok(TerminalAttach {
             subscription,
-            connection_epoch: self.terminal_epoch,
             revision,
             output_offset,
             screen,
@@ -1581,16 +1646,28 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         self.pump.take(terminal, after_offset)
     }
 
+    fn terminal_connection_epoch(&self) -> Option<u64> {
+        Some(self.terminal_epoch)
+    }
+
     fn input_terminal(
         &mut self,
         terminal: &usagi_core::domain::id::TerminalRef,
-        subscription: u64,
+        subscription: TerminalSubscription,
         input_seq: u64,
         bytes: &[u8],
     ) -> Result<TerminalInputOutcome, TerminalError> {
+        // Backstop for the session's own epoch fence: an input fenced by a
+        // replaced connection's subscription is refused here rather than written
+        // to the current one, where the daemon would reject it as unattached and
+        // the keystroke would be spent for nothing. Nothing is sent, so the
+        // effect is definitely zero and the session reattaches.
+        if subscription.epoch != self.terminal_epoch {
+            return Err(TerminalError::Unavailable);
+        }
         let payload = serde_json::to_value(TerminalRequest::Input {
             terminal: terminal.clone(),
-            subscription,
+            subscription: subscription.id,
             input_seq,
             bytes: bytes.to_vec(),
         })
@@ -1604,30 +1681,31 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                 payload,
             })
         };
+        // A fully received answer — an `Ok` body this build cannot decode, a
+        // non-final `Accepted`, or a protocol error — leaves the stream
+        // consistent, so the connection and the daemon's input ledger for it are
+        // kept. Only a transport failure drops the connection (and with it every
+        // pane's subscription), because only then is the stream's position
+        // unknown.
         match reply {
-            Ok(DaemonReply::Ok(body)) => {
-                let outcome = decode_terminal_input_ack(&body, bytes.len());
-                if outcome.is_err() {
-                    self.reset_terminal();
-                }
-                outcome
-            }
+            Ok(DaemonReply::Ok(body)) => decode_terminal_input_ack(&body, bytes.len()),
             // `Accepted` is not a final input ACK. Likewise, once the request
             // write was attempted, an EOF or transport error can equally mean
             // "not sent", "partly sent" or "applied but ACK lost". Never label
             // either path undelivered and never replay it blindly.
-            Ok(DaemonReply::Accepted { .. })
-            | Err(
-                ClientError::Unavailable(_)
+            Ok(DaemonReply::Accepted { .. }) => Err(TerminalError::InputEffectUnknown),
+            Err(
+                error @ (ClientError::Unavailable(_)
                 | ClientError::Lifecycle(_)
                 | ClientError::RolloverRequired(_)
-                | ClientError::BuildIdentityUnavailable,
+                | ClientError::BuildIdentityUnavailable),
             ) => {
-                self.reset_terminal();
+                if error.is_transport_failure() {
+                    self.reset_terminal();
+                }
                 Err(TerminalError::InputEffectUnknown)
             }
             Err(error @ ClientError::Protocol(_)) => {
-                self.reset_terminal();
                 if error.side_effect() == usagi_core::infrastructure::ipc::SideEffect::None {
                     Err(map_terminal_error(&error))
                 } else {
@@ -1640,16 +1718,27 @@ impl AgentCommandPort for DaemonAgentCommandPort {
     fn detach_terminal(
         &mut self,
         terminal: &usagi_core::domain::id::TerminalRef,
-        subscription: u64,
+        subscription: TerminalSubscription,
     ) {
-        self.pump.unregister(terminal);
-        let _ = self.terminal_request(
-            TerminalAction::Detach,
-            TerminalRequest::Detach {
-                terminal: terminal.clone(),
-                subscription,
-            },
-        );
+        // Releasing a superseded subscription must not stop the stream a newer
+        // attach established for the same terminal: that attach owns the pump
+        // registration now.
+        if self.release_attachment(terminal, subscription) {
+            self.pump.unregister(terminal);
+        }
+        // A subscription from a replaced connection is released locally. The
+        // daemon dropped that attachment when the connection closed, so sending
+        // the request on the current connection would only ask it to release a
+        // subscription it never issued.
+        if subscription.epoch == self.terminal_epoch {
+            let _ = self.terminal_request(
+                TerminalAction::Detach,
+                TerminalRequest::Detach {
+                    terminal: terminal.clone(),
+                    subscription: subscription.id,
+                },
+            );
+        }
     }
 }
 
@@ -2839,13 +2928,14 @@ mod tests {
         EnvironmentStorePort, FsWorkspaceLoader, Geometry, LifecycleSnapshot,
         PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore,
         SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen, TerminalChunk,
-        TerminalError, TerminalInputOutcome, TerminalSnapshotMode, agent_inventory_request,
-        classify_terminal_input, created_session_hook, daemon_error_reason, decode_agent_admission,
-        decode_attach_screen, decode_exact_agent_resume, decode_terminal_input_ack,
-        decode_terminal_inventory, decode_terminal_poll, exact_agent_resume_request,
-        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
-        passthrough_key, probe_path, provider_resume_projection, session_snapshot_result,
-        terminal_copy_key, terminal_inventory_matches_scope, validate_workspace_directory,
+        TerminalError, TerminalInputOutcome, TerminalSnapshotMode, TerminalSubscription,
+        agent_inventory_request, classify_terminal_input, created_session_hook,
+        daemon_error_reason, decode_agent_admission, decode_attach_screen,
+        decode_exact_agent_resume, decode_terminal_input_ack, decode_terminal_inventory,
+        decode_terminal_poll, exact_agent_resume_request, lifecycle_snapshot,
+        load_screen_graph_data, load_workspace_state, map_terminal_error, passthrough_key,
+        probe_path, provider_resume_projection, session_snapshot_result, terminal_copy_key,
+        terminal_inventory_matches_scope, validate_workspace_directory,
     };
     use crate::runtime::terminal_pump::TerminalPollPump;
     use chrono::Utc;
@@ -2941,6 +3031,36 @@ mod tests {
         DaemonAgentCommandPort,
         std::thread::JoinHandle<Vec<serde_json::Value>>,
     ) {
+        let (client, server) = scripted_terminal_connection(replies, adjust);
+        (
+            DaemonAgentCommandPort {
+                terminal: Some(client),
+                poll: None,
+                pump: TerminalPollPump::spawn(|_, _| Ok(Vec::new())),
+                terminal_epoch: 1,
+                attachments: Vec::new(),
+                restore_connection: None,
+                terminal_watch_cancelled: None,
+            },
+            server,
+        )
+    }
+
+    /// One scripted daemon connection: it answers `replies` in order, then closes
+    /// the socket. A request beyond the script therefore reads EOF, which is the
+    /// transport failure a stopped or restarted daemon produces mid-stream. The
+    /// joined handle yields the request bodies the connection actually received.
+    #[cfg(unix)]
+    fn scripted_terminal_connection(
+        replies: Vec<(
+            usagi_core::infrastructure::ipc::ResponseOutcome,
+            serde_json::Value,
+        )>,
+        adjust: impl FnOnce(&mut usagi_core::infrastructure::ipc::ServerProtocol),
+    ) -> (
+        usagi_core::usecase::client::IpcClient<std::os::unix::net::UnixStream>,
+        std::thread::JoinHandle<Vec<serde_json::Value>>,
+    ) {
         use std::os::unix::net::UnixStream;
 
         use usagi_core::infrastructure::ipc::{
@@ -3012,17 +3132,13 @@ mod tests {
             test_client_workspace(),
         )
         .unwrap();
-        (
-            DaemonAgentCommandPort {
-                terminal: Some(client),
-                poll: None,
-                pump: TerminalPollPump::spawn(|_, _| Ok(Vec::new())),
-                terminal_epoch: 1,
-                restore_connection: None,
-                terminal_watch_cancelled: None,
-            },
-            server,
-        )
+        (client, server)
+    }
+
+    /// A subscription on the scripted fixture's connection epoch.
+    #[cfg(unix)]
+    fn subscription(id: u64) -> TerminalSubscription {
+        TerminalSubscription { id, epoch: 1 }
     }
 
     #[cfg(unix)]
@@ -3066,27 +3182,27 @@ mod tests {
         let terminal = input_terminal_ref();
 
         assert_eq!(
-            port.input_terminal(&terminal, 7, 0, b"x"),
+            port.input_terminal(&terminal, subscription(7), 0, b"x"),
             Ok(TerminalInputOutcome::Written)
         );
         assert_eq!(
-            port.input_terminal(&terminal, 7, 1, b"x"),
+            port.input_terminal(&terminal, subscription(7), 1, b"x"),
             Ok(TerminalInputOutcome::Written)
         );
         assert_eq!(
-            port.input_terminal(&terminal, 7, 2, b"x"),
+            port.input_terminal(&terminal, subscription(7), 2, b"x"),
             Ok(TerminalInputOutcome::Failed)
         );
         assert_eq!(
-            port.input_terminal(&terminal, 7, 3, b"x"),
+            port.input_terminal(&terminal, subscription(7), 3, b"x"),
             Ok(TerminalInputOutcome::Failed)
         );
         assert_eq!(
-            port.input_terminal(&terminal, 7, 4, b"abc"),
+            port.input_terminal(&terminal, subscription(7), 4, b"abc"),
             Ok(TerminalInputOutcome::Ambiguous { applied_prefix: 2 })
         );
         assert_eq!(
-            port.input_terminal(&terminal, 7, 5, b"abc"),
+            port.input_terminal(&terminal, subscription(7), 5, b"abc"),
             Ok(TerminalInputOutcome::Ambiguous { applied_prefix: 3 })
         );
 
@@ -3111,10 +3227,14 @@ mod tests {
         )]);
 
         assert_eq!(
-            port.input_terminal(&input_terminal_ref(), 7, 0, b"x"),
+            port.input_terminal(&input_terminal_ref(), subscription(7), 0, b"x"),
             Err(TerminalError::InputEffectUnknown)
         );
-        assert!(port.terminal.is_none());
+        // The answer was fully received, so the stream stays consistent: the
+        // shared connection — and every peer pane's subscription on it — survives
+        // this pane's unknown input effect.
+        assert!(port.terminal.is_some());
+        assert_eq!(port.terminal_connection_epoch(), Some(1));
         drop(port);
         server.join().unwrap();
     }
@@ -3145,14 +3265,275 @@ mod tests {
                 terminal_input_port(vec![(ResponseOutcome::Error(error), json!(null))]);
 
             assert_eq!(
-                port.input_terminal(&input_terminal_ref(), 7, 0, b"x"),
+                port.input_terminal(&input_terminal_ref(), subscription(7), 0, b"x"),
                 Err(expected),
                 "side effect {side_effect:?}"
             );
-            assert!(port.terminal.is_none());
+            // A protocol error is a finished request on a healthy socket, whatever
+            // its side effect: the shared connection is kept so peer panes keep
+            // their attachments.
+            assert!(port.terminal.is_some(), "side effect {side_effect:?}");
+            assert_eq!(port.terminal_connection_epoch(), Some(1));
             drop(port);
             server.join().unwrap();
         }
+    }
+
+    /// A second daemon-owned terminal, so two panes share one connection.
+    #[cfg(unix)]
+    fn peer_terminal_ref() -> TerminalRef {
+        let mut terminal = input_terminal_ref();
+        terminal.terminal_id = TerminalId::new();
+        terminal
+    }
+
+    /// The terminal actions one scripted connection received, in order.
+    #[cfg(unix)]
+    fn terminal_actions(requests: Vec<serde_json::Value>) -> Vec<String> {
+        use usagi_core::usecase::client::{DaemonRequest, TerminalRequest};
+
+        requests
+            .into_iter()
+            .filter_map(|body| serde_json::from_value::<DaemonRequest>(body).ok())
+            .filter_map(|request| match request {
+                DaemonRequest::Terminal { action, payload } => {
+                    serde_json::from_value::<TerminalRequest>(payload)
+                        .ok()
+                        .map(|request| (action, request))
+                }
+                _ => None,
+            })
+            .map(|(action, request)| match request {
+                TerminalRequest::Input {
+                    subscription,
+                    input_seq,
+                    ..
+                } => format!("input#{input_seq}@{subscription}"),
+                TerminalRequest::Attach { .. } => "attach".to_owned(),
+                TerminalRequest::Detach { subscription, .. } => format!("detach@{subscription}"),
+                _ => format!("{action:?}").to_lowercase(),
+            })
+            .collect()
+    }
+
+    /// The shared attach / input / detach connection is only replaced by a
+    /// transport failure, and that replacement invalidates every pane's
+    /// subscription at once.
+    ///
+    /// This is the production half of the cross-pane contract: a fully received
+    /// `resync_required` for one pane keeps the socket its peers are attached on,
+    /// while an EOF advances the epoch so no pane can spend a keystroke on an
+    /// attachment the daemon released. Releasing a superseded subscription must
+    /// leave neither the fresh attachment nor its output registration behind.
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::too_many_lines)] // Two scripted connections are one epoch contract.
+    fn production_shared_connection_epoch_survives_protocol_errors_and_invalidates_on_eof() {
+        use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
+        use usagi_tui::presentation::AgentCommandPort;
+
+        let geometry = Geometry { cols: 20, rows: 3 };
+        let attach_body = |subscription: u64| {
+            json!({
+                "subscription": subscription,
+                "snapshot": {
+                    "revision": 1,
+                    "output_offset": 0,
+                    "base_offset": 0,
+                    "screen": screen_checkpoint_value(b"", 3, 20),
+                    "exited": null
+                }
+            })
+        };
+        let agent = input_terminal_ref();
+        let generic = peer_terminal_ref();
+
+        // The first connection serves both panes, then stops answering: the ninth
+        // request reads EOF, exactly as a restarted daemon leaves it.
+        let (client, first) = scripted_terminal_connection(
+            vec![
+                (ResponseOutcome::Ok, attach_body(11)),
+                (ResponseOutcome::Ok, attach_body(12)),
+                (ResponseOutcome::Ok, json!({ "ack": "Written" })),
+                (ResponseOutcome::Ok, json!({ "ack": "Written" })),
+                (
+                    ResponseOutcome::Error(ProtocolError::new(
+                        ErrorCode::ResyncRequired,
+                        "scripted pane-local resync",
+                    )),
+                    json!(null),
+                ),
+                (ResponseOutcome::Ok, attach_body(13)),
+                (ResponseOutcome::Ok, json!({})),
+                (ResponseOutcome::Ok, json!({ "ack": "Written" })),
+            ],
+            |_| {},
+        );
+        let mut port = DaemonAgentCommandPort {
+            terminal: Some(client),
+            poll: None,
+            // The pump answers every registered terminal, so a lost registration
+            // is observable as output that stops arriving.
+            pump: TerminalPollPump::spawn(|_, offset| {
+                Ok(vec![TerminalChunk {
+                    start_offset: offset,
+                    end_offset: offset + 2,
+                    data: b"hi".to_vec(),
+                }])
+            }),
+            terminal_epoch: 1,
+            attachments: Vec::new(),
+            restore_connection: None,
+            terminal_watch_cancelled: None,
+        };
+
+        let agent_first = port.attach_terminal(&agent, geometry).unwrap();
+        let generic_first = port.attach_terminal(&generic, geometry).unwrap();
+        assert_eq!(agent_first.subscription, subscription(11));
+        assert_eq!(generic_first.subscription, subscription(12));
+        assert_eq!(
+            port.input_terminal(&agent, agent_first.subscription, 0, b"a"),
+            Ok(TerminalInputOutcome::Written)
+        );
+        assert_eq!(
+            port.input_terminal(&generic, generic_first.subscription, 0, b"b"),
+            Ok(TerminalInputOutcome::Written)
+        );
+
+        // One pane's fully received `resync_required` keeps the shared connection,
+        // so the peer's subscription and the epoch are untouched.
+        assert_eq!(
+            port.attach_terminal(&agent, geometry),
+            Err(TerminalError::ResyncRequired)
+        );
+        assert!(port.terminal.is_some());
+        assert_eq!(port.terminal_connection_epoch(), Some(1));
+
+        // That pane resyncs on the same connection and releases its superseded
+        // subscription there — without revoking the attachment, or the output
+        // registration, that replaced it.
+        let agent_resync = port.attach_terminal(&agent, geometry).unwrap();
+        assert_eq!(agent_resync.subscription, subscription(13));
+        port.detach_terminal(&agent, agent_first.subscription);
+        let mut streamed = Vec::new();
+        for _ in 0..200 {
+            streamed = port.poll_terminal(&agent, 0).unwrap();
+            if !streamed.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            !streamed.is_empty(),
+            "the superseded release unregistered the fresh attachment's output"
+        );
+        // Same connection, so the daemon's ledger for this client continues.
+        assert_eq!(
+            port.input_terminal(&agent, agent_resync.subscription, 1, b"a2"),
+            Ok(TerminalInputOutcome::Written)
+        );
+
+        // The next request reads EOF. The connection is dropped and the epoch
+        // advances, which invalidates both panes' subscriptions at once.
+        assert_eq!(
+            port.attach_terminal(&generic, geometry),
+            Err(TerminalError::Unavailable)
+        );
+        assert!(port.terminal.is_none());
+        assert_eq!(port.terminal_connection_epoch(), Some(2));
+
+        // A replaced subscription is refused before any connection is opened, so
+        // the keystroke is definitely unwritten instead of rejected as unattached.
+        assert_eq!(
+            port.input_terminal(&generic, generic_first.subscription, 1, b"lost"),
+            Err(TerminalError::Unavailable)
+        );
+        // Its release is local too: nothing is sent, and no connection is opened
+        // to send it on.
+        port.detach_terminal(&generic, generic_first.subscription);
+        port.detach_terminal(&agent, agent_resync.subscription);
+        assert!(port.terminal.is_none());
+        assert_eq!(port.terminal_connection_epoch(), Some(2));
+
+        // The reconnect the next attach performs, with the replacement connection
+        // injected in place of the real socket.
+        let (replacement, second) = scripted_terminal_connection(
+            vec![
+                (ResponseOutcome::Ok, attach_body(21)),
+                (ResponseOutcome::Ok, json!({ "ack": "Written" })),
+            ],
+            |_| {},
+        );
+        port.terminal = Some(replacement);
+        let generic_second = port.attach_terminal(&generic, geometry).unwrap();
+        assert_eq!(
+            generic_second.subscription,
+            TerminalSubscription { id: 21, epoch: 2 }
+        );
+        // A new connection means a new daemon-side ledger, so the first input on
+        // it starts at zero and is written once.
+        assert_eq!(
+            port.input_terminal(&generic, generic_second.subscription, 0, b"k"),
+            Ok(TerminalInputOutcome::Written)
+        );
+
+        drop(port);
+        // Nothing was sent for the replaced subscriptions, and on each connection
+        // the attach precedes every input for that pane.
+        assert_eq!(
+            terminal_actions(first.join().unwrap()),
+            vec![
+                "attach",
+                "attach",
+                "input#0@11",
+                "input#0@12",
+                "attach",
+                "attach",
+                "detach@11",
+                "input#1@13",
+            ]
+        );
+        assert_eq!(
+            terminal_actions(second.join().unwrap()),
+            vec!["attach", "input#0@21"]
+        );
+    }
+
+    /// A resize failure drops only its own lane: the shared attach / input
+    /// connection, its epoch, and every pane's subscription survive it.
+    #[cfg(unix)]
+    #[test]
+    fn production_resize_lane_failure_keeps_the_shared_connection_and_epoch() {
+        use usagi_core::infrastructure::ipc::ResponseOutcome;
+        use usagi_tui::presentation::AgentCommandPort;
+
+        let geometry = Geometry { cols: 20, rows: 3 };
+        let (mut port, server) =
+            terminal_input_port(vec![(ResponseOutcome::Ok, json!({ "ack": "Written" }))]);
+        // The resize lane answers nothing and closes, which is the read timeout /
+        // EOF the deadline-bounded lane is there to contain.
+        let (resize_lane, resize_server) = scripted_terminal_connection(Vec::new(), |_| {});
+        port.poll = Some(resize_lane);
+        let terminal = input_terminal_ref();
+
+        assert_eq!(
+            port.resize_terminal(&terminal, geometry),
+            Err(TerminalError::Unavailable)
+        );
+
+        assert!(port.poll.is_none());
+        assert!(port.terminal.is_some());
+        assert_eq!(port.terminal_connection_epoch(), Some(1));
+        // The subscription taken before the resize is still current, so the pane
+        // keeps writing without reattaching.
+        assert_eq!(
+            port.input_terminal(&terminal, subscription(7), 0, b"x"),
+            Ok(TerminalInputOutcome::Written)
+        );
+
+        drop(port);
+        server.join().unwrap();
+        resize_server.join().unwrap();
     }
 
     #[cfg(unix)]
@@ -3181,7 +3562,7 @@ mod tests {
         let terminal = input_terminal_ref();
 
         assert_eq!(
-            port.input_terminal(&terminal, 7, 0, b"a"),
+            port.input_terminal(&terminal, subscription(7), 0, b"a"),
             Ok(TerminalInputOutcome::Written)
         );
         assert_eq!(
@@ -3192,7 +3573,7 @@ mod tests {
         let attach = port
             .attach_terminal(&terminal, Geometry { cols: 20, rows: 3 })
             .unwrap();
-        assert_eq!(attach.connection_epoch, 1);
+        assert_eq!(attach.subscription.epoch, 1);
         assert_eq!(
             port.input_terminal(&terminal, attach.subscription, 1, b"b"),
             Ok(TerminalInputOutcome::Written)
@@ -3431,12 +3812,13 @@ mod tests {
             poll: None,
             pump: TerminalPollPump::spawn(|_, _| Ok(Vec::new())),
             terminal_epoch: 1,
+            attachments: Vec::new(),
             restore_connection: None,
             terminal_watch_cancelled: None,
         };
 
         assert_eq!(
-            port.input_terminal(&input_terminal_ref(), 7, 0, b"x"),
+            port.input_terminal(&input_terminal_ref(), subscription(7), 0, b"x"),
             Err(TerminalError::InputEffectUnknown)
         );
         assert!(port.terminal.is_none());

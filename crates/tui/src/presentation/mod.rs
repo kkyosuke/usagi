@@ -80,7 +80,7 @@ use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
 use crate::usecase::application::terminal_selection::TerminalSelection;
 use crate::usecase::application::terminal_session::{
     SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
-    TerminalSession, TerminalStreamPort,
+    TerminalSession, TerminalStreamPort, TerminalSubscription,
 };
 use crate::usecase::application::{Key, ScreenRunner, Terminal};
 use crate::usecase::overview::SessionCommand;
@@ -223,6 +223,17 @@ pub trait AgentCommandPort: Send {
         Err(TerminalError::Unavailable)
     }
 
+    /// The epoch of the shared terminal transport this port currently holds, or
+    /// `None` when it multiplexes nothing and therefore invalidates nothing.
+    ///
+    /// The production adapter carries every pane's attach / input / detach on
+    /// one connection, so replacing it invalidates all subscriptions taken
+    /// before. Reporting the epoch is what lets each [`TerminalSession`]
+    /// re-attach on its own before it spends a keystroke.
+    fn terminal_connection_epoch(&self) -> Option<u64> {
+        None
+    }
+
     /// Send input bytes to a daemon terminal, fenced by subscription/sequence.
     ///
     /// # Errors
@@ -231,7 +242,7 @@ pub trait AgentCommandPort: Send {
     fn input_terminal(
         &mut self,
         _terminal: &TerminalRef,
-        _subscription: u64,
+        _subscription: TerminalSubscription,
         _input_seq: u64,
         _bytes: &[u8],
     ) -> Result<TerminalInputOutcome, TerminalError> {
@@ -239,7 +250,9 @@ pub trait AgentCommandPort: Send {
     }
 
     /// Release a daemon terminal subscription; it must not stop the process.
-    fn detach_terminal(&mut self, _terminal: &TerminalRef, _subscription: u64) {}
+    /// A subscription from a replaced epoch is released locally, without
+    /// touching the current transport or the attachments its peers hold.
+    fn detach_terminal(&mut self, _terminal: &TerminalRef, _subscription: TerminalSubscription) {}
 
     /// List the daemon-owned runtimes in scope for this workspace so a freshly
     /// opened controller can re-project the terminals and Agents that are still
@@ -492,6 +505,10 @@ impl DesktopNotificationPort for NoDesktopNotifications {
 struct AgentStreamPort<'a>(&'a mut dyn AgentCommandPort);
 
 impl TerminalStreamPort for AgentStreamPort<'_> {
+    fn connection_epoch(&self) -> Option<u64> {
+        self.0.terminal_connection_epoch()
+    }
+
     fn resize(&mut self, terminal: &TerminalRef, geometry: Geometry) -> Result<(), TerminalError> {
         self.0.resize_terminal(terminal, geometry)
     }
@@ -513,14 +530,14 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
     fn input(
         &mut self,
         terminal: &TerminalRef,
-        subscription: u64,
+        subscription: TerminalSubscription,
         input_seq: u64,
         bytes: &[u8],
     ) -> Result<TerminalInputOutcome, TerminalError> {
         self.0
             .input_terminal(terminal, subscription, input_seq, bytes)
     }
-    fn detach(&mut self, terminal: &TerminalRef, subscription: u64) {
+    fn detach(&mut self, terminal: &TerminalRef, subscription: TerminalSubscription) {
         self.0.detach_terminal(terminal, subscription);
     }
 }
@@ -5213,17 +5230,17 @@ mod tests {
         NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep, PaneLaunch,
         PaneLaunchCommandPort, SerializedPaneLaunchPort, SessionCommandPort,
         SessionCommandPortFactory, SessionCommandResult, Start, TerminalAttach, TerminalChunk,
-        TerminalError, TerminalInputOutcome, UnavailableAgentCommandPort, UnavailableBackendPort,
-        UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
-        UnavailableExternalTerminalPort, UnavailablePaneLaunchPort, UnavailablePrSnapshotPort,
-        UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory, WelcomeStep,
-        WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
-        app_event_from_key, close_exited_panes, controller_terminal_view, copy_terminal_selection,
-        drain_controller_host_actions, drain_session_completions, forward_live_terminal_input,
-        handle_terminal_pointer, intercept_live_terminal_control, key_to_terminal_bytes,
-        new_project_notice, play_startup_splash, poll_and_project_terminals,
-        render_controller_frame, render_home_snapshot, restore_open_panes, run as run_from_start,
-        run_with_settings,
+        TerminalError, TerminalInputOutcome, TerminalSubscription, UnavailableAgentCommandPort,
+        UnavailableBackendPort, UnavailableBrowserOpener, UnavailableDecisionCommandPort,
+        UnavailableEnvironmentStore, UnavailableExternalTerminalPort, UnavailablePaneLaunchPort,
+        UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
+        UnavailableSessionCommandPortFactory, WelcomeStep, WorkspaceLoader, WorkspaceRuntime,
+        WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key, close_exited_panes,
+        controller_terminal_view, copy_terminal_selection, drain_controller_host_actions,
+        drain_session_completions, forward_live_terminal_input, handle_terminal_pointer,
+        intercept_live_terminal_control, key_to_terminal_bytes, new_project_notice,
+        play_startup_splash, poll_and_project_terminals, render_controller_frame,
+        render_home_snapshot, restore_open_panes, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
@@ -6055,8 +6072,7 @@ mod tests {
         ) -> Result<TerminalAttach, TerminalError> {
             self.0.lock().unwrap().attaches += 1;
             Ok(TerminalAttach {
-                subscription: 9,
-                connection_epoch: 1,
+                subscription: TerminalSubscription { id: 9, epoch: 1 },
                 revision: 1,
                 output_offset: 0,
                 screen: attach_checkpoint(b"", geometry),
@@ -6076,7 +6092,7 @@ mod tests {
         fn input_terminal(
             &mut self,
             _terminal: &TerminalRef,
-            _subscription: u64,
+            _subscription: TerminalSubscription,
             _input_seq: u64,
             bytes: &[u8],
         ) -> Result<TerminalInputOutcome, TerminalError> {
@@ -6093,7 +6109,11 @@ mod tests {
             Ok(())
         }
 
-        fn detach_terminal(&mut self, _terminal: &TerminalRef, _subscription: u64) {
+        fn detach_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            _subscription: TerminalSubscription,
+        ) {
             self.0.lock().unwrap().detaches += 1;
         }
     }
@@ -8282,8 +8302,10 @@ mod tests {
             geometry: Geometry,
         ) -> Result<TerminalAttach, TerminalError> {
             Ok(TerminalAttach {
-                subscription: self.subscription,
-                connection_epoch: 1,
+                subscription: TerminalSubscription {
+                    id: self.subscription,
+                    epoch: 1,
+                },
                 revision: 1,
                 output_offset: self.replay.len() as u64,
                 screen: attach_checkpoint(&self.replay, geometry),
@@ -8302,7 +8324,7 @@ mod tests {
         fn input_terminal(
             &mut self,
             _terminal: &TerminalRef,
-            _subscription: u64,
+            _subscription: TerminalSubscription,
             _input_seq: u64,
             bytes: &[u8],
         ) -> Result<TerminalInputOutcome, TerminalError> {
@@ -8313,8 +8335,8 @@ mod tests {
             }
         }
 
-        fn detach_terminal(&mut self, _terminal: &TerminalRef, subscription: u64) {
-            self.detaches.lock().unwrap().push(subscription);
+        fn detach_terminal(&mut self, _terminal: &TerminalRef, subscription: TerminalSubscription) {
+            self.detaches.lock().unwrap().push(subscription.id);
         }
     }
 
@@ -8379,6 +8401,396 @@ mod tests {
         assert!(runtime.active_pane().tabs().is_empty());
         assert!(!runtime.state().has_live_pane());
         assert_eq!(*detaches.lock().unwrap(), vec![5]);
+    }
+
+    /// The wire traffic one shared connection recorded, as `e<epoch> <op> <label>`.
+    type SharedConnectionLog = Arc<Mutex<Vec<String>>>;
+    /// The bytes each labelled pane wrote to its PTY, in order.
+    type SharedConnectionWrites = Arc<Mutex<Vec<(&'static str, Vec<u8>)>>>;
+
+    /// Failures armed between steps of the shared-connection scenario, so each
+    /// one happens at exactly the point the test drives it.
+    #[derive(Default)]
+    struct SharedConnectionScript {
+        /// Terminals whose next poll answers `resync_required`.
+        poll_resync: Vec<&'static str>,
+        /// Terminals whose next viewport resize fails on the resize lane.
+        resize_failures: Vec<&'static str>,
+        /// Terminals whose next input loses the transport mid-response.
+        input_transport_eof: Vec<&'static str>,
+    }
+
+    /// One shared daemon connection carrying every pane's attach / input /
+    /// detach, as the production adapter does.
+    ///
+    /// Replacing that connection releases **all** of its attachments and starts
+    /// a fresh per-connection input ledger — the daemon's own behavior — so a
+    /// subscription taken before the replacement is no longer usable by anyone.
+    /// Every request is recorded as `e<epoch> <op> <label>` so each pane's
+    /// ordering within an epoch can be asserted.
+    struct SharedConnectionPort {
+        labels: Vec<(TerminalRef, &'static str)>,
+        epoch: u64,
+        next_subscription: u64,
+        /// The subscriptions the live connection holds, as the daemon sees them.
+        attached: Vec<(TerminalRef, u64)>,
+        /// The next input sequence the daemon expects on this connection.
+        ledger: Vec<(TerminalRef, u64)>,
+        script: Arc<Mutex<SharedConnectionScript>>,
+        log: SharedConnectionLog,
+        writes: SharedConnectionWrites,
+    }
+
+    impl SharedConnectionPort {
+        fn label(&self, terminal: &TerminalRef) -> &'static str {
+            self.labels
+                .iter()
+                .find(|(candidate, _)| candidate.fences(terminal))
+                .map(|(_, label)| *label)
+                .expect("every terminal in this scenario is labelled")
+        }
+
+        fn record(&self, event: String) {
+            self.log.lock().unwrap().push(event);
+        }
+
+        /// Consumes one armed failure for `label`.
+        fn take_armed(
+            &self,
+            label: &'static str,
+            select: fn(&mut SharedConnectionScript) -> &mut Vec<&'static str>,
+        ) -> bool {
+            let mut script = self.script.lock().unwrap();
+            let list = select(&mut script);
+            match list.iter().position(|entry| *entry == label) {
+                Some(index) => {
+                    list.remove(index);
+                    true
+                }
+                None => false,
+            }
+        }
+
+        /// The transport broke mid-request: the daemon drops every attachment of
+        /// that connection, and the client's next request runs on a new one.
+        fn replace_transport(&mut self) {
+            self.epoch += 1;
+            self.attached.clear();
+            self.ledger.clear();
+            self.record(format!("e{} replaced", self.epoch));
+        }
+
+        fn holds(&self, terminal: &TerminalRef, subscription: u64) -> bool {
+            self.attached
+                .iter()
+                .any(|(attached, id)| attached.fences(terminal) && *id == subscription)
+        }
+
+        fn expected_seq(&self, terminal: &TerminalRef) -> u64 {
+            self.ledger
+                .iter()
+                .find(|(attached, _)| attached.fences(terminal))
+                .map_or(0, |(_, seq)| *seq)
+        }
+    }
+
+    impl AgentCommandPort for SharedConnectionPort {
+        fn launch(
+            &mut self,
+            _workspace: WorkspaceId,
+            _session: Option<SessionId>,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<AgentPaneAdmission, String> {
+            Err("this scenario attaches already-launched terminals".to_owned())
+        }
+
+        fn terminal_connection_epoch(&self) -> Option<u64> {
+            Some(self.epoch)
+        }
+
+        fn resize_terminal(
+            &mut self,
+            terminal: &TerminalRef,
+            _geometry: Geometry,
+        ) -> Result<(), TerminalError> {
+            let label = self.label(terminal);
+            // `Resize` rides its own deadline-bounded lane, so even its transport
+            // failure leaves the shared connection — and every attachment on it —
+            // alone.
+            if self.take_armed(label, |script| &mut script.resize_failures) {
+                self.record(format!("e{} resize-failed {label}", self.epoch));
+                return Err(TerminalError::Unavailable);
+            }
+            self.record(format!("e{} resize {label}", self.epoch));
+            Ok(())
+        }
+
+        fn attach_terminal(
+            &mut self,
+            terminal: &TerminalRef,
+            geometry: Geometry,
+        ) -> Result<TerminalAttach, TerminalError> {
+            let label = self.label(terminal);
+            self.next_subscription += 1;
+            let id = self.next_subscription;
+            self.attached.push((terminal.clone(), id));
+            self.record(format!("e{} attach {label}", self.epoch));
+            Ok(TerminalAttach {
+                subscription: TerminalSubscription {
+                    id,
+                    epoch: self.epoch,
+                },
+                revision: 1,
+                output_offset: 0,
+                screen: attach_checkpoint(b"", geometry),
+                exited: false,
+            })
+        }
+
+        fn poll_terminal(
+            &mut self,
+            terminal: &TerminalRef,
+            _after_offset: u64,
+        ) -> Result<Vec<TerminalChunk>, TerminalError> {
+            let label = self.label(terminal);
+            // A fully received `resync_required` is a finished answer: it tells
+            // one pane to replace its screen, not the whole TUI to reconnect.
+            if self.take_armed(label, |script| &mut script.poll_resync) {
+                self.record(format!("e{} resync-required {label}", self.epoch));
+                return Err(TerminalError::ResyncRequired);
+            }
+            self.record(format!("e{} resume {label}", self.epoch));
+            Ok(Vec::new())
+        }
+
+        fn input_terminal(
+            &mut self,
+            terminal: &TerminalRef,
+            subscription: TerminalSubscription,
+            input_seq: u64,
+            bytes: &[u8],
+        ) -> Result<TerminalInputOutcome, TerminalError> {
+            let label = self.label(terminal);
+            // What the daemon does with a subscription whose connection is gone:
+            // it released that attachment, so the write is refused with no effect
+            // and the keystroke is lost. No pane may ever reach this.
+            if subscription.epoch != self.epoch || !self.holds(terminal, subscription.id) {
+                self.record(format!("e{} not-attached {label}", self.epoch));
+                return Err(TerminalError::Stale);
+            }
+            let expected = self.expected_seq(terminal);
+            if input_seq != expected {
+                self.record(format!(
+                    "e{} sequence-gap {label} (got {input_seq}, want {expected})",
+                    self.epoch
+                ));
+                return Err(TerminalError::Stale);
+            }
+            if self.take_armed(label, |script| &mut script.input_transport_eof) {
+                self.replace_transport();
+                return Err(TerminalError::InputEffectUnknown);
+            }
+            match self
+                .ledger
+                .iter_mut()
+                .find(|(attached, _)| attached.fences(terminal))
+            {
+                Some((_, seq)) => *seq += 1,
+                None => self.ledger.push((terminal.clone(), 1)),
+            }
+            self.writes.lock().unwrap().push((label, bytes.to_vec()));
+            self.record(format!("e{} input#{input_seq} {label}", self.epoch));
+            Ok(TerminalInputOutcome::Written)
+        }
+
+        fn detach_terminal(&mut self, terminal: &TerminalRef, subscription: TerminalSubscription) {
+            let label = self.label(terminal);
+            if subscription.epoch != self.epoch {
+                // Released locally: the daemon already dropped this attachment
+                // with its connection, so nothing on the current one is touched.
+                self.record(format!("e{} local-detach {label}", self.epoch));
+                return;
+            }
+            self.attached
+                .retain(|(attached, id)| !(attached.fences(terminal) && *id == subscription.id));
+            self.record(format!("e{} detach {label}", self.epoch));
+        }
+    }
+
+    /// Every attachment-fenced request one pane made in one epoch, in order.
+    fn fenced_traffic(log: &[String], epoch: &str, label: &str) -> Vec<String> {
+        log.iter()
+            .filter(|event| {
+                event.starts_with(epoch)
+                    && event.ends_with(label)
+                    && (event.contains(" attach ")
+                        || event.contains(" resume ")
+                        || event.contains(" input#"))
+            })
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One scenario drives every epoch transition in order.
+    fn a_replaced_shared_connection_reattaches_every_pane_before_it_streams_again() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let agent = live_terminal_ref(workspace, session);
+        let generic = live_terminal_ref(workspace, session);
+        let script = Arc::new(Mutex::new(SharedConnectionScript::default()));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(SharedConnectionPort {
+                    labels: vec![(agent.clone(), "A"), (generic.clone(), "B")],
+                    epoch: 1,
+                    next_subscription: 10,
+                    attached: Vec::new(),
+                    ledger: Vec::new(),
+                    script: Arc::clone(&script),
+                    log: Arc::clone(&log),
+                    writes: Arc::clone(&writes),
+                }),
+            );
+        let geometry = terminal_geometry(20, 80);
+
+        // Both panes attach over one connection and type once.
+        ui.start_terminal_session(agent.clone(), geometry);
+        ui.start_terminal_session(generic.clone(), geometry);
+        assert_eq!(ui.send_terminal_bytes(&agent, b"a"), Ok(()));
+        assert_eq!(ui.send_terminal_bytes(&generic, b"b"), Ok(()));
+
+        // 1. Pane A's poll takes a fully received `resync_required`. It resyncs on
+        //    the same connection, so B keeps its attachment and its ledger
+        //    position, and A continues from the sequence the daemon expects.
+        script.lock().unwrap().poll_resync.push("A");
+        assert!(ui.poll_all_terminals().is_empty());
+        assert_eq!(ui.send_terminal_bytes(&generic, b"b2"), Ok(()));
+        assert_eq!(ui.send_terminal_bytes(&agent, b"a2"), Ok(()));
+
+        // 2. A's viewport resize fails on the resize lane. Neither pane loses its
+        //    attachment, so both keep writing on the same subscriptions.
+        script.lock().unwrap().resize_failures.push("A");
+        ui.resize_terminals(terminal_geometry(24, 100));
+        assert_eq!(ui.send_terminal_bytes(&agent, b"a3"), Ok(()));
+
+        // 3. A's input loses the transport before its response completes. The
+        //    daemon released B's attachment with that connection too, even though
+        //    B never saw a failure.
+        script.lock().unwrap().input_transport_eof.push("A");
+        assert!(ui.send_terminal_bytes(&agent, b"a4").is_err());
+
+        // B's very next keystroke attaches on the new connection first, and is
+        // written exactly once instead of being rejected as unattached.
+        assert_eq!(ui.send_terminal_bytes(&generic, b"k"), Ok(()));
+
+        // A recovers through its own reconnect backoff, then both panes stream.
+        for _ in 0..200 {
+            if ui.poll_all_terminals().is_empty()
+                && fenced_traffic(&log.lock().unwrap(), "e2", "A")
+                    .iter()
+                    .any(|event| event.contains(" attach "))
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(ui.send_terminal_bytes(&agent, b"a5"), Ok(()));
+
+        // Releasing A's pane at the end must not disturb B's attachment.
+        ui.close_terminal(&agent);
+        assert_eq!(ui.send_terminal_bytes(&generic, b"k2"), Ok(()));
+
+        let log = log.lock().unwrap().clone();
+        // No keystroke was ever spent on a released subscription, and no ledger
+        // gap opened: the exact cascade this fences off.
+        assert!(
+            !log.iter()
+                .any(|event| event.contains("not-attached") || event.contains("sequence-gap")),
+            "{log:#?}"
+        );
+        // In each epoch, every pane's first attachment-fenced request is its own
+        // attach — never a `Resume` or an `Input` on a released subscription.
+        for epoch in ["e1", "e2"] {
+            for label in ["A", "B"] {
+                let traffic = fenced_traffic(&log, epoch, label);
+                assert_eq!(
+                    traffic.first(),
+                    Some(&format!("{epoch} attach {label}")),
+                    "{label} in {epoch}: {log:#?}"
+                );
+            }
+        }
+        // Exactly one connection replacement happened, and only the failing lane
+        // caused it.
+        assert_eq!(
+            log.iter()
+                .filter(|event| event.contains("replaced"))
+                .count(),
+            1,
+            "{log:#?}"
+        );
+        // B held a subscription from the replaced connection, so its release was
+        // local: it was never re-sent on the connection its peers now use, and it
+        // came after — and did not revoke — the attach that replaced it.
+        assert!(log.contains(&"e2 local-detach B".to_owned()), "{log:#?}");
+        // A's same-connection resync detached its own superseded subscription
+        // there, where the daemon still held it, and closing A's pane later
+        // released its current one the same way.
+        assert!(log.contains(&"e1 detach A".to_owned()), "{log:#?}");
+        assert!(log.contains(&"e2 detach A".to_owned()), "{log:#?}");
+        // Sequences continue across a same-connection resync and restart only on
+        // the new connection's fresh ledger.
+        for (label, expected) in [
+            (
+                'A',
+                vec![
+                    "e1 input#0 A",
+                    "e1 input#1 A",
+                    "e1 input#2 A",
+                    "e2 input#0 A",
+                ],
+            ),
+            (
+                'B',
+                vec![
+                    "e1 input#0 B",
+                    "e1 input#1 B",
+                    "e2 input#0 B",
+                    "e2 input#1 B",
+                ],
+            ),
+        ] {
+            assert_eq!(
+                log.iter()
+                    .filter(|event| event.contains(" input#") && event.ends_with(label))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                expected,
+                "{log:#?}"
+            );
+        }
+
+        // Every keystroke reached the PTY once, in order, including the first one
+        // after the recovery.
+        assert_eq!(
+            writes.lock().unwrap().clone(),
+            vec![
+                ("A", b"a".to_vec()),
+                ("B", b"b".to_vec()),
+                ("B", b"b2".to_vec()),
+                ("A", b"a2".to_vec()),
+                ("A", b"a3".to_vec()),
+                ("B", b"k".to_vec()),
+                ("A", b"a5".to_vec()),
+                ("B", b"k2".to_vec()),
+            ]
+        );
     }
 
     #[test]
@@ -8743,8 +9155,7 @@ mod tests {
             geometry: Geometry,
         ) -> Result<TerminalAttach, TerminalError> {
             Ok(TerminalAttach {
-                subscription: 1,
-                connection_epoch: 1,
+                subscription: TerminalSubscription { id: 1, epoch: 1 },
                 revision: 1,
                 output_offset: 0,
                 screen: attach_checkpoint(&[], geometry),
@@ -8761,7 +9172,7 @@ mod tests {
         fn input_terminal(
             &mut self,
             terminal: &TerminalRef,
-            _subscription: u64,
+            _subscription: TerminalSubscription,
             _input_seq: u64,
             bytes: &[u8],
         ) -> Result<TerminalInputOutcome, TerminalError> {
@@ -14047,11 +14458,11 @@ mod tests {
             Err(TerminalError::Unavailable)
         );
         assert_eq!(
-            port.input_terminal(&terminal, 1, 0, b"x"),
+            port.input_terminal(&terminal, TerminalSubscription { id: 1, epoch: 1 }, 0, b"x"),
             Err(TerminalError::Unavailable)
         );
         // Detach is a no-op default and must not panic.
-        port.detach_terminal(&terminal, 1);
+        port.detach_terminal(&terminal, TerminalSubscription { id: 1, epoch: 1 });
         assert_eq!(
             port.launch_terminal(
                 WorkspaceId::new(),

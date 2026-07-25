@@ -1,13 +1,13 @@
 ---
 number: 523
 title: fix(tui): shared terminal connection epochで全pane subscriptionを再確立する
-status: todo
+status: done
 priority: high
 labels: [review, v2, tui, terminal, ipc, reconnect, safety]
 dependson: []
 related: [216, 463, 508, 517, 519]
 created_at: 2026-07-22T11:41:36.789232+00:00
-updated_at: 2026-07-22T11:45:23.051060+00:00
+updated_at: 2026-07-25T06:50:02.237182+00:00
 ---
 
 ## 問題・影響
