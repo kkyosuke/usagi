@@ -6177,9 +6177,8 @@ mod tests {
             _session: Option<SessionId>,
             _profile: Option<AgentProfileId>,
         ) -> Result<AgentPaneAdmission, String> {
-            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                panic!("launch client died");
-            }
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            assert!(call > 0, "launch client died");
             Ok(AgentPaneAdmission {
                 terminal: self.terminal.clone(),
                 continuation: None,
