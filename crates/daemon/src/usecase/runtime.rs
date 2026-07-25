@@ -15,7 +15,7 @@ use usagi_core::domain::{
         DurableLaunchSnapshot, LaunchRequest, LaunchValidationError, ProviderResumePhase,
         ProviderResumeRef, ProviderResumeStatus,
     },
-    id::{AgentRuntimeRef, CompletionFence, ConnectionId, TerminalRef},
+    id::{AgentRuntimeRef, ClientId, CompletionFence, ConnectionId, OperationId, TerminalRef},
     terminal_launch::TerminalKind,
     terminal_retention::{AdmissionRejection, EvictionReason, FinalLookup, RetainedFinal},
 };
@@ -1140,7 +1140,30 @@ impl RuntimeCoordinator {
     ) -> Result<InputAck, RuntimeError> {
         self.running(runtime)?;
         self.terminals
-            .write_input(&runtime.terminal, input, bytes, writer)
+            .write_input(
+                &runtime.terminal,
+                input,
+                bytes,
+                self.retention.now_ms(),
+                writer,
+            )
+            .map_err(RuntimeError::Terminal)
+    }
+
+    /// Reads the recorded final of one durable input operation (#519).
+    ///
+    /// It is read-only and deliberately not gated on liveness: a client resolving
+    /// a lost acknowledgement must reach the same final even after the Agent's
+    /// PTY has exited. `Ok(None)` is a typed unknown, never a rewrite licence.
+    pub fn input_outcome(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        client: ClientId,
+        operation: OperationId,
+    ) -> Result<Option<InputAck>, RuntimeError> {
+        let now_ms = self.retention.now_ms();
+        self.terminals
+            .input_outcome(&runtime.terminal, client, operation, now_ms)
             .map_err(RuntimeError::Terminal)
     }
 
@@ -2364,6 +2387,7 @@ mod tests {
                     client,
                     request: RequestId::new(),
                     input_seq: 0,
+                    operation: None,
                 },
                 b"go\n",
                 &mut writer,
@@ -2535,6 +2559,7 @@ mod tests {
                     client: ClientId::new(),
                     request: RequestId::new(),
                     input_seq: 0,
+                    operation: None,
                 },
                 b"ignored",
                 &mut Writer::default(),

@@ -334,6 +334,7 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
                     terminal,
                     subscription,
                     input_seq,
+                    input_operation,
                     bytes,
                 },
             ) => self
@@ -345,10 +346,22 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
                         client,
                         request: request_id,
                         input_seq,
+                        operation: input_operation,
                     },
                     &bytes,
                 )
                 .map(|ack| json!({"ack": ack}))
+                .map_err(map_error),
+            (
+                TerminalAction::InputOutcome,
+                TerminalRequest::InputOutcome {
+                    terminal,
+                    input_operation,
+                },
+            ) => self
+                .coordinator
+                .input_outcome(&terminal, client, input_operation)
+                .map(input_outcome_body)
                 .map_err(map_error),
             _ => Err(ProtocolError::new(
                 ErrorCode::InvalidArgument,
@@ -411,6 +424,18 @@ pub(super) fn geometry(value: TerminalGeometry) -> Result<Geometry, ProtocolErro
             )
         })
 }
+/// Projects a durable input operation lookup onto the wire.
+///
+/// An absent record is `unknown` rather than an error or a fabricated success:
+/// the client keeps its uncertainty latched and must not write the bytes again
+/// (#519).
+pub(super) fn input_outcome_body(ack: Option<super::terminal::InputAck>) -> Value {
+    match ack {
+        Some(ack) => json!({"outcome": "final", "ack": ack}),
+        None => json!({"outcome": "unknown"}),
+    }
+}
+
 fn map_scope_failure(_: TerminalScopeResolveError) -> ProtocolError {
     ProtocolError::new(
         ErrorCode::InvalidArgument,
@@ -426,6 +451,11 @@ fn map_error(error: GenericTerminalError) -> ProtocolError {
         // the client keeps its current state until a retry succeeds.
         GenericTerminalError::Terminal(RegistryError::CheckpointUnavailable) => {
             ErrorCode::ResourceExhausted
+        }
+        // One durable operation identity presented for different bytes or
+        // another terminal: nothing was written and nothing is replayed.
+        GenericTerminalError::Terminal(RegistryError::IdempotencyConflict) => {
+            ErrorCode::IdempotencyConflict
         }
         GenericTerminalError::UnknownTerminal
         | GenericTerminalError::TerminalGenerationMismatch
@@ -897,6 +927,7 @@ mod tests {
                     terminal: terminal.clone(),
                     subscription,
                     input_seq: 0,
+                    input_operation: None,
                     bytes: b"echo ok\n".to_vec()
                 }
             )["ack"],
@@ -955,6 +986,7 @@ mod tests {
                     terminal: terminal.clone(),
                     subscription,
                     input_seq: 1,
+                    input_operation: None,
                     bytes: b"late\n".to_vec(),
                 })
                 .unwrap(),
@@ -1404,6 +1436,178 @@ mod tests {
         clock.advance(1000);
         assert_eq!(runtime.collect_retention_garbage(), 1);
         assert!(retention.lookup(&terminal).marker().is_some());
+    }
+
+    /// The wire contract of #519: one operation identity, one PTY write, and a
+    /// read-only query that answers the same final on a different connection —
+    /// including after the terminal has exited, when the write path is closed.
+    #[test]
+    fn durable_input_operations_replay_and_resolve_across_connections() {
+        let (mut runtime, terminal) = launched_runtime();
+        let client = ClientId::new();
+        let first = ConnectionId::new();
+        let subscription = call(
+            &mut runtime,
+            first,
+            client,
+            TerminalAction::Attach,
+            TerminalRequest::Attach {
+                terminal: terminal.clone(),
+            },
+        )["subscription"]
+            .as_u64()
+            .unwrap();
+        let operation = OperationId::new();
+        let input = |subscription: u64, input_seq: u64, input_operation: Option<OperationId>| {
+            TerminalRequest::Input {
+                terminal: terminal.clone(),
+                subscription,
+                input_seq,
+                input_operation,
+                bytes: b"ls\r".to_vec(),
+            }
+        };
+        assert_eq!(
+            call(
+                &mut runtime,
+                first,
+                client,
+                TerminalAction::Input,
+                input(subscription, 0, Some(operation)),
+            )["ack"],
+            "Written"
+        );
+
+        // The connection dies before the client sees the acknowledgement.
+        TerminalOwner::disconnect(&mut runtime, first);
+        let second = ConnectionId::new();
+        let fresh = call(
+            &mut runtime,
+            second,
+            client,
+            TerminalAction::Attach,
+            TerminalRequest::Attach {
+                terminal: terminal.clone(),
+            },
+        )["subscription"]
+            .as_u64()
+            .unwrap();
+
+        // The resend on the fresh connection and subscription replays the
+        // recorded final; the epoch-local sequence restarted at zero.
+        assert_eq!(
+            call(
+                &mut runtime,
+                second,
+                client,
+                TerminalAction::Input,
+                input(fresh, 0, Some(operation)),
+            )["ack"],
+            serde_json::json!({ "Cached": "Written" })
+        );
+        // A genuinely new operation on the fresh connection is written, at
+        // sequence zero: the epoch-local ledger restarted with the connection
+        // even though the client incarnation (and its operation ledger) did not.
+        assert_eq!(
+            call(
+                &mut runtime,
+                second,
+                client,
+                TerminalAction::Input,
+                TerminalRequest::Input {
+                    terminal: terminal.clone(),
+                    subscription: fresh,
+                    input_seq: 0,
+                    input_operation: Some(OperationId::new()),
+                    bytes: b"\r".to_vec(),
+                },
+            )["ack"],
+            "Written"
+        );
+        let resolved = call(
+            &mut runtime,
+            second,
+            client,
+            TerminalAction::InputOutcome,
+            TerminalRequest::InputOutcome {
+                terminal: terminal.clone(),
+                input_operation: operation,
+            },
+        );
+        assert_eq!(resolved["outcome"], "final");
+        assert_eq!(resolved["ack"], "Written");
+        assert_eq!(runtime.pty.writes, b"ls\r\r");
+
+        // An operation the daemon never recorded is unknown, not an error and
+        // not a success.
+        assert_eq!(
+            call(
+                &mut runtime,
+                second,
+                client,
+                TerminalAction::InputOutcome,
+                TerminalRequest::InputOutcome {
+                    terminal: terminal.clone(),
+                    input_operation: OperationId::new(),
+                },
+            ),
+            serde_json::json!({ "outcome": "unknown" })
+        );
+
+        // Reusing the identity for different bytes is a conflict with no write.
+        let conflict = runtime
+            .request(
+                second,
+                client,
+                RequestId::new(),
+                TerminalAction::Input,
+                serde_json::to_value(TerminalRequest::Input {
+                    terminal: terminal.clone(),
+                    subscription: fresh,
+                    input_seq: 0,
+                    input_operation: Some(operation),
+                    bytes: b"rm -rf\r".to_vec(),
+                })
+                .unwrap(),
+                SnapshotWire::RawTail,
+            )
+            .unwrap_err();
+        assert_eq!(conflict.code, ErrorCode::IdempotencyConflict);
+        assert_eq!(
+            conflict.side_effect,
+            usagi_core::infrastructure::ipc::SideEffect::None
+        );
+        assert_eq!(runtime.pty.writes, b"ls\r\r");
+
+        // After exit the write path is closed, but the resolution query still
+        // returns the final recorded before it.
+        runtime.exit(&terminal, 0).unwrap();
+        let after_exit = call(
+            &mut runtime,
+            second,
+            client,
+            TerminalAction::InputOutcome,
+            TerminalRequest::InputOutcome {
+                terminal: terminal.clone(),
+                input_operation: operation,
+            },
+        );
+        assert_eq!(after_exit["ack"], "Written");
+        // Another client's query for the same identity is unknown: the ledger is
+        // scoped to the client incarnation that issued it.
+        assert_eq!(
+            call(
+                &mut runtime,
+                second,
+                ClientId::new(),
+                TerminalAction::InputOutcome,
+                TerminalRequest::InputOutcome {
+                    terminal,
+                    input_operation: operation,
+                },
+            )["outcome"],
+            "unknown"
+        );
     }
 
     #[test]

@@ -948,6 +948,7 @@ fn checkpoint_contract<O: DaemonOwner>(scenario: Scenario<O>, label: &str) {
             terminal: terminal.clone(),
             subscription,
             input_seq: 0,
+            input_operation: None,
             bytes: b"\n".to_vec(),
         },
         SnapshotWire::ScreenCheckpoint,

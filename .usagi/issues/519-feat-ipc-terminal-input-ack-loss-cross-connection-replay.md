@@ -1,13 +1,13 @@
 ---
 number: 519
 title: feat(ipc): terminal input ACK lossをcross-connection replayへ収束させる
-status: todo
+status: done
 priority: high
 labels: [review, v2, core, daemon, tui, terminal, ipc, idempotency]
 dependson: [517, 523]
 related: [215, 216, 463, 475, 508, 523]
 created_at: 2026-07-22T11:37:48.472334+00:00
-updated_at: 2026-07-22T11:56:37.187599+00:00
+updated_at: 2026-07-25T14:50:28.431403+00:00
 ---
 
 ## 問題・影響

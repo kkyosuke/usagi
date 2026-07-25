@@ -80,7 +80,7 @@ use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
 use crate::usecase::application::terminal_selection::TerminalSelection;
 use crate::usecase::application::terminal_session::{
     SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
-    TerminalSession, TerminalStreamPort, TerminalSubscription,
+    TerminalInputResolution, TerminalSession, TerminalStreamPort, TerminalSubscription,
 };
 use crate::usecase::application::{Key, ScreenRunner, Terminal, open_refusal_notice};
 use crate::usecase::overview::SessionCommand;
@@ -244,9 +244,28 @@ pub trait AgentCommandPort: Send {
         _terminal: &TerminalRef,
         _subscription: TerminalSubscription,
         _input_seq: u64,
+        _operation: OperationId,
         _bytes: &[u8],
     ) -> Result<TerminalInputOutcome, TerminalError> {
         Err(TerminalError::Unavailable)
+    }
+
+    /// Read the recorded final of one durable terminal input operation (#519).
+    ///
+    /// The default answers unknown, which is the fail-closed behaviour for an
+    /// embedder without a durable daemon ledger: the pane keeps its uncertainty
+    /// latched instead of writing the bytes again.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe daemon communication or terminal-ownership failure.
+    fn terminal_input_outcome(
+        &mut self,
+        _terminal: &TerminalRef,
+        _operation: OperationId,
+        _input_len: usize,
+    ) -> Result<TerminalInputResolution, TerminalError> {
+        Ok(TerminalInputResolution::Unknown)
     }
 
     /// Release a daemon terminal subscription; it must not stop the process.
@@ -532,10 +551,20 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
         terminal: &TerminalRef,
         subscription: TerminalSubscription,
         input_seq: u64,
+        operation: OperationId,
         bytes: &[u8],
     ) -> Result<TerminalInputOutcome, TerminalError> {
         self.0
-            .input_terminal(terminal, subscription, input_seq, bytes)
+            .input_terminal(terminal, subscription, input_seq, operation, bytes)
+    }
+    fn input_outcome(
+        &mut self,
+        terminal: &TerminalRef,
+        operation: OperationId,
+        input_len: usize,
+    ) -> Result<TerminalInputResolution, TerminalError> {
+        self.0
+            .terminal_input_outcome(terminal, operation, input_len)
     }
     fn detach(&mut self, terminal: &TerminalRef, subscription: TerminalSubscription) {
         self.0.detach_terminal(terminal, subscription);
@@ -5254,17 +5283,18 @@ mod tests {
         NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep, PaneLaunch,
         PaneLaunchCommandPort, SerializedPaneLaunchPort, SessionCommandPort,
         SessionCommandPortFactory, SessionCommandResult, Start, TerminalAttach, TerminalChunk,
-        TerminalError, TerminalInputOutcome, TerminalSubscription, UnavailableAgentCommandPort,
-        UnavailableBackendPort, UnavailableBrowserOpener, UnavailableDecisionCommandPort,
-        UnavailableEnvironmentStore, UnavailableExternalTerminalPort, UnavailablePaneLaunchPort,
-        UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
-        UnavailableSessionCommandPortFactory, WelcomeStep, WorkspaceLoader, WorkspaceRuntime,
-        WorkspaceSnapshot, WorkspaceUi, WorkspaceView, app_event_from_key, close_exited_panes,
-        controller_terminal_view, copy_terminal_selection, drain_controller_host_actions,
-        drain_session_completions, forward_live_terminal_input, handle_terminal_pointer,
-        intercept_live_terminal_control, key_to_terminal_bytes, new_project_notice,
-        play_startup_splash, poll_and_project_terminals, render_controller_frame,
-        render_home_snapshot, restore_open_panes, run as run_from_start, run_with_settings,
+        TerminalError, TerminalInputOutcome, TerminalInputResolution, TerminalSubscription,
+        UnavailableAgentCommandPort, UnavailableBackendPort, UnavailableBrowserOpener,
+        UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
+        UnavailableExternalTerminalPort, UnavailablePaneLaunchPort, UnavailablePrSnapshotPort,
+        UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory, WelcomeStep,
+        WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
+        app_event_from_key, close_exited_panes, controller_terminal_view, copy_terminal_selection,
+        drain_controller_host_actions, drain_session_completions, forward_live_terminal_input,
+        handle_terminal_pointer, intercept_live_terminal_control, key_to_terminal_bytes,
+        new_project_notice, play_startup_splash, poll_and_project_terminals,
+        render_controller_frame, render_home_snapshot, restore_open_panes, run as run_from_start,
+        run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
@@ -6118,6 +6148,7 @@ mod tests {
             _terminal: &TerminalRef,
             _subscription: TerminalSubscription,
             _input_seq: u64,
+            _operation: OperationId,
             bytes: &[u8],
         ) -> Result<TerminalInputOutcome, TerminalError> {
             self.0.lock().unwrap().inputs.push(bytes.to_vec());
@@ -8350,6 +8381,7 @@ mod tests {
             _terminal: &TerminalRef,
             _subscription: TerminalSubscription,
             _input_seq: u64,
+            _operation: OperationId,
             bytes: &[u8],
         ) -> Result<TerminalInputOutcome, TerminalError> {
             if bytes == b"fail" {
@@ -8460,6 +8492,10 @@ mod tests {
         attached: Vec<(TerminalRef, u64)>,
         /// The next input sequence the daemon expects on this connection.
         ledger: Vec<(TerminalRef, u64)>,
+        /// Durable input operations the daemon recorded. Unlike `ledger` this
+        /// survives the connection, which is what lets a client resolve an
+        /// acknowledgement it lost (#519).
+        recorded_operations: Vec<OperationId>,
         script: Arc<Mutex<SharedConnectionScript>>,
         log: SharedConnectionLog,
         writes: SharedConnectionWrites,
@@ -8592,6 +8628,7 @@ mod tests {
             terminal: &TerminalRef,
             subscription: TerminalSubscription,
             input_seq: u64,
+            operation: OperationId,
             bytes: &[u8],
         ) -> Result<TerminalInputOutcome, TerminalError> {
             let label = self.label(terminal);
@@ -8611,20 +8648,32 @@ mod tests {
                 return Err(TerminalError::Stale);
             }
             if self.take_armed(label, |script| &mut script.input_transport_eof) {
+                // The daemon applied the write and recorded its operation; only
+                // the response was lost. That is the case #519 has to converge:
+                // the client must resolve the operation, not resend the bytes.
+                self.apply(terminal, label, input_seq, bytes);
+                self.recorded_operations.push(operation);
                 self.replace_transport();
                 return Err(TerminalError::InputEffectUnknown);
             }
-            match self
-                .ledger
-                .iter_mut()
-                .find(|(attached, _)| attached.fences(terminal))
-            {
-                Some((_, seq)) => *seq += 1,
-                None => self.ledger.push((terminal.clone(), 1)),
-            }
-            self.writes.lock().unwrap().push((label, bytes.to_vec()));
-            self.record(format!("e{} input#{input_seq} {label}", self.epoch));
+            self.apply(terminal, label, input_seq, bytes);
+            self.recorded_operations.push(operation);
             Ok(TerminalInputOutcome::Written)
+        }
+
+        fn terminal_input_outcome(
+            &mut self,
+            terminal: &TerminalRef,
+            operation: OperationId,
+            _input_len: usize,
+        ) -> Result<TerminalInputResolution, TerminalError> {
+            let label = self.label(terminal);
+            self.record(format!("e{} input-outcome {label}", self.epoch));
+            Ok(if self.recorded_operations.contains(&operation) {
+                TerminalInputResolution::Final(TerminalInputOutcome::Written)
+            } else {
+                TerminalInputResolution::Unknown
+            })
         }
 
         fn detach_terminal(&mut self, terminal: &TerminalRef, subscription: TerminalSubscription) {
@@ -8638,6 +8687,28 @@ mod tests {
             self.attached
                 .retain(|(attached, id)| !(attached.fences(terminal) && *id == subscription.id));
             self.record(format!("e{} detach {label}", self.epoch));
+        }
+    }
+
+    impl SharedConnectionPort {
+        /// Records one accepted write exactly as the daemon would.
+        fn apply(
+            &mut self,
+            terminal: &TerminalRef,
+            label: &'static str,
+            input_seq: u64,
+            bytes: &[u8],
+        ) {
+            match self
+                .ledger
+                .iter_mut()
+                .find(|(attached, _)| attached.fences(terminal))
+            {
+                Some((_, seq)) => *seq += 1,
+                None => self.ledger.push((terminal.clone(), 1)),
+            }
+            self.writes.lock().unwrap().push((label, bytes.to_vec()));
+            self.record(format!("e{} input#{input_seq} {label}", self.epoch));
         }
     }
 
@@ -8676,6 +8747,7 @@ mod tests {
                     next_subscription: 10,
                     attached: Vec::new(),
                     ledger: Vec::new(),
+                    recorded_operations: Vec::new(),
                     script: Arc::clone(&script),
                     log: Arc::clone(&log),
                     writes: Arc::clone(&writes),
@@ -8724,6 +8796,27 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+        // A's lost acknowledgement fenced its producer queue, so reattaching is
+        // not enough: the next tick resolves that operation against the daemon's
+        // durable record before any later keystroke may reach the PTY (#519).
+        assert_eq!(
+            ui.send_terminal_bytes(&agent, b"a4-next"),
+            Err(
+                "terminal input is held in order behind an unresolved input (1 waiting)".to_owned()
+            )
+        );
+        ui.poll_all_terminals();
+        assert!(
+            log.lock()
+                .unwrap()
+                .iter()
+                .any(|event| event == "e2 input-outcome A")
+        );
+        // The held keystroke was delivered in order once the fence converged.
+        assert_eq!(
+            writes.lock().unwrap().last(),
+            Some(&("A", b"a4-next".to_vec()))
+        );
         assert_eq!(ui.send_terminal_bytes(&agent, b"a5"), Ok(()));
 
         // Releasing A's pane at the end must not disturb B's attachment.
@@ -8777,7 +8870,14 @@ mod tests {
                     "e1 input#0 A",
                     "e1 input#1 A",
                     "e1 input#2 A",
+                    // The write whose acknowledgement was lost: the daemon
+                    // applied it once, which is exactly what the client cannot
+                    // know until it resolves the operation.
+                    "e1 input#3 A",
+                    // The held keystroke, then the one typed after the fence
+                    // converged. Both on the fresh epoch's restarted sequence.
                     "e2 input#0 A",
+                    "e2 input#1 A",
                 ],
             ),
             (
@@ -8810,7 +8910,11 @@ mod tests {
                 ("B", b"b2".to_vec()),
                 ("A", b"a2".to_vec()),
                 ("A", b"a3".to_vec()),
+                // Applied before the response was lost, and never applied twice.
+                ("A", b"a4".to_vec()),
                 ("B", b"k".to_vec()),
+                // Released from the fence in production order.
+                ("A", b"a4-next".to_vec()),
                 ("A", b"a5".to_vec()),
                 ("B", b"k2".to_vec()),
             ]
@@ -9198,6 +9302,7 @@ mod tests {
             terminal: &TerminalRef,
             _subscription: TerminalSubscription,
             _input_seq: u64,
+            _operation: OperationId,
             bytes: &[u8],
         ) -> Result<TerminalInputOutcome, TerminalError> {
             self.inputs
@@ -14611,8 +14716,20 @@ mod tests {
             Err(TerminalError::Unavailable)
         );
         assert_eq!(
-            port.input_terminal(&terminal, TerminalSubscription { id: 1, epoch: 1 }, 0, b"x"),
+            port.input_terminal(
+                &terminal,
+                TerminalSubscription { id: 1, epoch: 1 },
+                0,
+                OperationId::new(),
+                b"x",
+            ),
             Err(TerminalError::Unavailable)
+        );
+        // A port with no durable ledger answers unknown rather than guessing,
+        // which keeps a lost acknowledgement latched instead of resent (#519).
+        assert_eq!(
+            port.terminal_input_outcome(&terminal, OperationId::new(), 1),
+            Ok(TerminalInputResolution::Unknown)
         );
         // Detach is a no-op default and must not panic.
         port.detach_terminal(&terminal, TerminalSubscription { id: 1, epoch: 1 });

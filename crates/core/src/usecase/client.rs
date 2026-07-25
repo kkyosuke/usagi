@@ -15,7 +15,7 @@ use crate::domain::agent::{
     AgentProfileId, AgentResumeTarget, CallerRef, ModelSelector, ProviderSessionId,
 };
 use crate::domain::daemon::{DaemonProcessObservation, DaemonRecord};
-use crate::domain::id::{AgentId, SessionId, TerminalRef, WorkspaceId};
+use crate::domain::id::{AgentId, OperationId, SessionId, TerminalRef, WorkspaceId};
 use crate::domain::pr_inventory::{PrEntry, PrInventory};
 use crate::domain::session_lifecycle::AgentPhase;
 use crate::domain::terminal_launch::{
@@ -25,8 +25,9 @@ use crate::infrastructure::ipc::{
     Bootstrap, BuildIdentity, ClientHello, ClientId, ClientWorkspace, DaemonGeneration, Envelope,
     EnvelopeKind, ErrorCode, GenerationRole, ProtocolError, ProtocolRange, ProtocolVersion,
     ResponseOutcome, RetryMode, ServerHello, SideEffect, TERMINAL_CHECKPOINT_REVISION,
-    TERMINAL_WIRE_GENERATION, TerminalSnapshotMode, WORKSPACE_FENCE_CAPABILITY,
-    is_workspace_mismatch, read_json_frame, terminal_snapshot_mode, write_json_frame,
+    TERMINAL_WIRE_GENERATION, TerminalInputReplayMode, TerminalSnapshotMode,
+    WORKSPACE_FENCE_CAPABILITY, is_workspace_mismatch, read_json_frame, terminal_input_replay_mode,
+    terminal_snapshot_mode, write_json_frame,
 };
 
 /// A daemon request understood by every presentation surface.
@@ -363,6 +364,11 @@ pub enum TerminalAction {
     Resume,
     Resync,
     Input,
+    /// Read the recorded final outcome of one durable input operation without
+    /// writing anything. It is the only way a client resolves an
+    /// acknowledgement it lost, and it never converts an unknown operation into
+    /// a PTY write (#519).
+    InputOutcome,
     Resize,
     Detach,
     /// List exited tombstones in a scope with their final replay locator, exit
@@ -419,8 +425,26 @@ pub enum TerminalRequest {
     Input {
         terminal: TerminalRef,
         subscription: u64,
+        /// Ordering number local to this connection epoch's fresh subscription.
+        /// A fresh epoch restarts it at zero, so it is never cross-connection
+        /// operation identity.
         input_seq: u64,
+        /// Producer-issued durable identity of this logical input, stable across
+        /// request retry, reconnect, and reattach. Additive on the wire: a peer
+        /// that predates the ledger simply omits it and keeps the
+        /// connection-local sequence contract (#519).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_operation: Option<OperationId>,
         bytes: Vec<u8>,
+    },
+    /// Read the recorded final of one durable input operation. The response body
+    /// is `{"outcome": "final", "ack": InputAck}` when the daemon still holds the
+    /// record, and `{"outcome": "unknown"}` when it never saw it or its bounded
+    /// ledger already released it. Unknown is a typed uncertainty, never a
+    /// licence to write the bytes again.
+    InputOutcome {
+        terminal: TerminalRef,
+        input_operation: OperationId,
     },
     Resize {
         terminal: TerminalRef,
@@ -761,6 +785,17 @@ impl<S: Read + Write> IpcClient<S> {
     #[must_use]
     pub fn terminal_snapshot_mode(&self) -> TerminalSnapshotMode {
         terminal_snapshot_mode(self.protocol, &self.server_capabilities)
+    }
+
+    /// How this connection may resolve a terminal input whose acknowledgement
+    /// was lost.
+    ///
+    /// Derived from the daemon's advertised capabilities, so a daemon without
+    /// the durable operation ledger fails closed: the client keeps the
+    /// uncertainty latched instead of sending the bytes a second time.
+    #[must_use]
+    pub fn terminal_input_replay_mode(&self) -> TerminalInputReplayMode {
+        terminal_input_replay_mode(&self.server_capabilities)
     }
 
     /// Borrows the authenticated byte stream for composition-owned passive
@@ -1136,9 +1171,12 @@ pub enum RetryEligibility {
     /// same final across a new connection.
     DurableOperation,
     /// No cross-connection idempotency evidence: generic Terminal Launch
-    /// (#518), terminal input (#519), `RequestId`-only mutations, and Codex
-    /// capture. After a request is dispatched the effect is unknown, so it is
-    /// never blind-retried on a fresh connection.
+    /// (#518), terminal input, `RequestId`-only mutations, and Codex capture.
+    /// After a request is dispatched the effect is unknown, so it is never
+    /// blind-retried on a fresh connection. Terminal input keeps this
+    /// classification even with a durable operation identity: the client
+    /// resolves the lost acknowledgement with a read-only
+    /// [`TerminalAction::InputOutcome`] query rather than by writing again.
     NoCrossConnectionEvidence,
 }
 
@@ -1151,7 +1189,14 @@ impl RetryEligibility {
         match request {
             DaemonRequest::Pr { .. }
             | DaemonRequest::Metrics { .. }
-            | DaemonRequest::AgentInventory { .. } => Self::ReadOnly,
+            | DaemonRequest::AgentInventory { .. }
+            // Resolving a durable input operation only reads the daemon's
+            // ledger, so a lost response is safely re-read on a fresh
+            // connection. Every other terminal action stays fail-closed below.
+            | DaemonRequest::Terminal {
+                action: TerminalAction::InputOutcome,
+                ..
+            } => Self::ReadOnly,
             DaemonRequest::Session { action, .. } => {
                 if session_action_is_read_only(*action) {
                     Self::ReadOnly
@@ -2438,6 +2483,12 @@ mod deadline_and_retry_tests {
             },
             DaemonRequest::UserDecision {
                 action: TuiUserDecisionAction::List,
+                payload: session_payload(),
+            },
+            // Resolving a durable input operation only reads the daemon's
+            // ledger, so losing its response is safely re-read (#519).
+            DaemonRequest::Terminal {
+                action: TerminalAction::InputOutcome,
                 payload: session_payload(),
             },
         ];

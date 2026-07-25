@@ -24,6 +24,7 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 - [dispatch request](#dispatch-request)
 - [generic terminal request](#generic-terminal-request)
   - [snapshot payload と revision](#snapshot-payload-と-revision)
+  - [terminal input identity と cross-connection replay](#terminal-input-identity-と-cross-connection-replay)
 - [exited tombstone visibility](#exited-tombstone-visibility)
 
 ## identity と fence
@@ -180,7 +181,8 @@ retry を許すかは request class だけで決める。これが唯一の elig
 | read-only query | budget 内で可 | 完全な resource / generation fence で再読でき、stale response は捨てる |
 | server-backed durable mutation | budget 内で可 | producer `OperationId` + semantic digest を daemon durable store が照合し、同じ operation final へ収束する |
 | `RequestId` だけの mutation | 不可 | `RequestId` は connection-local correlation に過ぎず、cross-connection idempotency evidence ではない |
-| terminal input | 不可（[#519](../.usagi/issues/519-feat-ipc-terminal-input-ack-loss-cross-connection-replay.md) まで） | client incarnation + stable input operation + digest + ordered ledger を持たない |
+| terminal input | 不可 | ACK loss は再送ではなく read-only な outcome 照会で収束させる（[cross-connection replay](#terminal-input-identity-と-cross-connection-replay)） |
+| terminal input outcome 照会 | budget 内で可 | daemon の operation ledger を読むだけなので、response loss は安全に再照会できる |
 | generic Terminal Launch | 不可（[#518](../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md) まで） | producer `OperationId` + digest + durable launch outcome を持たない |
 
 request 送信前（connect / handshake の失敗）は effect が生じないため、どの class でも budget 内で安全に retry する。
@@ -498,6 +500,7 @@ daemon 側の bound は次のとおりで、いずれも既定 1 MiB frame と p
 
 terminal input は daemon が PTY master に受理された byte 数を追跡し、operation の outcome として保持する。
 同じ client の同じ `input_seq` と request identity を再送した場合は保存済み outcome を replay し、PTY へ再送しない。
+connection を越える identity・ordering・replay は [terminal input identity と cross-connection replay](#terminal-input-identity-と-cross-connection-replay) を正本とする。
 
 | PTY write outcome | input ack | retry contract |
 |---|---|---|
@@ -519,11 +522,123 @@ terminal Input の protocol error は `side_effect: none` の場合だけerror c
 connectionを捨て、blind replayしない。
 
 request の write を試みた後で EOF / transport failure になった場合、client は PTY effect の有無を証明できない。
-この ACK-loss 経路は「未配送」へ変換せず delivery unknown と表示し、同じ bytes を自動再送しない。現行の
-connection-local ledgerだけでは reconnect 後に final outcome を照会できないため、cross-connection replayは別契約として扱う。
+この ACK-loss 経路は「未配送」へ変換せず delivery unknown と表示し、同じ bytes を自動再送しない。
 ACK lossと`Ambiguous`のuncertaintyはreattach成功や後続`Written`でclearせず、複数件をbounded count + first/latestで
-集約する。現行UIからclearせず、session破棄または#519のdurable outcome resolutionまでlatchする。後続の
+集約する。uncertaintyを解消できるのは
+[cross-connection replay](#terminal-input-identity-と-cross-connection-replay) の durable outcome resolution と
+session 破棄だけで、transport recovery や後続の成功では clear しない。後続の
 fatal/transport errorはprior uncertaintyを隠さず、current stateと合成して投影する。
+
+### terminal input identity と cross-connection replay
+
+ACK を受け取れなかった terminal input の outcome を、**その request を運んだ connection が消えた後でも**照会・replay する
+契約である。この節が cross-connection input identity・ordered replay・expiry の正本である。
+
+#### identity の分離
+
+5 つの identity を別物として扱う。混同すると、reconnect 後の照会が到達できない（ledger を connection に紐づけた場合）か、
+同じ input が二度 PTY へ届く（順序番号を operation identity として使った場合）。
+
+| identity | 発行者 | lifetime | 用途 |
+|---|---|---|---|
+| client incarnation（`ClientHello.client_id`） | client process | client process 1 回の起動 | daemon の durable per-client state（input operation ledger）の key |
+| connection epoch | client（transport 交換ごとに増える client-local 値） | 1 本の transport | subscription の有効性判定。epoch が変われば全 subscription が無効 |
+| subscription | daemon（`attach` の応答） | それを発行した connection | どの attachment が write してよいかの fence |
+| `input_seq` | client | connection epoch + fresh subscription に局所 | 同一 epoch 内の順序番号。fresh subscription で 0 に reset する |
+| `input_operation`（`OperationId`） | client（input ごと） | daemon ledger の bound 内 | request retry / reconnect / reattach を越えて同じ logical input を識別する |
+
+`client_id` は canonical resource ID（UUID）でなければならない。PID は再利用されるため、PID 由来の identity では
+新しい process が別 process の operation を継承し得る。合成ルートは process ごとに 1 つの UUID を発行し、per-request lane・
+terminal stream lane・poll lane のすべてで同じ値を申告する。これは workspace fence と同じ「同一 UID の協調する peer 同士の
+一貫性 fence」であり、authorization boundary ではない。
+
+`input_seq` を cross-connection の operation identity として使わない。逆に `input_operation` は epoch に依存しないため、
+fresh subscription が `input_seq` を 0 へ戻しても（[#523](../.usagi/issues/523-fix-tui-shared-terminal-connection-epoch-pane-subscription.md)）、
+未収束 operation の照合は影響を受けない。
+
+#### wire
+
+`terminal` kind に次を追加する。daemon は `terminal.input-operation.v1` capability を広告し、client はこの capability を
+真実源として経路を選ぶ（negotiated revision だけでは判断しない）。
+
+| 要素 | 形 | 意味 |
+|---|---|---|
+| `input` の `input_operation` | `OperationId?`（additive、省略可） | この input の durable identity。省略は ledger を持たない旧 client |
+| `input_outcome` action | `{"terminal", "input_operation"}` | 記録済み final の read-only 照会。PTY へは何も書かない |
+| `input_outcome` の応答 | `{"outcome":"final","ack":InputAck}` / `{"outcome":"unknown"}` | 記録があれば同じ final、無ければ typed unknown |
+
+`input_outcome` は read-only なので、[request class](#attempt-deadline-と-reconnect-budget) 上は新しい connection で再照会
+できる。`input` 自体は durable identity を持っても cross-connection retry の対象にしない。ACK loss の解消は「照会」であり
+「再送」ではない、という一点に契約を寄せている。
+
+migration は次のとおりで、いずれも fail closed である。
+
+| 組み合わせ | 挙動 |
+|---|---|
+| 新 client + 新 daemon（capability 有） | `input_operation` を送り、ACK loss は `input_outcome` で収束させる |
+| 新 client + 旧 daemon（capability 無） | `input_operation` を送らず、`input_outcome` も送らない。ACK loss は unknown のまま latch する |
+| 旧 client（`input_operation` 無し）+ 新 daemon | 従来どおり connection-local な `input_seq` ledger で動作し、cross-connection replay は得られない |
+| canonical な client incarnation を申告しない peer が `input_operation` を送る | `unauthenticated` で拒否する。ledger を scope できないため、後の「replay」が二度目の write になり得る |
+
+#### daemon 側の ledger
+
+daemon は `(client incarnation, input_operation)` を key に、**terminal registry 全体で 1 つの** bounded ledger を持つ。
+terminal ごとに分けないのは、同じ operation identity を別 terminal へ再利用したとき、fresh write ではなく conflict として
+検出するためである。lookup は attachment 検証より**前**に行う。ACK を落とした client は subscription も失っているので、
+attachment を先に要求すると、まさに必要なときに outcome へ到達できない。
+
+| 提示された operation | 判定 | 効果 |
+|---|---|---|
+| 記録済み・同じ terminal・同じ semantic digest | replay | `Cached(記録済み final)` を返し、PTY へ書かない。`input_seq` も進めない |
+| 記録済み・別 bytes または別 terminal | `idempotency_conflict` | 何も書かない。別 target へ適用しない |
+| 未記録 | 新規 | attachment・liveness・`input_seq` を検証してから 1 回だけ PTY へ書き、final を記録する |
+
+semantic digest は `(terminal, bytes)` の SHA-256（component は length-prefix する）であり、daemon が request から導出する。
+`input_outcome` は terminal identity だけを fence し、attachment・liveness は要求しない。したがって write path が閉じた
+**exit 後**でも、その前に記録された final を返せる。記録が無い場合は `unknown` であり、error でも成功でもない。
+
+ledger の bound は次のとおりで、超過は古い record から解放する。解放された record は `unknown` を返す。
+
+| 次元 | 既定 |
+|---|---|
+| operation 数（process 全体） | 4096 |
+| operation 数（client incarnation ごと） | 256 |
+| 保持 payload byte 数 | 1 MiB |
+| age | 5 分 |
+
+age は daemon の retention clock で測る（terminal retention と同じ時計を使うため、test は同じ fake で決定的に駆動できる）。
+
+daemon 側の 2 つの ledger は key と lifetime が異なる。混ぜると、reconnect のたびに最初の input が stale sequence として
+拒否されるか、逆に古い operation へ到達できなくなる。
+
+| ledger | key | 消える契機 |
+|---|---|---|
+| `input_seq` の期待値 | `(connection, client incarnation)` | その connection の終了（client 側の epoch reset と対になる） |
+| operation final | `(client incarnation, input_operation)` | 上表の bound だけ。connection の終了では消えない |
+
+#### client 側の ordering fence
+
+effect unknown は表示だけでなく、**per-terminal producer queue の ordering fence** である。unknown な先頭 operation が
+高々 1 件あり、それが収束するまで同じ terminal の後続 input を PTY へ送らない。送ってしまうと、まだ適用され得る先行 input
+を追い越すか、その input が途中まで書いた command に後続の bytes が連結され得る。
+
+| 状態 | 後続 input |
+|---|---|
+| fence 無し | そのまま送る。input ごとに新しい `input_operation` を発行する |
+| fence 有り・queue に空き | 生成順で bounded queue に保持する（PTY へは届かない） |
+| fence 有り・queue 満杯（既定 64 件 / 8 KiB） | typed backpressure で拒否する。黙って捨てず、順序も入れ替えない |
+
+収束は次のように進む。fence 解消のたびに queue を生成順で流し、途中で再び unknown になれば残りはその後ろで順序を保つ。
+
+| 照会結果 | 挙動 |
+|---|---|
+| `final`（`Written`） | fence を解放し、その input の uncertainty を撤回して queue を流す |
+| `final`（`Failed` / `Ambiguous`） | fence を解放して queue を流すが、outcome は成功へ変換しない（`Ambiguous` は uncertainty として latch し続ける） |
+| `unknown` | fence を latch する。ledger は忘れる方向にしか変化しないため再照会せず、blind resend もしない。解放には明示的な user abandonment / recovery policy が必要で、現行 UI では session 破棄だけがこれを解く |
+| transport failure | fence と照会をそのまま維持し、reconnect 後に再照会する |
+
+#523 の fresh subscription が `input_seq` を 0 へ戻しても、未収束 operation と queue は消さない。reattach は streaming の
+回復であって、失われた ACK の収束ではないからである。
 
 `inventory` は `WorkspaceId` / optional `SessionId`（None=root）/ `WorktreeId` の scope を送り、
 その scope に**完全一致**する daemon 所有 runtime を列挙する。daemon は generic terminal owner と

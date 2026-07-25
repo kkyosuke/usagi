@@ -27,8 +27,9 @@
 //! The daemon boundary is the injected [`TerminalStreamPort`], so the whole
 //! coordinator is exercised with a fake port in unit tests.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
-use usagi_core::domain::id::TerminalRef;
+use usagi_core::domain::id::{OperationId, TerminalRef};
 use usagi_core::usecase::vt_screen::{CheckpointError, ScreenCheckpoint};
 
 use super::pane_runtime::Geometry;
@@ -157,6 +158,22 @@ pub enum TerminalInputOutcome {
     Ambiguous { applied_prefix: usize },
 }
 
+/// How the daemon answered a durable input operation resolution query.
+///
+/// This is the *only* way an input whose acknowledgement was lost becomes
+/// certain again: the client asks what happened to that operation instead of
+/// writing the bytes a second time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalInputResolution {
+    /// The daemon still holds this operation's recorded final. It is the same
+    /// value the lost acknowledgement carried, including a non-success one.
+    Final(TerminalInputOutcome),
+    /// The daemon has no record: it never saw the operation, its bounded ledger
+    /// released it, or the peer has no durable ledger at all. That is typed
+    /// uncertainty, never permission to send the bytes again.
+    Unknown,
+}
+
 /// A safe, client-visible terminal transport failure.  None of these authorize
 /// a local PTY fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,7 +246,13 @@ pub trait TerminalStreamPort {
         terminal: &TerminalRef,
         after_offset: u64,
     ) -> Result<Vec<TerminalChunk>, TerminalError>;
-    /// Write input bytes exactly once, fenced by `subscription` and `input_seq`.
+    /// Write input bytes exactly once, fenced by `subscription` and `input_seq`
+    /// and identified across connections by `operation`.
+    ///
+    /// `operation` is producer-issued and stable for one logical input, so the
+    /// daemon can answer for it later through [`Self::input_outcome`] even though
+    /// the connection, subscription, and epoch-local `input_seq` that carried it
+    /// are gone.
     ///
     /// # Errors
     ///
@@ -239,8 +262,28 @@ pub trait TerminalStreamPort {
         terminal: &TerminalRef,
         subscription: TerminalSubscription,
         input_seq: u64,
+        operation: OperationId,
         bytes: &[u8],
     ) -> Result<TerminalInputOutcome, TerminalError>;
+
+    /// Read the recorded final of one durable input operation, without writing.
+    ///
+    /// The default answers [`TerminalInputResolution::Unknown`], which is what a
+    /// port with no durable ledger must do: the caller keeps the uncertainty
+    /// latched instead of replaying bytes that may already have been applied.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe daemon communication or terminal-ownership failure. A
+    /// failure leaves the operation unresolved, so the fence stays in place.
+    fn input_outcome(
+        &mut self,
+        _terminal: &TerminalRef,
+        _operation: OperationId,
+        _input_len: usize,
+    ) -> Result<TerminalInputResolution, TerminalError> {
+        Ok(TerminalInputResolution::Unknown)
+    }
     /// Release only this subscription; it must not stop the daemon terminal.
     ///
     /// A subscription from a replaced epoch is released locally: the daemon
@@ -276,6 +319,15 @@ pub enum TerminalInputError {
     Rejected(TerminalInputOutcome),
     /// A live input request reached the port but failed.
     Transport(TerminalError),
+    /// Accepted into this terminal's ordered producer queue behind an input
+    /// whose effect is still unknown. It has *not* reached the PTY: sending it
+    /// now could overtake the unresolved input or be concatenated onto a command
+    /// that input may have half-written. It is sent, in order, once the fence
+    /// resolves.
+    Fenced { queued: usize },
+    /// The bounded queue behind the fence is full, so this keystroke is refused
+    /// as typed backpressure rather than dropped silently or reordered.
+    FenceFull { queued: usize },
 }
 
 impl TerminalInputError {
@@ -322,12 +374,33 @@ impl TerminalInputError {
             Self::Transport(TerminalError::InputEffectUnknown) => {
                 "terminal input acknowledgement was lost; delivery is unknown".to_owned()
             }
+            Self::Fenced { queued } => format!(
+                "terminal input is held in order behind an unresolved input ({queued} waiting)"
+            ),
+            Self::FenceFull { queued } => format!(
+                "terminal input queue is full behind an unresolved input ({queued} waiting); keystroke not delivered"
+            ),
         }
     }
 }
 
 const RETRY_INITIAL: Duration = Duration::from_millis(100);
 const RETRY_MAX: Duration = Duration::from_secs(2);
+
+/// How many inputs may wait behind one unresolved input operation.
+///
+/// The fence must be bounded in both directions: an unresolved input blocks the
+/// PTY, so the queue behind it cannot be allowed to grow with every keystroke a
+/// user types into a stalled pane.
+const FENCE_QUEUE_MAX_INPUTS: usize = 64;
+/// How many payload bytes may wait behind one unresolved input operation.
+const FENCE_QUEUE_MAX_BYTES: usize = 8 * 1024;
+
+/// Feedback for an input operation the daemon can no longer account for. The
+/// fence stays: only discarding this session (or an explicit recovery policy)
+/// may release it, never an automatic resend.
+const FENCE_UNRESOLVED_MESSAGE: &str =
+    "terminal input effect cannot be resolved by the daemon; later input stays held";
 
 /// How many additional atomic snapshots one `connect` takes when a refused
 /// snapshot may converge immediately (a resize that interleaved the capture).
@@ -339,6 +412,21 @@ const SNAPSHOT_RETRY_LIMIT: u32 = 1;
 /// The retained raw tail is deliberately not parsed, so this view starts empty
 /// and fills from live output only.
 const HISTORY_UNAVAILABLE_MESSAGE: &str = "terminal history is unavailable; this daemon cannot restore the screen, showing new output only";
+
+/// One terminal input whose effect is unknown, retained as this terminal's
+/// ordering fence until the daemon accounts for it.
+///
+/// The bytes are kept only to describe the fence, never to resend: the operation
+/// identity is what resolves it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UnresolvedInput {
+    operation: OperationId,
+    length: usize,
+    /// Whether the daemon has already answered "unknown" for this operation.
+    /// It only ever forgets, so the answer cannot change and is not asked again;
+    /// the fence stays latched instead of being polled every redraw tick.
+    exhausted: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InputUncertainty {
@@ -396,6 +484,17 @@ pub struct TerminalSession {
     current_error_is_input: bool,
     error: Option<String>,
     input_uncertainty: Option<InputUncertainty>,
+    /// The at-most-one input whose effect is unknown. While it is set this
+    /// terminal's producer queue is fenced, so effect uncertainty is an ordering
+    /// constraint and not only a message.
+    ///
+    /// It is deliberately independent of `subscription` and `connection_epoch`: a
+    /// fresh subscription restarts `input_seq`, and neither that nor a new
+    /// transport resolves what happened to an operation issued before it.
+    unresolved_input: Option<UnresolvedInput>,
+    /// Inputs accepted behind the fence, in production order.
+    fenced_queue: VecDeque<Vec<u8>>,
+    fenced_bytes: usize,
     retry_attempt: u32,
     retry_at: Option<Instant>,
 }
@@ -424,6 +523,9 @@ impl TerminalSession {
             current_error_is_input: false,
             error: None,
             input_uncertainty: None,
+            unresolved_input: None,
+            fenced_queue: VecDeque::new(),
+            fenced_bytes: 0,
             retry_attempt: 0,
             retry_at: None,
         }
@@ -587,6 +689,16 @@ impl TerminalSession {
     /// Polls at an injected monotonic instant, retrying an unavailable daemon
     /// only after the capped exponential backoff expires.
     pub fn poll_at<P: TerminalStreamPort>(&mut self, port: &mut P, now: Instant) {
+        // Resolve an unknown input effect before streaming again. The fence blocks
+        // this terminal's producer queue, so converging it is what lets the held
+        // input reach the PTY in its original order (#519).
+        if self.state == SessionState::Live
+            && !self.subscription_replaced(port)
+            && let Some(unresolved) = self.pending_resolution()
+        {
+            self.resolve_input_fence_at(port, unresolved, now);
+            return;
+        }
         match self.state {
             // The shared transport was replaced, so this pane's attachment is
             // gone: take a fresh one before asking the new connection for
@@ -666,6 +778,23 @@ impl TerminalSession {
         bytes: &[u8],
         now: Instant,
     ) -> Result<(), TerminalInputError> {
+        // An input whose effect is unknown fences this terminal. Sending the next
+        // keystroke now would risk reordering it against a request that may still
+        // be applied, or concatenating it onto a command the unresolved input
+        // half-wrote, so it is held in order instead.
+        if self.unresolved_input.is_some() {
+            return Err(self.enqueue_behind_fence(bytes));
+        }
+        self.write_input_at(port, bytes, now)
+    }
+
+    /// Sends one input immediately, issuing its durable operation identity.
+    fn write_input_at<P: TerminalStreamPort>(
+        &mut self,
+        port: &mut P,
+        bytes: &[u8],
+        now: Instant,
+    ) -> Result<(), TerminalInputError> {
         // Re-attach before the first keystroke rather than spending it on a
         // subscription the daemon released with the previous connection: that
         // request would be rejected without effect, losing the key, and would
@@ -676,7 +805,16 @@ impl TerminalSession {
         let (SessionState::Live, Some(subscription)) = (self.state, self.subscription) else {
             return Err(TerminalInputError::NotLive(self.state));
         };
-        match port.input(&self.terminal, subscription, self.input_seq, bytes) {
+        // Issued before the request is written, so the retry, reconnect, and
+        // resolution of *this* logical input all name the same operation.
+        let operation = OperationId::new();
+        match port.input(
+            &self.terminal,
+            subscription,
+            self.input_seq,
+            operation,
+            bytes,
+        ) {
             Ok(outcome) => {
                 self.input_seq += 1;
                 match outcome {
@@ -697,10 +835,126 @@ impl TerminalSession {
                 }
             }
             Err(error) => {
+                // Only a lost acknowledgement leaves the effect unknown; a
+                // definitive failure did not write and therefore does not fence
+                // the ordering of what follows.
+                if error == TerminalError::InputEffectUnknown {
+                    self.unresolved_input = Some(UnresolvedInput {
+                        operation,
+                        length: bytes.len(),
+                        exhausted: false,
+                    });
+                }
                 self.fail_at(error, now);
                 Err(TerminalInputError::Transport(error))
             }
         }
+    }
+
+    /// Accepts one input into the bounded ordered queue behind the fence, or
+    /// refuses it as typed backpressure.
+    fn enqueue_behind_fence(&mut self, bytes: &[u8]) -> TerminalInputError {
+        if self.fenced_queue.len() >= FENCE_QUEUE_MAX_INPUTS
+            || self.fenced_bytes.saturating_add(bytes.len()) > FENCE_QUEUE_MAX_BYTES
+        {
+            let error = TerminalInputError::FenceFull {
+                queued: self.fenced_queue.len(),
+            };
+            self.set_current_input_error(error.message());
+            return error;
+        }
+        self.fenced_queue.push_back(bytes.to_vec());
+        self.fenced_bytes += bytes.len();
+        let error = TerminalInputError::Fenced {
+            queued: self.fenced_queue.len(),
+        };
+        self.set_current_input_error(error.message());
+        error
+    }
+
+    /// The unresolved input this session may still ask the daemon about.
+    ///
+    /// An exhausted fence is not asked again: the ledger only ever forgets, so a
+    /// second query cannot change the answer and would inflate the uncertainty
+    /// aggregate on every redraw tick.
+    fn pending_resolution(&self) -> Option<UnresolvedInput> {
+        self.unresolved_input
+            .filter(|unresolved| !unresolved.exhausted)
+    }
+
+    /// Asks the daemon what happened to the unresolved input, then releases the
+    /// fence in production order when it converges.
+    fn resolve_input_fence_at<P: TerminalStreamPort>(
+        &mut self,
+        port: &mut P,
+        unresolved: UnresolvedInput,
+        now: Instant,
+    ) {
+        match port.input_outcome(&self.terminal, unresolved.operation, unresolved.length) {
+            Ok(TerminalInputResolution::Final(outcome)) => {
+                self.unresolved_input = None;
+                // This input is no longer uncertain: the daemon accounted for it.
+                // That is the only sanctioned way its warning goes away.
+                self.retract_input_uncertainty();
+                // A recorded non-success stays a non-success: resolution only
+                // removes the uncertainty, it never upgrades the outcome.
+                match outcome {
+                    TerminalInputOutcome::Written => self.clear_current_input_error(),
+                    TerminalInputOutcome::Failed | TerminalInputOutcome::Ambiguous { .. } => {
+                        let message = TerminalInputError::Rejected(outcome).message();
+                        if matches!(outcome, TerminalInputOutcome::Ambiguous { .. }) {
+                            self.latch_input_uncertainty(message);
+                        } else {
+                            self.set_current_input_error(message);
+                        }
+                    }
+                }
+                self.drain_input_fence_at(port, now);
+            }
+            // The daemon cannot account for the operation. It only ever forgets,
+            // so this answer is final: the fence latches and the queued input is
+            // neither sent nor discarded.
+            Ok(TerminalInputResolution::Unknown) => {
+                self.unresolved_input = Some(UnresolvedInput {
+                    exhausted: true,
+                    ..unresolved
+                });
+                self.latch_input_uncertainty(FENCE_UNRESOLVED_MESSAGE.to_owned());
+            }
+            // Resolution itself failed; the fence and the query both stand.
+            Err(error) => self.fail_at(error, now),
+        }
+    }
+
+    /// Sends the inputs held behind a released fence, oldest first. A send that
+    /// leaves another effect unknown re-establishes the fence and keeps the rest
+    /// of the queue in order behind it.
+    fn drain_input_fence_at<P: TerminalStreamPort>(&mut self, port: &mut P, now: Instant) {
+        while self.unresolved_input.is_none() {
+            let Some(bytes) = self.fenced_queue.pop_front() else {
+                break;
+            };
+            self.fenced_bytes = self.fenced_bytes.saturating_sub(bytes.len());
+            let _ = self.write_input_at(port, &bytes, now);
+            if self.state != SessionState::Live {
+                break;
+            }
+        }
+    }
+
+    /// How many inputs are held behind an unresolved input operation.
+    #[must_use]
+    pub fn fenced_input_count(&self) -> usize {
+        self.fenced_queue.len()
+    }
+
+    /// The length of the input whose effect is unknown, when this terminal's
+    /// producer queue is fenced by one.
+    #[must_use]
+    pub fn unresolved_input_length(&self) -> Option<usize> {
+        self.unresolved_input
+            .as_ref()
+            .map(|unresolved| unresolved.length)
     }
 
     /// Releases the subscription without stopping the daemon terminal.
@@ -802,6 +1056,12 @@ impl TerminalSession {
         // The daemon counts input per connection, so only a new epoch starts a
         // fresh ledger. A resync that merely replaces the subscription on the
         // same connection continues the sequence the daemon already expects.
+        //
+        // The epoch-local sequence is the *only* thing a fresh subscription
+        // resets. An input operation issued on an earlier epoch is still
+        // outstanding, so `unresolved_input` and the queue fenced behind it are
+        // deliberately preserved here: the reattach that recovers streaming must
+        // not silently declare a lost acknowledgement resolved (#519/#523).
         if self.connection_epoch != Some(attach.subscription.epoch) {
             self.input_seq = 0;
         }
@@ -916,6 +1176,25 @@ impl TerminalSession {
         self.clear_current_input_error();
     }
 
+    /// Removes the aggregate entry a now-resolved lost acknowledgement
+    /// contributed.
+    ///
+    /// A durable answer from the daemon is the only thing that may retract an
+    /// uncertainty; transport recovery and later successful input must not
+    /// (#517). The aggregate keeps fixed memory (count plus first/latest), so
+    /// when other uncertain inputs remain only the count is adjusted — the
+    /// retained messages stay as they were rather than being invented.
+    fn retract_input_uncertainty(&mut self) {
+        self.input_uncertainty = match self.input_uncertainty.take() {
+            Some(uncertainty) if uncertainty.count > 1 => Some(InputUncertainty {
+                count: uncertainty.count - 1,
+                ..uncertainty
+            }),
+            _ => None,
+        };
+        self.refresh_error();
+    }
+
     fn set_current_input_error(&mut self, error: String) {
         self.current_error = Some(error);
         self.current_error_is_input = true;
@@ -1004,8 +1283,16 @@ mod tests {
         attach: Vec<Result<TerminalAttach, TerminalError>>,
         polls: Vec<Result<Vec<TerminalChunk>, TerminalError>>,
         input: Option<TerminalError>,
+        /// A failure applied to the next input only, then consumed.
+        input_error_once: Option<TerminalError>,
         input_outcomes: Vec<TerminalInputOutcome>,
         inputs: Vec<(u64, u64, Vec<u8>)>,
+        /// Every durable operation identity the session issued, in order.
+        issued_operations: Vec<OperationId>,
+        /// Scripted answers for the durable resolution query, oldest first.
+        resolutions: Vec<Result<TerminalInputResolution, TerminalError>>,
+        /// Operations the session asked the daemon to account for.
+        resolution_queries: Vec<OperationId>,
         detached: Vec<TerminalSubscription>,
         resized: Vec<Geometry>,
         resize_error: Option<TerminalError>,
@@ -1041,9 +1328,11 @@ mod tests {
             _: &TerminalRef,
             subscription: TerminalSubscription,
             input_seq: u64,
+            operation: OperationId,
             bytes: &[u8],
         ) -> Result<TerminalInputOutcome, TerminalError> {
-            if let Some(error) = self.input {
+            self.issued_operations.push(operation);
+            if let Some(error) = self.input.or_else(|| self.input_error_once.take()) {
                 return Err(error);
             }
             self.inputs
@@ -1052,6 +1341,19 @@ mod tests {
                 Ok(TerminalInputOutcome::Written)
             } else {
                 Ok(self.input_outcomes.remove(0))
+            }
+        }
+        fn input_outcome(
+            &mut self,
+            _: &TerminalRef,
+            operation: OperationId,
+            _: usize,
+        ) -> Result<TerminalInputResolution, TerminalError> {
+            self.resolution_queries.push(operation);
+            if self.resolutions.is_empty() {
+                Ok(TerminalInputResolution::Unknown)
+            } else {
+                self.resolutions.remove(0)
             }
         }
         fn detach(&mut self, _: &TerminalRef, subscription: TerminalSubscription) {
@@ -1079,6 +1381,7 @@ mod tests {
             _: &TerminalRef,
             _: TerminalSubscription,
             _: u64,
+            _: OperationId,
             _: &[u8],
         ) -> Result<TerminalInputOutcome, TerminalError> {
             Err(TerminalError::Unavailable)
@@ -1144,8 +1447,14 @@ mod tests {
             Err(TerminalError::Unavailable)
         );
         assert_eq!(
-            default_port.input(&terminal(), sub(1), 0, b"x"),
+            default_port.input(&terminal(), sub(1), 0, OperationId::new(), b"x"),
             Err(TerminalError::Unavailable)
+        );
+        // A port without a durable ledger answers unknown, which keeps a lost
+        // acknowledgement latched instead of replayed (#519).
+        assert_eq!(
+            default_port.input_outcome(&terminal(), OperationId::new(), 1),
+            Ok(TerminalInputResolution::Unknown)
         );
         default_port.detach(&terminal(), sub(1));
         let mut port = FakePort {
@@ -1409,6 +1718,286 @@ mod tests {
         );
     }
 
+    /// The ordering half of #519. An input whose acknowledgement was lost fences
+    /// this terminal: later keystrokes are held in order, the fence is resolved
+    /// by asking about the *operation* (never by resending), and only then does
+    /// the held input reach the PTY — still in the order it was produced.
+    #[test]
+    fn an_unknown_input_fences_the_queue_until_its_operation_resolves() {
+        let now = Instant::now();
+        let mut port = FakePort {
+            attach: vec![
+                Ok(attach_at(1, 1, 0, b"", false)),
+                Ok(attach_at(2, 2, 0, b"", false)),
+            ],
+            input: Some(TerminalError::InputEffectUnknown),
+            resolutions: vec![Ok(TerminalInputResolution::Final(
+                TerminalInputOutcome::Written,
+            ))],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect_at(&mut port, now);
+        assert_eq!(
+            session.send_input_at(&mut port, b"first", now),
+            Err(TerminalInputError::Transport(
+                TerminalError::InputEffectUnknown
+            ))
+        );
+        let fenced = port.issued_operations[0];
+        assert_eq!(session.unresolved_input_length(), Some(5));
+
+        // Nothing more reaches the port while the effect is unknown.
+        port.input = None;
+        assert_eq!(
+            session.send_input_at(&mut port, b"second", now),
+            Err(TerminalInputError::Fenced { queued: 1 })
+        );
+        assert_eq!(
+            session.send_input_at(&mut port, b"third", now),
+            Err(TerminalInputError::Fenced { queued: 2 })
+        );
+        assert_eq!(port.inputs.len(), 0);
+        assert_eq!(session.fenced_input_count(), 2);
+
+        // Recover the transport. A fresh epoch restarts the epoch-local sequence
+        // but leaves the fence and its queue intact.
+        session.poll_at(&mut port, now + RETRY_INITIAL);
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(session.fenced_input_count(), 2);
+        assert_eq!(session.unresolved_input_length(), Some(5));
+
+        // The next tick resolves the operation and releases the queue in order.
+        session.poll_at(&mut port, now + RETRY_INITIAL);
+        assert_eq!(port.resolution_queries, vec![fenced]);
+        assert_eq!(session.unresolved_input_length(), None);
+        assert_eq!(session.fenced_input_count(), 0);
+        assert_eq!(
+            port.inputs,
+            vec![(2, 0, b"second".to_vec()), (2, 1, b"third".to_vec())]
+        );
+        // Every input carried its own durable identity; nothing was resent.
+        assert_eq!(port.issued_operations.len(), 3);
+        assert_eq!(
+            port.issued_operations
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3
+        );
+    }
+
+    /// A daemon that cannot account for the operation leaves the fence latched:
+    /// the bytes are never resent, the queue is never reordered, and the query is
+    /// not repeated on every redraw tick.
+    #[test]
+    fn an_unresolvable_operation_latches_the_fence_without_resending() {
+        let now = Instant::now();
+        let mut port = FakePort {
+            attach: vec![
+                Ok(attach_at(1, 1, 0, b"", false)),
+                Ok(attach_at(2, 2, 0, b"", false)),
+            ],
+            input: Some(TerminalError::InputEffectUnknown),
+            resolutions: vec![Ok(TerminalInputResolution::Unknown)],
+            polls: vec![Ok(Vec::new()), Ok(Vec::new()), Ok(Vec::new())],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect_at(&mut port, now);
+        let _ = session.send_input_at(&mut port, b"lost", now);
+        port.input = None;
+        let _ = session.send_input_at(&mut port, b"held", now);
+
+        session.poll_at(&mut port, now + RETRY_INITIAL);
+        for tick in 1..4 {
+            session.poll_at(&mut port, now + RETRY_INITIAL * tick);
+        }
+        // Asked exactly once: the answer cannot change, so the fence latches.
+        assert_eq!(port.resolution_queries.len(), 1);
+        assert_eq!(session.unresolved_input_length(), Some(4));
+        assert_eq!(session.fenced_input_count(), 1);
+        assert!(port.inputs.is_empty());
+        assert!(
+            session
+                .error()
+                .is_some_and(|error| error.contains("cannot be resolved"))
+        );
+
+        // The bounded queue refuses further input instead of growing.
+        for _ in 0..FENCE_QUEUE_MAX_INPUTS {
+            let _ = session.send_input_at(&mut port, b"x", now);
+        }
+        assert_eq!(
+            session.send_input_at(&mut port, b"x", now),
+            Err(TerminalInputError::FenceFull {
+                queued: FENCE_QUEUE_MAX_INPUTS
+            })
+        );
+        assert_eq!(session.fenced_input_count(), FENCE_QUEUE_MAX_INPUTS);
+        assert!(port.inputs.is_empty());
+    }
+
+    /// Resolution never upgrades an outcome, and a resolution query that fails on
+    /// the transport leaves the fence exactly where it was.
+    #[test]
+    fn resolution_preserves_non_success_finals_and_survives_a_failed_query() {
+        for (final_outcome, lingering) in [
+            // A resolved `Failed` is certain: nothing uncertain is left behind.
+            (TerminalInputOutcome::Failed, None),
+            // A resolved `Ambiguous` is still uncertain and stays latched.
+            (
+                TerminalInputOutcome::Ambiguous { applied_prefix: 2 },
+                Some("2 bytes were applied"),
+            ),
+        ] {
+            let now = Instant::now();
+            let mut port = FakePort {
+                input: Some(TerminalError::InputEffectUnknown),
+                attach: vec![
+                    Ok(attach_at(1, 1, 0, b"", false)),
+                    Ok(attach_at(2, 2, 0, b"", false)),
+                    Ok(attach_at(3, 3, 0, b"", false)),
+                ],
+                resolutions: vec![
+                    Err(TerminalError::Unavailable),
+                    Ok(TerminalInputResolution::Final(final_outcome)),
+                ],
+                ..FakePort::default()
+            };
+            let mut session = TerminalSession::new(terminal(), geometry());
+            session.connect_at(&mut port, now);
+            let _ = session.send_input_at(&mut port, b"ab", now);
+            port.input = None;
+            let _ = session.send_input_at(&mut port, b"next", now);
+
+            // Reattach, then a failing query: still fenced, still queued.
+            session.poll_at(&mut port, now + RETRY_INITIAL);
+            session.poll_at(&mut port, now + RETRY_INITIAL);
+            assert_eq!(session.unresolved_input_length(), Some(2));
+            assert_eq!(session.fenced_input_count(), 1);
+            assert!(port.inputs.is_empty());
+
+            // The second query converges on the recorded non-success, which is
+            // reported as itself and still releases the ordered queue.
+            session.poll_at(&mut port, now + RETRY_INITIAL * 2);
+            session.poll_at(&mut port, now + RETRY_INITIAL * 2);
+            assert_eq!(session.unresolved_input_length(), None);
+            // The third attach is the one that finally resolved the fence, and
+            // its fresh subscription restarted the epoch-local sequence at zero.
+            assert_eq!(port.inputs, vec![(3, 0, b"next".to_vec())]);
+            match lingering {
+                Some(expected) => assert!(
+                    session
+                        .error()
+                        .is_some_and(|error| error.contains(expected)),
+                    "{:?}",
+                    session.error()
+                ),
+                None => assert_eq!(session.error(), None),
+            }
+        }
+    }
+
+    /// Draining stops at the first input that leaves the session non-Live, and
+    /// the rest of the queue keeps its order behind it.
+    ///
+    /// Resolving one fence must not turn the held input into a burst that races
+    /// a transport which has just failed again.
+    #[test]
+    fn an_interrupted_drain_keeps_the_rest_of_the_queue_in_order() {
+        let now = Instant::now();
+        let mut port = FakePort {
+            attach: vec![
+                Ok(attach_at(1, 1, 0, b"", false)),
+                Ok(attach_at(2, 2, 0, b"", false)),
+            ],
+            input: Some(TerminalError::InputEffectUnknown),
+            resolutions: vec![Ok(TerminalInputResolution::Final(
+                TerminalInputOutcome::Written,
+            ))],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect_at(&mut port, now);
+        let _ = session.send_input_at(&mut port, b"lost", now);
+        port.input = None;
+        let _ = session.send_input_at(&mut port, b"one", now);
+        let _ = session.send_input_at(&mut port, b"two", now);
+
+        // The transport fails again on the first drained input.
+        port.input_error_once = Some(TerminalError::Unavailable);
+        session.poll_at(&mut port, now + RETRY_INITIAL);
+        session.poll_at(&mut port, now + RETRY_INITIAL);
+
+        assert_eq!(session.state(), SessionState::Reconnecting);
+        assert_eq!(session.unresolved_input_length(), None);
+        // "one" was attempted and definitively failed; "two" is still held.
+        assert_eq!(session.fenced_input_count(), 1);
+        assert!(port.inputs.is_empty());
+    }
+
+    /// Retracting a resolved input's uncertainty leaves the other uncertain
+    /// inputs counted: durable resolution accounts for one input, not for all.
+    #[test]
+    fn retraction_only_removes_the_resolved_inputs_uncertainty() {
+        let now = Instant::now();
+        let mut port = FakePort {
+            attach: vec![
+                Ok(attach_at(1, 1, 0, b"", false)),
+                Ok(attach_at(2, 2, 0, b"", false)),
+            ],
+            input_outcomes: vec![TerminalInputOutcome::Ambiguous { applied_prefix: 1 }],
+            resolutions: vec![Ok(TerminalInputResolution::Final(
+                TerminalInputOutcome::Written,
+            ))],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect_at(&mut port, now);
+        // One ambiguous input, then one whose acknowledgement is lost.
+        let _ = session.send_input_at(&mut port, b"ab", now);
+        port.input = Some(TerminalError::InputEffectUnknown);
+        let _ = session.send_input_at(&mut port, b"cd", now);
+        assert!(
+            session
+                .error()
+                .is_some_and(|error| error.starts_with("2 terminal inputs have uncertain effects"))
+        );
+
+        port.input = None;
+        session.poll_at(&mut port, now + RETRY_INITIAL);
+        session.poll_at(&mut port, now + RETRY_INITIAL);
+        // The resolved input is accounted for; the ambiguous one still is not.
+        assert_eq!(
+            session.error(),
+            Some("terminal input is uncertain; 1 bytes were applied before failure")
+        );
+    }
+
+    /// A definitive failure did not write, so it must not fence what follows.
+    #[test]
+    fn a_definitive_input_failure_does_not_fence_the_queue() {
+        let now = Instant::now();
+        let mut port = FakePort {
+            attach: vec![Ok(attach_at(1, 1, 0, b"", false))],
+            input_outcomes: vec![TerminalInputOutcome::Failed],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect_at(&mut port, now);
+        assert_eq!(
+            session.send_input_at(&mut port, b"a", now),
+            Err(TerminalInputError::Rejected(TerminalInputOutcome::Failed))
+        );
+        assert_eq!(session.unresolved_input_length(), None);
+        assert_eq!(session.send_input_at(&mut port, b"b", now), Ok(()));
+        assert_eq!(
+            port.inputs,
+            vec![(1, 0, b"a".to_vec()), (1, 1, b"b".to_vec())]
+        );
+    }
+
     #[test]
     fn same_socket_decode_failure_reattach_preserves_the_input_sequence() {
         let now = Instant::now();
@@ -1562,9 +2151,12 @@ mod tests {
             Some("terminal input acknowledgement was lost; delivery is unknown")
         );
         assert!(port.inputs.is_empty());
+        // The unknown effect fences this terminal's producer queue, so the next
+        // keystroke is held in order rather than merely refused: it must not be
+        // able to overtake an input that may still be applied (#519).
         assert_eq!(
             session.send_input(&mut port, b"y"),
-            Err(TerminalInputError::NotLive(SessionState::Reconnecting))
+            Err(TerminalInputError::Fenced { queued: 1 })
         );
         assert!(port.inputs.is_empty());
     }
@@ -1597,6 +2189,20 @@ mod tests {
             session.error(),
             Some("terminal input acknowledgement was lost; delivery is unknown")
         );
+        // Resolving the fence converges the lost acknowledgement on the daemon's
+        // recorded final, which here is itself uncertain: the warning is replaced
+        // by what the daemon actually recorded, not cleared.
+        port.resolutions.push(Ok(TerminalInputResolution::Final(
+            TerminalInputOutcome::Ambiguous { applied_prefix: 1 },
+        )));
+        session.poll_at(&mut port, clock.0);
+        assert_eq!(
+            session.error(),
+            Some("terminal input is uncertain; 1 bytes were applied before failure")
+        );
+
+        // A second, independently uncertain input aggregates with it instead of
+        // overwriting it.
         port.input_outcomes
             .push(TerminalInputOutcome::Ambiguous { applied_prefix: 1 });
         assert_eq!(
@@ -1607,7 +2213,6 @@ mod tests {
         );
         let uncertainty = session.error().unwrap();
         assert!(uncertainty.starts_with("2 terminal inputs have uncertain effects"));
-        assert!(uncertainty.contains("delivery is unknown"));
         assert!(uncertainty.contains("1 bytes were applied"));
 
         port.polls.push(Err(TerminalError::Orphaned));
@@ -1615,7 +2220,6 @@ mod tests {
         let feedback = session.error().unwrap();
         assert!(feedback.starts_with("terminal ownership is unknown"));
         assert!(feedback.contains("prior terminal input uncertainty"));
-        assert!(feedback.contains("delivery is unknown"));
         assert!(feedback.contains("2 terminal inputs have uncertain effects"));
     }
 
@@ -1902,6 +2506,7 @@ mod tests {
                 _: &TerminalRef,
                 _: TerminalSubscription,
                 _: u64,
+                _: OperationId,
                 _: &[u8],
             ) -> Result<TerminalInputOutcome, TerminalError> {
                 self.available().map(|()| TerminalInputOutcome::Written)

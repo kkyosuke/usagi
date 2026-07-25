@@ -52,12 +52,39 @@ pub trait TerminalOwner {
     fn disconnect(&mut self, connection: usagi_core::domain::id::ConnectionId);
 }
 
+/// An admitted connection and the peer identity durable per-client daemon state
+/// is bound to.
+///
+/// The connection is not that identity. A client keeps working across reconnects,
+/// so anything it must still reach after a lost response — notably the terminal
+/// input operation ledger (#519) — has to be keyed by the client incarnation the
+/// hello declares, not by the socket that happened to carry the request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdmittedConnection {
+    pub hello: ServerHello,
+    /// The peer's declared client incarnation, when it is a canonical resource
+    /// identity. `None` is a peer that predates the ledger: its terminal input
+    /// stays on the connection-local sequence contract and it may not present a
+    /// durable operation identity.
+    pub client_incarnation: Option<usagi_core::domain::id::ClientId>,
+}
+
 /// Complete a bootstrap handshake. No ordinary envelope is accepted before this succeeds.
 pub fn handshake(
     reader: &mut dyn Read,
     writer: &mut dyn Write,
     server: &ServerProtocol,
 ) -> io::Result<Option<ServerHello>> {
+    Ok(handshake_admitted(reader, writer, server)?.map(|admitted| admitted.hello))
+}
+
+/// As [`handshake`], but also reports the client incarnation durable per-client
+/// state is keyed by.
+pub fn handshake_admitted(
+    reader: &mut dyn Read,
+    writer: &mut dyn Write,
+    server: &ServerProtocol,
+) -> io::Result<Option<AdmittedConnection>> {
     let Some(first) = read_json_frame::<Bootstrap>(reader, server.limits.max_frame_bytes as usize)?
     else {
         return Ok(None);
@@ -75,7 +102,11 @@ pub fn handshake(
                 &Bootstrap::ServerHello(reply.clone()),
                 server.limits.max_frame_bytes as usize,
             )?;
-            Ok(Some(reply))
+            Ok(Some(AdmittedConnection {
+                hello: reply,
+                client_incarnation: usagi_core::domain::id::ClientId::parse(&hello.client_id.0)
+                    .ok(),
+            }))
         }
         Err(error) => {
             write_json_frame(
@@ -211,11 +242,19 @@ pub fn handle_connection_with_terminal_and(
         usagi_core::domain::id::ClientId,
     ) -> Envelope,
 ) -> io::Result<()> {
-    let Some(hello) = handshake(reader, writer, server)? else {
+    let Some(admitted) = handshake_admitted(reader, writer, server)? else {
         return Ok(());
     };
+    let AdmittedConnection {
+        hello,
+        client_incarnation,
+    } = admitted;
     let connection = usagi_core::domain::id::ConnectionId::new();
-    let client = usagi_core::domain::id::ClientId::new();
+    // The ledger key is the client incarnation the peer declared, so a client
+    // that reconnects still reaches the input operations it already issued. A
+    // peer without one gets a connection-local identity, which keeps its
+    // sequence ledger working and leaves it unable to replay anything.
+    let client = client_incarnation.unwrap_or_else(usagi_core::domain::id::ClientId::new);
     let result = (|| {
         while let Some(envelope) =
             read_json_frame::<Envelope>(reader, hello.limits.max_frame_bytes as usize)?
@@ -241,23 +280,30 @@ pub fn handle_connection_with_terminal_and(
                 payload,
             }) = serde_json::from_value(body.clone())
             {
-                match usagi_core::domain::id::RequestId::parse(&request_id.0) {
-                    Ok(owner_request_id) => terminal
-                        .request(
-                            connection,
-                            client,
-                            owner_request_id,
-                            action,
-                            payload,
-                            crate::usecase::terminal::SnapshotWire::for_revision(
-                                hello.protocol.revision,
-                            ),
-                        )
-                        .map(ok_response),
-                    Err(_) => Err(ProtocolError::new(
-                        ErrorCode::InvalidArgument,
-                        "terminal request_id must be a canonical resource ID",
-                    )),
+                if client_incarnation.is_none() && carries_input_operation(&payload) {
+                    Err(ProtocolError::new(
+                        ErrorCode::Unauthenticated,
+                        "durable terminal input requires a canonical client incarnation",
+                    ))
+                } else {
+                    match usagi_core::domain::id::RequestId::parse(&request_id.0) {
+                        Ok(owner_request_id) => terminal
+                            .request(
+                                connection,
+                                client,
+                                owner_request_id,
+                                action,
+                                payload,
+                                crate::usecase::terminal::SnapshotWire::for_revision(
+                                    hello.protocol.revision,
+                                ),
+                            )
+                            .map(ok_response),
+                        Err(_) => Err(ProtocolError::new(
+                            ErrorCode::InvalidArgument,
+                            "terminal request_id must be a canonical resource ID",
+                        )),
+                    }
                 }
             } else {
                 let dispatched =
@@ -286,6 +332,18 @@ pub fn handle_connection_with_terminal_and(
     })();
     terminal.disconnect(connection);
     result
+}
+
+/// Whether a terminal payload asks for cross-connection operation semantics.
+///
+/// A peer whose client incarnation could not be established cannot be given
+/// those semantics: its ledger would be keyed by a connection-local identity, so
+/// a later "replay" would look like a new operation and reach the PTY twice. The
+/// request is refused before the owner sees it rather than degraded silently.
+fn carries_input_operation(payload: &serde_json::Value) -> bool {
+    payload
+        .get("input_operation")
+        .is_some_and(|operation| !operation.is_null())
 }
 
 fn ok_response(body: serde_json::Value) -> (ResponseOutcome, serde_json::Value) {
@@ -336,6 +394,7 @@ pub fn server_protocol(
             "build.artifact.v1".into(),
             "daemon.owner-identity.v1".into(),
             usagi_core::infrastructure::ipc::TERMINAL_SCREEN_CHECKPOINT_CAPABILITY.into(),
+            usagi_core::infrastructure::ipc::TERMINAL_INPUT_OPERATION_CAPABILITY.into(),
             usagi_core::infrastructure::ipc::WORKSPACE_FENCE_CAPABILITY.into(),
         ],
         build,
@@ -370,12 +429,14 @@ mod tests {
         requests: usize,
         disconnects: usize,
         wires: Vec<crate::usecase::terminal::SnapshotWire>,
+        /// The client incarnation each routed request was attributed to.
+        clients: Vec<usagi_core::domain::id::ClientId>,
     }
     impl TerminalOwner for RecordingTerminal {
         fn request(
             &mut self,
             _: usagi_core::domain::id::ConnectionId,
-            _: usagi_core::domain::id::ClientId,
+            client: usagi_core::domain::id::ClientId,
             _: usagi_core::domain::id::RequestId,
             _: usagi_core::usecase::client::TerminalAction,
             _: serde_json::Value,
@@ -383,6 +444,7 @@ mod tests {
         ) -> Result<serde_json::Value, ProtocolError> {
             self.requests += 1;
             self.wires.push(wire);
+            self.clients.push(client);
             if self.fail {
                 Err(ProtocolError::new(
                     ErrorCode::Unavailable,
@@ -509,6 +571,129 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(matches!(response.kind, EnvelopeKind::Response { .. }));
+    }
+
+    /// Durable per-client state must key on the peer's declared incarnation, not
+    /// on the socket: a client that reconnects has to reach the terminal input
+    /// operations it already issued (#519).
+    #[test]
+    fn terminal_requests_are_attributed_to_the_declared_client_incarnation() {
+        let incarnation = usagi_core::domain::id::ClientId::new();
+        let mut durable = client_hello();
+        durable.client_id = ClientId(incarnation.as_str());
+        let terminal_request = |body: serde_json::Value| Envelope {
+            protocol: ProtocolVersion {
+                generation: 1,
+                revision: 1,
+            },
+            daemon_generation: DaemonGeneration("current".into()),
+            kind: EnvelopeKind::Request {
+                request_id: usagi_core::infrastructure::ipc::RequestId(
+                    usagi_core::domain::id::RequestId::new().as_str(),
+                ),
+                timeout_ms: None,
+                body,
+            },
+        };
+        let input = |input_operation: Option<serde_json::Value>| {
+            json!({
+                "kind": "terminal",
+                "action": "input",
+                "payload": {
+                    "operation": "input",
+                    "terminal": terminal_ref(),
+                    "subscription": 1,
+                    "input_seq": 0,
+                    "input_operation": input_operation,
+                    "bytes": [97],
+                },
+            })
+        };
+
+        let mut serve_ordinary =
+            |request_id, _, hello: &ServerHello, _, _| dispatch(request_id, json!(null), hello);
+
+        // Two independent connections from the same client incarnation.
+        let mut owner = RecordingTerminal::default();
+        for _ in 0..2 {
+            let mut frames = Vec::new();
+            write_json_frame(&mut frames, &Bootstrap::ClientHello(durable.clone()), 4096).unwrap();
+            write_json_frame(&mut frames, &terminal_request(input(None)), 4096).unwrap();
+            handle_connection_with_terminal_and(
+                &mut Cursor::new(frames),
+                &mut Vec::new(),
+                &server(),
+                &mut owner,
+                &mut serve_ordinary,
+            )
+            .unwrap();
+        }
+        assert_eq!(owner.clients, vec![incarnation, incarnation]);
+
+        // A peer without a canonical incarnation keeps working, but each of its
+        // connections is a separate identity, so it can replay nothing.
+        let mut legacy_owner = RecordingTerminal::default();
+        for _ in 0..2 {
+            let mut frames = Vec::new();
+            write_json_frame(&mut frames, &hello(), 4096).unwrap();
+            write_json_frame(&mut frames, &terminal_request(input(None)), 4096).unwrap();
+            // Its ordinary, non-terminal traffic is served as before.
+            write_json_frame(&mut frames, &request(), 4096).unwrap();
+            handle_connection_with_terminal_and(
+                &mut Cursor::new(frames),
+                &mut Vec::new(),
+                &server(),
+                &mut legacy_owner,
+                &mut serve_ordinary,
+            )
+            .unwrap();
+        }
+        assert_ne!(legacy_owner.clients[0], legacy_owner.clients[1]);
+
+        // And it may not ask for cross-connection semantics it cannot be given:
+        // the request is refused before the owner ever sees it.
+        let mut refused = RecordingTerminal::default();
+        let mut frames = Vec::new();
+        write_json_frame(&mut frames, &hello(), 4096).unwrap();
+        write_json_frame(
+            &mut frames,
+            &terminal_request(input(Some(json!(
+                usagi_core::domain::id::OperationId::new().as_str()
+            )))),
+            4096,
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        handle_connection_with_terminal_and(
+            &mut Cursor::new(frames),
+            &mut output,
+            &server(),
+            &mut refused,
+            &mut serve_ordinary,
+        )
+        .unwrap();
+        assert!(refused.clients.is_empty());
+        let mut output = Cursor::new(output);
+        let _ = read_json_frame::<Bootstrap>(&mut output, 4096).unwrap();
+        let response = serde_json::to_value(
+            read_json_frame::<Envelope>(&mut output, 4096)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(response["outcome"]["outcome"], "error");
+        assert_eq!(response["outcome"]["value"]["code"], "unauthenticated");
+        assert_eq!(response["outcome"]["value"]["side_effect"], "none");
+    }
+
+    fn terminal_ref() -> serde_json::Value {
+        json!({
+            "daemon_generation": usagi_core::domain::id::DaemonGeneration::new().as_str(),
+            "terminal_id": usagi_core::domain::id::TerminalId::new().as_str(),
+            "workspace_id": usagi_core::domain::id::WorkspaceId::new().as_str(),
+            "session_id": null,
+            "worktree_id": usagi_core::domain::id::WorktreeId::new().as_str(),
+        })
     }
 
     #[test]

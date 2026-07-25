@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use usagi_core::domain::{
-    id::{CompletionFence, ConnectionId, TerminalRef},
+    id::{ClientId, CompletionFence, ConnectionId, OperationId, TerminalRef},
     terminal_launch::{
         DurableTerminalLaunchSnapshot, ResolvedTerminalLaunch, TerminalInventoryEntry,
         TerminalKind, TerminalLaunchRequest, TerminalLaunchValidationError,
@@ -447,9 +447,27 @@ impl GenericTerminalCoordinator {
         bytes: &[u8],
         writer: &mut dyn PtyWriter,
     ) -> Result<InputAck, GenericTerminalError> {
+        // The liveness gate stays on the write path: a *new* operation must
+        // never reach a reserved, reconciling, or exited runtime. Resolving an
+        // already recorded operation is the read-only `input_outcome` path, which
+        // is deliberately not gated this way.
         self.running(terminal)?;
         self.terminals
-            .write_input(terminal, input, bytes, writer)
+            .write_input(terminal, input, bytes, self.retention.now_ms(), writer)
+            .map_err(GenericTerminalError::Terminal)
+    }
+
+    /// Reads the recorded final of one durable input operation. `Ok(None)` is a
+    /// typed unknown rather than an error, and never authorizes a rewrite.
+    pub fn input_outcome(
+        &mut self,
+        terminal: &TerminalRef,
+        client: ClientId,
+        operation: OperationId,
+    ) -> Result<Option<InputAck>, GenericTerminalError> {
+        let now_ms = self.retention.now_ms();
+        self.terminals
+            .input_outcome(terminal, client, operation, now_ms)
             .map_err(GenericTerminalError::Terminal)
     }
     pub fn replay_from(

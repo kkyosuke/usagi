@@ -741,12 +741,22 @@ daemon の input ACK は `Written` だけを通常成功とする。`Failed` は
 
 Live でない、subscription がない、または definitive な送信前 failure は success と扱わず、未配送を safe feedback として
 footer に表示する。一方、request write 後に transport / ACK を失った入力は delivery が unknown であり、未配送と断定しない。
-その入力を自動 queue / replay せず `Reconnecting` へ移り、利用者が不確定な command を認識できる feedback を残す。
+その入力を blind replay せず `Reconnecting` へ移り、利用者が不確定な command を認識できる feedback を残す。
 未知の ACK variant、範囲外の `applied_prefix`、過剰に深い `Cached` も同じく fail closed とする。
 ACK lossと`Ambiguous`のmutation uncertaintyはtransport recoveryや後続`Written`では消さず、複数件をcount + first/latestで
-集約する。現行UIにはclear操作を置かず、session破棄または#519のoperation-ledger resolutionまでlatchする。後から
+集約する。現行UIにはclear操作を置かず、session破棄と daemon の durable outcome resolution だけがこれを解く。後から
 stale/orphaned/exited/resize failureが起きた場合はcurrent terminal errorを先に表示し、prior input uncertaintyも同じfooter
 feedbackへ合成して隠さない。
+
+ACK を失った入力は表示だけでなく、その pane の **ordering fence** になる。fence がある間の打鍵は PTY へ送らず生成順に
+bounded queue（既定 64 件 / 8 KiB）へ保持し、footer は「順序を保って保留中」であることと待ち件数を示す。queue が満杯に
+なった打鍵は typed backpressure として拒否し、黙って捨てたり順序を入れ替えたりしない。fence は次の redraw tick で
+daemon へ**当該 operation の outcome 照会**を送って解消する（同じ bytes は再送しない）。`Written` なら uncertainty を
+撤回して queue を順序どおり流し、`Failed` / `Ambiguous` なら outcome をそのまま投影してから流す。daemon が記録を
+持たない `unknown` の場合は fence を latch し、以後は照会も再送も行わない。fresh connection epoch は
+`input_seq` を 0 へ戻すが、未収束 operation と queue は保持する。identity・wire・ledger の bound は
+[4. daemon IPC#terminal input identity と cross-connection replay](04-ipc.md#terminal-input-identity-と-cross-connection-replay) を正本とする。
+
 terminal は起動時点と resize 後の右ペイン実幅・高さで geometry を要求するため、shell の right prompt も pane 内に収まる。geometry が変わると TUI は PTY と decoded local screen を resize する。過去の cursor 移動列は新しい幅で再生せず、過去行を含む既存セルを clip して行数を増やさない。daemon 不通・stale・orphan は安全な
 feedback だけを表示し、local PTY を生成しない。
 

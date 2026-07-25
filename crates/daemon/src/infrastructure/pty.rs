@@ -261,6 +261,7 @@ mod tests {
             client,
             request,
             input_seq: 0,
+            operation: None,
         }
     }
 
@@ -476,14 +477,14 @@ mod tests {
         };
         assert_eq!(
             registry
-                .write_input(&terminal, ambiguous_input, b"hello", &mut partial)
+                .write_input(&terminal, ambiguous_input, b"hello", 0, &mut partial)
                 .unwrap(),
             InputAck::Ambiguous { applied_prefix: 2 }
         );
         assert_eq!(partial.inner.written, b"he");
         assert_eq!(
             registry
-                .write_input(&terminal, ambiguous_input, b"hello", &mut partial)
+                .write_input(&terminal, ambiguous_input, b"hello", 0, &mut partial)
                 .unwrap(),
             InputAck::Cached(Box::new(InputAck::Ambiguous { applied_prefix: 2 }))
         );
@@ -504,13 +505,13 @@ mod tests {
         };
         assert_eq!(
             safe_registry
-                .write_input(&terminal, safe_input, b"hello", &mut failed)
+                .write_input(&terminal, safe_input, b"hello", 0, &mut failed)
                 .unwrap(),
             InputAck::Failed
         );
         assert_eq!(
             safe_registry
-                .write_input(&terminal, safe_input, b"hello", &mut failed)
+                .write_input(&terminal, safe_input, b"hello", 0, &mut failed)
                 .unwrap(),
             InputAck::Cached(Box::new(InputAck::Failed))
         );

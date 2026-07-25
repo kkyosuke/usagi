@@ -12,12 +12,12 @@
 //! bounded raw journal stays: it serves the incremental `Resume` suffix a
 //! client feeds into the screen restored from the checkpoint.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
-use usagi_core::domain::id::{ClientId, ConnectionId, RequestId, TerminalRef};
-use usagi_core::infrastructure::ipc::TERMINAL_CHECKPOINT_REVISION;
+use usagi_core::domain::id::{ClientId, ConnectionId, OperationId, RequestId, TerminalRef};
+use usagi_core::infrastructure::ipc::{TERMINAL_CHECKPOINT_REVISION, terminal_input_digest};
 use usagi_core::usecase::vt_screen::{
     CHECKPOINT_BYTES_MAX, COLS_MAX, ROWS_MAX, ScreenCheckpoint, VtScreen,
 };
@@ -351,13 +351,203 @@ pub struct PtyWriteError {
 }
 
 /// The authenticated input identity carried by one terminal-key command.
+///
+/// The three identities here are deliberately independent. `connection` and
+/// `subscription` fence the *attachment* that may write; `input_seq` orders the
+/// writes of one connection epoch's subscription; `operation` identifies the
+/// logical input itself and therefore survives the connection that carried it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InputRequest {
     pub subscription: u64,
     pub connection: ConnectionId,
+    /// The producer's client incarnation. It is stable for one client process,
+    /// so the durable operation ledger outlives any single connection.
     pub client: ClientId,
     pub request: RequestId,
     pub input_seq: u64,
+    /// Producer-issued durable identity of this input. `None` is a peer that
+    /// predates the ledger: it keeps the connection-local sequence contract and
+    /// gets no cross-connection resolution.
+    pub operation: Option<OperationId>,
+}
+
+/// Bounds for the durable input operation ledger.
+///
+/// Every dimension the ledger can grow along is bounded: how many operations one
+/// client may keep, how many the process keeps in total, how many payload bytes
+/// they hold, and how long a record survives. Exceeding a count or byte bound
+/// releases the oldest records; exceeding the age bound releases records on the
+/// next lookup or insert. A released record answers as unknown, never as success.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputOperationBounds {
+    pub max_operations: usize,
+    pub max_operations_per_client: usize,
+    pub max_bytes: usize,
+    pub max_age_ms: u64,
+}
+
+impl Default for InputOperationBounds {
+    fn default() -> Self {
+        Self {
+            max_operations: 4_096,
+            max_operations_per_client: 256,
+            max_bytes: 1024 * 1024,
+            max_age_ms: 5 * 60 * 1000,
+        }
+    }
+}
+
+/// What the ledger knows about one presented operation identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OperationLookup {
+    /// Never recorded (or already released): the caller may write it as new.
+    Absent,
+    /// Recorded for the same target and semantic content: replay this final.
+    Recorded(InputAck),
+    /// Recorded for a different target or different bytes: the identity is
+    /// being reused for another meaning.
+    Conflict,
+}
+
+/// One recorded terminal input operation and the bounds accounting it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InputOperationRecord {
+    terminal: String,
+    digest: String,
+    ack: InputAck,
+    bytes: usize,
+    recorded_at_ms: u64,
+}
+
+/// A bounded, process-local ledger of terminal input operation finals, keyed by
+/// client incarnation and producer operation identity.
+///
+/// It is deliberately *not* per attachment: a client that lost an acknowledgement
+/// has also lost the subscription that carried it, so binding the outcome to the
+/// attachment would make the outcome unreachable exactly when it is needed.
+#[derive(Debug)]
+struct InputOperationLedger {
+    bounds: InputOperationBounds,
+    records: HashMap<(ClientId, OperationId), InputOperationRecord>,
+    order: VecDeque<(ClientId, OperationId)>,
+    bytes: usize,
+}
+
+impl InputOperationLedger {
+    fn new(bounds: InputOperationBounds) -> Self {
+        Self {
+            bounds,
+            records: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+        }
+    }
+
+    /// Releases every record older than the age bound. An aged-out record is
+    /// indistinguishable from one never seen, which is why the client contract
+    /// treats "unknown" as uncertainty rather than as permission to write again.
+    fn expire(&mut self, now_ms: u64) {
+        let bounds = self.bounds;
+        let expired: Vec<(ClientId, OperationId)> = self
+            .records
+            .iter()
+            .filter(|(_, record)| now_ms.saturating_sub(record.recorded_at_ms) > bounds.max_age_ms)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in expired {
+            self.release(&key);
+        }
+    }
+
+    fn release(&mut self, key: &(ClientId, OperationId)) {
+        if let Some(record) = self.records.remove(key) {
+            self.bytes = self.bytes.saturating_sub(record.bytes);
+            self.order.retain(|queued| queued != key);
+        }
+    }
+
+    fn lookup(
+        &mut self,
+        client: ClientId,
+        operation: OperationId,
+        terminal: &str,
+        digest: &str,
+        now_ms: u64,
+    ) -> OperationLookup {
+        self.expire(now_ms);
+        match self.records.get(&(client, operation)) {
+            Some(record) if record.terminal == terminal && record.digest == digest => {
+                OperationLookup::Recorded(record.ack.clone())
+            }
+            Some(_) => OperationLookup::Conflict,
+            None => OperationLookup::Absent,
+        }
+    }
+
+    /// Reads a recorded final without asserting anything about the request that
+    /// produced it. `None` means unknown: never seen, or already released.
+    fn recorded(
+        &mut self,
+        client: ClientId,
+        operation: OperationId,
+        terminal: &str,
+        now_ms: u64,
+    ) -> Option<InputAck> {
+        self.expire(now_ms);
+        self.records
+            .get(&(client, operation))
+            .filter(|record| record.terminal == terminal)
+            .map(|record| record.ack.clone())
+    }
+
+    fn record(
+        &mut self,
+        client: ClientId,
+        operation: OperationId,
+        record: InputOperationRecord,
+        now_ms: u64,
+    ) {
+        self.expire(now_ms);
+        if self.bounds.max_operations == 0 || self.bounds.max_operations_per_client == 0 {
+            return;
+        }
+        let key = (client, operation);
+        self.release(&key);
+        self.bytes = self.bytes.saturating_add(record.bytes);
+        self.records.insert(key, record);
+        self.order.push_back(key);
+        self.enforce_bounds(client);
+    }
+
+    /// Releases oldest-first until every bound holds again.
+    ///
+    /// `records` and `order` are always mutated together, so an over-budget
+    /// ledger always has something to release; the lookups are part of the loop
+    /// conditions rather than defensive breaks that could never be taken.
+    fn enforce_bounds(&mut self, client: ClientId) {
+        while self.per_client(client) > self.bounds.max_operations_per_client
+            && let Some(oldest) = self
+                .order
+                .iter()
+                .find(|(owner, _)| *owner == client)
+                .copied()
+        {
+            self.release(&oldest);
+        }
+        while (self.records.len() > self.bounds.max_operations
+            || self.bytes > self.bounds.max_bytes)
+            && let Some(oldest) = self.order.front().copied()
+        {
+            self.release(&oldest);
+        }
+    }
+
+    fn per_client(&self, client: ClientId) -> usize {
+        self.records
+            .keys()
+            .filter(|(owner, _)| *owner == client)
+            .count()
+    }
 }
 
 /// Registry failures are explicit so stale references never fall back to names.
@@ -371,6 +561,10 @@ pub enum RegistryError {
     NotAttached,
     SequenceGap,
     IdempotencyExpired,
+    /// One durable operation identity was presented for different bytes or a
+    /// different terminal than the one it already records. The daemon writes
+    /// nothing and never applies it to the other target.
+    IdempotencyConflict,
     Exited,
     PtyResizeFailed,
     /// The screen cannot be captured inside the frame budget even with all of
@@ -390,7 +584,14 @@ struct Entry {
     exited: Option<i32>,
     attachments: BTreeMap<u64, ConnectionId>,
     next_subscription: u64,
-    inputs: BTreeMap<ClientId, InputLedger>,
+    /// Epoch-local input sequence ledgers.
+    ///
+    /// Keyed by the *connection* as well as the client, because `input_seq` is a
+    /// per-connection-epoch ordering number: a client that reconnects restarts it
+    /// at zero, so a ledger that outlived the connection would reject the first
+    /// input after every reconnect as a stale sequence. Cross-connection identity
+    /// lives in the separate operation ledger, keyed by client incarnation.
+    inputs: BTreeMap<(ConnectionId, ClientId), InputLedger>,
     /// The authoritative decoded screen for this terminal (#199). Every byte
     /// this registry accepts is fed to it, so a checkpoint never depends on
     /// where the bounded journal happens to start.
@@ -424,6 +625,10 @@ pub struct TerminalRegistry {
     checkpoint_bytes_limit: usize,
     screen_cells_limit: usize,
     screen_cells_aggregate_limit: usize,
+    /// Cross-connection input operation finals. It lives beside `entries`
+    /// instead of inside one, so reusing an operation identity for a second
+    /// terminal is detected as a conflict rather than written twice.
+    operations: InputOperationLedger,
 }
 
 impl TerminalRegistry {
@@ -436,7 +641,18 @@ impl TerminalRegistry {
             checkpoint_bytes_limit: CHECKPOINT_BYTES_MAX,
             screen_cells_limit: SCREEN_CELLS_PER_TERMINAL_MAX,
             screen_cells_aggregate_limit: SCREEN_CELLS_AGGREGATE_MAX,
+            operations: InputOperationLedger::new(InputOperationBounds::default()),
         }
+    }
+
+    /// Overrides the durable input operation bounds.
+    ///
+    /// The defaults are [`InputOperationBounds::default`]; a smaller budget makes
+    /// eviction and expiry observable without recording thousands of operations.
+    #[must_use]
+    pub fn with_input_operation_bounds(mut self, bounds: InputOperationBounds) -> Self {
+        self.operations = InputOperationLedger::new(bounds);
+        self
     }
 
     /// Overrides the serialized checkpoint budget.
@@ -564,6 +780,11 @@ impl TerminalRegistry {
     pub fn disconnect(&mut self, connection: ConnectionId) {
         for entry in self.entries.values_mut() {
             entry.attachments.retain(|_, owner| *owner != connection);
+            // The epoch-local sequence ledger dies with its connection, exactly
+            // as the client's `input_seq` restarts on a fresh transport. Durable
+            // operation finals are unaffected: they are what a reconnecting
+            // client still has to be able to resolve.
+            entry.inputs.retain(|(owner, _), _| *owner != connection);
         }
     }
 
@@ -723,9 +944,32 @@ impl TerminalRegistry {
         reference: &TerminalRef,
         input: InputRequest,
         bytes: &[u8],
+        now_ms: u64,
         writer: &mut dyn PtyWriter,
     ) -> Result<InputAck, RegistryError> {
         let input_cache_limit = self.input_cache_limit;
+        let target = key(reference);
+        // Resolve the durable identity first. A client whose acknowledgement was
+        // lost reconnects with a *new* connection and a *new* subscription, so
+        // requiring the attachment before consulting the ledger is exactly what
+        // made an existing outcome unreachable.
+        let digest = terminal_input_digest(&target, bytes);
+        if let Some(operation) = input.operation {
+            match self
+                .operations
+                .lookup(input.client, operation, &target, &digest, now_ms)
+            {
+                OperationLookup::Recorded(ack) => {
+                    // The terminal identity must still fence, but neither the
+                    // attachment nor the exit state may turn a recorded final
+                    // into a different answer.
+                    self.entry(reference)?;
+                    return Ok(InputAck::Cached(Box::new(ack)));
+                }
+                OperationLookup::Conflict => return Err(RegistryError::IdempotencyConflict),
+                OperationLookup::Absent => {}
+            }
+        }
         let entry = self.entry_mut(reference)?;
         if entry.attachments.get(&input.subscription) != Some(&input.connection) {
             return Err(RegistryError::NotAttached);
@@ -733,7 +977,10 @@ impl TerminalRegistry {
         if entry.exited.is_some() {
             return Err(RegistryError::Exited);
         }
-        let ledger = entry.inputs.entry(input.client).or_default();
+        let ledger = entry
+            .inputs
+            .entry((input.connection, input.client))
+            .or_default();
         if input.input_seq < ledger.next_seq {
             return ledger
                 .entries
@@ -759,7 +1006,45 @@ impl TerminalRegistry {
         while ledger.entries.len() > input_cache_limit {
             ledger.entries.pop_front();
         }
+        if let Some(operation) = input.operation {
+            self.operations.record(
+                input.client,
+                operation,
+                InputOperationRecord {
+                    terminal: target,
+                    digest,
+                    ack: ack.clone(),
+                    bytes: bytes.len(),
+                    recorded_at_ms: now_ms,
+                },
+                now_ms,
+            );
+        }
         Ok(ack)
+    }
+
+    /// Reads the recorded final of one durable input operation without writing.
+    ///
+    /// `Ok(None)` is a typed unknown: the operation was never recorded here, or
+    /// the bounded ledger already released it. It is deliberately not an error
+    /// and deliberately not permission to write the bytes again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::StaleTarget`] for a non-current terminal. An
+    /// exited terminal still answers, because the input it recorded happened
+    /// before the exit.
+    pub fn input_outcome(
+        &mut self,
+        reference: &TerminalRef,
+        client: ClientId,
+        operation: OperationId,
+        now_ms: u64,
+    ) -> Result<Option<InputAck>, RegistryError> {
+        self.entry(reference)?;
+        Ok(self
+            .operations
+            .recorded(client, operation, &key(reference), now_ms))
     }
 
     /// Commits exit only after the caller has drained PTY output into the journal.
@@ -1063,6 +1348,22 @@ mod tests {
             client,
             request,
             input_seq,
+            operation: None,
+        }
+    }
+
+    /// The same input carrying a producer-issued durable operation identity.
+    fn durable_input(
+        subscription: u64,
+        connection: ConnectionId,
+        client: ClientId,
+        request: RequestId,
+        input_seq: u64,
+        operation: OperationId,
+    ) -> InputRequest {
+        InputRequest {
+            operation: Some(operation),
+            ..input(subscription, connection, client, request, input_seq)
         }
     }
 
@@ -1630,6 +1931,7 @@ mod tests {
                     &r,
                     input(subscription, connection, client, request, 0),
                     b"ok",
+                    0,
                     &mut writer
                 )
                 .unwrap(),
@@ -1641,6 +1943,7 @@ mod tests {
                     &r,
                     input(subscription, connection, client, request, 0),
                     b"ok",
+                    0,
                     &mut writer
                 )
                 .unwrap(),
@@ -1657,6 +1960,7 @@ mod tests {
                     &r,
                     input(subscription, connection, client, RequestId::new(), 1),
                     b"x",
+                    0,
                     &mut partial
                 )
                 .unwrap(),
@@ -1667,6 +1971,7 @@ mod tests {
                 &r,
                 input(subscription, connection, client, RequestId::new(), 3),
                 b"gap",
+                0,
                 &mut writer
             ),
             Err(RegistryError::SequenceGap)
@@ -1681,6 +1986,7 @@ mod tests {
                     &r,
                     input(subscription, connection, client, RequestId::new(), 2),
                     b"fail",
+                    0,
                     &mut failed
                 )
                 .unwrap(),
@@ -1691,11 +1997,496 @@ mod tests {
                 &r,
                 input(subscription, connection, client, request, 0),
                 b"old",
+                0,
                 &mut writer
             ),
             Err(RegistryError::IdempotencyExpired)
         );
     }
+    /// The core of #519: the response was produced, the connection that carried
+    /// it died, and the client comes back on a *new* connection with a *new*
+    /// subscription and a restarted epoch-local sequence. The stable operation
+    /// identity is the only thing that still ties the two together, so the PTY
+    /// must be written exactly once and both answers must be the same final.
+    #[test]
+    fn a_recorded_operation_converges_on_one_pty_write_across_connections() {
+        let r = reference();
+        let mut registry = registry(r.clone());
+        let client = ClientId::new();
+        let operation = OperationId::new();
+        let mut writer = Writer::default();
+
+        let first = ConnectionId::new();
+        let subscription = registry.attach(&r, first).unwrap().subscription;
+        assert_eq!(
+            registry
+                .write_input(
+                    &r,
+                    durable_input(subscription, first, client, RequestId::new(), 0, operation),
+                    b"ls\r",
+                    1_000,
+                    &mut writer,
+                )
+                .unwrap(),
+            InputAck::Written
+        );
+
+        // The connection is gone: every attachment it owned is released.
+        registry.disconnect(first);
+        let second = ConnectionId::new();
+        let fresh = registry.attach(&r, second).unwrap().subscription;
+        assert_ne!(fresh, subscription);
+
+        // The epoch-local sequence restarted at zero, and the operation identity
+        // still resolves the recorded final without another write.
+        assert_eq!(
+            registry
+                .write_input(
+                    &r,
+                    durable_input(fresh, second, client, RequestId::new(), 0, operation),
+                    b"ls\r",
+                    1_100,
+                    &mut writer,
+                )
+                .unwrap(),
+            InputAck::Cached(Box::new(InputAck::Written))
+        );
+        // The read-only query answers the same value.
+        assert_eq!(
+            registry
+                .input_outcome(&r, client, operation, 1_100)
+                .unwrap(),
+            Some(InputAck::Written)
+        );
+        assert_eq!(writer.written, b"ls\r");
+    }
+
+    /// The two ledgers have deliberately different lifetimes: `input_seq` is
+    /// epoch-local and dies with its connection, while the operation ledger is
+    /// keyed by client incarnation and survives it.
+    ///
+    /// Regression: making the client incarnation stable (so operations *can* be
+    /// resolved after a reconnect) must not make the sequence ledger outlive the
+    /// connection too — the client restarts `input_seq` at zero on a fresh epoch,
+    /// so a surviving ledger would reject its first input after every reconnect.
+    #[test]
+    fn a_fresh_connection_restarts_the_sequence_ledger_but_not_the_operation_ledger() {
+        let r = reference();
+        let mut registry = registry(r.clone());
+        let client = ClientId::new();
+        let operation = OperationId::new();
+        let mut writer = Writer::default();
+
+        let first = ConnectionId::new();
+        let subscription = registry.attach(&r, first).unwrap().subscription;
+        for seq in 0..3 {
+            registry
+                .write_input(
+                    &r,
+                    durable_input(
+                        subscription,
+                        first,
+                        client,
+                        RequestId::new(),
+                        seq,
+                        if seq == 0 {
+                            operation
+                        } else {
+                            OperationId::new()
+                        },
+                    ),
+                    b"a",
+                    0,
+                    &mut writer,
+                )
+                .unwrap();
+        }
+
+        registry.disconnect(first);
+        let second = ConnectionId::new();
+        let fresh = registry.attach(&r, second).unwrap().subscription;
+        // The same client's first input on the fresh connection is sequence zero
+        // again, and it is a new operation that reaches the PTY.
+        assert_eq!(
+            registry
+                .write_input(
+                    &r,
+                    durable_input(
+                        fresh,
+                        second,
+                        client,
+                        RequestId::new(),
+                        0,
+                        OperationId::new()
+                    ),
+                    b"b",
+                    0,
+                    &mut writer,
+                )
+                .unwrap(),
+            InputAck::Written
+        );
+        assert_eq!(writer.written, b"aaab");
+        // The operation issued on the previous connection is still resolvable.
+        assert_eq!(
+            registry.input_outcome(&r, client, operation, 0).unwrap(),
+            Some(InputAck::Written)
+        );
+    }
+
+    /// Every outcome replays as itself. A cached non-success is never promoted to
+    /// a success, and an exit after the write does not change the answer either.
+    #[test]
+    fn failed_and_ambiguous_finals_replay_unchanged_after_exit() {
+        for (failure, expected) in [
+            (Some(0), InputAck::Failed),
+            (Some(1), InputAck::Ambiguous { applied_prefix: 1 }),
+        ] {
+            let r = reference();
+            let mut registry = registry(r.clone());
+            let connection = ConnectionId::new();
+            let subscription = registry.attach(&r, connection).unwrap().subscription;
+            let client = ClientId::new();
+            let operation = OperationId::new();
+            let mut writer = Writer {
+                written: Vec::new(),
+                failure,
+            };
+            assert_eq!(
+                registry
+                    .write_input(
+                        &r,
+                        durable_input(
+                            subscription,
+                            connection,
+                            client,
+                            RequestId::new(),
+                            0,
+                            operation
+                        ),
+                        b"ab",
+                        0,
+                        &mut writer,
+                    )
+                    .unwrap(),
+                expected
+            );
+            registry.exited(&r, 0).unwrap();
+            // The write path is closed after exit, but the outcome the client is
+            // owed was recorded before it and stays reachable.
+            assert_eq!(
+                registry.input_outcome(&r, client, operation, 10).unwrap(),
+                Some(expected.clone())
+            );
+        }
+    }
+
+    /// Identity reuse for different content, another terminal, or another client
+    /// is fail-closed: nothing is written and nothing is replayed.
+    #[test]
+    fn operation_identity_reuse_conflicts_and_never_crosses_scope() {
+        let first_ref = reference();
+        let mut registry = registry(first_ref.clone());
+        let second_ref = reference();
+        registry
+            .register(second_ref.clone(), Geometry { cols: 80, rows: 24 })
+            .unwrap();
+        let connection = ConnectionId::new();
+        let first = registry
+            .attach(&first_ref, connection)
+            .unwrap()
+            .subscription;
+        let second = registry
+            .attach(&second_ref, connection)
+            .unwrap()
+            .subscription;
+        let client = ClientId::new();
+        let other_client = ClientId::new();
+        let operation = OperationId::new();
+        let mut writer = Writer::default();
+        registry
+            .write_input(
+                &first_ref,
+                durable_input(first, connection, client, RequestId::new(), 0, operation),
+                b"one",
+                0,
+                &mut writer,
+            )
+            .unwrap();
+
+        // Same identity, different bytes.
+        assert_eq!(
+            registry.write_input(
+                &first_ref,
+                durable_input(first, connection, client, RequestId::new(), 1, operation),
+                b"two",
+                0,
+                &mut writer,
+            ),
+            Err(RegistryError::IdempotencyConflict)
+        );
+        // Same identity, another terminal: the ledger is registry-wide, so this
+        // is a conflict rather than a fresh write applied to the wrong PTY.
+        assert_eq!(
+            registry.write_input(
+                &second_ref,
+                durable_input(second, connection, client, RequestId::new(), 0, operation),
+                b"one",
+                0,
+                &mut writer,
+            ),
+            Err(RegistryError::IdempotencyConflict)
+        );
+        // Another client's identical operation is a different operation.
+        assert_eq!(
+            registry
+                .write_input(
+                    &first_ref,
+                    durable_input(
+                        first,
+                        connection,
+                        other_client,
+                        RequestId::new(),
+                        0,
+                        operation
+                    ),
+                    b"one",
+                    0,
+                    &mut writer,
+                )
+                .unwrap(),
+            InputAck::Written
+        );
+        // Queries never cross terminal or client scope either.
+        assert_eq!(
+            registry.input_outcome(&second_ref, client, operation, 0),
+            Ok(None)
+        );
+        assert_eq!(writer.written, b"oneone");
+    }
+
+    /// The ledger is bounded on every dimension, and an operation it released is
+    /// answered as unknown rather than as a success or another operation's final.
+    #[test]
+    fn the_operation_ledger_is_bounded_by_count_bytes_and_age() {
+        let r = reference();
+        let mut registry = TerminalRegistry::new(MAX_RETAINED_OUTPUT_BYTES, 16)
+            .with_input_operation_bounds(InputOperationBounds {
+                max_operations: 2,
+                max_operations_per_client: 2,
+                max_bytes: 8,
+                max_age_ms: 1_000,
+            });
+        registry
+            .register(r.clone(), Geometry { cols: 80, rows: 24 })
+            .unwrap();
+        let connection = ConnectionId::new();
+        let subscription = registry.attach(&r, connection).unwrap().subscription;
+        let client = ClientId::new();
+        let mut writer = Writer::default();
+        let operations: Vec<OperationId> = (0..3).map(|_| OperationId::new()).collect();
+        for (seq, operation) in operations.iter().enumerate() {
+            registry
+                .write_input(
+                    &r,
+                    durable_input(
+                        subscription,
+                        connection,
+                        client,
+                        RequestId::new(),
+                        seq as u64,
+                        *operation,
+                    ),
+                    b"ab",
+                    0,
+                    &mut writer,
+                )
+                .unwrap();
+        }
+        // The count bound released the oldest; the newest two are still answered.
+        assert_eq!(
+            registry.input_outcome(&r, client, operations[0], 0),
+            Ok(None)
+        );
+        assert_eq!(
+            registry
+                .input_outcome(&r, client, operations[2], 0)
+                .unwrap(),
+            Some(InputAck::Written)
+        );
+        // The age bound releases the rest, and an aged-out record is unknown.
+        assert_eq!(
+            registry.input_outcome(&r, client, operations[2], 5_000),
+            Ok(None)
+        );
+
+        // The byte bound alone also evicts, without the count bound firing.
+        let mut wide = TerminalRegistry::new(MAX_RETAINED_OUTPUT_BYTES, 16)
+            .with_input_operation_bounds(InputOperationBounds {
+                max_operations: 64,
+                max_operations_per_client: 64,
+                max_bytes: 4,
+                max_age_ms: 1_000,
+            });
+        wide.register(r.clone(), Geometry { cols: 80, rows: 24 })
+            .unwrap();
+        let connection = ConnectionId::new();
+        let subscription = wide.attach(&r, connection).unwrap().subscription;
+        let big = [OperationId::new(), OperationId::new()];
+        for (seq, operation) in big.iter().enumerate() {
+            wide.write_input(
+                &r,
+                durable_input(
+                    subscription,
+                    connection,
+                    client,
+                    RequestId::new(),
+                    seq as u64,
+                    *operation,
+                ),
+                b"abcd",
+                0,
+                &mut writer,
+            )
+            .unwrap();
+        }
+        assert_eq!(wide.input_outcome(&r, client, big[0], 0), Ok(None));
+        assert_eq!(
+            wide.input_outcome(&r, client, big[1], 0).unwrap(),
+            Some(InputAck::Written)
+        );
+    }
+
+    /// The remaining ledger dimensions: a per-client cap, and a ledger with no
+    /// capacity at all, which records nothing rather than growing.
+    #[test]
+    fn the_operation_ledger_bounds_each_client_and_can_be_disabled() {
+        let r = reference();
+        let client = ClientId::new();
+        let mut writer = Writer::default();
+        // A per-client bound tighter than the aggregate evicts that client only.
+        let mut per_client = TerminalRegistry::new(MAX_RETAINED_OUTPUT_BYTES, 16)
+            .with_input_operation_bounds(InputOperationBounds {
+                max_operations: 64,
+                max_operations_per_client: 1,
+                max_bytes: 4_096,
+                max_age_ms: 1_000,
+            });
+        per_client
+            .register(r.clone(), Geometry { cols: 80, rows: 24 })
+            .unwrap();
+        let connection = ConnectionId::new();
+        let subscription = per_client.attach(&r, connection).unwrap().subscription;
+        let mine = [OperationId::new(), OperationId::new()];
+        for (seq, operation) in mine.iter().enumerate() {
+            per_client
+                .write_input(
+                    &r,
+                    durable_input(
+                        subscription,
+                        connection,
+                        client,
+                        RequestId::new(),
+                        seq as u64,
+                        *operation,
+                    ),
+                    b"a",
+                    0,
+                    &mut writer,
+                )
+                .unwrap();
+        }
+        let others = OperationId::new();
+        per_client
+            .write_input(
+                &r,
+                durable_input(
+                    subscription,
+                    connection,
+                    other(),
+                    RequestId::new(),
+                    // A different client incarnation starts its own sequence.
+                    0,
+                    others,
+                ),
+                b"a",
+                0,
+                &mut writer,
+            )
+            .unwrap();
+        assert_eq!(per_client.input_outcome(&r, client, mine[0], 0), Ok(None));
+        assert_eq!(
+            per_client.input_outcome(&r, client, mine[1], 0).unwrap(),
+            Some(InputAck::Written)
+        );
+
+        // A zero-capacity ledger records nothing at all instead of growing.
+        let mut disabled = TerminalRegistry::new(MAX_RETAINED_OUTPUT_BYTES, 16)
+            .with_input_operation_bounds(InputOperationBounds {
+                max_operations: 0,
+                max_operations_per_client: 0,
+                max_bytes: 0,
+                max_age_ms: 0,
+            });
+        disabled
+            .register(r.clone(), Geometry { cols: 80, rows: 24 })
+            .unwrap();
+        let connection = ConnectionId::new();
+        let subscription = disabled.attach(&r, connection).unwrap().subscription;
+        let dropped = OperationId::new();
+        disabled
+            .write_input(
+                &r,
+                durable_input(
+                    subscription,
+                    connection,
+                    client,
+                    RequestId::new(),
+                    0,
+                    dropped,
+                ),
+                b"a",
+                0,
+                &mut writer,
+            )
+            .unwrap();
+        assert_eq!(disabled.input_outcome(&r, client, dropped, 0), Ok(None));
+    }
+
+    /// A query still fences the terminal identity, and a legacy input without an
+    /// operation identity records nothing to replay.
+    #[test]
+    fn queries_fence_the_terminal_and_legacy_input_records_nothing() {
+        let r = reference();
+        let mut registry = registry(r.clone());
+        let mut stale = r.clone();
+        stale.worktree_id = WorktreeId::new();
+        let client = ClientId::new();
+        assert_eq!(
+            registry.input_outcome(&stale, client, OperationId::new(), 0),
+            Err(RegistryError::StaleTarget)
+        );
+        let connection = ConnectionId::new();
+        let subscription = registry.attach(&r, connection).unwrap().subscription;
+        registry
+            .write_input(
+                &r,
+                input(subscription, connection, client, RequestId::new(), 0),
+                b"a",
+                0,
+                &mut Writer::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            registry.input_outcome(&r, client, OperationId::new(), 0),
+            Ok(None)
+        );
+    }
+
+    fn other() -> ClientId {
+        ClientId::new()
+    }
+
     #[test]
     fn stale_refs_and_wrong_attachment_are_rejected() {
         let r = reference();
@@ -1708,6 +2499,7 @@ mod tests {
                 &r,
                 input(1, ConnectionId::new(), ClientId::new(), RequestId::new(), 0),
                 b"x",
+                0,
                 &mut Writer::default()
             ),
             Err(RegistryError::NotAttached)
@@ -1752,6 +2544,7 @@ mod tests {
                     0
                 ),
                 b"x",
+                0,
                 &mut Writer::default()
             ),
             Err(RegistryError::Exited)

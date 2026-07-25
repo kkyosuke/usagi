@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use fs2::FileExt;
@@ -5537,6 +5537,19 @@ impl DeadlineConnection for DeadlineUnixStream {
 
 type DeadlineIpcClient = IpcClient<DeadlineStream<SystemClock, DeadlineUnixStream>>;
 
+/// This process's client incarnation, declared by every connection it opens.
+///
+/// It is a canonical resource identity rather than a PID: PIDs are reused, and
+/// the daemon keys durable per-client state on this value, so a reused PID would
+/// let a new process inherit another one's terminal input operations (#519). It
+/// is minted once per process and shared by every lane (per-request, terminal
+/// stream, poll pump), which is what makes an operation issued before a reconnect
+/// still resolvable afterwards.
+fn client_incarnation() -> &'static str {
+    static INCARNATION: OnceLock<String> = OnceLock::new();
+    INCARNATION.get_or_init(|| usagi_core::domain::id::ClientId::new().as_str())
+}
+
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=mcp_e2e
 fn connect_deadline_client(
     data_dir: &Path,
@@ -5550,7 +5563,7 @@ fn connect_deadline_client(
     let deadline = DeadlineStream::new(clock, DeadlineUnixStream(stream), budget_ms);
     IpcClient::connect(
         deadline,
-        format!("cli-{}", std::process::id()),
+        client_incarnation().to_owned(),
         format!("{}", std::process::id()),
         policy,
         build,
@@ -5763,7 +5776,7 @@ fn connect_client(
     let observation = ExactProcessControl.observe(&expected);
     IpcClient::connect_expected_owner(
         stream,
-        format!("cli-{}", std::process::id()),
+        client_incarnation().to_owned(),
         format!("{}", std::process::id()),
         policy,
         build,
@@ -8620,6 +8633,7 @@ mod tests {
                     terminal: terminal.clone(),
                     subscription,
                     input_seq: 0,
+                    input_operation: None,
                     bytes: b"printf race\n".to_vec(),
                 },
             ),
@@ -8681,6 +8695,7 @@ mod tests {
                     terminal: terminal.clone(),
                     subscription: exit_subscription,
                     input_seq: 0,
+                    input_operation: None,
                     bytes: b"exit\n".to_vec(),
                 })
                 .unwrap(),
@@ -8875,6 +8890,7 @@ mod tests {
                     terminal: old_terminal.clone(),
                     subscription: 1,
                     input_seq: 0,
+                    input_operation: None,
                     bytes: b"must-not-run".to_vec(),
                 },
             ),

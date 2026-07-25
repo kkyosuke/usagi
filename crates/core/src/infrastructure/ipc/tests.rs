@@ -840,3 +840,42 @@ fn saturated_output_preserves_control_capacity() {
         Some(b"ack".to_vec())
     );
 }
+
+#[test]
+fn terminal_input_replay_is_capability_gated_and_fails_closed() {
+    assert_eq!(
+        terminal_input_replay_mode(&[TERMINAL_INPUT_OPERATION_CAPABILITY.to_owned()]),
+        TerminalInputReplayMode::DurableOperation
+    );
+    // A peer that does not advertise the ledger cannot answer for a lost
+    // acknowledgement, so the client must keep its uncertainty rather than
+    // write the bytes again.
+    for capabilities in [
+        vec![],
+        vec![TERMINAL_SCREEN_CHECKPOINT_CAPABILITY.to_owned()],
+    ] {
+        assert_eq!(
+            terminal_input_replay_mode(&capabilities),
+            TerminalInputReplayMode::LegacyFailClosed,
+            "{capabilities:?}"
+        );
+    }
+}
+
+#[test]
+fn the_terminal_input_digest_separates_target_from_bytes() {
+    let digest = terminal_input_digest("terminal-a", b"ls\r");
+    assert_eq!(digest.len(), 64);
+    assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    // Stable for the same operation content.
+    assert_eq!(digest, terminal_input_digest("terminal-a", b"ls\r"));
+    // Different bytes, or the same bytes addressed to another terminal, are
+    // different semantic operations.
+    assert_ne!(digest, terminal_input_digest("terminal-a", b"ls\n"));
+    assert_ne!(digest, terminal_input_digest("terminal-b", b"ls\r"));
+    // Length-prefixing keeps the target/bytes boundary from being re-cut.
+    assert_ne!(
+        terminal_input_digest("ab", b"c"),
+        terminal_input_digest("a", b"bc")
+    );
+}

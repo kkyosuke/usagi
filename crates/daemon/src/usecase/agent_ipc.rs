@@ -1947,6 +1947,7 @@ impl AgentRuntime {
                 TerminalRequest::Input {
                     subscription,
                     input_seq,
+                    input_operation,
                     bytes,
                     ..
                 },
@@ -1961,6 +1962,7 @@ impl AgentRuntime {
                             client,
                             request: request_id,
                             input_seq,
+                            operation: input_operation,
                         },
                         &bytes,
                         &mut *self.pty,
@@ -1968,6 +1970,16 @@ impl AgentRuntime {
                     .map(|ack| json!({ "ack": ack }))
                     .map_err(map_runtime_error)
             }
+            (
+                TerminalAction::InputOutcome,
+                TerminalRequest::InputOutcome {
+                    input_operation, ..
+                },
+            ) => self
+                .coordinator
+                .input_outcome(runtime, client, input_operation)
+                .map(crate::usecase::terminal_ipc::input_outcome_body)
+                .map_err(map_runtime_error),
             _ => Err(ProtocolError::new(
                 ErrorCode::InvalidArgument,
                 "terminal action does not match its payload",
@@ -2193,6 +2205,7 @@ fn terminal_of(request: &TerminalRequest) -> Option<&TerminalRef> {
         | TerminalRequest::Resume { terminal, .. }
         | TerminalRequest::Resync { terminal }
         | TerminalRequest::Input { terminal, .. }
+        | TerminalRequest::InputOutcome { terminal, .. }
         | TerminalRequest::Resize { terminal, .. }
         | TerminalRequest::Detach { terminal, .. } => Some(terminal),
         // Launch has no current terminal; Inventory / CompletedInventory /
@@ -2516,6 +2529,12 @@ fn map_runtime_error(error: RuntimeError) -> ProtocolError {
         RuntimeError::Terminal(RegistryError::CheckpointUnavailable) => (
             ErrorCode::ResourceExhausted,
             "agent terminal screen exceeds the snapshot budget",
+        ),
+        // One durable operation identity presented for different bytes or
+        // another terminal: nothing was written and nothing is replayed (#519).
+        RuntimeError::Terminal(RegistryError::IdempotencyConflict) => (
+            ErrorCode::IdempotencyConflict,
+            "terminal input operation identity was reused for different input",
         ),
         RuntimeError::Terminal(_)
         | RuntimeError::UnknownRuntime
@@ -4565,6 +4584,7 @@ mod tests {
             vec![(terminal.clone(), Geometry { cols: 43, rows: 17 })]
         );
 
+        let input_operation = OperationId::new();
         let ack = handled(runtime.handle_terminal(
             connection,
             client,
@@ -4574,11 +4594,53 @@ mod tests {
                 terminal: terminal.clone(),
                 subscription,
                 input_seq: 0,
+                input_operation: Some(input_operation),
                 bytes: b"go\n".to_vec(),
             },
             SnapshotWire::RawTail,
         ));
         assert_eq!(ack["ack"], "Written");
+
+        // The Agent owner shares the durable input operation ledger, so a client
+        // whose acknowledgement was lost resolves the same final here too (#519),
+        // and an identity it never issued is a typed unknown.
+        let resolve = |runtime: &mut AgentRuntime, operation| {
+            handled(runtime.handle_terminal(
+                connection,
+                client,
+                RequestId::new(),
+                TerminalAction::InputOutcome,
+                TerminalRequest::InputOutcome {
+                    terminal: terminal.clone(),
+                    input_operation: operation,
+                },
+                SnapshotWire::RawTail,
+            ))
+        };
+        let resolved = resolve(&mut runtime, input_operation);
+        assert_eq!(resolved["outcome"], "final");
+        assert_eq!(resolved["ack"], "Written");
+        assert_eq!(
+            resolve(&mut runtime, OperationId::new())["outcome"],
+            "unknown"
+        );
+        // Reusing that identity for different bytes conflicts without writing.
+        let conflict = handled_result(runtime.handle_terminal(
+            connection,
+            client,
+            RequestId::new(),
+            TerminalAction::Input,
+            TerminalRequest::Input {
+                terminal: terminal.clone(),
+                subscription,
+                input_seq: 1,
+                input_operation: Some(input_operation),
+                bytes: b"rm -rf\n".to_vec(),
+            },
+            SnapshotWire::RawTail,
+        ))
+        .unwrap_err();
+        assert_eq!(conflict.code, ErrorCode::IdempotencyConflict);
 
         handled(runtime.handle_terminal(
             connection,
