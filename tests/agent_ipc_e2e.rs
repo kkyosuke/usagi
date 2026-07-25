@@ -28,6 +28,12 @@ use usagi_core::usecase::client::{
 };
 use usagi_daemon::infrastructure::unix_transport::connect_current;
 
+/// daemon の起動はすべて共有 fixture 経由にする（cwd の fixture 固定と exact reap）。
+#[path = "support/daemon.rs"]
+mod daemon_fixture;
+
+use daemon_fixture::{Channel, usagi_command};
+
 fn shipping_build_identity() -> usagi_core::infrastructure::ipc::BuildIdentity {
     usagi_core::infrastructure::ipc::build_identity(
         env!("CARGO_PKG_VERSION"),
@@ -50,10 +56,7 @@ const DAEMON_READINESS_TIMEOUT: Duration = Duration::from_secs(60);
 static DAEMON_START_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn short_dir(prefix: &str) -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix(prefix)
-        .tempdir_in("/tmp")
-        .expect("short Unix socket path")
+    daemon_fixture::short_dir(prefix)
 }
 
 fn channel_data_dir(home: &Path) -> PathBuf {
@@ -133,11 +136,13 @@ fn start_daemon(repo: &Path, home: &Path, path: &Path, shell: Option<&Path>) -> 
 /// directory is already published, so it is not re-created here.
 fn spawn_daemon(repo: &Path, home: &Path, path: &Path, shell: Option<&Path>) -> Daemon {
     let fixture_path = format!("{}:/usr/bin:/bin", path.display());
-    let mut command = Command::new(env!("CARGO_BIN_EXE_usagi"));
+    let mut command = usagi_command(
+        home,
+        Channel::Local,
+        repo,
+        &["daemon".as_ref(), "serve".as_ref()],
+    );
     command
-        .args(["daemon", "serve"])
-        .current_dir(repo)
-        .env("USAGI_HOME", home)
         .env("PATH", fixture_path)
         .env("USAGI_PTY_SENTINEL", "must-not-leak")
         // Claude は OS sandbox launcher 経由で起動するため、backend を持たない CI でも live
@@ -145,11 +150,7 @@ fn spawn_daemon(repo: &Path, home: &Path, path: &Path, shell: Option<&Path>) -> 
         .env(
             usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE,
             "1",
-        )
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_INDEX_FILE");
+        );
     if let Some(shell) = shell {
         command.env("SHELL", shell);
     }

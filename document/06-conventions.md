@@ -16,6 +16,7 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 - [品質チェック（リスク比例の gate）](#品質チェックリスク比例の-gate)
 - [`coverage(off)` 例外](#coverageoff-例外)
 - [変更箇所からの推奨テスト](#変更箇所からの推奨テスト)
+- [結合テストからの daemon 起動](#結合テストからの-daemon-起動)
 - [Git Hooks（lefthook）](#git-hookslefthook)
 - [CI（GitHub Actions）](#cigithub-actions)
 - [リリース](#リリース)
@@ -255,6 +256,26 @@ bash scripts/tests/recommend-tests.sh
 コミット・push 前には、この節の出力にかかわらず
 [品質チェック](#品質チェックリスク比例の-gate)の該当 gate（commit 前の Lint / selected tests、push 前の Markdown link check）を実行し、
 最終的な full gate は PR CI の green で確認する。
+
+## 結合テストからの daemon 起動
+
+ルートの結合テスト（`tests/*.rs`）が `usagi` プロセスを起動するときは、**必ず `tests/support/daemon.rs` の
+command builder 経由**で起動する。直接 `Command::new(env!("CARGO_BIN_EXE_usagi"))` を書かない。
+
+daemon の workspace root は**起動時 cwd** で決まるため（[5. daemon](05-daemon.md#daemon-process-lifecycle)）、cwd を
+指定せずに起動したテストは、開発者のチェックアウト（セッション worktree）を権威として掴んだ daemon を作ってしまう。
+その daemon は worktree 内の実行ファイルを掴んだまま残留し、`session remove` の worktree 削除を止める。helper は
+次の 3 点を 1 か所で保証する。
+
+| 保証 | 内容 |
+|---|---|
+| cwd の隔離 | 起動ごとに fixture workspace を `.current_dir()` に設定し、cwd がチェックアウトの内側でないことを assert する |
+| workspace root の回帰検出 | fixture の teardown で、起動した daemon が `sessions.json` に記録した `repository_root` が fixture であることを assert する |
+| exact reap | teardown で graceful stop を試み、残った場合だけ `daemon.json` の pid + process-start identity が一致する incarnation へ SIGTERM → SIGKILL と段階的に落とす |
+
+`daemon serve` の直接起動だけでなく、`daemon start` / `daemon restart` と client bootstrap（`session ...` /
+`mcp` / TUI）による間接起動も同じ経路に載せる。自プロセス上に fake daemon を立てるテストの record は reap 対象外に
+なる（自分自身を撃たない）。
 
 ## Git Hooks（lefthook）
 

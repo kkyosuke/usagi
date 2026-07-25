@@ -127,7 +127,7 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 | `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。stale record は process に signal を送らず、singleton lock 下で stale endpoint を回収してから消去する。unverified record は signal・回収とも拒否する |
 | `usagi daemon restart` | 稼働中 daemon を停止してから新しい daemon を起動する。active / draining handoff は行わない |
 | `usagi daemon replace` | exact artifact の意図的な replacement trigger を要求する。同じ artifact pair / channel は同じ operation ID へ収束し、この command 自体は old daemon を停止しない |
-| `usagi daemon` / `usagi daemon serve` | 前景で daemon を serve する。`serve` は内部用の subcommand である |
+| `usagi daemon` / `usagi daemon serve` | 前景で daemon を serve する。`serve` は内部用の subcommand であり、[custody を失うと自主終了する](#custody-喪失による-self-shutdown) |
 | `usagi daemon install-service` | macOS の LaunchAgent を明示的に install し、前景 `serve` を login と異常終了後に supervise する |
 | `usagi daemon uninstall-service` | install 済み LaunchAgent を unload して remove する |
 
@@ -141,13 +141,30 @@ data directory の選択は [daemon data directory](#daemon-data-directory) が�
 scope は起動時に確定した **workspace root** であり、`<repository>/.usagi/sessions/<name>` の worktree と
 `usagi/<name>` branch である。したがって同一 workspace に対して runtime mode または `$USAGI_HOME` を変えて
 `serve` を起動すると、それぞれ別の lock file を取得して共存し、2 つの独立した lifecycle state が同じ worktree
-集合を権威として書き換える。また `serve` の終了条件は SIGINT / SIGTERM と IPC 由来の shutdown 要求だけであり、
-自分の data directory や lock が失われても自主終了しない（detached 起動した daemon が孤児として残留する）。
-この 2 つの gap は
-[#542](../.usagi/issues/542-fix-daemon-fence-workspace-mode-home.md)（fence の単位を workspace へ広げる）と
-[#540](../.usagi/issues/540-fix-daemon-daemon-serve-self-shutdown-test-fixture-workspace.md)（custody 喪失による
-self-shutdown）で追跡し、設計判断は
-[13. daemon singleton と session teardown](proposals/13-daemon-singleton-and-teardown.md) を正本とする。
+集合を権威として書き換える。この gap は
+[#542](../.usagi/issues/542-fix-daemon-fence-workspace-mode-home.md)（fence の単位を workspace へ広げる）で追跡し、
+設計判断は [13. daemon singleton と session teardown](proposals/13-daemon-singleton-and-teardown.md) を正本とする。
+
+### custody 喪失による self-shutdown
+
+`serve` は SIGINT / SIGTERM と IPC 由来の shutdown 要求のほかに、**custody（権威）の喪失**でも自主終了する。
+daemon は前景の hangup で PTY を失わないよう自前の process group へ detach して起動するため、launcher が
+異常終了しても誰にも reap されない。そこで「自分がまだ権威か」を約 1 秒周期で検証し、次のいずれかが崩れた時点で
+shared shutdown flag を立てる（SIGTERM と同じ graceful path を通る）。
+
+| invariant | 検証内容 | 崩れた意味 |
+|---|---|---|
+| lock custody | 保持中の lock 記述子の inode identity（`dev` と `ino`）が、`daemon.lock` path を `stat` した結果と一致する | path が消えた／別 inode に置き換わった。この process はもうその data directory の singleton ではない |
+| record custody | `daemon.json` が今もこの pid と OS process-start identity を記録している | 権威が retire された、または別 owner incarnation に置き換わった |
+
+観測自体が失敗した場合は custody を「不明」として serve を継続し、次の周期で再評価する。transient な filesystem
+error で正当な daemon を終了させないためであり、終了根拠になるのは観測できた喪失だけである。lock を先に検証するので、
+data directory が消えている場合は record を読まずに（＝tree に触れずに）喪失を判定する。
+
+喪失後の cleanup は通常の retirement path を通る。ただし data directory がすでに消えている場合、endpoint retirement と
+record clear は **no-op として成功**する（解放した tree を lock 取得のために再作成しない）。client が 0 でも live PTY と
+supervisor schedule を所有するため、idle timeout は終了根拠として採用しない（[13. daemon singleton と session
+teardown](proposals/13-daemon-singleton-and-teardown.md) が正本）。
 
 IPC endpoint は `serve` が lock を取得して exact process-owner record を登録した後に、明示的な ready hook からだけ公開する。
 lock を取得できない replacement は ready hook に到達しないため session request を受理できず、endpoint 公開に

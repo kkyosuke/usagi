@@ -7,7 +7,7 @@ use std::os::unix::net::UnixListener;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::{Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -24,21 +24,20 @@ use usagi_daemon::infrastructure::unix_transport::{
     read_locator,
 };
 
+/// 起動する usagi プロセスはすべてこの fixture 経由にする。daemon の workspace root は
+/// 起動時 cwd で決まるため、cwd を fixture へ固定して開発者のチェックアウトを掴ませない。
+#[path = "support/daemon.rs"]
+mod daemon_fixture;
+
+use daemon_fixture::{Channel, DaemonHome};
+
 /// Daemon lifecycle tests spawn the same test binary as a background daemon.
 /// Serialize those starts so parallel integration tests cannot race its process
 /// discovery and readiness publication on a loaded CI runner.
 static DAEMON_LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
 
-fn short_home() -> tempfile::TempDir {
-    // A Unix-domain socket includes the data directory, generation, and socket
-    // name. Keep the integration fixture below the platform sockaddr limit.
-    let home = tempfile::Builder::new()
-        .prefix("usagi-")
-        .tempdir_in("/tmp")
-        .expect("short daemon data directory");
-    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700))
-        .expect("private daemon data directory");
-    home
+fn short_home() -> DaemonHome {
+    DaemonHome::new()
 }
 
 fn precreate_restrictive_umask_coverage_profile(command: &mut Command) {
@@ -122,19 +121,12 @@ fn shipping_build_identity() -> BuildIdentity {
     )
 }
 
-fn run(args: &[&OsStr]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_usagi"))
-        .args(args)
-        .output()
-        .expect("usagi バイナリを起動できる")
+fn run(home: &DaemonHome, args: &[&OsStr]) -> Output {
+    home.run(args)
 }
 
-fn stop_daemon(home: &Path) {
-    let output = Command::new(env!("CARGO_BIN_EXE_usagi"))
-        .args([OsStr::new("daemon"), OsStr::new("stop")])
-        .env("USAGI_HOME", home)
-        .output()
-        .expect("usagi daemon stop を起動できる");
+fn stop_daemon(home: &DaemonHome) {
+    let output = home.run(&[OsStr::new("daemon"), OsStr::new("stop")]);
     assert!(
         output.status.success(),
         "{}",
@@ -142,31 +134,18 @@ fn stop_daemon(home: &Path) {
     );
 }
 
-fn assert_daemon_running(home: &Path) {
-    let output = Command::new(env!("CARGO_BIN_EXE_usagi"))
-        .args([OsStr::new("daemon"), OsStr::new("status")])
-        .env("USAGI_HOME", home)
-        .output()
-        .expect("usagi daemon status を起動できる");
+fn assert_daemon_running(home: &DaemonHome) {
+    let output = home.run(&[OsStr::new("daemon"), OsStr::new("status")]);
     assert!(output.status.success());
     assert!(stdout(&output).contains("daemon running"));
 }
 
-fn run_with_home(args: &[&OsStr], home: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_usagi"))
-        .args(args)
-        .env("USAGI_HOME", home)
-        .output()
-        .expect("usagi バイナリを起動できる")
+fn run_with_home(args: &[&OsStr], home: &DaemonHome) -> Output {
+    home.run(args)
 }
 
-fn run_in_production(args: &[&OsStr], home: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_usagi"))
-        .args(args)
-        .env("USAGI_HOME", home)
-        .env("USAGI_RUNTIME_MODE", "production")
-        .output()
-        .expect("production runtime の usagi バイナリを起動できる")
+fn run_in_production(args: &[&OsStr], home: &DaemonHome) -> Output {
+    home.run_in_production(args)
 }
 
 fn daemon_pid(home: &Path) -> Option<u32> {
@@ -193,53 +172,6 @@ fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
     condition()
 }
 
-struct ProductionDaemonCleanup {
-    home: PathBuf,
-    owned: Child,
-}
-
-impl ProductionDaemonCleanup {
-    fn spawn(home: &Path) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_usagi"));
-        command
-            .args([OsStr::new("daemon"), OsStr::new("serve")])
-            .env("USAGI_HOME", home)
-            .env("USAGI_RUNTIME_MODE", "production")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let owned = command
-            .spawn()
-            .expect("production daemon serve を起動できる");
-        Self {
-            home: home.to_path_buf(),
-            owned,
-        }
-    }
-
-    fn pid(&self) -> u32 {
-        self.owned.id()
-    }
-
-    fn wait_for_exit(&mut self, timeout: Duration) -> bool {
-        wait_until(timeout, || {
-            self.owned.try_wait().is_ok_and(|status| status.is_some())
-        })
-    }
-}
-
-impl Drop for ProductionDaemonCleanup {
-    fn drop(&mut self) {
-        let _ = run_in_production(&[OsStr::new("daemon"), OsStr::new("stop")], &self.home);
-        if !self.wait_for_exit(Duration::from_secs(2)) {
-            // `Child` identifies the exact process this fixture spawned, so a
-            // hard cleanup cannot target a recycled raw PID or a replacement.
-            let _ = self.owned.kill();
-            let _ = self.owned.wait();
-        }
-    }
-}
-
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
@@ -263,7 +195,7 @@ fn spawn_fake_daemon(home: &Path, reply: FakeDaemonReply) -> thread::JoinHandle<
     let listener = SecureUnixListener::bind(&data_dir, generation.clone()).unwrap();
     let record = usagi_core::domain::daemon::DaemonRecord::identified(
         std::process::id(),
-        fixture_process_start_identity(std::process::id()),
+        daemon_fixture::process_start_identity(std::process::id()),
     );
     std::fs::write(
         data_dir.join("daemon/daemon.json"),
@@ -334,28 +266,6 @@ fn spawn_fake_daemon(home: &Path, reply: FakeDaemonReply) -> thread::JoinHandle<
     })
 }
 
-#[cfg(target_os = "linux")]
-fn fixture_process_start_identity(pid: u32) -> String {
-    let stat_text = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-    let close = stat_text.rfind(')').unwrap();
-    let start_ticks = stat_text[close + 1..].split_whitespace().nth(19).unwrap();
-    format!("linux:{start_ticks}")
-}
-
-#[cfg(target_os = "macos")]
-fn fixture_process_start_identity(pid: u32) -> String {
-    let pid = libc::pid_t::try_from(pid).unwrap();
-    // SAFETY: the buffer is initialized and has the exact proc_bsdinfo size.
-    let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
-    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).unwrap();
-    // SAFETY: `info` remains valid writable storage for this call.
-    assert_eq!(
-        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) },
-        size
-    );
-    format!("macos:{}:{}", info.pbi_start_tvsec, info.pbi_start_tvusec)
-}
-
 fn install_absent_daemon_endpoint(home: &Path) {
     let data_dir = channel_data_dir(home);
     let daemon = data_dir.join("daemon");
@@ -384,11 +294,9 @@ fn install_absent_daemon_endpoint(home: &Path) {
     std::fs::set_permissions(locator, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
-fn run_mcp(home: &Path, cwd: &Path, requests: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_usagi"))
-        .arg("mcp")
-        .env("USAGI_HOME", home)
-        .current_dir(cwd)
+fn run_mcp(home: &DaemonHome, cwd: &Path, requests: &str) -> Output {
+    let mut child = home
+        .command_at(Channel::Local, cwd, &[OsStr::new("mcp")])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -434,7 +342,7 @@ fn welcome_entry_renders_the_welcome_screen() {
     // 合成ルートは対話ループの代わりに welcome の 1 フレームを描いて返す。
     let home = short_home();
     for args in [&[][..], &[OsStr::new("hop")][..]] {
-        let output = run_with_home(args, home.path());
+        let output = run_with_home(args, &home);
         assert!(output.status.success(), "args={args:?}");
         let out = stdout(&output);
         assert!(out.contains("USAGI"), "args={args:?}");
@@ -442,7 +350,7 @@ fn welcome_entry_renders_the_welcome_screen() {
         assert!(out.contains("q: quit"), "args={args:?}");
         assert!(output.stderr.is_empty(), "args={args:?}");
     }
-    stop_daemon(home.path());
+    stop_daemon(&home);
 }
 
 #[test]
@@ -451,11 +359,7 @@ fn daemon_status_reports_not_running_with_a_fresh_data_dir() {
     // （`FsRecordFile` を backing にした `DaemonRecordStore`）を通す。データディレクトリを
     // 空の一時パスへ向けるので、レコードは無く「daemon not running」を報告する。
     let home = short_home();
-    let output = Command::new(env!("CARGO_BIN_EXE_usagi"))
-        .args([OsStr::new("daemon"), OsStr::new("status")])
-        .env("USAGI_HOME", home.path())
-        .output()
-        .expect("usagi バイナリを起動できる");
+    let output = home.run(&[OsStr::new("daemon"), OsStr::new("status")]);
     assert!(output.status.success());
     assert!(stdout(&output).contains("daemon not running"));
 }
@@ -471,7 +375,7 @@ fn daemon_stop_clears_a_stale_production_record() {
     std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
     std::fs::set_permissions(&record_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-    let output = run_in_production(&[OsStr::new("daemon"), OsStr::new("stop")], home.path());
+    let output = run_in_production(&[OsStr::new("daemon"), OsStr::new("stop")], &home);
 
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(
@@ -498,19 +402,130 @@ fn daemon_restart_initializes_a_private_endpoint_from_an_empty_data_dir() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let home = short_home();
-    let output = Command::new(env!("CARGO_BIN_EXE_usagi"))
-        .args([OsStr::new("daemon"), OsStr::new("restart")])
-        .env("USAGI_HOME", home.path())
-        .output()
-        .expect("usagi daemon restart を起動できる");
+    let output = home.run(&[OsStr::new("daemon"), OsStr::new("restart")]);
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(stdout(&output).contains("daemon restarted"));
-    assert_daemon_running(home.path());
-    stop_daemon(home.path());
+    assert_daemon_running(&home);
+    stop_daemon(&home);
+}
+
+/// A daemon is started detached, so nothing reaps it when its launcher dies
+/// abnormally. Removing its single-instance lock takes away its custody of the
+/// data directory, and it must then exit on its own through the ordinary
+/// graceful path — retiring its endpoint and clearing its record.
+#[test]
+fn a_daemon_that_loses_its_instance_lock_shuts_itself_down_gracefully() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let mut abandoned = home.spawn_serve();
+    let daemon_dir = home.path().join("daemon");
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            daemon_dir.join("daemon.json").is_file() && daemon_dir.join("current.json").is_file()
+        }),
+        "daemon did not publish its production endpoint"
+    );
+    let locator = read_locator(&daemon_dir).expect("started daemon publishes a locator");
+    let socket = daemon_dir.join(&locator.endpoint);
+    assert!(socket.exists());
+
+    std::fs::remove_file(daemon_dir.join("daemon.lock")).unwrap();
+
+    assert!(
+        abandoned.wait_for_exit(Duration::from_secs(10)),
+        "a daemon that lost custody of its data directory kept running"
+    );
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            !daemon_dir.join("daemon.json").exists()
+                && !daemon_dir.join("current.json").exists()
+                && !socket.exists()
+        }),
+        "self-shutdown left its record, locator, or generation socket behind"
+    );
+    // Self-shutdown never re-creates the fence it lost.
+    assert!(!daemon_dir.join("daemon.lock").exists());
+}
+
+/// The same custody loss, but with the whole data directory deleted underneath
+/// the daemon (a `$USAGI_HOME` temporary directory removed by a dead test
+/// harness). Cleanup must be a silent no-op instead of resurrecting the tree.
+#[test]
+fn a_daemon_whose_data_directory_is_deleted_exits_without_re_creating_it() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let mut abandoned = home.spawn_serve_in(Channel::Local);
+    let data_dir = home.data_dir();
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            data_dir.join("daemon/daemon.json").is_file()
+                && data_dir.join("daemon/current.json").is_file()
+        }),
+        "daemon did not publish its local endpoint"
+    );
+
+    // The daemon is still running while the tree is removed, so a worker can
+    // legitimately re-create an entry mid-walk. Retry until the tree is gone.
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            std::fs::remove_dir_all(&data_dir).is_ok() && !data_dir.exists()
+        }),
+        "could not delete the daemon's data directory"
+    );
+
+    assert!(
+        abandoned.wait_for_exit(Duration::from_secs(10)),
+        "a daemon whose data directory disappeared kept running"
+    );
+    // Endpoint retirement and record clearing are no-ops on a released tree: the
+    // exiting daemon must not re-create the lifecycle artifacts it lost.
+    assert!(
+        !data_dir.join("daemon/daemon.json").exists()
+            && !data_dir.join("daemon/current.json").exists(),
+        "self-shutdown re-created lifecycle artifacts under the released data directory"
+    );
+}
+
+/// The daemon's workspace root is its startup directory, so a test that starts
+/// one without a fixture cwd binds it to the developer's checkout and blocks
+/// that worktree's removal. Every start goes through the fixture, and the root
+/// it recorded proves the binding.
+#[test]
+fn a_client_started_daemon_binds_the_fixture_workspace_root() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    // An ordinary daemon-backed request; the daemon is autostarted by bootstrap
+    // rather than by an explicit lifecycle command.
+    let output = run_with_home(
+        &[
+            OsStr::new("session"),
+            OsStr::new("remove"),
+            OsStr::new("missing"),
+        ],
+        &home,
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_daemon_running(&home);
+
+    let state: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(home.data_dir().join("daemon/sessions.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::canonicalize(state["repository_root"].as_str().unwrap()).unwrap(),
+        std::fs::canonicalize(home.workspace()).unwrap()
+    );
+    stop_daemon(&home);
 }
 
 #[test]
@@ -519,7 +534,7 @@ fn explicit_artifact_replacement_coalesces_without_stopping_the_running_daemon()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let home = short_home();
-    let cleanup = ProductionDaemonCleanup::spawn(home.path());
+    let cleanup = home.spawn_serve();
     let daemon_dir = home.path().join("daemon");
     assert!(
         wait_until(Duration::from_secs(5), || {
@@ -530,8 +545,8 @@ fn explicit_artifact_replacement_coalesces_without_stopping_the_running_daemon()
     let old_pid = cleanup.pid();
     let old_locator = read_locator(&daemon_dir).unwrap();
 
-    let first = run_in_production(&[OsStr::new("daemon"), OsStr::new("replace")], home.path());
-    let second = run_in_production(&[OsStr::new("daemon"), OsStr::new("replace")], home.path());
+    let first = run_in_production(&[OsStr::new("daemon"), OsStr::new("replace")], &home);
+    let second = run_in_production(&[OsStr::new("daemon"), OsStr::new("replace")], &home);
     assert!(first.status.success(), "{}", stderr(&first));
     assert!(second.status.success(), "{}", stderr(&second));
     assert_eq!(stdout(&first), stdout(&second));
@@ -547,7 +562,7 @@ fn planned_stop_retires_generation_endpoint_and_allows_safe_autostart() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let home = short_home();
-    let mut cleanup = ProductionDaemonCleanup::spawn(home.path());
+    let mut cleanup = home.spawn_serve();
     let daemon_dir = home.path().join("daemon");
 
     assert!(
@@ -580,7 +595,7 @@ fn planned_stop_retires_generation_endpoint_and_allows_safe_autostart() {
         );
     }
 
-    let stop = run_in_production(&[OsStr::new("daemon"), OsStr::new("stop")], home.path());
+    let stop = run_in_production(&[OsStr::new("daemon"), OsStr::new("stop")], &home);
     assert!(stop.status.success(), "{}", stderr(&stop));
     assert!(
         cleanup.wait_for_exit(Duration::from_secs(5)),
@@ -605,7 +620,7 @@ fn planned_stop_retires_generation_endpoint_and_allows_safe_autostart() {
             OsStr::new("remove"),
             OsStr::new("missing"),
         ],
-        home.path(),
+        &home,
     );
     assert_eq!(client.status.code(), Some(1));
     assert!(
@@ -625,7 +640,7 @@ fn planned_stop_retires_generation_endpoint_and_allows_safe_autostart() {
     assert_ne!(replacement.generation, old_locator.generation);
     assert!(!old_socket.exists());
 
-    let stop = run_in_production(&[OsStr::new("daemon"), OsStr::new("stop")], home.path());
+    let stop = run_in_production(&[OsStr::new("daemon"), OsStr::new("stop")], &home);
     assert!(stop.status.success(), "{}", stderr(&stop));
     assert!(
         wait_until(Duration::from_secs(5), || {
@@ -643,7 +658,7 @@ fn ordinary_client_recovers_a_sigkilled_daemon_without_manual_lifecycle() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let home = short_home();
-    let mut killed = ProductionDaemonCleanup::spawn(home.path());
+    let mut killed = home.spawn_serve();
     let daemon_dir = home.path().join("daemon");
 
     assert!(
@@ -661,8 +676,7 @@ fn ordinary_client_recovers_a_sigkilled_daemon_without_manual_lifecycle() {
 
     // `Child` is the exact process created by this fixture. Reap it so the
     // recovery path observes a completed SIGKILL rather than a zombie.
-    killed.owned.kill().expect("SIGKILL the owned daemon");
-    killed.owned.wait().expect("reap the killed daemon");
+    killed.kill_and_reap();
     assert!(!process_alive(old_pid));
     assert!(daemon_dir.join("daemon.json").exists());
     assert!(daemon_dir.join("current.json").exists());
@@ -686,7 +700,7 @@ fn ordinary_client_recovers_a_sigkilled_daemon_without_manual_lifecycle() {
                     OsStr::new("remove"),
                     OsStr::new("missing"),
                 ],
-                home.path(),
+                &home,
             )
         });
         let second = scope.spawn(|| {
@@ -697,7 +711,7 @@ fn ordinary_client_recovers_a_sigkilled_daemon_without_manual_lifecycle() {
                     OsStr::new("remove"),
                     OsStr::new("missing"),
                 ],
-                home.path(),
+                &home,
             )
         });
 
@@ -747,7 +761,7 @@ fn ordinary_client_recovers_a_sigkilled_daemon_without_manual_lifecycle() {
     assert_eq!(daemon_pid(home.path()), Some(replacement_pid));
     assert_eq!(read_locator(&daemon_dir).unwrap(), replacement);
 
-    let stop = run_in_production(&[OsStr::new("daemon"), OsStr::new("stop")], home.path());
+    let stop = run_in_production(&[OsStr::new("daemon"), OsStr::new("stop")], &home);
     assert!(stop.status.success(), "{}", stderr(&stop));
     assert!(wait_until(Duration::from_secs(5), || {
         !process_alive(replacement_pid)
@@ -771,7 +785,7 @@ fn cli_daemon_request_autostarts_without_manual_daemon_start() {
             OsStr::new("remove"),
             OsStr::new("missing"),
         ],
-        home.path(),
+        &home,
     );
     assert_eq!(output.status.code(), Some(1));
     assert!(
@@ -779,8 +793,8 @@ fn cli_daemon_request_autostarts_without_manual_daemon_start() {
         "daemon request error: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_daemon_running(home.path());
-    stop_daemon(home.path());
+    assert_daemon_running(&home);
+    stop_daemon(&home);
 }
 
 #[test]
@@ -860,7 +874,7 @@ fn cli_daemon_reply_contract_maps_stdout_stderr_and_exit_code() {
                 OsStr::new("remove"),
                 OsStr::new("fixture"),
             ],
-            home.path(),
+            &home,
         );
         assert_eq!(output.status.code(), Some(case.exit_code), "{}", case.name);
         assert_eq!(stdout(&output), case.stdout, "{}", case.name);
@@ -877,9 +891,8 @@ fn mcp_autostarts_without_manual_daemon_start() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let home = short_home();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_usagi"))
-        .arg("mcp")
-        .env("USAGI_HOME", home.path())
+    let mut child = home
+        .command(&[OsStr::new("mcp")])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -893,8 +906,8 @@ fn mcp_autostarts_without_manual_daemon_start() {
     let output = child.wait_with_output().expect("MCP の終了を待てる");
     assert!(output.status.success());
     assert!(stdout(&output).contains("\"serverInfo\""));
-    assert_daemon_running(home.path());
-    stop_daemon(home.path());
+    assert_daemon_running(&home);
+    stop_daemon(&home);
 }
 
 #[test]
@@ -911,7 +924,7 @@ fn mcp_store_tools_round_trip_through_stdio_and_durable_files() {
         "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_save\",\"arguments\":{\"name\":\"MCP Fact\",\"title\":\"Durable fact\",\"type\":\"project\",\"body\":\"remember me\"}}}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_get\",\"arguments\":{\"name\":\"mcp-fact\"}}}\n",
     );
-    let output = run_mcp(home.path(), &session, requests);
+    let output = run_mcp(&home, &session, requests);
     assert!(
         output.status.success(),
         "{}",
@@ -929,7 +942,7 @@ fn mcp_store_tools_round_trip_through_stdio_and_durable_files() {
             .is_file()
     );
     assert!(session.join(".usagi/memory/mcp-fact.md").is_file());
-    stop_daemon(home.path());
+    stop_daemon(&home);
 }
 
 #[test]
@@ -949,7 +962,7 @@ fn mcp_store_tools_cover_prompt_update_search_and_delete_lifecycles() {
         "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_delete\",\"arguments\":{\"number\":1}}}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_delete\",\"arguments\":{\"name\":\"life\"}}}\n",
     );
-    let output = run_mcp(home.path(), &session, requests);
+    let output = run_mcp(&home, &session, requests);
     assert!(
         output.status.success(),
         "{}",
@@ -974,7 +987,7 @@ fn mcp_store_tools_cover_prompt_update_search_and_delete_lifecycles() {
         "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_update\",\"arguments\":{\"status\":\"done\"}}}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_delete\",\"arguments\":{}}}\n",
     );
-    let missing = run_mcp(home.path(), &session, missing_requests);
+    let missing = run_mcp(&home, &session, missing_requests);
     let missing_responses = mcp_responses(&missing);
     assert!(
         missing_responses[0]["error"]["message"]
@@ -1003,7 +1016,7 @@ fn mcp_store_tools_cover_prompt_update_search_and_delete_lifecycles() {
         "{\"jsonrpc\":\"2.0\",\"id\":24,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_save\",\"arguments\":{\"name\":\"fact\",\"title\":\"Fact\"}}}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":25,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_search\",\"arguments\":{}}}\n",
     );
-    let broken = run_mcp(home.path(), &broken_session, broken_requests);
+    let broken = run_mcp(&home, &broken_session, broken_requests);
     for response in mcp_responses(&broken) {
         assert_eq!(response["error"]["code"], -32603);
     }
@@ -1013,7 +1026,7 @@ fn mcp_store_tools_cover_prompt_update_search_and_delete_lifecycles() {
         "{\"jsonrpc\":\"2.0\",\"id\":27,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_update\",\"arguments\":{\"number\":1}}}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":28,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_delete\",\"arguments\":{\"number\":1}}}\n",
     );
-    let refused = run_mcp(home.path(), workspace.path(), root_requests);
+    let refused = run_mcp(&home, workspace.path(), root_requests);
     for response in mcp_responses(&refused) {
         assert_eq!(response["error"]["code"], -32603);
         assert!(
@@ -1024,7 +1037,7 @@ fn mcp_store_tools_cover_prompt_update_search_and_delete_lifecycles() {
         );
     }
     assert!(!workspace.path().join(".usagi/issues").exists());
-    stop_daemon(home.path());
+    stop_daemon(&home);
 }
 
 #[test]
@@ -1039,7 +1052,7 @@ fn config_entry_renders_the_config_screen() {
         "{ broken",
     )
     .unwrap();
-    let output = run_with_home(&[OsStr::new("config")], home.path());
+    let output = run_with_home(&[OsStr::new("config")], &home);
     assert!(output.status.success());
     let out = stdout(&output);
     assert!(out.contains("Config"));
@@ -1051,14 +1064,10 @@ fn config_entry_renders_the_config_screen() {
     assert!(!out.contains("Scope:"));
     assert!(out.contains("Esc: back"));
     assert!(output.stderr.is_empty());
-    let status = Command::new(env!("CARGO_BIN_EXE_usagi"))
-        .args([OsStr::new("daemon"), OsStr::new("status")])
-        .env("USAGI_HOME", home.path())
-        .output()
-        .expect("usagi daemon status を起動できる");
+    let status = home.run(&[OsStr::new("daemon"), OsStr::new("status")]);
     assert!(status.status.success());
     assert!(stdout(&status).contains("daemon not running"));
-    stop_daemon(home.path());
+    stop_daemon(&home);
 }
 
 #[test]
@@ -1067,11 +1076,8 @@ fn config_first_boot_with_restrictive_umask_preserves_ordinary_daemon_bootstrap(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let home = short_home();
-    let mut config = Command::new(env!("CARGO_BIN_EXE_usagi"));
-    config
-        .arg("config")
-        .env("USAGI_HOME", home.path())
-        .stdin(Stdio::null());
+    let mut config = home.command(&[OsStr::new("config")]);
+    config.stdin(Stdio::null());
     // The coverage runtime creates its raw profile lazily. Pre-create this
     // child's unique profile before applying umask 0777 so llvm-profdata can
     // still read and merge the completed measurement.
@@ -1101,23 +1107,23 @@ fn config_first_boot_with_restrictive_umask_preserves_ordinary_daemon_bootstrap(
             OsStr::new("remove"),
             OsStr::new("missing"),
         ],
-        home.path(),
+        &home,
     );
     assert_eq!(ordinary.status.code(), Some(1));
     assert!(stderr(&ordinary).contains("session was not found"));
-    assert_daemon_running(home.path());
-    stop_daemon(home.path());
+    assert_daemon_running(&home);
+    stop_daemon(&home);
 }
 
 #[test]
 fn other_entries_route_to_their_banner_screens() {
     // 対話ループ未接続の画面（Doctor）は暫定バナー。
     let home = short_home();
-    let output = run_with_home(&[OsStr::new("doctor")], home.path());
+    let output = run_with_home(&[OsStr::new("doctor")], &home);
     assert!(output.status.success());
     assert!(stdout(&output).contains("doctor TUI"));
     assert!(output.stderr.is_empty());
-    stop_daemon(home.path());
+    stop_daemon(&home);
 }
 
 #[test]
@@ -1127,7 +1133,7 @@ fn open_registers_and_renders_an_explicit_or_current_workspace() {
     let explicit = roots.path().join("explicit-workspace");
     std::fs::create_dir(&explicit).unwrap();
 
-    let output = run_with_home(&[OsStr::new("open"), explicit.as_os_str()], home.path());
+    let output = run_with_home(&[OsStr::new("open"), explicit.as_os_str()], &home);
     assert!(output.status.success());
     let out = stdout(&output);
     assert!(out.contains("explicit-workspace"));
@@ -1148,7 +1154,7 @@ fn open_registers_and_renders_an_explicit_or_current_workspace() {
             ..Settings::default()
         })
         .unwrap();
-    let reopened = run_with_home(&[OsStr::new("open"), explicit.as_os_str()], home.path());
+    let reopened = run_with_home(&[OsStr::new("open"), explicit.as_os_str()], &home);
     assert!(reopened.status.success());
     assert_eq!(
         WorkspaceSettingsStore::new(&explicit).load().unwrap(),
@@ -1159,7 +1165,7 @@ fn open_registers_and_renders_an_explicit_or_current_workspace() {
     let registry =
         std::fs::read_to_string(channel_data_dir(home.path()).join("workspaces.json")).unwrap();
     assert!(registry.contains("explicit-workspace"));
-    let output = run_with_home(&[OsStr::new("hop")], home.path());
+    let output = run_with_home(&[OsStr::new("hop")], &home);
     assert!(output.status.success());
     let out = stdout(&output);
     assert!(out.contains("Recent"));
@@ -1167,28 +1173,23 @@ fn open_registers_and_renders_an_explicit_or_current_workspace() {
 
     let current = roots.path().join("current-workspace");
     std::fs::create_dir(&current).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_usagi"))
-        .arg("open")
-        .current_dir(&current)
-        .env("USAGI_HOME", home.path())
-        .output()
-        .expect("usagi バイナリを起動できる");
+    let output = home.run_at(&current, &[OsStr::new("open")]);
     assert!(output.status.success());
     let out = stdout(&output);
     assert!(out.contains("current-workspace"));
     assert!(out.contains("main"));
-    stop_daemon(home.path());
+    stop_daemon(&home);
 }
 
 #[test]
 fn open_rejects_a_missing_or_non_directory_workspace_path() {
-    let home = tempfile::tempdir().unwrap();
+    let home = short_home();
     let missing = home.path().join("missing-workspace");
     let file = home.path().join("not-a-directory");
     std::fs::write(&file, "not a workspace").unwrap();
 
     for path in [&missing, &file] {
-        let output = run_with_home(&[OsStr::new("open"), path.as_os_str()], home.path());
+        let output = run_with_home(&[OsStr::new("open"), path.as_os_str()], &home);
         assert!(!output.status.success(), "path={}", path.display());
         assert!(!output.stderr.is_empty(), "path={}", path.display());
     }
@@ -1196,12 +1197,13 @@ fn open_rejects_a_missing_or_non_directory_workspace_path() {
 
 #[test]
 fn clap_errors_do_not_launch_a_tui() {
+    let home = short_home();
     for args in [
         &[OsStr::new("hop"), OsStr::new("extra")][..],
         &[OsStr::new("config"), OsStr::new("extra")][..],
         &[OsStr::new("open"), OsStr::new("one"), OsStr::new("two")][..],
     ] {
-        let output = run(args);
+        let output = run(&home, args);
         assert!(!output.status.success(), "args={args:?}");
         assert!(!stdout(&output).contains("TUI"), "args={args:?}");
         assert!(!output.stderr.is_empty(), "args={args:?}");
@@ -1239,16 +1241,20 @@ fn special_entry_argv_errors_are_rejected_before_runtime_side_effects() {
         .into_iter()
         .map(|case| {
             let home = short_home();
-            let output = Command::new(env!("CARGO_BIN_EXE_usagi"))
-                .args(case.args)
-                .env("USAGI_HOME", home.path())
-                .current_dir(home.path())
+            let args = case
+                .args
+                .iter()
+                .copied()
+                .map(OsStr::new)
+                .collect::<Vec<_>>();
+            let output = home
+                .command(&args)
                 .stdin(Stdio::null())
                 .output()
                 .expect("usagi バイナリを起動できる");
             let created_channel_data = channel_data_dir(home.path()).exists();
             if created_channel_data {
-                stop_daemon(home.path());
+                stop_daemon(&home);
             }
             (case, output, home, created_channel_data)
         })
@@ -1272,7 +1278,7 @@ fn special_entry_argv_errors_are_rejected_before_runtime_side_effects() {
 fn open_accepts_an_existing_non_utf8_workspace_path_when_supported() {
     use std::os::unix::ffi::OsStringExt;
 
-    let home = tempfile::tempdir().unwrap();
+    let home = short_home();
     let roots = tempfile::tempdir().unwrap();
     let name = std::ffi::OsString::from_vec(b"usagi-\xff".to_vec());
     let path = roots.path().join(name);
@@ -1283,7 +1289,7 @@ fn open_accepts_an_existing_non_utf8_workspace_path_when_supported() {
         Err(_) if cfg!(target_os = "macos") => return,
         Err(error) => panic!("non-UTF-8 workspace fixtureを作成できない: {error}"),
     }
-    let output = run_with_home(&[OsStr::new("open"), path.as_os_str()], home.path());
+    let output = run_with_home(&[OsStr::new("open"), path.as_os_str()], &home);
 
     assert!(output.status.success());
     assert!(stdout(&output).contains("main"));
@@ -1301,12 +1307,12 @@ fn open_accepts_an_existing_non_utf8_workspace_path_when_supported() {
 fn open_validates_non_utf8_workspace_paths() {
     use std::os::unix::ffi::OsStringExt;
 
-    let home = tempfile::tempdir().unwrap();
+    let home = short_home();
     let roots = tempfile::tempdir().unwrap();
 
     let missing_name = std::ffi::OsString::from_vec(b"missing-\xff".to_vec());
     let missing = roots.path().join(missing_name);
-    let output = run_with_home(&[OsStr::new("open"), missing.as_os_str()], home.path());
+    let output = run_with_home(&[OsStr::new("open"), missing.as_os_str()], &home);
     assert!(!output.status.success());
     assert!(!output.stderr.is_empty());
 
@@ -1314,12 +1320,7 @@ fn open_validates_non_utf8_workspace_paths() {
     let relative = std::ffi::OsString::from_vec(b"relative-\xff".to_vec());
     let absolute_relative = roots.path().join(&relative);
     let relative_fixture_exists = std::fs::create_dir(&absolute_relative).is_ok();
-    let output = Command::new(env!("CARGO_BIN_EXE_usagi"))
-        .args([OsStr::new("open"), relative.as_os_str()])
-        .current_dir(roots.path())
-        .env("USAGI_HOME", home.path())
-        .output()
-        .expect("usagi バイナリを起動できる");
+    let output = home.run_at(roots.path(), &[OsStr::new("open"), relative.as_os_str()]);
     if relative_fixture_exists {
         assert!(output.status.success());
         assert!(stdout(&output).contains("main"));
@@ -1333,7 +1334,7 @@ fn open_validates_non_utf8_workspace_paths() {
     let file = roots.path().join(file_name);
     match std::fs::write(&file, "not a workspace") {
         Ok(()) => {
-            let output = run_with_home(&[OsStr::new("open"), file.as_os_str()], home.path());
+            let output = run_with_home(&[OsStr::new("open"), file.as_os_str()], &home);
             assert!(!output.status.success());
             assert!(!output.stderr.is_empty());
         }
