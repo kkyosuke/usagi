@@ -2582,9 +2582,7 @@ mod tests {
                 .tabs()
                 .iter()
                 .any(|tab| matches!(tab, PaneTab::Interrupted(pane)
-                    if pane.tab.continuation == history.continuation)),
-            "{:?}",
-            runtime.active_pane().tabs()
+                    if pane.tab.continuation == history.continuation))
         );
         assert!(
             runtime
