@@ -1,13 +1,13 @@
 ---
 number: 527
 title: perf(tui): terminal pollingをUI loopから分離しforeground cadenceに制限する
-status: todo
+status: done
 priority: medium
 labels: [review, v2, tui, terminal, ipc, performance, scheduler]
 dependson: [506, 521, 523, 525]
 related: [197, 216, 344, 385, 388, 508, 521, 523]
 created_at: 2026-07-22T11:44:32.841588+00:00
-updated_at: 2026-07-23T00:09:07.139578+00:00
+updated_at: 2026-07-25T14:34:14.687332+00:00
 ---
 
 ## 問題・影響
