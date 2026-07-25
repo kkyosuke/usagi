@@ -24,6 +24,7 @@ use usagi_core::domain::{
         DurableTerminalLaunchSnapshot, ResolvedTerminalLaunch, TerminalInventoryEntry,
         TerminalKind, TerminalLaunchRequest, TerminalLaunchValidationError,
     },
+    terminal_retention::{AdmissionRejection, EvictionReason, FinalLookup, RetainedFinal},
 };
 
 use super::{
@@ -32,6 +33,7 @@ use super::{
         Attached, Geometry, InputAck, InputRequest, Output, PtyWriter, RegistryError, Snapshot,
         SpawnFailure, TerminalReconcileState, TerminalRegistry, TerminalRuntimeState,
     },
+    terminal_retention_ipc::{RESTORED_FINAL_BYTES, SharedTerminalRetention},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +139,13 @@ pub enum GenericTerminalError {
     ReconcileRequired(TerminalReconcileState),
     UnknownTerminal,
     TerminalGenerationMismatch,
+    /// The aggregate retention budget cannot reserve this launch's worst-case
+    /// final, so the launch is refused before any PTY is spawned (#526).
+    RetentionExhausted(AdmissionRejection),
+    /// The terminal existed, and its final was collected by aggregate
+    /// retention. It is never answered as unknown or with another terminal's
+    /// history.
+    FinalEvicted(EvictionReason),
 }
 
 /// Owns generic shell PTYs. It has no `AgentRuntimeId` or adapter hook path.
@@ -145,14 +154,32 @@ pub struct GenericTerminalCoordinator {
     limit: usize,
     records: BTreeMap<String, DurableTerminalRecord>,
     terminals: TerminalRegistry,
+    retention: SharedTerminalRetention,
 }
 impl GenericTerminalCoordinator {
     #[must_use]
     pub fn new(limit: usize, journal_limit: usize, input_cache_limit: usize) -> Self {
+        Self::with_retention(
+            limit,
+            journal_limit,
+            input_cache_limit,
+            SharedTerminalRetention::new(),
+        )
+    }
+    /// Builds an owner bound to the daemon-wide retention authority so its
+    /// finals share one aggregate budget with the Agent owner's (#526).
+    #[must_use]
+    pub fn with_retention(
+        limit: usize,
+        journal_limit: usize,
+        input_cache_limit: usize,
+        retention: SharedTerminalRetention,
+    ) -> Self {
         Self {
             limit,
             records: BTreeMap::new(),
             terminals: TerminalRegistry::new(journal_limit, input_cache_limit),
+            retention,
         }
     }
     pub fn from_snapshot(
@@ -160,6 +187,25 @@ impl GenericTerminalCoordinator {
         journal_limit: usize,
         input_cache_limit: usize,
         snapshot: TerminalStoreSnapshot,
+    ) -> Result<Self, GenericTerminalError> {
+        Self::from_snapshot_with_retention(
+            limit,
+            journal_limit,
+            input_cache_limit,
+            snapshot,
+            SharedTerminalRetention::new(),
+        )
+    }
+    /// Restores durable records and re-imports their finals into the shared
+    /// retention accounting, which is derived state a restart rebuilds. Records
+    /// that predate the aggregate budget are migrated here and become ordinary
+    /// collection candidates.
+    pub fn from_snapshot_with_retention(
+        limit: usize,
+        journal_limit: usize,
+        input_cache_limit: usize,
+        snapshot: TerminalStoreSnapshot,
+        retention: SharedTerminalRetention,
     ) -> Result<Self, GenericTerminalError> {
         snapshot.validate()?;
         if snapshot.records.iter().any(|record| {
@@ -179,10 +225,22 @@ impl GenericTerminalCoordinator {
             .into_iter()
             .map(|record| (record.terminal.terminal_id.as_str(), record))
             .collect::<BTreeMap<_, _>>();
+        let restored_at = retention.now();
+        for record in records.values() {
+            if record.state == TerminalRuntimeState::Exited {
+                retention.import_existing(RetainedFinal::new(
+                    record.terminal.clone(),
+                    TerminalKind::Terminal,
+                    RESTORED_FINAL_BYTES,
+                    restored_at,
+                ));
+            }
+        }
         Ok(Self {
             limit,
             records,
             terminals: TerminalRegistry::new(journal_limit, input_cache_limit),
+            retention,
         })
     }
     pub fn launch(
@@ -203,6 +261,42 @@ impl GenericTerminalCoordinator {
         if self.occupied_slots() >= self.limit {
             return Err(GenericTerminalError::ConcurrencyExhausted);
         }
+        // Reserve the worst-case final this runtime will leave behind before
+        // anything is spawned. An exhausted aggregate budget refuses the launch
+        // here instead of dropping somebody else's protected final later.
+        self.retention
+            .reserve(&terminal)
+            .map_err(GenericTerminalError::RetentionExhausted)?;
+        // Applying the collection the reservation may have triggered keeps the
+        // records, the journals, and the accounting converged.
+        self.collect_garbage(store);
+        let outcome = self.launch_admitted(
+            request,
+            terminal.clone(),
+            operation,
+            geometry,
+            resolver,
+            store,
+            spawner,
+        );
+        if outcome.is_err() {
+            // No final will ever be committed for a refused or failed launch.
+            self.retention.release(&terminal);
+        }
+        outcome
+    }
+
+    fn launch_admitted(
+        &mut self,
+        request: &TerminalLaunchRequest,
+        terminal: TerminalRef,
+        operation: CompletionFence,
+        geometry: Geometry,
+        resolver: &mut dyn TerminalProfileResolver,
+        store: &mut dyn TerminalStore,
+        spawner: &mut dyn GenericPtySpawner,
+    ) -> Result<(), GenericTerminalError> {
+        let key = terminal.terminal_id.as_str();
         let resolved = resolver
             .resolve(request)
             .map_err(GenericTerminalError::Launch)?;
@@ -260,6 +354,15 @@ impl GenericTerminalCoordinator {
     /// Detach only removes this connection's subscriptions; the PTY stays alive.
     pub fn disconnect(&mut self, connection: ConnectionId) {
         self.terminals.disconnect(connection);
+        // Finals this connection was draining are no longer pinned.
+        for record in self.records.values() {
+            if record.state == TerminalRuntimeState::Exited {
+                self.retention.set_pinned(
+                    &record.terminal,
+                    self.terminals.is_attached(&record.terminal),
+                );
+            }
+        }
     }
     pub fn terminal_snapshot(
         &self,
@@ -302,9 +405,14 @@ impl GenericTerminalCoordinator {
         connection: ConnectionId,
     ) -> Result<(), GenericTerminalError> {
         self.record(terminal)?;
-        self.terminals
+        let detached = self
+            .terminals
             .detach(terminal, subscription, connection)
-            .map_err(GenericTerminalError::Terminal)
+            .map_err(GenericTerminalError::Terminal);
+        // A final nobody is draining any more is an ordinary GC candidate.
+        self.retention
+            .set_pinned(terminal, self.terminals.is_attached(terminal));
+        detached
     }
     /// Applies PTY output to the daemon journal and returns its fenced cursor.
     pub fn output(
@@ -368,11 +476,59 @@ impl GenericTerminalCoordinator {
         if self.persist(store).is_err() {
             self.record_mut(terminal)?.state =
                 TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::PersistAfterExit);
+            // The reservation stays held: the journal still holds these bytes
+            // and the record needs reconciliation, so its capacity is not freed.
             return Err(GenericTerminalError::ReconcileRequired(
                 TerminalReconcileState::PersistAfterExit,
             ));
         }
+        // The exit result is stored into the capacity reserved before spawn, so
+        // no cap can drop it. A client still draining this final pins it.
+        let bytes = self.terminals.retained_bytes(terminal);
+        self.retention
+            .commit_final(terminal, TerminalKind::Terminal, bytes);
+        self.retention
+            .set_pinned(terminal, self.terminals.is_attached(terminal));
+        self.collect_garbage(store);
         Ok(())
+    }
+
+    /// Applies the aggregate retention authority's decisions to this owner:
+    /// every exited record whose final the authority collected loses its
+    /// durable record and its output journal, and the store is rewritten once.
+    ///
+    /// Only a final the authority evicted with a typed marker is removed, so a
+    /// record the ledger never accounted for is never deleted by accident. The
+    /// work is bounded by the collection batch, and a failed store write leaves
+    /// the removal to converge on a later pass or the next startup import
+    /// rather than resurrecting the runtime.
+    pub fn collect_garbage(&mut self, store: &mut dyn TerminalStore) -> usize {
+        let collected: Vec<TerminalRef> = self
+            .records
+            .values()
+            .filter(|record| record.state == TerminalRuntimeState::Exited)
+            .filter(|record| {
+                matches!(
+                    self.retention.lookup(&record.terminal),
+                    FinalLookup::Evicted(_)
+                )
+            })
+            .map(|record| record.terminal.clone())
+            .collect();
+        for terminal in &collected {
+            self.records.remove(&terminal.terminal_id.as_str());
+            self.terminals.forget(terminal);
+        }
+        if !collected.is_empty() {
+            let _ = self.persist(store);
+        }
+        collected.len()
+    }
+
+    /// The aggregate retention authority this owner shares with the Agent owner.
+    #[must_use]
+    pub fn retention(&self) -> &SharedTerminalRetention {
+        &self.retention
     }
     /// Never starts a replacement after an ambiguous outcome.
     pub fn reconcile(
@@ -497,19 +653,30 @@ impl GenericTerminalCoordinator {
         &self,
         terminal: &TerminalRef,
     ) -> Result<&DurableTerminalRecord, GenericTerminalError> {
+        let missing = self.missing(terminal);
         self.records
             .get(&terminal.terminal_id.as_str())
             .filter(|record| record.terminal.fences(terminal))
-            .ok_or(GenericTerminalError::UnknownTerminal)
+            .ok_or(missing)
     }
     fn record_mut(
         &mut self,
         terminal: &TerminalRef,
     ) -> Result<&mut DurableTerminalRecord, GenericTerminalError> {
+        let missing = self.missing(terminal);
         self.records
             .get_mut(&terminal.terminal_id.as_str())
             .filter(|record| record.terminal.fences(terminal))
-            .ok_or(GenericTerminalError::UnknownTerminal)
+            .ok_or(missing)
+    }
+    /// Why a terminal is absent: collected by aggregate retention, or never
+    /// owned here. A collected final is a typed outcome, never a fallback to
+    /// some other history.
+    fn missing(&self, terminal: &TerminalRef) -> GenericTerminalError {
+        match self.retention.lookup(terminal) {
+            FinalLookup::Evicted(marker) => GenericTerminalError::FinalEvicted(marker.reason),
+            _ => GenericTerminalError::UnknownTerminal,
+        }
     }
     fn running(&self, terminal: &TerminalRef) -> Result<(), GenericTerminalError> {
         match self.record(terminal)?.state {
@@ -1099,5 +1266,308 @@ mod tests {
             coordinator.terminal_exit_status(&stale),
             Err(GenericTerminalError::TerminalGenerationMismatch)
         );
+    }
+
+    /// Launches, drains one output chunk, and exits one generic terminal.
+    fn run_terminal(
+        coordinator: &mut GenericTerminalCoordinator,
+        store: &mut dyn TerminalStore,
+        bytes: &[u8],
+    ) -> TerminalRef {
+        let request = request();
+        let (terminal, fence) = refs(&request);
+        coordinator
+            .launch(
+                &request,
+                terminal.clone(),
+                fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver,
+                store,
+                &mut Spawner(Ok(process())),
+            )
+            .expect("the fixture admits this launch");
+        coordinator.output(&terminal, bytes.to_vec()).unwrap();
+        coordinator.exit(&terminal, 0, store).unwrap();
+        terminal
+    }
+
+    #[test]
+    fn a_launch_reserves_its_final_and_a_failed_launch_gives_the_capacity_back() {
+        let (retention, _clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
+        let mut coordinator =
+            GenericTerminalCoordinator::with_retention(4, 64, 1, retention.clone());
+        let request = request();
+        let (terminal, fence) = refs(&request);
+        // A definite spawn failure never produces a final, so its reservation
+        // must not keep occupying the aggregate budget.
+        assert_eq!(
+            coordinator.launch(
+                &request,
+                terminal.clone(),
+                fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver,
+                &mut Store::default(),
+                &mut Spawner(Err(SpawnFailure::Definite)),
+            ),
+            Err(GenericTerminalError::SpawnFailed)
+        );
+        assert_eq!(retention.metrics().reserved_finals, 0);
+        assert_eq!(retention.metrics().retained_finals, 0);
+
+        // A successful run commits its final into the reserved capacity.
+        let mut store = Store::default();
+        let terminal = run_terminal(&mut coordinator, &mut store, b"final output");
+        let metrics = retention.metrics();
+        assert_eq!(metrics.reserved_finals, 0);
+        assert_eq!(metrics.retained_finals, 1);
+        assert_eq!(metrics.retained_bytes, 12);
+        assert!(retention.lookup(&terminal).retained().is_some());
+    }
+
+    /// Counts spawns so a rejected launch can prove no PTY was started.
+    struct CountingSpawner<'a>(&'a std::cell::Cell<usize>);
+    impl GenericPtySpawner for CountingSpawner<'_> {
+        fn spawn(
+            &mut self,
+            _: &ResolvedTerminalLaunch,
+            _: &TerminalRef,
+            _: Geometry,
+        ) -> Result<ProcessIdentity, SpawnFailure> {
+            self.0.set(self.0.get() + 1);
+            Ok(ProcessIdentity {
+                pid: 9,
+                start_identity: "start".into(),
+                process_group: 9,
+            })
+        }
+    }
+
+    #[test]
+    fn an_exhausted_retention_budget_refuses_the_launch_before_spawn() {
+        let (retention, clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
+        let mut coordinator =
+            GenericTerminalCoordinator::with_retention(8, 64, 1, retention.clone());
+        let mut store = Store::default();
+        let mut retained = Vec::new();
+        for _ in 0..3 {
+            retained.push(run_terminal(&mut coordinator, &mut store, b"x"));
+        }
+        // All three finals are inside the minimum visibility TTL.
+        clock.advance(1);
+        let request = request();
+        let (terminal, fence) = refs(&request);
+        let spawns = std::cell::Cell::new(0);
+        let rejected = coordinator.launch(
+            &request,
+            terminal.clone(),
+            fence,
+            Geometry { cols: 80, rows: 24 },
+            &mut Resolver,
+            &mut store,
+            &mut CountingSpawner(&spawns),
+        );
+        assert!(matches!(
+            rejected,
+            Err(GenericTerminalError::RetentionExhausted(_))
+        ));
+        // Nothing was spawned and no protected final was deleted to make room.
+        assert_eq!(spawns.get(), 0);
+        assert_eq!(retention.metrics().retained_finals, 3);
+        assert_eq!(retention.metrics().evicted_finals, 0);
+        for terminal in &retained {
+            assert!(coordinator.terminal_exit_status(terminal).is_ok());
+        }
+        // Past the TTL the same launch admits, because the reserve path
+        // collects first.
+        clock.advance(30);
+        let later = super::tests::request();
+        let (terminal, fence) = refs(&later);
+        assert!(
+            coordinator
+                .launch(
+                    &later,
+                    terminal,
+                    fence,
+                    Geometry { cols: 80, rows: 24 },
+                    &mut Resolver,
+                    &mut store,
+                    &mut CountingSpawner(&spawns),
+                )
+                .is_ok()
+        );
+        // The one spawn belongs to the admitted launch, never to the rejected one.
+        assert_eq!(spawns.get(), 1);
+        assert!(retention.metrics().evicted_finals >= 1);
+    }
+
+    #[test]
+    fn a_collected_final_leaves_no_record_journal_or_untyped_query() {
+        let (retention, clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
+        let mut coordinator =
+            GenericTerminalCoordinator::with_retention(4, 64, 1, retention.clone());
+        let mut store = Store::default();
+        let terminal = run_terminal(&mut coordinator, &mut store, b"bye");
+        clock.advance(1000);
+        retention.collect();
+        assert_eq!(coordinator.collect_garbage(&mut store), 1);
+        // The durable record, the journal, and the inventory entry are gone.
+        assert!(coordinator.snapshot().records.is_empty());
+        assert!(coordinator.completed_inventory(&request().scope).is_empty());
+        assert!(
+            store
+                .0
+                .last()
+                .is_some_and(|snapshot| snapshot.records.is_empty())
+        );
+        // The query is typed: expired history, not an unknown terminal and not
+        // some other terminal's replay.
+        assert_eq!(
+            coordinator.terminal_snapshot(&terminal),
+            Err(GenericTerminalError::FinalEvicted(
+                usagi_core::domain::terminal_retention::EvictionReason::AgeExpired
+            ))
+        );
+        assert_eq!(
+            coordinator.replay_from(&terminal, 0),
+            Err(GenericTerminalError::FinalEvicted(
+                usagi_core::domain::terminal_retention::EvictionReason::AgeExpired
+            ))
+        );
+        // A terminal the authority never held stays unknown.
+        let (stranger, _) = refs(&request());
+        assert_eq!(
+            coordinator.terminal_snapshot(&stranger),
+            Err(GenericTerminalError::UnknownTerminal)
+        );
+        // A second pass is idempotent.
+        assert_eq!(coordinator.collect_garbage(&mut store), 0);
+        assert_eq!(coordinator.retention().metrics().retained_finals, 0);
+    }
+
+    #[test]
+    fn a_final_a_client_is_still_draining_is_not_collected() {
+        let (retention, clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
+        let mut coordinator =
+            GenericTerminalCoordinator::with_retention(4, 64, 1, retention.clone());
+        let mut store = Store::default();
+        let request = request();
+        let (terminal, fence) = refs(&request);
+        coordinator
+            .launch(
+                &request,
+                terminal.clone(),
+                fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver,
+                &mut store,
+                &mut Spawner(Ok(process())),
+            )
+            .unwrap();
+        let connection = ConnectionId::new();
+        let attached = coordinator.attach(&terminal, connection).unwrap();
+        coordinator.exit(&terminal, 0, &mut store).unwrap();
+        clock.advance(1000);
+        retention.collect();
+        assert_eq!(coordinator.collect_garbage(&mut store), 0);
+        assert!(coordinator.terminal_snapshot(&terminal).is_ok());
+
+        // Detaching releases the protection, and the next pass collects it.
+        coordinator
+            .detach(&terminal, attached.subscription, connection)
+            .unwrap();
+        retention.collect();
+        assert_eq!(coordinator.collect_garbage(&mut store), 1);
+    }
+
+    #[test]
+    fn a_disconnect_releases_the_protection_of_every_final_it_was_draining() {
+        let (retention, clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
+        let mut coordinator =
+            GenericTerminalCoordinator::with_retention(4, 64, 1, retention.clone());
+        let mut store = Store::default();
+        let request = request();
+        let (terminal, fence) = refs(&request);
+        coordinator
+            .launch(
+                &request,
+                terminal.clone(),
+                fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver,
+                &mut store,
+                &mut Spawner(Ok(process())),
+            )
+            .unwrap();
+        let connection = ConnectionId::new();
+        coordinator.attach(&terminal, connection).unwrap();
+        coordinator.exit(&terminal, 0, &mut store).unwrap();
+        clock.advance(1000);
+        coordinator.disconnect(connection);
+        retention.collect();
+        assert_eq!(coordinator.collect_garbage(&mut store), 1);
+    }
+
+    #[test]
+    fn a_restart_reimports_exited_records_so_the_budget_survives_it() {
+        let (retention, clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
+        let mut coordinator =
+            GenericTerminalCoordinator::with_retention(4, 64, 1, retention.clone());
+        let mut store = Store::default();
+        let terminal = run_terminal(&mut coordinator, &mut store, b"gone");
+        let snapshot = coordinator.snapshot();
+        drop(coordinator);
+
+        // A fresh daemon rebuilds the accounting from the durable records; the
+        // reservation of the previous process is not carried over.
+        let (restarted_retention, restart_clock) =
+            crate::usecase::terminal_retention_ipc::tests::manual_retention();
+        let mut restarted = GenericTerminalCoordinator::from_snapshot_with_retention(
+            4,
+            64,
+            1,
+            snapshot,
+            restarted_retention.clone(),
+        )
+        .unwrap();
+        let metrics = restarted_retention.metrics();
+        assert_eq!(metrics.retained_finals, 1);
+        assert_eq!(metrics.reserved_finals, 0);
+        assert_eq!(
+            metrics.retained_bytes,
+            crate::usecase::terminal_retention_ipc::RESTORED_FINAL_BYTES
+        );
+        // It ages out of the restored budget like any other final.
+        restart_clock.advance(1000);
+        restarted_retention.collect();
+        let mut store = Store::default();
+        assert_eq!(restarted.collect_garbage(&mut store), 1);
+        assert!(restarted_retention.lookup(&terminal).marker().is_some());
+        clock.advance(1);
+    }
+
+    #[test]
+    fn a_store_failure_during_collection_converges_on_the_next_pass() {
+        let (retention, clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
+        let mut coordinator =
+            GenericTerminalCoordinator::with_retention(4, 64, 1, retention.clone());
+        let mut store = Store::default();
+        let terminal = run_terminal(&mut coordinator, &mut store, b"x");
+        clock.advance(1000);
+        retention.collect();
+        // The store write fails, but the runtime is not resurrected: the record
+        // is gone from memory and the query stays typed.
+        assert_eq!(coordinator.collect_garbage(&mut FailingStore), 1);
+        assert!(coordinator.snapshot().records.is_empty());
+        assert_eq!(
+            coordinator.terminal_snapshot(&terminal),
+            Err(GenericTerminalError::FinalEvicted(
+                usagi_core::domain::terminal_retention::EvictionReason::AgeExpired
+            ))
+        );
+        // A later successful write publishes the same converged snapshot.
+        coordinator.persist(&mut store).unwrap();
+        assert!(store.0.last().unwrap().records.is_empty());
     }
 }

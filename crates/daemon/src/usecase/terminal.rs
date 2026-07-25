@@ -821,6 +821,38 @@ impl TerminalRegistry {
         })
     }
 
+    /// Bytes this terminal's bounded output journal currently retains.
+    ///
+    /// Aggregate retention accounting (#526) charges a final for what its
+    /// tombstone actually holds, so an unknown or stale terminal is charged
+    /// nothing rather than an assumed worst case.
+    #[must_use]
+    pub fn retained_bytes(&self, reference: &TerminalRef) -> u64 {
+        self.entry(reference).map_or(0, |entry| {
+            u64::try_from(entry.retained_bytes).unwrap_or(u64::MAX)
+        })
+    }
+
+    /// Whether any connection still holds a subscription to this terminal. A
+    /// client draining the final replay of an exited terminal keeps it here, so
+    /// retention can protect it from collection while it is being read.
+    #[must_use]
+    pub fn is_attached(&self, reference: &TerminalRef) -> bool {
+        self.entry(reference)
+            .is_ok_and(|entry| !entry.attachments.is_empty())
+    }
+
+    /// Drops a collected terminal's journal, screen, and attachments, releasing
+    /// its retained bytes and screen cells. Forgetting an unknown or stale
+    /// terminal is a no-op, so a retried collection cannot remove another
+    /// incarnation.
+    pub fn forget(&mut self, reference: &TerminalRef) -> bool {
+        if self.entry(reference).is_err() {
+            return false;
+        }
+        self.entries.remove(&key(reference)).is_some()
+    }
+
     const fn screen_budgets(&self) -> ScreenBudgets {
         ScreenBudgets {
             per_terminal: self.screen_cells_limit,
@@ -1387,6 +1419,37 @@ mod tests {
         );
         assert_eq!(screen_dimensions(Geometry { cols: 0, rows: 0 }), (1, 1));
         assert_eq!(screen_dimensions(Geometry { cols: 80, rows: 24 }), (24, 80));
+    }
+
+    #[test]
+    fn retention_reads_what_a_terminal_holds_and_forgets_it_exactly_once() {
+        let r = reference();
+        let mut registry = registry(r.clone());
+        assert_eq!(registry.retained_bytes(&r), 0);
+        assert!(!registry.is_attached(&r));
+        registry.append_output(&r, b"abc".to_vec()).unwrap();
+        assert_eq!(registry.retained_bytes(&r), 3);
+
+        let connection = ConnectionId::new();
+        let attached = registry.attach(&r, connection).unwrap();
+        assert!(registry.is_attached(&r));
+        registry
+            .detach(&r, attached.subscription, connection)
+            .unwrap();
+        assert!(!registry.is_attached(&r));
+
+        // A stale identity reads nothing and forgets nothing.
+        let mut stale = r.clone();
+        stale.worktree_id = WorktreeId::new();
+        assert_eq!(registry.retained_bytes(&stale), 0);
+        assert!(!registry.is_attached(&stale));
+        assert!(!registry.forget(&stale));
+        assert_eq!(registry.retained_bytes(&r), 3);
+
+        // Forgetting releases the journal and the screen; a retry is a no-op.
+        assert!(registry.forget(&r));
+        assert!(!registry.forget(&r));
+        assert_eq!(registry.snapshot(&r), Err(RegistryError::StaleTarget));
     }
 
     #[test]

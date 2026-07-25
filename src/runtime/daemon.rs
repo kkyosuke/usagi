@@ -1371,6 +1371,11 @@ fn spawn_ipc_server(
         data_dir.join("daemon"),
     ))));
     let pipeline_metrics = Arc::new(TerminalPipelineMetrics::default());
+    // One daemon-wide aggregate retention budget for exited terminal and Agent
+    // finals (#526). Both owners reserve from it before spawning and commit
+    // their finals into it, so short-lived runtimes cannot grow the daemon's
+    // tombstones without bound.
+    let retention = usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention::new();
     let (pty, observations) = DaemonPty::new(Arc::clone(&pipeline_metrics));
     let workspace_root = trusted_repository_root(&runtime)?;
     // One reader for the whole daemon: Agent adapters and the terminal profile
@@ -1383,6 +1388,7 @@ fn spawn_ipc_server(
         pty,
         Arc::clone(&runtime),
         Arc::clone(&user_environment),
+        retention.clone(),
     )?;
     start_terminal_observer(
         Arc::clone(&terminal),
@@ -1399,6 +1405,7 @@ fn spawn_ipc_server(
         agent_pty,
         mcp_command,
         user_environment,
+        retention.clone(),
     )?;
     let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(&data_dir.join("daemon"))));
     if let Ok(runtime) = supervisor.lock()
@@ -1420,6 +1427,11 @@ fn spawn_ipc_server(
     start_decision_maintenance(Arc::clone(&decisions))?;
     start_pr_refresh_worker(Arc::clone(&pr_inventory), Arc::clone(&shutdown))?;
     let teardown = start_session_teardown_worker(Arc::clone(&runtime), Arc::clone(&shutdown))?;
+    start_retention_gc_worker(
+        Arc::clone(&terminal),
+        Arc::clone(&agent),
+        Arc::clone(&shutdown),
+    )?;
     start_custody_worker(
         custody,
         owner,
@@ -1433,6 +1445,7 @@ fn spawn_ipc_server(
         teardown,
         terminal,
         agent,
+        retention,
         pr_inventory,
         decisions,
         Arc::new(Mutex::new(MetricsBroker::default())),
@@ -1648,6 +1661,56 @@ where
         })
 }
 
+/// How often the daemon ages exited terminal / Agent finals out of the
+/// aggregate retention budget when nothing else drives collection.
+const RETENTION_GC_TICK: Duration = Duration::from_secs(30);
+
+/// Starts the only production retention collector. Launch and exit already
+/// collect on the spot; this worker covers an idle daemon, where the age budget
+/// and the minimum visibility TTL are the only things still moving.
+fn start_retention_gc_worker(
+    terminal: SharedTerminalRuntime,
+    agent: SharedAgentRuntime,
+    shutdown: Arc<AtomicBool>,
+) -> std::io::Result<()> {
+    spawn_retention_gc_worker(
+        move || {
+            if let Ok(mut terminal) = terminal.lock() {
+                terminal.collect_retention_garbage();
+            }
+            if let Ok(mut agent) = agent.lock() {
+                agent.collect_retention_garbage();
+            }
+        },
+        shutdown,
+        RETENTION_GC_TICK,
+    )
+    .map(|_| ())
+}
+
+/// The worker loop, with the collection step injected so a test can drive it
+/// without a daemon, a PTY, or a store.
+fn spawn_retention_gc_worker<C>(
+    mut collect: C,
+    shutdown: Arc<AtomicBool>,
+    tick: Duration,
+) -> std::io::Result<std::thread::JoinHandle<()>>
+where
+    C: FnMut() + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("usagi-retention-gc".to_string())
+        .spawn(move || {
+            while !shutdown.load(Ordering::Acquire) {
+                collect();
+                let deadline = Instant::now() + tick;
+                while !shutdown.load(Ordering::Acquire) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        })
+}
+
 /// Real filesystem observations behind [`usagi_daemon::usecase::custody`].
 ///
 /// `locked` is observed through the descriptor the single-instance lock holds,
@@ -1720,6 +1783,7 @@ fn open_agent_runtime(
     pty: AgentPty,
     mcp_command: PathBuf,
     environment: Arc<SharedUserEnvironment>,
+    retention: usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention,
 ) -> std::io::Result<SharedAgentRuntime> {
     let mut store = FileRuntimeStore(data_dir.join("daemon").join("agents.json"));
     let snapshot = store.reconcile_after_restart()?;
@@ -1765,7 +1829,7 @@ fn open_agent_runtime(
             ),
         }),
     );
-    let runtime = AgentRuntime::hydrate_with_dispatch_and_locator(
+    let runtime = AgentRuntime::hydrate_with_retention(
         generation,
         registry,
         store,
@@ -1776,6 +1840,7 @@ fn open_agent_runtime(
         DispatchStore::new(data_dir.join("daemon")),
         usagi_core::infrastructure::runtime_model::PathExecutableLocator,
         snapshot,
+        retention,
     )
     .map_err(|error| {
         std::io::Error::new(
@@ -1855,6 +1920,7 @@ fn new_terminal_runtime(
     pty: DaemonPty,
     sessions: SharedSessionRuntime,
     environment: Arc<SharedUserEnvironment>,
+    retention: usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention,
 ) -> std::io::Result<SharedTerminalRuntime> {
     let mut store = FileTerminalStore(data_dir.join("daemon").join("terminals.json"));
     let (snapshot, interrupted) = store.load_reconciled()?;
@@ -1863,7 +1929,7 @@ fn new_terminal_runtime(
             "daemon startup reconciled {interrupted} generic terminal(s) as identity_unknown"
         ));
     }
-    let runtime = GenericTerminalRuntime::from_snapshot(
+    let runtime = GenericTerminalRuntime::from_snapshot_with_retention(
         generation,
         TrustedLoginShell {
             profile: LoginShellProfile::new(terminal_environment(), repo_root.clone()),
@@ -1874,6 +1940,7 @@ fn new_terminal_runtime(
         pty,
         SharedTerminalScopeResolver(sessions),
         snapshot,
+        retention,
     )
     .map_err(|_| std::io::Error::other("invalid generic terminal snapshot"))?;
     Ok(Arc::new(Mutex::new(runtime)))
@@ -1924,6 +1991,7 @@ fn start_ipc_accept_loop(
     teardown: Arc<TeardownSignal>,
     terminal: SharedTerminalRuntime,
     agent: SharedAgentRuntime,
+    retention: usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention,
     pr_inventory: SharedPrInventory,
     decisions: Arc<UserDecisionStore>,
     metrics: SharedMetricsBroker,
@@ -1955,6 +2023,7 @@ fn start_ipc_accept_loop(
                         let teardown = Arc::clone(&teardown);
                         let terminal = Arc::clone(&terminal);
                         let visibility = visibility.clone();
+                        let retention = retention.clone();
                         let agent_owner = Arc::clone(&agent);
                         let agent_launch = Arc::clone(&agent);
                         let pr_inventory = Arc::clone(&pr_inventory);
@@ -1971,11 +2040,13 @@ fn start_ipc_accept_loop(
                                     return;
                                 };
                                 let mut reader = stream;
-                                let mut owner = SharedTerminalOwner::with_visibility(
-                                    SharedAgent(agent_owner),
-                                    SharedTerminal(terminal),
-                                    visibility,
-                                );
+                                let mut owner =
+                                    SharedTerminalOwner::with_visibility_and_retention(
+                                        SharedAgent(agent_owner),
+                                        SharedTerminal(terminal),
+                                        visibility,
+                                        retention,
+                                    );
                                 let mut metrics_observer = None;
                                 let result = usagi_daemon::presentation::ipc::handle_connection_with_terminal_and(
                                     &mut reader,
@@ -7129,6 +7200,41 @@ mod tests {
         DaemonReady::retire(&ready).unwrap();
         assert!(!RecordFile::remove_if(&record, &contents).unwrap());
         assert!(!data_dir.exists());
+    }
+
+    #[test]
+    fn the_retention_collector_ticks_until_shutdown_and_stops_when_already_down() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let ticking = Arc::clone(&calls);
+        let stopper = Arc::clone(&shutdown);
+        let handle = spawn_retention_gc_worker(
+            move || {
+                if ticking.fetch_add(1, Ordering::AcqRel) >= 1 {
+                    stopper.store(true, Ordering::Release);
+                }
+            },
+            Arc::clone(&shutdown),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        handle.join().unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), 2);
+
+        // A daemon already shutting down never collects.
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let skipped = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&skipped);
+        let handle = spawn_retention_gc_worker(
+            move || {
+                counter.fetch_add(1, Ordering::AcqRel);
+            },
+            cancelled,
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        handle.join().unwrap();
+        assert_eq!(skipped.load(Ordering::Acquire), 0);
     }
 
     fn session_test_hello() -> usagi_core::infrastructure::ipc::ServerHello {
