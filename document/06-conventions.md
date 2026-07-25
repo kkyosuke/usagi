@@ -17,6 +17,7 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 - [`coverage(off)` 例外](#coverageoff-例外)
 - [変更箇所からの推奨テスト](#変更箇所からの推奨テスト)
 - [結合テストからの daemon 起動](#結合テストからの-daemon-起動)
+  - [重い E2E の直列化](#重い-e2e-の直列化)
 - [Git Hooks（lefthook）](#git-hookslefthook)
 - [CI（GitHub Actions）](#cigithub-actions)
 - [リリース](#リリース)
@@ -276,6 +277,13 @@ daemon の workspace root は**起動時 cwd** で決まるため（[5. daemon](
 `daemon serve` の直接起動だけでなく、`daemon start` / `daemon restart` と client bootstrap（`session ...` /
 `mcp` / TUI）による間接起動も同じ経路に載せる。自プロセス上に fake daemon を立てるテストの record は reap 対象外に
 なる（自分自身を撃たない）。
+
+### 重い E2E の直列化
+
+shipping binary・daemon・fixture provider・実 PTY を同時に走らせる E2E は CPU を占有するため、**1 test binary 内では
+直列に実行する**。`tests/agent_ipc_e2e.rs` は daemon 起動 lock、`tests/cli_tui_pty.rs` は file 全体の serial lock で
+直列化する。並行させると frame 待ちが product の失敗ではなく CPU 競合による timeout になり、偽陽性の失敗を生む。
+新しい実 PTY / 実 daemon E2E を追加するときは、同じ lock を取る。
 
 ## Git Hooks（lefthook）
 
