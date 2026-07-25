@@ -9,6 +9,7 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 
 - [identity と fence](#identity-と-fence)
 - [frame と handshake](#frame-と-handshake)
+- [workspace fence](#workspace-fence)
 - [attempt deadline と reconnect budget](#attempt-deadline-と-reconnect-budget)
 - [envelope とエラー](#envelope-とエラー)
 - [Unix transport](#unix-transport)
@@ -56,8 +57,9 @@ CLI・MCP・TUI の per-request 経路は [attempt deadline と reconnect budget
 これを実効化する。TUI の pane restore は request を off-thread に隔離して frame / input / quit の同期待ちを避ける。
 
 最初の frame は必ず `ClientHello` である。hello は client ID、connection nonce、期待する
-daemon generation、対応 protocol range、capability、build diagnostics を含む。daemon は generation /
-revision の共通範囲と必須 capability を検証し、成功時に `ServerHello` を返す。build identity は wire
+daemon generation、client が申告する workspace（[workspace fence](#workspace-fence)）、対応 protocol range、
+capability、build diagnostics を含む。daemon は「意図した daemon か」を先に確定するため
+**generation → workspace → protocol / capability** の順に検証し、成功時に `ServerHello` を返す。build identity は wire
 protocol の互換性判定には使わないが、client bootstrap は `ServerHello` の identity で同一 runtime channel の
 daemon が現在 executable と **exact same artifact** かを確認する。client は `build.artifact.v1` capability を必須とし、
 capability を持たない旧 daemon は build tuple へ fallback せず handshake で拒否される。
@@ -86,6 +88,62 @@ private standby、generation limit / draining admission、authority handoff は
 その consumer が接続されるまで production / local は trigger を typed outcome として返すだけで、blind cold replacement や
 二重 daemon spawn を行わない。development の cold restart でも singleton lifecycle lock を維持し、二重 daemon を
 spawn しない。通常 envelope は handshake の成功後だけ受理する。
+
+## workspace fence
+
+daemon が権威を持つ workspace root は起動時に 1 つだけ確定する（[5. daemon](05-daemon.md#daemon-process-lifecycle)）。
+一方 client の接続先は data directory（`$USAGI_HOME` と runtime mode）から解決するため **workspace に依存しない**。
+したがって handshake が workspace を照合しなければ、workspace B で実行した client が workspace A の daemon へ
+接続し、A の session 一覧・scope・PR inventory をそのまま受け取る（`session remove` は A の worktree を撤去する）。
+`ClientHello.workspace` はこれを閉じるための申告であり、daemon は自分の trusted repository root と
+突き合わせて admit / refuse を決める。
+
+| 申告 | wire | 意味 |
+|---|---|---|
+| bound | `{"scope":"bound","root":"<絶対 canonical path>"}` | この client は `root` を含む workspace で作業する |
+| unbound | `{"scope":"unbound"}` | workspace resource を一切扱わない接続（request を送らない） |
+| 欠落 | field 省略 | fence 以前の client。typed error で拒否する |
+
+admit の条件は次のとおりで、比較は path component 単位である（`<root>-2` は `<root>` の子ではない）。
+
+| 判定 | 条件 |
+|---|---|
+| admit | `unbound`、または `bound` の root が trusted root と一致するか **その配下**（subdirectory・session worktree `<root>/.usagi/sessions/<name>` を含む） |
+| refuse | 別 workspace の root、trusted root の親、比較できない root（相対 path、非 UTF-8 が畳まれた空 root）、daemon 側の trusted root が空、申告の欠落 |
+
+拒否は `permission_denied` / `error_id = workspace-mismatch` / `retry_mode = never` / `side_effect = none` の
+typed `ProtocolError` であり、message は **serve している workspace root** を含む。client はこれを
+そのまま提示し、`unavailable` へ丸めない。bootstrap はこの拒否を「到達不能」と解釈しないため、
+daemon の cold start、stale endpoint recovery、rollover、cold restart のいずれも起こさない
+（別 workspace を正当に所有している daemon を壊さないため）。readiness 待ちも即座に打ち切る。
+
+client は申告する root を次の順で決める。git を client 起動ごとに実行しない。
+
+| 優先 | 出所 | 対象 |
+|---|---|---|
+| 1 | `USAGI_WORKSPACE_ROOT`（daemon が provision した child に注入する trusted root） | MCP child、agent hook |
+| 2 | process の canonical working directory | TUI・CLI・手動起動の `usagi mcp` |
+
+`bound` を申告する client は `workspace.fence.v1` capability を必須にする。fence を持たない daemon は
+どの workspace の client も admit してしまうため、capability の無い peer は handshake で拒否する
+（`build.artifact.v1` と同じ形の双方向 fence）。
+
+**免除する経路**は「request を 1 件も送らない接続」だけであり、`unbound` を申告する。
+
+| 経路 | 理由 |
+|---|---|
+| client readiness（TUI の entry screen: `usagi hop` の Recent、`usagi open <path>` の起動前確認） | daemon の存在確認だけで workspace state を読まない。workspace 切り替え画面はどの directory からでも開ける必要がある |
+| `usagi daemon replace` | 広告された build identity を読む lifecycle 観測であり、workspace に紐づかない |
+
+この fence は**同一 UID の協調する peer 同士の一貫性 fence**であり、authorization boundary ではない
+（accept 時に UID を検証済みで、到達できた peer は任意の root を綴れる）。したがって `unbound` は
+per-request の権限判定ではなく、「workspace 作業をしない」という申告である。
+
+data directory ごとに daemon は 1 つ、その daemon が serve する workspace も 1 つなので、
+**別 workspace を同時に扱うことはできない**。別 workspace で作業する場合は、その daemon を停止してから
+目的の workspace で起動する。TUI が daemon の workspace と異なる path を `usagi open <path>` で開いた場合、
+表示 title だけが別 workspace になり session 一覧は daemon の workspace のものになる。この不整合は
+[#549](../.usagi/issues/549-fix-tui-open-path-daemon-workspace.md) で追跡する。
 
 ## attempt deadline と reconnect budget
 

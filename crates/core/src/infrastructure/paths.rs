@@ -162,9 +162,41 @@ pub fn canonical_workspace_root(candidate: impl AsRef<Path>) -> Result<PathBuf> 
     })
 }
 
+/// Spell a workspace root for the IPC workspace fence.
+///
+/// The fence compares an absolute canonical path, so a root that cannot be
+/// spelled as absolute UTF-8 is returned empty instead of lossily converted:
+/// two distinct non-UTF-8 roots can share one lossy spelling, and an empty root
+/// is refused by both peers rather than matched by accident.
+#[must_use]
+pub fn wire_workspace_root(root: impl AsRef<Path>) -> String {
+    let root = root.as_ref();
+    root.to_str()
+        .filter(|_| root.is_absolute())
+        .map(str::to_owned)
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wire_workspace_root_keeps_absolute_utf8_roots_and_empties_the_rest() {
+        assert_eq!(wire_workspace_root("/project/root"), "/project/root");
+        // A relative root cannot be compared against the daemon's canonical
+        // root, so it fails closed as an empty spelling.
+        assert_eq!(wire_workspace_root("project/root"), "");
+        assert_eq!(wire_workspace_root(""), "");
+
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt;
+            let invalid = PathBuf::from(OsString::from_vec(b"/project/\xff".to_vec()));
+            assert_eq!(wire_workspace_root(invalid), "");
+        }
+    }
 
     #[test]
     fn data_dir_prefers_env_override_then_falls_back() {

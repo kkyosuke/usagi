@@ -25,6 +25,7 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use usagi_core::domain::daemon::DaemonRecord;
+use usagi_core::infrastructure::ipc::ClientWorkspace;
 
 /// daemon の graceful stop を待つ上限。
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -253,6 +254,38 @@ impl Drop for OwnedDaemon {
             let _ = self.child.wait();
         }
     }
+}
+
+/// テスト client が handshake で申告する workspace（#548）。
+///
+/// daemon は起動時に確定した workspace root しか serve できず、handshake はそこから外れた
+/// client を typed error で拒否する。fixture は `sessions.json` に記録された root をそのまま
+/// 申告することで、「その workspace で動く実 client」と同じ経路で admit される。
+///
+/// socket は lifecycle state の書き込みより先に connectable になり得るため、記録が現れるまで
+/// 有界に待つ。空 root を申告して拒否されると、テストの失敗理由が fence の誤りに見えてしまう。
+pub fn client_workspace(data_dir: &Path) -> ClientWorkspace {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(root) = recorded_workspace_root(data_dir) {
+            return ClientWorkspace::Bound { root };
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon did not record its workspace root in {}",
+            data_dir.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn recorded_workspace_root(data_dir: &Path) -> Option<String> {
+    let bytes = std::fs::read(data_dir.join("daemon/sessions.json")).ok()?;
+    let state: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let root = usagi_core::infrastructure::paths::wire_workspace_root(PathBuf::from(
+        state["repository_root"].as_str()?,
+    ));
+    (!root.is_empty()).then_some(root)
 }
 
 /// テストが `usagi` を起動する唯一の command builder。

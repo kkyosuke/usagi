@@ -305,12 +305,18 @@ impl ResponseOutcomeBody for Envelope {
 }
 
 /// Build a server protocol policy from daemon-owned identity/configuration.
+///
+/// `workspace_root` is the canonical root this daemon took authority over at
+/// startup. It is the only workspace it can serve, so the handshake refuses a
+/// client that declares a different one; a root that cannot be spelled on the
+/// wire is passed as empty and refuses every workspace-bound client.
 #[must_use]
 pub fn server_protocol(
     daemon_generation: DaemonGeneration,
     connection_id: String,
     build: usagi_core::infrastructure::ipc::BuildIdentity,
     daemon_process: usagi_core::domain::daemon::DaemonRecord,
+    workspace_root: String,
 ) -> ServerProtocol {
     ServerProtocol {
         daemon_generation,
@@ -330,10 +336,12 @@ pub fn server_protocol(
             "build.artifact.v1".into(),
             "daemon.owner-identity.v1".into(),
             usagi_core::infrastructure::ipc::TERMINAL_SCREEN_CHECKPOINT_CAPABILITY.into(),
+            usagi_core::infrastructure::ipc::WORKSPACE_FENCE_CAPABILITY.into(),
         ],
         build,
         limits: usagi_core::infrastructure::ipc::ProtocolLimits::default(),
         daemon_process: Some(daemon_process),
+        workspace_root,
     }
 }
 
@@ -342,8 +350,8 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use usagi_core::infrastructure::ipc::{
-        BuildIdentity, ClientHello, ClientId, ProtocolRange, ProtocolVersion, read_json_frame,
-        write_json_frame,
+        BuildIdentity, ClientHello, ClientId, ClientWorkspace, ProtocolRange, ProtocolVersion,
+        WORKSPACE_FENCE_CAPABILITY, is_workspace_mismatch, read_json_frame, write_json_frame,
     };
 
     struct BrokenWriter;
@@ -390,6 +398,9 @@ mod tests {
         }
     }
 
+    /// The workspace root the fixture daemon owns.
+    const TRUSTED_ROOT: &str = "/workspace/root";
+
     fn server() -> ServerProtocol {
         server_protocol(
             DaemonGeneration("current".into()),
@@ -401,6 +412,7 @@ mod tests {
                 artifact: "server-artifact".into(),
             },
             usagi_core::domain::daemon::DaemonRecord::identified(2, "test-process"),
+            TRUSTED_ROOT.to_owned(),
         )
     }
     fn hello() -> Bootstrap {
@@ -424,6 +436,9 @@ mod tests {
                 target: "test".into(),
                 artifact: "client-artifact".into(),
             },
+            workspace: Some(ClientWorkspace::Bound {
+                root: TRUSTED_ROOT.to_owned(),
+            }),
         }
     }
     fn request() -> Envelope {
@@ -801,6 +816,54 @@ mod tests {
             read_json_frame::<Bootstrap>(&mut Cursor::new(output), 1024).unwrap(),
             Some(Bootstrap::Error(_))
         ));
+    }
+
+    #[test]
+    fn a_client_from_another_workspace_is_refused_before_any_request_reaches_a_runtime() {
+        // The daemon advertises the fence so a workspace-bound client can require
+        // it and refuse a daemon that would admit any workspace.
+        assert!(
+            server()
+                .capabilities
+                .contains(&WORKSPACE_FENCE_CAPABILITY.to_owned())
+        );
+
+        let mut elsewhere = client_hello();
+        elsewhere.workspace = Some(ClientWorkspace::Bound {
+            root: "/workspace/other".into(),
+        });
+        let mut input = Vec::new();
+        write_json_frame(&mut input, &Bootstrap::ClientHello(elsewhere), 1024).unwrap();
+        // A request follows the hello, as a real client's first RPC would.
+        write_json_frame(&mut input, &request(), 1024).unwrap();
+
+        let mut output = Vec::new();
+        let mut terminal = RecordingTerminal::default();
+        handle_connection_with_terminal_and(
+            &mut Cursor::new(input),
+            &mut output,
+            &server(),
+            &mut terminal,
+            &mut test_dispatch,
+        )
+        .unwrap();
+
+        // The connection ends at the refusal: nothing is dispatched, so no
+        // session, scope, or PR inventory of this workspace is observed by a
+        // client working in another one.
+        assert_eq!(terminal.requests, 0);
+        let mut replies = Cursor::new(output);
+        let Some(Bootstrap::Error(refusal)) =
+            read_json_frame::<Bootstrap>(&mut replies, 1024).unwrap()
+        else {
+            panic!("a foreign workspace must be answered with a typed error frame");
+        };
+        assert!(is_workspace_mismatch(&refusal));
+        assert!(refusal.message.contains(TRUSTED_ROOT), "{refusal:?}");
+        assert_eq!(
+            read_json_frame::<Envelope>(&mut replies, 1024).unwrap(),
+            None
+        );
     }
 
     #[test]

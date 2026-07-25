@@ -22,10 +22,11 @@ use crate::domain::terminal_launch::{
     TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
 };
 use crate::infrastructure::ipc::{
-    Bootstrap, BuildIdentity, ClientHello, ClientId, DaemonGeneration, Envelope, EnvelopeKind,
-    ErrorCode, GenerationRole, ProtocolError, ProtocolRange, ProtocolVersion, ResponseOutcome,
-    RetryMode, ServerHello, SideEffect, TERMINAL_CHECKPOINT_REVISION, TERMINAL_WIRE_GENERATION,
-    TerminalSnapshotMode, read_json_frame, terminal_snapshot_mode, write_json_frame,
+    Bootstrap, BuildIdentity, ClientHello, ClientId, ClientWorkspace, DaemonGeneration, Envelope,
+    EnvelopeKind, ErrorCode, GenerationRole, ProtocolError, ProtocolRange, ProtocolVersion,
+    ResponseOutcome, RetryMode, ServerHello, SideEffect, TERMINAL_CHECKPOINT_REVISION,
+    TERMINAL_WIRE_GENERATION, TerminalSnapshotMode, WORKSPACE_FENCE_CAPABILITY,
+    is_workspace_mismatch, read_json_frame, terminal_snapshot_mode, write_json_frame,
 };
 
 /// A daemon request understood by every presentation surface.
@@ -592,8 +593,17 @@ impl<S: Read + Write> IpcClient<S> {
         connection_nonce: String,
         policy: ClientPolicy,
         build: BuildIdentity,
+        workspace: ClientWorkspace,
     ) -> Result<Self, ClientError> {
-        Self::connect_with(stream, client_id, connection_nonce, policy, build, None)
+        Self::connect_with(
+            stream,
+            client_id,
+            connection_nonce,
+            policy,
+            build,
+            workspace,
+            None,
+        )
     }
 
     /// Performs a handshake authorized by the established stream's OS peer
@@ -610,6 +620,7 @@ impl<S: Read + Write> IpcClient<S> {
         connection_nonce: String,
         policy: ClientPolicy,
         build: BuildIdentity,
+        workspace: ClientWorkspace,
         record: &DaemonRecord,
         generation: &DaemonGeneration,
         peer_pid: u32,
@@ -621,6 +632,7 @@ impl<S: Read + Write> IpcClient<S> {
             connection_nonce,
             policy,
             build,
+            workspace,
             Some(ExpectedOwner {
                 record,
                 generation,
@@ -643,6 +655,7 @@ impl<S: Read + Write> IpcClient<S> {
         connection_nonce: String,
         policy: ClientPolicy,
         build: BuildIdentity,
+        workspace: ClientWorkspace,
         expected_owner: Option<ExpectedOwner<'_>>,
     ) -> Result<Self, ClientError> {
         let expected_nonce = connection_nonce.clone();
@@ -653,6 +666,13 @@ impl<S: Read + Write> IpcClient<S> {
         ];
         if expected_owner.is_some() {
             required_capabilities.push("daemon.owner-identity.v1".into());
+        }
+        // A workspace-bound client requires the fence itself: a daemon that does
+        // not enforce it would admit this connection and answer with another
+        // workspace's sessions, which is exactly the silent outcome the
+        // declaration exists to end.
+        if matches!(workspace, ClientWorkspace::Bound { .. }) {
+            required_capabilities.push(WORKSPACE_FENCE_CAPABILITY.into());
         }
         let hello = Bootstrap::ClientHello(ClientHello {
             client_id: ClientId(client_id),
@@ -671,6 +691,7 @@ impl<S: Read + Write> IpcClient<S> {
             capabilities: vec![],
             required_capabilities,
             build,
+            workspace: Some(workspace),
         });
         write_json_frame(&mut stream, &hello, 1_048_576)
             .map_err(|error| ClientError::Unavailable(error.to_string()))?;
@@ -696,6 +717,14 @@ impl<S: Read + Write> IpcClient<S> {
                     next_request: 0,
                     policy,
                 })
+            }
+            // A workspace refusal is definitive and asserts nothing about
+            // ownership, so it is surfaced verbatim even on the owner-fenced
+            // path. Folding it into `ownership_unknown` would leave the caller
+            // with an unactionable error for a mismatch it can fix by working in
+            // the daemon's workspace.
+            Some(Bootstrap::Error(error)) if is_workspace_mismatch(&error) => {
+                Err(ClientError::Protocol(error))
             }
             Some(Bootstrap::Error(_error)) if expected_owner.is_some() => {
                 Err(ClientError::Protocol(ProtocolError::new(
@@ -1269,6 +1298,14 @@ mod tests {
         }
     }
 
+    /// The workspace a test client declares. Bound, so the hello also carries the
+    /// required workspace-fence capability like every production surface.
+    fn test_workspace() -> ClientWorkspace {
+        ClientWorkspace::Bound {
+            root: "/workspace".into(),
+        }
+    }
+
     fn owner_hello(record: &DaemonRecord, generation: &DaemonGeneration) -> ServerHello {
         ServerHello {
             connection_nonce: "nonce".into(),
@@ -1409,6 +1446,7 @@ mod tests {
                 "nonce".into(),
                 ClientPolicy::cli(),
                 client_build(),
+                test_workspace(),
                 &record,
                 &generation,
                 record.pid,
@@ -1452,6 +1490,117 @@ mod tests {
     }
 
     #[test]
+    fn a_workspace_bound_client_declares_its_workspace_and_requires_the_fence() {
+        let client = IpcClient::connect(
+            bootstrap_script(&Bootstrap::ServerHello(ServerHello {
+                connection_nonce: "nonce".into(),
+                connection_id: crate::infrastructure::ipc::ConnectionId("connection".into()),
+                daemon_generation: DaemonGeneration("daemon".into()),
+                generation_role: GenerationRole::Active,
+                protocol: ProtocolVersion {
+                    generation: TERMINAL_WIRE_GENERATION,
+                    revision: TERMINAL_CHECKPOINT_REVISION,
+                },
+                capabilities: vec![],
+                build: client_build(),
+                limits: crate::infrastructure::ipc::ProtocolLimits::default(),
+                daemon_process: None,
+            })),
+            "client".into(),
+            "nonce".into(),
+            ClientPolicy::tui(),
+            client_build(),
+            test_workspace(),
+        )
+        .unwrap();
+
+        let sent = read_json_frame::<serde_json::Value>(
+            &mut Cursor::new(client.transport().output.clone()),
+            1_048_576,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            sent["workspace"],
+            serde_json::json!({
+                "scope": "bound",
+                "root": "/workspace",
+            })
+        );
+        // The fence is required, so a daemon that does not enforce it cannot
+        // silently serve this client another workspace's state.
+        let required = sent["required_capabilities"].as_array().unwrap();
+        assert!(required.contains(&serde_json::json!(WORKSPACE_FENCE_CAPABILITY)));
+
+        // An unbound connection names no workspace resource, so it does not
+        // require the fence and stays usable against any daemon.
+        let unbound = IpcClient::connect(
+            bootstrap_script(&Bootstrap::ServerHello(owner_hello(
+                &DaemonRecord::identified(1, "process-start"),
+                &DaemonGeneration("generation".into()),
+            ))),
+            "client".into(),
+            "nonce".into(),
+            ClientPolicy::tui(),
+            client_build(),
+            ClientWorkspace::Unbound,
+        )
+        .unwrap();
+        let sent = read_json_frame::<serde_json::Value>(
+            &mut Cursor::new(unbound.transport().output.clone()),
+            1_048_576,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(sent["workspace"], serde_json::json!({"scope": "unbound"}));
+        assert!(
+            !sent["required_capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(WORKSPACE_FENCE_CAPABILITY))
+        );
+    }
+
+    #[test]
+    fn a_workspace_refusal_survives_the_owner_fenced_handshake_verbatim() {
+        // The owner path folds pre-authentication failures into
+        // `ownership_unknown`, but a workspace refusal must reach the caller as
+        // itself: it is definitive, asserts nothing about ownership, and is the
+        // only error the user can act on by working in the daemon's workspace.
+        let record = DaemonRecord::identified(4321, "process-start");
+        let generation = DaemonGeneration("generation".into());
+        let refusal = crate::infrastructure::ipc::workspace_admission(
+            Some(&ClientWorkspace::Bound {
+                root: "/workspace/other".into(),
+            }),
+            "/workspace/root",
+        )
+        .unwrap_err();
+
+        let error = IpcClient::connect_expected_owner(
+            bootstrap_script(&Bootstrap::Error(refusal.clone())),
+            "client".into(),
+            "nonce".into(),
+            ClientPolicy::cli(),
+            client_build(),
+            test_workspace(),
+            &record,
+            &generation,
+            record.pid,
+            DaemonProcessObservation::Exact,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.code(), ErrorCode::PermissionDenied);
+        assert_eq!(error.side_effect(), SideEffect::None);
+        assert_eq!(error.retry_mode(), RetryMode::Never);
+        let ClientError::Protocol(surfaced) = error else {
+            panic!("the refusal must stay a typed protocol error");
+        };
+        assert_eq!(surfaced, refusal);
+    }
+
+    #[test]
     fn client_advertises_the_checkpoint_revision_and_derives_its_snapshot_mode() {
         use crate::infrastructure::ipc::TERMINAL_SCREEN_CHECKPOINT_CAPABILITY;
 
@@ -1478,6 +1627,7 @@ mod tests {
                 "nonce".into(),
                 ClientPolicy::tui(),
                 client_build(),
+                test_workspace(),
             )
             .unwrap()
         };
@@ -1666,6 +1816,7 @@ mod tests {
             "nonce".into(),
             ClientPolicy::cli(),
             client_build(),
+            test_workspace(),
         )
         .unwrap();
         assert_eq!(client.server_build().version, "test");
@@ -1717,6 +1868,7 @@ mod tests {
                 "nonce".into(),
                 ClientPolicy::cli(),
                 client_build(),
+                test_workspace(),
             )
             .unwrap();
             let result = client.request(DaemonRequest::Terminal {
@@ -1751,7 +1903,8 @@ mod tests {
                 "c".into(),
                 "n".into(),
                 ClientPolicy::tui(),
-                client_build()
+                client_build(),
+                test_workspace(),
             ),
             Err(ClientError::Protocol(_))
         ));
@@ -1764,7 +1917,8 @@ mod tests {
                 "c".into(),
                 "n".into(),
                 ClientPolicy::tui(),
-                client_build()
+                client_build(),
+                test_workspace(),
             ),
             Err(ClientError::Unavailable(_))
         ));
@@ -1774,7 +1928,8 @@ mod tests {
                 "c".into(),
                 "n".into(),
                 ClientPolicy::tui(),
-                client_build()
+                client_build(),
+                test_workspace(),
             ),
             Err(ClientError::Unavailable(_))
         ));
@@ -1784,7 +1939,8 @@ mod tests {
                 "c".into(),
                 "n".into(),
                 ClientPolicy::tui(),
-                client_build()
+                client_build(),
+                test_workspace(),
             ),
             Err(ClientError::Unavailable(_))
         ));
@@ -2346,6 +2502,14 @@ mod deadline_and_retry_tests {
         }
     }
 
+    /// The workspace a test client declares. Bound, so the hello also carries the
+    /// required workspace-fence capability like every production surface.
+    fn test_workspace() -> ClientWorkspace {
+        ClientWorkspace::Bound {
+            root: "/workspace".into(),
+        }
+    }
+
     fn test_build() -> BuildIdentity {
         BuildIdentity {
             version: "test".into(),
@@ -2403,6 +2567,7 @@ mod deadline_and_retry_tests {
             "n".into(),
             ClientPolicy::tui(),
             test_build(),
+            test_workspace(),
         )
     }
 
@@ -2449,6 +2614,7 @@ mod deadline_and_retry_tests {
             "n".into(),
             ClientPolicy::tui(),
             test_build(),
+            test_workspace(),
         );
         assert!(matches!(result, Err(ClientError::Unavailable(_))));
     }
@@ -2625,6 +2791,7 @@ mod deadline_and_retry_tests {
                 "n".into(),
                 bounded_policy(),
                 test_build(),
+                test_workspace(),
             );
             assert!(matches!(result, Err(ClientError::Unavailable(_))));
             assert!(started.elapsed() < Duration::from_secs(5));
@@ -2650,6 +2817,7 @@ mod deadline_and_retry_tests {
                 "n".into(),
                 bounded_policy(),
                 test_build(),
+                test_workspace(),
             )
             .unwrap();
             let started = Instant::now();

@@ -40,7 +40,9 @@ Codex を daemon が起動するときは、注入した `usagi` stdio server �
 binding を引き続き照合するため、credential の欠落・偽造・失効は state を変更せず拒否する。
 daemon-provisioned MCP child には同時に daemon が解決した workspace root を一時的に渡す。session worktree の
 cwd から起動した server も、この trusted root にある Workspace 設定を Global 設定へ重ねて issue / memory の
-tool availability を解決する。workspace root は認可上の caller identity には使用しない。
+tool availability を解決する。同じ trusted root は daemon 接続時に申告する workspace にもなる
+（正本は [4. daemon IPC#workspace fence](04-ipc.md#workspace-fence)）。workspace root は認可上の caller identity
+には使用しない。
 
 ## プロトコルとライフサイクル
 

@@ -2873,6 +2873,16 @@ mod tests {
         KeyCode, KeyEvent, KeyEventKind, LiveInput, Modifiers, PointerEvent, PointerKind,
     };
 
+    /// The workspace root the scripted daemon fixtures own, and the declaration
+    /// their clients send so the handshake fence admits them (#548).
+    const TEST_WORKSPACE_ROOT: &str = "/workspace/root";
+
+    fn test_client_workspace() -> usagi_core::infrastructure::ipc::ClientWorkspace {
+        usagi_core::infrastructure::ipc::ClientWorkspace::Bound {
+            root: TEST_WORKSPACE_ROOT.to_owned(),
+        }
+    }
+
     /// A pressed [`LiveInput::Key`] with the given code and modifiers.
     fn live_key(code: KeyCode, modifiers: Modifiers) -> LiveInput {
         LiveInput::Key(KeyEvent::new(code, modifiers, KeyEventKind::Press))
@@ -2944,6 +2954,7 @@ mod tests {
             "input-ack-connection".to_owned(),
             build.clone(),
             usagi_core::domain::daemon::DaemonRecord::identified(2, "test-process"),
+            TEST_WORKSPACE_ROOT.to_owned(),
         );
         adjust(&mut protocol);
         let server = std::thread::spawn(move || {
@@ -2990,6 +3001,7 @@ mod tests {
             "input-ack-nonce".to_owned(),
             ClientPolicy::tui(),
             build,
+            test_client_workspace(),
         )
         .unwrap();
         (
@@ -3380,6 +3392,7 @@ mod tests {
             "input-ack-loss-connection".to_owned(),
             build.clone(),
             usagi_core::domain::daemon::DaemonRecord::identified(2, "test-process"),
+            TEST_WORKSPACE_ROOT.to_owned(),
         );
         let server = std::thread::spawn(move || {
             let mut reader = server_stream.try_clone().unwrap();
@@ -3402,6 +3415,7 @@ mod tests {
             "input-ack-loss-nonce".to_owned(),
             ClientPolicy::tui(),
             build,
+            test_client_workspace(),
         )
         .unwrap();
         let mut port = DaemonAgentCommandPort {

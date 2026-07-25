@@ -12,9 +12,10 @@ use std::thread;
 use std::time::Duration;
 
 use usagi_core::infrastructure::ipc::{
-    BuildArtifactDecision, BuildIdentity, BuildRolloverTrigger, build_artifact_decision,
-    build_rollover_trigger,
+    BuildArtifactDecision, BuildIdentity, BuildRolloverTrigger, ProtocolError,
+    build_artifact_decision, build_rollover_trigger, is_workspace_mismatch,
 };
+use usagi_core::usecase::client::ClientError;
 
 // `daemon start` confirms the PID record before the subsequently published IPC
 // endpoint becomes connectable. Leave room for that bounded publication on a
@@ -42,7 +43,17 @@ where
     K: FnMut() -> io::Result<StaleRecovery>,
     B: Fn(&S) -> &BuildIdentity,
 {
-    match connect() {
+    let result = connect();
+    if let Err(error) = &result
+        && let Some(refusal) = workspace_refusal(error)
+    {
+        // The running daemon serves another workspace. That is a definitive
+        // answer about *this* endpoint, so it must not be read as an unreachable
+        // one: starting, recovering, or replacing a daemon would neither fix the
+        // mismatch nor be safe for the workspace that daemon already owns.
+        return Err(BootstrapError::WorkspaceMismatch(refusal));
+    }
+    match result {
         Ok(stream) => {
             match build_artifact_decision(build_of(&stream), expected_build, force_replacement) {
                 BuildArtifactDecision::Reuse => Ok(stream),
@@ -61,7 +72,7 @@ where
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             start().map_err(BootstrapError::Start)?;
-            let stream = wait_for_ready(&mut connect).map_err(BootstrapError::Readiness)?;
+            let stream = wait_for_ready(&mut connect)?;
             require_expected_build(&stream, expected_build, &build_of)?;
             Ok(stream)
         }
@@ -69,12 +80,12 @@ where
             match recover_stale().map_err(BootstrapError::Recovery)? {
                 StaleRecovery::Recovered => {
                     start().map_err(BootstrapError::Start)?;
-                    let stream = wait_for_ready(&mut connect).map_err(BootstrapError::Readiness)?;
+                    let stream = wait_for_ready(&mut connect)?;
                     require_expected_build(&stream, expected_build, &build_of)?;
                     Ok(stream)
                 }
                 StaleRecovery::OwnerActive => {
-                    let stream = wait_for_ready(&mut connect).map_err(BootstrapError::Readiness)?;
+                    let stream = wait_for_ready(&mut connect)?;
                     require_expected_build(&stream, expected_build, &build_of)?;
                     Ok(stream)
                 }
@@ -103,7 +114,7 @@ where
     B: Fn(&S) -> &BuildIdentity,
 {
     restart().map_err(BootstrapError::Restart)?;
-    let stream = wait_for_ready(&mut connect).map_err(BootstrapError::Readiness)?;
+    let stream = wait_for_ready(&mut connect)?;
     require_expected_build(&stream, expected_build, &build_of)?;
     Ok(stream)
 }
@@ -125,6 +136,16 @@ fn can_attempt_stale_recovery(kind: io::ErrorKind) -> bool {
     kind == io::ErrorKind::ConnectionRefused
 }
 
+/// The typed workspace-fence refusal carried by a connect failure, if that is
+/// what it was. The composition root wraps client errors as `io::Error::other`,
+/// so the classification reads the original typed error instead of a message.
+fn workspace_refusal(error: &io::Error) -> Option<ProtocolError> {
+    match error.get_ref()?.downcast_ref::<ClientError>()? {
+        ClientError::Protocol(refusal) if is_workspace_mismatch(refusal) => Some(refusal.clone()),
+        _ => None,
+    }
+}
+
 /// A safe, classified bootstrap failure. No variant permits local lifecycle or
 /// terminal fallback; callers render only its display message.
 #[derive(Debug)]
@@ -137,6 +158,10 @@ pub(crate) enum BootstrapError {
     UnknownBuildIdentity,
     ReplacementBuildMismatch,
     RolloverRequired(BuildRolloverTrigger),
+    /// The reachable daemon owns a different workspace. Callers surface the
+    /// daemon's own refusal so the user learns which workspace is served instead
+    /// of an unavailable endpoint.
+    WorkspaceMismatch(ProtocolError),
 }
 
 impl fmt::Display for BootstrapError {
@@ -171,6 +196,7 @@ impl fmt::Display for BootstrapError {
                 "daemon build rollover is required (operation {})",
                 trigger.operation_id.0
             ),
+            Self::WorkspaceMismatch(refusal) => f.write_str(&refusal.message),
         }
     }
 }
@@ -196,7 +222,7 @@ where
 }
 
 #[coverage(off)]
-fn wait_for_ready<S, C>(connect: &mut C) -> io::Result<S>
+fn wait_for_ready<S, C>(connect: &mut C) -> Result<S, BootstrapError>
 where
     C: FnMut() -> io::Result<S>,
 {
@@ -204,14 +230,20 @@ where
     for _ in 0..READINESS_ATTEMPTS {
         match connect() {
             Ok(stream) => return Ok(stream),
-            Err(error) => last_error = error,
+            // A workspace refusal is the endpoint's final answer, not a
+            // publication delay: waiting cannot change it, so report it at once
+            // instead of spending the readiness budget on it.
+            Err(error) => match workspace_refusal(&error) {
+                Some(refusal) => return Err(BootstrapError::WorkspaceMismatch(refusal)),
+                None => last_error = error,
+            },
         }
         thread::sleep(READINESS_DELAY);
     }
-    Err(io::Error::new(
+    Err(BootstrapError::Readiness(io::Error::new(
         io::ErrorKind::TimedOut,
         format!("daemon did not become ready: {last_error}"),
-    ))
+    )))
 }
 
 #[cfg(test)]
@@ -678,6 +710,88 @@ mod tests {
             unknown_after_start,
             BootstrapError::UnknownBuildIdentity
         ));
+    }
+
+    #[test]
+    fn a_daemon_serving_another_workspace_is_neither_started_recovered_nor_replaced() {
+        use usagi_core::infrastructure::ipc::{ClientWorkspace, workspace_admission};
+        use usagi_core::usecase::client::ClientError;
+
+        let refusal = workspace_admission(
+            Some(&ClientWorkspace::Bound {
+                root: "/workspace/other".into(),
+            }),
+            "/workspace/root",
+        )
+        .unwrap_err();
+        let refused =
+            || Err::<Endpoint, _>(io::Error::other(ClientError::Protocol(refusal.clone())));
+        let starts = Cell::new(0);
+        let recoveries = Cell::new(0);
+        let expected = build("current");
+
+        let error = connect_or_start(
+            refused,
+            || {
+                starts.set(starts.get() + 1);
+                Ok(())
+            },
+            || {
+                recoveries.set(recoveries.get() + 1);
+                Ok(StaleRecovery::Recovered)
+            },
+            &expected,
+            "local",
+            false,
+            endpoint_build,
+        )
+        .unwrap_err();
+
+        // The endpoint answered, so it is neither absent nor stale: replacing or
+        // restarting a daemon that legitimately owns another workspace would be
+        // both useless and destructive.
+        let BootstrapError::WorkspaceMismatch(surfaced) = error else {
+            panic!("a workspace refusal must be classified, not read as unavailable");
+        };
+        assert_eq!(surfaced, refusal);
+        assert_eq!(starts.get(), 0);
+        assert_eq!(recoveries.get(), 0);
+        // The caller renders the daemon's own message, which names the workspace
+        // that is served.
+        assert_eq!(
+            BootstrapError::WorkspaceMismatch(refusal.clone()).to_string(),
+            refusal.message
+        );
+
+        // An explicit cold replacement is refused for the same reason.
+        let restart_error =
+            restart_and_connect(refused, || Ok(()), &expected, endpoint_build).unwrap_err();
+        assert!(matches!(
+            restart_error,
+            BootstrapError::WorkspaceMismatch(_)
+        ));
+
+        // Only this refusal is reclassified. Every other typed client failure
+        // keeps its existing connect handling, so the fence cannot swallow an
+        // unrelated protocol error.
+        let unrelated = connect_or_start(
+            || {
+                Err::<Endpoint, _>(io::Error::other(ClientError::Protocol(
+                    usagi_core::infrastructure::ipc::ProtocolError::new(
+                        usagi_core::infrastructure::ipc::ErrorCode::Busy,
+                        "daemon is busy",
+                    ),
+                )))
+            },
+            lifecycle_error,
+            recovery_error,
+            &expected,
+            "local",
+            false,
+            endpoint_build,
+        )
+        .unwrap_err();
+        assert!(matches!(unrelated, BootstrapError::Connect(_)));
     }
 
     #[test]
