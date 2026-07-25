@@ -1,13 +1,13 @@
 ---
 number: 524
 title: fix(terminal): raw 64KiB tailをVT parser-safe snapshotへ置き換える
-status: todo
+status: done
 priority: high
 labels: [review, v2, daemon, tui, terminal, vt, replay, correctness, p1]
 dependson: []
 related: [199, 251, 265, 472, 473]
 created_at: 2026-07-22T11:41:58.106442+00:00
-updated_at: 2026-07-22T12:08:12.322807+00:00
+updated_at: 2026-07-25T02:07:40.444765+00:00
 ---
 
 ## P1 correctness classification
@@ -36,14 +36,14 @@ PTY process自体は生存し続ける一方、trim後のattach/resyncで利用�
 
 ## 受入条件
 
-- [ ] retention先頭がUTF-8、CSI/OSC、SGR、alternate-screen sequenceの途中でもreconnect前後のvisible cells/cursor/styleが一致する。
-- [ ] primary/alternate/saved primary buffer、`cells_with_scrollback`、selection/copy historyがuntrimmed referenceと一致する。
-- [ ] tail以前に開始したcursor movement、clear、scroll region、alternate bufferの状態がsnapshot後も保持される。
-- [ ] resizeがcheckpoint直前、checkpoint生成とsuffixの間、restore直後にinterleaveしてもgeometry/revision fenceでold/new stateを混在させない。
-- [ ] malformed/unknown snapshot revisionとhostile dimensions/countsはescape injection、panic、integer overflow、unbounded allocation、blank parser corruptionを起こさずtyped fail closedになる。
-- [ ] checkpoint+suffixは既定IPC frameとper-terminal/aggregate cell/scrollback memory bound内に収まる。
-- [ ] old/new client-daemon capability/revisionの全組合せがnegotiated semantic snapshot、明示legacy限定表示、typed incompatibleのいずれかへ決定的に収束する。
-- [ ] Agent/generic、resize、resync、exit final snapshotで同一contractを使い、reattach前後でchild PIDとspawn countが不変である。
+- [x] retention先頭がUTF-8、CSI/OSC、SGR、alternate-screen sequenceの途中でもreconnect前後のvisible cells/cursor/styleが一致する。
+- [x] primary/alternate/saved primary buffer、`cells_with_scrollback`、selection/copy historyがuntrimmed referenceと一致する。
+- [x] tail以前に開始したcursor movement、clear、scroll region、alternate bufferの状態がsnapshot後も保持される。
+- [x] resizeがcheckpoint直前、checkpoint生成とsuffixの間、restore直後にinterleaveしてもgeometry/revision fenceでold/new stateを混在させない。
+- [x] malformed/unknown snapshot revisionとhostile dimensions/countsはescape injection、panic、integer overflow、unbounded allocation、blank parser corruptionを起こさずtyped fail closedになる。
+- [x] checkpoint+suffixは既定IPC frameとper-terminal/aggregate cell/scrollback memory bound内に収まる。
+- [x] old/new client-daemon capability/revisionの全組合せがnegotiated semantic snapshot、明示legacy限定表示、typed incompatibleのいずれかへ決定的に収束する。
+- [x] Agent/generic、resize、resync、exit final snapshotで同一contractを使い、reattach前後でchild PIDとspawn countが不変である。
 
 ## 必須回帰テスト
 
@@ -57,3 +57,18 @@ PTY process自体は生存し続ける一方、trim後のattach/resyncで利用�
 ## docs / migration
 
 `document/04-ipc.md` をsnapshot schema/capability/revision/geometry/offsetのSSoT、`document/03-tui.md` をvisible + primary/copy-history restore behaviorのSSoTとして更新する。wire revision、old/new compatibility matrix、hostile allocation limitを定義する。
+
+## 完了
+
+設計は [`document/proposals/12-terminal-vt-snapshot.md`](../../document/proposals/12-terminal-vt-snapshot.md) で確定し、
+5 phase に分けて実装した。正本は [04-ipc.md#snapshot payload と revision](../../document/04-ipc.md#snapshot-payload-と-revision) と
+[03-tui.md#snapshot negotiation と legacy 限定表示](../../document/03-tui.md#snapshot-negotiation-と-legacy-限定表示) で、
+proposal 12 は畳み込み済みの設計記録として残す。
+
+| Phase | issue | 実装 | 対応する必須回帰テスト |
+|---|---|---|---|
+| 1 | #532 | core への VT parser 抽出（挙動不変） | 既存 test の移送 |
+| 2 | #533 | `ScreenCheckpoint` と bounded / hostile decode | 2, 4 |
+| 3 | #534 | daemon grid authority と revision 2 snapshot | 5, 6 |
+| 4 | #535 | revision 2 negotiation と screen reconstruct（legacy fail-closed） | 3 |
+| 5 | #536 | 実 daemon + 実 PTY の reattach 一致 E2E と docs 畳み込み | 1, 6 |

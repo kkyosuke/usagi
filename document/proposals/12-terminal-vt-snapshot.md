@@ -2,7 +2,9 @@
 
 > [設計提案一覧](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [workspace open 時の pane 復元](11-workspace-restore-panes.md)
 
-本書は [#524](../../.usagi/issues/524-fix-terminal-raw-64kib-tail-vt-parser-safe-snapshot.md)（P1 correctness）の**未実装設計**である。attach / resync snapshot を「blank parser に任意の raw 64 KiB tail」から **versioned semantic screen checkpoint** へ置き換え、[#199](../../.usagi/issues/199-perf-daemon-vt100-scrollback-daemon.md) が定めた「daemon を terminal grid/scrollback の唯一の権威とする」契約を回復するための設計判断を確定する。本書が採用機構・wire schema・互換 matrix・allocation 上限の設計判断の正本であり、実装が確定したら該当部分を [4. daemon IPC](../04-ipc.md)（snapshot schema / capability / revision / geometry / offset）と [3. TUI](../03-tui.md)（visible + primary/copy-history restore）へ畳み込む。
+本書は [#524](../../.usagi/issues/524-fix-terminal-raw-64kib-tail-vt-parser-safe-snapshot.md)（P1 correctness）の設計記録である。attach / resync snapshot を「blank parser に任意の raw 64 KiB tail」から **versioned semantic screen checkpoint** へ置き換え、[#199](../../.usagi/issues/199-perf-daemon-vt100-scrollback-daemon.md) が定めた「daemon を terminal grid/scrollback の唯一の権威とする」契約を回復するための設計判断を確定した。
+
+**この設計は実装済みであり、正本は [4. daemon IPC](../04-ipc.md#snapshot-payload-と-revision)（snapshot schema / capability / revision / geometry / offset / allocation 上限）と [3. TUI](../03-tui.md#snapshot-negotiation-と-legacy-限定表示)（visible + primary/copy-history restore と legacy 限定表示）に移った**。本書は採用に至った判断（なぜ daemon が parser を持つ必要があるか、なぜ checkpoint + contiguous suffix に分けるか）の記録として残す。以降の記述は当時の設計判断であり、現在の挙動は上記の正本を参照する。
 
 ## 目次
 
@@ -217,8 +219,8 @@ root は committed の #524 が todo かつ生存 session が無い状態を rea
 
 ## docs 畳み込み先
 
-実装確定後、次の正本へ畳み込み、本書は README 一覧でリンクだけ残す。
+次の正本へ畳み込み済みである。挙動を知りたい読者はここではなく畳み込み先を読む。
 
-- [4. daemon IPC](../04-ipc.md#generic-terminal-request): snapshot schema（`replay` → `screen` checkpoint）、`terminal.screen-checkpoint.v1` capability、generation 1 revision 2、geometry/offset 契約、互換 matrix、hostile allocation 上限。
-- [3. TUI](../03-tui.md#live-terminal-の出力表示と入力): visible + primary/copy-history restore behavior、legacy fail-closed 限定表示。
+- [4. daemon IPC](../04-ipc.md#snapshot-payload-と-revision): snapshot schema（`replay` → `screen` checkpoint）、`terminal.screen-checkpoint.v1` capability、generation 1 revision 2、geometry/offset 契約、互換 matrix、hostile allocation 上限。
+- [3. TUI](../03-tui.md#snapshot-negotiation-と-legacy-限定表示): visible + primary/copy-history restore behavior、legacy fail-closed 限定表示。
 - [06-conventions.md#依存クレート](../06-conventions.md#依存クレート): `unicode-width` を `usagi-core`（usecase 層）でも使う旨。

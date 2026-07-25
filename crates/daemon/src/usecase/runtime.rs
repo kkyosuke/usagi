@@ -801,9 +801,11 @@ impl RuntimeCoordinator {
         journal: &mut dyn OutputJournal,
     ) -> Result<Output, RuntimeError> {
         self.running(runtime)?;
+        // Offsets only: journaling an accepted chunk must not capture a screen,
+        // or every PTY chunk would pay for a full checkpoint.
         let start_offset = self
             .terminals
-            .snapshot(&runtime.terminal)
+            .output_window(&runtime.terminal)
             .map_err(RuntimeError::Terminal)?
             .output_offset;
         let output = Output {
@@ -1055,14 +1057,20 @@ impl RuntimeCoordinator {
                     && matches!(record.state, RuntimeState::Exited)
             })
             .filter_map(|record| {
-                let snapshot = self.terminals.snapshot(&record.runtime.terminal).ok()?;
-                let exit_status = snapshot.exited?;
+                // A tombstone listing needs the final replay locator, not a
+                // screen: capturing one per entry would make every inventory
+                // query proportional to the retained screens.
+                let window = self
+                    .terminals
+                    .output_window(&record.runtime.terminal)
+                    .ok()?;
+                let exit_status = window.exited?;
                 Some(CompletedTerminalEntry {
                     terminal: record.runtime.terminal.clone(),
                     kind: TerminalKind::Agent,
                     exit_status,
-                    base_offset: snapshot.base_offset,
-                    final_output_offset: snapshot.output_offset,
+                    base_offset: window.base_offset,
+                    final_output_offset: window.output_offset,
                     visibility: TerminalVisibility::unobserved(),
                 })
             })
