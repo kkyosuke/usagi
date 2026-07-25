@@ -1,13 +1,13 @@
 ---
 number: 520
 title: fix(tui): pane launch workerからlive terminal stream portを分離する
-status: todo
+status: in-progress
 priority: high
 labels: [review, v2, tui, terminal, agent, concurrency, resilience]
 dependson: []
 related: [463, 489, 506, 508, 521, 523]
 created_at: 2026-07-22T11:38:16.425358+00:00
-updated_at: 2026-07-22T11:44:45.691094+00:00
+updated_at: 2026-07-25T05:35:05.410720+00:00
 ---
 
 ## 問題・影響

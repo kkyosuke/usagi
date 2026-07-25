@@ -567,7 +567,7 @@ fn wait_for_screen_since(output: &Arc<Mutex<Vec<u8>>>, baseline: usize, needle: 
             };
             let all = String::from_utf8_lossy(&output.lock().unwrap()).into_owned();
             let input_feedback = [
-                "terminal is busy; keystroke not delivered",
+                "terminal stream is unavailable",
                 "terminal session is no longer available",
                 "terminal is reconnecting; input is temporarily unavailable",
                 "terminal is disconnected; input is unavailable",
