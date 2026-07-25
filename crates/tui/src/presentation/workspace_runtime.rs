@@ -235,17 +235,23 @@ impl WorkspaceRuntime {
                     },
                 },
             );
-            // The interrupted projection is merged after live membership so a
-            // history tab keeps its slot behind this target's live tabs.
-            let _ = reduce_registry(
-                &mut self.panes,
-                PaneRegistryEvent::Pane {
-                    target: entry,
-                    event: PaneEvent::RestoreInterrupted {
-                        tabs: target.interrupted,
+            // The interrupted projection is authoritative for history
+            // membership, so it is merged only on the authoritative path and
+            // after live membership: a history tab then keeps its slot behind
+            // this target's live tabs. The append-only path preserves every
+            // existing tab instead, since its observation could not be trusted
+            // as display intent.
+            if replace_order {
+                let _ = reduce_registry(
+                    &mut self.panes,
+                    PaneRegistryEvent::Pane {
+                        target: entry,
+                        event: PaneEvent::RestoreInterrupted {
+                            tabs: target.interrupted,
+                        },
                     },
-                },
-            );
+                );
+            }
         }
         self.sync_live_pane();
         true
@@ -2537,5 +2543,55 @@ mod tests {
         assert_eq!(runtime.active_pane().tabs().len(), 1);
         // Resumable again after the failure.
         assert!(runtime.resume_selected_tab(OperationId::new()).is_ok());
+    }
+
+    #[test]
+    fn an_append_only_restore_preserves_history_tabs_it_cannot_vouch_for() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        let history = interrupted_tab(workspace, session, true);
+        with_history(
+            &mut runtime,
+            Target::Session(session),
+            vec![history.clone()],
+        );
+
+        // The append path runs when Agent intent persistence failed, so its
+        // observation is not display intent: it adds generic panes without
+        // dropping the interrupted history it carries no projection for.
+        let generic = terminal_ref(workspace, session);
+        let (interaction, revision) = runtime.restore_fence();
+        assert!(runtime.append_restore_snapshot(
+            interaction,
+            revision,
+            vec![PaneRestoreTarget {
+                target: Target::Session(session),
+                panes: vec![LivePane {
+                    terminal: generic.clone(),
+                    kind: PaneKind::Terminal,
+                }],
+                selected: None,
+                interrupted: Vec::new(),
+            }],
+        ));
+
+        assert!(
+            runtime
+                .active_pane()
+                .tabs()
+                .iter()
+                .any(|tab| matches!(tab, PaneTab::Interrupted(pane)
+                    if pane.tab.continuation == history.continuation)),
+            "{:?}",
+            runtime.active_pane().tabs()
+        );
+        assert!(
+            runtime
+                .active_pane()
+                .tabs()
+                .iter()
+                .any(|tab| matches!(tab, PaneTab::Live(live) if live.terminal == generic))
+        );
     }
 }
