@@ -36,6 +36,7 @@ use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
 use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::usecase::client::DaemonMetrics;
+use usagi_core::usecase::env::EnvScope;
 
 use crate::presentation::live_terminal::{LiveTerminalControls, PointerRelease};
 use crate::presentation::metrics::{MetricsBackend, MetricsProjection};
@@ -285,18 +286,18 @@ pub trait DecisionCommandPort: Send {
 /// Durable per-target environment boundary for the workspace runtime.
 ///
 /// The controller keeps the editor's draft locally; this port is the only route
-/// that reads and writes the persisted environment for a [`Target`] (workspace
-/// root or session). Both operations project their result back through
+/// that reads and writes the persisted environment bindings of one
+/// [`EnvScope`] — this workspace's own, or the global ones every workspace
+/// inherits. Both operations project their result back through
 /// [`BackendEvent`] (`EnvironmentLoaded` / `EnvironmentError`), preserving the
 /// reducer's one-way event flow and keeping the editor's values through a save
-/// failure. Resolving a target's stable identity to its store key is the
-/// implementation's concern.
+/// failure. Mapping a scope to its settings file is the implementation's concern.
 pub trait EnvironmentStorePort: Send {
-    /// Read the persisted environment for `target`.
-    fn load(&mut self, target: Target) -> BackendEvent;
-    /// Persist the complete set of `entries` for `target`, replacing what was
+    /// Read `scope`'s bindings, plus the global ones it inherits.
+    fn load(&mut self, scope: EnvScope) -> BackendEvent;
+    /// Persist the complete set of `entries` for `scope`, replacing what was
     /// stored. On success the saved set refluxes as `EnvironmentLoaded`.
-    fn save(&mut self, target: Target, entries: Vec<EnvironmentEntry>) -> BackendEvent;
+    fn save(&mut self, scope: EnvScope, entries: Vec<EnvironmentEntry>) -> BackendEvent;
 }
 
 /// Best-effort desktop-notification boundary for newly observed user decisions.
@@ -637,10 +638,15 @@ impl BackendTargetStorePort for UnavailableBackendPort {
     ) {
         unavailable_completion(&completions, "notes are unavailable");
     }
-    fn load_environment(&mut self, _: Target, completions: Completions) {
+    fn load_environment(&mut self, _: EnvScope, completions: Completions) {
         unavailable_completion(&completions, "environment is unavailable");
     }
-    fn save_environment(&mut self, _: Target, _: Vec<EnvironmentEntry>, completions: Completions) {
+    fn save_environment(
+        &mut self,
+        _: EnvScope,
+        _: Vec<EnvironmentEntry>,
+        completions: Completions,
+    ) {
         unavailable_completion(&completions, "environment is unavailable");
     }
 }
@@ -960,16 +966,16 @@ impl DecisionCommandPort for UnavailableDecisionCommandPort {
 struct UnavailableEnvironmentStore;
 #[cfg(test)]
 impl EnvironmentStorePort for UnavailableEnvironmentStore {
-    fn load(&mut self, target: Target) -> BackendEvent {
+    fn load(&mut self, scope: EnvScope) -> BackendEvent {
         BackendEvent::EnvironmentError {
-            target,
+            scope,
             error: unavailable_environment_error(),
         }
     }
 
-    fn save(&mut self, target: Target, _entries: Vec<EnvironmentEntry>) -> BackendEvent {
+    fn save(&mut self, scope: EnvScope, _entries: Vec<EnvironmentEntry>) -> BackendEvent {
         BackendEvent::EnvironmentError {
-            target,
+            scope,
             error: unavailable_environment_error(),
         }
     }
@@ -4945,6 +4951,7 @@ mod tests {
     use usagi_core::domain::settings::Settings;
     use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
     use usagi_core::domain::user_decision::UserDecisionAnswer;
+    use usagi_core::usecase::env::EnvScope;
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
     use usagi_core::domain::recent::{Recent, UniteOverview};
@@ -5113,10 +5120,8 @@ mod tests {
                 last_active: None,
                 notes: Scratchpad::default(),
                 prs: Vec::new(),
-                environment: std::collections::BTreeMap::new(),
             }],
             root_notes: Scratchpad::default(),
-            root_environment: std::collections::BTreeMap::new(),
             updated_at: now(),
         }
     }
@@ -5202,9 +5207,11 @@ mod tests {
                 target,
                 scratchpad: Scratchpad::default(),
             },
-            Effect::LoadEnvironment { target },
+            Effect::LoadEnvironment {
+                scope: EnvScope::Workspace,
+            },
             Effect::SaveEnvironment {
-                target,
+                scope: EnvScope::Workspace,
                 entries: vec![EnvironmentEntry {
                     name: "KEY".to_owned(),
                     value: "value".to_owned(),
@@ -5796,7 +5803,6 @@ mod tests {
 
         let workspace_id = WorkspaceId::new();
         let session_id = SessionId::new();
-        let target = Target::Root(workspace_id);
         let workspace = ws("fallback");
         assert!(
             DefaultSessionPort
@@ -5830,11 +5836,11 @@ mod tests {
             BackendEvent::DecisionError { .. }
         ));
         assert!(matches!(
-            UnavailableEnvironmentStore.load(target),
+            UnavailableEnvironmentStore.load(EnvScope::Workspace),
             BackendEvent::EnvironmentError { .. }
         ));
         assert!(matches!(
-            UnavailableEnvironmentStore.save(target, Vec::new()),
+            UnavailableEnvironmentStore.save(EnvScope::Global, Vec::new()),
             BackendEvent::EnvironmentError { .. }
         ));
         assert!(UnavailablePrSnapshotPort.snapshot(session_id).is_err());
@@ -5938,7 +5944,6 @@ mod tests {
                     last_active: None,
                     notes: Scratchpad::default(),
                     prs: Vec::new(),
-                    environment: std::collections::BTreeMap::new(),
                 }]),
                 SessionCommand::Remove { .. } => Some(Vec::new()),
                 _ => None,
@@ -6419,7 +6424,6 @@ mod tests {
             WorkspaceState {
                 sessions: Vec::new(),
                 root_notes: Scratchpad::default(),
-                root_environment: std::collections::BTreeMap::new(),
                 updated_at: now(),
             },
         );
@@ -6507,7 +6511,6 @@ mod tests {
                 WorkspaceState {
                     sessions: Vec::new(),
                     root_notes: Scratchpad::default(),
-                    root_environment: std::collections::BTreeMap::new(),
                     updated_at: now(),
                 },
             );

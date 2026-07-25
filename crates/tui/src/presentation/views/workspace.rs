@@ -1852,7 +1852,6 @@ mod tests {
             last_active: None,
             notes: Scratchpad::default(),
             prs: Vec::new(),
-            environment: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1864,7 +1863,6 @@ mod tests {
                 session("daemon", None, SessionOrigin::Mcp),
             ],
             root_notes: Scratchpad::default(),
-            root_environment: std::collections::BTreeMap::new(),
             updated_at: now(),
         };
         Workspace::new(record, state)

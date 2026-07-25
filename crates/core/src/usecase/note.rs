@@ -250,7 +250,6 @@ mod tests {
             last_active: None,
             notes: Scratchpad::default(),
             prs: Vec::new(),
-            environment: std::collections::BTreeMap::new(),
         }
     }
 
@@ -261,7 +260,6 @@ mod tests {
         let state = WorkspaceState {
             sessions: vec![session("alpha")],
             root_notes: Scratchpad::default(),
-            root_environment: std::collections::BTreeMap::new(),
             updated_at: ts(20),
         };
         store.save(&state).unwrap();

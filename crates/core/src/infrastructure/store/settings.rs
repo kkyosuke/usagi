@@ -119,6 +119,9 @@ mod tests {
             default_model: Some(DefaultModel::Claude),
             issue_enabled: Some(false),
             memory_enabled: Some(true),
+            env: [("PROJECT".to_owned(), "usagi".to_owned())]
+                .into_iter()
+                .collect(),
         };
         store.initialize(&initial).unwrap();
         assert_eq!(store.load().unwrap(), initial);

@@ -5,6 +5,8 @@
 //! - [`issue`] — issue の CRUD（create（採番）/ get / list / update / delete）。
 //!   人間向け CLI と MCP tool の双方が呼ぶ。
 //! - [`memory`] — memory の CRUD（save（slug・upsert）/ get / list / delete）。
+//! - [`env`] — global / workspace の環境変数 binding を子プロセス環境へ解決する
+//!   （literal はそのまま、`op://` は注入された [`env::SecretResolver`] 経由）。
 //! - [`note`] — session / root の scratchpad 操作（note / todo / decision）を
 //!   `state.json` 上で行う（`session_note_* / session_todo_* / session_decision_*`
 //!   と TUI が呼ぶ中身）。
@@ -21,7 +23,7 @@
 pub mod agent;
 pub mod claude_sandbox;
 pub mod client;
-pub mod environment;
+pub mod env;
 pub mod issue;
 pub mod memory;
 pub mod note;
