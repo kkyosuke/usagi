@@ -2856,6 +2856,7 @@ mod deadline_and_retry_tests {
         assert_eq!(stream.read(&mut buf).unwrap(), 7);
         assert_eq!(&buf, b"refused");
         assert_eq!(stream.write(b"x").unwrap(), 1);
+        assert!(stream.flush().is_ok());
 
         // The deadline itself still applies: an exhausted budget fails closed
         // rather than reading without one.
