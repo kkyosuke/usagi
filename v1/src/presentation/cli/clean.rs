@@ -16,7 +16,13 @@
 //! mid-transaction (see
 //! [`resume_pending_removals`](crate::usecase::session::resume_pending_removals)):
 //! such a removal still owns its session name, so neither the agent nor a new
-//! `session create` can make progress on it.
+//! `session create` can make progress on it. After handing over, it reclaims the
+//! trash (see [`sweep_trash`](crate::usecase::session::sweep_trash)):
+//! `session remove` renames a session tree aside instead of erasing it, so this
+//! is the command that gives the disk back in a workflow that never opens the
+//! TUI. Both run only for a real (non-`--dry-run`) clean and are synchronous, so
+//! a removal that deferred minutes of deletion pays for it here — the agent is
+//! already running by then, and nothing is waiting on a response.
 //!
 //! The orchestration here (resolving the workspace, settings and binary path,
 //! building the prompt and command) is pure once the genuine side effects —
@@ -32,7 +38,7 @@ use anyhow::{Context, Result};
 use crate::domain::agent::LaunchMode;
 use crate::domain::settings::AgentCli;
 use crate::infrastructure::repo_paths::STATE_DIR;
-use crate::usecase::session::ResumedRemoval;
+use crate::usecase::session::{ReclaimedTree, ResumedRemoval};
 
 /// The log file (under the workspace's `.usagi/`) the background agent's output
 /// is appended to.
@@ -56,11 +62,17 @@ const CLEAN_LOG: &str = "clean.log";
 /// more: these tests run from inside a usagi session worktree, so the resolved
 /// workspace root is the developer's *real* workspace. A stub keeps `cargo test`
 /// from deleting real session trees.
+///
+/// `reclaim_trash` deletes the session trees earlier removals retired under
+/// `.usagi/trash/` (the production
+/// [`session::sweep_trash`](crate::usecase::session::sweep_trash)), injected for
+/// exactly the same two reasons.
 pub fn run(
     dry_run: bool,
     agent: Option<String>,
     spawn: impl Fn(&str, &Path, &Path) -> Result<()>,
     resume_removals: impl Fn(&Path, &dyn crate::domain::agent::Agent) -> Vec<ResumedRemoval>,
+    reclaim_trash: impl Fn(&Path) -> Vec<ReclaimedTree>,
 ) -> Result<()> {
     let cwd = env::current_dir()?;
     let root = crate::usecase::session::workspace_root(&cwd);
@@ -120,6 +132,31 @@ pub fn run(
         println!("--dry-run: 削除はせず、対象を報告します。");
     }
     println!("ログ: {}", log_path.display());
+
+    // Last, with the agent already working and the user already told where its
+    // log is: reclaim what completed removals left behind. `session remove`
+    // renames the session tree into `.usagi/trash/` so it can return without
+    // waiting on the disk, which leaves the deletion to whoever comes next — and
+    // for a workflow that never opens the TUI, this command is who comes next.
+    // Reported per entry and never fatal: a directory that resists deletion is
+    // disk, not correctness, and the next sweep retries it.
+    if !dry_run {
+        let reclaimed = reclaim_trash(&root);
+        let freed = reclaimed
+            .iter()
+            .filter(|entry| entry.error.is_none())
+            .count();
+        if freed > 0 {
+            println!("削除済みセッションの実体 {freed} 件を破棄しました。");
+        }
+        for entry in reclaimed.iter().filter(|entry| entry.error.is_some()) {
+            eprintln!(
+                "警告: {} を破棄できませんでした: {}",
+                entry.path.display(),
+                entry.error.as_deref().unwrap_or_default()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -201,6 +238,27 @@ mod tests {
         Vec::new()
     }
 
+    /// A trash sweep that reports one reclaimed tree and one that resisted,
+    /// exercising both report paths without touching the developer's real
+    /// workspace — which, as above, is what the real sweep would reach.
+    fn stub_reclaim(_root: &Path) -> Vec<ReclaimedTree> {
+        vec![
+            ReclaimedTree {
+                path: PathBuf::from("/w/.usagi/trash/gone-1"),
+                error: None,
+            },
+            ReclaimedTree {
+                path: PathBuf::from("/w/.usagi/trash/stuck-2"),
+                error: Some("permission denied".to_string()),
+            },
+        ]
+    }
+
+    /// A trash sweep that finds nothing to reclaim.
+    fn no_reclaim(_root: &Path) -> Vec<ReclaimedTree> {
+        Vec::new()
+    }
+
     fn last_command() -> Option<String> {
         SPAWN.with(|s| s.borrow().0.clone())
     }
@@ -210,7 +268,7 @@ mod tests {
         SPAWN.with(|s| *s.borrow_mut() = (None, Ok(())));
         // With no `--agent` override and the default (non-dry-run) mode the agent
         // is launched headlessly on the deletion prompt.
-        run(false, None, recording_spawn, no_resume).unwrap();
+        run(false, None, recording_spawn, no_resume, stub_reclaim).unwrap();
         assert!(last_command().is_some());
     }
 
@@ -218,7 +276,14 @@ mod tests {
     fn run_honors_a_dry_run_and_an_agent_override() {
         SPAWN.with(|s| *s.borrow_mut() = (None, Ok(())));
         // `--agent gemini` overrides the default and `--dry-run` is reported.
-        run(true, Some("gemini".to_string()), recording_spawn, no_resume).unwrap();
+        run(
+            true,
+            Some("gemini".to_string()),
+            recording_spawn,
+            no_resume,
+            no_reclaim,
+        )
+        .unwrap();
         assert!(last_command().is_some());
     }
 
@@ -226,7 +291,14 @@ mod tests {
     fn run_errors_on_an_unknown_agent_override() {
         SPAWN.with(|s| *s.borrow_mut() = (None, Ok(())));
         // A typo'd `--agent` is surfaced before anything is spawned.
-        let err = run(false, Some("nope".to_string()), recording_spawn, no_resume).unwrap_err();
+        let err = run(
+            false,
+            Some("nope".to_string()),
+            recording_spawn,
+            no_resume,
+            no_reclaim,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("unknown agent CLI: nope"));
     }
 
@@ -234,7 +306,7 @@ mod tests {
     fn run_propagates_a_spawn_failure() {
         SPAWN.with(|s| *s.borrow_mut() = (None, Err("spawn failed")));
         assert_eq!(
-            run(false, None, recording_spawn, no_resume)
+            run(false, None, recording_spawn, no_resume, no_reclaim)
                 .unwrap_err()
                 .to_string(),
             "spawn failed"

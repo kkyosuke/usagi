@@ -22,3 +22,20 @@ pub const STATE_DIR: &str = ".usagi";
 /// session's tree under it), so it is named here once rather than re-spelled as
 /// a `"sessions"` literal at each site.
 pub const SESSIONS_DIR: &str = "sessions";
+
+/// The directory under [`STATE_DIR`] where a removed session's tree waits to be
+/// deleted: `<repo>/.usagi/trash/<name>-<removal id>`.
+///
+/// Teardown *retires* a session tree by renaming it here rather than deleting it
+/// inline — a rename costs the same whether the tree is empty or holds a
+/// multi-gigabyte `target/`, so `session remove` returns without waiting on the
+/// disk. The reclamation that actually frees the space runs later, off the
+/// caller's critical path (see
+/// [`sweep_trash`](crate::usecase::session::sweep_trash)).
+///
+/// It sits beside `sessions/` rather than inside it so reconcile's stray scan —
+/// which reads `.usagi/sessions/` directly — never mistakes a retired tree for a
+/// session whose record went missing. Git never sees it either: `.usagi/`'s own
+/// `.gitignore` ignores everything it does not explicitly re-include
+/// ([`USAGI_GITIGNORE`](super::gitignore::USAGI_GITIGNORE)).
+pub const TRASH_DIR: &str = "trash";

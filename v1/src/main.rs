@@ -102,7 +102,16 @@ impl AgentBackend for CliAgentBackend {
         force: bool,
     ) -> Result<session::RemovalOutcome, String> {
         let agent = configured_agent(workspace_root)?;
-        session::remove(workspace_root, name, force, agent.as_ref()).map_err(|e| e.to_string())
+        let outcome =
+            session::remove(workspace_root, name, force, agent.as_ref()).map_err(|e| e.to_string());
+        // The removal only renamed the session tree aside, which is what lets this
+        // tool call answer immediately instead of blocking the agent for the
+        // minutes it takes to erase a session's `target/`. Start that deletion
+        // here and do not wait for it: `usagi mcp` outlives the call, and whatever
+        // an early exit leaves behind the next sweep picks up. Runs after a failed
+        // removal too — earlier removals may still have trash owed.
+        drop(session::spawn_trash_sweep(workspace_root));
+        outcome
     }
 
     fn recover(
@@ -112,8 +121,13 @@ impl AgentBackend for CliAgentBackend {
         recovery: session::QuarantineRecovery,
     ) -> Result<session::QuarantineRecoveryOutcome, String> {
         let agent = configured_agent(workspace_root)?;
-        session::recover_quarantine(workspace_root, name, recovery, agent.as_ref())
-            .map_err(|e| e.to_string())
+        let outcome = session::recover_quarantine(workspace_root, name, recovery, agent.as_ref())
+            .map_err(|e| e.to_string());
+        // A resumed teardown retires its session tree just like an ordinary
+        // removal does, so reclaim on the same terms: in the background, without
+        // making this call wait for it.
+        drop(session::spawn_trash_sweep(workspace_root));
+        outcome
     }
 }
 
@@ -373,6 +387,7 @@ fn main() -> anyhow::Result<()> {
             agent,
             spawn_detached,
             usagi::usecase::session::resume_pending_removals,
+            usagi::usecase::session::sweep_trash,
         ),
         Commands::Completion { shell } => {
             let mut cmd = Cli::command();
