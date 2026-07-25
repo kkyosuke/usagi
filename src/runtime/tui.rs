@@ -252,7 +252,7 @@ impl RepoEnvironmentStore {
     fn safe_error(reason: impl std::fmt::Display) -> SafeError {
         SafeError {
             message: SafeMessage::new(reason.to_string()),
-            error_id: "environment-store-error".to_owned(),
+            error_id: "target-store-error".to_owned(),
         }
     }
 
@@ -2759,9 +2759,10 @@ mod tests {
     use super::{
         DaemonAgentCommandPort, DaemonDecisionCommandPort, DaemonRestoreConnectionPort, EnvScope,
         EnvironmentStorePort, FsWorkspaceLoader, Geometry, LifecycleSnapshot,
-        PersistentSettingsPort, ProductionBackendFactory, SettingsEnvironmentStore, Start,
-        TerminalChunk, TerminalError, TerminalInputOutcome, agent_inventory_request,
-        classify_terminal_input, created_session_hook, daemon_error_reason, decode_agent_admission,
+        PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore,
+        SettingsEnvironmentStore, Start, StoreTarget, TerminalChunk, TerminalError,
+        TerminalInputOutcome, agent_inventory_request, classify_terminal_input,
+        created_session_hook, daemon_error_reason, decode_agent_admission,
         decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
         exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
         load_workspace_state, map_terminal_error, passthrough_key, probe_path,
@@ -4071,6 +4072,39 @@ mod tests {
         assert!(state.root_notes.note.is_none());
         assert!(state.root_notes.todos.is_empty());
         assert!(state.root_notes.decisions.is_empty());
+    }
+
+    #[test]
+    fn repo_store_resolves_targets_and_reports_a_stale_session() {
+        let workspace = tempfile::tempdir().unwrap();
+        let alpha = SessionId::new();
+        let store = RepoEnvironmentStore::new(
+            workspace.path(),
+            vec![(alpha, "alpha".to_owned())],
+            SettingsEnvironmentStore::new(workspace.path().to_path_buf(), workspace.path()),
+        );
+
+        // The root always resolves; a known session resolves to its store name.
+        assert!(matches!(
+            store.resolve(Target::Root(WorkspaceId::new())),
+            Some(StoreTarget::Root)
+        ));
+        assert!(matches!(
+            store.resolve(Target::Session(alpha)),
+            Some(StoreTarget::Session("alpha"))
+        ));
+        // A session absent from the snapshot mapping is stale, not guessed.
+        assert!(store.resolve(Target::Session(SessionId::new())).is_none());
+
+        let stale = RepoEnvironmentStore::stale_target();
+        assert_eq!(stale.error_id, "target-store-error");
+        assert!(stale.message.as_str().contains("no longer available"));
+        assert!(
+            RepoEnvironmentStore::safe_error(anyhow::anyhow!("state.json is unreadable"))
+                .message
+                .as_str()
+                .contains("state.json is unreadable")
+        );
     }
 
     #[test]

@@ -2922,14 +2922,15 @@ fn update_editor_key(state: &mut AppState, key: &AppKey) -> Option<Vec<Effect>> 
             }
             Some(Vec::new())
         }
-        AppKey::CommitEnvironmentDraft | AppKey::Enter if environment_open => {
+        AppKey::CommitEnvironmentDraft => Some(commit_environment_draft(state, environment_open)),
+        AppKey::ToggleEnvironmentScope => Some(toggle_environment_scope(state, environment_open)),
+        // While the environment editor owns input, the ordinary editing keys drive
+        // it: Enter commits the line (or saves), Tab switches scope, and typing
+        // edits the line. The notes overlay keeps its own draft keys.
+        AppKey::Enter if environment_open => {
             Some(commit_environment_draft(state, environment_open))
         }
-        AppKey::ToggleEnvironmentScope | AppKey::Tab if environment_open => {
-            Some(toggle_environment_scope(state, environment_open))
-        }
-        // While the environment editor owns input, ordinary typing edits its
-        // `NAME=value` line. The notes overlay keeps its own draft keys.
+        AppKey::Tab if environment_open => Some(toggle_environment_scope(state, environment_open)),
         AppKey::Char(character) if environment_open => {
             if let Some(editor) = editable_environment(state, environment_open) {
                 editor.draft.push(*character);
@@ -2944,8 +2945,6 @@ fn update_editor_key(state: &mut AppState, key: &AppKey) -> Option<Vec<Effect>> 
             }
             Some(Vec::new())
         }
-        AppKey::CommitEnvironmentDraft => Some(commit_environment_draft(state, environment_open)),
-        AppKey::ToggleEnvironmentScope => Some(toggle_environment_scope(state, environment_open)),
         AppKey::SaveEnvironment => Some(editable_environment(state, environment_open).map_or_else(
             Vec::new,
             |editor| {
@@ -5959,7 +5958,7 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::Backspace));
         assert_eq!(state.environment_editor().unwrap().draft(), "RUST_LOG=debu");
         let _ = update(&mut state, AppEvent::Key(AppKey::Char('g')));
-        assert!(update(&mut state, AppEvent::Key(AppKey::CommitEnvironmentDraft)).is_empty());
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
         assert_eq!(
             state.environment_editor().unwrap().entries(),
             [entry("KEEP", "1"), entry("RUST_LOG", "debug")].as_slice()
@@ -6049,9 +6048,9 @@ mod tests {
         });
         run_fake_cycle(&mut state, &mut backend, switched);
         assert!(state.environment_editor().unwrap().inherited().is_empty());
-        // And back again.
+        // And back again — `Tab` is the same request as the explicit key.
         assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::ToggleEnvironmentScope)),
+            update(&mut state, AppEvent::Key(AppKey::Tab)),
             vec![Effect::LoadEnvironment {
                 scope: EnvScope::Workspace
             }]
@@ -6061,19 +6060,34 @@ mod tests {
     #[test]
     fn environment_keys_are_inert_without_an_open_editor() {
         let (workspace, _, _) = ids();
+        let environment_keys = || {
+            [
+                AppKey::SetEnvironmentDraft("A=1".to_owned()),
+                AppKey::CommitEnvironmentDraft,
+                AppKey::ToggleEnvironmentScope,
+                AppKey::SaveEnvironment,
+                AppKey::RemoveEnvironment {
+                    name: "A".to_owned(),
+                },
+            ]
+        };
+
+        // With no overlay at all.
         let mut state = AppState::home(workspace, Vec::new());
-        for key in [
-            AppKey::SetEnvironmentDraft("A=1".to_owned()),
-            AppKey::CommitEnvironmentDraft,
-            AppKey::ToggleEnvironmentScope,
-            AppKey::SaveEnvironment,
-            AppKey::RemoveEnvironment {
-                name: "A".to_owned(),
-            },
-        ] {
+        for key in environment_keys() {
             assert!(update(&mut state, AppEvent::Key(key)).is_empty());
             assert!(state.environment_editor().is_none());
         }
+
+        // And while a different editor owns input: the notes overlay keeps its
+        // own draft, and no environment editor appears behind it.
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenNotes));
+        for key in environment_keys() {
+            assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+            assert!(state.environment_editor().is_none());
+        }
+        assert!(state.note_editor().is_some());
     }
 
     #[test]

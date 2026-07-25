@@ -107,11 +107,8 @@ fn note_body(editor: &NoteEditor) -> Vec<String> {
 
 fn environment_body(editor: &EnvironmentEditor) -> Vec<String> {
     let (caption, scope_hint) = match editor.scope() {
-        EnvScope::Workspace => ("this workspace's environment", "Tab: edit global instead"),
-        EnvScope::Global => (
-            "global environment · every workspace",
-            "Tab: edit this workspace instead",
-        ),
+        EnvScope::Workspace => ("this workspace's environment", "Tab: global"),
+        EnvScope::Global => ("global environment · every workspace", "Tab: workspace"),
     };
     let mut lines = vec![modal::caption(caption)];
     if editor.is_loading() {
@@ -136,7 +133,7 @@ fn environment_body(editor: &EnvironmentEditor) -> Vec<String> {
     let footer = if editor.is_saving() {
         "Esc: close   Saving…".to_owned()
     } else {
-        format!("Enter: NAME=value / empty: save   {scope_hint}   Esc: close")
+        format!("Enter: NAME=value / save   {scope_hint}   Esc: close")
     };
     lines.push(modal::footer(&footer));
     modal::fixed_body(lines, ENVIRONMENT_BODY_HEIGHT)
@@ -338,6 +335,61 @@ mod tests {
             let frame = render_notes_over(24, 80, &base(), state.note_editor().unwrap());
             assert!(frame.join("\n").contains(expected));
         }
+    }
+
+    #[test]
+    fn environment_overlay_marks_inherited_rows_and_names_the_edited_scope() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenEnvironment));
+        let inherited = (0..5)
+            .map(|index| EnvironmentEntry {
+                name: format!("GLOBAL_{index}"),
+                value: format!("g-{index}"),
+            })
+            .collect();
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentLoaded {
+                scope: EnvScope::Workspace,
+                entries: vec![EnvironmentEntry {
+                    name: "GLOBAL_0".to_owned(),
+                    value: "mine".to_owned(),
+                }],
+                inherited,
+            }),
+        );
+        let frame = render_environment_over(40, 80, &base(), state.environment_editor().unwrap())
+            .join("\n");
+        // The workspace scope is named, its own binding is listed, and the global
+        // set is shown with only the shadowed name marked. The list is capped, so
+        // the remainder is counted rather than pushing the footer off the modal.
+        assert!(frame.contains("this workspace's environment"));
+        assert!(frame.contains("Tab: global"));
+        assert!(frame.contains("GLOBAL_0=mine"));
+        assert!(frame.contains("GLOBAL_0=g-0   (overridden here)"));
+        assert!(frame.contains("GLOBAL_1=g-1"));
+        assert!(!frame.contains("GLOBAL_1=g-1   (overridden here)"));
+        assert!(frame.contains("2 more inherited"));
+
+        // The global scope names itself and inherits nothing, so no second list.
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleEnvironmentScope));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentLoaded {
+                scope: EnvScope::Global,
+                entries: vec![EnvironmentEntry {
+                    name: "GLOBAL_0".to_owned(),
+                    value: "g-0".to_owned(),
+                }],
+                inherited: Vec::new(),
+            }),
+        );
+        let global = render_environment_over(40, 80, &base(), state.environment_editor().unwrap())
+            .join("\n");
+        assert!(global.contains("global environment"));
+        assert!(global.contains("Tab: workspace"));
+        assert!(!global.contains("inherited from global"));
     }
 
     #[test]
