@@ -82,7 +82,7 @@ use crate::usecase::application::terminal_session::{
     SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
     TerminalSession, TerminalStreamPort, TerminalSubscription,
 };
-use crate::usecase::application::{Key, ScreenRunner, Terminal};
+use crate::usecase::application::{Key, ScreenRunner, Terminal, open_refusal_notice};
 use crate::usecase::overview::SessionCommand;
 use crate::usecase::terminal_input::{LiveTerminalAction, PointerEvent, PointerKind};
 use usagi_core::usecase::settings::SettingsPort;
@@ -5033,7 +5033,19 @@ pub fn run_screen_graph_with_backend(
                     else {
                         continue;
                     };
-                    let snapshot = loader.open(&path)?;
+                    // A workspace this daemon does not serve keeps the switcher on
+                    // screen with the reason, so another Recent entry can be tried.
+                    let snapshot = match loader.open(&path) {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => match open_refusal_notice(&error) {
+                            Some(notice) => {
+                                welcome.set_notice(Some(notice));
+                                continue;
+                            }
+                            None => return Err(error),
+                        },
+                    };
+                    welcome.set_notice(None);
                     welcome.record_opened(&snapshot.workspace);
                     open.record_opened(&snapshot.workspace);
                     let workspace_step = open_snapshot_via_controller(
@@ -5052,7 +5064,19 @@ pub fn run_screen_graph_with_backend(
                 OpenStep::Quit => return Ok(Exit::Quit),
                 OpenStep::Back => screen = Screen::Welcome,
                 OpenStep::Choose(path) => {
-                    let snapshot = loader.open(&path)?;
+                    // Same contract as Recent: the list stays up with the reason so
+                    // the workspace this daemon does serve can be chosen instead.
+                    let snapshot = match loader.open(&path) {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => match open_refusal_notice(&error) {
+                            Some(notice) => {
+                                open.set_notice(Some(notice));
+                                continue;
+                            }
+                            None => return Err(error),
+                        },
+                    };
+                    open.set_notice(None);
                     welcome.record_opened(&snapshot.workspace);
                     open.record_opened(&snapshot.workspace);
                     return open_snapshot_via_controller(
@@ -13069,6 +13093,10 @@ mod tests {
         unregister_calls: usize,
         created: Vec<NewRequest>,
         fail: bool,
+        /// Stands in for the daemon refusing to describe the workspace being
+        /// opened because it serves a different one: the loader reports it as
+        /// `PermissionDenied`, which entry screens present in place.
+        refuse: Option<String>,
         /// Number of leading `create_workspace` calls that reject before the
         /// loader starts succeeding, standing in for a pre-flight rejection
         /// (e.g. the workspace already exists) that the user then corrects.
@@ -13079,6 +13107,12 @@ mod tests {
     impl WorkspaceLoader for FakeLoader {
         fn open(&mut self, path: &Path) -> io::Result<WorkspaceSnapshot> {
             self.opened.push(path.to_path_buf());
+            if let Some(refusal) = &self.refuse {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    refusal.clone(),
+                ));
+            }
             if self.fail {
                 return Err(io::Error::other("open failed"));
             }
@@ -13872,6 +13906,125 @@ mod tests {
                 .iter()
                 .any(|frame| frame.join("\n").contains("x-session"))
         );
+    }
+
+    /// A workspace the daemon does not serve must not be shown: its session list
+    /// would be the daemon's workspace under the opened workspace's name (#549).
+    /// Both switcher entries stay up with the refusal instead of tearing the TUI
+    /// down, so the workspace that *is* served can be chosen next.
+    #[test]
+    fn a_refused_workspace_keeps_the_switcher_open_with_the_reason() {
+        const REFUSAL: &str = "cannot open /tmp/recent: this daemon does not serve the selected workspace; \
+             this daemon serves the workspace /tmp/served. \
+             Stop it with `usagi daemon stop`, then start usagi in /tmp/recent.";
+
+        // Welcome's Recent entry: the refusal shows on Welcome, and no workspace
+        // screen is drawn for the workspace that was refused.
+        let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Quit]);
+        let mut loader = FakeLoader {
+            refuse: Some(REFUSAL.to_owned()),
+            ..FakeLoader::default()
+        };
+        assert_eq!(
+            run(
+                &mut term,
+                Vec::new(),
+                vec![recent("recent")],
+                now(),
+                &mut loader,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(loader.opened, vec![PathBuf::from("/tmp/recent")]);
+        let frames = term
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .collect::<Vec<_>>();
+        let welcome = frames
+            .iter()
+            .rev()
+            .find(|frame| frame.contains("Menu"))
+            .expect("the switcher stays on screen");
+        // Wrapped over several lines, so the reason and the recovery step are both
+        // present rather than clipped at the terminal width.
+        assert!(contains_wrapped(welcome, REFUSAL), "{welcome}");
+        assert!(!frames.iter().any(|frame| frame.contains("Overview")));
+
+        // The Open list: same contract, presented on the list itself.
+        let mut term =
+            FakeTerminal::with_keys(&[Key::Char('o'), Key::Enter, Key::Escape, Key::Quit]);
+        let mut loader = FakeLoader {
+            refuse: Some(REFUSAL.to_owned()),
+            ..FakeLoader::default()
+        };
+        assert_eq!(
+            run(
+                &mut term,
+                vec![ws("served")],
+                Vec::new(),
+                now(),
+                &mut loader,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(loader.opened, vec![PathBuf::from("/tmp/served")]);
+        let open_list = term
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .rev()
+            .find(|frame| frame.contains("Open Workspace"))
+            .expect("the Open list stays on screen");
+        assert!(contains_wrapped(&open_list, REFUSAL), "{open_list}");
+    }
+
+    /// Whether `frame` shows `text`, ignoring styling and the line breaks the
+    /// notice was wrapped at.
+    fn contains_wrapped(frame: &str, text: &str) -> bool {
+        let squeeze = |value: &str| {
+            crate::presentation::widgets::strip_ansi(value)
+                .split_whitespace()
+                .collect::<String>()
+        };
+        squeeze(frame).contains(&squeeze(text))
+    }
+
+    #[test]
+    fn only_a_refusal_keeps_the_switcher_open() {
+        // Every other failure still propagates: staying on the list would not
+        // help, and the caller reports it.
+        let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Quit]);
+        let mut loader = FakeLoader {
+            fail: true,
+            ..FakeLoader::default()
+        };
+        let error = run(
+            &mut term,
+            Vec::new(),
+            vec![recent("recent")],
+            now(),
+            &mut loader,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "open failed");
+
+        let mut term = FakeTerminal::with_keys(&[Key::Char('o'), Key::Enter, Key::Quit]);
+        let mut loader = FakeLoader {
+            fail: true,
+            ..FakeLoader::default()
+        };
+        let error = run(
+            &mut term,
+            vec![ws("served")],
+            Vec::new(),
+            now(),
+            &mut loader,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "open failed");
     }
 
     #[test]

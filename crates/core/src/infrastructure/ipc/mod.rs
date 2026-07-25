@@ -313,9 +313,16 @@ pub enum ClientWorkspace {
     /// cannot be spelled that way (non-UTF-8, relative, unresolvable) is
     /// declared empty and always refused rather than guessed at.
     Bound { root: String },
+    /// The client operates on the workspace `root` as a whole: the workspace a
+    /// TUI was asked to open, rather than the directory the process happens to
+    /// run in. A daemon serves exactly one workspace, so this is admitted only
+    /// when `root` *is* that workspace — a subdirectory below it is a different
+    /// workspace to open, even though it is the same tree to run in.
+    Selected { root: String },
     /// The connection performs no workspace-scoped work. It only proves that a
-    /// daemon exists (client readiness) or observes daemon lifecycle identity
-    /// (`usagi daemon replace`), and therefore sends no workspace request.
+    /// daemon exists (client readiness), observes daemon lifecycle identity
+    /// (`usagi daemon replace`), or subscribes to display-only daemon metrics,
+    /// and therefore names no workspace resource.
     Unbound,
 }
 
@@ -534,8 +541,13 @@ pub struct ServerProtocol {
 /// resource. A [`ClientWorkspace::Bound`] declaration is admitted only when its
 /// root is `trusted_root` itself or a path below it, which is what keeps
 /// subdirectories and session worktrees (`<root>/.usagi/sessions/<name>`)
-/// working while refusing a sibling or parent workspace. Comparison is by path
-/// component, so `<root>-2` is never mistaken for a child of `<root>`.
+/// working while refusing a sibling or parent workspace. A
+/// [`ClientWorkspace::Selected`] declaration names the workspace the client
+/// operates on, so it is admitted only when it equals `trusted_root`: a client
+/// that opened a subdirectory would otherwise show this daemon's sessions under
+/// a different workspace's name. Comparison is by path component, so `<root>-2`
+/// is never mistaken for a child of `<root>` and a trailing separator never
+/// makes a root unequal to itself.
 ///
 /// A hello that declares nothing is refused: the field is additive on the wire,
 /// but admitting it would leave the whole fence bypassable by a stale client,
@@ -559,6 +571,20 @@ pub fn workspace_admission(
                 (Some(trusted), Some(declared)) if declared.starts_with(trusted) => Ok(()),
                 (Some(_), Some(_)) => Err(workspace_refused(
                     "client workspace is not inside this daemon's workspace",
+                    trusted_root,
+                )),
+                _ => Err(workspace_refused(
+                    "workspace roots cannot be compared",
+                    trusted_root,
+                )),
+            }
+        }
+        Some(ClientWorkspace::Selected { root }) => {
+            let declared = comparable_root(root);
+            match (trusted, declared) {
+                (Some(trusted), Some(declared)) if declared == trusted => Ok(()),
+                (Some(_), Some(_)) => Err(workspace_refused(
+                    "this daemon does not serve the selected workspace",
                     trusted_root,
                 )),
                 _ => Err(workspace_refused(
