@@ -650,6 +650,36 @@ mod tests {
     }
 
     #[test]
+    fn rapid_focus_switching_applies_only_the_newest_registration() {
+        let mut state = PumpState::default();
+        let first = terminal();
+        let second = terminal();
+        state.register(&first, 0, 1);
+        let in_flight = only_fence(&mut state);
+        // The user cycles tabs faster than the daemon answers: each switch
+        // detaches one terminal and attaches the next.
+        for round in 1..=5_u64 {
+            let (leaving, arriving) = if round % 2 == 1 {
+                (&first, &second)
+            } else {
+                (&second, &first)
+            };
+            state.unregister(leaving);
+            state.register(arriving, round * 10, 1);
+        }
+        // The fetch issued for the first focus finally returns.
+        state.apply_fetch(&in_flight, Ok(vec![chunk(0, b"stale")]));
+        assert_eq!(state.metrics().fenced_drops, 1);
+        assert_eq!(state.take(&first, 50).unwrap(), Vec::new());
+        // Only the terminal focused last is fetched, from its own cursor.
+        let fence = only_fence(&mut state);
+        assert!(fence.terminal.fences(&second));
+        assert_eq!(fence.after_offset, 50);
+        state.apply_fetch(&fence, Ok(vec![chunk(50, b"fresh")]));
+        assert_eq!(state.take(&second, 50).unwrap(), vec![chunk(50, b"fresh")]);
+    }
+
+    #[test]
     fn a_result_from_a_superseded_connection_epoch_is_dropped() {
         let mut state = PumpState::default();
         let terminal = terminal();

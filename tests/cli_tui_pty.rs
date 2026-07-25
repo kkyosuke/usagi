@@ -884,7 +884,7 @@ fn terminal_tab_count(screen: &str) -> usize {
         .map(|row| row.chars().collect::<Vec<_>>())
         .collect::<Vec<_>>();
     for index in 1..rows.len() {
-        if !rows[index].iter().any(|cell| *cell == '▔') {
+        if !rows[index].contains(&'▔') {
             continue;
         }
         return rows[index - 1]

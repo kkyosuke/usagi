@@ -586,8 +586,9 @@ Agent launch、provider resume、runtime kill を行わない。pending tab の 
 
 shell が attach するのは、現在の active target に属する selected foreground terminal だけである。target / tab の
 切替時は以前の subscription を detach し、background target と選択外 tab は terminal session を保持しない。
-**1 frame は daemon への同期 request を 1 件も行わない**: foreground の出力取得も background tab の exit 観測も
-[背景 observation lane](#背景-observation-lane) が別 thread で行い、描画スレッドはその結果を非ブロッキングに drain するだけである。
+**定常状態の観測のために 1 frame が同期 request を出すことはない**: foreground の出力取得も background tab の exit 観測も
+[背景 observation lane](#背景-observation-lane) が別 thread で行い、描画スレッドはその結果を非ブロッキングに drain するだけである
+（利用者の操作が起こす attach / input / resize / detach は従来どおり描画スレッドから同期送信する）。
 どちらの lane が exit を報告した tab も自動で閉じる。最後の live tab が exit したとき、tab が 1 枚も残らなければ
 Closeup の action 空状態へ戻る（interrupted history などの非 live tab が残っている場合は tab surface に留まる）。
 IPC request の実効 deadline は

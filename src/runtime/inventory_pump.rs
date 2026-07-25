@@ -31,7 +31,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use usagi_core::domain::id::TerminalRef;
 use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalLaunchScope};
@@ -412,11 +412,9 @@ struct Shared {
 }
 
 /// Sleeps until `interval` elapses or the render thread signals work (a new
-/// background tab, or shutdown), whichever comes first.
+/// background tab, or shutdown), whichever comes first. A zero interval — a
+/// scope that came due during the round — returns at once.
 fn wait_for_next_round(shared: &Shared, interval: Duration) {
-    if interval.is_zero() {
-        return;
-    }
     let guard = lock(&shared.state);
     let (mut guard, _timeout) = shared
         .signal
@@ -431,7 +429,7 @@ pub struct TerminalInventoryPump {
     shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
-    started: std::time::Instant,
+    started: Instant,
 }
 
 impl TerminalInventoryPump {
@@ -444,7 +442,7 @@ impl TerminalInventoryPump {
     {
         let shared = Arc::new(Shared::default());
         let stop = Arc::new(AtomicBool::new(false));
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let thread_shared = Arc::clone(&shared);
         let thread_stop = Arc::clone(&stop);
         let handle = std::thread::spawn(move || {
@@ -903,6 +901,28 @@ mod tests {
         }
         assert_eq!(exited, vec![background]);
         assert_eq!(pump.metrics().exits_observed, 1);
+    }
+
+    #[test]
+    fn dropping_the_pump_stops_the_thread_even_mid_observation() {
+        let background = terminal();
+        let (started, observing) = mpsc::channel();
+        let pump = TerminalInventoryPump::spawn(move |_| {
+            let _ = started.send(());
+            // Hold the round open long enough for the drop below to land while
+            // this observation is still in flight.
+            std::thread::sleep(Duration::from_millis(200));
+            Err(())
+        });
+        pump.watch(1, std::slice::from_ref(&background));
+        observing
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the pump thread starts an observation");
+        // Drop joins the thread: it must notice the stop after the in-flight
+        // observation returns instead of waiting out the backoff.
+        let stopping = Instant::now();
+        drop(pump);
+        assert!(stopping.elapsed() < BACKOFF_BASE.saturating_mul(4));
     }
 
     #[test]
