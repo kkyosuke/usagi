@@ -163,6 +163,12 @@ fn spawn_daemon(repo: &Path, home: &Path, path: &Path, shell: Option<&Path>) -> 
     Daemon { child }
 }
 
+/// This test process's client incarnation, shared by every connection it opens.
+fn client_incarnation() -> &'static str {
+    static INCARNATION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    INCARNATION.get_or_init(|| usagi_core::domain::id::ClientId::new().as_str())
+}
+
 fn client(data_dir: &Path) -> IpcClient<std::os::unix::net::UnixStream> {
     let deadline = Instant::now() + DAEMON_READINESS_TIMEOUT;
     let daemon_dir = data_dir.join("daemon");
@@ -175,7 +181,11 @@ fn client(data_dir: &Path) -> IpcClient<std::os::unix::net::UnixStream> {
         {
             return IpcClient::connect(
                 stream,
-                "agent-ipc-e2e".into(),
+                // A canonical, process-stable client incarnation, exactly as the
+                // composition root declares. The daemon keys durable per-client
+                // state (the terminal input operation ledger) on it, so every
+                // connection this fixture opens must present the same value.
+                client_incarnation().to_owned(),
                 OperationId::new().to_string(),
                 ClientPolicy::cli(),
                 shipping_build_identity(),
@@ -417,6 +427,7 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
                 terminal: terminal.clone(),
                 subscription,
                 input_seq: 0,
+                input_operation: None,
                 bytes: b"go\n".to_vec(),
             })
             .unwrap(),
@@ -456,6 +467,7 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
                 terminal: resumed_terminal,
                 subscription: resumed_subscription,
                 input_seq: 0,
+                input_operation: None,
                 bytes: b"done\n".to_vec(),
             })
             .unwrap(),
@@ -539,6 +551,7 @@ fn root_ipc_agent_phase_report_without_a_live_credential_fails_closed() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One generic-terminal product flow, asserted end to end.
 fn root_ipc_fixture_login_shell_is_fenced_and_replays_exit() {
     let _serial = DAEMON_START_LOCK
         .lock()
@@ -552,11 +565,11 @@ fn root_ipc_fixture_login_shell_is_fenced_and_replays_exit() {
     write_shell(&shell, &count);
     let _daemon = start_daemon(repo.path(), home.path(), &bin, Some(&shell));
     let data_dir = channel_data_dir(home.path());
-    let mut client = client(&data_dir);
-    let (workspace, session, worktree) = available_scope(&mut client);
+    let mut first = client(&data_dir);
+    let (workspace, session, worktree) = available_scope(&mut first);
 
     let mut launch = |scope: TerminalLaunchScope, profile: &str| {
-        client.request(DaemonRequest::Terminal {
+        first.request(DaemonRequest::Terminal {
             action: TerminalAction::Launch,
             payload: serde_json::to_value(TerminalRequest::Launch {
                 intent: TerminalLaunchIntent {
@@ -598,23 +611,63 @@ fn root_ipc_fixture_login_shell_is_fenced_and_replays_exit() {
     assert_eq!(terminal.workspace_id, workspace);
     assert_eq!(terminal.session_id, Some(session));
     assert_eq!(terminal.worktree_id, worktree);
-    let subscription = attach(&mut client, &terminal);
-    client
+    let subscription = attach(&mut first, &terminal);
+    // #519: carry this input's durable operation identity, then throw the
+    // connection away as a lost acknowledgement would.
+    let input_operation = OperationId::new();
+    first
         .request(DaemonRequest::Terminal {
             action: TerminalAction::Input,
             payload: serde_json::to_value(TerminalRequest::Input {
                 terminal: terminal.clone(),
                 subscription,
                 input_seq: 0,
+                input_operation: Some(input_operation),
                 bytes: b"go\n".to_vec(),
             })
             .unwrap(),
         })
         .unwrap();
+    drop(first);
+
+    // A fresh connection, a fresh subscription, and an epoch-local sequence back
+    // at zero: only the operation identity still ties this to the earlier write.
+    let mut reconnected = client(&data_dir);
+    let DaemonReply::Ok(resolved) = reconnected
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::InputOutcome,
+            payload: serde_json::to_value(TerminalRequest::InputOutcome {
+                terminal: terminal.clone(),
+                input_operation,
+            })
+            .unwrap(),
+        })
+        .unwrap()
+    else {
+        panic!("resolving an input operation is a synchronous read");
+    };
+    assert_eq!(resolved["outcome"], "final");
+    assert_eq!(resolved["ack"], "Written");
+    // An operation this daemon never recorded is a typed unknown, never a
+    // fabricated success.
+    let DaemonReply::Ok(unknown) = reconnected
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::InputOutcome,
+            payload: serde_json::to_value(TerminalRequest::InputOutcome {
+                terminal: terminal.clone(),
+                input_operation: OperationId::new(),
+            })
+            .unwrap(),
+        })
+        .unwrap()
+    else {
+        panic!("resolving an input operation is a synchronous read");
+    };
+    assert_eq!(unknown["outcome"], "unknown");
 
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let DaemonReply::Ok(snapshot) = client
+        let DaemonReply::Ok(snapshot) = reconnected
             .request(DaemonRequest::Terminal {
                 action: TerminalAction::Resync,
                 payload: serde_json::to_value(TerminalRequest::Resync {
@@ -629,7 +682,15 @@ fn root_ipc_fixture_login_shell_is_fenced_and_replays_exit() {
         if snapshot["exited"] == 0 {
             let rows = restored_screen(&snapshot);
             assert!(screen_contains(&rows, "shell-ready"), "{rows:?}");
-            assert!(screen_contains(&rows, "shell-input:go"), "{rows:?}");
+            // Exactly one echo: the operation was replayed as an answer, never
+            // as a second write to the PTY.
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row.contains("shell-input:go"))
+                    .count(),
+                1,
+                "{rows:?}"
+            );
             break;
         }
         assert!(Instant::now() < deadline, "fixture shell did not exit");

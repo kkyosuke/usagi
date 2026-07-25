@@ -110,6 +110,17 @@ impl SharedTerminalRetention {
         self.clock.now()
     }
 
+    /// The same clock as milliseconds, for the age bound of the durable terminal
+    /// input operation ledger (#519).
+    ///
+    /// Reusing the retention clock keeps the ledger's expiry deterministic under
+    /// the fake a test already drives, instead of introducing a second time
+    /// source into the terminal owners.
+    #[must_use]
+    pub fn now_ms(&self) -> u64 {
+        u64::try_from(self.clock.now().timestamp_millis()).unwrap_or(0)
+    }
+
     /// Reserves the worst-case final budget of a runtime about to be spawned.
     ///
     /// # Errors

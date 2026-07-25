@@ -31,6 +31,15 @@ pub const TERMINAL_CHECKPOINT_REVISION: u16 = 2;
 /// screen checkpoint. It is the truth source for the checkpoint path: a client
 /// requires this capability even when the negotiated revision would allow it.
 pub const TERMINAL_SCREEN_CHECKPOINT_CAPABILITY: &str = "terminal.screen-checkpoint.v1";
+/// The capability a daemon advertises when a terminal input carries a durable,
+/// producer-issued operation identity whose final outcome it can answer on a
+/// *different* connection than the one that wrote it.
+///
+/// It is the truth source for cross-connection input resolution, exactly like
+/// [`TERMINAL_SCREEN_CHECKPOINT_CAPABILITY`] is for checkpoints: a client that
+/// cannot see it must keep its lost acknowledgement latched as an unknown effect
+/// instead of resending the bytes.
+pub const TERMINAL_INPUT_OPERATION_CAPABILITY: &str = "terminal.input-operation.v1";
 /// The capability a daemon advertises when it admits a hello only after matching
 /// the client's declared workspace against its own trusted workspace root. A
 /// workspace-bound client requires it, so a daemon that would admit any
@@ -708,6 +717,73 @@ pub fn terminal_snapshot_mode(
     } else {
         TerminalSnapshotMode::LegacyFailClosed
     }
+}
+
+/// How a client may resolve a terminal input whose acknowledgement it never
+/// received.
+///
+/// The two identities involved are deliberately different things: `input_seq` is
+/// an ordering number local to one connection epoch's fresh subscription, while
+/// the operation identity is stable across request retry, reconnect, and
+/// reattach. Only a peer that keeps the latter can answer "what happened to that
+/// input?" after the connection that carried it is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalInputReplayMode {
+    /// The daemon keeps a bounded ledger keyed by client incarnation and
+    /// operation identity, so the client resolves a lost acknowledgement by
+    /// querying that operation's recorded final instead of writing again.
+    DurableOperation,
+    /// The peer has only a connection-local input sequence ledger. A lost
+    /// acknowledgement stays an unknown effect: the client must not send the
+    /// operation identity, must not query, and must never resend the bytes.
+    LegacyFailClosed,
+}
+
+/// Decide how a client resolves terminal input acknowledgement loss on a
+/// negotiated connection.
+///
+/// The capability is the **truth source**; a daemon that silently gained the
+/// ledger without advertising it is still treated as legacy, which keeps the
+/// decision fail-closed.
+#[must_use]
+pub fn terminal_input_replay_mode(capabilities: &[String]) -> TerminalInputReplayMode {
+    if capabilities
+        .iter()
+        .any(|capability| capability == TERMINAL_INPUT_OPERATION_CAPABILITY)
+    {
+        TerminalInputReplayMode::DurableOperation
+    } else {
+        TerminalInputReplayMode::LegacyFailClosed
+    }
+}
+
+/// The semantic digest of one terminal input operation.
+///
+/// A durable operation identity alone cannot prove that a resend means the same
+/// thing, so the daemon stores this digest beside the recorded final and treats a
+/// mismatch as an idempotency conflict rather than as the same input. `target`
+/// is the fenced terminal the bytes were addressed to, so reusing one operation
+/// identity for another terminal conflicts instead of applying elsewhere.
+/// Components are length-prefixed so no `target` / `bytes` split can collide.
+#[must_use]
+pub fn terminal_input_digest(target: &str, bytes: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    for component in [
+        b"usagi-terminal-input-v1".as_slice(),
+        target.as_bytes(),
+        bytes,
+    ] {
+        digest.update((component.len() as u64).to_be_bytes());
+        digest.update(component);
+    }
+    digest
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut acc, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(acc, "{byte:02x}");
+            acc
+        })
 }
 
 /// A cache entry ties a response to the exact request body digest.

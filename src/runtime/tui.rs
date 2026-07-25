@@ -36,7 +36,7 @@ use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::git::{clone as git_clone, diff_status};
-use usagi_core::infrastructure::ipc::TerminalSnapshotMode;
+use usagi_core::infrastructure::ipc::{TerminalInputReplayMode, TerminalSnapshotMode};
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
@@ -80,7 +80,7 @@ use usagi_tui::usecase::application::pane_runtime::Geometry;
 use usagi_tui::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
 use usagi_tui::usecase::application::terminal_session::{
     TerminalAttach, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
-    TerminalSubscription,
+    TerminalInputResolution, TerminalSubscription,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::overview;
@@ -1024,6 +1024,17 @@ impl DaemonAgentCommandPort {
             .expect("terminal client was just set"))
     }
 
+    /// Whether the connected daemon keeps the durable input operation ledger.
+    ///
+    /// The capability is the truth source, so a daemon that does not advertise it
+    /// is treated as legacy even if it would accept the field: this client then
+    /// neither issues an operation identity nor claims a lost acknowledgement is
+    /// resolvable (#519).
+    fn terminal_input_is_durable(&mut self) -> Result<bool, TerminalError> {
+        Ok(self.terminal_client()?.terminal_input_replay_mode()
+            == TerminalInputReplayMode::DurableOperation)
+    }
+
     /// Sends one terminal request over the persistent connection and returns its
     /// success body.
     ///
@@ -1655,6 +1666,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         terminal: &usagi_core::domain::id::TerminalRef,
         subscription: TerminalSubscription,
         input_seq: u64,
+        operation: usagi_core::domain::id::OperationId,
         bytes: &[u8],
     ) -> Result<TerminalInputOutcome, TerminalError> {
         // Backstop for the session's own epoch fence: an input fenced by a
@@ -1665,10 +1677,15 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         if subscription.epoch != self.terminal_epoch {
             return Err(TerminalError::Unavailable);
         }
+        // The operation identity is sent only to a daemon that advertises the
+        // durable ledger. Sending it to a peer that ignores it would let this
+        // client believe a lost acknowledgement is resolvable when it is not.
+        let durable = self.terminal_input_is_durable()?;
         let payload = serde_json::to_value(TerminalRequest::Input {
             terminal: terminal.clone(),
             subscription: subscription.id,
             input_seq,
+            input_operation: durable.then_some(operation),
             bytes: bytes.to_vec(),
         })
         .expect("terminal request is serializable");
@@ -1712,6 +1729,37 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                     Err(TerminalError::InputEffectUnknown)
                 }
             }
+        }
+    }
+
+    fn terminal_input_outcome(
+        &mut self,
+        terminal: &usagi_core::domain::id::TerminalRef,
+        operation: usagi_core::domain::id::OperationId,
+        input_len: usize,
+    ) -> Result<TerminalInputResolution, TerminalError> {
+        // A daemon without the ledger cannot answer, and a guess is exactly what
+        // must not happen here: the caller keeps its uncertainty latched.
+        if !self.terminal_input_is_durable()? {
+            return Ok(TerminalInputResolution::Unknown);
+        }
+        let body = self.terminal_request(
+            TerminalAction::InputOutcome,
+            TerminalRequest::InputOutcome {
+                terminal: terminal.clone(),
+                input_operation: operation,
+            },
+        )?;
+        match body["outcome"].as_str() {
+            Some("unknown") => Ok(TerminalInputResolution::Unknown),
+            // A recorded final is projected exactly as the lost acknowledgement
+            // would have been, success or not, and its applied prefix is bounded
+            // by the input it belongs to.
+            Some("final") => decode_terminal_input_ack_value(&body["ack"], input_len, 0)
+                .map(TerminalInputResolution::Final),
+            // An answer this build cannot read is not "nothing happened": it
+            // stays an unresolved effect rather than a decoded success.
+            _ => Err(TerminalError::InputEffectUnknown),
         }
     }
 
@@ -3182,27 +3230,27 @@ mod tests {
         let terminal = input_terminal_ref();
 
         assert_eq!(
-            port.input_terminal(&terminal, subscription(7), 0, b"x"),
+            port.input_terminal(&terminal, subscription(7), 0, OperationId::new(), b"x"),
             Ok(TerminalInputOutcome::Written)
         );
         assert_eq!(
-            port.input_terminal(&terminal, subscription(7), 1, b"x"),
+            port.input_terminal(&terminal, subscription(7), 1, OperationId::new(), b"x"),
             Ok(TerminalInputOutcome::Written)
         );
         assert_eq!(
-            port.input_terminal(&terminal, subscription(7), 2, b"x"),
+            port.input_terminal(&terminal, subscription(7), 2, OperationId::new(), b"x"),
             Ok(TerminalInputOutcome::Failed)
         );
         assert_eq!(
-            port.input_terminal(&terminal, subscription(7), 3, b"x"),
+            port.input_terminal(&terminal, subscription(7), 3, OperationId::new(), b"x"),
             Ok(TerminalInputOutcome::Failed)
         );
         assert_eq!(
-            port.input_terminal(&terminal, subscription(7), 4, b"abc"),
+            port.input_terminal(&terminal, subscription(7), 4, OperationId::new(), b"abc"),
             Ok(TerminalInputOutcome::Ambiguous { applied_prefix: 2 })
         );
         assert_eq!(
-            port.input_terminal(&terminal, subscription(7), 5, b"abc"),
+            port.input_terminal(&terminal, subscription(7), 5, OperationId::new(), b"abc"),
             Ok(TerminalInputOutcome::Ambiguous { applied_prefix: 3 })
         );
 
@@ -3227,7 +3275,13 @@ mod tests {
         )]);
 
         assert_eq!(
-            port.input_terminal(&input_terminal_ref(), subscription(7), 0, b"x"),
+            port.input_terminal(
+                &input_terminal_ref(),
+                subscription(7),
+                0,
+                OperationId::new(),
+                b"x"
+            ),
             Err(TerminalError::InputEffectUnknown)
         );
         // The answer was fully received, so the stream stays consistent: the
@@ -3237,6 +3291,154 @@ mod tests {
         assert_eq!(port.terminal_connection_epoch(), Some(1));
         drop(port);
         server.join().unwrap();
+    }
+
+    /// The production wire half of #519: the adapter carries the producer's
+    /// operation identity on the input, resolves it with a read-only query, and
+    /// never turns an unreadable or absent record into a success.
+    #[cfg(unix)]
+    #[test]
+    fn production_terminal_input_carries_and_resolves_a_durable_operation() {
+        use usagi_core::infrastructure::ipc::ResponseOutcome;
+        use usagi_core::usecase::client::{DaemonRequest, TerminalAction, TerminalRequest};
+        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::terminal_session::TerminalInputResolution;
+
+        let operation = OperationId::new();
+        let (mut port, server) = terminal_input_port(vec![
+            (ResponseOutcome::Ok, json!({ "ack": "Written" })),
+            (
+                ResponseOutcome::Ok,
+                json!({ "outcome": "final", "ack": { "Cached": "Written" } }),
+            ),
+            (ResponseOutcome::Ok, json!({ "outcome": "unknown" })),
+            (
+                ResponseOutcome::Ok,
+                json!({ "outcome": "final", "ack": { "Ambiguous": { "applied_prefix": 9 } } }),
+            ),
+            (ResponseOutcome::Ok, json!({ "outcome": "sideways" })),
+        ]);
+        let terminal = input_terminal_ref();
+
+        assert_eq!(
+            port.input_terminal(&terminal, subscription(7), 0, operation, b"ab"),
+            Ok(TerminalInputOutcome::Written)
+        );
+        // A cached final normalizes to the outcome it wraps.
+        assert_eq!(
+            port.terminal_input_outcome(&terminal, operation, 2),
+            Ok(TerminalInputResolution::Final(
+                TerminalInputOutcome::Written
+            ))
+        );
+        // No record: typed uncertainty, not an error and not a success.
+        assert_eq!(
+            port.terminal_input_outcome(&terminal, operation, 2),
+            Ok(TerminalInputResolution::Unknown)
+        );
+        // An applied prefix beyond the input it belongs to is fail-closed.
+        assert_eq!(
+            port.terminal_input_outcome(&terminal, operation, 2),
+            Err(TerminalError::InputEffectUnknown)
+        );
+        // An outcome vocabulary this build cannot read is not "nothing happened".
+        assert_eq!(
+            port.terminal_input_outcome(&terminal, operation, 2),
+            Err(TerminalError::InputEffectUnknown)
+        );
+        // Every answer was fully received, so the shared connection is intact.
+        assert!(port.terminal.is_some());
+        assert_eq!(port.terminal_connection_epoch(), Some(1));
+        drop(port);
+
+        let requests = server.join().unwrap();
+        let sent: Vec<(TerminalAction, TerminalRequest)> = requests
+            .into_iter()
+            .filter_map(|body| serde_json::from_value::<DaemonRequest>(body).ok())
+            .filter_map(|request| match request {
+                DaemonRequest::Terminal { action, payload } => {
+                    serde_json::from_value::<TerminalRequest>(payload)
+                        .ok()
+                        .map(|request| (action, request))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(matches!(
+            &sent[0],
+            (
+                TerminalAction::Input,
+                TerminalRequest::Input {
+                    input_operation: Some(sent),
+                    input_seq: 0,
+                    ..
+                },
+            ) if *sent == operation
+        ));
+        // Each resolution is a read-only query naming the same operation; the
+        // bytes are never sent again.
+        assert!(sent[1..].iter().all(|entry| matches!(
+            entry,
+            (
+                TerminalAction::InputOutcome,
+                TerminalRequest::InputOutcome { input_operation, .. },
+            ) if *input_operation == operation
+        )));
+    }
+
+    /// A daemon without the durable ledger capability is treated as legacy: no
+    /// operation identity is put on the wire, and resolution answers unknown
+    /// without asking, so the client keeps its uncertainty instead of resending.
+    #[cfg(unix)]
+    #[test]
+    fn a_daemon_without_the_input_operation_capability_fails_closed_to_legacy() {
+        use usagi_core::infrastructure::ipc::{
+            ResponseOutcome, TERMINAL_INPUT_OPERATION_CAPABILITY,
+        };
+        use usagi_core::usecase::client::{DaemonRequest, TerminalRequest};
+        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::terminal_session::TerminalInputResolution;
+
+        let (mut port, server) = terminal_input_port_with(
+            vec![(ResponseOutcome::Ok, json!({ "ack": "Written" }))],
+            |protocol| {
+                protocol
+                    .capabilities
+                    .retain(|capability| capability != TERMINAL_INPUT_OPERATION_CAPABILITY);
+            },
+        );
+        let terminal = input_terminal_ref();
+        let operation = OperationId::new();
+        assert_eq!(
+            port.input_terminal(&terminal, subscription(7), 0, operation, b"ab"),
+            Ok(TerminalInputOutcome::Written)
+        );
+        assert_eq!(
+            port.terminal_input_outcome(&terminal, operation, 2),
+            Ok(TerminalInputResolution::Unknown)
+        );
+        drop(port);
+
+        let requests = server.join().unwrap();
+        let sent: Vec<TerminalRequest> = requests
+            .into_iter()
+            .filter_map(|body| serde_json::from_value::<DaemonRequest>(body).ok())
+            .filter_map(|request| match request {
+                DaemonRequest::Terminal { payload, .. } => {
+                    serde_json::from_value::<TerminalRequest>(payload).ok()
+                }
+                _ => None,
+            })
+            .collect();
+        // Exactly one request: the input, without an operation identity. The
+        // resolution never reached the wire.
+        assert!(matches!(
+            sent.as_slice(),
+            [TerminalRequest::Input {
+                input_operation: None,
+                ..
+            }]
+        ));
     }
 
     #[cfg(unix)]
@@ -3265,7 +3467,13 @@ mod tests {
                 terminal_input_port(vec![(ResponseOutcome::Error(error), json!(null))]);
 
             assert_eq!(
-                port.input_terminal(&input_terminal_ref(), subscription(7), 0, b"x"),
+                port.input_terminal(
+                    &input_terminal_ref(),
+                    subscription(7),
+                    0,
+                    OperationId::new(),
+                    b"x"
+                ),
                 Err(expected),
                 "side effect {side_effect:?}"
             );
@@ -3392,11 +3600,23 @@ mod tests {
         assert_eq!(agent_first.subscription, subscription(11));
         assert_eq!(generic_first.subscription, subscription(12));
         assert_eq!(
-            port.input_terminal(&agent, agent_first.subscription, 0, b"a"),
+            port.input_terminal(
+                &agent,
+                agent_first.subscription,
+                0,
+                OperationId::new(),
+                b"a"
+            ),
             Ok(TerminalInputOutcome::Written)
         );
         assert_eq!(
-            port.input_terminal(&generic, generic_first.subscription, 0, b"b"),
+            port.input_terminal(
+                &generic,
+                generic_first.subscription,
+                0,
+                OperationId::new(),
+                b"b"
+            ),
             Ok(TerminalInputOutcome::Written)
         );
 
@@ -3429,7 +3649,13 @@ mod tests {
         );
         // Same connection, so the daemon's ledger for this client continues.
         assert_eq!(
-            port.input_terminal(&agent, agent_resync.subscription, 1, b"a2"),
+            port.input_terminal(
+                &agent,
+                agent_resync.subscription,
+                1,
+                OperationId::new(),
+                b"a2"
+            ),
             Ok(TerminalInputOutcome::Written)
         );
 
@@ -3445,7 +3671,13 @@ mod tests {
         // A replaced subscription is refused before any connection is opened, so
         // the keystroke is definitely unwritten instead of rejected as unattached.
         assert_eq!(
-            port.input_terminal(&generic, generic_first.subscription, 1, b"lost"),
+            port.input_terminal(
+                &generic,
+                generic_first.subscription,
+                1,
+                OperationId::new(),
+                b"lost"
+            ),
             Err(TerminalError::Unavailable)
         );
         // Its release is local too: nothing is sent, and no connection is opened
@@ -3473,7 +3705,13 @@ mod tests {
         // A new connection means a new daemon-side ledger, so the first input on
         // it starts at zero and is written once.
         assert_eq!(
-            port.input_terminal(&generic, generic_second.subscription, 0, b"k"),
+            port.input_terminal(
+                &generic,
+                generic_second.subscription,
+                0,
+                OperationId::new(),
+                b"k"
+            ),
             Ok(TerminalInputOutcome::Written)
         );
 
@@ -3527,7 +3765,7 @@ mod tests {
         // The subscription taken before the resize is still current, so the pane
         // keeps writing without reattaching.
         assert_eq!(
-            port.input_terminal(&terminal, subscription(7), 0, b"x"),
+            port.input_terminal(&terminal, subscription(7), 0, OperationId::new(), b"x"),
             Ok(TerminalInputOutcome::Written)
         );
 
@@ -3562,7 +3800,7 @@ mod tests {
         let terminal = input_terminal_ref();
 
         assert_eq!(
-            port.input_terminal(&terminal, subscription(7), 0, b"a"),
+            port.input_terminal(&terminal, subscription(7), 0, OperationId::new(), b"a"),
             Ok(TerminalInputOutcome::Written)
         );
         assert_eq!(
@@ -3575,7 +3813,7 @@ mod tests {
             .unwrap();
         assert_eq!(attach.subscription.epoch, 1);
         assert_eq!(
-            port.input_terminal(&terminal, attach.subscription, 1, b"b"),
+            port.input_terminal(&terminal, attach.subscription, 1, OperationId::new(), b"b"),
             Ok(TerminalInputOutcome::Written)
         );
 
@@ -3818,7 +4056,13 @@ mod tests {
         };
 
         assert_eq!(
-            port.input_terminal(&input_terminal_ref(), subscription(7), 0, b"x"),
+            port.input_terminal(
+                &input_terminal_ref(),
+                subscription(7),
+                0,
+                OperationId::new(),
+                b"x"
+            ),
             Err(TerminalError::InputEffectUnknown)
         );
         assert!(port.terminal.is_none());
