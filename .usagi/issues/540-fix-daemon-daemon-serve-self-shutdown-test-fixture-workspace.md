@@ -1,13 +1,13 @@
 ---
 number: 540
 title: fix(daemon): 権威を失った daemon serve を self-shutdown させ、test 起動を fixture workspace へ隔離する
-status: todo
+status: done
 priority: high
 labels: [v2, daemon, test, lifecycle, leak]
 dependson: []
 related: [171]
 created_at: 2026-07-24T22:38:25.106198+00:00
-updated_at: 2026-07-24T22:38:25.106198+00:00
+updated_at: 2026-07-25T01:09:37.898311+00:00
 ---
 
 ## 問題・根拠（実測）
