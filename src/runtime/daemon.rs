@@ -23,7 +23,8 @@ use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId, WorktreeId};
 use usagi_core::infrastructure::daemon::{
     DaemonLauncher, DaemonReady, DaemonRecordStore, InstanceLock, LivenessProbe,
-    ProcessIdentitySource, RecordFile, ShutdownSignal, Sleeper, Terminator,
+    ProcessIdentitySource, RecordFile, ShutdownSignal, Sleeper, Terminator, WorkspaceFence,
+    WorkspaceFenceOutcome,
 };
 use usagi_core::infrastructure::env_resolver::OpCli;
 use usagi_core::infrastructure::error_log::ErrorLog;
@@ -1342,11 +1343,16 @@ impl usagi_daemon::presentation::ipc::TerminalOwner for SharedTerminal {
 use super::bootstrap;
 use super::launchd;
 
-#[allow(clippy::too_many_lines)] // IPC request routing remains in the composition adapter.
+// IPC request routing remains in the composition adapter, and each argument is one
+// independently resolved startup fact (endpoint, generation, data directory, fenced
+// workspace, build, owner record, custody probe, shutdown); bundling them would only
+// hide the composition wiring.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn spawn_ipc_server(
     listener: SecureUnixListener,
     generation: &usagi_core::infrastructure::ipc::DaemonGeneration,
     data_dir: &Path,
+    workspace_root: &Path,
     build: &BuildIdentity,
     daemon_process: DaemonRecord,
     custody: FsCustodyProbe,
@@ -1359,7 +1365,7 @@ fn spawn_ipc_server(
         build.clone(),
         daemon_process,
     );
-    let repo_root = std::env::current_dir()?;
+    let repo_root = workspace_root.to_path_buf();
     let daemon_generation = usagi_core::domain::id::DaemonGeneration::parse(&generation.0)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     let runtime = open_session_runtime(
@@ -4630,6 +4636,10 @@ fn signal_exact_process(_record: &DaemonRecord, _signal: libc::c_int) -> std::io
 /// future duplicate invocation a no-op instead of binding a second endpoint.
 struct IpcReady<'a> {
     data_dir: &'a Path,
+    /// The canonical workspace root resolved once at startup and fenced before
+    /// publication, so the runtime this publishes owns exactly the workspace the
+    /// fence guards.
+    workspace_root: &'a Path,
     /// The single-instance lock this daemon holds. Publication reads the locked
     /// inode from it so the custody supervisor can prove, on every tick, that
     /// this process is still the singleton for `data_dir`.
@@ -4731,6 +4741,7 @@ impl DaemonReady for IpcReady<'_> {
                 listener,
                 &generation,
                 self.data_dir,
+                self.workspace_root,
                 &self.build,
                 process,
                 custody,
@@ -4950,6 +4961,87 @@ impl FileInstanceLock {
         Some(node_identity(&metadata))
     }
 }
+/// The workspace-scoped fence: an exclusive `flock` on
+/// `<workspace>/.usagi/daemon/daemon.lock`.
+///
+/// The node is outside every runtime-mode child directory, so `production`,
+/// `development`, and `local` — and any `$USAGI_HOME` — converge on one inode.
+/// Path spelling cannot split it either, because `flock` excludes per inode and
+/// the workspace root is canonicalized before it is spelled.
+///
+/// After acquiring, the owner writes its pid line into the node. That line is the
+/// only cross-mode discovery channel there is: a refused daemon reads a different
+/// data directory's `daemon.json` than the owner writes, so without the hint it
+/// could not name the process holding the workspace.
+struct FileWorkspaceFence {
+    path: PathBuf,
+    workspace: PathBuf,
+    pid: u32,
+    held: RefCell<Option<std::fs::File>>,
+}
+
+impl WorkspaceFence for FileWorkspaceFence {
+    fn acquire(&self) -> std::io::Result<WorkspaceFenceOutcome> {
+        const TIMEOUT: Duration = Duration::from_secs(2);
+        const POLL: Duration = Duration::from_millis(20);
+        // `<workspace>/.usagi` is user-visible project metadata, so it keeps
+        // ordinary directory permissions; only the `daemon/` child holding the
+        // fence is private, which `open_private_lock` establishes.
+        std::fs::create_dir_all(self.workspace.join(paths::STATE_DIR))?;
+        let file = open_private_lock(
+            &self.path,
+            "daemon workspace fence",
+            PrivateLockModePolicy::CrashResidue,
+        )?;
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            match FileExt::try_lock_exclusive(&file) {
+                Ok(()) => {
+                    #[cfg(test)]
+                    wait_private_lock_after_flock_barrier(&self.path);
+                    verify_private_lock_path(&self.path, &file, "daemon workspace fence")?;
+                    // Publish the owner hint immediately, so the window in which a
+                    // refused start could read the previous owner's line is only
+                    // as long as this write.
+                    write_owner_hint(&file, self.pid)?;
+                    *self.held.borrow_mut() = Some(file);
+                    return Ok(WorkspaceFenceOutcome::Acquired);
+                }
+                Err(_) if Instant::now() < deadline => std::thread::sleep(POLL),
+                Err(_) => {
+                    return Ok(WorkspaceFenceOutcome::Held {
+                        workspace: self.workspace.display().to_string(),
+                        // The hint is diagnostic only. An empty or garbled line
+                        // (a holder killed before publishing) yields no pid, and a
+                        // holder mid-write can still show the departed owner's.
+                        // Neither changes the refusal, which the `flock` decides.
+                        owner: read_owner_hint(&file),
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Replace the fence node's contents with this owner's pid line.
+fn write_owner_hint(file: &std::fs::File, pid: u32) -> std::io::Result<()> {
+    use std::io::{Seek, SeekFrom};
+    file.set_len(0)?;
+    let mut file = file;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(format!("{pid}\n").as_bytes())?;
+    file.flush()
+}
+
+/// Read the owner pid published by the daemon currently holding the fence.
+fn read_owner_hint(file: &std::fs::File) -> Option<u32> {
+    use std::io::Read;
+    // The hint is one short decimal line; a longer node is not ours to trust.
+    let mut contents = String::new();
+    file.take(64).read_to_string(&mut contents).ok()?;
+    contents.trim().parse().ok()
+}
+
 impl InstanceLock for FileInstanceLock {
     fn acquire(&self) -> std::io::Result<bool> {
         const TIMEOUT: Duration = Duration::from_secs(2);
@@ -5091,8 +5183,21 @@ fn run_inner(
         path: daemon_dir.join("daemon.lock"),
         held: RefCell::new(None),
     };
+    // One resolution of the workspace identity for the whole process: the fence
+    // that guards the workspace and the runtime that owns it must key on the same
+    // path, or a daemon could fence one workspace and then take authority over
+    // another.
+    let workspace_root = bound_workspace_root(&daemon_dir, std::env::current_dir()?)?;
+    let pid = std::process::id();
+    let workspace = FileWorkspaceFence {
+        path: paths::workspace_fence_path(&workspace_root),
+        workspace: workspace_root.clone(),
+        pid,
+        held: RefCell::new(None),
+    };
     let ready = IpcReady {
         data_dir: &data_dir,
+        workspace_root: &workspace_root,
         instance_lock: &lock,
         // The daemon advertises the exact artifact it started as for its whole
         // process lifetime. Atomic replacement of the executable path cannot
@@ -5115,9 +5220,24 @@ fn run_inner(
         launcher: &launcher,
         sleeper: &RealSleeper,
         lock: &lock,
-        pid: std::process::id(),
+        workspace: &workspace,
+        pid,
     };
     usagi_daemon::presentation::run(out, command, info, &env)
+}
+
+/// Resolve the canonical workspace root this daemon would bind, before anything
+/// locks or publishes.
+///
+/// The candidate is the startup working directory — the same value the session
+/// runtime takes — but a durable `repository_root` from a previous start wins, so
+/// starting from a subdirectory cannot fence a workspace the runtime will not
+/// own. Canonicalization then collapses spelling differences.
+fn bound_workspace_root(daemon_dir: &Path, candidate: PathBuf) -> std::io::Result<PathBuf> {
+    let bound = SessionRuntime::bound_workspace_root(daemon_dir, candidate)
+        .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
+    paths::canonical_workspace_root(&bound)
+        .map_err(|error| std::io::Error::other(format!("{error:#}")))
 }
 
 /// Connect to the daemon for this binary's isolated runtime channel. Every
@@ -5494,9 +5614,23 @@ mod tests {
         }))
     }
 
+    /// A workspace fence fixture that is already owned, so `serve` tests reach
+    /// the publication and retirement seams under test. The real fence's own
+    /// acquire / refuse / owner-hint behaviour has dedicated tests.
+    struct AcquiredWorkspaceFence;
+
+    impl WorkspaceFence for AcquiredWorkspaceFence {
+        fn acquire(&self) -> std::io::Result<WorkspaceFenceOutcome> {
+            Ok(WorkspaceFenceOutcome::Acquired)
+        }
+    }
+
     fn fresh_ipc_ready<'a>(data_dir: &'a Path, _info: &'a AppInfo) -> IpcReady<'a> {
         IpcReady {
             data_dir,
+            // These tests never reach the real publication path, so the workspace
+            // root only has to be a resolved directory.
+            workspace_root: data_dir,
             instance_lock: unacquired_instance_lock(data_dir),
             build: BuildIdentity {
                 version: "test".to_owned(),
@@ -6009,6 +6143,156 @@ mod tests {
             held: RefCell::new(None),
         };
         assert!(retry.acquire().unwrap());
+    }
+
+    /// Build a fence for `workspace` as `pid` would see it.
+    fn workspace_fence(workspace: &Path, pid: u32) -> FileWorkspaceFence {
+        let workspace = paths::canonical_workspace_root(workspace).unwrap();
+        FileWorkspaceFence {
+            path: paths::workspace_fence_path(&workspace),
+            workspace,
+            pid,
+            held: RefCell::new(None),
+        }
+    }
+
+    #[test]
+    fn workspace_fence_refuses_a_second_owner_and_names_its_pid() {
+        let workspace = tempfile::tempdir_in("/tmp").unwrap();
+        let owner = workspace_fence(workspace.path(), 4242);
+        assert_eq!(owner.acquire().unwrap(), WorkspaceFenceOutcome::Acquired);
+
+        // A second daemon over the same workspace is refused and can name the
+        // live owner, which is the only cross-data-directory discovery it has.
+        let second = workspace_fence(workspace.path(), 5252);
+        assert_eq!(
+            second.acquire().unwrap(),
+            WorkspaceFenceOutcome::Held {
+                workspace: paths::canonical_workspace_root(workspace.path())
+                    .unwrap()
+                    .display()
+                    .to_string(),
+                owner: Some(4242),
+            }
+        );
+        assert!(second.held.borrow().is_none());
+
+        // The fence node lives in a daemon-private directory beside — not inside
+        // — the runtime-mode children, and the OS releases it with the owner.
+        assert_eq!(
+            owner.path,
+            paths::canonical_workspace_root(workspace.path())
+                .unwrap()
+                .join(".usagi/daemon/daemon.lock")
+        );
+        drop(owner);
+        let third = workspace_fence(workspace.path(), 6262);
+        assert_eq!(third.acquire().unwrap(), WorkspaceFenceOutcome::Acquired);
+    }
+
+    #[test]
+    fn workspace_fence_refuses_through_a_symlinked_or_relative_spelling() {
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let owner = workspace_fence(&workspace, 4242);
+        assert_eq!(owner.acquire().unwrap(), WorkspaceFenceOutcome::Acquired);
+
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&workspace, &link).unwrap();
+        for spelling in [
+            link,
+            workspace.join("."),
+            workspace.join("..").join("workspace"),
+        ] {
+            let refused = workspace_fence(&spelling, 5252);
+            assert!(
+                matches!(
+                    refused.acquire().unwrap(),
+                    WorkspaceFenceOutcome::Held {
+                        owner: Some(4242),
+                        ..
+                    }
+                ),
+                "{} escaped the workspace fence",
+                spelling.display()
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_fence_refuses_when_the_owner_hint_is_unreadable() {
+        let workspace = tempfile::tempdir_in("/tmp").unwrap();
+        let owner = workspace_fence(workspace.path(), 4242);
+        assert_eq!(owner.acquire().unwrap(), WorkspaceFenceOutcome::Acquired);
+
+        // A holder killed between `flock` and publishing its hint leaves an empty
+        // node. The refusal must stand; only the diagnostic pid is lost.
+        std::fs::write(&owner.path, "").unwrap();
+        let refused = workspace_fence(workspace.path(), 5252);
+        assert_eq!(
+            refused.acquire().unwrap(),
+            WorkspaceFenceOutcome::Held {
+                workspace: paths::canonical_workspace_root(workspace.path())
+                    .unwrap()
+                    .display()
+                    .to_string(),
+                owner: None,
+            }
+        );
+
+        // So does a garbled or over-long line.
+        std::fs::write(&owner.path, "x".repeat(128)).unwrap();
+        assert!(matches!(
+            workspace_fence(workspace.path(), 5252).acquire().unwrap(),
+            WorkspaceFenceOutcome::Held { owner: None, .. }
+        ));
+    }
+
+    #[test]
+    fn workspace_fence_rejects_a_path_replacement_after_flock() {
+        let workspace = tempfile::tempdir_in("/tmp").unwrap();
+        let fence = workspace_fence(workspace.path(), 4242);
+        // Create the parent chain first: the replacement thread races the
+        // pathname, not the directory setup.
+        std::fs::create_dir_all(fence.workspace.join(paths::STATE_DIR)).unwrap();
+        ensure_private_dir(fence.path.parent().unwrap()).unwrap();
+        let replacement = replace_private_lock_after_flock(&fence.path);
+
+        let error = fence.acquire().unwrap_err();
+        replacement.join().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("daemon workspace fence"));
+        assert!(fence.held.borrow().is_none());
+    }
+
+    #[test]
+    fn bound_workspace_root_canonicalizes_and_fails_on_an_unresolvable_root() {
+        let workspace = tempfile::tempdir_in("/tmp").unwrap();
+        let daemon = workspace.path().join("data/daemon");
+        ensure_private_dir_all(&daemon).unwrap();
+
+        // With no durable state the bound root is the (canonicalized) startup
+        // directory, which is what the session runtime would adopt.
+        assert_eq!(
+            bound_workspace_root(&daemon, workspace.path().join(".")).unwrap(),
+            paths::canonical_workspace_root(workspace.path()).unwrap()
+        );
+
+        // A startup directory that no longer resolves is a startup failure, not a
+        // fence that silently keys some other path.
+        let error = bound_workspace_root(&daemon, workspace.path().join("absent")).unwrap_err();
+        assert!(error.to_string().contains("workspace root"), "{error}");
+
+        // Unreadable durable state fails the same way, rather than falling back
+        // to a candidate the runtime would not adopt.
+        std::fs::write(daemon.join("sessions.json"), "not json").unwrap();
+        assert!(
+            bound_workspace_root(&daemon, workspace.path().to_path_buf())
+                .unwrap_err()
+                .to_string()
+                .contains("Storage")
+        );
     }
 
     #[test]
@@ -6615,6 +6899,7 @@ mod tests {
                     &store,
                     &recovery,
                     &ImmediateTestShutdown,
+                    &AcquiredWorkspaceFence,
                     &lock,
                     &FixedIdentitySource("test:7777"),
                     7777,
@@ -6644,6 +6929,7 @@ mod tests {
                 &store,
                 &recovery,
                 &ImmediateTestShutdown,
+                &AcquiredWorkspaceFence,
                 &lock,
                 &FixedIdentitySource("test:7777"),
                 7777,

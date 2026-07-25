@@ -211,6 +211,45 @@ pub trait InstanceLock {
     fn acquire(&self) -> io::Result<bool>;
 }
 
+/// What a [`WorkspaceFence`] acquisition found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceFenceOutcome {
+    /// This process now owns the workspace for its lifetime.
+    Acquired,
+    /// Another live daemon owns the workspace. `owner` is its pid when the
+    /// holder published one; it is absent when the hint cannot be read, which
+    /// still refuses the start.
+    Held {
+        /// The canonical workspace root that is already owned.
+        workspace: String,
+        /// The owning daemon's pid, when its hint is readable.
+        owner: Option<u32>,
+    },
+}
+
+/// The workspace-scoped single-daemon guard held by a running `serve`.
+///
+/// [`InstanceLock`] excludes a second daemon per *data directory*, but a
+/// daemon's authority is a *workspace*: the git worktrees, `usagi/<name>`
+/// branches, and session names under `<workspace>/.usagi`. Because the data
+/// directory is selected by `$USAGI_HOME` and the runtime mode, two daemons that
+/// disagree about either one take different instance locks and then both write
+/// the same worktrees from independent lifecycle state. This fence keys on the
+/// workspace instead, so no spelling of the environment can produce a second
+/// owner.
+///
+/// It is acquired **before** [`InstanceLock`] and held for the process's
+/// lifetime; the OS releases it on death, so a crashed owner does not lock the
+/// workspace out. Real IO is bound at the synthesis root.
+pub trait WorkspaceFence {
+    /// Try to become the single daemon owning this workspace.
+    ///
+    /// # Errors
+    /// Returns an error when the fence node cannot be created, verified, or
+    /// locked.
+    fn acquire(&self) -> io::Result<WorkspaceFenceOutcome>;
+}
+
 /// Persists a [`DaemonRecord`] as JSON through a [`RecordFile`].
 pub struct DaemonRecordStore<F> {
     file: F,

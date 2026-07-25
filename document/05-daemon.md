@@ -59,7 +59,17 @@ source に含めない。remove は mirror 内の worktree を子から順に Gi
 
 Git workspace を daemon が最初に開くと、`.usagi/.gitignore` に usagi 管理の ignore rules を書く。`issues/`
 と `memory/` は共有・追跡対象のままにし、session tree、derived index、lock、その他の local metadata は
-ignore する。旧版が repository root の `.gitignore` に書いた usagi 専用行は削除するが、他の行は保持する。
+ignore する。この `/*` の既定 ignore が、[workspace fence](#単一-daemon-の-2-段-fence) の
+`<workspace>/.usagi/daemon/daemon.lock` も git 追跡外に保つ。旧版が repository root の `.gitignore` に書いた
+usagi 専用行は削除するが、他の行は保持する。
+
+workspace 直下の `.usagi` 配下で daemon が使う node は次のとおり。runtime mode 別の子 directory
+（`dev/` / `local/`）は project runtime state のためのものであり、workspace fence はそれらの兄弟として置く。
+
+| path | 種別 | 用途 |
+|---|---|---|
+| `sessions/<name>` | directory | session worktree（または mirror した session tree） |
+| `daemon/daemon.lock` | lock file | workspace 単位の単一 daemon fence。owner の pid を 1 行持つ。この `daemon/` だけが daemon-private（`0700`） |
 
 ## daemon process lifecycle
 
@@ -127,7 +137,7 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 | `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。stale record は process に signal を送らず、singleton lock 下で stale endpoint を回収してから消去する。unverified record は signal・回収とも拒否する |
 | `usagi daemon restart` | 稼働中 daemon を停止してから新しい daemon を起動する。active / draining handoff は行わない |
 | `usagi daemon replace` | exact artifact の意図的な replacement trigger を要求する。同じ artifact pair / channel は同じ operation ID へ収束し、この command 自体は old daemon を停止しない |
-| `usagi daemon` / `usagi daemon serve` | 前景で daemon を serve する。`serve` は内部用の subcommand であり、[custody を失うと自主終了する](#custody-喪失による-self-shutdown) |
+| `usagi daemon` / `usagi daemon serve` | 前景で daemon を serve する。`serve` は内部用の subcommand であり、[workspace / data directory の 2 段 fence](#単一-daemon-の-2-段-fence)を取得してから公開し、[custody を失うと自主終了する](#custody-喪失による-self-shutdown) |
 | `usagi daemon install-service` | macOS の LaunchAgent を明示的に install し、前景 `serve` を login と異常終了後に supervise する |
 | `usagi daemon uninstall-service` | install 済み LaunchAgent を unload して remove する |
 
@@ -136,14 +146,39 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 identity の組であり、macOS では process start time、Linux では `/proc/<pid>/stat` の start time を opaque token
 として保存する。
 
-この単一インスタンス lock の scope は **mode 別の data directory** である（`<data-dir>/daemon/daemon.lock`。
-data directory の選択は [daemon data directory](#daemon-data-directory) が正本）。一方 daemon が所有する資源の
-scope は起動時に確定した **workspace root** であり、`<repository>/.usagi/sessions/<name>` の worktree と
-`usagi/<name>` branch である。したがって同一 workspace に対して runtime mode または `$USAGI_HOME` を変えて
-`serve` を起動すると、それぞれ別の lock file を取得して共存し、2 つの独立した lifecycle state が同じ worktree
-集合を権威として書き換える。この gap は
-[#542](../.usagi/issues/542-fix-daemon-fence-workspace-mode-home.md)（fence の単位を workspace へ広げる）で追跡し、
-設計判断は [13. daemon singleton と session teardown](proposals/13-daemon-singleton-and-teardown.md) を正本とする。
+### 単一 daemon の 2 段 fence
+
+`serve` は **workspace** と **data directory** の 2 つを、どちらも process lifetime にわたって fence する。
+2 つは異なる問いに答えるため、片方が他方を包含しない。
+
+| fence | node | scope | 守る対象 |
+|---|---|---|---|
+| workspace fence | `<workspace>/.usagi/daemon/daemon.lock` | canonical workspace root。runtime mode と `$USAGI_HOME` に依存しない | workspace の所有権（`<workspace>/.usagi/sessions/<name>` の worktree、`usagi/<name>` branch、session 名） |
+| 単一インスタンス lock | `<data-dir>/daemon/daemon.lock` | mode 別 data directory（[daemon data directory](#daemon-data-directory) が正本） | その data directory の record・locator・endpoint・durable state |
+
+取得順序は **workspace fence → 単一インスタンス lock** に固定する。順序が固定なので、逆向きに競合する 2 つの
+start が deadlock することはない。どちらも [IPC endpoint 公開](#daemon-process-lifecycle)の ready hook より前に
+取得し、取得できなかった `serve` は record・endpoint に触れずに typed refusal を出して終了する。
+
+workspace fence の node は **runtime mode の子 directory の下に置かない**。data directory は `$USAGI_HOME` と
+runtime mode で選ばれるため、同一 workspace に対して mode を変えるだけで別の単一インスタンス lock に届いてしまい、
+2 つの独立した lifecycle state が同じ worktree 集合を権威として書き換えられる。fence を workspace 側に置くことで
+**1 machine × 1 canonical workspace root に daemon は 1 つ**が成立する。mode split が分離するのは **data** であり、
+**workspace の所有権ではない**（git worktree は共有された物理状態なので、mode を分けても分離できない）。
+
+path の綴り違い（末尾セパレータ、`.` / `..`、symlink 経由、macOS の `/tmp` → `/private/tmp` firmlink）でも回避
+できない。`flock` は inode に対する排他であり、加えて workspace root は fence 前に canonical 化される。
+workspace root の解決は process ごとに 1 回だけ行い、fence と session runtime が同じ値を使う。候補は起動時 cwd だが、
+`sessions.json` に durable な `repository_root` があればそれが勝つ（[session tree と ignore
+rules](#session-tree-と-ignore-rules)）。したがって subdirectory から起動しても、runtime が所有しない workspace を
+fence することはない。
+
+workspace fence の node には、取得した owner が自分の pid を 1 行書く。別の data directory の daemon は互いの
+`daemon.json` を読めないため、この hint が cross-mode の唯一の発見経路である（`daemon status` は自分の mode の
+record しか見ない）。hint は診断専用であり、refusal を決めるのは `flock` である。したがって hint が未公開・破損・
+過大な場合は pid を伏せて refuse し、owner の交代中に読んだ場合は直前の owner の pid を示すことがある。node は `<workspace>/.usagi` 配下なので
+[ignore rules](#session-tree-と-ignore-rules) の `/*` で git 追跡外になり、`<workspace>/.usagi/daemon/` だけが
+daemon-private（`0700`）である（`<workspace>/.usagi` 自体は利用者が見る project metadata なので通常の permission を保つ）。
 
 ### custody 喪失による self-shutdown
 
@@ -818,8 +853,9 @@ TUI は最新 snapshot を workspace の左ペイン下部にある v1 互換の
 ## generation と orphan safety
 
 generation coordinator は一つの daemon process 内で Agent admission、terminal control/exit、completion outcome を
-current generation に fence する。shipping `serve` は process lifetime の `daemon.lock` を保持するため、同じ data
-directory で 2 process は共存せず、production lifecycle は coordinator の `rollover` を呼ばない。standby endpoint、
+current generation に fence する。shipping `serve` は process lifetime の 2 段 fence（workspace と data directory。
+[単一 daemon の 2 段 fence](#単一-daemon-の-2-段-fence)）を保持するため、同じ data directory でも同じ workspace でも
+2 process は共存せず、production lifecycle は coordinator の `rollover` を呼ばない。standby endpoint、
 cross-process generation registry、draining process への admission は現在存在しない。generic terminal runtime も
 この coordinator の cross-process authority には含まれない。
 
