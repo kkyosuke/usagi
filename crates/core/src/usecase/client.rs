@@ -24,7 +24,8 @@ use crate::domain::terminal_launch::{
 use crate::infrastructure::ipc::{
     Bootstrap, BuildIdentity, ClientHello, ClientId, DaemonGeneration, Envelope, EnvelopeKind,
     ErrorCode, GenerationRole, ProtocolError, ProtocolRange, ProtocolVersion, ResponseOutcome,
-    RetryMode, ServerHello, SideEffect, read_json_frame, write_json_frame,
+    RetryMode, ServerHello, SideEffect, TERMINAL_CHECKPOINT_REVISION, TERMINAL_WIRE_GENERATION,
+    TerminalSnapshotMode, read_json_frame, terminal_snapshot_mode, write_json_frame,
 };
 
 /// A daemon request understood by every presentation surface.
@@ -562,6 +563,10 @@ pub struct IpcClient<S> {
     protocol: ProtocolVersion,
     daemon_generation: DaemonGeneration,
     server_build: BuildIdentity,
+    /// Capabilities the daemon advertised in its hello. Kept because a
+    /// capability, not the negotiated revision alone, decides whether snapshots
+    /// may be treated as semantic checkpoints.
+    server_capabilities: Vec<String>,
     next_request: u64,
     policy: ClientPolicy,
 }
@@ -656,9 +661,12 @@ impl<S: Read + Write> IpcClient<S> {
                 .as_ref()
                 .map(|owner| (*owner.generation).clone()),
             supported_protocols: vec![ProtocolRange {
-                generation: 1,
+                generation: TERMINAL_WIRE_GENERATION,
                 min_revision: 0,
-                max_revision: 1,
+                // Revision 2 carries the semantic screen checkpoint. An older
+                // daemon still negotiates revision 1, which this client treats
+                // as legacy (it never parses the raw tail).
+                max_revision: TERMINAL_CHECKPOINT_REVISION,
             }],
             capabilities: vec![],
             required_capabilities,
@@ -684,6 +692,7 @@ impl<S: Read + Write> IpcClient<S> {
                     protocol: hello.protocol,
                     daemon_generation: hello.daemon_generation,
                     server_build: hello.build,
+                    server_capabilities: hello.capabilities,
                     next_request: 0,
                     policy,
                 })
@@ -708,6 +717,17 @@ impl<S: Read + Write> IpcClient<S> {
     #[must_use]
     pub fn server_build(&self) -> &BuildIdentity {
         &self.server_build
+    }
+
+    /// How this connection must treat terminal attach / resync snapshots.
+    ///
+    /// Derived from the negotiated protocol version **and** the daemon's
+    /// advertised capabilities, so a daemon that cannot serve semantic
+    /// checkpoints fails closed to a limited view instead of having its raw byte
+    /// tail parsed.
+    #[must_use]
+    pub fn terminal_snapshot_mode(&self) -> TerminalSnapshotMode {
+        terminal_snapshot_mode(self.protocol, &self.server_capabilities)
     }
 
     /// Borrows the authenticated byte stream for composition-owned passive
@@ -1431,6 +1451,75 @@ mod tests {
         assert_eq!(unauthenticated.side_effect(), SideEffect::None);
     }
 
+    #[test]
+    fn client_advertises_the_checkpoint_revision_and_derives_its_snapshot_mode() {
+        use crate::infrastructure::ipc::TERMINAL_SCREEN_CHECKPOINT_CAPABILITY;
+
+        let peer = |revision: u16, capabilities: Vec<String>| {
+            Bootstrap::ServerHello(ServerHello {
+                connection_nonce: "nonce".into(),
+                connection_id: crate::infrastructure::ipc::ConnectionId("connection".into()),
+                daemon_generation: DaemonGeneration("daemon".into()),
+                generation_role: GenerationRole::Active,
+                protocol: ProtocolVersion {
+                    generation: TERMINAL_WIRE_GENERATION,
+                    revision,
+                },
+                capabilities,
+                build: client_build(),
+                limits: crate::infrastructure::ipc::ProtocolLimits::default(),
+                daemon_process: None,
+            })
+        };
+        let connect = |message: &Bootstrap| {
+            IpcClient::connect(
+                bootstrap_script(message),
+                "client".into(),
+                "nonce".into(),
+                ClientPolicy::tui(),
+                client_build(),
+            )
+            .unwrap()
+        };
+
+        let checkpoint = connect(&peer(
+            TERMINAL_CHECKPOINT_REVISION,
+            vec![TERMINAL_SCREEN_CHECKPOINT_CAPABILITY.into()],
+        ));
+        assert_eq!(
+            checkpoint.terminal_snapshot_mode(),
+            TerminalSnapshotMode::Checkpoint
+        );
+
+        // The client offers revision 2 so a checkpoint daemon can select it.
+        let sent = read_json_frame::<serde_json::Value>(
+            &mut Cursor::new(checkpoint.transport().output.clone()),
+            1_048_576,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(sent["kind"], "client_hello");
+        assert_eq!(
+            sent["supported_protocols"],
+            serde_json::json!([ProtocolRange {
+                generation: TERMINAL_WIRE_GENERATION,
+                min_revision: 0,
+                max_revision: TERMINAL_CHECKPOINT_REVISION,
+            }])
+        );
+
+        // An older daemon (revision 1) and an advertisement gap both fail closed.
+        for legacy in [
+            peer(1, vec![TERMINAL_SCREEN_CHECKPOINT_CAPABILITY.into()]),
+            peer(TERMINAL_CHECKPOINT_REVISION, vec![]),
+        ] {
+            assert_eq!(
+                connect(&legacy).terminal_snapshot_mode(),
+                TerminalSnapshotMode::LegacyFailClosed
+            );
+        }
+    }
+
     fn scripted(reply: ResponseOutcome, request_id: &str) -> Scripted {
         let protocol = ProtocolVersion {
             generation: 1,
@@ -1722,6 +1811,7 @@ mod tests {
             protocol,
             daemon_generation: DaemonGeneration("d".into()),
             server_build: server_build.clone(),
+            server_capabilities: Vec::new(),
             next_request: 0,
             policy: ClientPolicy::tui(),
         };
@@ -1737,6 +1827,7 @@ mod tests {
             protocol,
             daemon_generation: DaemonGeneration("d".into()),
             server_build: server_build.clone(),
+            server_capabilities: Vec::new(),
             next_request: 0,
             policy: ClientPolicy::tui(),
         };
@@ -1749,6 +1840,7 @@ mod tests {
             protocol,
             daemon_generation: DaemonGeneration("d".into()),
             server_build,
+            server_capabilities: Vec::new(),
             next_request: 0,
             policy: ClientPolicy::tui(),
         };

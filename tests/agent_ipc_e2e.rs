@@ -258,6 +258,34 @@ fn attach(client: &mut impl DaemonClient, terminal: &TerminalRef) -> u64 {
     body["subscription"].as_u64().expect("subscription id")
 }
 
+/// The screen a revision 2 snapshot restores to, rendered as retained rows.
+///
+/// A negotiated checkpoint connection never receives a raw tail, so this asserts
+/// the frame's shape (one payload, complete at `output_offset`) before restoring
+/// the daemon's authoritative screen through the shared parser.
+fn restored_screen(snapshot: &serde_json::Value) -> Vec<String> {
+    use usagi_core::usecase::vt_screen::{ScreenCheckpoint, VtScreen};
+
+    assert!(
+        snapshot["replay"].is_null(),
+        "a revision 2 frame carries only the checkpoint"
+    );
+    assert_eq!(
+        snapshot["base_offset"], snapshot["output_offset"],
+        "a checkpoint is complete at output_offset"
+    );
+    let checkpoint: ScreenCheckpoint = serde_json::from_value(snapshot["screen"].clone())
+        .expect("revision 2 snapshot carries a screen checkpoint");
+    VtScreen::from_checkpoint(&checkpoint)
+        .expect("the daemon checkpoint restores")
+        .cells_with_scrollback()
+}
+
+/// Whether any restored row contains `text`.
+fn screen_contains(rows: &[String], text: &str) -> bool {
+    rows.iter().any(|row| row.contains(text))
+}
+
 fn wait_for_agent_completion(
     client: &mut impl DaemonClient,
     operation: &str,
@@ -404,7 +432,9 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
         unreachable!()
     };
     assert_eq!(snapshot["exited"], 0);
-    assert!(snapshot["replay"].as_array().unwrap().len() >= b"ready\r\ninput:go\r\n".len());
+    let rows = restored_screen(&snapshot);
+    assert!(screen_contains(&rows, "ready"), "{rows:?}");
+    assert!(screen_contains(&rows, "input:go"), "{rows:?}");
     let durable = fs::read_to_string(data_dir.join("daemon/agents.json")).unwrap();
     assert!(durable.contains("provider_structured"));
 
@@ -589,17 +619,9 @@ fn root_ipc_fixture_login_shell_is_fenced_and_replays_exit() {
             unreachable!()
         };
         if snapshot["exited"] == 0 {
-            let replay: Vec<u8> = serde_json::from_value(snapshot["replay"].clone()).unwrap();
-            assert!(
-                replay
-                    .windows(b"shell-ready\r\n".len())
-                    .any(|v| v == b"shell-ready\r\n")
-            );
-            assert!(
-                replay
-                    .windows(b"shell-input:go\r\n".len())
-                    .any(|v| v == b"shell-input:go\r\n")
-            );
+            let rows = restored_screen(&snapshot);
+            assert!(screen_contains(&rows, "shell-ready"), "{rows:?}");
+            assert!(screen_contains(&rows, "shell-input:go"), "{rows:?}");
             break;
         }
         assert!(Instant::now() < deadline, "fixture shell did not exit");
