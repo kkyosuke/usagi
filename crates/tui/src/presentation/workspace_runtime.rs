@@ -1020,6 +1020,15 @@ impl WorkspaceRuntime {
     /// overlay opened in the same batch (quit confirmation, PR / Preview) and
     /// the Ctrl-C grace from being clobbered by the next sample.
     fn sync_live_pane(&mut self) {
+        // A target that owns any tab shows its tab strip, so the action
+        // launcher steps aside and a non-live tab (an interrupted Agent history)
+        // can be selected and resumed. This is sampled *before* the live level so
+        // that losing the last live pane can consult a current tab level and keep
+        // a surviving history tab's strip in front.
+        let _ = update(
+            &mut self.state,
+            AppEvent::PaneTabAvailability(self.panes.active_pane().has_tabs()),
+        );
         // Any active target with a live tab — a session or the workspace root —
         // carries the live signal; the pane registry is keyed uniformly.
         let live = self
@@ -1029,13 +1038,6 @@ impl WorkspaceRuntime {
             .iter()
             .any(|tab| matches!(tab, PaneTab::Live(_)));
         let _ = update(&mut self.state, AppEvent::LivePaneAvailability(live));
-        // A target that owns any tab shows its tab strip, so the action
-        // launcher steps aside and a non-live tab (an interrupted Agent history)
-        // can be selected and resumed.
-        let _ = update(
-            &mut self.state,
-            AppEvent::PaneTabAvailability(self.panes.active_pane().has_tabs()),
-        );
     }
 
     /// Build the Home frame from the controller state, pane strip, and the
@@ -2369,6 +2371,97 @@ mod tests {
                 interrupted: tabs,
             }],
         ));
+    }
+
+    /// #544: a target whose only tabs are interrupted history must open Closeup
+    /// on its tab strip, not behind the action launcher.
+    ///
+    /// The restore lands while Home is still in Switch, so activation sees no
+    /// availability *edge*. If activation decided the overlay from the live-pane
+    /// level alone, the launcher would cover the strip and swallow every
+    /// `Ctrl-O` pane control, leaving `Ctrl-O r` unreachable from real keys.
+    #[test]
+    fn a_history_only_target_activates_onto_its_tab_strip_not_the_action_launcher() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let history = interrupted_tab(workspace, session, true);
+        // Root is the initially selected target, so restore its history first and
+        // activate afterwards: exactly the cold-restart order the shell observes.
+        with_history(
+            &mut runtime,
+            Target::Root(workspace),
+            vec![super::InterruptedTab {
+                session_id: None,
+                ..history.clone()
+            }],
+        );
+        assert!(matches!(
+            runtime.state().route(),
+            Route::Home(HomeMode::Switch)
+        ));
+
+        let _ = runtime.handle_key(Key::Enter);
+
+        assert!(matches!(
+            runtime.state().route(),
+            Route::Home(HomeMode::Closeup)
+        ));
+        assert!(!runtime.state().has_live_pane());
+        assert!(
+            runtime.wants_pane_control_input(),
+            "the launcher must step aside for a target that owns tabs"
+        );
+        // Tab cycling is a tab-strip concern, not a live-PTY one.
+        for effect in runtime.handle_key(Key::Live(
+            crate::usecase::terminal_input::LiveTerminalAction::NextTab,
+        )) {
+            runtime.on_effect(&effect);
+        }
+        assert_eq!(
+            runtime.focused_interrupted().map(|tab| tab.continuation),
+            Some(history.continuation)
+        );
+    }
+
+    /// #544: losing the last *live* pane is not an empty Closeup while an
+    /// interrupted history tab survives; the strip keeps its pane controls.
+    #[test]
+    fn closing_the_last_live_pane_keeps_a_surviving_history_tab_in_front() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        let history = interrupted_tab(workspace, session, true);
+        let live = terminal_ref(workspace, session);
+        let (interaction, revision) = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            interaction,
+            revision,
+            vec![PaneRestoreTarget {
+                target: Target::Session(session),
+                panes: vec![LivePane {
+                    terminal: live.clone(),
+                    kind: PaneKind::Agent,
+                }],
+                selected: Some(live),
+                interrupted: vec![history.clone()],
+            }],
+        ));
+        assert!(runtime.state().has_live_pane());
+        assert!(runtime.wants_pane_control_input());
+
+        let outcome = runtime.close_focused_pane();
+        assert!(outcome.detach.is_some());
+
+        assert!(!runtime.state().has_live_pane());
+        assert!(
+            runtime.wants_pane_control_input(),
+            "the surviving history tab keeps the strip in front of the launcher"
+        );
+        assert_eq!(
+            tab_selection(&runtime.active_pane().tabs()[0]),
+            TabSelection::Interrupted(history.continuation)
+        );
     }
 
     #[test]

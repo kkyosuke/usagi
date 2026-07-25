@@ -434,7 +434,10 @@ fn controller_closeup_prefix_and_tab_gating_match_live_model() {
     let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
     assert_eq!(state.overlay(), Some(Overlay::Closeup));
 
-    // 4: once a pane is available the tab surface is frontmost.
+    // 4: once a pane is available the tab surface is frontmost. The runtime
+    // samples the tab level first and the live level second, so mirror that order
+    // here: a live pane is itself a tab, and tab controls follow the tab level.
+    let _ = update(&mut state, AppEvent::PaneTabAvailability(true));
     let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
     assert_eq!(state.overlay(), None);
     let projection = HomeProjection::from_state(

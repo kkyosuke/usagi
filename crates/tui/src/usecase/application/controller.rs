@@ -2293,7 +2293,11 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                     if !state.closeup_action_forced {
                         state.overlay = None;
                     }
-                } else {
+                } else if !state.has_pane_tab {
+                    // Losing the last *live* pane is not an empty Closeup: an
+                    // interrupted Agent history tab still owns the strip and
+                    // must keep its `Ctrl-O` pane controls. The runtime samples
+                    // the tab level before this one, so it is already current.
                     state.overlay = Some(Overlay::Closeup);
                 }
             }
@@ -2417,7 +2421,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                     // Closeup route treats Ctrl-C as a request to detach the
                     // whole TUI.
                     state.closeup_action_forced = false;
-                    state.overlay = (!state.has_live_pane).then_some(Overlay::Closeup);
+                    state.overlay = closeup_launcher_on_entry(state);
                 }
             } else if pending.is_some_and(|pending| pending.kind == PendingKind::CreateSession)
                 && state.overlay.is_none()
@@ -2838,15 +2842,19 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
             }
             Vec::new()
         }
+        // Tab cycling belongs to the tab strip, not to a live PTY: a target whose
+        // only tabs are interrupted Agent history must still be able to move its
+        // selection onto the tab it wants to resume. A live pane is itself a tab,
+        // so this is a strict widening of the live-pane condition.
         AppKey::CtrlN
-            if state.has_live_pane && matches!(state.route, Route::Home(HomeMode::Closeup)) =>
+            if state.has_pane_tab && matches!(state.route, Route::Home(HomeMode::Closeup)) =>
         {
             vec![Effect::SelectTab {
                 direction: TabDirection::Next,
             }]
         }
         AppKey::CtrlP
-            if state.has_live_pane && matches!(state.route, Route::Home(HomeMode::Closeup)) =>
+            if state.has_pane_tab && matches!(state.route, Route::Home(HomeMode::Closeup)) =>
         {
             vec![Effect::SelectTab {
                 direction: TabDirection::Previous,
@@ -3491,6 +3499,21 @@ fn update_pointer(
     }
 }
 
+/// Whether entering Closeup must open the action launcher.
+///
+/// The launcher is the *empty* Closeup surface, so it opens only for a target
+/// that owns no tab at all. A tab-owning target — including one whose only tabs
+/// are interrupted Agent history — lands on its tab strip so `Ctrl-O` pane
+/// controls stay reachable (see [`AppEvent::PaneTabAvailability`]).
+///
+/// Both levels belong to the target that was active before this activation. That
+/// is sound because they disagree with the newly activated target's own levels
+/// only when an edge exists, and the runtime's post-event sample then repairs the
+/// decision through the availability handlers.
+fn closeup_launcher_on_entry(state: &AppState) -> Option<Overlay> {
+    (!state.has_live_pane && !state.has_pane_tab).then_some(Overlay::Closeup)
+}
+
 fn activate_selected(state: &mut AppState) -> Vec<Effect> {
     match state.selected {
         // A Failed row is not a usable checkout (`can_use=false`): it stays
@@ -3504,7 +3527,7 @@ fn activate_selected(state: &mut AppState) -> Vec<Effect> {
             state.active = target;
             state.route = Route::Home(HomeMode::Closeup);
             state.closeup_action_forced = false;
-            state.overlay = (!state.has_live_pane).then_some(Overlay::Closeup);
+            state.overlay = closeup_launcher_on_entry(state);
             Vec::new()
         }
         Selection::NewSession => open_create_session(state),
@@ -7046,6 +7069,7 @@ mod tests {
         state.overlay = Some(Overlay::Closeup);
         state.closeup_action_forced = false;
         state.has_live_pane = false;
+        let _ = update(&mut state, AppEvent::PaneTabAvailability(true));
         let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
         assert!(!update_management_key(&mut state, AppKey::CtrlN).is_empty());
         assert!(!update_management_key(&mut state, AppKey::CtrlP).is_empty());

@@ -245,10 +245,13 @@ prefix（leader）が次の入力を所有し、leader が無い場合だけ `Ct
 解決し、それ以外は消費する。tab 切替（`Ctrl-O` / `Ctrl-A` / `Ctrl-N` / `Ctrl-P`）は reducer が所有するが、scroll・tab close・copy は
 reducer に持ち込まず shell と `TerminalSession` が所有する（scroll offset・選択・feedback は shell 側の状態）。
 
-controller reducer path も同じ投影を使う。`LivePaneAvailability` が無い Closeup への遷移は action overlay を
-自動で開き、pane が到着すると通常の tab surface へ戻る。adapter は prefix の next / previous 結果を
+controller reducer path も同じ投影を使う。**tab を 1 枚も持たない** target の Closeup への遷移だけが action overlay を
+自動で開き、pane が到着すると通常の tab surface へ戻る。live PTY を持たない tab（interrupted Agent history）だけを
+持つ target も tab surface へ着地するので、`Ctrl-O` の pane control はそのまま届く。最後の live tab が exit しても
+tab が残っていれば action overlay へは戻らない。runtime は `PaneTabAvailability` を `LivePaneAvailability` より先に
+sample するため、live pane を失った時点の判定は現在の tab 有無を見る。adapter は prefix の next / previous 結果を
 `CtrlN` / `CtrlP` として reducer に渡し、reducer は pane 所有者へ tab selection effect を要求するだけで、tab
-identity は保持しない。
+identity は保持しない。tab 巡回は live PTY の有無ではなく tab の有無で有効になる。
 
 | prefix | アクション | 効果 |
 |---|---|---|
@@ -550,7 +553,8 @@ Agent launch、provider resume、runtime kill を行わない。pending tab の 
 shell が attach / poll するのは、現在の active target に属する selected foreground terminal だけである。target / tab の
 切替時は以前の subscription を detach し、background target と選択外 tab は terminal session を保持しない。1 frame が同期
 poll する terminal は高々 1 件であり、その foreground terminal の exit を daemon が報告したときだけ tab を自動で閉じる。
-最後の live tab が exit すると `has_live_pane` が落ちて Closeup の action 空状態へ戻る。foreground poll 自体を UI thread から
+最後の live tab が exit したとき、tab が 1 枚も残らなければ Closeup の action 空状態へ戻る（interrupted history などの
+非 live tab が残っている場合は tab surface に留まる）。foreground poll 自体を UI thread から
 分離する scheduler は [#527](../.usagi/issues/527-perf-tui-terminal-polling-ui-loop-foreground-cadence.md)、IPC request の実効
 deadline は [#521](../.usagi/issues/521-fix-ipc-clientpolicy-request-deadline-reconnect-budget.md) が所有する。
 
@@ -947,6 +951,10 @@ planned restart は resume request を作らない。要求は選択中の exact
 投影された interrupted tab は live tab と同じ tab strip に並ぶ。target ごとの pane registry entry に入るため、
 root と managed session の history は互いに混ざらない。live restore は live membership だけを所有し、
 interrupted tab の membership・順序・selection は projection だけが所有する。
+
+cold restart 直後のように **interrupted tab しか無い target** でも、Closeup は action launcher ではなく tab strip へ
+着地する（[Closeup pane](#closeup-pane) の入力所有者は live PTY の有無ではなく tab の有無で決まる）。
+したがって `Ctrl-O Ctrl-N` / `Ctrl-O Ctrl-P` で history tab を選び、`Ctrl-O r` で resume できる。
 
 | 状態 | tab label | 選択時の body |
 |---|---|---|
