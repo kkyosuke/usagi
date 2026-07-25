@@ -92,6 +92,7 @@ use usagi_tui::usecase::terminal_input::{
 
 use crate::runtime::agent_tab_intent::FileAgentTabIntentStore;
 use crate::runtime::clipboard::PlatformClipboard;
+use crate::runtime::inventory_pump::TerminalInventoryPump;
 use crate::runtime::terminal_pump::TerminalPollPump;
 use crate::tui_input::{CrosstermSource, EventPump, NoBackend};
 
@@ -636,7 +637,10 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         ControllerBackendComposition {
             backend,
             session_commands: Box::new(DaemonSessionCommandPort),
-            agent_commands: Box::new(DaemonAgentCommandPort::new(spawn_poll_pump())),
+            agent_commands: Box::new(
+                DaemonAgentCommandPort::new(spawn_poll_pump())
+                    .with_inventory_pump(spawn_inventory_pump()),
+            ),
             // A third daemon client, dedicated to pane launches. Keeping it out
             // of the resident stream client is what lets a slow or hung launch
             // leave existing panes' poll / input / resize / detach untouched.
@@ -921,10 +925,17 @@ struct DaemonAgentCommandPort {
     /// connection's subscription or exactly-once ledger. (`Resume` polling runs
     /// on the background `pump` instead of any render-thread connection.)
     poll: Option<IpcClient<std::os::unix::net::UnixStream>>,
-    /// Background poll pump. `Resume` fetches run on its own thread and
-    /// connection, so the render thread only drains ready output and never
-    /// blocks on the daemon. Attach registers a terminal here; detach removes it.
+    /// Foreground poll pump. `Resume` fetches run on its own thread and
+    /// connection at a bounded interactive cadence, so the render thread only
+    /// drains ready output and never blocks on the daemon. Attach registers a
+    /// terminal here; detach removes it.
     pump: TerminalPollPump,
+    /// Background scope-inventory pump, present only on the resident stream port
+    /// of a workspace. It observes the exit metadata of **detached** background
+    /// tabs through per-scope `Inventory` requests on its own thread and
+    /// connection; the launch and restore ports watch nothing, so they leave it
+    /// unset rather than spawning an idle thread.
+    inventory: Option<TerminalInventoryPump>,
     /// Client-local incarnation of the shared `terminal` connection.
     ///
     /// Every subscription this port issues carries the epoch it was taken on.
@@ -988,11 +999,20 @@ impl DaemonAgentCommandPort {
             terminal: None,
             poll: None,
             pump,
+            inventory: None,
             terminal_epoch: 1,
             attachments: Vec::new(),
             restore_connection: None,
             terminal_watch_cancelled: None,
         }
+    }
+
+    /// Binds the background scope-inventory lane. Only the workspace's resident
+    /// stream port takes one; every other client of this adapter watches no
+    /// background tab.
+    fn with_inventory_pump(mut self, inventory: TerminalInventoryPump) -> Self {
+        self.inventory = Some(inventory);
+        self
     }
 
     fn with_restore_connection(mut self, publisher: DaemonRestoreConnectionPublisher) -> Self {
@@ -1080,6 +1100,26 @@ impl DaemonAgentCommandPort {
             .expect("terminal connection epoch exhausted");
     }
 
+    /// Appends one line per degraded observation lane to the daily error log.
+    /// Both lanes run off the render thread, so their failures never reach the
+    /// UI; this is what makes a stalled pane inspectable afterwards.
+    #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=terminal_pump_unit_contract
+    fn record_lane_degradation(&self) {
+        let inventory = self
+            .inventory
+            .as_ref()
+            .and_then(|inventory| inventory.metrics().degradation_summary());
+        for summary in self
+            .pump
+            .metrics()
+            .degradation_summary()
+            .into_iter()
+            .chain(inventory)
+        {
+            ErrorLog::record(&summary);
+        }
+    }
+
     /// Records the subscription a fresh attach fenced `terminal` with, replacing
     /// any superseded one.
     fn record_attachment(
@@ -1159,8 +1199,13 @@ impl DaemonAgentCommandPort {
 }
 
 impl Drop for DaemonAgentCommandPort {
+    /// Release the shared connection, then record the observation lanes'
+    /// counters when something actually degraded. A wedged pane leaves no trace
+    /// otherwise: the lanes complete off the render thread, so their failures are
+    /// invisible to the UI by design.
     fn drop(&mut self) {
         self.reset_terminal();
+        self.record_lane_degradation();
     }
 }
 
@@ -1615,10 +1660,13 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             epoch: self.terminal_epoch,
         };
         self.record_attachment(terminal, subscription);
-        // Resume polling for this terminal on the background pump from the
-        // snapshot's output offset. Reattach (after a reconnect/resync) resets
-        // the pump to the fresh offset, discarding any stale buffered output.
-        self.pump.register(terminal, output_offset);
+        // Resume polling for this terminal on the foreground pump from the
+        // snapshot's output offset, fenced by the epoch this attach was served
+        // on. Reattach (after a reconnect/resync) resets the pump to the fresh
+        // offset, so an in-flight fetch of the previous registration is dropped
+        // instead of rewinding the resynced cursor.
+        self.pump
+            .register(terminal, output_offset, self.terminal_epoch);
         Ok(TerminalAttach {
             subscription,
             revision,
@@ -1633,6 +1681,9 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         terminal: &usagi_core::domain::id::TerminalRef,
         geometry: Geometry,
     ) -> Result<(), TerminalError> {
+        // A resize reflows the screen immediately, so restore the interactive
+        // fetch cadence rather than waiting out an idle backoff.
+        self.pump.wake();
         self.poll_request(
             TerminalAction::Resize,
             TerminalRequest::Resize {
@@ -1677,6 +1728,9 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         if subscription.epoch != self.terminal_epoch {
             return Err(TerminalError::Unavailable);
         }
+        // The keystroke is about to produce output: restore the interactive
+        // fetch cadence so the echo is not delayed by an idle backoff.
+        self.pump.wake();
         // The operation identity is sent only to a daemon that advertises the
         // durable ledger. Sending it to a peer that ignores it would let this
         // client believe a lost acknowledgement is resolvable when it is not.
@@ -1788,6 +1842,25 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             );
         }
     }
+
+    fn watch_background_terminals(&mut self, terminals: &[usagi_core::domain::id::TerminalRef]) {
+        // Fenced by the shared connection epoch: when the transport is replaced
+        // every pane re-attaches, and the background observation bound applies
+        // again from the newly available epoch.
+        if let Some(inventory) = &self.inventory {
+            inventory.watch(self.terminal_epoch, terminals);
+        }
+    }
+
+    fn take_exited_background_terminals(
+        &mut self,
+        limit: usize,
+    ) -> Vec<usagi_core::domain::id::TerminalRef> {
+        self.inventory
+            .as_ref()
+            .map(|inventory| inventory.take_exited(limit))
+            .unwrap_or_default()
+    }
 }
 
 /// Spawns a background poll pump backed by a dedicated, deadline-bounded daemon
@@ -1795,9 +1868,56 @@ impl AgentCommandPort for DaemonAgentCommandPort {
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
 fn spawn_poll_pump() -> TerminalPollPump {
     let mut client: Option<IpcClient<std::os::unix::net::UnixStream>> = None;
-    TerminalPollPump::spawn(move |terminal, after_offset| {
-        fetch_terminal_output(&mut client, terminal, after_offset)
+    TerminalPollPump::spawn(move |fence| {
+        fetch_terminal_output(&mut client, &fence.terminal, fence.after_offset)
     })
+}
+
+/// Spawns the background scope-inventory pump on its own deadline-bounded daemon
+/// connection. It is the only observation primitive for detached background
+/// tabs: it asks for a scope's inventory and never attaches or resumes one of
+/// them (#527).
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=inventory_pump_unit_contract
+fn spawn_inventory_pump() -> TerminalInventoryPump {
+    let mut client: Option<IpcClient<std::os::unix::net::UnixStream>> = None;
+    TerminalInventoryPump::spawn(move |job| fetch_scope_inventory(&mut client, &job.scope))
+}
+
+/// Performs one scope `Inventory` request on the inventory lane's own
+/// connection, reconnecting on any transport error (including a read timeout).
+/// Called only by the inventory pump thread, never the render thread.
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=inventory_pump_unit_contract
+fn fetch_scope_inventory(
+    client: &mut Option<IpcClient<std::os::unix::net::UnixStream>>,
+    scope: &TerminalLaunchScope,
+) -> Result<Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry>, ()> {
+    if client.is_none() {
+        let opened = crate::runtime::daemon::client(ClientPolicy::tui()).map_err(|_| ())?;
+        let _ = opened
+            .transport()
+            .set_read_timeout(Some(DaemonAgentCommandPort::POLL_LANE_DEADLINE));
+        *client = Some(opened);
+    }
+    let payload = serde_json::to_value(TerminalRequest::Inventory {
+        scope: scope.clone(),
+    })
+    .expect("terminal request is serializable");
+    let reply = client
+        .as_mut()
+        .expect("inventory connection was just set")
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Inventory,
+            payload,
+        });
+    match reply {
+        Ok(DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. }) => {
+            decode_terminal_inventory(&body).map_err(|_| ())
+        }
+        Err(_) => {
+            *client = None;
+            Err(())
+        }
+    }
 }
 
 /// Performs one `Resume` fetch on the pump's own deadline-bounded connection,
@@ -3176,7 +3296,8 @@ mod tests {
             DaemonAgentCommandPort {
                 terminal: Some(client),
                 poll: None,
-                pump: TerminalPollPump::spawn(|_, _| Ok(Vec::new())),
+                pump: TerminalPollPump::spawn(|_| Ok(Vec::new())),
+                inventory: None,
                 terminal_epoch: 1,
                 attachments: Vec::new(),
                 restore_connection: None,
@@ -3674,13 +3795,14 @@ mod tests {
             poll: None,
             // The pump answers every registered terminal, so a lost registration
             // is observable as output that stops arriving.
-            pump: TerminalPollPump::spawn(|_, offset| {
+            pump: TerminalPollPump::spawn(|fence| {
                 Ok(vec![TerminalChunk {
-                    start_offset: offset,
-                    end_offset: offset + 2,
+                    start_offset: fence.after_offset,
+                    end_offset: fence.after_offset + 2,
                     data: b"hi".to_vec(),
                 }])
             }),
+            inventory: None,
             terminal_epoch: 1,
             attachments: Vec::new(),
             restore_connection: None,
@@ -4140,7 +4262,8 @@ mod tests {
         let mut port = DaemonAgentCommandPort {
             terminal: Some(client),
             poll: None,
-            pump: TerminalPollPump::spawn(|_, _| Ok(Vec::new())),
+            pump: TerminalPollPump::spawn(|_| Ok(Vec::new())),
+            inventory: None,
             terminal_epoch: 1,
             attachments: Vec::new(),
             restore_connection: None,

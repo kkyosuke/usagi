@@ -801,7 +801,14 @@ CLI の exit、MCP の response loop を無期限停止させない。retry の�
 `OperationId` を持つ mutation を再送するときは元の operation identity を保持する。generic Terminal Launch は現行 wire に
 producer `OperationId` がないため、この durable retry 契約の対象外である。attach 済み terminal の stream lane（attach /
 resume / resync / input / resize / detach）は connection-local な subscription であり、per-request budget ではなく
-下記の `unavailable` → backoff reattach で扱う。TUI は stream sequence、resource revision、terminal output offset を別々に保持し、gap や
+下記の `unavailable` → backoff reattach で扱う。
+
+TUI が daemon の出力・exit を観測する 2 本の lane（attach 済み terminal の `resume` と、detach 済み background tab のための
+scope 単位 `inventory`）は、いずれも描画スレッドの外で、上記の attempt deadline に加えて **client 側の bounded cadence**
+と backoff を持つ。したがって idle な TUI が生む request rate は frame rate にも pane 数にも比例せず、遅い / hung / unavailable な
+owner は当該 lane を後退させるだけで draw / input / modal / quit を止めない。cadence、fence（exact ref・scope・connection epoch・
+要求時 cursor）、bounded な queue と 1 frame あたりの適用数は
+[3. TUI#背景 observation lane](03-tui.md#背景-observation-lane) が正本である。TUI は stream sequence、resource revision、terminal output offset を別々に保持し、gap や
 epoch の不一致では output を継ぎ足さず、snapshot resync を要求する。
 
 terminal の `unavailable` は TerminalSession の connection-local subscription の喪失として扱う。TUI は

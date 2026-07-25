@@ -584,13 +584,14 @@ terminal を停止しない。live Agent tab の close は subscription を deta
 Agent launch、provider resume、runtime kill を行わない。pending tab の close は daemon へ未送信の client-owned launch
 だけを取り消し、送信済み operation を推測して再送・cancel しない。
 
-shell が attach / poll するのは、現在の active target に属する selected foreground terminal だけである。target / tab の
-切替時は以前の subscription を detach し、background target と選択外 tab は terminal session を保持しない。1 frame が同期
-poll する terminal は高々 1 件であり、その foreground terminal の exit を daemon が報告したときだけ tab を自動で閉じる。
-最後の live tab が exit したとき、tab が 1 枚も残らなければ Closeup の action 空状態へ戻る（interrupted history などの
-非 live tab が残っている場合は tab surface に留まる）。foreground poll 自体を UI thread から
-分離する scheduler は [#527](../.usagi/issues/527-perf-tui-terminal-polling-ui-loop-foreground-cadence.md)、IPC request の実効
-deadline は [#521](../.usagi/issues/521-fix-ipc-clientpolicy-request-deadline-reconnect-budget.md) が所有する。
+shell が attach するのは、現在の active target に属する selected foreground terminal だけである。target / tab の
+切替時は以前の subscription を detach し、background target と選択外 tab は terminal session を保持しない。
+**1 frame は daemon への同期 request を 1 件も行わない**: foreground の出力取得も background tab の exit 観測も
+[背景 observation lane](#背景-observation-lane) が別 thread で行い、描画スレッドはその結果を非ブロッキングに drain するだけである。
+どちらの lane が exit を報告した tab も自動で閉じる。最後の live tab が exit したとき、tab が 1 枚も残らなければ
+Closeup の action 空状態へ戻る（interrupted history などの非 live tab が残っている場合は tab surface に留まる）。
+IPC request の実効 deadline は
+[#521](../.usagi/issues/521-fix-ipc-clientpolicy-request-deadline-reconnect-budget.md) が所有する。
 
 ### pane launch の command worker と常駐 stream の分離
 
@@ -634,7 +635,41 @@ scroll region・SGR・alternate と背景 primary buffer・decoder の途中状�
 UTF-8 / CSI / OSC / SGR / alternate の途中でも reconnect 前後で可視セル・cursor・style が一致し、
 `cells_with_scrollback` を使う selection / copy history も untrimmed な参照と一致する。
 
-`Resume`（poll）は**描画スレッドでは行わない**。専用接続を持つ背景スレッド（poll pump）が、attach 済みの各 terminal を継続的に fetch して per-terminal の read-ahead バッファへ積み、描画スレッドは redraw ごとにそのバッファを**非ブロッキングに drain** するだけである。daemon が一時的に応答できない間（例: dispatch 中に agent lock を保持している間）に固まるのは背景スレッドの fetch だけで、描画・入力ループは即座に応答を続ける。attach で得た output offset を pump に登録し、再 attach（reconnect / resync）では新しい snapshot offset で登録し直してバッファと fetch offset をリセットする。`Resume` は daemon 側で接続にも subscription にも紐づかない stateless な操作なので、この専用接続の破棄・再接続は input の subscription・exactly-once ledger・input sequence に影響しない。`Resize` は attach / input とは別の deadline 付き接続で送る（低頻度なので描画スレッドから同期送信でよい）。attach / input / detach は従来どおり単一接続に載せる。この共有接続の epoch と subscription 無効化は [connection epoch と subscription 無効化](#connection-epoch-と-subscription-無効化) が正本である。
+`Resume`（poll）は**描画スレッドでは行わない**。専用接続を持つ背景スレッド（foreground poll pump）が、attach 済みの
+terminal を fetch して per-terminal の read-ahead バッファへ積み、描画スレッドは redraw ごとにそのバッファを**非ブロッキングに
+drain** するだけである。daemon が一時的に応答できない間（例: dispatch 中に agent lock を保持している間）に固まるのは背景
+スレッドの fetch だけで、描画・入力ループは即座に応答を続ける。attach で得た output offset を pump に登録し、再 attach
+（reconnect / resync）では新しい snapshot offset で登録し直してバッファと fetch offset をリセットする。`Resume` は daemon 側で
+接続にも subscription にも紐づかない stateless な操作なので、この専用接続の破棄・再接続は input の subscription・exactly-once
+ledger・input sequence に影響しない。`Resize` は attach / input とは別の deadline 付き接続で送る（低頻度なので描画スレッドから
+同期送信でよい）。attach / input / detach は従来どおり単一接続に載せる。この共有接続の epoch と subscription 無効化は
+[connection epoch と subscription 無効化](#connection-epoch-と-subscription-無効化) が正本である。
+
+#### 背景 observation lane
+
+daemon の出力・exit を観測する lane は 2 本あり、どちらも描画スレッドの外で、専用接続と bounded cadence を持つ。
+
+| lane | 観測対象 | primitive | cadence |
+|---|---|---|---|
+| foreground poll pump | 選択中の attach 済み terminal 1 件の出力 | `Resume { after_offset }` | 出力がある間は interactive（8ms）。無出力が続くと 64ms 上限まで倍々に後退し、出力・attach・入力・resize で即座に interactive へ戻る |
+| background inventory pump | detach 済み background tab の **exit metadata だけ** | scope 単位の `Inventory` | 2s。失敗中は 500ms から 8s 上限の指数 backoff |
+
+この分離により、idle な TUI が生む daemon request は frame rate（約 62.5Hz）ではなく上表の cadence で決まり、pane 数にも比例しない
+（foreground は常に高々 1 件、background は tab 数ではなく **scope 数**に比例する）。
+
+- background lane は `Attach` も terminal 単位の `Resume` も**送らない**。detach 済み tab の観測 primitive は scope inventory だけである。
+- background で bound するのは exit metadata の観測時刻（cadence + queue 遅延 + request deadline 1 回分）だけであり、**final output byte の取得時刻は bound しない**。
+  final output は tab を foreground 化して再 attach したとき、または [completed entry](#exited-terminal-の-completed-entry) の明示 reopen で
+  read-only に読む。
+- inventory が `live: false` として列挙した tracked terminal だけを exit として扱う。reply から単に欠落している entry は exit とみなさず、
+  次の観測へ持ち越す（partial / 誤 routing な inventory で tab を閉じないため）。要求した scope 外の entry を含む reply は失敗として backoff する。
+- 各 lane は完了を **exact `TerminalRef` / scope + connection epoch + 要求時の cursor / watch generation** で fence する。focus 切替、resync、
+  [epoch 変化](#connection-epoch-と-subscription-無効化)、tab の開閉で in-flight だった応答は新しい cursor へ適用せず捨てる。
+- 1 つの ref / scope につき in-flight request は高々 1 件で、遅い owner に対しては request を積まず round を coalesce する。read-ahead バッファ、
+  watch する scope / terminal 数、exit queue、1 frame あたりの exit 適用数はいずれも bounded である。バッファ上限超過は resync 要求へ変換する。
+- lane が劣化した（fetch 失敗、overflow resync、inventory 失敗、scope 不一致、queue / watch の drop）ときだけ、workspace を閉じるときに
+  各 lane の counter を [failure log](05-daemon.md#failure-logging) へ 1 行記録する。描画スレッドの外で完了する lane の失敗は UI に出ないため、
+  これが後から追跡できる唯一の痕跡である。
 
 #### connection epoch と subscription 無効化
 
@@ -647,11 +682,13 @@ client は subscription を `{wire id, connection epoch}` として session に�
 |---|---|---|---|
 | 完全に受信した protocol error（`resync_required` / `stale_target` など）、decode できない `Ok` body、非終端の `Accepted` | 保持する | 変わらない | 無い。当該 pane だけが resync / typed feedback へ進み、他 pane は subscription と ledger を保つ |
 | transport 破断（EOF、frame 破損、write 失敗） | 破棄する | 進む | 全 pane の subscription が同時に無効になる |
-| resize lane・poll pump の失敗 | 触らない | 変わらない | 無い。当該 lane だけを開き直し、attachment も input ledger も無効化しない |
+| resize lane・[foreground poll pump・background inventory pump](#背景-observation-lane) の失敗 | 触らない | 変わらない | 無い。当該 lane だけを開き直し、attachment も input ledger も無効化しない |
 
 epoch が進んだ session は、`Resume` も `Input` も送る前に **fresh attach** を行う。したがって recovery 後の最初の
 打鍵は新しい subscription で一度だけ書かれ、解放済み attachment に対する effect-zero 拒否で失われない。
 無効化された subscription の `Input` は接続を開く前に client 内で拒否するため、effect は確定して 0 である。
+[background inventory pump](#背景-observation-lane) も同じ epoch で fence する。epoch が進むと in-flight の観測結果を捨て、
+新しい epoch が使えるようになった時点から exit metadata の観測上限を測り直す。
 
 detach は次の 2 つを local no-op として扱う。どちらも現在の connection と、他 pane が持つ attachment を変えない。
 
