@@ -188,8 +188,21 @@ enum FakeDaemonReply {
     Ok,
 }
 
-fn spawn_fake_daemon(home: &Path, reply: FakeDaemonReply) -> thread::JoinHandle<()> {
+/// A scripted daemon on the real Unix transport.
+///
+/// `workspace_root` is the workspace this fake daemon claims authority over. The
+/// handshake fence compares a client's declared workspace against it, so a
+/// fixture that wants its `usagi` client admitted passes the same workspace the
+/// client runs in (#548).
+fn spawn_fake_daemon(
+    home: &Path,
+    workspace_root: &Path,
+    reply: FakeDaemonReply,
+) -> thread::JoinHandle<()> {
     let data_dir = channel_data_dir(home);
+    let workspace_root = usagi_core::infrastructure::paths::wire_workspace_root(
+        usagi_core::infrastructure::paths::canonical_workspace_root(workspace_root).unwrap(),
+    );
     ensure_private_dir_all(&data_dir).unwrap();
     let generation = DaemonGeneration(format!("fake-{}", std::process::id()));
     let listener = SecureUnixListener::bind(&data_dir, generation.clone()).unwrap();
@@ -220,10 +233,15 @@ fn spawn_fake_daemon(home: &Path, reply: FakeDaemonReply) -> thread::JoinHandle<
             "fake-connection".into(),
             server_build,
             record,
+            workspace_root,
         );
-        let hello = usagi_daemon::presentation::ipc::handshake(&mut stream, &mut writer, &server)
-            .unwrap()
-            .unwrap();
+        // A refused handshake (e.g. the workspace fence) writes its typed error
+        // frame and ends the connection; there is no request to script after it.
+        let Some(hello) =
+            usagi_daemon::presentation::ipc::handshake(&mut stream, &mut writer, &server).unwrap()
+        else {
+            return;
+        };
         let request = read_json_frame::<Envelope>(&mut stream, 1_048_576)
             .unwrap()
             .unwrap();
@@ -929,7 +947,7 @@ fn cli_daemon_reply_contract_maps_stdout_stderr_and_exit_code() {
     for case in cases {
         let home = short_home();
         let server = if let Some(reply) = case.reply {
-            Some(spawn_fake_daemon(home.path(), reply))
+            Some(spawn_fake_daemon(home.path(), home.workspace(), reply))
         } else {
             install_absent_daemon_endpoint(home.path());
             None
@@ -949,6 +967,82 @@ fn cli_daemon_reply_contract_maps_stdout_stderr_and_exit_code() {
             server.join().unwrap();
         }
     }
+}
+
+/// A client reached from outside the daemon's workspace must be refused instead
+/// of being served another workspace's sessions, scopes, and PR inventory —
+/// which is what lets `session remove` tear down a worktree the caller never
+/// named (#548).
+#[test]
+fn the_running_daemon_admits_only_clients_inside_its_own_workspace() {
+    use usagi_core::infrastructure::ipc::ClientWorkspace;
+    use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
+
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let _daemon = home.spawn_serve();
+    let daemon_dir = home.path().join("daemon");
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            daemon_dir.join("daemon.json").is_file()
+                && daemon_dir.join("current.json").is_file()
+                && daemon_dir.join("sessions.json").is_file()
+        }),
+        "daemon did not publish its production endpoint"
+    );
+
+    let connect = |workspace: ClientWorkspace| {
+        IpcClient::connect(
+            connect_current(home.path()).expect("the published endpoint is connectable"),
+            "workspace-fence-e2e".to_owned(),
+            usagi_core::domain::id::OperationId::new().to_string(),
+            ClientPolicy::cli(),
+            shipping_build_identity(),
+            workspace,
+        )
+    };
+
+    // The daemon fenced the fixture workspace at startup, so a client working in
+    // it — here through the session-worktree spelling below the root — is
+    // admitted exactly as before.
+    let served = daemon_fixture::client_workspace(&home.production_data_dir());
+    let ClientWorkspace::Bound { root: served_root } = served.clone() else {
+        panic!("the fixture declares a bound workspace");
+    };
+    assert!(connect(served).is_ok());
+    assert!(
+        connect(ClientWorkspace::Bound {
+            root: format!("{served_root}/.usagi/sessions/fixture"),
+        })
+        .is_ok()
+    );
+
+    // A sibling workspace is refused with a typed error that names the workspace
+    // this daemon does serve, and a client that declares nothing is refused for
+    // the same reason.
+    let other = tempfile::tempdir_in("/tmp").unwrap();
+    let outside = usagi_core::infrastructure::paths::wire_workspace_root(
+        usagi_core::infrastructure::paths::canonical_workspace_root(other.path()).unwrap(),
+    );
+    let refused = connect(ClientWorkspace::Bound { root: outside })
+        .err()
+        .expect("a foreign workspace must not be admitted");
+    let ClientError::Protocol(refusal) = refused else {
+        panic!("the refusal must be a typed protocol error: {refused}");
+    };
+    assert_eq!(refusal.code, ErrorCode::PermissionDenied);
+    assert_eq!(refusal.error_id, "workspace-mismatch");
+    assert!(refusal.message.contains(&served_root), "{refusal:?}");
+
+    // The daemon keeps serving its own workspace after the refusal.
+    assert!(
+        connect(daemon_fixture::client_workspace(
+            &home.production_data_dir()
+        ))
+        .is_ok()
+    );
 }
 
 #[test]
@@ -976,13 +1070,30 @@ fn mcp_autostarts_without_manual_daemon_start() {
     stop_daemon(&home);
 }
 
+/// `usagi mcp` は daemon client を必須とし、handshake は client の workspace を daemon の
+/// trusted root と照合する（#548）。store tool の fixture は自分で作った repository を
+/// workspace とするため、その root で daemon を起動しておく。以降 root・session worktree・
+/// broken store のどの cwd から実行しても、同じ workspace の内側として admit される。
+fn start_daemon_for(home: &DaemonHome, workspace: &Path) {
+    let output = home
+        .command_at(
+            Channel::Local,
+            workspace,
+            &[OsStr::new("daemon"), OsStr::new("start")],
+        )
+        .output()
+        .expect("usagi バイナリを起動できる");
+    assert!(output.status.success(), "{}", stderr(&output));
+}
+
 #[test]
 fn mcp_store_tools_round_trip_through_stdio_and_durable_files() {
     let _guard = DAEMON_LIFECYCLE_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let home = short_home();
-    let (_workspace, session) = linked_issue_session("e2e");
+    let (workspace, session) = linked_issue_session("e2e");
+    start_daemon_for(&home, workspace.path());
     let requests = concat!(
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_create\",\"arguments\":{\"title\":\"MCP durable issue\",\"priority\":\"high\",\"labels\":[\"mcp\"],\"body\":\"round trip\"}}}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_get\",\"arguments\":{\"number\":1}}}\n",
@@ -1018,6 +1129,7 @@ fn mcp_store_tools_cover_prompt_update_search_and_delete_lifecycles() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let home = short_home();
     let (workspace, session) = linked_issue_session("lifecycle");
+    start_daemon_for(&home, workspace.path());
     let requests = concat!(
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_create\",\"arguments\":{\"title\":\"Lifecycle\"}}}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_to_prompt\",\"arguments\":{\"number\":1}}}\n",
@@ -1237,14 +1349,20 @@ fn open_registers_and_renders_an_explicit_or_current_workspace() {
     assert!(out.contains("Recent"));
     assert!(out.contains("explicit-workspace"));
 
+    stop_daemon(&home);
+
+    // 引数なしの open はカレントディレクトリを開く。session 一覧は daemon が返すため、
+    // その workspace を所有する daemon が必要である（handshake の workspace fence。#548）。
+    // ここでは cwd を workspace とする別 home を使い、その daemon を autostart させる。
+    let current_home = short_home();
     let current = roots.path().join("current-workspace");
     std::fs::create_dir(&current).unwrap();
-    let output = home.run_at(&current, &[OsStr::new("open")]);
-    assert!(output.status.success());
+    let output = current_home.run_at(&current, &[OsStr::new("open")]);
+    assert!(output.status.success(), "{}", stderr(&output));
     let out = stdout(&output);
     assert!(out.contains("current-workspace"));
     assert!(out.contains("main"));
-    stop_daemon(&home);
+    stop_daemon(&current_home);
 }
 
 #[test]

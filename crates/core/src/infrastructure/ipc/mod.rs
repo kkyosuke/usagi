@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -30,6 +31,16 @@ pub const TERMINAL_CHECKPOINT_REVISION: u16 = 2;
 /// screen checkpoint. It is the truth source for the checkpoint path: a client
 /// requires this capability even when the negotiated revision would allow it.
 pub const TERMINAL_SCREEN_CHECKPOINT_CAPABILITY: &str = "terminal.screen-checkpoint.v1";
+/// The capability a daemon advertises when it admits a hello only after matching
+/// the client's declared workspace against its own trusted workspace root. A
+/// workspace-bound client requires it, so a daemon that would admit any
+/// workspace cannot silently serve one workspace's sessions to another.
+pub const WORKSPACE_FENCE_CAPABILITY: &str = "workspace.fence.v1";
+/// The [`ProtocolError::error_id`] carried by every workspace-fence refusal.
+/// Clients match on it to present "this is not this workspace's daemon" instead
+/// of an unavailable endpoint, and to keep the refusal out of cold start,
+/// stale-endpoint recovery, and rollover.
+pub const WORKSPACE_MISMATCH_ERROR_ID: &str = "workspace-mismatch";
 
 macro_rules! string_id {
     ($name:ident, $doc:literal) => {
@@ -281,6 +292,33 @@ impl Default for ProtocolLimits {
     }
 }
 
+/// The workspace a client asserts for the connection it is opening.
+///
+/// A daemon owns exactly one workspace root for its whole process lifetime, but
+/// its endpoint is discovered from the data directory, which is workspace
+/// independent. Without this declaration a client running in workspace B reaches
+/// the daemon of workspace A and receives A's sessions, scopes, and PR
+/// inventory as if they were its own. The declaration is the only thing that
+/// lets the daemon refuse that connection.
+///
+/// It is a coherence fence between cooperating peers, not an authorization
+/// boundary: the accept path already restricts the socket to the daemon's own
+/// UID, and any peer that reaches it can spell any root it likes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+pub enum ClientWorkspace {
+    /// The client works inside the workspace containing `root`: its canonical
+    /// working directory, or the trusted root the daemon injected into a
+    /// provisioned child. `root` must be an absolute canonical path; a path that
+    /// cannot be spelled that way (non-UTF-8, relative, unresolvable) is
+    /// declared empty and always refused rather than guessed at.
+    Bound { root: String },
+    /// The connection performs no workspace-scoped work. It only proves that a
+    /// daemon exists (client readiness) or observes daemon lifecycle identity
+    /// (`usagi daemon replace`), and therefore sends no workspace request.
+    Unbound,
+}
+
 /// The first frame sent by a client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientHello {
@@ -291,6 +329,11 @@ pub struct ClientHello {
     pub capabilities: Vec<String>,
     pub required_capabilities: Vec<String>,
     pub build: BuildIdentity,
+    /// The workspace this connection asserts. Additive on the wire so a hello
+    /// from a client that predates the fence still parses and is answered with
+    /// a typed refusal instead of an unreadable frame.
+    #[serde(default)]
+    pub workspace: Option<ClientWorkspace>,
 }
 
 /// The server's successful handshake result.
@@ -477,9 +520,90 @@ pub struct ServerProtocol {
     pub build: BuildIdentity,
     pub limits: ProtocolLimits,
     pub daemon_process: Option<crate::domain::daemon::DaemonRecord>,
+    /// The canonical workspace root this daemon took authority over at startup.
+    /// It is the only workspace it can serve, so it is also the only one a
+    /// workspace-bound client may declare. An empty value means the root cannot
+    /// be spelled on the wire, which refuses every bound client rather than
+    /// admitting one that cannot be compared.
+    pub workspace_root: String,
 }
 
-/// Negotiate version/capabilities, rejecting mismatched generation before normal traffic.
+/// Decide whether a hello may be served by the daemon that owns `trusted_root`.
+///
+/// [`ClientWorkspace::Unbound`] is admitted because it names no workspace
+/// resource. A [`ClientWorkspace::Bound`] declaration is admitted only when its
+/// root is `trusted_root` itself or a path below it, which is what keeps
+/// subdirectories and session worktrees (`<root>/.usagi/sessions/<name>`)
+/// working while refusing a sibling or parent workspace. Comparison is by path
+/// component, so `<root>-2` is never mistaken for a child of `<root>`.
+///
+/// A hello that declares nothing is refused: the field is additive on the wire,
+/// but admitting it would leave the whole fence bypassable by a stale client,
+/// and no such client can reuse this daemon anyway (the bootstrap artifact fence
+/// only reuses an exact same-artifact daemon).
+///
+/// # Errors
+///
+/// Returns the typed [`WORKSPACE_MISMATCH_ERROR_ID`] refusal, which never
+/// permits a retry, a daemon start, or a silent fallback to this daemon.
+pub fn workspace_admission(
+    declared: Option<&ClientWorkspace>,
+    trusted_root: &str,
+) -> Result<(), ProtocolError> {
+    let trusted = comparable_root(trusted_root);
+    match declared {
+        Some(ClientWorkspace::Unbound) => Ok(()),
+        Some(ClientWorkspace::Bound { root }) => {
+            let declared = comparable_root(root);
+            match (trusted, declared) {
+                (Some(trusted), Some(declared)) if declared.starts_with(trusted) => Ok(()),
+                (Some(_), Some(_)) => Err(workspace_refused(
+                    "client workspace is not inside this daemon's workspace",
+                    trusted_root,
+                )),
+                _ => Err(workspace_refused(
+                    "workspace roots cannot be compared",
+                    trusted_root,
+                )),
+            }
+        }
+        None => Err(workspace_refused(
+            "client did not declare its workspace",
+            trusted_root,
+        )),
+    }
+}
+
+/// A root is comparable only as an absolute path; anything else (empty,
+/// relative) fails closed instead of matching by accident — notably an empty
+/// root, which is a prefix of every path.
+fn comparable_root(root: &str) -> Option<&Path> {
+    Some(Path::new(root)).filter(|path| path.is_absolute())
+}
+
+fn workspace_refused(reason: &str, trusted_root: &str) -> ProtocolError {
+    let root = if trusted_root.is_empty() {
+        "unavailable"
+    } else {
+        trusted_root
+    };
+    let mut error = ProtocolError::new(
+        ErrorCode::PermissionDenied,
+        format!("{reason}; this daemon serves the workspace {root}"),
+    );
+    WORKSPACE_MISMATCH_ERROR_ID.clone_into(&mut error.error_id);
+    error
+}
+
+/// Whether `error` is the workspace-fence refusal. Callers use it to present the
+/// mismatch verbatim and to keep it out of lifecycle recovery.
+#[must_use]
+pub fn is_workspace_mismatch(error: &ProtocolError) -> bool {
+    error.code == ErrorCode::PermissionDenied && error.error_id == WORKSPACE_MISMATCH_ERROR_ID
+}
+
+/// Negotiate version/capabilities, rejecting a mismatched generation and a
+/// foreign workspace before normal traffic.
 pub fn negotiate(
     hello: &ClientHello,
     server: &ServerProtocol,
@@ -496,6 +620,10 @@ pub fn negotiate(
         error.current_daemon_generation = Some(server.daemon_generation.clone());
         return Err(error);
     }
+    // Both fences answer "is this the daemon you meant?", so they precede
+    // feature negotiation: a client pointed at the wrong workspace learns that
+    // instead of a protocol or capability detail of a daemon it cannot use.
+    workspace_admission(hello.workspace.as_ref(), &server.workspace_root)?;
     let protocol = hello
         .supported_protocols
         .iter()

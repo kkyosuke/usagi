@@ -20,6 +20,9 @@ impl io::Write for BadWriter {
     }
 }
 
+/// The workspace root the fixture daemon owns.
+const TRUSTED_ROOT: &str = "/workspace/root";
+
 fn build() -> BuildIdentity {
     build_identity("1", "abc", "test", "debug", &"a".repeat(64))
 }
@@ -36,6 +39,9 @@ fn hello() -> ClientHello {
         capabilities: vec![],
         required_capabilities: vec!["request.correlation.v1".into()],
         build: build(),
+        workspace: Some(ClientWorkspace::Bound {
+            root: TRUSTED_ROOT.into(),
+        }),
     }
 }
 fn server() -> ServerProtocol {
@@ -52,6 +58,7 @@ fn server() -> ServerProtocol {
         build: build(),
         limits: ProtocolLimits::default(),
         daemon_process: None,
+        workspace_root: TRUSTED_ROOT.into(),
     }
 }
 
@@ -169,6 +176,136 @@ fn negotiation_uses_protocol_not_build_identity() {
             revision: 2
         }
     );
+}
+
+#[test]
+fn workspace_fence_admits_the_trusted_tree_and_refuses_every_other_declaration() {
+    let bound = |root: &str| ClientWorkspace::Bound { root: root.into() };
+
+    for admitted in [
+        // The trusted root itself, and the two shapes a client normally reports:
+        // a subdirectory and a session worktree below it.
+        bound(TRUSTED_ROOT),
+        bound(&format!("{TRUSTED_ROOT}/crates/core")),
+        bound(&format!("{TRUSTED_ROOT}/.usagi/sessions/issue-548")),
+        // A trailing separator is the same tree, not a different one.
+        bound(&format!("{TRUSTED_ROOT}/")),
+        // No workspace resource is named at all.
+        ClientWorkspace::Unbound,
+    ] {
+        assert!(
+            workspace_admission(Some(&admitted), TRUSTED_ROOT).is_ok(),
+            "{admitted:?}"
+        );
+    }
+
+    for refused in [
+        // A sibling workspace, and a prefix that only looks like a child: the
+        // comparison is by path component, not by string prefix.
+        bound("/workspace/other"),
+        bound(&format!("{TRUSTED_ROOT}-2")),
+        // The parent of the trusted root does not contain only this workspace.
+        bound("/workspace"),
+        // Roots that cannot be compared at all fail closed, including the empty
+        // spelling a non-UTF-8 or relative path collapses to.
+        bound(""),
+        bound("relative/root"),
+    ] {
+        let error = workspace_admission(Some(&refused), TRUSTED_ROOT).unwrap_err();
+        assert_eq!(error.code, ErrorCode::PermissionDenied, "{refused:?}");
+        assert_eq!(error.error_id, WORKSPACE_MISMATCH_ERROR_ID, "{refused:?}");
+        assert_eq!(error.retry_mode, RetryMode::Never, "{refused:?}");
+        assert_eq!(error.side_effect, SideEffect::None, "{refused:?}");
+        assert!(is_workspace_mismatch(&error), "{refused:?}");
+        // The refusal names the workspace that *is* served, so the client can
+        // say which daemon this is instead of "unavailable".
+        assert!(error.message.contains(TRUSTED_ROOT), "{}", error.message);
+    }
+
+    // A daemon that cannot spell its own root refuses every bound client rather
+    // than admitting one it cannot compare — an empty root is a prefix of every
+    // path, so this is the failure mode that must not fall open.
+    let unknown_root = workspace_admission(Some(&bound(TRUSTED_ROOT)), "").unwrap_err();
+    assert!(is_workspace_mismatch(&unknown_root));
+    assert!(
+        unknown_root.message.contains("unavailable"),
+        "{}",
+        unknown_root.message
+    );
+    // It still admits a connection that names no workspace.
+    assert!(workspace_admission(Some(&ClientWorkspace::Unbound), "").is_ok());
+}
+
+#[test]
+fn negotiation_refuses_a_foreign_workspace_before_protocol_and_capability() {
+    // The fence is part of negotiation, not a separate layer a caller can skip.
+    let mut elsewhere = hello();
+    elsewhere.workspace = Some(ClientWorkspace::Bound {
+        root: "/workspace/other".into(),
+    });
+    let refused = negotiate(&elsewhere, &server()).unwrap_err();
+    assert!(is_workspace_mismatch(&refused));
+
+    // A wrong-workspace client learns that, even when its protocol range and
+    // required capabilities would also have failed: the answer is "wrong
+    // daemon", not a feature detail of a daemon it cannot use.
+    let mut also_incompatible = elsewhere.clone();
+    also_incompatible.supported_protocols = vec![ProtocolRange {
+        generation: 9,
+        min_revision: 0,
+        max_revision: 0,
+    }];
+    also_incompatible.required_capabilities = vec!["absent.capability.v1".into()];
+    assert!(is_workspace_mismatch(
+        &negotiate(&also_incompatible, &server()).unwrap_err()
+    ));
+
+    // The generation fence still precedes it: that client is talking to a
+    // superseded generation regardless of where it is running.
+    let mut wrong_generation = elsewhere;
+    wrong_generation.expected_daemon_generation = Some(DaemonGeneration("previous".into()));
+    assert_eq!(
+        negotiate(&wrong_generation, &server()).unwrap_err().code,
+        ErrorCode::GenerationMismatch
+    );
+}
+
+#[test]
+fn a_hello_without_a_workspace_declaration_parses_and_is_refused() {
+    // The field is additive so a hello from before the fence still decodes; the
+    // daemon answers it with a typed refusal instead of an unreadable frame.
+    let mut legacy = serde_json::to_value(hello()).unwrap();
+    assert!(
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("workspace")
+            .is_some()
+    );
+    let legacy: ClientHello = serde_json::from_value(legacy).unwrap();
+    assert_eq!(legacy.workspace, None);
+
+    let refused = negotiate(&legacy, &server()).unwrap_err();
+    assert!(is_workspace_mismatch(&refused));
+    assert!(refused.message.contains("did not declare"), "{refused:?}");
+}
+
+#[test]
+fn the_bound_declaration_is_a_stable_wire_shape() {
+    assert_eq!(
+        serde_json::to_value(ClientWorkspace::Bound {
+            root: TRUSTED_ROOT.into(),
+        })
+        .unwrap(),
+        json!({"scope": "bound", "root": TRUSTED_ROOT})
+    );
+    assert_eq!(
+        serde_json::to_value(ClientWorkspace::Unbound).unwrap(),
+        json!({"scope": "unbound"})
+    );
+    let hello = serde_json::to_value(hello()).unwrap();
+    assert_eq!(hello["workspace"]["scope"], "bound");
+    assert_eq!(hello["workspace"]["root"], TRUSTED_ROOT);
 }
 
 #[test]

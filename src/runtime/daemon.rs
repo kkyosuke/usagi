@@ -29,8 +29,8 @@ use usagi_core::infrastructure::daemon::{
 use usagi_core::infrastructure::env_resolver::OpCli;
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::ipc::{
-    BuildArtifactDecision, BuildIdentity, BuildRolloverTrigger, build_artifact_decision,
-    build_rollover_trigger,
+    BuildArtifactDecision, BuildIdentity, BuildRolloverTrigger, ClientWorkspace,
+    build_artifact_decision, build_rollover_trigger,
 };
 use usagi_core::infrastructure::paths;
 use usagi_core::infrastructure::persistence::json_file;
@@ -1359,12 +1359,6 @@ fn spawn_ipc_server(
     shutdown: Arc<AtomicBool>,
 ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
     let owner = daemon_process.clone();
-    let server = usagi_daemon::presentation::ipc::server_protocol(
-        generation.clone(),
-        generation.0.clone(),
-        build.clone(),
-        daemon_process,
-    );
     let repo_root = workspace_root.to_path_buf();
     let daemon_generation = usagi_core::domain::id::DaemonGeneration::parse(&generation.0)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -1384,6 +1378,16 @@ fn spawn_ipc_server(
     let retention = usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention::new();
     let (pty, observations) = DaemonPty::new(Arc::clone(&pipeline_metrics));
     let workspace_root = trusted_repository_root(&runtime)?;
+    // The handshake fence compares a client's declared workspace against the
+    // same trusted root the session runtime resolved, so a client working in
+    // another workspace cannot be served this one's sessions (#548).
+    let server = usagi_daemon::presentation::ipc::server_protocol(
+        generation.clone(),
+        generation.0.clone(),
+        build.clone(),
+        daemon_process,
+        paths::wire_workspace_root(&workspace_root),
+    );
     // One reader for the whole daemon: Agent adapters and the terminal profile
     // resolve the same configured environment and share its secret cache.
     let user_environment = Arc::new(UserEnvironment::new(data_dir.to_path_buf(), OpCli));
@@ -5311,6 +5315,37 @@ fn bound_workspace_root(daemon_dir: &Path, candidate: PathBuf) -> std::io::Resul
         .map_err(|error| std::io::Error::other(format!("{error:#}")))
 }
 
+/// The workspace a client process declares in its handshake.
+///
+/// The daemon-injected trusted root wins, so a provisioned MCP child declares
+/// the daemon's own workspace instead of whatever directory the provider left it
+/// in. Every other surface declares its canonical working directory: the daemon
+/// admits that directory when it is the trusted root or below it, which covers
+/// subdirectories and session worktrees without running Git per client start.
+/// A directory that cannot be canonicalized is declared as spelled, so the
+/// daemon refuses it rather than this client guessing that it matches.
+fn bound_client_workspace(
+    injected: Option<std::ffi::OsString>,
+    cwd: std::io::Result<PathBuf>,
+) -> ClientWorkspace {
+    let candidate = injected
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| cwd.ok());
+    let root = candidate.map_or_else(String::new, |path| {
+        paths::wire_workspace_root(paths::canonical_workspace_root(&path).unwrap_or(path))
+    });
+    ClientWorkspace::Bound { root }
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=bound_client_workspace_prefers_the_injected_trusted_root
+fn client_workspace() -> ClientWorkspace {
+    bound_client_workspace(
+        std::env::var_os(paths::WORKSPACE_ROOT_ENV),
+        std::env::current_dir(),
+    )
+}
+
 /// Connect to the daemon for this binary's isolated runtime channel. Every
 /// channel reuses an exact artifact. A different known artifact returns one
 /// deterministic rollover trigger. Development consumes it with a cold
@@ -5318,7 +5353,16 @@ fn bound_workspace_root(daemon_dir: &Path, candidate: PathBuf) -> std::io::Resul
 pub(crate) fn client(
     policy: ClientPolicy,
 ) -> Result<IpcClient<std::os::unix::net::UnixStream>, ClientError> {
-    bootstrap_client(|data_dir, build| connect_client(data_dir, policy, build.clone()))
+    client_for(policy, &client_workspace())
+}
+
+fn client_for(
+    policy: ClientPolicy,
+    workspace: &ClientWorkspace,
+) -> Result<IpcClient<std::os::unix::net::UnixStream>, ClientError> {
+    bootstrap_client(|data_dir, build| {
+        connect_client(data_dir, policy, build.clone(), workspace.clone())
+    })
 }
 
 /// Establishes a bootstrapped, build-fenced daemon connection. `connect` builds
@@ -5366,6 +5410,10 @@ fn bootstrap_client<S: Read + Write>(
             ClientError::RolloverRequired(trigger)
         }
         bootstrap::BootstrapError::UnknownBuildIdentity => ClientError::BuildIdentityUnavailable,
+        // Keep the daemon's typed refusal (code, error id, message) so every
+        // surface renders "this is another workspace's daemon" instead of an
+        // unavailable transport.
+        bootstrap::BootstrapError::WorkspaceMismatch(refusal) => ClientError::Protocol(refusal),
         other => ClientError::Lifecycle(other.to_string()),
     })
 }
@@ -5434,6 +5482,7 @@ fn connect_deadline_client(
     data_dir: &Path,
     policy: ClientPolicy,
     build: BuildIdentity,
+    workspace: ClientWorkspace,
     clock: SystemClock,
     budget_ms: u64,
 ) -> std::io::Result<DeadlineIpcClient> {
@@ -5445,6 +5494,7 @@ fn connect_deadline_client(
         format!("{}", std::process::id()),
         policy,
         build,
+        workspace,
     )
     .map_err(std::io::Error::other)
 }
@@ -5457,8 +5507,16 @@ fn connect_deadline_client(
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=mcp_e2e
 pub(crate) fn policy_client(policy: ClientPolicy) -> Result<impl DaemonClient, ClientError> {
     let clock = SystemClock::new();
+    let workspace = client_workspace();
     let initial = bootstrap_client(|data_dir, build| {
-        connect_deadline_client(data_dir, policy, build.clone(), clock, policy.timeout_ms)
+        connect_deadline_client(
+            data_dir,
+            policy,
+            build.clone(),
+            workspace.clone(),
+            clock,
+            policy.timeout_ms,
+        )
     })?;
     let data_dir =
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
@@ -5467,8 +5525,15 @@ pub(crate) fn policy_client(policy: ClientPolicy) -> Result<impl DaemonClient, C
     // owns cold-start and rollover, so a plain connect that fails simply exhausts
     // the budget as a typed unavailable rather than churning the daemon.
     let reconnect = move |clock: SystemClock, budget_ms: u64| {
-        connect_deadline_client(&data_dir, policy, build.clone(), clock, budget_ms)
-            .map_err(|error| ClientError::Unavailable(error.to_string()))
+        connect_deadline_client(
+            &data_dir,
+            policy,
+            build.clone(),
+            workspace.clone(),
+            clock,
+            budget_ms,
+        )
+        .map_err(|error| ClientError::Unavailable(error.to_string()))
     };
     Ok(PolicyClient::new(clock, policy, reconnect, Some(initial)))
 }
@@ -5484,8 +5549,16 @@ pub(crate) fn request_replacement(
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
     let _bootstrap_lock = acquire_bootstrap_lock(&data_dir)?;
     let expected_build = current_build();
-    let client = connect_client(&data_dir, policy, expected_build.clone())
-        .map_err(|_| ClientError::Unavailable("daemon endpoint is unavailable".into()))?;
+    // Replacing the running artifact is a lifecycle observation, not workspace
+    // work: it reads the daemon's advertised build and sends no request, so it
+    // stays usable from outside the daemon's workspace.
+    let client = connect_client(
+        &data_dir,
+        policy,
+        expected_build.clone(),
+        ClientWorkspace::Unbound,
+    )
+    .map_err(|_| ClientError::Unavailable("daemon endpoint is unavailable".into()))?;
     let actual_build = client.server_build();
     match build_artifact_decision(actual_build, &expected_build, true) {
         BuildArtifactDecision::ForceReplace | BuildArtifactDecision::RolloverTrigger => {
@@ -5584,6 +5657,7 @@ fn connect_client(
     data_dir: &Path,
     policy: ClientPolicy,
     build: BuildIdentity,
+    workspace: ClientWorkspace,
 ) -> std::io::Result<IpcClient<std::os::unix::net::UnixStream>> {
     let daemon = data_dir.join("daemon");
     let locator = read_locator(&daemon)?;
@@ -5605,6 +5679,7 @@ fn connect_client(
         format!("{}", std::process::id()),
         policy,
         build,
+        workspace,
         &expected,
         &locator.generation,
         peer,
@@ -5641,8 +5716,14 @@ fn acquire_bootstrap_lock(data_dir: &Path) -> Result<std::fs::File, ClientError>
 
 /// Ensures that an active daemon endpoint exists before an interactive TUI is
 /// shown. TUI operations still acquire their own client connection.
+///
+/// This readiness probe sends no request, so it declares no workspace: the entry
+/// screens that need it (`usagi hop`'s Recent list, `usagi open <path>`) are
+/// workspace switchers that must keep working from any directory. The
+/// workspace-bound connections those screens make afterwards carry their own
+/// declaration and are fenced there.
 pub(crate) fn ensure_ready() -> Result<(), ClientError> {
-    client(ClientPolicy::tui()).map(|_| ())
+    client_for(ClientPolicy::tui(), &ClientWorkspace::Unbound).map(|_| ())
 }
 
 #[cfg(test)]
@@ -5881,6 +5962,7 @@ mod tests {
             "forged".into(),
             current_build(),
             record,
+            paths::wire_workspace_root(data),
         );
         let server = std::thread::spawn(move || {
             let mut stream = loop {
@@ -5899,9 +5981,16 @@ mod tests {
                 .unwrap();
         });
 
-        let error = connect_client(data, ClientPolicy::cli(), current_build())
-            .err()
-            .expect("forged endpoint must be rejected");
+        let error = connect_client(
+            data,
+            ClientPolicy::cli(),
+            current_build(),
+            ClientWorkspace::Bound {
+                root: paths::wire_workspace_root(data),
+            },
+        )
+        .err()
+        .expect("forged endpoint must be rejected");
         assert!(error.to_string().contains("endpoint owner"));
         server.join().unwrap();
         recorded.kill().unwrap();
@@ -6667,6 +6756,56 @@ mod tests {
         assert!(!daemon.join("current.json").exists());
         // SAFETY: the listener was not moved or dropped; cleanup is idempotent.
         unsafe { ManuallyDrop::drop(&mut listener) };
+    }
+
+    #[test]
+    fn bound_client_workspace_prefers_the_injected_trusted_root() {
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let canonical = ClientWorkspace::Bound {
+            root: paths::wire_workspace_root(paths::canonical_workspace_root(&workspace).unwrap()),
+        };
+
+        // A daemon-provisioned child declares the trusted root the daemon
+        // injected, not whatever directory the provider left it in.
+        assert_eq!(
+            bound_client_workspace(
+                Some(workspace.clone().into_os_string()),
+                Ok(directory.path().join("elsewhere")),
+            ),
+            canonical
+        );
+
+        // Every other surface declares its canonical working directory, so a
+        // subdirectory spelling still resolves onto the one comparable root. An
+        // empty injection is ignored rather than treated as a root.
+        assert_eq!(
+            bound_client_workspace(
+                Some(std::ffi::OsString::new()),
+                Ok(workspace.join(".").join("..").join("workspace")),
+            ),
+            canonical
+        );
+
+        // An unresolvable directory is declared exactly as spelled: the daemon
+        // refuses it rather than this client assuming that it matches.
+        let missing = workspace.join("absent");
+        assert_eq!(
+            bound_client_workspace(None, Ok(missing.clone())),
+            ClientWorkspace::Bound {
+                root: paths::wire_workspace_root(&missing),
+            }
+        );
+
+        // With no working directory at all there is nothing to declare, and an
+        // empty root is refused by every daemon.
+        assert_eq!(
+            bound_client_workspace(None, Err(std::io::Error::other("no working directory"))),
+            ClientWorkspace::Bound {
+                root: String::new(),
+            }
+        );
     }
 
     #[test]

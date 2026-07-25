@@ -627,6 +627,9 @@ mod tests {
                 target: "test".into(),
                 artifact: "client-artifact".into(),
             },
+            usagi_core::infrastructure::ipc::ClientWorkspace::Bound {
+                root: "/workspace/root".into(),
+            },
         )
         .unwrap();
         let reply = client

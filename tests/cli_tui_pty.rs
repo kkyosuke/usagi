@@ -462,6 +462,7 @@ fn daemon_client(home: &Path) -> IpcClient<std::os::unix::net::UnixStream> {
         OperationId::new().to_string(),
         ClientPolicy::cli(),
         shipping_build_identity(),
+        daemon_fixture::client_workspace(&data_dir),
     )
     .unwrap()
 }

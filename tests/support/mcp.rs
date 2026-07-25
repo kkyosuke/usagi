@@ -363,6 +363,7 @@ impl McpHarness {
                     OperationId::new().to_string(),
                     ClientPolicy::cli(),
                     shipping_build_identity(),
+                    super::daemon::client_workspace(&self.data_dir()),
                 )
                 .unwrap();
             }
