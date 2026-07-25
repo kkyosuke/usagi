@@ -1637,17 +1637,22 @@ struct LifecycleSnapshot {
 }
 
 impl LifecycleSnapshot {
-    /// Sessions the sidebar lists: usable `Available` checkouts and `Failed`
-    /// reservations. A `Failed` row still owns its name, so listing it is what
-    /// lets a client see and remove it; capability gating (attach vs remove) is
-    /// derived per row from its lifecycle. Transient states (`Creating` /
-    /// `Initializing` / `Deleting`) are not surfaced as sidebar rows.
+    /// Sessions the sidebar lists: usable `Available` checkouts, `Failed`
+    /// reservations, and `Deleting` rows whose teardown is still running. A
+    /// `Failed` row still owns its name, so listing it is what lets a client see
+    /// and remove it; a `Deleting` row is the visible half of an accepted
+    /// removal, which the daemon's teardown worker finishes asynchronously and
+    /// which therefore lasts as long as the worktree takes to remove. Capability
+    /// gating (attach vs remove) is derived per row from its lifecycle, so
+    /// neither row is attachable and a `Deleting` row cannot be removed again.
+    /// The reservation states (`Creating` / `Initializing`) stay hidden: they are
+    /// bounded by one request and have their own pending-row treatment.
     fn listed_sessions(&self) -> impl Iterator<Item = &ManagedSession> {
         use usagi_core::domain::session_lifecycle::SessionLifecycle;
         self.sessions.iter().filter(|session| {
             matches!(
                 session.lifecycle,
-                SessionLifecycle::Available | SessionLifecycle::Failed
+                SessionLifecycle::Available | SessionLifecycle::Failed | SessionLifecycle::Deleting
             )
         })
     }
@@ -3340,7 +3345,7 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_snapshot_lists_failed_sessions_with_their_lifecycle_projection() {
+    fn lifecycle_snapshot_lists_failed_and_deleting_sessions_with_their_lifecycle_projection() {
         use usagi_core::domain::session_lifecycle::{Failure, FailureStage};
         let workspace = Workspace::new("work", "/tmp/work");
         let mut available =
@@ -3353,35 +3358,41 @@ mod tests {
             stage: FailureStage::Create,
             summary: "create failed".into(),
         });
+        // An accepted removal whose daemon-owned teardown is still running.
+        let mut deleting =
+            ManagedSession::new_creating("deleting".into(), OperationId::new(), Utc::now());
+        deleting.lifecycle = SessionLifecycle::Deleting;
         // A transient reservation is durable but not a sidebar row.
         let creating =
             ManagedSession::new_creating("creating".into(), OperationId::new(), Utc::now());
         let available_id = available.session_id;
         let failed_id = failed.session_id;
+        let deleting_id = deleting.session_id;
         let snapshot = LifecycleSnapshot {
             workspace_id: WorkspaceId::new(),
             root_worktree_id: usagi_core::domain::id::WorktreeId::new(),
             revision: 1,
-            sessions: vec![available, failed, creating],
+            sessions: vec![available, failed, deleting, creating],
             agent_resumes: std::collections::BTreeMap::new(),
         };
 
-        // Available and Failed are listed; the transient Creating row is not.
+        // Available, Failed and Deleting are listed; the Creating row is not.
         assert_eq!(
             snapshot
                 .listed_sessions()
                 .map(|session| session.name.as_str())
                 .collect::<Vec<_>>(),
-            ["available", "failed"]
+            ["available", "failed", "deleting"]
         );
-        // Both listed rows are projected, so a Failed row's name is visible.
+        // Every listed row is projected, so a Failed row's name is visible and a
+        // removal in progress keeps its row until the teardown finishes.
         assert_eq!(
             snapshot
                 .project(&workspace, &[])
                 .iter()
                 .map(|record| record.name.clone())
                 .collect::<Vec<_>>(),
-            ["available", "failed"]
+            ["available", "failed", "deleting"]
         );
         // The lifecycle projection carries each state and the Failed summary.
         let lifecycles = snapshot.session_lifecycles();
@@ -3397,6 +3408,13 @@ mod tests {
             failed_projection.failure_summary.as_deref(),
             Some("create failed")
         );
+        // A Deleting row is neither attachable nor removable again, so listing
+        // it cannot produce a second teardown of the same session.
+        let deleting_projection = lifecycles.get(&deleting_id).unwrap();
+        assert_eq!(deleting_projection.lifecycle, SessionLifecycle::Deleting);
+        assert!(!deleting_projection.capabilities().can_use);
+        assert!(!deleting_projection.capabilities().can_remove);
+        assert_eq!(deleting_projection.failure_summary, None);
     }
 
     #[test]

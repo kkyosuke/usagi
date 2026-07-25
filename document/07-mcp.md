@@ -13,6 +13,7 @@
 - [プロトコルとライフサイクル](#プロトコルとライフサイクル)
 - [JSON-RPC メソッド](#json-rpc-メソッド)
 - [tool 面](#tool-面)
+  - [session lifecycle の受理契約](#session-lifecycle-の受理契約)
 - [tool descriptor と追加手順](#tool-descriptor-と追加手順)
 - [resource 面](#resource-面)
 - [orchestration ガイド](#orchestration-ガイド)
@@ -113,7 +114,8 @@ session / agent など無効化対象ではない MCP tool は引き続き公開
 
 | tool | 実挙動 |
 |---|---|
-| `session_create` / `session_remove` / `session_recover_legacy` | daemon IPC を通じて session lifecycle store と worktree を操作する |
+| `session_create` / `session_recover_legacy` | daemon IPC を通じて session lifecycle store と worktree を操作する |
+| `session_remove` | 削除を **受理**して返す。worktree の撤去は daemon の teardown worker が完了させる（[session lifecycle の受理契約](#session-lifecycle-の受理契約)） |
 | `session_list` / `session_status` | daemon の durable lifecycle snapshot を返す。`session_status` は agent phase と worktree の branch/status/dirty/merged も投影する |
 | `session_prompt` | `auto` / `queue` / `live` を daemon が解決し、次回 Agent launch 用の durable queue または live Agent PTY へ配送する |
 | `session_delegate_issue` | session 作成と durable prompt queue 投入を 1 回の daemon request で完了する |
@@ -128,6 +130,25 @@ session / agent など無効化対象ではない MCP tool は引き続き公開
 
 agent は durable effect を保証する行だけを実行手順に使う。daemon は handler の無い action の入力
 payload を成功応答としてエコーしない。
+
+### session lifecycle の受理契約
+
+`session_create` / `session_remove` / `session_recover_legacy --apply` の成功応答は
+`accepted operation <operation_id> (revision <revision>)` である。この文字列は **operation が受理され durable state に
+記録された**ことを意味する。
+
+`session_remove` の受理は「worktree を削除し終えた」ことを意味しない。daemon は session を `deleting` に
+遷移させた時点で応答し、worktree の撤去は daemon 所有の teardown worker が続ける
+（[5. daemon の session teardown worker](05-daemon.md#session-teardown-worker) が正本）。これにより、数 GB の
+`target/` を持つ session の削除でも MCP の 30 秒 deadline 内に応答が返る。agent は完了を次のように観測する。
+
+| 観測 | 意味 |
+|---|---|
+| `session_list` にその session が `deleting` で残る | teardown が進行中である。remove を再送しても新しい teardown は始まらず、進行中 operation が返る |
+| `session_list` からその session が消える | teardown が完了した |
+| `session_list` にその session が `failed` で残る | teardown が失敗した。`failure.summary` に原因が入る。名前は保持されるため、その record を `session_remove` すれば同名 session を再作成できる |
+
+daemon を停止・crash させても teardown は失われない。次の daemon 起動時に `deleting` の record から再開される。
 
 dispatch 系は credential から caller と current run を復元する。`session_dispatch` は session を作成または再利用し、
 その session worktree で worker PTY を起動して run/agent/binding を durable に保存する。worker の

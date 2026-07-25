@@ -2,14 +2,17 @@
 
 > [設計提案一覧](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [terminal VT snapshot](12-terminal-vt-snapshot.md)
 
-本書は、v2 daemon の**単一インスタンス保証**と**session teardown の実行位置**についての未実装設計である。
+本書は、v2 daemon の**単一インスタンス保証**と**session teardown の実行位置**についての設計である。
+このうち [設計 3: teardown worker と resume 契約](#設計-3-teardown-worker-と-resume-契約) は実装済みで、
+契約の正本は [5. daemon の session teardown worker](../05-daemon.md#session-teardown-worker) と
+[7. MCP サーバの session lifecycle の受理契約](../07-mcp.md#session-lifecycle-の受理契約) に移った。
+本書に残るのは、その採用理由と却下した代替案である。設計 1 / 2 は未実装である。
 実地調査で 3 つの独立した欠陥を確認し、実装 issue
 [#540](../../.usagi/issues/540-fix-daemon-daemon-serve-self-shutdown-test-fixture-workspace.md) /
 [#542](../../.usagi/issues/542-fix-daemon-fence-workspace-mode-home.md) /
 [#543](../../.usagi/issues/543-fix-daemon-session-remove-worktree-teardown-worker-ipc.md)
-に分割した。本書が採用機構・却下した代替案・fence の単位・crash 時の再開契約の設計判断の正本であり、実装が確定したら
-該当部分を [5. daemon](../05-daemon.md)（process lifecycle / data directory / durable operation）と
-[7. MCP サーバ](../07-mcp.md)（`session_remove` の受理契約）へ畳み込む。
+に分割した。本書が採用機構・却下した代替案・fence の単位・crash 時の再開契約の設計判断の正本であり、実装が確定した
+部分は [5. daemon](../05-daemon.md) と [7. MCP サーバ](../07-mcp.md) へ畳み込む（[docs 畳み込み先](#docs-畳み込み先)）。
 
 ## 目次
 
@@ -44,7 +47,7 @@ PID 25529  PPID 1  ELAPSED 01:48:04
 |---|---|---|---|
 | 1 | daemon に「権威を失ったら終了する」自衛が無い | `SignalShutdown::wait` の shutdown 条件は signal と IPC flag だけ | 実測で確認（残留 20 プロセス） |
 | 2 | fence の単位が mode 別 data directory であり、daemon が所有する workspace と一致しない | `FileInstanceLock` は `<data_dir>/daemon/daemon.lock`、権威は `current_dir()` 由来の repo root | コード調査で確定（潜在） |
-| 3 | session teardown が IPC request handler 内で同期実行される | `perform_remove` の 3 段が `usagi-ipc-client` thread 上で直列 | コード調査で確定 |
+| 3 | session teardown が IPC request handler 内で同期実行される | `perform_remove` の 3 段が `usagi-ipc-client` thread 上で直列 | 修正済み（#543。即時受理 + teardown worker） |
 
 欠陥 1 は、同じクラスの不具合として
 [#171](../../.usagi/issues/171-fix-daemon-usagi-daemon-serve-teardown-data-dir-self-shutdown.md)（`done`）が
@@ -59,16 +62,17 @@ PID 25529  PPID 1  ELAPSED 01:48:04
 [欠陥 1] test が起動した daemon が reap されず残留
    └─ cwd が session worktree の内側（test が fixture workspace を指定していない）
         └─ その session の git worktree remove / remove_dir_all が失敗・停滞
-             └─ [欠陥 3] remove は IPC handler 内で同期実行されるので
-                  呼び出した client の接続が deadline を超えて timeout する
+             └─ [欠陥 3・修正済み] かつて remove は IPC handler 内で同期実行されたため
+                  呼び出した client の接続が deadline を超えて timeout した。現在は即時受理し、
+                  停滞するのは daemon 所有の teardown worker だけである（client は応答を受け取る）
 
 [欠陥 2] は日常運用では未発火（出荷バイナリは daemon を持たない v1 コード）。
    v2 出荷時に mode 切り替え運用（task run / dev / prd）で確実に踏む。
 ```
 
-実装順序は **#540 → #542**（#542 の test は #540 が入れる fixture workspace helper を前提にする）、
-**#543 は独立**である。ただし #543 の受入条件のうち「巨大 `target/` の削除が完了する」は、
-残留 daemon が worktree を握らないこと、すなわち #540 に実質的に依存する。
+残る実装順序は **#540 → #542** である（#542 の test は #540 が入れる fixture workspace helper を前提にする）。
+#543 は独立に実装済みだが、その受入条件のうち「巨大 `target/` の削除が完了する」は、残留 daemon が worktree を
+握らないこと、すなわち #540 に実質的に依存する（削除は再開され続けるが、握られている間は完了しない）。
 
 ## 設計 1: custody 喪失による self-shutdown
 
@@ -142,41 +146,33 @@ fence を workspace 単位にしても、この誤接続経路は fence では�
 
 ## 設計 3: teardown worker と resume 契約
 
-`perform_remove` は [#1270](https://github.com/KKyosuke/usagi/pull/1270) で 3 段に分割され、重い削除の間は
-session lock を解放している。しかし 3 段は 1 本の IPC request handler の中で直列に走るため、**呼び出した client の
+**実装済み（#543）。契約の正本は [5. daemon の session teardown worker](../05-daemon.md#session-teardown-worker) と
+[7. MCP サーバの session lifecycle の受理契約](../07-mcp.md#session-lifecycle-の受理契約)である。**
+本節に残すのは採用理由だけである。
+
+修正前は、`perform_remove` の 3 段（[#1270](https://github.com/KKyosuke/usagi/pull/1270) で分割）がすべて 1 本の
+IPC request handler の中で直列に走っていた。重い削除の間 session lock は解放されていたが、**呼び出した client の
 接続が削除完了まで応答を受け取れない**。client の deadline budget は TUI 2,000ms / CLI 10,000ms / MCP 30,000ms で、
-coverage 実行後の `target/llvm-cov-target` は数 GB あるため、削除は分オーダーになり必ず timeout する。
+coverage 実行後の `target/llvm-cov-target` は数 GB あるため、削除は分オーダーになり必ず timeout していた。
+さらに daemon 起動時の `reconcile()` が `Deleting` を `Failed` へ落としていたため、`DeletePlan` が durable に
+残っているのに削除は再開されず、半分消えた worktree tree と session 名を所有し続ける record が残った。v1 で
+`git_teardown` 中断が次の手動 remove まで詰まった病理と同型である。
 
-さらに daemon 起動時の `reconcile()` は `Deleting` を `Failed` へ落とす。`DeletePlan` は durable に残っているのに
-削除は再開されず、半分消えた worktree tree と session 名を所有し続ける record が残る。v1 で `git_teardown` 中断が
-次の手動 remove まで詰まった病理と同型である。
+**採用した機構は「即時 accept + daemon 所有の teardown worker」である。** その選択理由は次のとおり。
 
-**採用: 即時 accept + daemon 所有の teardown worker。**
-
-```text
-client ── session_remove ──▶ IPC handler
-                              begin_remove（session lock 下・Deleting へ遷移・DeletePlan を durable に記録）
-                            ◀── accepted { operation_id, deleting } を即時返却
-                                    │
-                        teardown worker（1 thread・直列 drain）
-                              remove_session_tree（nested worktree → remove_dir_all）
-                              finish_remove（session lock を短時間だけ再取得して確定）
-                                    │
-client ── session_list ─────▶ deleting 行 → 完了で消滅（失敗なら Failed + 原因）
-```
-
-- reply は既存の `SessionReply { operation_id, revision, body }` で表現できるため **wire schema の変更は不要**である。
-- **queue は新設しない**。`lifecycle == Deleting` かつ `delete_plan` を持つ record が、そのまま未完了 teardown の
+- reply は既存の `SessionReply { operation_id, revision, body }` で表現できるため **wire schema を変えずに済む**。
+  受理応答の body は `deleting` 行を含む通常の snapshot であり、client は追加の field を解釈しない。
+- **queue を新設しない**。`lifecycle == Deleting` かつ `delete_plan` を持つ record が、そのまま未完了 teardown の
   集合である。追加の永続 file を持たないので、queue と durable state が乖離しない。
-- worker は 1 本・直列とする。N 件の削除が同時に I/O を飽和させない。queue 深さは session 数で自然に有界である。
-- **`reconcile()` の `Deleting` を「`Failed` へ落とす」から「worker へ再投入する（resume）」へ変える**。
-  `remove_session_tree` は `NotFound → Ok` で冪等なので、途中まで削除された tree に対して安全に再実行できる。
+- worker を 1 本・直列にする。N 件の削除が同時に I/O を飽和させない。queue 深さは session 数で自然に有界である。
+- **`reconcile()` の `Deleting` を「`Failed` へ落とす」から「worker が再開する（resume）」へ変える**。
+  teardown は「対象が無ければ成功」で冪等なので、途中まで削除された tree に対して安全に再実行できる。
   これが本設計の中心的な correctness 改善である。`Creating` / `Initializing` の `Failed` 化は変えない
   （create は effect を巻き戻せないため）。
 - client 表示は既存の投影で足りる。`snapshot()` は
   [#529](../../.usagi/issues/529-fix-daemon-failed-session-remove.md) 以降すべての durable record を `lifecycle` 付きで
   投影し、[4. daemon IPC の managed session request](../04-ipc.md#managed-session-request) も `deleting` scope への
-  launch を typed refusal として定義済みである。
+  launch を typed refusal として定義済みである。TUI は `deleting` 行を削除中の行として描画するだけでよい。
 - 冪等性は、同一 `operation_id` の再送は既存の journal replay、`Deleting` な session への**新しい** `operation_id` は
   重複投入せず進行中 operation を返す、で閉じる。
 
@@ -212,5 +208,5 @@ client ── session_list ─────▶ deleting 行 → 完了で消滅�
 | custody 喪失による self-shutdown | [5. daemon の daemon process lifecycle](../05-daemon.md#daemon-process-lifecycle) |
 | workspace × data dir の 2 段 fence | [5. daemon の daemon process lifecycle](../05-daemon.md#daemon-process-lifecycle) / [daemon data directory](../05-daemon.md#daemon-data-directory) |
 | `<repo>/.usagi/daemon.lock` の ignore rules | [5. daemon の session tree と ignore rules](../05-daemon.md#session-tree-と-ignore-rules) |
-| teardown worker と resume 契約 | [5. daemon の durable operation](../05-daemon.md#durable-operation) |
-| `session_remove` が受理を返す契約 | [7. MCP サーバ](../07-mcp.md) |
+| teardown worker と resume 契約（畳み込み済み） | [5. daemon の session teardown worker](../05-daemon.md#session-teardown-worker) |
+| `session_remove` が受理を返す契約（畳み込み済み） | [7. MCP サーバの session lifecycle の受理契約](../07-mcp.md#session-lifecycle-の受理契約) |

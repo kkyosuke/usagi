@@ -15,6 +15,7 @@ managed session と terminal を所有する daemon の現在の契約である�
 - [PR refresh scheduler](#pr-refresh-scheduler)
 - [failure logging](#failure-logging)
 - [durable operation](#durable-operation)
+- [session teardown worker](#session-teardown-worker)
 - [terminal ownership](#terminal-ownership)
 - [terminal launch environment](#terminal-launch-environment)
 - [agent ownership](#agent-ownership)
@@ -38,13 +39,13 @@ session incarnation で fence する。IPC の create/remove は daemon が rese
 effect を実行し、同じ daemon generation・operation・session attempt・revision の completion だけを反映する。
 失敗した effect は safe failure として残り、client が local worktree 操作へ fallback しない。
 
-create/remove の重い Git worktree 構築・撤去（`git worktree add` / `remove`）は**共有 session lock を解放した状態で実行する**。lock を握るのは fast な durable transition（reservation・`BeginRemove`・completion の永続化）だけであり、その間に session 一覧・terminal poll・user-decision 一覧など他 connection の read が同じ lock 待ちで固まらない。したがって長い worktree 操作の最中も daemon は応答し続け、TUI の描画・入力ループが session 作成・削除で凍結しない。
+create の重い Git worktree 構築（`git worktree add`）は**共有 session lock を解放した状態で実行する**。lock を握るのは fast な durable transition（reservation・completion の永続化）だけであり、その間に session 一覧・terminal poll・user-decision 一覧など他 connection の read が同じ lock 待ちで固まらない。remove はさらに一歩進めて、`Deleting` への遷移だけで受理を返し、worktree 撤去（`git worktree remove` と session tree の除去）を daemon 所有の worker へ渡す（[session teardown worker](#session-teardown-worker)）。したがって長い worktree 操作の最中も daemon は応答し続け、TUI の描画・入力ループが session 作成・削除で凍結しない。
 
 各 managed session は `SessionId` と `WorktreeId` を同時に永続化する。agent / delegation が必要とする path は、available の workspace / session / worktree identity がすべて一致する場合だけ daemon が返す。creating、deleting、failed、stale identity、表示名・path-only の指定は scope に解決しない。
 
 workspace root（`⌂ root`）も一つの scope として同じ仕組みで解決する。root scope は `session_id` を持たず（`None`）、workspace ごとに一度だけ生成して永続化した **root `WorktreeId`** で識別する。daemon は snapshot でこの root worktree id を公開し、launch 時に要求された workspace / root worktree identity が自分のものと一致する場合だけ、cwd を **trusted repository root** に解決する。root scope の cwd は常に daemon が持つ trusted root であり、client 供給の path は使わない。session scope の fence（`session_id` 必須の completion）はこの追加で回帰しない。詳細な設計根拠は [proposals/10-workspace-root-scope.md](proposals/10-workspace-root-scope.md)。
 
-client に返す session 一覧は、使用可能な `available` に加えて、名前を占有し続ける `failed`（作成に失敗した reservation と中断後に reconcile された record）も lifecycle と失敗理由付きで投影する。過渡状態（`creating` / `initializing` / `deleting`）は一覧に出さない。各行の可否（attach / remove など）は wire に載る lifecycle から client 側で導出する（`SessionLifecycle::capabilities` が正本）。`failed` 行は使用不可（attach を提示しない）だが削除可能で、削除すると worktree 未作成でも名前が解放されて同名 create が再び通る。一覧への投影は attach 対象を広げない: scope 解決は引き続き `available` だけを対象とする（前述）。
+client に返す session 一覧は、使用可能な `available` に加えて、名前を占有し続ける `failed`（作成に失敗した reservation と中断後に reconcile された record）と、teardown が進行中の `deleting` も lifecycle と失敗理由付きで投影する。`deleting` を出すのは、remove が受理を返してから worker が撤去を終えるまでの間（巨大な `target/` では分オーダー）が client から見える状態だからである（[session teardown worker](#session-teardown-worker)）。reservation 状態（`creating` / `initializing`）は 1 request で完結し、client 側に固有の pending 表現があるため一覧に出さない。各行の可否（attach / remove など）は wire に載る lifecycle から client 側で導出する（`SessionLifecycle::capabilities` が正本）。`failed` 行は使用不可（attach を提示しない）だが削除可能で、削除すると worktree 未作成でも名前が解放されて同名 create が再び通る。`deleting` 行は使用不可かつ削除不可で、同じ session の teardown が二重に走らない。一覧への投影は attach 対象を広げない: scope 解決は引き続き `available` だけを対象とする（前述）。
 
 ## session tree と ignore rules
 
@@ -391,19 +392,53 @@ durable store は、受理される create / remove operation の owner generati
 検証する。completion は `CompletionFence` と reducer transition の両方を満たす場合だけ反映される。
 このため ACK loss や late worker で effect の結果を推測して二重実行しない。
 
-daemon 起動時には未完了の create / initialize / delete journal を reconcile する。physical effect の完了を証明できない record は再実行せず safe failure にして明示 recovery を待つ。
-
-remove の worktree teardown は shared session lock を解放した状態で実行するが、`begin` / `execute` / `finish` の
-3 段は要求元の IPC 接続の応答経路の内側で直列に走る。したがって巨大な `target/` を持つ session の削除では、
-その接続の応答が client の attempt deadline（[4. daemon IPC の attempt deadline と reconnect
-budget](04-ipc.md#attempt-deadline-と-reconnect-budget)）を超える。また中断された delete は上記のとおり
-safe failure になり、durable な delete plan が残っていても teardown を再開しない。即時受理と daemon 所有 worker
-による resume は [#543](../.usagi/issues/543-fix-daemon-session-remove-worktree-teardown-worker-ipc.md) で追跡し、
-設計判断は [13. daemon singleton と session teardown](proposals/13-daemon-singleton-and-teardown.md) を正本とする。
+daemon 起動時には未完了の create / initialize / delete journal を reconcile する。中断された create / initialize は
+physical effect の完了を証明できないため再実行せず safe failure にして明示 recovery を待つ。中断された **delete は
+resume する**（[session teardown worker](#session-teardown-worker)）。
 
 interrupted reconciliation は session を `failed`、対応 operation を terminal `failed` に同じ durable state で記録する。元の `OperationId` の再送は保存済み safe failure を返し、effect を再試行しない。operator が filesystem / Git の状態を確認・修復した後は、明示 recovery または新しい `OperationId` による許可された lifecycle 操作を使う。
 
 旧 reducer が書いた `session.lifecycle = failed` と `operation.status = succeeded` の矛盾した snapshot は daemon open 時に保守的に補正する。failure stage、session name、operation の canonical semantic key が一致する operation だけを `failed` に戻して関連付け、成功 outcome や success hook は生成しない。この移行は effect の再実行可能性を推測しないため、自動 retry は行わず明示 recovery を待つ。
+
+## session teardown worker
+
+session remove の受理契約と teardown 実行位置の正本はこの節である。
+
+**remove は即時受理し、worktree teardown は daemon 所有の worker が実行する。** 要求元の IPC 接続の中で走るのは
+fast な durable transition（検証・`Deleting` への遷移・`DeletePlan` の永続化）だけであり、応答はその時点で返る。
+巨大な `target/` を持つ session（coverage 実行後は数 GB）の削除は分オーダーになるため、teardown を接続内で走らせると
+どの client も attempt deadline（[4. daemon IPC の attempt deadline と reconnect
+budget](04-ipc.md#attempt-deadline-と-reconnect-budget)）内に応答を受け取れない。受理を前倒しすることで、削除中も
+同じ接続に並んだ他 request（session 一覧・terminal・agent）が即応答し続ける。
+
+```text
+client ── session_remove ──▶ IPC handler
+                              begin（session lock 下・Deleting へ遷移・DeletePlan を永続化）
+                            ◀── accepted { operation_id, revision, snapshot }
+                                    │  worker を起床させる
+                        teardown worker（1 thread・直列 drain）
+                              nested worktree を子から Git で除去 → session tree を除去
+                              session lock を短時間だけ取り、outcome を確定
+                                    │
+client ── session_list ─────▶ deleting 行 → 完了で消滅（失敗なら failed + 理由）
+```
+
+| 性質 | 契約 |
+|---|---|
+| queue | 新設しない。`lifecycle == deleting` かつ `delete_plan` を持つ record が未完了 teardown の集合である（durable state から導出） |
+| 並列度 | worker は 1 本・直列。N 件の削除が同時に filesystem を飽和させない。queue 深さは session 数で有界 |
+| 起床 | 受理が worker を即時起床させる。加えて 1 秒 tick で pending を再導出し、確定に失敗した teardown を retry する |
+| 冪等性 | 同一 `operation_id` の再送は journal replay。`deleting` な session への新しい `operation_id` は進行中 operation を返し、teardown を二重投入しない |
+| resume | 中断された delete は `failed` に落とさず `deleting` のまま残し、次の daemon 起動で worker が再開する。teardown は「対象が無ければ成功」で冪等なので、途中まで削除された tree に安全に再実行できる |
+| completion fence | 確定時の state から再計算する（受理時 revision は teardown 完了時点では陳腐化している）。identity は session incarnation・attempt・受理 operation で fence され、journal の owner generation を使うため restart 後の worker も同じ operation を確定できる |
+| 失敗 | `failed` + 原因を含む safe summary（`could not remove the session worktree "<name>": <理由>`）を durable に残す。名前は保持されるため、失敗 record を remove すれば同名 create が再び通る |
+
+client 側の表示は既存の投影で足りる。受理直後から `deleting` 行が見え、完了で消える。TUI は `deleting` 行を
+削除中の行として描画し、`SessionLifecycle::capabilities` により attach も再 remove もできない。MCP の
+`session_remove` は受理を返す（[7. MCP サーバ](07-mcp.md#session-lifecycle-の受理契約)）。
+
+設計判断（却下した代替案・fence の単位・crash 時の再開契約）は
+[13. daemon singleton と session teardown](proposals/13-daemon-singleton-and-teardown.md) を参照する。
 
 ## terminal ownership
 
