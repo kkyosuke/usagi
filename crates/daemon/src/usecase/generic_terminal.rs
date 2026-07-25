@@ -444,14 +444,16 @@ impl GenericTerminalCoordinator {
                     && matches!(record.state, TerminalRuntimeState::Exited)
             })
             .filter_map(|record| {
-                let snapshot = self.terminals.snapshot(&record.terminal).ok()?;
-                let exit_status = snapshot.exited?;
+                // Offsets only: a tombstone listing must not capture one screen
+                // per entry (see `TerminalRegistry::output_window`).
+                let window = self.terminals.output_window(&record.terminal).ok()?;
+                let exit_status = window.exited?;
                 Some(CompletedTerminalEntry {
                     terminal: record.terminal.clone(),
                     kind: TerminalKind::Terminal,
                     exit_status,
-                    base_offset: snapshot.base_offset,
-                    final_output_offset: snapshot.output_offset,
+                    base_offset: window.base_offset,
+                    final_output_offset: window.output_offset,
                     visibility: TerminalVisibility::unobserved(),
                 })
             })

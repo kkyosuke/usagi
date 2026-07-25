@@ -138,6 +138,22 @@ pub struct Snapshot {
     pub exited: Option<i32>,
 }
 
+/// A terminal's retained output window and liveness, captured without building
+/// a screen checkpoint.
+///
+/// It carries exactly the scalars a caller can learn from the bounded journal:
+/// where the retained window starts, how many bytes the terminal has accepted,
+/// and whether the child has exited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputWindow {
+    /// Offset of the oldest byte the bounded journal still retains.
+    pub base_offset: u64,
+    /// Total bytes accepted for this terminal.
+    pub output_offset: u64,
+    /// The committed exit status once the child has exited.
+    pub exited: Option<i32>,
+}
+
 /// Which snapshot payload a negotiated wire revision receives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SnapshotWire {
@@ -783,6 +799,28 @@ impl TerminalRegistry {
         Ok(self.entry(reference)?.exited)
     }
 
+    /// The retained output window and liveness of a terminal, without capturing
+    /// a screen.
+    ///
+    /// Every caller that needs only offsets must use this instead of
+    /// [`snapshot`](Self::snapshot): a snapshot builds a complete semantic
+    /// checkpoint and measures its serialized size, which is proportional to the
+    /// retained screen. Paying that to read an integer offset would cost a full
+    /// screen capture on **every** accepted PTY chunk and on every tombstone of
+    /// every inventory query.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::StaleTarget`] for a non-current terminal.
+    pub fn output_window(&self, reference: &TerminalRef) -> Result<OutputWindow, RegistryError> {
+        let entry = self.entry(reference)?;
+        Ok(OutputWindow {
+            base_offset: base_offset(entry),
+            output_offset: entry.next_offset,
+            exited: entry.exited,
+        })
+    }
+
     const fn screen_budgets(&self) -> ScreenBudgets {
         ScreenBudgets {
             per_terminal: self.screen_cells_limit,
@@ -868,6 +906,15 @@ fn account_screen(entry: &mut Entry) -> usize {
     cells
 }
 
+/// The offset of the oldest byte the bounded journal still retains. An empty
+/// journal has nothing older than what the terminal has already accepted.
+fn base_offset(entry: &Entry) -> u64 {
+    entry
+        .journal
+        .front()
+        .map_or(entry.next_offset, |segment| segment.start_offset)
+}
+
 /// Captures the terminal view: the retained raw tail plus a screen checkpoint
 /// that fits `checkpoint_bytes_limit`.
 ///
@@ -877,10 +924,7 @@ fn account_screen(entry: &mut Entry) -> usize {
 /// the terminal's own bounds. A screen whose visible grids alone exceed the
 /// budget fails closed rather than emitting a partial screen.
 fn snapshot(entry: &Entry, checkpoint_bytes_limit: usize) -> Result<Snapshot, RegistryError> {
-    let base_offset = entry
-        .journal
-        .front()
-        .map_or(entry.next_offset, |segment| segment.start_offset);
+    let base_offset = base_offset(entry);
     let mut replay = Vec::with_capacity(entry.retained_bytes);
     for segment in &entry.journal {
         replay.extend_from_slice(&segment.data);
@@ -1156,6 +1200,40 @@ mod tests {
             .into_frame(SnapshotWire::ScreenCheckpoint);
         assert_eq!(restored(&fresh), restored(&authority));
         assert_eq!(fresh.geometry, Geometry { cols: 6, rows: 2 });
+    }
+
+    #[test]
+    fn the_output_window_reports_offsets_without_capturing_a_screen() {
+        let r = reference();
+        // A zero checkpoint budget makes any screen capture fail closed, so a
+        // window that still succeeds cannot have taken one.
+        let mut registry = TerminalRegistry::new(4, 2).with_checkpoint_bytes_limit(0);
+        registry
+            .register(r.clone(), Geometry { cols: 8, rows: 2 })
+            .unwrap();
+        registry.append_output(&r, b"abcdef".to_vec()).unwrap();
+
+        assert_eq!(
+            registry.snapshot(&r).unwrap_err(),
+            RegistryError::CheckpointUnavailable
+        );
+        // The journal retains 4 of the 6 accepted bytes, so the window starts at
+        // 2 and the terminal has accepted 6.
+        assert_eq!(
+            registry.output_window(&r).unwrap(),
+            OutputWindow {
+                base_offset: 2,
+                output_offset: 6,
+                exited: None,
+            }
+        );
+
+        registry.exited(&r, 3).unwrap();
+        assert_eq!(registry.output_window(&r).unwrap().exited, Some(3));
+        assert_eq!(
+            registry.output_window(&reference()).unwrap_err(),
+            RegistryError::StaleTarget
+        );
     }
 
     /// Rows a checkpoint's primary buffer retains (visible grid plus history).

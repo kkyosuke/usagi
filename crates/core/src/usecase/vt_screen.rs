@@ -14,7 +14,7 @@
 //!
 //! This is the single VT parser authority for v2: the TUI wraps it to render
 //! (selection / links / cursor marker are presentation vocabulary and stay in
-//! `usagi-tui`), and the daemon will feed and checkpoint it as terminal grid
+//! `usagi-tui`), and the daemon feeds and checkpoints it as terminal grid
 //! authority. The type exposes a read-only cell API (`grid` / `scrollback` /
 //! `cursor` / `cursor_style` and [`Cell`] accessors) that those faces build on
 //! without reaching into parser state.
