@@ -4,6 +4,8 @@
 //! usagi-core の usecase に置き、ここからは呼び出すだけにする。
 //! 依存方向は presentation → usecase → domain（domain は usagi-core が持つ）。
 
+/// Shared syntax for selecting which agent CLI a Closeup `agent` launch uses.
+pub mod agent_command;
 pub mod application;
 pub mod closeup;
 pub mod overview;

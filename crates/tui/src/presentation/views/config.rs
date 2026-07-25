@@ -54,54 +54,12 @@ pub enum Field {
 }
 
 /// Agent-model CLIs available to the Config screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AvailableAgentModels {
-    claude: bool,
-    open_ai: bool,
-}
-
-impl AvailableAgentModels {
-    /// Construct availability from the installed Claude and Codex CLIs.
-    #[must_use]
-    pub const fn new(claude: bool, open_ai: bool) -> Self {
-        Self { claude, open_ai }
-    }
-
-    /// Availability used by callers that do not supply a system probe.
-    #[must_use]
-    pub const fn all() -> Self {
-        Self::new(true, true)
-    }
-
-    const fn is_empty(self) -> bool {
-        !self.claude && !self.open_ai
-    }
-
-    const fn contains(self, model: DefaultModel) -> bool {
-        match model {
-            DefaultModel::Claude => self.claude,
-            DefaultModel::OpenAi => self.open_ai,
-        }
-    }
-
-    const fn first(self) -> Option<DefaultModel> {
-        if self.open_ai {
-            Some(DefaultModel::OpenAi)
-        } else if self.claude {
-            Some(DefaultModel::Claude)
-        } else {
-            None
-        }
-    }
-
-    const fn next(self, model: DefaultModel) -> Option<DefaultModel> {
-        match (self.claude, self.open_ai, model) {
-            (false, false, _) => None,
-            (true, true, DefaultModel::Claude) | (false, true, _) => Some(DefaultModel::OpenAi),
-            (true, true, DefaultModel::OpenAi) | (true, false, _) => Some(DefaultModel::Claude),
-        }
-    }
-}
+///
+/// The availability vocabulary is shared with the Closeup `agent -m` picker, so
+/// both surfaces offer exactly the installed CLIs
+/// ([`AvailableModels`](usagi_core::domain::settings::AvailableModels) is the
+/// single source of truth).
+pub type AvailableAgentModels = usagi_core::domain::settings::AvailableModels;
 
 #[derive(Debug, Clone)]
 struct ScopeSettings {
@@ -556,6 +514,7 @@ fn default_model_name(model: DefaultModel) -> &'static str {
     match model {
         DefaultModel::Claude => "Claude",
         DefaultModel::OpenAi => "OpenAI",
+        DefaultModel::SakanaAi => "sakana.ai",
     }
 }
 
@@ -797,7 +756,7 @@ mod tests {
 
         let mut without_agents = Config::load_workspace_with_available_models(
             &mut port,
-            AvailableAgentModels::new(false, false),
+            AvailableAgentModels::default(),
         );
         assert_eq!(without_agents.field(), Field::Issue);
         without_agents.previous_field();
@@ -946,11 +905,17 @@ mod tests {
         config.next_field();
         config.next_field();
         assert_eq!(config.field(), Field::DefaultModel);
+        // The row cycles through every installed provider and wraps.
+        config.cycle_selected(true);
+        assert_eq!(config.settings().default_model, DefaultModel::SakanaAi);
+        assert!(render(24, 80, &config).join("\n").contains("sakana.ai"));
         config.cycle_selected(true);
         assert_eq!(config.settings().default_model, DefaultModel::Claude);
         assert!(render(24, 80, &config).join("\n").contains("Claude"));
         config.cycle_selected(true);
         assert_eq!(config.settings().default_model, DefaultModel::OpenAi);
+        config.cycle_selected(true);
+        assert_eq!(config.settings().default_model, DefaultModel::SakanaAi);
         config.cycle_selected(true);
         assert_eq!(config.settings().default_model, DefaultModel::Claude);
         config.next_field();
@@ -974,8 +939,10 @@ mod tests {
             },
             ..FakeSettingsPort::default()
         };
-        let mut config =
-            Config::load_with_available_models(&mut port, AvailableAgentModels::new(true, false));
+        let mut config = Config::load_with_available_models(
+            &mut port,
+            AvailableAgentModels::new([DefaultModel::Claude]),
+        );
 
         assert_eq!(config.settings().default_model, DefaultModel::Claude);
         assert!(config.is_dirty());
@@ -983,15 +950,19 @@ mod tests {
         config.cycle_default_model();
         assert_eq!(config.settings().default_model, DefaultModel::Claude);
 
-        let mut open_ai_only =
-            Config::load_with_available_models(&mut port, AvailableAgentModels::new(false, true));
+        let mut open_ai_only = Config::load_with_available_models(
+            &mut port,
+            AvailableAgentModels::new([DefaultModel::OpenAi]),
+        );
         assert_eq!(open_ai_only.settings().default_model, DefaultModel::OpenAi);
         open_ai_only.cycle_default_model();
         assert_eq!(open_ai_only.settings().default_model, DefaultModel::OpenAi);
 
         port.global.default_model = DefaultModel::Claude;
-        let claude_saved =
-            Config::load_with_available_models(&mut port, AvailableAgentModels::new(true, false));
+        let claude_saved = Config::load_with_available_models(
+            &mut port,
+            AvailableAgentModels::new([DefaultModel::Claude]),
+        );
         assert_eq!(claude_saved.settings().default_model, DefaultModel::Claude);
         assert!(!claude_saved.is_dirty());
     }
@@ -1000,7 +971,7 @@ mod tests {
     fn agent_model_is_dimmed_and_skipped_when_no_cli_is_available() {
         let mut port = FakeSettingsPort::default();
         let mut config =
-            Config::load_with_available_models(&mut port, AvailableAgentModels::new(false, false));
+            Config::load_with_available_models(&mut port, AvailableAgentModels::default());
 
         let frame = render(24, 80, &config).join("\n");
         assert!(frame.contains("Agent") && frame.contains("< none   >"));

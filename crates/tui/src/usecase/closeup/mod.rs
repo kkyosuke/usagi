@@ -58,7 +58,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         info: CommandInfo {
             name: "agent",
             description: "Launch or attach a daemon Agent",
-            usage: "agent [name]",
+            usage: "agent [-m <cli>]",
         },
         factory: |arguments| Command::Agent { arguments },
     },

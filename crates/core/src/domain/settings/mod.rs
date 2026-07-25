@@ -42,11 +42,21 @@ pub enum ModalSelectionMode {
 }
 
 /// The cloud model provider used when a new Agent pane has no explicit profile.
+///
+/// This is also the closed vocabulary a user selects from with the Closeup
+/// `agent -m <model>` command, so [`selector`](Self::selector),
+/// [`profile_id`](Self::profile_id), and [`command`](Self::command) are the
+/// single source of truth for the typed token, the daemon profile it launches,
+/// and the executable whose presence makes it usable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DefaultModel {
     /// Anthropic Claude, launched through the `claude` profile.
     Claude,
+    /// Sakana AI's Codex-compatible CLI. Presented as `sakana.ai` and launched
+    /// through the `sakana-ai` profile, whose executable is `codex-fugu`.
+    #[serde(alias = "codex_fugu", alias = "sakana.ai")]
+    SakanaAi,
     /// `OpenAI`, launched through the Codex `codex` profile.
     #[default]
     #[serde(rename = "openai", other)]
@@ -54,12 +64,141 @@ pub enum DefaultModel {
 }
 
 impl DefaultModel {
+    /// Every selectable model provider, in the order menus and completion list
+    /// them.
+    pub const ALL: [Self; 3] = [Self::Claude, Self::OpenAi, Self::SakanaAi];
+
     /// Stable daemon profile ID selected by this model provider.
     #[must_use]
     pub const fn profile_id(self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::OpenAi => "codex",
+            Self::SakanaAi => "sakana-ai",
+        }
+    }
+
+    /// The executable whose availability decides whether this provider can be
+    /// selected. It is deliberately distinct from
+    /// [`profile_id`](Self::profile_id): `sakana-ai` runs `codex-fugu`.
+    #[must_use]
+    pub const fn command(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::OpenAi => "codex",
+            Self::SakanaAi => "codex-fugu",
+        }
+    }
+
+    /// The user-facing token typed after `agent -m` and shown in the picker.
+    #[must_use]
+    pub const fn selector(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::OpenAi => "codex",
+            Self::SakanaAi => "sakana.ai",
+        }
+    }
+
+    /// Resolve a user-typed token to its provider, accepting the
+    /// [`selector`](Self::selector), the [`profile_id`](Self::profile_id), and
+    /// the [`command`](Self::command) case-insensitively. `-`, `_`, and `.` are
+    /// treated as the same separator, so `sakana_ai` and `sakana.ai` both
+    /// resolve.
+    #[must_use]
+    pub fn from_selector(token: &str) -> Option<Self> {
+        let normalize = |value: &str| value.trim().to_ascii_lowercase().replace(['_', '.'], "-");
+        let token = normalize(token);
+        (!token.is_empty()).then_some(())?;
+        Self::ALL.into_iter().find(|model| {
+            [model.selector(), model.profile_id(), model.command()]
+                .into_iter()
+                .any(|candidate| normalize(candidate) == token)
+        })
+    }
+}
+
+/// The model providers whose CLI is installed on this machine.
+///
+/// Availability is observed by the composition root (a PATH / `--version`
+/// probe) and injected, so every surface that offers a provider — the Config
+/// screen and the Closeup `agent -m` picker and completion — offers exactly the
+/// providers that can actually run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AvailableModels {
+    claude: bool,
+    open_ai: bool,
+    sakana_ai: bool,
+}
+
+impl AvailableModels {
+    /// Construct availability from an observed set of providers.
+    #[must_use]
+    pub fn new(models: impl IntoIterator<Item = DefaultModel>) -> Self {
+        let mut available = Self::default();
+        for model in models {
+            match model {
+                DefaultModel::Claude => available.claude = true,
+                DefaultModel::OpenAi => available.open_ai = true,
+                DefaultModel::SakanaAi => available.sakana_ai = true,
+            }
+        }
+        available
+    }
+
+    /// Availability used by callers that do not supply a system probe.
+    #[must_use]
+    pub fn all() -> Self {
+        Self::new(DefaultModel::ALL)
+    }
+
+    /// Whether no provider is installed.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        !self.claude && !self.open_ai && !self.sakana_ai
+    }
+
+    /// Whether this exact provider can be selected.
+    #[must_use]
+    pub const fn contains(self, model: DefaultModel) -> bool {
+        match model {
+            DefaultModel::Claude => self.claude,
+            DefaultModel::OpenAi => self.open_ai,
+            DefaultModel::SakanaAi => self.sakana_ai,
+        }
+    }
+
+    /// Every selectable provider in [`DefaultModel::ALL`] order.
+    pub fn iter(self) -> impl Iterator<Item = DefaultModel> {
+        DefaultModel::ALL
+            .into_iter()
+            .filter(move |model| self.contains(*model))
+    }
+
+    /// The first selectable provider, used when a stored choice is not
+    /// installed.
+    #[must_use]
+    pub fn first(self) -> Option<DefaultModel> {
+        // `OpenAi` is the stored default, so it stays the first offer whenever
+        // it is installed.
+        [
+            DefaultModel::OpenAi,
+            DefaultModel::Claude,
+            DefaultModel::SakanaAi,
+        ]
+        .into_iter()
+        .find(|model| self.contains(*model))
+    }
+
+    /// The next selectable provider after `model`, wrapping in
+    /// [`DefaultModel::ALL`] order.
+    #[must_use]
+    pub fn next(self, model: DefaultModel) -> Option<DefaultModel> {
+        let ordered: Vec<_> = self.iter().collect();
+        let position = ordered.iter().position(|candidate| *candidate == model);
+        match position {
+            Some(index) => ordered.get((index + 1) % ordered.len()).copied(),
+            None => self.first(),
         }
     }
 }
@@ -150,6 +289,7 @@ where
     Ok(match token.as_deref() {
         Some("claude") => Some(DefaultModel::Claude),
         Some("openai") => Some(DefaultModel::OpenAi),
+        Some("sakana_ai" | "sakana.ai" | "codex_fugu") => Some(DefaultModel::SakanaAi),
         _ => None,
     })
 }

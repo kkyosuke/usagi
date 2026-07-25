@@ -1,4 +1,4 @@
-use super::{DefaultModel, LocalSettings, ModalSelectionMode, Settings, Theme};
+use super::{AvailableModels, DefaultModel, LocalSettings, ModalSelectionMode, Settings, Theme};
 
 #[test]
 fn theme_default_is_system() {
@@ -66,6 +66,7 @@ fn settings_round_trip_through_json() {
 fn default_model_tokens_select_the_expected_agent_profile() {
     assert_eq!(DefaultModel::Claude.profile_id(), "claude");
     assert_eq!(DefaultModel::OpenAi.profile_id(), "codex");
+    assert_eq!(DefaultModel::SakanaAi.profile_id(), "sakana-ai");
     assert_eq!(
         serde_json::to_value(DefaultModel::OpenAi).unwrap(),
         "openai"
@@ -74,6 +75,113 @@ fn default_model_tokens_select_the_expected_agent_profile() {
         serde_json::from_str::<DefaultModel>("\"future_provider\"").unwrap(),
         DefaultModel::OpenAi
     );
+}
+
+#[test]
+fn every_model_provider_maps_a_selector_profile_and_executable() {
+    assert_eq!(
+        DefaultModel::ALL.map(DefaultModel::selector),
+        ["claude", "codex", "sakana.ai"]
+    );
+    assert_eq!(
+        DefaultModel::ALL.map(DefaultModel::command),
+        ["claude", "codex", "codex-fugu"]
+    );
+    // `sakana.ai` is presented under its product name but launches `codex-fugu`
+    // through the `sakana-ai` profile.
+    assert_eq!(DefaultModel::SakanaAi.command(), "codex-fugu");
+    assert_eq!(DefaultModel::SakanaAi.selector(), "sakana.ai");
+}
+
+#[test]
+fn selector_resolution_accepts_every_spelling_of_a_provider() {
+    for (token, expected) in [
+        ("claude", DefaultModel::Claude),
+        ("Claude", DefaultModel::Claude),
+        ("codex", DefaultModel::OpenAi),
+        ("sakana.ai", DefaultModel::SakanaAi),
+        ("sakana_ai", DefaultModel::SakanaAi),
+        ("sakana-ai", DefaultModel::SakanaAi),
+        ("codex-fugu", DefaultModel::SakanaAi),
+        ("codex_fugu", DefaultModel::SakanaAi),
+        ("  SAKANA.AI  ", DefaultModel::SakanaAi),
+    ] {
+        assert_eq!(
+            DefaultModel::from_selector(token),
+            Some(expected),
+            "{token}"
+        );
+    }
+    // `openai` is the persisted token, not a launchable CLI name, so the typed
+    // vocabulary rejects it alongside unknown and empty input.
+    for token in ["openai", "gemini", "", "   "] {
+        assert_eq!(DefaultModel::from_selector(token), None, "{token}");
+    }
+}
+
+#[test]
+fn sakana_ai_persists_as_snake_case_and_reads_legacy_tokens() {
+    assert_eq!(
+        serde_json::to_value(DefaultModel::SakanaAi).unwrap(),
+        "sakana_ai"
+    );
+    for token in ["sakana_ai", "sakana.ai", "codex_fugu"] {
+        assert_eq!(
+            serde_json::from_str::<DefaultModel>(&format!("\"{token}\"")).unwrap(),
+            DefaultModel::SakanaAi,
+            "{token}"
+        );
+    }
+    let local: LocalSettings = serde_json::from_str(r#"{"default_model":"sakana.ai"}"#).unwrap();
+    assert_eq!(local.default_model, Some(DefaultModel::SakanaAi));
+}
+
+#[test]
+fn availability_offers_only_installed_providers() {
+    let all = AvailableModels::all();
+    assert!(!all.is_empty());
+    assert_eq!(all.iter().collect::<Vec<_>>(), DefaultModel::ALL);
+    assert!(
+        DefaultModel::ALL
+            .into_iter()
+            .all(|model| all.contains(model))
+    );
+
+    let none = AvailableModels::default();
+    assert!(none.is_empty());
+    assert_eq!(none.first(), None);
+    assert_eq!(none.next(DefaultModel::Claude), None);
+    assert!(none.iter().next().is_none());
+
+    // `codex` remains the first offer whenever it is installed, matching the
+    // stored default; otherwise the first installed provider is offered.
+    assert_eq!(all.first(), Some(DefaultModel::OpenAi));
+    assert_eq!(
+        AvailableModels::new([DefaultModel::Claude, DefaultModel::SakanaAi]).first(),
+        Some(DefaultModel::Claude)
+    );
+    assert_eq!(
+        AvailableModels::new([DefaultModel::SakanaAi]).first(),
+        Some(DefaultModel::SakanaAi)
+    );
+
+    // `next` wraps through the installed providers and recovers from a stored
+    // choice that is no longer installed.
+    assert_eq!(all.next(DefaultModel::Claude), Some(DefaultModel::OpenAi));
+    assert_eq!(all.next(DefaultModel::OpenAi), Some(DefaultModel::SakanaAi));
+    assert_eq!(all.next(DefaultModel::SakanaAi), Some(DefaultModel::Claude));
+    let only_sakana = AvailableModels::new([DefaultModel::SakanaAi]);
+    assert_eq!(
+        only_sakana.next(DefaultModel::Claude),
+        Some(DefaultModel::SakanaAi)
+    );
+    assert_eq!(
+        only_sakana.next(DefaultModel::SakanaAi),
+        Some(DefaultModel::SakanaAi)
+    );
+    // Exercise the derived vocabulary the Config screen and Closeup share.
+    assert_eq!(all.clone(), all);
+    assert!(format!("{all:?}").contains("claude"));
 }
 
 #[test]
