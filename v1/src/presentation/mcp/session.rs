@@ -617,6 +617,7 @@ impl SessionMcpServer {
             "name": args.name,
             "removed": outcome.removed,
             "dirty": outcome.dirty,
+            "retained_branches": outcome.retained_branches,
         })))
     }
 
@@ -1141,7 +1142,10 @@ fn session_tool_schemas() -> Value {
                 Without force, a session whose worktrees have uncommitted changes \
                 is left untouched and the result lists those dirty worktrees \
                 (removed=false); set force=true to discard the changes and remove \
-                it anyway. Returns { name, removed, dirty }.",
+                it anyway. Only the branch the session recorded creating is \
+                deleted: if the session moved to another branch, that branch is \
+                kept and listed in retained_branches. \
+                Returns { name, removed, dirty, retained_branches }.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1352,6 +1356,7 @@ mod tests {
                 // override this with `with_remove`.
                 remove_result: Ok(session::RemovalOutcome {
                     removed: true,
+                    retained_branches: Vec::new(),
                     dirty: Vec::new(),
                 }),
                 remove_calls: Rc::new(RefCell::new(Vec::new())),
@@ -1366,6 +1371,7 @@ mod tests {
                 prompt_deliveries: Rc::new(RefCell::new(Vec::new())),
                 remove_result: Ok(session::RemovalOutcome {
                     removed: true,
+                    retained_branches: Vec::new(),
                     dirty: Vec::new(),
                 }),
                 remove_calls: Rc::new(RefCell::new(Vec::new())),
@@ -2983,7 +2989,10 @@ mod tests {
         let result = call(&server, "session_remove", json!({"name":"feature-x"}));
         assert_eq!(result["isError"], false);
         let body = tool_json(&result);
-        assert_eq!(body, json!({"name":"feature-x","removed":true,"dirty":[]}));
+        assert_eq!(
+            body,
+            json!({"name":"feature-x","removed":true,"dirty":[],"retained_branches":[]})
+        );
 
         // The backend was invoked once with the workspace root, the session name,
         // and force defaulted to false.
@@ -3000,6 +3009,7 @@ mod tests {
         let dirty = root.path().join(".usagi/sessions/wip");
         let backend = FakeBackend::ok("x").with_remove(Ok(session::RemovalOutcome {
             removed: false,
+            retained_branches: Vec::new(),
             dirty: vec![dirty.clone()],
         }));
         let server = server_at(root.path(), backend);
@@ -3010,6 +3020,25 @@ mod tests {
         let body = tool_json(&result);
         assert_eq!(body["removed"], false);
         assert_eq!(body["dirty"][0], dirty.to_str().unwrap());
+    }
+
+    #[test]
+    fn remove_reports_branches_the_session_moved_onto() {
+        // usagi deletes only the branch the session recorded creating, so an
+        // agent that switched branches inside the session must be told what is
+        // still there rather than assuming everything went away.
+        let root = tempfile::tempdir().unwrap();
+        let backend = FakeBackend::ok("x").with_remove(Ok(session::RemovalOutcome {
+            removed: true,
+            dirty: Vec::new(),
+            retained_branches: vec!["usagi/wip-tui".to_string()],
+        }));
+        let server = server_at(root.path(), backend);
+
+        let body = tool_json(&call(&server, "session_remove", json!({"name":"wip"})));
+
+        assert_eq!(body["removed"], true);
+        assert_eq!(body["retained_branches"], json!(["usagi/wip-tui"]));
     }
 
     #[test]

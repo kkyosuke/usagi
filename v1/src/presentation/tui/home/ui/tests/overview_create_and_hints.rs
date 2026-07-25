@@ -48,6 +48,7 @@ fn render_frame_inserts_the_inline_create_row_before_the_next_unite_group() {
         root_path: PathBuf::from("/wsB"),
         root_note: None,
         sessions: vec![SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: "b1".to_string(),
@@ -88,6 +89,7 @@ fn render_frame_reuses_the_unite_gap_for_inline_create_without_shifting_lower_wo
         root_path: PathBuf::from("/wsB"),
         root_note: None,
         sessions: vec![SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: "b1".to_string(),

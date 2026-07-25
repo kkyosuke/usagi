@@ -10,6 +10,7 @@ use std::time::Instant;
 /// give the primary workspace real rows that survive a rebuild.
 fn session(name: &str) -> crate::domain::workspace_state::SessionRecord {
     crate::domain::workspace_state::SessionRecord {
+        branch: None,
         todos: Vec::new(),
         decisions: Vec::new(),
         name: name.to_string(),

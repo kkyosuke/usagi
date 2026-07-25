@@ -269,6 +269,7 @@ mod tests {
             updated_at: now,
         };
         let session = |name: &str, prs: Vec<PrLink>| SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: name.to_string(),

@@ -70,6 +70,7 @@ mod tests {
             updated_at: ts,
             root_note: None,
             sessions: vec![SessionRecord {
+                branch: None,
                 todos: Vec::new(),
                 decisions: Vec::new(),
                 name: "login".to_string(),

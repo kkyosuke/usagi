@@ -671,6 +671,18 @@ pub struct SessionRecord {
     /// loads as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_from: Option<String>,
+    /// The branch this session actually cut in every source repository,
+    /// recorded once at creation.
+    ///
+    /// Removal matches its own recorded branch rather than re-deriving one from
+    /// [`name`](Self::name): the two agree at creation, but a worktree may
+    /// legitimately move off it afterwards (`git switch -c`, `git branch -m`),
+    /// and a *derived* name would then be matched against a branch this session
+    /// never owned. `None` — the default, and how every file written before this
+    /// field existed reads — means "the branch derived from the name", which is
+    /// exactly what those older sessions were created with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     /// Root of the session tree: `<workspace>/.usagi/sessions/<name>`.
     pub root: PathBuf,
     /// One entry per repository that received a worktree, with its git status.
@@ -711,6 +723,15 @@ pub struct PendingSessionRemoval {
     pub name: String,
     /// Session tree that Git teardown owns.
     pub root: PathBuf,
+    /// The session's recorded branch, copied from
+    /// [`SessionRecord::branch`] when the tombstone was written, so a removal
+    /// resumed after a crash drops the same branch the first attempt targeted.
+    /// `None` in a tombstone written before this field existed (and in one
+    /// reconcile wrote for a stray, which has no session record to copy from);
+    /// removal then falls back to the branch derived from
+    /// [`name`](Self::name), matching what those removals always used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     /// Canonical per-worktree keys captured while the directories still exist.
     /// Ancillary cleanup must use these after Git has removed the directories.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -727,6 +748,46 @@ pub struct PendingSessionRemoval {
     pub force: bool,
     /// Last durably committed teardown boundary.
     pub phase: SessionRemovalPhase,
+    /// Which pass quarantined this removal, when
+    /// [`phase`](Self::phase) is [`SessionRemovalPhase::Orphaned`]. The phase
+    /// alone cannot say: reconcile and teardown both write it, from opposite
+    /// evidence (see [`QuarantineOrigin`]). `None` for a removal that is not
+    /// quarantined, and in files written before this field existed.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::domain::serde_fallback::or_default"
+    )]
+    pub quarantine: Option<QuarantineOrigin>,
+}
+
+/// Which pass quarantined a removal as [`SessionRemovalPhase::Orphaned`].
+///
+/// Both write the same phase from *opposite* evidence, and recovery differs
+/// accordingly: a reconcile quarantine has no ownership evidence at all to work
+/// from, while a teardown quarantine has complete evidence that the on-disk
+/// worktrees contradicted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuarantineOrigin {
+    /// Reconcile found a session directory with no record behind it. Its
+    /// [`provenance`](PendingSessionRemoval::provenance) is empty — there was
+    /// never a record to copy any from — so nothing about it can be proven.
+    Reconcile,
+    /// A removal's Git teardown could not prove its own recorded ownership
+    /// against the repositories' live worktrees. Its
+    /// [`provenance`](PendingSessionRemoval::provenance) is complete; it is the
+    /// on-disk state that disagreed with it.
+    Teardown,
+}
+
+impl QuarantineOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reconcile => "reconcile",
+            Self::Teardown => "teardown",
+        }
+    }
 }
 
 /// Durable boundaries of the two-stage removal transaction.
@@ -898,6 +959,7 @@ mod tests {
         // A default (unset) agent override is skipped entirely, so an older
         // `state.json` without the key still loads and a fresh one stays lean.
         let mut session = SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: "s".to_string(),
@@ -934,6 +996,87 @@ mod tests {
         let restored: SessionRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.agent.cli, Some(AgentCli::Gemini));
         assert_eq!(restored.agent.model.as_deref(), Some("gemini-2.5-pro"));
+    }
+
+    #[test]
+    fn a_session_record_without_a_branch_key_loads_as_none() {
+        // Every `state.json` written before sessions recorded their branch omits
+        // the key; it must read as "derive it from the name", not fail the load.
+        let restored: SessionRecord = serde_json::from_str(
+            r#"{
+                "name": "s",
+                "root": "/tmp/s",
+                "worktrees": [],
+                "created_at": "2026-06-13T05:01:18.659149Z"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(restored.branch, None);
+
+        let stored: SessionRecord = serde_json::from_str(
+            r#"{
+                "name": "s",
+                "branch": "usagi/s-tui",
+                "root": "/tmp/s",
+                "worktrees": [],
+                "created_at": "2026-06-13T05:01:18.659149Z"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(stored.branch.as_deref(), Some("usagi/s-tui"));
+        // An unset branch stays out of the file entirely.
+        assert!(!serde_json::to_string(&restored).unwrap().contains("branch"));
+    }
+
+    #[test]
+    fn a_pending_removal_round_trips_its_branch_and_quarantine_origin() {
+        let mut pending = PendingSessionRemoval {
+            branch: None,
+            quarantine: None,
+            name: "s".to_string(),
+            root: PathBuf::from("/repo/.usagi/sessions/s"),
+            worktrees: Vec::new(),
+            provenance: Vec::new(),
+            force: false,
+            phase: SessionRemovalPhase::GitTeardown,
+        };
+        // Both are absent from a lean tombstone and from every older file.
+        let json = serde_json::to_string(&pending).unwrap();
+        assert!(!json.contains("branch"), "{json}");
+        assert!(!json.contains("quarantine"), "{json}");
+        assert_eq!(
+            serde_json::from_str::<PendingSessionRemoval>(&json).unwrap(),
+            pending
+        );
+
+        pending.branch = Some("usagi/s".to_string());
+        pending.phase = SessionRemovalPhase::Orphaned;
+        pending.quarantine = Some(QuarantineOrigin::Teardown);
+        let json = serde_json::to_string(&pending).unwrap();
+        assert!(json.contains(r#""quarantine":"teardown""#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<PendingSessionRemoval>(&json).unwrap(),
+            pending
+        );
+        assert_eq!(QuarantineOrigin::Teardown.as_str(), "teardown");
+        assert_eq!(QuarantineOrigin::Reconcile.as_str(), "reconcile");
+    }
+
+    #[test]
+    fn an_unknown_quarantine_origin_degrades_to_none_without_failing_the_load() {
+        // A value a newer usagi wrote must not make a downgraded usagi refuse the
+        // whole tombstone — it would lose the removal's phase and provenance too.
+        let restored: PendingSessionRemoval = serde_json::from_str(
+            r#"{
+                "name": "s",
+                "root": "/repo/.usagi/sessions/s",
+                "phase": "orphaned",
+                "quarantine": "from-the-future"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(restored.quarantine, None);
+        assert_eq!(restored.phase, SessionRemovalPhase::Orphaned);
     }
 
     #[test]
@@ -976,6 +1119,7 @@ mod tests {
         // The default (Unknown) origin is skipped entirely, so a session recorded
         // before usagi tracked provenance stays lean and its key is simply absent.
         let mut session = SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: "s".to_string(),
@@ -1051,6 +1195,7 @@ mod tests {
         // interactively-created session stays lean and an older file without the
         // key still loads.
         let mut session = SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: "child".to_string(),
@@ -1354,6 +1499,7 @@ mod tests {
     fn pr_is_omitted_when_empty_and_round_trips_when_set() {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: "feature-x".to_string(),
@@ -1413,6 +1559,7 @@ mod tests {
     fn diff_is_omitted_when_absent_and_round_trips_when_set() {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: "feature-x".to_string(),
@@ -1471,6 +1618,7 @@ mod tests {
     fn workspace_state_round_trips_through_json() {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: "feature-x".to_string(),
@@ -1495,6 +1643,7 @@ mod tests {
     #[test]
     fn display_label_falls_back_to_name_then_prefers_display_name() {
         let mut session = SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: "feature-x".to_string(),
@@ -1520,6 +1669,7 @@ mod tests {
     fn display_name_is_omitted_from_json_when_absent_and_round_trips_when_set() {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: "feature-x".to_string(),
@@ -1556,6 +1706,7 @@ mod tests {
     fn note_is_omitted_when_absent_round_trips_when_set_and_reads_legacy_files() {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: "feature-x".to_string(),
@@ -1597,6 +1748,7 @@ mod tests {
         let at = Utc.with_ymd_and_hms(2026, 6, 13, 5, 1, 18).unwrap();
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: "feature-x".to_string(),
@@ -1668,6 +1820,7 @@ mod tests {
     fn last_active_is_omitted_when_absent_falls_back_to_created_at_and_round_trips() {
         let created = Utc.with_ymd_and_hms(2026, 6, 13, 5, 0, 0).unwrap();
         let mut session = SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: "feature-x".to_string(),
@@ -1711,6 +1864,7 @@ mod tests {
     fn label_id_is_omitted_when_absent_round_trips_when_set_and_reads_legacy_files() {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
+            branch: None,
             todos: Vec::new(),
             decisions: Vec::new(),
             name: "feature-x".to_string(),

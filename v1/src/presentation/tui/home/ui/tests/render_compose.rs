@@ -426,6 +426,7 @@ fn render_frame_edits_the_note_in_the_right_pane_not_a_full_screen_modal() {
     // screen never switches to a full-screen modal.
     let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
     let session = SessionRecord {
+        branch: None,
         todos: Vec::new(),
         decisions: Vec::new(),
         name: "alpha".to_string(),
@@ -478,6 +479,7 @@ fn note_overlay_renders_all_three_panes_at_once_and_marks_the_focus() {
     // (the editing target), marked by the title suffix.
     let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
     let mut session = SessionRecord {
+        branch: None,
         todos: vec![SessionTodo::new("write tests"), {
             let mut td = SessionTodo::new("ship it");
             td.done = true;
@@ -551,6 +553,7 @@ fn note_overlay_renders_all_three_panes_at_once_and_marks_the_focus() {
 fn todos_tab_marks_the_selection_and_shows_the_inline_input() {
     let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
     state.restore_sessions(vec![SessionRecord {
+        branch: None,
         todos: vec![SessionTodo::new("write tests"), SessionTodo::new("ship it")],
         decisions: Vec::new(),
         name: "alpha".to_string(),
@@ -604,6 +607,7 @@ fn note_overlay_todos_and_decisions_panes_show_placeholders_when_empty() {
     let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
     // A session with a note but no todos / decisions.
     let session = SessionRecord {
+        branch: None,
         todos: Vec::new(),
         decisions: Vec::new(),
         name: "alpha".to_string(),

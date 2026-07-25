@@ -11,7 +11,8 @@ use anyhow::{Context, Result};
 use super::tree;
 use crate::domain::agent::Agent;
 use crate::domain::workspace_state::{
-    PendingSessionRemoval, SessionRemovalPhase, WorkspaceState, WorktreeProvenance,
+    PendingSessionRemoval, QuarantineOrigin, SessionRemovalPhase, WorkspaceState,
+    WorktreeProvenance,
 };
 use crate::infrastructure::git;
 use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR};
@@ -111,6 +112,12 @@ pub(super) fn reconcile_locked(workspace_root: &Path) -> Result<Vec<PathBuf>> {
     let mut quarantined = Vec::new();
     for (stray, name) in strays {
         state.pending_removals.push(PendingSessionRemoval {
+            // A stray has no session record, so there is no recorded branch to
+            // copy and no evidence for one: the directory name is all reconcile
+            // knows. Recording `None` keeps that honest rather than asserting a
+            // branch derived from the name.
+            branch: None,
+            quarantine: Some(QuarantineOrigin::Reconcile),
             name,
             root: stray.clone(),
             worktrees: Vec::new(),
@@ -141,18 +148,10 @@ pub(super) fn list_repo_worktrees(
         .collect()
 }
 
-/// Physically destroy one session whose directory is `root` and whose branch is
-/// `branch`: preflight every candidate against recorded repository/worktree
-/// provenance, canonical containment, and the branch before issuing any effect.
-/// With `force`, a dirty worktree may be discarded. Infrastructure failures
-/// (including locked worktrees) still abort before the directory is deleted so
-/// the durable caller can retain context and retry. Already-absent components
-/// remain successful, making partial teardown idempotent.
-///
-/// Used by [`remove`](super::remove); reconcile quarantines unowned strays and
-/// therefore never calls this destructive primitive.
-/// `repo_worktrees` is each source repository paired with its worktrees, from
-/// [`list_repo_worktrees`].
+/// Ownership could not be **proven**: the recorded evidence and the live
+/// repositories genuinely disagree. The caller quarantines on this
+/// ([`SessionRemovalPhase::Orphaned`]) because retrying cannot change the
+/// answer — only an operator can.
 #[derive(Debug)]
 pub(super) struct OwnershipError(String);
 
@@ -168,7 +167,30 @@ fn ownership_error(message: impl Into<String>) -> anyhow::Error {
     OwnershipError(message.into()).into()
 }
 
+/// The ownership check could not be **completed**: a filesystem probe it needs
+/// failed for a reason unrelated to ownership (a permission error, an unreadable
+/// mount, an I/O fault). Distinct from [`OwnershipError`] because the evidence is
+/// not in conflict — it is merely unreadable right now — so the caller keeps the
+/// removal retryable instead of quarantining a session over a transient fault.
+#[derive(Debug)]
+pub(super) struct ProbeError(String);
+
+impl std::fmt::Display for ProbeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ProbeError {}
+
+fn probe_error(message: impl Into<String>) -> anyhow::Error {
+    ProbeError(message.into()).into()
+}
+
 fn canonical_git_common_dir(path: &Path) -> Result<PathBuf> {
+    // Not resolving to a Git repository at all is an ownership answer (the
+    // recorded repository is gone, or was never one); failing to canonicalize a
+    // path git *did* report is a probe fault.
     let common = git::git_common_dir(path).ok_or_else(|| {
         ownership_error(format!(
             "cannot resolve Git repository identity for {}",
@@ -176,20 +198,51 @@ fn canonical_git_common_dir(path: &Path) -> Result<PathBuf> {
         ))
     })?;
     fs::canonicalize(&common).map_err(|error| {
-        ownership_error(format!(
+        probe_error(format!(
             "cannot canonicalize Git repository identity {}: {error}",
             common.display()
         ))
     })
 }
 
+/// What one [`discard_session`] left behind that the caller should mention.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct DiscardOutcome {
+    /// Branches that were checked out in the worktrees this teardown removed but
+    /// are **not** the session's recorded branch — a branch the session cut or
+    /// renamed after creation (`git switch -c`, `git branch -m`).
+    ///
+    /// Teardown deletes only the recorded branch, so these still exist
+    /// afterwards. They are reported rather than deleted: usagi has no record
+    /// that it created them, and silently dropping a branch holding a session's
+    /// work is exactly the destructive guess the ownership rules exist to
+    /// prevent. Sorted and deduplicated.
+    pub retained_branches: Vec<String>,
+}
+
+/// Physically destroy one session whose directory is `root` and whose recorded
+/// branch is `branch`: preflight every candidate against recorded
+/// repository/worktree provenance and canonical containment in `root` before
+/// issuing any effect. `branch` selects what may be *deleted* (and candidates
+/// carrying it are still matched, so an impostor on the same branch is caught) —
+/// it is never what *proves* ownership, because a session's worktree may
+/// legitimately have moved to another branch since creation.
+/// With `force`, a dirty worktree may be discarded. Infrastructure failures
+/// (including locked worktrees) still abort before the directory is deleted so
+/// the durable caller can retain context and retry. Already-absent components
+/// remain successful, making partial teardown idempotent.
+///
+/// Used by [`remove`](super::remove); reconcile quarantines unowned strays and
+/// therefore never calls this destructive primitive.
+/// `repo_worktrees` is each source repository paired with its worktrees, from
+/// [`list_repo_worktrees`].
 pub(super) fn discard_session(
     root: &Path,
     branch: &str,
     provenance: &[WorktreeProvenance],
     repo_worktrees: &[(PathBuf, Vec<git::WorktreeInfo>)],
     force: bool,
-) -> Result<()> {
+) -> Result<DiscardOutcome> {
     if provenance.is_empty() {
         return Err(ownership_error(format!(
             "session {} has no recorded worktree provenance; clean it up manually",
@@ -203,7 +256,7 @@ pub(super) fn discard_session(
             let mut recorded_worktrees = HashSet::new();
             for recorded in provenance {
                 let repo = fs::canonicalize(&recorded.repo).map_err(|repo_error| {
-                    ownership_error(format!(
+                    probe_error(format!(
                         "cannot canonicalize recorded repository {}: {repo_error}",
                         recorded.repo.display()
                     ))
@@ -246,10 +299,12 @@ pub(super) fn discard_session(
             // A prior teardown attempt already removed every recorded target and
             // branch. There is no remaining effect to authorize, so the retry is
             // an idempotent success even though the old path no longer resolves.
-            return Ok(());
+            return Ok(DiscardOutcome::default());
         }
         Err(error) => {
-            return Err(ownership_error(format!(
+            // Not "the root is gone" (handled above) but "the root cannot be
+            // read": a probe fault, so the removal stays retryable.
+            return Err(probe_error(format!(
                 "cannot prove session root {}: {error}",
                 root.display()
             )));
@@ -262,7 +317,7 @@ pub(super) fn discard_session(
         )));
     }
     let root_canon = fs::canonicalize(root).map_err(|error| {
-        ownership_error(format!(
+        probe_error(format!(
             "cannot canonicalize session root {}: {error}",
             root.display()
         ))
@@ -271,7 +326,7 @@ pub(super) fn discard_session(
     let mut expected = Vec::new();
     for recorded in provenance {
         let repo = fs::canonicalize(&recorded.repo).map_err(|error| {
-            ownership_error(format!(
+            probe_error(format!(
                 "cannot canonicalize recorded repository {}: {error}",
                 recorded.repo.display()
             ))
@@ -286,7 +341,7 @@ pub(super) fn discard_session(
                     )));
                 }
                 let worktree = fs::canonicalize(&recorded.worktree).map_err(|error| {
-                    ownership_error(format!(
+                    probe_error(format!(
                         "cannot canonicalize recorded worktree {}: {error}",
                         recorded.worktree.display()
                     ))
@@ -302,7 +357,7 @@ pub(super) fn discard_session(
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
-                return Err(ownership_error(format!(
+                return Err(probe_error(format!(
                     "cannot inspect recorded worktree {}: {error}",
                     recorded.worktree.display()
                 )));
@@ -329,9 +384,10 @@ pub(super) fn discard_session(
     }
 
     let mut targets = Vec::new();
+    let mut retained_branches = Vec::new();
     for (repo, worktrees) in repo_worktrees {
         let repo_canon = fs::canonicalize(repo).map_err(|error| {
-            ownership_error(format!(
+            probe_error(format!(
                 "cannot canonicalize expected repository {}: {error}",
                 repo.display()
             ))
@@ -356,16 +412,28 @@ pub(super) fn discard_session(
             );
             if branch_matches || identity.is_some() {
                 let path = path_canon.map_err(|error| {
-                    ownership_error(format!(
+                    probe_error(format!(
                         "cannot canonicalize candidate worktree {}: {error}",
                         wt.path.display()
                     ))
                 })?;
-                if !branch_matches || identity.is_none() || !path.starts_with(&root_canon) {
+                // Ownership rests on *identity* — recorded repository, Git
+                // common dir, recorded worktree path, and canonical containment
+                // in this session root — never on the branch label. A candidate
+                // that matches the branch but no recorded identity is a
+                // different worktree that happens to share the name, and stays
+                // fail-closed. The reverse (identity proven, branch moved on) is
+                // an ordinary `git switch -c` inside the session and must not
+                // make the session undeletable: the label a worktree carries is
+                // not evidence of who owns it.
+                if identity.is_none() || !path.starts_with(&root_canon) {
                     return Err(ownership_error(format!(
                         "worktree {} lacks complete ownership proof",
                         wt.path.display()
                     )));
+                }
+                if let Some(checked_out) = wt.branch.as_deref().filter(|_| !branch_matches) {
+                    retained_branches.push(checked_out.to_string());
                 }
                 targets.push((repo.clone(), wt.path.clone(), path));
             }
@@ -400,11 +468,15 @@ pub(super) fn discard_session(
         fs::remove_dir_all(root).context(format!("failed to remove {}", root.display()))?;
     }
 
+    // Only the *recorded* branch is deleted. A branch the session moved onto
+    // afterwards is not usagi's to drop — see [`DiscardOutcome::retained_branches`].
     for (repo, _) in repo_worktrees {
         git::prune_worktrees(repo)?;
         if git::branch_exists(repo, branch) {
             git::delete_branch(repo, branch)?;
         }
     }
-    Ok(())
+    retained_branches.sort();
+    retained_branches.dedup();
+    Ok(DiscardOutcome { retained_branches })
 }
