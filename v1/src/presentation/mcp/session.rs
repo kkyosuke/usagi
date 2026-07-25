@@ -45,7 +45,7 @@ use crate::usecase::session;
 /// Names of the session tools this server exposes. The unified `usagi` server
 /// ([`super::usagi`]) uses this to route `tools/call` for these names to the
 /// embedded session server.
-pub const TOOL_NAMES: [&str; 15] = [
+pub const TOOL_NAMES: [&str; 16] = [
     "session_create",
     "session_list",
     "session_status",
@@ -53,6 +53,7 @@ pub const TOOL_NAMES: [&str; 15] = [
     "session_complete",
     "session_pr",
     "session_remove",
+    "session_recover",
     "session_note_get",
     "session_note_update",
     "session_todo_list",
@@ -216,6 +217,19 @@ pub trait AgentBackend {
         name: &str,
         force: bool,
     ) -> Result<session::RemovalOutcome, String>;
+
+    /// Run one explicit recovery on session `name`'s quarantined removal under
+    /// `workspace_root`, resolving the workspace's configured agent CLI the same way
+    /// [`remove`](Self::remove) does — a resumed teardown discards the session's
+    /// persisted conversation along with its worktrees. Both recoveries are
+    /// fail-closed: an `Err` means nothing was changed and says what could not be
+    /// proven.
+    fn recover(
+        &self,
+        workspace_root: &Path,
+        name: &str,
+        recovery: session::QuarantineRecovery,
+    ) -> Result<session::QuarantineRecoveryOutcome, String>;
 }
 
 /// A JSON-RPC server exposing session tools for one workspace.
@@ -621,6 +635,26 @@ impl SessionMcpServer {
         })))
     }
 
+    fn tool_recover(&self, arguments: Value) -> Result<String, String> {
+        let args: RecoverArgs = parse_args(arguments)?;
+        let recovery = session::QuarantineRecovery::from_name(&args.action).ok_or_else(|| {
+            format!(
+                "session_recover action must be \"resume\" or \"release\", not \"{}\"",
+                args.action
+            )
+        })?;
+        let outcome = self
+            .backend
+            .recover(&self.workspace_root, &args.name, recovery)?;
+        Ok(to_pretty(&json!({
+            "name": outcome.name,
+            "action": outcome.recovery.as_str(),
+            "removed": outcome.removed,
+            "retained_branches": outcome.retained_branches,
+            "detail": outcome.detail,
+        })))
+    }
+
     fn tool_note_get(&self) -> Result<String, String> {
         let name = self
             .current_session
@@ -766,6 +800,7 @@ impl McpService for SessionMcpServer {
             "session_complete" => self.tool_complete(arguments),
             "session_pr" => self.tool_pr(arguments),
             "session_remove" => self.tool_remove(arguments),
+            "session_recover" => self.tool_recover(arguments),
             "session_note_get" => self.tool_note_get(),
             "session_note_update" => self.tool_note_update(arguments),
             "session_todo_list" => self.tool_todo_list(),
@@ -894,6 +929,14 @@ struct RemoveArgs {
     /// the caller omits it.
     #[serde(default)]
     force: bool,
+}
+
+#[derive(Deserialize)]
+struct RecoverArgs {
+    name: String,
+    /// Which recovery to run: `resume` or `release`. Required — the two do
+    /// materially different things, so there is no safe default.
+    action: String,
 }
 
 #[derive(Deserialize)]
@@ -1159,6 +1202,37 @@ fn session_tool_schemas() -> Value {
             }
         },
         {
+            "name": "session_recover",
+            "description": "Get a session out of the orphaned quarantine a fail-closed \
+                removal left it in. A quarantined session cannot be removed (not even \
+                with force), cannot be recreated under the same name, and is skipped by \
+                `usagi clean`, because usagi refuses to delete anything whose ownership \
+                it could not prove; this runs one explicit recovery instead. \
+                action=\"resume\" re-proves the recorded ownership against today's \
+                repositories and finishes the teardown when it proves — when it does not, \
+                the session is quarantined again and no destructive effect is issued. \
+                action=\"release\" withdraws the quarantine: a session whose recorded \
+                worktrees are all still present and registered becomes an ordinary session \
+                again, and a stray tombstone is dropped once you have removed its \
+                directory yourself (usagi will not delete a directory it has no ownership \
+                evidence for). A quarantine reconcile created has no evidence to re-prove, \
+                so only release applies to it. Both actions fail with an explanation \
+                rather than guessing. \
+                Returns { name, action, removed, retained_branches, detail }.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the quarantined session to recover" },
+                    "action": {
+                        "type": "string",
+                        "enum": ["resume", "release"],
+                        "description": "resume = re-prove ownership and finish the removal; release = withdraw the quarantine"
+                    }
+                },
+                "required": ["name", "action"]
+            }
+        },
+        {
             "name": "session_note_get",
             "description": "Return the free-form note stored for the current session \
                 (the session whose worktree the agent is running inside). \
@@ -1276,6 +1350,7 @@ mod tests {
     type CallLog = Rc<RefCell<Vec<(PathBuf, String)>>>;
     type PromptDeliveryLog = Rc<RefCell<Vec<LaunchPromptDelivery>>>;
     type RemoveLog = Rc<RefCell<Vec<(PathBuf, String, bool)>>>;
+    type RecoverLog = Rc<RefCell<Vec<(PathBuf, String, session::QuarantineRecovery)>>>;
     type ModelProbeLog = Rc<RefCell<Vec<(AgentCli, String)>>>;
 
     /// A runner that reports a fixed allowlist of programs as available.
@@ -1341,6 +1416,8 @@ mod tests {
         prompt_deliveries: PromptDeliveryLog,
         remove_result: Result<session::RemovalOutcome, String>,
         remove_calls: RemoveLog,
+        recover_result: Result<session::QuarantineRecoveryOutcome, String>,
+        recover_calls: RecoverLog,
         /// What `agent_is_live` reports, so a test can steer `auto` mode toward the
         /// live or the launch channel. Defaults to `false` (no live pane).
         live: bool,
@@ -1360,6 +1437,14 @@ mod tests {
                     dirty: Vec::new(),
                 }),
                 remove_calls: Rc::new(RefCell::new(Vec::new())),
+                recover_result: Ok(session::QuarantineRecoveryOutcome {
+                    name: "s".to_string(),
+                    recovery: session::QuarantineRecovery::Resume,
+                    removed: true,
+                    retained_branches: Vec::new(),
+                    detail: "recovered".to_string(),
+                }),
+                recover_calls: Rc::new(RefCell::new(Vec::new())),
                 live: false,
             }
         }
@@ -1375,6 +1460,8 @@ mod tests {
                     dirty: Vec::new(),
                 }),
                 remove_calls: Rc::new(RefCell::new(Vec::new())),
+                recover_result: Err(message.to_string()),
+                recover_calls: Rc::new(RefCell::new(Vec::new())),
                 live: false,
             }
         }
@@ -1382,6 +1469,15 @@ mod tests {
         /// Script the outcome `session_remove` returns.
         fn with_remove(mut self, outcome: Result<session::RemovalOutcome, String>) -> Self {
             self.remove_result = outcome;
+            self
+        }
+
+        /// Script the outcome `session_recover` returns.
+        fn with_recover(
+            mut self,
+            outcome: Result<session::QuarantineRecoveryOutcome, String>,
+        ) -> Self {
+            self.recover_result = outcome;
             self
         }
 
@@ -1429,6 +1525,20 @@ mod tests {
                 force,
             ));
             self.remove_result.clone()
+        }
+
+        fn recover(
+            &self,
+            workspace_root: &Path,
+            name: &str,
+            recovery: session::QuarantineRecovery,
+        ) -> Result<session::QuarantineRecoveryOutcome, String> {
+            self.recover_calls.borrow_mut().push((
+                workspace_root.to_path_buf(),
+                name.to_string(),
+                recovery,
+            ));
+            self.recover_result.clone()
         }
     }
 
@@ -1549,6 +1659,7 @@ mod tests {
                 "session_complete",
                 "session_pr",
                 "session_remove",
+                "session_recover",
                 "session_note_get",
                 "session_note_update",
                 "session_todo_list",
@@ -3069,6 +3180,120 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("no such session"));
+    }
+
+    #[test]
+    fn recover_forwards_each_recovery_to_the_backend_and_formats_the_outcome() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = FakeBackend::ok("x").with_recover(Ok(session::QuarantineRecoveryOutcome {
+            name: "wedged".to_string(),
+            recovery: session::QuarantineRecovery::Resume,
+            removed: true,
+            retained_branches: vec!["usagi/wip-tui".to_string()],
+            detail: "re-proved ownership".to_string(),
+        }));
+        let calls = backend.recover_calls.clone(); // inspect after the move
+        let server = server_at(root.path(), backend);
+
+        let result = call(
+            &server,
+            "session_recover",
+            json!({"name":"wedged","action":"resume"}),
+        );
+
+        assert_eq!(result["isError"], false);
+        assert_eq!(
+            tool_json(&result),
+            json!({
+                "name": "wedged",
+                "action": "resume",
+                "removed": true,
+                "retained_branches": ["usagi/wip-tui"],
+                "detail": "re-proved ownership",
+            })
+        );
+        let recorded = calls.borrow();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, root.path());
+        assert_eq!(recorded[0].1, "wedged");
+        assert_eq!(recorded[0].2, session::QuarantineRecovery::Resume);
+    }
+
+    #[test]
+    fn recover_routes_release_as_a_non_destructive_outcome() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = FakeBackend::ok("x").with_recover(Ok(session::QuarantineRecoveryOutcome {
+            name: "alive".to_string(),
+            recovery: session::QuarantineRecovery::Release,
+            removed: false,
+            retained_branches: Vec::new(),
+            detail: "withdrew the quarantine".to_string(),
+        }));
+        let calls = backend.recover_calls.clone();
+        let server = server_at(root.path(), backend);
+
+        let body = tool_json(&call(
+            &server,
+            "session_recover",
+            json!({"name":"alive","action":"release"}),
+        ));
+
+        // A release keeps the session, so the caller must not read it as a removal.
+        assert_eq!(body["action"], "release");
+        assert_eq!(body["removed"], false);
+        assert_eq!(calls.borrow()[0].2, session::QuarantineRecovery::Release);
+    }
+
+    #[test]
+    fn recover_rejects_an_action_it_does_not_recognise_before_reaching_the_backend() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = FakeBackend::ok("x");
+        let calls = backend.recover_calls.clone();
+        let server = server_at(root.path(), backend);
+
+        // A near-miss (`force`, `--resume`, an empty string) must not be guessed at:
+        // the two recoveries do opposite things.
+        for action in [json!("force"), json!("--resume"), json!("")] {
+            let result = call(
+                &server,
+                "session_recover",
+                json!({"name":"wedged","action":action}),
+            );
+            assert_eq!(result["isError"], true, "{action}");
+            let text = result["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains("resume"), "{action}: {text}");
+            assert!(text.contains("release"), "{action}: {text}");
+        }
+        // A missing or non-string action fails argument parsing for the same reason.
+        for arguments in [
+            json!({"name":"wedged"}),
+            json!({"name":"wedged","action":1}),
+        ] {
+            assert_eq!(call(&server, "session_recover", arguments)["isError"], true);
+        }
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn recover_surfaces_a_refused_recovery_as_a_tool_error() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = FakeBackend::ok("x").with_recover(Err(
+            "session \"stray\" stays quarantined: ... still exists".to_string(),
+        ));
+        let server = server_at(root.path(), backend);
+
+        let result = call(
+            &server,
+            "session_recover",
+            json!({"name":"stray","action":"release"}),
+        );
+
+        // Fail-closed by design, not a transport failure: the agent sees the reason.
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("stays quarantined"));
     }
 
     #[test]

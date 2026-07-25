@@ -1,4 +1,5 @@
 use super::*;
+use crate::usecase::session::QuarantineRecovery;
 
 #[test]
 fn session_list_logs_the_sessions() {
@@ -402,6 +403,8 @@ fn finished_create_does_not_auto_closeup_after_another_operation() {
     let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut broadcast_wake = noop_broadcast_wake as fn(&HomeState) -> usize;
+    let mut dispatch_recover =
+        |_: &Path, _: &str, _: crate::usecase::session::QuarantineRecovery| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -414,6 +417,7 @@ fn finished_create_does_not_auto_closeup_after_another_operation() {
         set_label: &mut set_label_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut remove,
+        dispatch_recover: &mut dispatch_recover,
         unite_resolve: &mut unite_resolve,
         dispatch_update: &mut update,
         evict_pool: &mut evict,
@@ -659,6 +663,8 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
     let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut broadcast_wake = noop_broadcast_wake as fn(&HomeState) -> usize;
+    let mut dispatch_recover =
+        |_: &Path, _: &str, _: crate::usecase::session::QuarantineRecovery| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -671,6 +677,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
         set_label: &mut set_label_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut remove,
+        dispatch_recover: &mut dispatch_recover,
         unite_resolve: &mut unite_resolve,
         dispatch_update: &mut update,
         evict_pool: &mut evict,
@@ -714,6 +721,57 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
         branches_called, 1,
         "`c` after the delayed close completion stayed in 選択 instead of being consumed elsewhere"
     );
+}
+
+#[test]
+fn session_recover_routes_each_recovery_to_the_recovery_worker() {
+    // The palette is one of the two surfaces a quarantined session can be rescued
+    // from, so `session recover` must reach the recovery hook — not the removal one,
+    // whose completion would clear the sidebar row of a session a `--release` keeps.
+    for (input, expected) in [
+        ("session recover feat --resume", QuarantineRecovery::Resume),
+        (
+            "session recover feat --release",
+            QuarantineRecovery::Release,
+        ),
+    ] {
+        let mut keys = cmd(input);
+        keys.push(Ok(Key::Enter));
+        keys.push(Ok(Key::Escape));
+        let mut recovered = Vec::new();
+        // The target root comes from the same `workspace_root_for_session` lookup a
+        // removal uses (empty in this single-workspace fake, which records no group
+        // root), so what matters here is the session and the recovery reaching the
+        // hook.
+        let mut dispatch_recover = |_: &Path, name: &str, recovery: QuarantineRecovery| {
+            recovered.push((name.to_string(), recovery));
+        };
+        assert!(matches!(
+            run_full_recover(keys, sample_state(), &mut dispatch_recover).unwrap(),
+            Outcome::Quit
+        ));
+        assert_eq!(recovered, vec![("feat".to_string(), expected)], "{input}");
+    }
+}
+
+#[test]
+fn a_malformed_session_recover_dispatches_nothing() {
+    // Naming no recovery (or both) is a usage error the command reports itself, so
+    // no worker starts and nothing is touched.
+    for input in [
+        "session recover feat",
+        "session recover feat --resume --release",
+    ] {
+        let mut keys = cmd(input);
+        keys.push(Ok(Key::Enter));
+        keys.push(Ok(Key::Escape));
+        let mut recovered = Vec::new();
+        let mut dispatch_recover = |_: &Path, name: &str, _: QuarantineRecovery| {
+            recovered.push(name.to_string());
+        };
+        run_full_recover(keys, sample_state(), &mut dispatch_recover).unwrap();
+        assert!(recovered.is_empty(), "{input}");
+    }
 }
 
 #[test]

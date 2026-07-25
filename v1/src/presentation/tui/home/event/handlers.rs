@@ -114,6 +114,20 @@ pub(super) fn palette_key(
                     state.begin_removing_session(root.clone(), name.clone());
                     (wiring.dispatch_remove)(&root, &name, force, None);
                 }
+                // `session recover <name> --resume|--release` runs the explicit
+                // recovery on a background worker: re-proving ownership can take as
+                // long as the teardown it resumes. No removal skeleton is shown —
+                // `--release` keeps the session — so the row simply refreshes when
+                // the task finishes.
+                Effect::RecoverSession {
+                    workspace,
+                    name,
+                    recovery,
+                } => {
+                    let root = state.workspace_root_for_session(workspace.as_deref(), &name);
+                    state.set_op_target(root.clone());
+                    (wiring.dispatch_recover)(&root, &name, recovery);
+                }
                 // `session remove` with no name opens the removal checklist over
                 // the palette, so it stays open behind it.
                 Effect::OpenRemoveModal { force } => state.open_remove_modal(force),

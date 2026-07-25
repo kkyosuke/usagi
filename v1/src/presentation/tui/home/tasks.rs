@@ -55,6 +55,11 @@ pub enum TaskKind {
     CreateSession,
     /// Removing a session (git worktree remove + branch delete + cleanup).
     RemoveSession,
+    /// Recovering a session out of the orphaned quarantine: re-proving its
+    /// recorded ownership and finishing the teardown, or withdrawing the
+    /// quarantine. Distinct from [`RemoveSession`](Self::RemoveSession) because a
+    /// withdrawal *keeps* the session, so labelling it 削除 would be a lie.
+    RecoverSession,
     /// Launching a restored or queued-autostart pane.
     LaunchPane,
 }
@@ -65,6 +70,7 @@ impl TaskKind {
         match self {
             TaskKind::CreateSession => "作成",
             TaskKind::RemoveSession => "削除",
+            TaskKind::RecoverSession => "回復",
             TaskKind::LaunchPane => "起動",
         }
     }
@@ -76,6 +82,7 @@ impl TaskKind {
         match self {
             TaskKind::CreateSession => "session create",
             TaskKind::RemoveSession => "session remove",
+            TaskKind::RecoverSession => "session recover",
             TaskKind::LaunchPane => "pane launch",
         }
     }
@@ -197,6 +204,8 @@ pub fn panic_outcome(
         focus: None,
         // A panicked task still needs its inline skeleton cleared.
         created: matches!(kind, TaskKind::CreateSession).then(|| target.to_string()),
+        // A recovery shows no inline removal skeleton (the session may well be
+        // staying), so only a real removal has one to clear.
         removed: matches!(kind, TaskKind::RemoveSession).then(|| target.to_string()),
     };
     (log_line, completion)

@@ -1083,6 +1083,8 @@ fn run_with_chat(
     let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut broadcast_wake = noop_broadcast_wake as fn(&HomeState) -> usize;
+    let mut dispatch_recover =
+        |_: &Path, _: &str, _: crate::usecase::session::QuarantineRecovery| {};
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -1095,6 +1097,7 @@ fn run_with_chat(
         set_label: &mut set_label_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut dispatch_remove,
+        dispatch_recover: &mut dispatch_recover,
         unite_resolve: &mut unite_resolve,
         dispatch_update: &mut dispatch_update,
         evict_pool: &mut evict,
