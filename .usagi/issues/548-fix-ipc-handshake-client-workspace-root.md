@@ -1,13 +1,13 @@
 ---
 number: 548
 title: fix(ipc): handshake で client の workspace root 不一致を拒否する
-status: todo
+status: done
 priority: medium
 labels: [v2, ipc, daemon, cli, mcp, tui, correctness]
 dependson: []
 related: [542]
 created_at: 2026-07-25T02:26:56.991011+00:00
-updated_at: 2026-07-25T02:26:56.991011+00:00
+updated_at: 2026-07-25T07:10:09.781902+00:00
 ---
 
 ## 問題・根拠（コード調査で確定）
