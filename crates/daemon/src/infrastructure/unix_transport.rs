@@ -430,13 +430,47 @@ impl SecureUnixListener {
     /// a filesystem/socket failure.
     #[coverage(off)]
     pub fn bind(data_dir: &Path, generation: DaemonGeneration) -> io::Result<Self> {
-        Self::bind_with(data_dir, generation, |_| Ok(()))
+        Self::bind_with(data_dir, generation, true, |_| Ok(()))
+    }
+
+    /// Binds this generation's endpoint **without** publishing the current
+    /// locator.
+    ///
+    /// This is what a standby generation uses: its endpoint exists and is
+    /// connectable by name, but no client discovers it, because `current.json`
+    /// still points at the active generation. Authority moves only when
+    /// [`publish_current`](Self::publish_current) is called after the registry
+    /// commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsafe existing path, a duplicate generation, or
+    /// a filesystem/socket failure.
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=unix_transport_standby_endpoint
+    pub fn bind_private(data_dir: &Path, generation: DaemonGeneration) -> io::Result<Self> {
+        Self::bind_with(data_dir, generation, false, |_| Ok(()))
+    }
+
+    /// Publishes this generation's endpoint as the current locator.
+    ///
+    /// The socket's identity is re-verified inside the locator lock, so a
+    /// standby whose endpoint was replaced between bind and promotion cannot
+    /// become `current`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the endpoint can no longer be proved to be this
+    /// generation's, or when the locator cannot be published atomically.
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=unix_transport_standby_endpoint
+    pub fn publish_current(&self) -> io::Result<()> {
+        self.cleanup.publish()
     }
 
     #[coverage(off)]
     fn bind_with(
         data_dir: &Path,
         generation: DaemonGeneration,
+        publish: bool,
         mut before: impl FnMut(BindStage) -> io::Result<()>,
     ) -> io::Result<Self> {
         let daemon = data_dir.join("daemon");
@@ -497,14 +531,20 @@ impl SecureUnixListener {
             // Publication takes current.lock. Release the generation setup
             // fence first so stale cleanup never observes the reverse order.
             FileExt::unlock(generation_directory.as_ref())?;
-            write_locator(&daemon, &locator, || {
-                before(BindStage::VerifyPublication)?;
-                verify_open_directory(&generation_dir, &generation_directory, true)?;
-                verify_owned_socket_identity_at(&generation_directory, "sock", identity, true)
-            })?;
-            Ok((listener, locator, identity))
+            let cleanup = EndpointCleanup {
+                locator,
+                daemon: daemon.clone(),
+                socket: socket.clone(),
+                socket_identity: identity,
+                generation_dir: generation_dir.clone(),
+                generation_directory: Arc::clone(&generation_directory),
+            };
+            if publish {
+                cleanup.publish_verified(&mut before)?;
+            }
+            Ok((listener, cleanup))
         })();
-        let (listener, locator, socket_identity) = match result {
+        let (listener, cleanup) = match result {
             Ok(published) => published,
             Err(error) => {
                 // `Self` does not exist yet, so its Drop cannot retire files
@@ -523,14 +563,7 @@ impl SecureUnixListener {
         };
         Ok(Self {
             listener,
-            cleanup: EndpointCleanup {
-                locator,
-                daemon,
-                socket,
-                socket_identity,
-                generation_dir,
-                generation_directory,
-            },
+            cleanup,
             retired: false,
         })
     }
@@ -590,6 +623,35 @@ impl SecureUnixListener {
 }
 
 impl EndpointCleanup {
+    /// Publishes this generation's locator, re-verifying the owned socket
+    /// inside the locator lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the socket is no longer provably this
+    /// generation's, or when the locator cannot be published.
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=unix_transport_standby_endpoint
+    pub fn publish(&self) -> io::Result<()> {
+        self.publish_verified(&mut |_| Ok(()))
+    }
+
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=unix_transport_standby_endpoint
+    fn publish_verified(
+        &self,
+        before: &mut dyn FnMut(BindStage) -> io::Result<()>,
+    ) -> io::Result<()> {
+        write_locator(&self.daemon, &self.locator, || {
+            before(BindStage::VerifyPublication)?;
+            verify_open_directory(&self.generation_dir, &self.generation_directory, true)?;
+            verify_owned_socket_identity_at(
+                &self.generation_directory,
+                "sock",
+                self.socket_identity,
+                true,
+            )
+        })
+    }
+
     /// Removes this exact generation socket first and only then removes a
     /// locator that still names it. A missing locator is therefore successful
     /// cleanup proof only after the owned socket is known to be absent.
@@ -789,6 +851,37 @@ pub fn read_locator(daemon: &Path) -> io::Result<EndpointLocator> {
 #[cfg(test)]
 fn write_locator_unverified(daemon: &Path, locator: &EndpointLocator) -> io::Result<()> {
     write_locator(daemon, locator, || Ok(()))
+}
+
+/// Publishes an existing generation's endpoint as the current locator on behalf
+/// of a committed handoff whose publisher died before it could write.
+///
+/// Unlike [`SecureUnixListener::publish_current`], the caller does not own the
+/// listener: it is a recovering process rolling a durable commit forward. The
+/// endpoint is therefore re-derived from the generation, required to live
+/// inside that generation's private directory, and re-verified as an owned
+/// socket both before and across the locator write.
+///
+/// # Errors
+///
+/// Returns an error when the endpoint is not this generation's own safe socket,
+/// or when the locator cannot be published atomically.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=generation_registry_store
+pub fn publish_recovered_locator(
+    data_dir: &Path,
+    generation: &DaemonGeneration,
+    endpoint: &str,
+) -> io::Result<()> {
+    let daemon = data_dir.join("daemon");
+    ensure_private_dir(&daemon)?;
+    let locator = EndpointLocator {
+        generation: generation.clone(),
+        endpoint: endpoint.to_owned(),
+        state: EndpointState::Active,
+    };
+    write_locator(&daemon, &locator, || {
+        checked_endpoint(&daemon, &locator).map(|_| ())
+    })
 }
 
 #[coverage(off)]
@@ -1006,7 +1099,13 @@ fn create_private_locator_temp(daemon: &Path) -> io::Result<(PathBuf, fs::File)>
     }
 }
 
-fn read_private_bytes_if_present(path: &Path) -> io::Result<Option<Vec<u8>>> {
+/// Reads a private `0600` file's bytes, or `None` when it does not exist.
+///
+/// # Errors
+///
+/// Returns an error when the path exists but is not a safe private file, or
+/// cannot be read.
+pub(crate) fn read_private_bytes_if_present(path: &Path) -> io::Result<Option<Vec<u8>>> {
     let mut file = match OpenOptions::new()
         .read(true)
         .custom_flags(PRIVATE_FILE_FLAGS | libc::O_NONBLOCK)
@@ -1146,11 +1245,64 @@ fn cleanup_optional_owned_temp_error(
 }
 
 fn unique_locator_temp_path(daemon: &Path) -> PathBuf {
+    unique_private_temp_path(daemon, LOCATOR_TEMP_PREFIX)
+}
+
+fn unique_private_temp_path(daemon: &Path, prefix: &str) -> PathBuf {
     daemon.join(format!(
-        "{LOCATOR_TEMP_PREFIX}{}.{}",
+        "{prefix}{}.{}",
         std::process::id(),
         LOCATOR_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
     ))
+}
+
+/// Replaces `<daemon>/<name>` with `bytes` through a private temporary in the
+/// same directory, so a reader never observes a partial document.
+///
+/// The caller holds the node's cross-process lock; this function only owns the
+/// atomicity of the replacement itself.
+///
+/// # Errors
+///
+/// Returns an error when the temporary cannot be created privately, written,
+/// synced, or renamed. A failure removes the temporary and leaves the previous
+/// contents in place.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=generation_registry_store
+pub(crate) fn write_private_file(
+    daemon: &Path,
+    name: &str,
+    prefix: &str,
+    bytes: &[u8],
+) -> io::Result<()> {
+    let target = daemon.join(name);
+    let (temporary, mut file) = loop {
+        let path = unique_private_temp_path(daemon, prefix);
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(SOCKET_MODE)
+            .custom_flags(PRIVATE_FILE_FLAGS)
+            .open(&path)
+        {
+            Ok(file) => match make_open_file_private(&file, SOCKET_MODE) {
+                Ok(()) => break (path, file),
+                Err(error) => return Err(cleanup_owned_temp_error(&path, error, "private temp")),
+            },
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    };
+    let written = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| verify_open_private_file(&file, SOCKET_MODE))
+        .and_then(|()| fs::rename(&temporary, &target));
+    if let Err(error) = written {
+        return Err(cleanup_owned_temp_error(&temporary, error, "private temp"));
+    }
+    sync_parent_best_effort(&target);
+    Ok(())
 }
 
 fn owns_endpoint(current: &EndpointLocator, owner: &EndpointLocator) -> bool {
@@ -1159,7 +1311,19 @@ fn owns_endpoint(current: &EndpointLocator, owner: &EndpointLocator) -> bool {
 
 #[coverage(off)]
 fn lock_locator(daemon: &Path) -> io::Result<fs::File> {
-    let path = daemon.join(LOCATOR_LOCK);
+    lock_private_node(daemon, LOCATOR_LOCK)
+}
+
+/// Takes the cross-process lock named `name` inside the private daemon
+/// directory, creating or repairing the node under the same secure contract as
+/// `current.lock`.
+///
+/// # Errors
+///
+/// Returns an error when the node cannot be created, verified, or locked.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=generation_registry_store
+pub(crate) fn lock_private_node(daemon: &Path, name: &str) -> io::Result<fs::File> {
+    let path = daemon.join(name);
     // The directory fd is a bootstrap lock for creating or repairing the lock
     // file itself.
     let directory = lock_setup_directory(daemon, true)?;
@@ -2392,15 +2556,16 @@ mod tests {
             let generation = generation();
             let generation_dir = temp.path().join("daemon/generations").join(&generation.0);
 
-            let result = SecureUnixListener::bind_with(temp.path(), generation.clone(), |stage| {
-                if stage == failure {
-                    Err(io::Error::other(format!(
-                        "injected failure before {stage:?}"
-                    )))
-                } else {
-                    Ok(())
-                }
-            });
+            let result =
+                SecureUnixListener::bind_with(temp.path(), generation.clone(), true, |stage| {
+                    if stage == failure {
+                        Err(io::Error::other(format!(
+                            "injected failure before {stage:?}"
+                        )))
+                    } else {
+                        Ok(())
+                    }
+                });
             let error = result
                 .err()
                 .expect("injected post-bind failure unexpectedly succeeded");
@@ -2430,14 +2595,18 @@ mod tests {
         let replacement_dir = daemon.join("generations").join(&replacement_generation.0);
         let temporary = replacement_dir.join(".sock.bind");
 
-        let error =
-            SecureUnixListener::bind_with(temp.path(), replacement_generation.clone(), |stage| {
+        let error = SecureUnixListener::bind_with(
+            temp.path(),
+            replacement_generation.clone(),
+            true,
+            |stage| {
                 assert_eq!(stage, BindStage::CaptureIdentity);
                 fs::remove_file(&temporary)?;
                 Ok(())
-            })
-            .err()
-            .expect("a disappeared temporary socket must fail publication");
+            },
+        )
+        .err()
+        .expect("a disappeared temporary socket must fail publication");
 
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         assert!(!temporary.exists());
@@ -2473,7 +2642,7 @@ mod tests {
             let mut replacement_listener = None;
 
             let error =
-                SecureUnixListener::bind_with(temp.path(), replacement_generation, |stage| {
+                SecureUnixListener::bind_with(temp.path(), replacement_generation, true, |stage| {
                     if stage == replacement_stage {
                         replacement_listener = Some(replace_with_private_socket(&replacement_path));
                     }
@@ -2522,7 +2691,7 @@ mod tests {
         let racing_generation = generation();
         let racing_dir = daemon.join("generations").join(&racing_generation.0);
         let racing_socket = racing_dir.join("sock");
-        let error = SecureUnixListener::bind_with(temp.path(), racing_generation, |stage| {
+        let error = SecureUnixListener::bind_with(temp.path(), racing_generation, true, |stage| {
             if stage == BindStage::RenameEndpoint {
                 std::os::unix::fs::symlink(&dangling_target, &racing_socket)?;
             }
@@ -2557,15 +2726,16 @@ mod tests {
         let outside_listener = UnixListener::bind(&outside_socket).unwrap();
         fs::set_permissions(&outside_socket, fs::Permissions::from_mode(SOCKET_MODE)).unwrap();
 
-        let error = SecureUnixListener::bind_with(temp.path(), replacement_generation, |stage| {
-            if stage == BindStage::VerifyPublication {
-                fs::rename(&generation_dir, &displaced)?;
-                std::os::unix::fs::symlink(&outside_generation, &generation_dir)?;
-            }
-            Ok(())
-        })
-        .err()
-        .expect("a replaced generation pathname must fail closed");
+        let error =
+            SecureUnixListener::bind_with(temp.path(), replacement_generation, true, |stage| {
+                if stage == BindStage::VerifyPublication {
+                    fs::rename(&generation_dir, &displaced)?;
+                    std::os::unix::fs::symlink(&outside_generation, &generation_dir)?;
+                }
+                Ok(())
+            })
+            .err()
+            .expect("a replaced generation pathname must fail closed");
 
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(outside_socket.exists());
@@ -2612,7 +2782,7 @@ mod tests {
             let ready = Arc::clone(&endpoint_ready);
             let resume = Arc::clone(&endpoint_resume);
             std::thread::spawn(move || {
-                SecureUnixListener::bind_with(&data_dir, replacement_generation, |stage| {
+                SecureUnixListener::bind_with(&data_dir, replacement_generation, true, |stage| {
                     if stage == BindStage::SetNonblocking {
                         ready.wait();
                         resume.wait();

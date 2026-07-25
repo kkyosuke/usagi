@@ -22,6 +22,7 @@ managed session と terminal を所有する daemon の現在の契約である�
 - [final retention と aggregate GC](#final-retention-と-aggregate-gc)
 - [supervisor scheduler](#supervisor-scheduler)
 - [supervisor policy and verification](#supervisor-policy-and-verification)
+- [cross-process generation authority](#cross-process-generation-authority)
 - [generation と orphan safety](#generation-と-orphan-safety)
 - [metrics observer](#metrics-observer)
 
@@ -291,9 +292,11 @@ parent directory fsync は platform / filesystem が対応する範囲の best-e
 hard crash では unique temporary が残り得るが、後続 save は別名を使うため阻害されない。
 
 この順序は新規 connection を止めるが、accept 済み connection の frame dispatch、reserve/spawn/control effect を
-停止しない。client worker の JoinHandle も保持しないため、role 付き request lease、internal producer の停止、既接続
-stream の shutdown/join は未実装である。この admission race は
-[#516](../.usagi/issues/516-refactor-daemon-cross-process-generation-registry-standby-handoff-authority.md) で追跡する。
+停止しない。shipping `serve` は client worker の JoinHandle も保持しない。role 付き request lease、internal
+producer の停止、既接続 stream の shutdown/join を行う admission fence は
+[cross-process generation authority](#cross-process-generation-authority) に実装されているが、shipping `serve`
+はまだそれを駆動しないため、この順序自体は変わっていない。両者の接続は
+[#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md) で行う。
 正常終了後の discovery は stale socket への `ConnectionRefused` ではなく `NotFound` になる。client bootstrap は
 locator 自体の `NotFound` では replacement を一度起動する。検証済み locator の endpoint 検証または connect 後の
 `NotFound` は `ConnectionRefused` 相当に分類し、上記の fenced recovery が完了した場合だけ起動する。その他の接続失敗、
@@ -325,6 +328,8 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `record.lock` | lock file | `daemon.json` の read、save、incarnation-conditional clear を cross-process で直列化する |
 | `current.lock` | lock file | current locator の publish と generation-fenced retire を cross-process で直列化する |
 | `current.json` | private atomic JSON locator | active daemon generation の Unix socket endpoint を公開する。安全な publication の正本は [4. IPC の Unix transport](04-ipc.md#unix-transport) |
+| `generations.json` | durable atomic JSON | cross-process generation registry。schema、document revision、各 generation の role / endpoint / process identity / expected・verified artifact、進行中 handoff を持つ（[cross-process generation authority](#cross-process-generation-authority)） |
+| `generations.lock` | lock file | `generations.json` の read・compare-and-swap を cross-process で直列化する |
 | `generations/<generation>/sock` | Unix domain socket | generation ごとの IPC endpoint。socket と locator は所有者・permission・symlink を検証して利用する |
 | `sessions.json` | JSON | managed session の lifecycle、operation journal、stable identity と trusted repository root。daemon restart をまたいで共有する |
 | `terminals.json` | durable atomic JSON | generic terminal の launch reservation、trusted profile provenance、process identity、runtime state。PTY master と output journal は process memory にのみ保持する |
@@ -953,14 +958,110 @@ terminal output、argv、environment、secret を含めない。
 TUI は最新 snapshot を workspace の左ペイン下部にある v1 互換の usagi mascot の足元の右へ表示する。
 この観測値は操作対象ではないため、狭い terminal では session 一覧と footer を優先して mascot ごと省略される。
 
+## cross-process generation authority
+
+2 つの daemon process が一時的に共存する planned restart の前提となる authority である。本節がその契約の正本で、
+process 内 1 世代の fence（[generation と orphan safety](#generation-と-orphan-safety)）とは別物である。shipping
+`serve` はまだこの authority を駆動しない（[daemon process lifecycle](#daemon-process-lifecycle)）。統合は
+[#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md) が担う。
+
+### durable registry
+
+`generations.json` は 1 つの document であり、writer は**読んだ bytes と完全一致する場合だけ**置換できる
+（compare-and-swap）。commit は document revision をちょうど 1 進める必要があり、遅れた writer は
+`stale_revision` で拒否される。未知 schema、破損・切り詰め、重複 generation、`current` と active の不一致、
+generation 上限超過は commit 前に検証して**effect zero で拒否**する。
+
+role transition は退役方向にだけ進む。
+
+```text
+standby ──▶ active ──▶ draining ──▶ retired
+   │           │                       ▲
+   └───────────┴───────────────────────┘
+```
+
+`standby` は known な expected artifact を宣言した場合だけ slot を取れる。同一 identity の再登録は idempotent で、
+lost ACK の再試行が 2 つ目の slot を消費しない。retained generation は最大 2（draining 1 + active 1）であり、
+繰り返しの rollover が process を増やさない。
+
+### standby readiness
+
+standby は自分専用の endpoint を bind する（`SecureUnixListener::bind_private`）。この時点で `current.json` は
+変更されないため、client は旧 active を見続ける。readiness は read-only の hello 1 往復だけで、runtime store の
+reconcile / save、supervisor tick、worker 起動、spawn を一切行わない。受理するのは次を**すべて**満たす場合だけである。
+
+| 検証 | 拒否時の挙動 |
+|---|---|
+| endpoint に応答した peer が登録済み generation 自身であること | old active / current を維持 |
+| `build.artifact.v1` と `daemon.generation-handoff.v1` を advertise していること | old active / current を維持 |
+| `ServerHello` の artifact が admit 時の expected artifact と exact match すること | old active / current を維持 |
+
+version と target が同じでも source tree が異なる build、どちらか一方でも unknown な identity は match にしない。
+
+### handoff protocol
+
+registry と current locator は別の durable object なので、1 回の write で両方を動かせない。書き込み順序を 1 つに固定し、
+各境界の意味を durable phase として持つ。
+
+```text
+W1  registry CAS   handoff = { operation, from, to, preparing }   まだ observable でない
+W2  registry CAS   from→draining, to→active, current = to         commit が observable になる
+W3  locator write  current.json が to を指す                       client が commit に追随する
+W4  registry CAS   handoff を消し、operation を完了として記録       bookkeeping のみ
+```
+
+| crash 境界 | durable phase | recovery |
+|---|---|---|
+| W1 より前 | handoff なし | 旧 authority のまま |
+| W1〜W2 | `preparing` | intent を破棄し旧 authority を維持 |
+| W2〜W3 | `committed`・locator は旧 | roll forward（publish してから clear） |
+| W3〜W4 | `committed`・locator は新 | roll forward（clear のみ） |
+| W4 より後 | handoff なし | 新 authority のまま |
+
+observable になった commit を旧 authority へ rollback しない。後継 process の exact identity を alive と証明できない場合は
+旧 authority を復活させず、全 generation を retired にし locator を撤去した **effect zero の fail-closed** に収束する。
+ambiguous な partial phase は operation ID で同じ結果へ収束するため、concurrent restart・ACK loss・再試行は 1 つの
+outcome になる。異なる operation の割り込みは `handoff_in_progress` で拒否する。
+
+### admission fence
+
+authority は request ごとに live な role・revision・resource owner から決め直す。**接続が確立済みという事実は authority に
+ならない**。
+
+| role | control / spawn | 自 generation の terminal IO | 他 generation の resource | read / inventory |
+|---|---|---|---|---|
+| `active` | 受理 | 受理 | 拒否 | 受理 |
+| `draining` | 拒否 | 受理 | 拒否 | 受理 |
+| `standby` | 拒否 | 拒否 | 拒否 | 受理 |
+| `retired` | 拒否 | 拒否 | 拒否 | 拒否 |
+
+active-only の work は durable reservation より前に role / revision 付きの RAII admission lease を取り、external effect と
+durable commit が終わるまで保持する。`active → draining` は **lease の新規発行を止め、既存 lease と active-only
+background worker が 0 になるまで待ってから** registry / locator handoff を commit する。effect 後の再検証で発生済みの
+spawn を取り消せるとは扱わない。owner-terminal の lease は別 class で継続し、collection は発行停止と 0 確認の後だけ許可する。
+
+barrier は W2 より前は **process local** であり、client からは観測できない。したがって commit 前に handoff が失敗した場合は
+barrier を戻して旧 authority を維持する。W2 が成功した後の barrier は durable であり、二度と `active` へ戻らない。
+
+`retired` への遷移は、保持した client worker の stream を shutdown して parked な frame read を解除し、**全 JoinHandle を
+join してから** endpoint と process を回収する。count だけを待って JoinHandle を捨てることはしない。
+
+### legacy migration
+
+registry を持たない `daemon.json` + `current.json` の状態は、record が exact な OS process
+（`DaemonProcessObservation::Exact`）を指し、かつ locator が読めて endpoint を名指ししている場合だけ active 1 件へ移行する。
+process identity を持たない legacy record、PID 再利用、観測不能、locator の欠落・破損はいずれも fail-closed で、
+所有者を推測しない。移行した entry は expected artifact が unknown なので、handoff の**移譲元にはなれるが移譲先にはならない**。
+
 ## generation と orphan safety
 
 generation coordinator は一つの daemon process 内で Agent admission、terminal control/exit、completion outcome を
 current generation に fence する。shipping `serve` は process lifetime の 2 段 fence（workspace と data directory。
 [単一 daemon の 2 段 fence](#単一-daemon-の-2-段-fence)）を保持するため、同じ data directory でも同じ workspace でも
-2 process は共存せず、production lifecycle は coordinator の `rollover` を呼ばない。standby endpoint、
-cross-process generation registry、draining process への admission は現在存在しない。generic terminal runtime も
-この coordinator の cross-process authority には含まれない。
+2 process は共存せず、production lifecycle は coordinator の `rollover` を呼ばない。standby endpoint、cross-process
+generation registry、draining process への admission は [cross-process generation
+authority](#cross-process-generation-authority) が持つが、shipping `serve` はまだそれを駆動しない。generic terminal
+runtime も、この process 内 coordinator の authority には含まれない。
 
 daemon owner process の exact identity と fenced SIGTERM は lifecycle record に実装されている。そのため PID reuse や
 legacy record を daemon owner と推測しない。
@@ -969,14 +1070,13 @@ generation record は optional `expected_build` を持つ。process-local / lega
 cross-process standby contract の `register_standby_for_build` は known identity を必須とする。readiness 後の
 `verify_standby_build` は expected artifact と実 `ServerHello` artifact の exact match だけを受理する。unknown または
 mismatch は active generation を変えず、candidate を standby のまま保つ。known expected build の record は
-`build_verified` が立つまで `rollover` も拒否する。この pure contract を #516 の registry CAS / private endpoint
-consumer が使い、TOCTOU で別 artifact を active にしない。
+`build_verified` が立つまで `rollover` も拒否する。同じ artifact 契約を durable registry の
+[standby readiness](#standby-readiness) が使い、TOCTOU で別 artifact を active にしない。
 
 そのため current generation の exact fence は stale request の誤適用を防ぐが、planned restart 中に旧 PTY を
 draining owner として維持する機構ではない。安全な landing order は、artifact identity / trigger の
-[#528](../.usagi/issues/528-fix-daemon-build-artifact-identity-safe-rollover-trigger.md) と daemon identity / locator の
-#515 を前提に、cross-process registry / admission の
-[#516](../.usagi/issues/516-refactor-daemon-cross-process-generation-registry-standby-handoff-authority.md)、owner shard /
+[#528](../.usagi/issues/528-fix-daemon-build-artifact-identity-safe-rollover-trigger.md)、daemon identity / locator の
+#515、[cross-process generation authority](#cross-process-generation-authority) を前提に、owner shard /
 exit-capacity handoff の
 [#518](../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md)、draining owner routing の
 [#508](../.usagi/issues/508-fix-tui-ipc-draining-generation-inventory-terminalref-owner-routing.md)、shipping lifecycle / final E2E の

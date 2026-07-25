@@ -589,9 +589,13 @@ continuation で別 incarnation へ fallback しない。TUI の projection 契�
 
 Unix socket は daemon 専用 adapter が管理する。endpoint は private data directory の generation
 directory に作り、bind 成功後に current locator を atomic publish する。directory は `0700`、socket と
-locator は `0600` で、所有 UID・mode・symlink でないことを discovery と accept の両方で検証する。現行
-`SecureUnixListener::bind` は endpoint bind と current publish を一つの処理で行うため、active locator を変えずに
-private standby endpoint だけを ready にする段階はない。
+locator は `0600` で、所有 UID・mode・symlink でないことを discovery と accept の両方で検証する。
+`SecureUnixListener::bind` は endpoint bind と current publish を一つの処理で行う。両者を分けたい呼出元は
+`bind_private` で endpoint だけを用意し、authority を移す時点で `publish_current` を呼ぶ。publish は locator lock 下で
+socket の inode identity を再検証するため、bind 後に endpoint が置き換わった generation は current になれない。
+`publish_recovered_locator` は crash recovery 専用で、listener を所有しない process が committed handoff を roll forward
+するときにだけ使い、endpoint が当該 generation の private directory 内の安全な socket であることを再検証する
+（[5. daemon の cross-process generation authority](05-daemon.md#cross-process-generation-authority)）。
 
 private directory は、検証済みの trusted parent directory の直下に `0700` を mkdir syscall へ指定して作る。
 そのため process が mkdir と事後 chmod の間で停止しても group / other に公開された directory は残らない。

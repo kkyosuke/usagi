@@ -11,6 +11,7 @@
 //! 拒否は合成ルートが担う。
 
 pub mod agent_ipc;
+pub mod authority;
 pub mod claude;
 pub mod codex;
 pub mod control;

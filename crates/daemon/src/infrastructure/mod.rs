@@ -6,6 +6,9 @@
 //! 実 IO そのもの（socket accept・PTY fork・ファイル書き込み）は合成ルートが束ね、
 //! この層はそれを注入で受けて純粋に振る舞う。v2 では必要になった時点で実装を追加する。
 
+/// Durable cross-process generation authority: the registry document and the
+/// current locator, bound to the daemon data directory.
+pub mod generation_registry;
 /// The daemon's concrete pseudo-terminal adapter.  Presentation surfaces only
 /// ever receive terminal stream data through IPC; they do not own this IO.
 pub mod pty;

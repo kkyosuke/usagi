@@ -1,14 +1,14 @@
 ---
 number: 516
 title: refactor(daemon): cross-process generation registry と standby handoff authority を実装する
-status: todo
+status: in-progress
 priority: high
 labels: [review, v2, daemon, lifecycle, ipc, generation, recovery]
 dependson: [515, 528]
 related: [209, 221, 492, 507, 550]
 parent: 507
 created_at: 2026-07-22T11:30:17.999672+00:00
-updated_at: 2026-07-25T13:20:33.599441+00:00
+updated_at: 2026-07-25T21:42:15.416548+00:00
 ---
 
 ## 問題・根拠
