@@ -19,6 +19,7 @@ managed session と terminal を所有する daemon の現在の契約である�
 - [terminal ownership](#terminal-ownership)
 - [terminal launch environment](#terminal-launch-environment)
 - [agent ownership](#agent-ownership)
+- [final retention と aggregate GC](#final-retention-と-aggregate-gc)
 - [supervisor scheduler](#supervisor-scheduler)
 - [supervisor policy and verification](#supervisor-policy-and-verification)
 - [generation と orphan safety](#generation-と-orphan-safety)
@@ -540,8 +541,9 @@ durable terminal record と bounded output journal は transport entry とは別
 generic / Agent 両 owner の `Exited` record だけを列挙し、[4. IPC](04-ipc.md#exited-tombstone-visibility) の
 `CompletedTerminalEntry` として返す。running / reserved / reconcile 中 / reclaimed は tombstone ではないため
 列挙しない。daemon restart 後は未終端 record が `identity_unknown`（`live: false`）へ reconcile され `Exited`
-ではなくなるため、completed inventory には現れない。tombstone の lifetime 上限（aggregate retention と GC）は
-[#526](../.usagi/issues/526-fix-daemon-terminal-agent-tombstone-retention-aggregate-bound-gc.md) が所有する。
+ではなくなるため、completed inventory には現れない。tombstone の lifetime 上限（aggregate な count / byte / age budget、minimum visibility TTL、soft reserve、
+pre-admission reservation、GC と typed expiry）は [final retention と aggregate GC](#final-retention-と-aggregate-gc)
+が正本である。
 
 tombstone の可視状態は daemon が唯一の authority として保持する **workspace-global visibility** である。root IPC
 server は全 client connection で共有する 1 つの visibility ledger を持ち、connection ごとに生成される terminal owner
@@ -807,6 +809,107 @@ root IPC の Agent fixture は次を確認する。実 CLI を install または
 pending Agent pane を attachable にするのは、同じ `OperationId` の成功 final が返す完全な `TerminalRef`
 だけである。late / duplicate / wrong-generation / wrong-scope の completion は現 incarnation を変更しない。
 TUI 側の pending pane と fenced attach policy は [3. TUI](03-tui.md) を正本とする。
+
+## final retention と aggregate GC
+
+per-terminal の bound（64 KiB の replay window、exit 時の PTY / FD 解放）は 1 本の terminal しか縛らない。本節は
+その上に載る **aggregate** の契約——daemon 全体・workspace ごとに何本の final を、何 byte、どれだけの期間 retain
+できるか、pressure 下でどの順に evict するか——の正本である。exited generic terminal と completed / interrupted
+Agent runtime の final tombstone（durable record・bounded replay・journal）だけを対象とし、[#518] の launch
+operation outcome / relation と [#519] の input sequence / ACK ledger は各 owner の契約に従う（本節では削除も
+再定義もしない）。
+
+[#518]: ../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md
+[#519]: ../.usagi/issues/519-feat-ipc-terminal-input-ack-loss-cross-connection-replay.md
+
+### budget
+
+daemon は user ごとの data directory を 1 プロセスで所有するため、daemon budget が user budget を兼ねる。
+budget は起動時に正規化され、各 cap は最低 1 本の final を通し、soft reserve は hard cap 以下、minimum TTL は
+age budget 以下、GC batch は 1 以上になる。
+
+| 項目 | 既定値 | 意味 |
+|---|---|---|
+| hard count（daemon） | 512 | retained final ＋ 未使用 reservation の総数上限 |
+| hard bytes（daemon） | 32 MiB | retained ＋ reserved の総 byte 上限 |
+| hard count / bytes（workspace） | 256 / 16 MiB | 1 workspace が占有できる上限 |
+| soft reserve（daemon） | 384 / 24 MiB | 到達すると GC と launch backpressure を開始する水位 |
+| soft reserve（workspace） | 192 / 12 MiB | 同上を workspace 単位で判定する水位 |
+| minimum visibility TTL | 600 秒 | observed / unobserved を問わず pressure eviction から保護する期間 |
+| age budget | 86400 秒 | pressure が無くても次の GC pass で回収する上限年齢 |
+| worst-case final | 64 KiB | 1 launch が事前予約する final budget |
+| GC batch | 64 | 1 pass が evict する上限（bounded work） |
+| eviction marker | 1024 件 | typed expiry を返せる compact marker の保持数 |
+
+### admission reservation
+
+launch は spawn の前に worst-case final budget を予約する。予約が hard cap に収まらなければ **PTY を起動せず**
+typed `resource_exhausted` で拒否し、minimum TTL 内の final を消して capacity を作ることはしない。
+
+```text
+launch -> (soft reserve 超過なら GC) -> reserve worst-case final
+            |                                   |
+            | reserve 不可                       | reserve 可
+            v                                   v
+   resource_exhausted（spawn 前）        spawn -> ... -> exit
+                                                          |
+                                                          v
+                                             予約済み capacity へ final を commit
+```
+
+予約は exact `TerminalRef` を key に持つため、同じ launch の retry は二重予約にならない。spawn failure・ambiguous・
+scope mismatch など final を生まない失敗はすべて予約を返却する。exit 時の commit は失敗しない——予約より大きい
+final も保存し、超過分は metric に計上して次の GC が回収する。したがって hard cap を理由に exit 結果を
+silent drop することはない。exit 後の store write に失敗した record は reconcile 対象として予約を保持したままにする。
+
+### eviction 順序
+
+GC は age → pressure → emergency の 3 pass を固定順で走らせ、各 pass は決定的な順序で候補を取る。同じ ledger と
+同じ時刻なら常に同じ final を evict する。
+
+| pass | 対象 | 順序 |
+|---|---|---|
+| age | age budget 超過、pin なし | 古い順 → exact `TerminalRef` |
+| pressure | minimum TTL 経過、pin なし、pressure 中の scope に属する | class 順 → 古い順 → exact `TerminalRef` |
+| emergency | hard cap 超過 scope の全 final（pin と TTL 内も対象） | pin なし優先 → class 順 → 古い順 → exact `TerminalRef` |
+
+class は visibility と lineage から決まり、`dismissed` < `superseded` < `observed` < `unobserved` の順に evict する
+（利用者が閉じた history から先に捨て、まだ見ていない history を最後に残す）。TTL 経過後は unobserved も候補に
+なる。全件 unobserved の workload と hard cap を両立させるには無期限保護を約束できないためである。
+
+pin は「今まさに client が final replay を drain している terminal」を守る。attach 中に exit した final は pin され、
+detach / disconnect で解除される。emergency pass は migration や budget 縮小で **既に** hard cap を超えている場合
+だけ動き、pin も TTL 内も対象にするが、silent deletion にはならない（下記 marker と metric に必ず現れる）。
+
+### typed expiry
+
+evict された final は compact な eviction marker（exact `TerminalRef`・kind・理由・時刻・byte 数）を残す。
+以後その key への query は marker に基づく typed な expiry を返し、`unknown` や別 runtime の history へ
+fallback しない。marker window（既定 1024 件）から溢れた分は「忘れた marker 数」として metric に計上する。
+
+| query 対象 | 応答 |
+|---|---|
+| retained final | 通常どおり snapshot / replay / completed inventory |
+| evict 済み final | `not_found`（retention expired）。runtime は復活させない |
+| 一度も owner が持たなかった key | `stale_target`（unknown terminal） |
+
+### GC の起動点と crash safety
+
+GC は startup import、launch admission、exit commit、そして 30 秒周期の collector から起動し、いずれも
+bounded work（1 pass = GC batch 件）である。owner は「authority が typed marker を付けて evict した final」だけを
+durable record と output journal から外し、store を 1 回書き直す。marker の無い record を消すことはない。
+
+retention の会計は derived state であり、durable な正本は各 owner の record である。daemon 起動時に exited record を
+import して会計を組み直すため、reservation が restart を跨いで leak することも、eviction 決定が半端に残ることもない。
+GC 中の store write 失敗も runtime を復活させず、memory 上の除去はそのまま、次の pass か次回 startup の import で
+収束する。既存の unbounded な record も同じ import 経路で移行し、cap 超過分は emergency pass が marker 付きで
+段階的に回収する。
+
+### metrics
+
+retained / reserved の件数と byte、最古 final の age、soft pressure の有無、admission rejection 数、evict 件数と
+byte、emergency eviction 数、予約超過 byte、忘れた marker 数を公開する。いずれも件数・byte・秒だけで、terminal
+output、argv、provider-native ID は含まない。
 
 ## supervisor scheduler
 

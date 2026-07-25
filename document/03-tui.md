@@ -834,6 +834,13 @@ final output を保持したまま completed entry へ到達可能にし、即�
 completed entry は **read-only** である。input / resize / live Resume / spawn を一切送らず、daemon の bounded final
 replay を表示するだけである。live tab とは別 identity（完全な `TerminalRef`）で持ち、`live` restore の tab と衝突しない。
 
+tombstone が到達可能である期間は daemon の aggregate retention が決める（正本は
+[5. daemon](05-daemon.md#final-retention-と-aggregate-gc)）。final は observed / unobserved を問わず minimum
+visibility TTL の間は保護されるので、その間に completed entry を表示して `observe` / `dismiss` できる。TTL 経過後の
+final は pressure 下で決定的な順に回収され、`dismissed` が最初、まだ見ていない `unobserved` が最後になる。回収後の
+reopen は typed な expiry になり、別 terminal の history へ fallback しない。TUI は inventory から entry が消えたことを
+retention の証明として扱わず、この typed 応答だけを根拠にする。
+
 ### workspace-global visibility の投影
 
 visibility は client-local な「既読」flag ではなく、daemon が authority を持つ workspace-global state（`unobserved <

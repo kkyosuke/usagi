@@ -54,7 +54,10 @@ use usagi_core::{
 };
 
 use crate::presentation::ipc::TerminalOwner;
-use crate::usecase::terminal_visibility_ipc::SharedTerminalVisibility;
+use crate::usecase::{
+    terminal_retention_ipc::SharedTerminalRetention,
+    terminal_visibility_ipc::SharedTerminalVisibility,
+};
 use usagi_core::domain::terminal_visibility::VisibilityOutcome;
 
 use super::{
@@ -337,7 +340,7 @@ impl AgentRuntime {
     pub fn hydrate_with_dispatch_and_locator(
         generation: DaemonGeneration,
         registry: AdapterRegistry,
-        mut store: impl super::runtime::RuntimeStore + Send + 'static,
+        store: impl super::runtime::RuntimeStore + Send + 'static,
         journal: impl OutputJournal + Send + 'static,
         pty: impl PtySpawner + PtyWriter + Send + 'static,
         default_profile: AgentProfileId,
@@ -346,7 +349,39 @@ impl AgentRuntime {
         locator: impl ExecutableLocator + 'static,
         snapshot: super::runtime::RuntimeStoreSnapshot,
     ) -> Result<Self, super::runtime::RuntimeSnapshotError> {
-        let mut coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64)?;
+        Self::hydrate_with_retention(
+            generation,
+            registry,
+            store,
+            journal,
+            pty,
+            default_profile,
+            geometry,
+            dispatch,
+            locator,
+            snapshot,
+            SharedTerminalRetention::new(),
+        )
+    }
+
+    /// Hydrates the owner bound to the daemon-wide retention authority, so
+    /// Agent runtimes and generic terminals share one aggregate budget (#526).
+    #[allow(clippy::too_many_arguments)]
+    pub fn hydrate_with_retention(
+        generation: DaemonGeneration,
+        registry: AdapterRegistry,
+        mut store: impl super::runtime::RuntimeStore + Send + 'static,
+        journal: impl OutputJournal + Send + 'static,
+        pty: impl PtySpawner + PtyWriter + Send + 'static,
+        default_profile: AgentProfileId,
+        geometry: Geometry,
+        dispatch: DispatchStore,
+        locator: impl ExecutableLocator + 'static,
+        snapshot: super::runtime::RuntimeStoreSnapshot,
+        retention: SharedTerminalRetention,
+    ) -> Result<Self, super::runtime::RuntimeSnapshotError> {
+        let mut coordinator =
+            RuntimeCoordinator::hydrate_with_retention(snapshot, 16, 64 * 1024, 64, retention)?;
         coordinator.activate_generation(generation)?;
         store
             .save(coordinator.snapshot())
@@ -1941,6 +1976,16 @@ impl AgentRuntime {
     }
 }
 
+impl AgentRuntime {
+    /// Runs one bounded retention collection pass and applies its decisions to
+    /// this owner's records and journals. The composition root drives it
+    /// periodically so an idle daemon still ages its finals out of the budget.
+    pub fn collect_retention_garbage(&mut self) -> usize {
+        self.coordinator.retention().collect();
+        self.coordinator.collect_garbage(&mut *self.store)
+    }
+}
+
 impl AgentTerminalActor for AgentRuntime {
     fn handle_terminal(
         &mut self,
@@ -1988,6 +2033,7 @@ pub struct SharedTerminalOwner<G, A> {
     agent: A,
     generic: G,
     visibility: SharedTerminalVisibility,
+    retention: SharedTerminalRetention,
 }
 
 impl<G, A> SharedTerminalOwner<G, A> {
@@ -2001,10 +2047,28 @@ impl<G, A> SharedTerminalOwner<G, A> {
     /// Builds an owner bound to a shared visibility authority so every client
     /// connection converges on the same workspace-global tombstone state.
     pub fn with_visibility(agent: A, generic: G, visibility: SharedTerminalVisibility) -> Self {
+        Self::with_visibility_and_retention(
+            agent,
+            generic,
+            visibility,
+            SharedTerminalRetention::new(),
+        )
+    }
+
+    /// Builds an owner bound to both daemon-wide authorities. Visibility raises
+    /// are mirrored into retention so a dismissed tombstone becomes the first
+    /// eviction candidate and an observed one outranks it (#526).
+    pub fn with_visibility_and_retention(
+        agent: A,
+        generic: G,
+        visibility: SharedTerminalVisibility,
+        retention: SharedTerminalRetention,
+    ) -> Self {
         Self {
             agent,
             generic,
             visibility,
+            retention,
         }
     }
 }
@@ -2077,11 +2141,23 @@ impl<G: TerminalOwner, A: AgentTerminalActor> TerminalOwner for SharedTerminalOw
                 TerminalRequest::Observe {
                     terminal,
                     expected_revision,
-                } => self.visibility.observe(&terminal, expected_revision),
+                } => {
+                    let outcome = self.visibility.observe(&terminal, expected_revision);
+                    // Retention classes follow the authoritative visibility, so
+                    // the ledger evicts seen history before unseen history.
+                    self.retention
+                        .note_visibility(&terminal, outcome.snapshot().state);
+                    outcome
+                }
                 TerminalRequest::Dismiss {
                     terminal,
                     expected_revision,
-                } => self.visibility.dismiss(&terminal, expected_revision),
+                } => {
+                    let outcome = self.visibility.dismiss(&terminal, expected_revision);
+                    self.retention
+                        .note_visibility(&terminal, outcome.snapshot().state);
+                    outcome
+                }
                 _ => {
                     return Err(ProtocolError::new(
                         ErrorCode::InvalidArgument,
@@ -2415,6 +2491,18 @@ fn map_runtime_error(error: RuntimeError) -> ProtocolError {
         RuntimeError::ConcurrencyExhausted => (
             ErrorCode::ResourceExhausted,
             "daemon agent runtime capacity is exhausted",
+        ),
+        // A launch whose worst-case final does not fit the aggregate retention
+        // budget is refused before spawn, like any other exhausted capacity.
+        RuntimeError::RetentionExhausted(_) => (
+            ErrorCode::ResourceExhausted,
+            "daemon retention budget cannot admit another agent runtime",
+        ),
+        // Retention collected this runtime's final. The client is told the
+        // history expired rather than being handed another runtime's.
+        RuntimeError::FinalEvicted(_) => (
+            ErrorCode::NotFound,
+            "agent runtime history was collected by daemon retention",
         ),
         RuntimeError::Terminal(RegistryError::ResyncRequired) => (
             ErrorCode::ResyncRequired,
@@ -5545,6 +5633,96 @@ mod tests {
     }
 
     #[test]
+    fn dismissing_a_tombstone_makes_it_the_first_eviction_candidate() {
+        use crate::usecase::terminal_retention_ipc::tests::manual_retention;
+        use usagi_core::domain::terminal_visibility::TerminalVisibilityState;
+
+        let (retention, clock) = manual_retention();
+        let mut agent = AgentRuntime::hydrate_with_retention(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty::default(),
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+            PathExecutableLocator,
+            RuntimeStoreSnapshot::default(),
+            retention.clone(),
+        )
+        .unwrap();
+        let admission = agent
+            .launch(
+                &OperationId::new().to_string(),
+                &intent(None),
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let terminal = admission.terminal.clone();
+        agent.exit(&terminal, 0).unwrap();
+        assert_eq!(
+            retention
+                .lookup(&terminal)
+                .retained()
+                .map(|record| record.visibility),
+            Some(TerminalVisibilityState::Unobserved)
+        );
+
+        let mut owner = SharedTerminalOwner::with_visibility_and_retention(
+            agent,
+            FakeGeneric::default(),
+            SharedTerminalVisibility::new(),
+            retention.clone(),
+        );
+        let connection = ConnectionId::new();
+        let client = ClientId::new();
+        for (action, request, expected) in [
+            (
+                TerminalAction::Observe,
+                TerminalRequest::Observe {
+                    terminal: terminal.clone(),
+                    expected_revision: 0,
+                },
+                TerminalVisibilityState::Observed,
+            ),
+            (
+                TerminalAction::Dismiss,
+                TerminalRequest::Dismiss {
+                    terminal: terminal.clone(),
+                    expected_revision: 1,
+                },
+                TerminalVisibilityState::Dismissed,
+            ),
+        ] {
+            let reply = owner
+                .request(
+                    connection,
+                    client,
+                    RequestId::new(),
+                    action,
+                    serde_json::to_value(request).unwrap(),
+                    SnapshotWire::RawTail,
+                )
+                .unwrap();
+            assert_eq!(reply["applied"], json!(true));
+            // The retention class follows the authoritative visibility.
+            assert_eq!(
+                retention
+                    .lookup(&terminal)
+                    .retained()
+                    .map(|record| record.visibility),
+                Some(expected)
+            );
+        }
+
+        // The periodic collector then ages the dismissed final out.
+        clock.advance(1000);
+        assert_eq!(owner.agent.collect_retention_garbage(), 1);
+        assert!(retention.lookup(&terminal).marker().is_some());
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)] // One fixture covers merge, stamping, and CAS.
     fn shared_owner_completed_inventory_merges_and_stamps_visibility() {
         use usagi_core::domain::terminal_launch::{TerminalKind, TerminalLaunchScope};
@@ -6044,6 +6222,24 @@ mod tests {
                 ErrorCode::OwnershipUnknown,
             ),
             (RuntimeError::SpawnFailed, ErrorCode::Unavailable),
+            // An unreservable admission is exhausted capacity; a collected
+            // final is expired history, not a stale runtime reference.
+            (
+                RuntimeError::RetentionExhausted(
+                    usagi_core::domain::terminal_retention::AdmissionRejection {
+                        scope: usagi_core::domain::terminal_retention::RetentionScope::Workspace,
+                        dimension:
+                            usagi_core::domain::terminal_retention::RetentionDimension::Bytes,
+                    },
+                ),
+                ErrorCode::ResourceExhausted,
+            ),
+            (
+                RuntimeError::FinalEvicted(
+                    usagi_core::domain::terminal_retention::EvictionReason::Emergency,
+                ),
+                ErrorCode::NotFound,
+            ),
         ] {
             assert_eq!(map_runtime_error(error).code, code);
         }

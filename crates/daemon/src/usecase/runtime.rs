@@ -16,6 +16,8 @@ use usagi_core::domain::{
         ProviderResumeRef, ProviderResumeStatus,
     },
     id::{AgentRuntimeRef, CompletionFence, ConnectionId, TerminalRef},
+    terminal_launch::TerminalKind,
+    terminal_retention::{AdmissionRejection, EvictionReason, FinalLookup, RetainedFinal},
 };
 
 pub use super::terminal::{
@@ -31,6 +33,7 @@ use super::{
         Attached, Geometry, InputAck, InputRequest, Output, PtyWriter, RegistryError, Snapshot,
         TerminalRegistry,
     },
+    terminal_retention_ipc::{RESTORED_FINAL_BYTES, SharedTerminalRetention},
 };
 
 /// Durable association; `launch` is never re-resolved during reconciliation.
@@ -419,6 +422,12 @@ pub enum RuntimeError {
     UnknownRuntime,
     TerminalGenerationMismatch,
     Generation(GenerationError),
+    /// The aggregate retention budget cannot reserve this launch's worst-case
+    /// final, so admission is refused before any PTY is spawned (#526).
+    RetentionExhausted(AdmissionRejection),
+    /// The runtime existed, and its final was collected by aggregate retention.
+    /// It is never answered as unknown or with another runtime's history.
+    FinalEvicted(EvictionReason),
 }
 
 /// The daemon owns this coordinator. Callers persist each mutation as one
@@ -429,16 +438,35 @@ pub struct RuntimeCoordinator {
     records: BTreeMap<String, DurableRuntimeRecord>,
     terminals: TerminalRegistry,
     generation: GenerationCoordinator,
+    retention: SharedTerminalRetention,
 }
 
 impl RuntimeCoordinator {
     #[must_use]
     pub fn new(limit: usize, journal_limit: usize, input_cache_limit: usize) -> Self {
+        Self::with_retention(
+            limit,
+            journal_limit,
+            input_cache_limit,
+            SharedTerminalRetention::new(),
+        )
+    }
+
+    /// Builds a coordinator bound to the daemon-wide retention authority so
+    /// Agent finals share one aggregate budget with generic terminals (#526).
+    #[must_use]
+    pub fn with_retention(
+        limit: usize,
+        journal_limit: usize,
+        input_cache_limit: usize,
+        retention: SharedTerminalRetention,
+    ) -> Self {
         Self {
             limit,
             records: BTreeMap::new(),
             terminals: TerminalRegistry::new(journal_limit, input_cache_limit),
             generation: GenerationCoordinator::new(DEFAULT_GENERATION_LIMIT),
+            retention,
         }
     }
 
@@ -448,16 +476,50 @@ impl RuntimeCoordinator {
         journal_limit: usize,
         input_cache_limit: usize,
     ) -> Result<Self, RuntimeSnapshotError> {
+        Self::hydrate_with_retention(
+            snapshot,
+            limit,
+            journal_limit,
+            input_cache_limit,
+            SharedTerminalRetention::new(),
+        )
+    }
+
+    /// Restores durable records and re-imports their finals into the shared
+    /// retention accounting, which is derived state a restart rebuilds. Records
+    /// that predate the aggregate budget are migrated here and become ordinary
+    /// collection candidates.
+    pub fn hydrate_with_retention(
+        snapshot: RuntimeStoreSnapshot,
+        limit: usize,
+        journal_limit: usize,
+        input_cache_limit: usize,
+        retention: SharedTerminalRetention,
+    ) -> Result<Self, RuntimeSnapshotError> {
         snapshot.validate_ownership()?;
         let generation =
             GenerationCoordinator::restore(snapshot.generation.clone(), DEFAULT_GENERATION_LIMIT)
                 .map_err(|_| RuntimeSnapshotError::Generation)?;
         let records = hydrated_records(snapshot)?;
+        let restored_at = retention.now();
+        for record in records.values() {
+            if record.state == RuntimeState::Exited {
+                let mut final_record = RetainedFinal::new(
+                    record.runtime.terminal.clone(),
+                    TerminalKind::Agent,
+                    RESTORED_FINAL_BYTES,
+                    restored_at,
+                );
+                final_record.superseded = record.superseded_by.is_some();
+                retention.import_existing(final_record);
+            }
+        }
         Ok(Self {
             limit,
             records,
             terminals: TerminalRegistry::new(journal_limit, input_cache_limit),
             generation,
+            retention,
         })
     }
 
@@ -558,8 +620,43 @@ impl RuntimeCoordinator {
         )
     }
 
-    #[allow(clippy::too_many_lines)] // Keep the reservation, source transition, and spawn compensation in one transactional flow.
+    /// Releases the pre-admission retention reservation on every failure: a
+    /// launch that never reaches `Running` will never commit a final.
+    #[allow(clippy::too_many_arguments)]
     fn launch_with_semantic_superseding(
+        &mut self,
+        request: &LaunchRequest,
+        runtime: AgentRuntimeRef,
+        operation: CompletionFence,
+        geometry: Geometry,
+        adapter: &mut dyn AgentAdapter,
+        store: &mut dyn RuntimeStore,
+        spawner: &mut dyn PtySpawner,
+        mcp_credential: Option<String>,
+        semantic_key: String,
+        superseded: &[AgentRuntimeRef],
+    ) -> Result<(), RuntimeError> {
+        let terminal = runtime.terminal.clone();
+        let outcome = self.admit_with_semantic_superseding(
+            request,
+            runtime,
+            operation,
+            geometry,
+            adapter,
+            store,
+            spawner,
+            mcp_credential,
+            semantic_key,
+            superseded,
+        );
+        if outcome.is_err() {
+            self.retention.release(&terminal);
+        }
+        outcome
+    }
+
+    #[allow(clippy::too_many_lines)] // Keep the reservation, source transition, and spawn compensation in one transactional flow.
+    fn admit_with_semantic_superseding(
         &mut self,
         request: &LaunchRequest,
         runtime: AgentRuntimeRef,
@@ -632,6 +729,12 @@ impl RuntimeCoordinator {
         if self.occupied_slots().saturating_sub(released_slots) >= self.limit {
             return Err(RuntimeError::ConcurrencyExhausted);
         }
+        // Reserve the worst-case final this runtime will leave behind before
+        // anything is spawned. An exhausted aggregate budget refuses admission
+        // here instead of dropping somebody else's protected final later.
+        self.retention
+            .reserve(&runtime.terminal)
+            .map_err(RuntimeError::RetentionExhausted)?;
         let mut resolved = adapter.resolve(request).map_err(RuntimeError::Adapter)?;
         let credential_provenance = mcp_credential
             .as_ref()
@@ -661,6 +764,9 @@ impl RuntimeCoordinator {
                 .get_mut(&source)
                 .expect("validated resume source remains present");
             record.superseded_by = Some(runtime.agent_runtime_id);
+            // A replaced source is the least valuable history in its lineage:
+            // it keeps its minimum TTL but is collected before anything else.
+            let source_terminal = record.runtime.terminal.clone();
             if record.state == RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown) {
                 record.state = RuntimeState::Reclaimed;
                 if let Some(provider) = &mut record.provider_resume {
@@ -668,6 +774,8 @@ impl RuntimeCoordinator {
                     provider.last_known_phase = Some(ProviderResumePhase::Ended);
                 }
             }
+            self.retention.mark_superseded(&source_terminal);
+            self.retention.set_pinned(&source_terminal, false);
         }
         self.records.insert(
             key.clone(),
@@ -854,11 +962,63 @@ impl RuntimeCoordinator {
                 ProcessObservation::Unknown,
                 false,
             );
+            // The reservation stays held: the journal still holds these bytes
+            // and the record needs reconciliation, so its capacity is not freed.
             return Err(RuntimeError::ReconcileRequired(
                 ReconcileState::PersistAfterExit,
             ));
         }
+        // The exit result is stored into the capacity reserved before spawn, so
+        // no cap can drop it. A client still draining this final pins it.
+        let bytes = self.terminals.retained_bytes(&runtime.terminal);
+        self.retention
+            .commit_final(&runtime.terminal, TerminalKind::Agent, bytes);
+        let attached = self.terminals.is_attached(&runtime.terminal);
+        self.retention.set_pinned(&runtime.terminal, attached);
+        // A runtime can only be superseded once it has already exited, so the
+        // launch path — not this one — lowers a replaced source's priority.
+        self.collect_garbage(store);
         Ok(())
+    }
+
+    /// Applies the aggregate retention authority's decisions to this owner:
+    /// every exited runtime whose final the authority collected loses its
+    /// durable record and its output journal, and the store is rewritten once.
+    ///
+    /// Only a final the authority evicted with a typed marker is removed, so a
+    /// record the ledger never accounted for is never deleted by accident. A
+    /// runtime that is still a live resume source keeps its record because a
+    /// pinned or in-TTL final is never collected in the first place. The work is
+    /// bounded by the collection batch, and a failed store write leaves the
+    /// removal to converge on a later pass or the next startup import.
+    pub fn collect_garbage(&mut self, store: &mut dyn RuntimeStore) -> usize {
+        let collected: Vec<(String, TerminalRef)> = self
+            .records
+            .iter()
+            .filter(|(_, record)| record.state == RuntimeState::Exited)
+            .filter(|(_, record)| {
+                matches!(
+                    self.retention.lookup(&record.runtime.terminal),
+                    FinalLookup::Evicted(_)
+                )
+            })
+            .map(|(key, record)| (key.clone(), record.runtime.terminal.clone()))
+            .collect();
+        for (key, terminal) in &collected {
+            self.records.remove(key);
+            self.terminals.forget(terminal);
+        }
+        if !collected.is_empty() {
+            let _ = self.persist(store);
+        }
+        collected.len()
+    }
+
+    /// The aggregate retention authority this owner shares with the generic
+    /// terminal owner.
+    #[must_use]
+    pub fn retention(&self) -> &SharedTerminalRetention {
+        &self.retention
     }
 
     /// Reconciliation performs no replacement spawn. A slot is released only
@@ -947,9 +1107,14 @@ impl RuntimeCoordinator {
         connection: ConnectionId,
     ) -> Result<(), RuntimeError> {
         self.record(runtime)?;
-        self.terminals
+        let detached = self
+            .terminals
             .detach(&runtime.terminal, subscription, connection)
-            .map_err(RuntimeError::Terminal)
+            .map_err(RuntimeError::Terminal);
+        // A final nobody is draining any more is an ordinary GC candidate.
+        let attached = self.terminals.is_attached(&runtime.terminal);
+        self.retention.set_pinned(&runtime.terminal, attached);
+        detached
     }
 
     /// Updates the fenced runtime terminal geometry.
@@ -995,6 +1160,17 @@ impl RuntimeCoordinator {
     /// It never kills an Agent process, its PTY, or the completion worker.
     pub fn disconnect(&mut self, connection: ConnectionId) {
         self.terminals.disconnect(connection);
+        // Finals this connection was draining are no longer pinned.
+        let exited: Vec<TerminalRef> = self
+            .records
+            .values()
+            .filter(|record| record.state == RuntimeState::Exited)
+            .map(|record| record.runtime.terminal.clone())
+            .collect();
+        for terminal in exited {
+            let attached = self.terminals.is_attached(&terminal);
+            self.retention.set_pinned(&terminal, attached);
+        }
     }
 
     /// Resolves the fenced runtime that currently owns `terminal`.  IPC terminal
@@ -1184,19 +1360,30 @@ impl RuntimeCoordinator {
             .ok_or(RuntimeError::ScopeMismatch)
     }
     fn record(&self, runtime: &AgentRuntimeRef) -> Result<&DurableRuntimeRecord, RuntimeError> {
+        let missing = self.missing(&runtime.terminal);
         self.records
             .get(&runtime.agent_runtime_id.as_str())
             .filter(|record| record.runtime.fences(runtime))
-            .ok_or(RuntimeError::UnknownRuntime)
+            .ok_or(missing)
     }
     fn record_mut(
         &mut self,
         runtime: &AgentRuntimeRef,
     ) -> Result<&mut DurableRuntimeRecord, RuntimeError> {
+        let missing = self.missing(&runtime.terminal);
         self.records
             .get_mut(&runtime.agent_runtime_id.as_str())
             .filter(|record| record.runtime.fences(runtime))
-            .ok_or(RuntimeError::UnknownRuntime)
+            .ok_or(missing)
+    }
+    /// Why a runtime is absent: collected by aggregate retention, or never
+    /// owned here. A collected final is a typed outcome, never a fallback to
+    /// some other history.
+    fn missing(&self, terminal: &TerminalRef) -> RuntimeError {
+        match self.retention.lookup(terminal) {
+            FinalLookup::Evicted(marker) => RuntimeError::FinalEvicted(marker.reason),
+            _ => RuntimeError::UnknownRuntime,
+        }
     }
     fn running(&self, runtime: &AgentRuntimeRef) -> Result<(), RuntimeError> {
         match self.record(runtime)?.state {
@@ -2699,5 +2886,211 @@ mod tests {
                 ReconcileState::IdentityUnknown
             ))
         );
+    }
+
+    /// Launches, journals one output chunk, and exits one Agent runtime.
+    fn run_agent(
+        coordinator: &mut RuntimeCoordinator,
+        store: &mut dyn RuntimeStore,
+        bytes: &[u8],
+    ) -> AgentRuntimeRef {
+        let request = request();
+        let (runtime, operation) = refs(&request);
+        coordinator
+            .launch(
+                &request,
+                runtime.clone(),
+                operation,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver { calls: 0 },
+                store,
+                &mut Spawner(Ok(process())),
+                None,
+            )
+            .expect("the fixture admits this launch");
+        coordinator
+            .append_output(&runtime, bytes.to_vec(), &mut Journal::default())
+            .unwrap();
+        coordinator.exit(&runtime, 0, store).unwrap();
+        runtime
+    }
+
+    #[test]
+    fn an_agent_launch_reserves_its_final_and_a_failed_spawn_returns_the_capacity() {
+        let (retention, _clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
+        let mut coordinator = RuntimeCoordinator::with_retention(8, 64, 1, retention.clone());
+        let request = request();
+        let (runtime, operation) = refs(&request);
+        assert_eq!(
+            coordinator.launch(
+                &request,
+                runtime,
+                operation,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver { calls: 0 },
+                &mut Store::default(),
+                &mut Spawner(Err(SpawnFailure::Definite)),
+                None,
+            ),
+            Err(RuntimeError::SpawnFailed)
+        );
+        assert_eq!(retention.metrics().reserved_finals, 0);
+
+        let mut store = Store::default();
+        let runtime = run_agent(&mut coordinator, &mut store, b"agent final");
+        let metrics = retention.metrics();
+        assert_eq!(metrics.retained_finals, 1);
+        assert_eq!(metrics.retained_bytes, 11);
+        assert_eq!(metrics.reserved_finals, 0);
+        assert!(retention.lookup(&runtime.terminal).retained().is_some());
+    }
+
+    #[test]
+    fn an_exhausted_retention_budget_refuses_agent_admission_before_spawn() {
+        let (retention, clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
+        let mut coordinator = RuntimeCoordinator::with_retention(8, 64, 1, retention.clone());
+        let mut store = Store::default();
+        for _ in 0..3 {
+            run_agent(&mut coordinator, &mut store, b"x");
+        }
+        clock.advance(1);
+        let request = request();
+        let (runtime, operation) = refs(&request);
+        let mut spawner = Spawner(Ok(process()));
+        let rejected = coordinator.launch(
+            &request,
+            runtime,
+            operation,
+            Geometry { cols: 80, rows: 24 },
+            &mut Resolver { calls: 0 },
+            &mut store,
+            &mut spawner,
+            None,
+        );
+        assert!(matches!(rejected, Err(RuntimeError::RetentionExhausted(_))));
+        // No protected final was deleted to make room.
+        assert_eq!(retention.metrics().retained_finals, 3);
+        assert_eq!(retention.metrics().evicted_finals, 0);
+    }
+
+    #[test]
+    fn a_collected_agent_final_leaves_no_record_and_answers_typed() {
+        let (retention, clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
+        let mut coordinator = RuntimeCoordinator::with_retention(8, 64, 1, retention.clone());
+        let mut store = Store::default();
+        let runtime = run_agent(&mut coordinator, &mut store, b"bye");
+        clock.advance(1000);
+        retention.collect();
+        assert_eq!(coordinator.collect_garbage(&mut store), 1);
+        assert!(coordinator.snapshot().records.is_empty());
+        let scope = usagi_core::domain::terminal_launch::TerminalLaunchScope {
+            workspace_id: runtime.terminal.workspace_id,
+            session_id: runtime.terminal.session_id,
+            worktree_id: runtime.terminal.worktree_id,
+        };
+        assert!(coordinator.completed_inventory(&scope).is_empty());
+        assert_eq!(
+            coordinator.terminal_snapshot(&runtime),
+            Err(RuntimeError::FinalEvicted(
+                usagi_core::domain::terminal_retention::EvictionReason::AgeExpired
+            ))
+        );
+        // A runtime the authority never held stays unknown.
+        let (stranger, _) = refs(&request());
+        assert_eq!(
+            coordinator.terminal_snapshot(&stranger),
+            Err(RuntimeError::UnknownRuntime)
+        );
+        assert_eq!(coordinator.collect_garbage(&mut store), 0);
+        assert_eq!(coordinator.retention().metrics().retained_finals, 0);
+    }
+
+    #[test]
+    fn an_agent_final_a_client_is_draining_is_protected_until_it_detaches() {
+        let (retention, clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
+        let mut coordinator = RuntimeCoordinator::with_retention(8, 64, 1, retention.clone());
+        let mut store = Store::default();
+        let request = request();
+        let (runtime, operation) = refs(&request);
+        coordinator
+            .launch(
+                &request,
+                runtime.clone(),
+                operation,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver { calls: 0 },
+                &mut store,
+                &mut Spawner(Ok(process())),
+                None,
+            )
+            .unwrap();
+        let connection = ConnectionId::new();
+        let attached = coordinator.attach(&runtime, connection).unwrap();
+        coordinator.exit(&runtime, 0, &mut store).unwrap();
+        clock.advance(1000);
+        retention.collect();
+        assert_eq!(coordinator.collect_garbage(&mut store), 0);
+
+        coordinator
+            .detach(&runtime, attached.subscription, connection)
+            .unwrap();
+        retention.collect();
+        assert_eq!(coordinator.collect_garbage(&mut store), 1);
+    }
+
+    #[test]
+    fn a_disconnect_releases_every_agent_final_it_was_draining() {
+        let (retention, clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
+        let mut coordinator = RuntimeCoordinator::with_retention(8, 64, 1, retention.clone());
+        let mut store = Store::default();
+        let request = request();
+        let (runtime, operation) = refs(&request);
+        coordinator
+            .launch(
+                &request,
+                runtime.clone(),
+                operation,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver { calls: 0 },
+                &mut store,
+                &mut Spawner(Ok(process())),
+                None,
+            )
+            .unwrap();
+        let connection = ConnectionId::new();
+        coordinator.attach(&runtime, connection).unwrap();
+        coordinator.exit(&runtime, 0, &mut store).unwrap();
+        clock.advance(1000);
+        coordinator.disconnect(connection);
+        retention.collect();
+        assert_eq!(coordinator.collect_garbage(&mut store), 1);
+    }
+
+    #[test]
+    fn a_restart_reimports_exited_agent_finals_into_the_budget() {
+        let (retention, _clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
+        let mut coordinator = RuntimeCoordinator::with_retention(8, 64, 1, retention.clone());
+        let mut store = Store::default();
+        let runtime = run_agent(&mut coordinator, &mut store, b"gone");
+        let snapshot = coordinator.snapshot();
+        drop(coordinator);
+
+        let (restored, restart_clock) =
+            crate::usecase::terminal_retention_ipc::tests::manual_retention();
+        let mut restarted =
+            RuntimeCoordinator::hydrate_with_retention(snapshot, 8, 64, 1, restored.clone())
+                .unwrap();
+        let metrics = restored.metrics();
+        assert_eq!(metrics.retained_finals, 1);
+        assert_eq!(metrics.reserved_finals, 0);
+        assert_eq!(
+            metrics.retained_bytes,
+            crate::usecase::terminal_retention_ipc::RESTORED_FINAL_BYTES
+        );
+        restart_clock.advance(1000);
+        restored.collect();
+        let mut store = Store::default();
+        assert_eq!(restarted.collect_garbage(&mut store), 1);
+        assert!(restored.lookup(&runtime.terminal).marker().is_some());
     }
 }

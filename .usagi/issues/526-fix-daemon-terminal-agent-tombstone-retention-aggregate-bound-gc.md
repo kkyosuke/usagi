@@ -1,13 +1,13 @@
 ---
 number: 526
 title: fix(daemon): terminal/Agent tombstone retentionをaggregate boundでGCする
-status: todo
+status: done
 priority: high
 labels: [review, v2, daemon, terminal, agent, resource, retention, gc]
 dependson: [525]
 related: [472, 473, 506, 509, 510, 518, 519]
 created_at: 2026-07-22T11:43:25.850125+00:00
-updated_at: 2026-07-22T11:56:37.831500+00:00
+updated_at: 2026-07-25T01:36:22.856572+00:00
 ---
 
 ## 問題・影響

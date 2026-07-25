@@ -36,6 +36,7 @@ use super::{
         TerminalProfileResolver, TerminalStore,
     },
     terminal::{Geometry, InputRequest, PtyWriter, RegistryError, SnapshotWire},
+    terminal_retention_ipc::SharedTerminalRetention,
 };
 
 /// Injected process boundary used by the runtime.  It is intentionally the
@@ -123,14 +124,54 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
         scope: Q,
         snapshot: super::generic_terminal::TerminalStoreSnapshot,
     ) -> Result<Self, GenericTerminalError> {
+        Self::from_snapshot_with_retention(
+            generation,
+            resolver,
+            store,
+            pty,
+            scope,
+            snapshot,
+            SharedTerminalRetention::new(),
+        )
+    }
+
+    /// Restores a runtime bound to the daemon-wide retention authority, so
+    /// generic terminals and Agent runtimes share one aggregate budget (#526).
+    pub fn from_snapshot_with_retention(
+        generation: DaemonGeneration,
+        resolver: R,
+        store: S,
+        pty: P,
+        scope: Q,
+        snapshot: super::generic_terminal::TerminalStoreSnapshot,
+        retention: SharedTerminalRetention,
+    ) -> Result<Self, GenericTerminalError> {
         Ok(Self {
             generation,
-            coordinator: GenericTerminalCoordinator::from_snapshot(16, 64 * 1024, 64, snapshot)?,
+            coordinator: GenericTerminalCoordinator::from_snapshot_with_retention(
+                16,
+                64 * 1024,
+                64,
+                snapshot,
+                retention,
+            )?,
             resolver,
             store,
             pty,
             scope,
         })
+    }
+
+    /// Runs one bounded retention collection pass and applies its decisions to
+    /// this owner's records and journals. The composition root drives it
+    /// periodically so a daemon whose terminals are idle still ages its finals
+    /// out of the budget.
+    pub fn collect_retention_garbage(&mut self) -> usize
+    where
+        S: TerminalStore,
+    {
+        self.coordinator.retention().collect();
+        self.coordinator.collect_garbage(&mut self.store)
     }
     pub fn output(
         &mut self,
@@ -389,7 +430,13 @@ fn map_error(error: GenericTerminalError) -> ProtocolError {
         GenericTerminalError::UnknownTerminal
         | GenericTerminalError::TerminalGenerationMismatch
         | GenericTerminalError::Terminal(_) => ErrorCode::StaleTarget,
-        GenericTerminalError::ConcurrencyExhausted => ErrorCode::ResourceExhausted,
+        // A launch whose worst-case final does not fit the aggregate retention
+        // budget is refused before spawn, like any other exhausted capacity.
+        GenericTerminalError::ConcurrencyExhausted
+        | GenericTerminalError::RetentionExhausted(_) => ErrorCode::ResourceExhausted,
+        // Retention collected this terminal's final. The client is told the
+        // history expired rather than being handed another terminal's.
+        GenericTerminalError::FinalEvicted(_) => ErrorCode::NotFound,
         GenericTerminalError::ReconcileRequired(_)
         | GenericTerminalError::Store
         | GenericTerminalError::InvalidSnapshot => ErrorCode::OwnershipUnknown,
@@ -1271,6 +1318,15 @@ mod tests {
             GenericTerminalError::Launch(TerminalLaunchValidationError::InvalidProgram),
             GenericTerminalError::ScopeMismatch,
             GenericTerminalError::TerminalAlreadyExists,
+            GenericTerminalError::RetentionExhausted(
+                usagi_core::domain::terminal_retention::AdmissionRejection {
+                    scope: usagi_core::domain::terminal_retention::RetentionScope::Daemon,
+                    dimension: usagi_core::domain::terminal_retention::RetentionDimension::Count,
+                },
+            ),
+            GenericTerminalError::FinalEvicted(
+                usagi_core::domain::terminal_retention::EvictionReason::Pressure,
+            ),
         ];
         let expected = [
             ErrorCode::ResourceExhausted,
@@ -1286,10 +1342,68 @@ mod tests {
             ErrorCode::InvalidArgument,
             ErrorCode::InvalidArgument,
             ErrorCode::RevisionConflict,
+            // An unreservable launch is exhausted capacity; a collected final
+            // is expired history, not a stale or unknown terminal.
+            ErrorCode::ResourceExhausted,
+            ErrorCode::NotFound,
         ];
         for (error, code) in errors.into_iter().zip(expected) {
             assert_eq!(map_error(error).code, code);
         }
+    }
+
+    #[test]
+    fn the_periodic_collector_ages_an_idle_owners_finals_out_of_the_budget() {
+        use crate::usecase::terminal_retention_ipc::tests::{manual_retention, small_budget};
+
+        let (retention, clock) = manual_retention();
+        assert_eq!(retention.budget(), small_budget());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let worktree = WorktreeId::new();
+        let scope = TerminalLaunchScope {
+            workspace_id: workspace,
+            session_id: Some(session),
+            worktree_id: worktree,
+        };
+        let mut runtime = GenericTerminalRuntime::from_snapshot_with_retention(
+            DaemonGeneration::new(),
+            Resolver,
+            Store::default(),
+            Pty::default(),
+            Scope {
+                scope: scope.clone(),
+                working_directory: PathBuf::from("/available-worktree"),
+            },
+            super::super::generic_terminal::TerminalStoreSnapshot::default(),
+            retention.clone(),
+        )
+        .unwrap();
+        let terminal: TerminalRef = serde_json::from_value(
+            call(
+                &mut runtime,
+                ConnectionId::new(),
+                ClientId::new(),
+                TerminalAction::Launch,
+                TerminalRequest::Launch {
+                    intent: usagi_core::usecase::client::TerminalLaunchIntent {
+                        request: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
+                            profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                            scope,
+                        },
+                        geometry: TerminalGeometry { cols: 80, rows: 24 },
+                    },
+                },
+            )["terminal"]
+                .clone(),
+        )
+        .unwrap();
+        runtime.exit(&terminal, 0).unwrap();
+        // Nothing is due yet, so an idle tick collects nothing.
+        assert_eq!(runtime.collect_retention_garbage(), 0);
+        clock.advance(1000);
+        assert_eq!(runtime.collect_retention_garbage(), 1);
+        assert!(retention.lookup(&terminal).marker().is_some());
     }
 
     #[test]
