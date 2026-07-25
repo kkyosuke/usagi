@@ -197,6 +197,9 @@ pub struct HomeProjection {
     terminal_view: Option<TerminalViewProjection>,
     pane_tabs: Vec<HomePaneTab>,
     pane_error: Option<String>,
+    /// Non-sensitive detail of the selected interrupted Agent tab (#510). It
+    /// replaces the phase line while a read-only history tab is selected.
+    pane_detail: Option<String>,
     /// Whether the Closeup action modal covers the right pane this frame. Its
     /// final value is only known once [`Self::with_pane`] has seen the pane
     /// strip: the modal is the launcher surface only while Closeup has no tab at
@@ -307,6 +310,7 @@ impl HomeProjection {
             terminal_view: None,
             pane_tabs: Vec::new(),
             pane_error: None,
+            pane_detail: None,
             // Seed only the explicit/forced action modal here (an open
             // `Overlay::Closeup`). The launcher-over-empty-pane case cannot be
             // decided without the pane strip, so `with_pane` finalizes it; this
@@ -374,6 +378,14 @@ impl HomeProjection {
             })
             .collect();
         self.pane_error = pane.error().map(str::to_owned);
+        self.pane_detail = pane
+            .tabs()
+            .iter()
+            .find(|tab| pane_tab_selected(tab, pane.selected()))
+            .and_then(|tab| match tab {
+                PaneTab::Interrupted(interrupted) => Some(interrupted_detail(interrupted)),
+                PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_) => None,
+            });
         // In Closeup the action modal is the launcher shown only while the pane
         // holds no tab at all — pending placeholders included. A pending launch
         // therefore keeps the wave visible instead of being re-covered every
@@ -450,6 +462,15 @@ impl HomeProjection {
 
 fn pane_tab_label(tab: &PaneTab) -> String {
     match tab {
+        // Interrupted history is labelled from the closed provider vocabulary
+        // only, so no provider-native identity can reach the tab strip.
+        PaneTab::Interrupted(pane) => match pane.resuming {
+            Some(_) => format!(
+                "{} (resuming)",
+                crate::usecase::application::interrupted_tab::provider_label(pane.tab.provider)
+            ),
+            None => pane.tab.safe_label(),
+        },
         PaneTab::Pending(pending) => match pending.kind {
             PaneKind::Terminal => "Terminal".to_owned(),
             PaneKind::Agent => "Agent".to_owned(),
@@ -468,29 +489,17 @@ fn pane_tab_label(tab: &PaneTab) -> String {
 }
 
 fn pane_tab_selected(tab: &PaneTab, selection: &PaneSelection) -> bool {
-    match (tab, selection) {
-        (PaneTab::Pending(pending), PaneSelection::Tab(TabSelection::Pending(selected))) => {
-            pending.operation == *selected
-        }
-        (PaneTab::Live(live), PaneSelection::Tab(TabSelection::Live(selected))) => {
-            live.terminal == *selected
-        }
-        (PaneTab::Ready(ready), PaneSelection::Tab(TabSelection::Ready(selected))) => {
-            ready.operation == *selected
-        }
-        (PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_), PaneSelection::Target(_))
-        | (
-            PaneTab::Pending(_),
-            PaneSelection::Tab(TabSelection::Live(_) | TabSelection::Ready(_)),
-        )
-        | (
-            PaneTab::Live(_),
-            PaneSelection::Tab(TabSelection::Pending(_) | TabSelection::Ready(_)),
-        )
-        | (
-            PaneTab::Ready(_),
-            PaneSelection::Tab(TabSelection::Pending(_) | TabSelection::Live(_)),
-        ) => false,
+    // Each tab kind carries its own stable selection key, so comparing keys is
+    // enough: a mismatched kind or identity simply compares unequal.
+    *selection == PaneSelection::Tab(pane_tab_selection(tab))
+}
+
+fn pane_tab_selection(tab: &PaneTab) -> TabSelection {
+    match tab {
+        PaneTab::Pending(pending) => TabSelection::Pending(pending.operation),
+        PaneTab::Live(live) => TabSelection::Live(live.terminal.clone()),
+        PaneTab::Ready(ready) => TabSelection::Ready(ready.operation),
+        PaneTab::Interrupted(pane) => TabSelection::Interrupted(pane.tab.continuation),
     }
 }
 
@@ -1666,7 +1675,10 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
             chrome[1].clone(),
             String::new(),
             Style::new().dim().paint(&widgets::pad_to_width(
-                &format!("  agent: {}", phase_label(home.active_phase)),
+                &home.pane_detail.as_ref().map_or_else(
+                    || format!("  agent: {}", phase_label(home.active_phase)),
+                    |detail| format!("  agent: {detail}"),
+                ),
                 width,
             )),
             Style::new().dim().paint(&widgets::pad_to_width(
@@ -1682,6 +1694,19 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         height,
         footer,
     )
+}
+
+/// The selected interrupted tab's body line. It states what an explicit Resume
+/// does, or why the conversation cannot be resumed, using only the closed
+/// display vocabulary of [`InterruptedTab`].
+fn interrupted_detail(pane: &crate::usecase::application::pane::InterruptedPane) -> String {
+    match pane.resuming {
+        Some(_) => "resuming this conversation".to_owned(),
+        // The body is one line, so the resumable case states the action and
+        // leaves the longer explanation to the unresumable reasons.
+        None if pane.tab.resumable() => "interrupted — Ctrl-O r resumes it".to_owned(),
+        None => pane.tab.safe_detail().to_owned(),
+    }
 }
 
 fn phase_label(phase: TargetPhase) -> &'static str {
@@ -1827,7 +1852,6 @@ mod tests {
             last_active: None,
             notes: Scratchpad::default(),
             prs: Vec::new(),
-            environment: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1839,7 +1863,6 @@ mod tests {
                 session("daemon", None, SessionOrigin::Mcp),
             ],
             root_notes: Scratchpad::default(),
-            root_environment: std::collections::BTreeMap::new(),
             updated_at: now(),
         };
         Workspace::new(record, state)
@@ -3651,5 +3674,153 @@ mod tests {
         let home =
             HomeProjection::from_state(&state, "actual", Path::new("/tmp/actual"), &[removing]);
         assert!(strip(&super::render_home(20, 80, &home).join("\n")).contains("removing"));
+    }
+
+    /// #510: an interrupted history tab is labelled and explained only from the
+    /// closed provider/reason vocabulary, and its body replaces the phase line.
+    #[test]
+    #[allow(clippy::too_many_lines)] // Label, selection, and every body variant.
+    fn interrupted_history_tabs_render_safe_labels_and_a_resume_hint() {
+        use crate::usecase::application::interrupted_tab::InterruptedTab;
+        use crate::usecase::application::pane::{InterruptedPane, PaneEvent, PaneState, reduce};
+        use usagi_core::domain::agent::{
+            AgentResumeTarget, ProviderKind, ProviderResumePhase, ProviderResumeReason,
+        };
+        use usagi_core::domain::id::{AgentContinuationRef, AgentResumeSourceId, AgentRuntimeId};
+
+        let workspace = WorkspaceId::new();
+        let target = Target::Root(workspace);
+        let terminal = TerminalRef {
+            workspace_id: workspace,
+            worktree_id: WorktreeId::new(),
+            session_id: None,
+            terminal_id: TerminalId::new(),
+            daemon_generation: DaemonGeneration::new(),
+        };
+        let continuation = AgentContinuationRef::new();
+        let resumable = InterruptedTab {
+            continuation,
+            session_id: None,
+            last_terminal: terminal.clone(),
+            provider: Some(ProviderKind::Claude),
+            last_known_phase: Some(ProviderResumePhase::Interrupted),
+            reason: ProviderResumeReason::ExplicitResumeAvailable,
+            target: Some(AgentResumeTarget {
+                continuation,
+                source: AgentResumeSourceId::new(),
+                workspace_id: workspace,
+                session_id: None,
+                worktree_id: terminal.worktree_id,
+                runtime_id: AgentRuntimeId::new(),
+                adapter_revision: 3,
+            }),
+        };
+        let unresumable = InterruptedTab {
+            continuation: AgentContinuationRef::new(),
+            provider: None,
+            reason: ProviderResumeReason::ProviderMetadataUnavailable,
+            target: None,
+            ..resumable.clone()
+        };
+
+        assert_eq!(
+            pane_tab_label(&PaneTab::Interrupted(InterruptedPane {
+                tab: resumable.clone(),
+                resuming: None,
+            })),
+            "Claude (interrupted)"
+        );
+        assert_eq!(
+            pane_tab_label(&PaneTab::Interrupted(InterruptedPane {
+                tab: resumable.clone(),
+                resuming: Some(OperationId::new()),
+            })),
+            "Claude (resuming)"
+        );
+        // A lineage that kept no provider metadata stays neutral.
+        assert_eq!(
+            pane_tab_label(&PaneTab::Interrupted(InterruptedPane {
+                tab: unresumable.clone(),
+                resuming: None,
+            })),
+            "Agent (interrupted)"
+        );
+        assert!(pane_tab_selected(
+            &PaneTab::Interrupted(InterruptedPane {
+                tab: resumable.clone(),
+                resuming: None,
+            }),
+            &PaneSelection::Tab(TabSelection::Interrupted(continuation)),
+        ));
+        assert!(!pane_tab_selected(
+            &PaneTab::Interrupted(InterruptedPane {
+                tab: resumable.clone(),
+                resuming: None,
+            }),
+            &PaneSelection::Target(target),
+        ));
+
+        // The selected tab's body states the explicit action; the unresumable
+        // one states only its safe reason.
+        let mut pane = PaneState::new(PaneSelection::Target(target));
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::RestoreInterrupted {
+                tabs: vec![resumable.clone(), unresumable.clone()],
+            },
+        );
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Interrupted(continuation))),
+        );
+        // Render on the Closeup surface, where the tab strip lives.
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let sessions = [projected_session(session, "session", "/work/session")];
+        let home = HomeProjection::from_state(&state, "repo", Path::new("/repo"), &sessions)
+            .with_pane(&pane);
+        let detail = home.pane_detail.clone().unwrap();
+        assert!(detail.contains("Ctrl-O r"), "{detail}");
+        let frame = render_home(24, 160, &home).join("\n");
+        assert!(frame.contains("Claude (interrupted)"), "{frame}");
+        assert!(frame.contains("Ctrl-O r"), "{frame}");
+        assert!(
+            !frame.contains(&resumable.continuation.as_str()),
+            "a raw lineage identifier must never reach the frame"
+        );
+
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Interrupted(
+                unresumable.continuation,
+            ))),
+        );
+        let detail = HomeProjection::from_state(&state, "repo", Path::new("/repo"), &sessions)
+            .with_pane(&pane)
+            .pane_detail
+            .clone()
+            .unwrap();
+        assert_eq!(detail, unresumable.safe_detail());
+
+        // While the resume is in flight the body says so.
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Interrupted(continuation))),
+        );
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::ResumeStarted {
+                continuation,
+                operation: OperationId::new(),
+            },
+        );
+        let detail = HomeProjection::from_state(&state, "repo", Path::new("/repo"), &sessions)
+            .with_pane(&pane)
+            .pane_detail
+            .clone()
+            .unwrap();
+        assert!(detail.contains("resuming"), "{detail}");
     }
 }

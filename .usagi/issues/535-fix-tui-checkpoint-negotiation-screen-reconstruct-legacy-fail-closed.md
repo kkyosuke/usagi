@@ -1,14 +1,14 @@
 ---
 number: 535
 title: fix(tui): checkpoint negotiation と screen reconstruct（legacy fail-closed）
-status: todo
+status: done
 priority: high
 labels: [fix, v2, tui, terminal, vt, replay, correctness]
 dependson: [534]
 related: [524, 199]
 parent: 524
 created_at: 2026-07-24T12:47:15.237736+00:00
-updated_at: 2026-07-24T12:47:15.237736+00:00
+updated_at: 2026-07-25T00:49:55.603718+00:00
 ---
 
 [#524](524-fix-terminal-raw-64kib-tail-vt-parser-safe-snapshot.md) の設計 [`document/proposals/12-terminal-vt-snapshot.md`](../../document/proposals/12-terminal-vt-snapshot.md) の **Phase 4**。#534 の上に構築する。この Phase で P1 correctness が解消する。
@@ -25,9 +25,9 @@ TUI が attach/resync で **blank parser に raw tail を流す**のをやめ、
 
 ## 受入条件
 
-- [ ] retention 先頭が UTF-8/CSI/OSC/SGR/alt 途中でも reconnect 前後の visible cells/cursor/style が一致（設計受入条件 1/3）。
-- [ ] primary/alternate/saved primary buffer・`cells_with_scrollback`・selection/copy history が untrimmed reference と一致（受入条件 2）。
-- [ ] old/new client × old/new daemon × capability present/absent × supported/unknown revision の compatibility matrix を固定し、途中 escape を legacy raw parser へ渡さないことを assert（設計テスト #3）。
-- [ ] resize interleave 時の TUI 側 fence（設計テスト #5、TUI 側）。
-- [ ] 実装に合わせ [03-tui.md#live-terminal-の出力表示と入力](../../document/03-tui.md#live-terminal-の出力表示と入力) を更新（visible + primary/copy-history restore、legacy 限定表示）。
-- [ ] coverage 100% / clippy / fmt 緑。
+- [x] retention 先頭が UTF-8/CSI/OSC/SGR/alt 途中でも reconnect 前後の visible cells/cursor/style が一致（設計受入条件 1/3）。
+- [x] primary/alternate/saved primary buffer・`cells_with_scrollback`・selection/copy history が untrimmed reference と一致（受入条件 2）。
+- [x] old/new client × old/new daemon × capability present/absent × supported/unknown revision の compatibility matrix を固定し、途中 escape を legacy raw parser へ渡さないことを assert（設計テスト #3）。
+- [x] resize interleave 時の TUI 側 fence（設計テスト #5、TUI 側）。
+- [x] 実装に合わせ [03-tui.md#live-terminal-の出力表示と入力](../../document/03-tui.md#live-terminal-の出力表示と入力) を更新（visible + primary/copy-history restore、legacy 限定表示）。
+- [x] coverage 100% / clippy / fmt 緑。

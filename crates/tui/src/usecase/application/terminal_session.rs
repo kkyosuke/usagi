@@ -2,21 +2,44 @@
 //!
 //! The daemon owns the PTY and journals its output; the synchronous IPC client
 //! the TUI uses cannot receive pushed stream events, so this coordinator keeps a
-//! live view by **polling**: it attaches once (taking the retained replay and an
-//! output cursor), then asks for the bytes after that cursor on every redraw
-//! tick.  It feeds the bytes into a [`TerminalScreen`], forwards keystrokes once
-//! each with a monotonic input sequence, and never spawns a local process — a
-//! transport failure only produces safe feedback.
+//! live view by **polling**: it attaches once (restoring the daemon's semantic
+//! screen checkpoint and taking an output cursor), then asks for the bytes after
+//! that cursor on every redraw tick.  It feeds those bytes into the restored
+//! [`TerminalScreen`], forwards keystrokes once each with a monotonic input
+//! sequence, and never spawns a local process — a transport failure only
+//! produces safe feedback.
+//!
+//! Retained history is **only** rebuilt from a checkpoint. A daemon that cannot
+//! serve one offers a raw byte tail cut at an arbitrary boundary; parsing that
+//! would expose partial UTF-8 / CSI / OSC sequences and lose the cursor, SGR,
+//! scroll region and alternate buffer established before the window, so this
+//! coordinator fails closed to a limited, history-less view instead
+//! ([`TerminalAttachScreen::HistoryUnavailable`]).
 //!
 //! The daemon boundary is the injected [`TerminalStreamPort`], so the whole
 //! coordinator is exercised with a fake port in unit tests.
 
 use std::time::{Duration, Instant};
 use usagi_core::domain::id::TerminalRef;
+use usagi_core::usecase::vt_screen::{CheckpointError, ScreenCheckpoint};
 
 use super::pane_runtime::Geometry;
 use super::terminal_screen::TerminalScreen;
 use super::terminal_selection::{TerminalPoint, TerminalSelection};
+
+/// How an attach snapshot carries the terminal screen.
+///
+/// The variant is decided at the wire boundary by capability / revision
+/// negotiation, so a legacy raw tail never reaches this use case at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalAttachScreen {
+    /// The daemon's semantic screen checkpoint, complete at `output_offset`.
+    Checkpoint(Box<ScreenCheckpoint>),
+    /// The daemon cannot serve a checkpoint (the capability is absent, or the
+    /// common wire revision fell back to the legacy raw tail). Retained history
+    /// is unavailable and only output after `output_offset` is rendered.
+    HistoryUnavailable,
+}
 
 /// The atomic view returned by attaching to a daemon terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,12 +50,64 @@ pub struct TerminalAttach {
     /// same epoch preserves the daemon's per-client input sequence; a new
     /// epoch starts a fresh ledger at zero.
     pub connection_epoch: u64,
-    /// The output offset the retained `replay` ends at.
+    /// The daemon terminal revision this view was taken at. It advances on
+    /// geometry commit and exit, so it fences a stale snapshot.
+    pub revision: u64,
+    /// The output offset the screen is complete at; polling resumes here.
     pub output_offset: u64,
-    /// The retained output buffer, rebuilt into the screen on every attach.
-    pub replay: Vec<u8>,
+    /// The screen state to rebuild this session's view from.
+    pub screen: TerminalAttachScreen,
     /// Whether the terminal has already exited.
     pub exited: bool,
+}
+
+/// Whether the current view carries the terminal's retained history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalHistory {
+    /// The screen was reconstructed from the daemon's semantic checkpoint, so
+    /// pre-window cursor, style, scroll region and buffers are present.
+    Restored,
+    /// The daemon cannot serve a checkpoint. History is not shown at all rather
+    /// than reconstructed from a raw tail, and only live output after the attach
+    /// offset appears.
+    Unavailable,
+}
+
+/// Why a restored view was refused. Every reason keeps the session's current
+/// screen untouched: an old and a new screen state are never mixed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SnapshotRefusal {
+    /// The checkpoint was captured at a geometry other than the one this pane
+    /// synchronized with the daemon (a resize interleaved the snapshot).
+    Geometry {
+        expected: Geometry,
+        snapshot: (u32, u32),
+    },
+    /// The snapshot is older than one already applied, so its screen and the
+    /// suffix after it cannot be trusted to belong together.
+    StaleRevision { seen: u64, snapshot: u64 },
+    /// The checkpoint violates a bound and was rejected before reconstruction.
+    Rejected(CheckpointError),
+}
+
+impl SnapshotRefusal {
+    /// Presentation-safe explanation. It never carries daemon internals beyond
+    /// the geometry, revision and typed bound involved.
+    fn message(&self) -> String {
+        match self {
+            // Sizes are reported as `cols`x`rows`, matching the pane geometry.
+            Self::Geometry { expected, snapshot } => format!(
+                "terminal screen changed size during attach (snapshot {}x{}, pane {}x{}); resynchronizing",
+                snapshot.1, snapshot.0, expected.cols, expected.rows
+            ),
+            Self::StaleRevision { seen, snapshot } => format!(
+                "terminal screen snapshot is stale (revision {snapshot} after {seen}); resynchronizing"
+            ),
+            Self::Rejected(error) => {
+                format!("terminal screen snapshot was rejected: {error}; resynchronizing")
+            }
+        }
+    }
 }
 
 /// A contiguous output segment returned by polling after a cursor.
@@ -212,6 +287,17 @@ impl TerminalInputError {
 const RETRY_INITIAL: Duration = Duration::from_millis(100);
 const RETRY_MAX: Duration = Duration::from_secs(2);
 
+/// How many additional atomic snapshots one `connect` takes when a refused
+/// snapshot may converge immediately (a resize that interleaved the capture).
+/// A bounded retry keeps a hostile or persistently racing daemon from spinning
+/// the redraw tick; the next attempt goes through the ordinary reconnect backoff.
+const SNAPSHOT_RETRY_LIMIT: u32 = 1;
+
+/// Feedback shown when the daemon cannot serve a semantic screen checkpoint.
+/// The retained raw tail is deliberately not parsed, so this view starts empty
+/// and fills from live output only.
+const HISTORY_UNAVAILABLE_MESSAGE: &str = "terminal history is unavailable; this daemon cannot restore the screen, showing new output only";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InputUncertainty {
     first: String,
@@ -253,6 +339,11 @@ pub struct TerminalSession {
     cursor: u64,
     input_seq: u64,
     connection_epoch: Option<u64>,
+    /// Whether the current screen carries restored history.
+    history: TerminalHistory,
+    /// The highest daemon terminal revision this session has applied, so an
+    /// out-of-order snapshot cannot replace a newer screen.
+    snapshot_revision: Option<u64>,
     state: SessionState,
     current_error: Option<String>,
     current_error_is_input: bool,
@@ -279,6 +370,8 @@ impl TerminalSession {
             cursor: 0,
             input_seq: 0,
             connection_epoch: None,
+            history: TerminalHistory::Restored,
+            snapshot_revision: None,
             state: SessionState::Disconnected,
             current_error: None,
             current_error_is_input: false,
@@ -305,6 +398,13 @@ impl TerminalSession {
     #[must_use]
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    /// Whether the current view restored the terminal's retained history, or is
+    /// the limited view a daemon without checkpoint support fails closed to.
+    #[must_use]
+    pub const fn history(&self) -> TerminalHistory {
+        self.history
     }
 
     /// The rendered screen rows.
@@ -374,10 +474,15 @@ impl TerminalSession {
     }
 
     /// Synchronizes the daemon PTY to the visible pane before attaching (or
-    /// reattaching) and rebuilding the screen from its retained replay.  This
-    /// ensures an application that redraws on `SIGWINCH` is snapshotted at the
-    /// same width as the right pane. A resize failure therefore cannot hide an
-    /// otherwise attachable terminal.
+    /// reattaching) and rebuilding the screen from the daemon's semantic
+    /// checkpoint.  This ensures an application that redraws on `SIGWINCH` is
+    /// snapshotted at the same width as the right pane. A resize failure
+    /// therefore cannot hide an otherwise attachable terminal.
+    ///
+    /// A snapshot whose geometry or revision does not fence against this pane is
+    /// refused rather than mixed into the current view: the attempt is retried
+    /// once atomically, and a still-mismatching snapshot leaves the previous
+    /// screen intact and falls back to the ordinary reconnect backoff.
     pub fn connect<P: TerminalStreamPort>(&mut self, port: &mut P) {
         self.connect_at(port, Instant::now());
     }
@@ -385,24 +490,38 @@ impl TerminalSession {
     /// Connects at an injected monotonic instant. This is the deterministic
     /// clock boundary used by reconnect tests.
     pub fn connect_at<P: TerminalStreamPort>(&mut self, port: &mut P, now: Instant) {
-        let resize_error = port.resize(&self.terminal, self.geometry).err();
-        self.synchronized_geometry = resize_error.is_none().then_some(self.geometry);
-        match port.attach(&self.terminal, self.geometry) {
-            Ok(attach) => {
-                if let Some(previous) = self.subscription
-                    && previous != attach.subscription
-                {
-                    port.detach(&self.terminal, previous);
+        for attempt in 0..=SNAPSHOT_RETRY_LIMIT {
+            let resize_error = port.resize(&self.terminal, self.geometry).err();
+            self.synchronized_geometry = resize_error.is_none().then_some(self.geometry);
+            let attach = match port.attach(&self.terminal, self.geometry) {
+                Ok(attach) => attach,
+                Err(error) => return self.fail_at(error, now),
+            };
+            match self.restore(&attach) {
+                Ok(()) => {
+                    if let Some(previous) = self.subscription
+                        && previous != attach.subscription
+                    {
+                        port.detach(&self.terminal, previous);
+                    }
+                    self.commit(&attach);
+                    if let Some(error) = resize_error {
+                        self.set_current_error(Some(format!(
+                            "terminal attached, but viewport synchronization failed: {}",
+                            error_message(error)
+                        )));
+                    }
+                    return;
                 }
-                self.replace(&attach);
-                if let Some(error) = resize_error {
-                    self.set_current_error(Some(format!(
-                        "terminal attached, but viewport synchronization failed: {}",
-                        error_message(error)
-                    )));
+                Err(refusal) => {
+                    // The refused view is never displayed, so its subscription
+                    // is released instead of being left registered.
+                    port.detach(&self.terminal, attach.subscription);
+                    if attempt == SNAPSHOT_RETRY_LIMIT {
+                        return self.resync_at(port, &refusal, now);
+                    }
                 }
             }
-            Err(error) => self.fail_at(error, now),
         }
     }
 
@@ -556,11 +675,65 @@ impl TerminalSession {
         }
     }
 
-    fn replace(&mut self, attach: &TerminalAttach) {
-        self.screen = screen_for(self.geometry);
-        self.screen.advance(&attach.replay);
+    /// Rebuilds the screen for `attach`, or refuses the snapshot and leaves the
+    /// current view untouched.
+    ///
+    /// A checkpoint is reconstructed at the geometry the daemon captured it at —
+    /// the grid authority's own dimensions — so a restored screen is never a
+    /// blend of two geometries. Historical control bytes are never replayed.
+    fn restore(&mut self, attach: &TerminalAttach) -> Result<(), SnapshotRefusal> {
+        if let Some(seen) = self.snapshot_revision
+            && attach.revision < seen
+        {
+            return Err(SnapshotRefusal::StaleRevision {
+                seen,
+                snapshot: attach.revision,
+            });
+        }
+        let (screen, history) = match &attach.screen {
+            TerminalAttachScreen::Checkpoint(checkpoint) => {
+                self.fence_geometry(checkpoint)?;
+                (
+                    TerminalScreen::from_checkpoint(checkpoint)
+                        .map_err(SnapshotRefusal::Rejected)?,
+                    TerminalHistory::Restored,
+                )
+            }
+            // Fail closed: the retained raw tail is never fed to the parser, so
+            // this view starts blank and only live output appears.
+            TerminalAttachScreen::HistoryUnavailable => {
+                (screen_for(self.geometry), TerminalHistory::Unavailable)
+            }
+        };
+        self.screen = screen;
+        self.history = history;
+        Ok(())
+    }
+
+    /// Refuses a checkpoint captured at a geometry other than the one this pane
+    /// synchronized with the daemon. When the resize did not reach the daemon
+    /// there is nothing to fence against, so the daemon's geometry is accepted
+    /// and the unsynchronized viewport is reported separately.
+    fn fence_geometry(&self, checkpoint: &ScreenCheckpoint) -> Result<(), SnapshotRefusal> {
+        let expected = self.synchronized_geometry.filter(|_| {
+            u32::from(self.geometry.rows) != checkpoint.geometry.rows
+                || u32::from(self.geometry.cols) != checkpoint.geometry.cols
+        });
+        match expected {
+            Some(expected) => Err(SnapshotRefusal::Geometry {
+                expected,
+                snapshot: (checkpoint.geometry.rows, checkpoint.geometry.cols),
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// Adopts a restored view: its subscription, output cursor, revision fence
+    /// and session state.
+    fn commit(&mut self, attach: &TerminalAttach) {
         self.subscription = Some(attach.subscription);
         self.cursor = attach.output_offset;
+        self.snapshot_revision = Some(attach.revision);
         if self.connection_epoch != Some(attach.connection_epoch) {
             self.input_seq = 0;
         }
@@ -573,11 +746,35 @@ impl TerminalSession {
             SessionState::Live
         };
         self.refresh_display_cache();
-        self.set_current_error(
-            attach
-                .exited
-                .then(|| error_message(TerminalError::Exited).to_owned()),
-        );
+        let exit = attach
+            .exited
+            .then(|| error_message(TerminalError::Exited).to_owned());
+        self.set_current_error(match (self.history, exit) {
+            (TerminalHistory::Restored, exit) => exit,
+            (TerminalHistory::Unavailable, None) => Some(HISTORY_UNAVAILABLE_MESSAGE.to_owned()),
+            (TerminalHistory::Unavailable, Some(exit)) => {
+                Some(format!("{exit}; {HISTORY_UNAVAILABLE_MESSAGE}"))
+            }
+        });
+    }
+
+    /// Falls back to a typed resync after a refused snapshot: the previous
+    /// screen stays as it was, the stale subscription is released, and the
+    /// ordinary reconnect backoff schedules the next atomic attach.
+    fn resync_at<P: TerminalStreamPort>(
+        &mut self,
+        port: &mut P,
+        refusal: &SnapshotRefusal,
+        now: Instant,
+    ) {
+        if let Some(previous) = self.subscription.take() {
+            port.detach(&self.terminal, previous);
+        }
+        self.state = SessionState::Reconnecting;
+        self.retry_at = Some(now + retry_delay(self.retry_attempt));
+        self.retry_attempt = self.retry_attempt.saturating_add(1);
+        self.refresh_display_cache();
+        self.set_current_error(Some(refusal.message()));
     }
 
     fn fail_at(&mut self, error: TerminalError, now: Instant) {
@@ -704,6 +901,7 @@ mod tests {
     use usagi_core::domain::id::{
         DaemonGeneration, SessionId, TerminalId, WorkspaceId, WorktreeId,
     };
+    use usagi_core::usecase::vt_screen::VtScreen;
 
     fn terminal() -> TerminalRef {
         TerminalRef {
@@ -800,6 +998,14 @@ mod tests {
         fn detach(&mut self, _: &TerminalRef, _: u64) {}
     }
 
+    /// The checkpoint a daemon at `geometry` produces after receiving `bytes`:
+    /// the grid authority parses every byte, so the client never sees them.
+    fn checkpoint_of(bytes: &[u8], geometry: Geometry) -> TerminalAttachScreen {
+        let mut screen = VtScreen::new(usize::from(geometry.rows), usize::from(geometry.cols));
+        screen.advance(bytes);
+        TerminalAttachScreen::Checkpoint(Box::new(screen.checkpoint()))
+    }
+
     fn attach(subscription: u64, offset: u64, replay: &[u8], exited: bool) -> TerminalAttach {
         attach_at(1, subscription, offset, replay, exited)
     }
@@ -814,8 +1020,9 @@ mod tests {
         TerminalAttach {
             subscription,
             connection_epoch,
+            revision: 1,
             output_offset: offset,
-            replay: replay.to_vec(),
+            screen: checkpoint_of(replay, geometry()),
             exited,
         }
     }
@@ -1558,6 +1765,337 @@ mod tests {
         assert_eq!(session.send_input(&mut port, b"x"), Ok(()));
         session.detach(&mut port);
         restarted_server.join().unwrap();
+    }
+
+    /// The checkpoint the daemon produces at a geometry other than the pane's,
+    /// i.e. after a resize interleaved the capture.
+    fn checkpoint_at(bytes: &[u8], geometry: Geometry) -> TerminalAttachScreen {
+        checkpoint_of(bytes, geometry)
+    }
+
+    /// A reference screen fed every byte contiguously — what an untrimmed client
+    /// would render. Restoring a checkpoint plus its suffix must match it.
+    fn reference(bytes: &[u8]) -> TerminalScreen {
+        let mut screen = screen_for(geometry());
+        screen.advance(bytes);
+        screen
+    }
+
+    #[test]
+    fn a_daemon_without_checkpoints_shows_no_history_instead_of_parsing_a_tail() {
+        let mut port = FakePort {
+            attach: vec![Ok(TerminalAttach {
+                subscription: 3,
+                connection_epoch: 1,
+                revision: 7,
+                output_offset: 64,
+                screen: TerminalAttachScreen::HistoryUnavailable,
+                exited: false,
+            })],
+            polls: vec![Ok(vec![chunk(64, b"live")])],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+
+        session.connect(&mut port);
+
+        // Live, but explicitly history-less: nothing was reconstructed and no
+        // retained byte was parsed, so the screen is blank.
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(session.history(), TerminalHistory::Unavailable);
+        assert_eq!(session.rows(), vec!["", "", ""]);
+        assert_eq!(session.error(), Some(HISTORY_UNAVAILABLE_MESSAGE));
+
+        // Only output after the attach offset is rendered.
+        session.poll(&mut port);
+        assert_eq!(session.rows()[0], "live");
+        assert_eq!(session.history(), TerminalHistory::Unavailable);
+    }
+
+    #[test]
+    fn a_history_less_exited_attach_reports_both_facts() {
+        let mut port = FakePort {
+            attach: vec![Ok(TerminalAttach {
+                subscription: 3,
+                connection_epoch: 1,
+                revision: 1,
+                output_offset: 0,
+                screen: TerminalAttachScreen::HistoryUnavailable,
+                exited: true,
+            })],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+
+        session.connect(&mut port);
+
+        assert_eq!(session.state(), SessionState::Exited);
+        let error = session.error().unwrap();
+        assert!(error.starts_with("terminal has exited"));
+        assert!(error.contains("history is unavailable"));
+    }
+
+    #[test]
+    fn a_checkpoint_taken_mid_sequence_matches_an_untrimmed_reference() {
+        // The retained window starts mid CSI and mid UTF-8: a raw tail would
+        // expose these bytes as text, while a checkpoint carries the decoder
+        // state so the suffix continues the sequence.
+        let complete = "\u{1b}[31mred\u{1b}[1mあ".as_bytes();
+        for split in 1..complete.len() {
+            let (head, suffix) = complete.split_at(split);
+            let mut port = FakePort {
+                attach: vec![Ok(TerminalAttach {
+                    subscription: 1,
+                    connection_epoch: 1,
+                    revision: 1,
+                    output_offset: head.len() as u64,
+                    screen: checkpoint_of(head, geometry()),
+                    exited: false,
+                })],
+                polls: vec![Ok(vec![chunk(head.len() as u64, suffix)])],
+                ..FakePort::default()
+            };
+            let mut session = TerminalSession::new(terminal(), geometry());
+
+            session.connect(&mut port);
+            session.poll(&mut port);
+
+            let expected = reference(complete);
+            assert_eq!(session.history(), TerminalHistory::Restored);
+            assert_eq!(
+                session.display_rows(),
+                expected.rows_with_cursor(),
+                "split at {split} must match the reference cells, style and cursor"
+            );
+            assert_eq!(session.cells(), expected.cells_with_scrollback());
+        }
+    }
+
+    #[test]
+    fn an_alternate_buffer_checkpoint_restores_the_saved_primary_and_copy_history() {
+        // The primary transcript, its scrollback and the live alternate frame
+        // exist only in the checkpoint: the raw journal window is long gone.
+        let head = b"one\r\ntwo\r\nthree\r\n\x1b[?1049h\x1b[1;1Halt-frame";
+        let suffix = b"\x1b[?1049lback";
+        let mut port = FakePort {
+            attach: vec![Ok(TerminalAttach {
+                subscription: 1,
+                connection_epoch: 1,
+                revision: 1,
+                output_offset: head.len() as u64,
+                screen: checkpoint_of(head, geometry()),
+                exited: false,
+            })],
+            polls: vec![Ok(vec![chunk(head.len() as u64, suffix)])],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+
+        session.connect(&mut port);
+
+        // While the alternate buffer is active it alone is visible, and its
+        // frame is not mixed into the scrollback copy history.
+        let in_alternate = reference(head);
+        assert_eq!(session.rows(), in_alternate.rows());
+        assert_eq!(session.cells(), in_alternate.cells_with_scrollback());
+
+        session.poll(&mut port);
+
+        // Leaving the alternate buffer restores the saved primary buffer with
+        // its scrollback, matching an untrimmed reference exactly.
+        let expected = reference(&[head.as_slice(), suffix.as_slice()].concat());
+        assert_eq!(session.cells(), expected.cells_with_scrollback());
+        assert_eq!(session.display_rows(), expected.rows_with_cursor());
+        assert!(session.cells().iter().any(|row| row.contains("one")));
+        assert!(!session.cells().iter().any(|row| row.contains("alt-frame")));
+    }
+
+    #[test]
+    fn a_checkpoint_captured_at_another_geometry_retries_then_resyncs() {
+        let interleaved = Geometry { cols: 40, rows: 4 };
+        let stale = |subscription: u64| TerminalAttach {
+            subscription,
+            connection_epoch: 1,
+            revision: 2,
+            output_offset: 5,
+            screen: checkpoint_at(b"wide", interleaved),
+            exited: false,
+        };
+        let mut port = FakePort {
+            attach: vec![
+                Ok(attach(1, 3, b"old", false)),
+                // A resize interleaves both snapshots of the reconnect.
+                Ok(stale(2)),
+                Ok(stale(3)),
+                // The retry after the backoff converges on the pane geometry.
+                Ok(attach(4, 9, b"converged", false)),
+            ],
+            polls: vec![Err(TerminalError::ResyncRequired)],
+            ..FakePort::default()
+        };
+        let now = Instant::now();
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect_at(&mut port, now);
+
+        session.poll_at(&mut port, now);
+
+        // Both refused snapshots are released, then the previous subscription:
+        // neither refused view is displayed, and the previous screen stays
+        // intact rather than being mixed with the wider one.
+        assert_eq!(port.detached, vec![2, 3, 1]);
+        assert_eq!(session.state(), SessionState::Reconnecting);
+        assert_eq!(session.rows()[0], "old");
+        assert_eq!(session.subscription, None);
+        let error = session.error().unwrap();
+        assert!(error.contains("changed size during attach"), "{error}");
+        assert!(error.contains("snapshot 40x4"), "{error}");
+        assert!(error.contains("pane 20x3"), "{error}");
+
+        session.poll_at(&mut port, now + RETRY_INITIAL);
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(session.rows()[0], "converged");
+        assert_eq!(session.error(), None);
+    }
+
+    #[test]
+    fn one_interleaved_snapshot_converges_on_the_immediate_retry() {
+        let mut port = FakePort {
+            attach: vec![
+                Ok(TerminalAttach {
+                    subscription: 1,
+                    connection_epoch: 1,
+                    revision: 2,
+                    output_offset: 4,
+                    screen: checkpoint_at(b"wide", Geometry { cols: 40, rows: 4 }),
+                    exited: false,
+                }),
+                Ok(attach(2, 6, b"paned", false)),
+            ],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+
+        session.connect(&mut port);
+
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(session.rows()[0], "paned");
+        assert_eq!(session.error(), None);
+        assert_eq!(port.detached, vec![1]);
+        // Each attempt re-synchronizes the viewport before capturing.
+        assert_eq!(port.resized, vec![geometry(), geometry()]);
+    }
+
+    #[test]
+    fn an_unsynchronized_viewport_accepts_the_daemon_geometry_instead_of_hiding_output() {
+        let daemon_geometry = Geometry { cols: 40, rows: 4 };
+        let mut port = FakePort {
+            attach: vec![Ok(TerminalAttach {
+                subscription: 1,
+                connection_epoch: 1,
+                revision: 1,
+                output_offset: 4,
+                screen: checkpoint_at(b"wide", daemon_geometry),
+                exited: false,
+            })],
+            resize_error: Some(TerminalError::Unavailable),
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+
+        session.connect(&mut port);
+
+        // There is nothing to fence against when the resize never reached the
+        // daemon, so its own geometry is restored and the failure is reported.
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(session.history(), TerminalHistory::Restored);
+        assert_eq!(session.rows()[0], "wide");
+        assert!(
+            session
+                .error()
+                .unwrap()
+                .contains("viewport synchronization failed")
+        );
+    }
+
+    #[test]
+    fn a_snapshot_older_than_the_applied_revision_is_refused() {
+        let stale = |subscription: u64| TerminalAttach {
+            subscription,
+            connection_epoch: 1,
+            revision: 4,
+            output_offset: 0,
+            screen: checkpoint_of(b"rewound", geometry()),
+            exited: false,
+        };
+        let mut port = FakePort {
+            attach: vec![
+                Ok(TerminalAttach {
+                    subscription: 1,
+                    connection_epoch: 1,
+                    revision: 9,
+                    output_offset: 3,
+                    screen: checkpoint_of(b"new", geometry()),
+                    exited: false,
+                }),
+                Ok(stale(2)),
+                Ok(stale(3)),
+            ],
+            ..FakePort::default()
+        };
+        let now = Instant::now();
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect_at(&mut port, now);
+
+        session.connect_at(&mut port, now);
+
+        assert_eq!(session.state(), SessionState::Reconnecting);
+        assert_eq!(session.rows()[0], "new");
+        assert_eq!(port.detached, vec![2, 3, 1]);
+        let error = session.error().unwrap();
+        assert!(error.contains("stale (revision 4 after 9)"), "{error}");
+    }
+
+    #[test]
+    fn an_out_of_bounds_checkpoint_is_rejected_before_it_replaces_the_screen() {
+        let hostile = |subscription: u64| {
+            let TerminalAttachScreen::Checkpoint(mut checkpoint) =
+                checkpoint_of(b"hostile", geometry())
+            else {
+                unreachable!("helper builds a checkpoint")
+            };
+            checkpoint.schema_version += 1;
+            TerminalAttach {
+                subscription,
+                connection_epoch: 1,
+                revision: 1,
+                output_offset: 0,
+                screen: TerminalAttachScreen::Checkpoint(checkpoint),
+                exited: false,
+            }
+        };
+        let mut port = FakePort {
+            attach: vec![
+                Ok(attach(1, 4, b"kept", false)),
+                Ok(hostile(2)),
+                Ok(hostile(3)),
+            ],
+            ..FakePort::default()
+        };
+        let now = Instant::now();
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect_at(&mut port, now);
+
+        session.connect_at(&mut port, now);
+
+        assert_eq!(session.state(), SessionState::Reconnecting);
+        assert_eq!(session.rows()[0], "kept");
+        assert_eq!(session.history(), TerminalHistory::Restored);
+        let error = session.error().unwrap();
+        assert!(error.contains("snapshot was rejected"), "{error}");
+        assert!(
+            error.contains("unknown checkpoint schema version"),
+            "{error}"
+        );
     }
 
     #[test]

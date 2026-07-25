@@ -184,6 +184,12 @@ mod tests {
             default_model: crate::domain::settings::DefaultModel::Claude,
             issue_enabled: false,
             memory_enabled: false,
+            env: [(
+                "GH_TOKEN".to_owned(),
+                "op://Private/GitHub/token".to_owned(),
+            )]
+            .into_iter()
+            .collect(),
         };
         assert_eq!(storage.load_settings().unwrap(), Settings::default());
         storage.save_settings(&settings).unwrap();

@@ -259,7 +259,8 @@ identity は保持しない。
 | `Ctrl-O` `]` | MoveTabNext | 選択 tab を次の表示 slot へ移動し、Agent 順序を commit する |
 | `Ctrl-O` `[` | MoveTabPrevious | 選択 tab を前の表示 slot へ移動し、Agent 順序を commit する |
 | macOS: Command+C / Linux: Ctrl+Shift+C / Windows: Ctrl+C | Copy selected output | 保持中の terminal 出力選択を OS clipboard へ再コピーする |
-| `Ctrl-O` `x` / `Ctrl-O` `Ctrl-X` | CloseTab | 選択中の tab を閉じる（live なら subscription を detach、pending なら起動待ちを取消） |
+| `Ctrl-O` `x` / `Ctrl-O` `Ctrl-X` | CloseTab | 選択中の tab を閉じる（live なら subscription を detach、pending なら起動待ちを取消、[interrupted](#interrupted-agent-の-tab-投影と明示-resume) なら lineage を dismiss） |
+| `Ctrl-O` `r` | ResumeTab | 選択中の [interrupted tab](#interrupted-agent-の-tab-投影と明示-resume) を明示 resume する（他の tab は変更しない） |
 | `Ctrl-O` `u` / `↑` | ScrollUp | 右ペインの scrollback を 1 行古い方向へ |
 | `Ctrl-O` `d` / `↓` | ScrollDown | 右ペインの scrollback を 1 行 live bottom 方向へ |
 
@@ -350,16 +351,39 @@ scope/revision 不一致は安全な error として収束し、provider の las
 sidebar は daemon snapshot の `available` session に加えて、名前を占有し続ける `failed` session も
 `failed` の状態と失敗理由付きで表示する。`failed` 行は使用不可（`can_use=false`）なので attach を提示せず、
 削除可能（`can_remove=true`）なので `x` / `X` の remove をそのまま受け付ける。各行の可否は snapshot の lifecycle
-から client 側で導出する（`SessionLifecycle::capabilities` が正本）。過渡状態（`creating` / `deleting` など）は
-一覧に出さず、attach 対象を広げないため scope 解決は引き続き `available` だけを対象とする。
+から client 側で導出する（`SessionLifecycle::capabilities` が正本）。`deleting` session も表示し、削除中の行
+（Danger の `✂` と wave）として描く。daemon は remove を受理した時点で応答し、worktree の撤去は daemon 所有の
+worker が続けるため（[5. daemon の session teardown worker](05-daemon.md#session-teardown-worker)）、この行は
+撤去が終わるまで（巨大な `target/` では分オーダー）残り、完了で消える。`deleting` は使用不可かつ削除不可
+（`can_use=false` / `can_remove=false`）なので、attach も再 remove も提示しない。この表示は daemon の lifecycle だけを
+根拠にするため、削除を要求していない別の TUI や再起動後の TUI でも同じ行が削除中として見える。reservation 状態
+（`creating` / `initializing`）は 1 request で完結し、作成中 skeleton という固有の表現を持つため一覧に出さない。
+いずれの場合も attach 対象は広がらず、scope 解決は引き続き `available` だけを対象とする。
 
-`env` は現在 active な target（workspace root か session）の environment editor を開き、その target の
-永続化済み環境変数を読み込んで表示する。正本は notes・todos・decisions と同じ repository の `state.json`
-（workspace state store）で、root と各 session が独立した `name → value` の集合を持つ。editor では変数の
-追加・編集・削除ができ、保存すると集合全体が `state.json` に書き戻される（保存は差分ではなく全置換で、
-消した変数は取り除かれる）。読み込み中と保存中はその状態を表示し、保存中の再保存は受け付けない
-（二重送信の防止）。読み込みや保存が失敗した場合は editor に留まり、入力を失わずに安全な error を表示して
-再試行できる。`env` は引数を取らないため、余分な引数を与えた場合は editor を開かず安全な notice で拒否する。
+### env editor
+
+`env` は環境変数の editor を開く。引数なし（または `workspace`）でこの workspace のスコープ、`global` で
+全 workspace 共通のスコープを編集し、それ以外の引数は editor を開かず安全な notice で拒否する。保存場所・
+スコープの合成・secret の解決・注入は [9. 環境変数設定](09-env.md) が正本で、ここでは editor の操作だけを
+述べる。
+
+| 入力 | 動作 |
+|---|---|
+| 文字 / `Backspace` | `NAME=value` の入力行を編集する |
+| `Enter`（入力行あり） | その binding を追加・置換する。値が空なら削除する |
+| `Enter`（入力行が空） | 編集中のスコープを保存する |
+| `Tab` | 編集対象スコープを workspace ⇄ global で切り替える |
+| `Esc` | editor を閉じる |
+
+- **workspace を編集しているときは global の binding を read-only で併記**し、workspace 側が同名を持つ
+  ものは上書き済みとして示す。global スコープは継承元を持たないため併記しない。
+- 保存は差分ではなく編集中スコープの全置換で、消した変数は取り除かれる。相手スコープの binding は
+  変わらない。
+- 読み込み中と保存中はその状態を表示し、保存中の再保存・編集・スコープ切り替えは受け付けない
+  （二重送信の防止）。
+- 入力行が `NAME=value` の形でない、または名前が移植可能な識別子でない場合は、入力を保持したまま
+  安全な error を表示する。読み込みや保存の失敗も editor に留まり、入力を失わずに再試行できる。
+- `Tab` でスコープを切り替えると相手スコープを読み直す。切り替え前の未保存の編集は破棄される。
 
 ## PR modal と browser effect
 
@@ -538,15 +562,49 @@ completion が到着した後の次フレームでは、request 受付後に入�
 
 選択中の foreground live terminal tab は、daemon が所有する PTY の出力を右ペインへ描画し、キー入力をその PTY へ
 そのまま送る。TUI が使う同期 IPC client は push される stream event を受け取れないため、出力は **poll** で
-取得する: foreground 化したときに一度 attach して保持済みの replay と output offset を受け取り、以降は redraw ごとに
-`Resume { after_offset }` で offset 以降の出力だけを取得する。取得したバイト列は最小の VT screen（印字・
-`CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去・scroll region を含む画面スクロール・SGR の色と属性・alternate screen buffer）へ流し込み、
+取得する: foreground 化したときに一度 attach して daemon の **semantic screen checkpoint** と output offset を
+受け取り、以降は redraw ごとに `Resume { after_offset }` で offset 以降の出力だけを取得する。attach では
+checkpoint から screen を復元し（履歴の control byte を再生しない）、以降の suffix を**その復元済み parser**へ
+feed する。screen は最小の VT screen（印字・
+`CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去・scroll region を含む画面スクロール・SGR の色と属性・alternate screen buffer）で、
 その screen 行を右ペインへ clip して表示する。描画済み retained 行は output・resize・接続状態が変わったときだけ更新し、各 frame は現在の
 viewport に必要な行 window だけを右ペインへ投影するため、scrollback の増加は idle redraw や scroll 操作の描画量を増やさない。
 live の input cursor は現在セルを反転して表示する。output offset に gap があるとき、または daemon が
 resync を要求したときは local に継ぎ足さず、daemon の atomic snapshot（再 attach）で置き換えて、その後の出力取得を継続する。
 
+checkpoint は `output_offset` 時点の完全な screen state（可視 grid・scrollback・cursor・saved cursor・
+scroll region・SGR・alternate と背景 primary buffer・decoder の途中状態）を含むため、retention の先頭が
+UTF-8 / CSI / OSC / SGR / alternate の途中でも reconnect 前後で可視セル・cursor・style が一致し、
+`cells_with_scrollback` を使う selection / copy history も untrimmed な参照と一致する。
+
 `Resume`（poll）は**描画スレッドでは行わない**。専用接続を持つ背景スレッド（poll pump）が、attach 済みの各 terminal を継続的に fetch して per-terminal の read-ahead バッファへ積み、描画スレッドは redraw ごとにそのバッファを**非ブロッキングに drain** するだけである。daemon が一時的に応答できない間（例: dispatch 中に agent lock を保持している間）に固まるのは背景スレッドの fetch だけで、描画・入力ループは即座に応答を続ける。attach で得た output offset を pump に登録し、再 attach（reconnect / resync）では新しい snapshot offset で登録し直してバッファと fetch offset をリセットする。`Resume` は daemon 側で接続にも subscription にも紐づかない stateless な操作なので、この専用接続の破棄・再接続は input の subscription・exactly-once ledger・input sequence に影響しない。`Resize` は attach / input とは別の deadline 付き接続で送る（低頻度なので描画スレッドから同期送信でよい）。attach / input / detach は従来どおり単一接続に載せ、この接続が返す `connection_epoch` だけを session に報告する。
+
+#### snapshot negotiation と legacy 限定表示
+
+TUI は checkpoint 経路を **capability と negotiated revision の両方**で判定する（wire 契約の正本は
+[4. daemon IPC#snapshot payload と revision](04-ipc.md#snapshot-payload-と-revision)）。
+
+| daemon | client が使う経路 | 表示 |
+|---|---|---|
+| `terminal.screen-checkpoint.v1` を広告し共通 revision が 2 | checkpoint から復元し、suffix を feed | 履歴を含む通常表示 |
+| capability 不在、または共通 revision が 1 | **legacy raw tail を parser へ流さない** | 履歴復元不可の限定表示。空の screen から `output_offset` 以降の live 出力だけを描画し、footer に履歴が復元できない旨を表示する |
+
+任意の byte 境界で切られた raw tail は UTF-8 / CSI / OSC の途中から始まり得るため、限定表示では tail を
+**一切 decode しない**（escape を文字として露出させない）。capability を真実源とするので、revision だけが
+2 に見えても capability を広告しない daemon は限定表示へ fail closed する。
+
+#### geometry / revision fence
+
+復元は次の 2 つの fence を通す。どちらも old / new state を混在させず、失敗した snapshot は表示しない。
+
+| fence | 条件 | 挙動 |
+|---|---|---|
+| geometry | pane の geometry を daemon へ同期できた attach で、checkpoint の geometry が pane と異なる（resize が capture に割り込んだ） | その snapshot を破棄して subscription を外し、同一 attach 内で 1 度だけ atomic snapshot を再取得する。なお不一致なら typed resync（`Reconnecting` + backoff）へ落とし、直前の screen をそのまま残す |
+| revision | snapshot の terminal `revision` が既に適用した revision より小さい（stale snapshot） | 同じく破棄・再取得・typed resync |
+
+bound 違反で reject された checkpoint（未知 schema version・範囲外 geometry など）も同じ経路で fail closed する。
+resize が daemon へ届かなかった attach には突き合わせる geometry が無いため、daemon 権威の geometry で復元し、
+viewport 同期の失敗だけを feedback に表示する（attach 可能な terminal を隠さない）。
 
 terminal pane の接続状態と footer feedback は `TerminalSession` の状態をそのまま投影する。
 
@@ -558,7 +616,8 @@ terminal pane の接続状態と footer feedback は `TerminalSession` の状態
 | `Orphaned` | typed failure として拒否 | ownership unknown の終端で、自動 retry しない |
 | `Exited` | typed failure として拒否 | 最終画面を保持し、自動 retry しない |
 
-一時的な `unavailable` と input effect unknown が `Reconnecting` へ遷移する。再 attach 成功時は backoff をresetし、新しい
+一時的な `unavailable`、input effect unknown、および
+[geometry / revision fence](#geometry--revision-fence) が拒否した snapshot が `Reconnecting` へ遷移する。再 attach 成功時は backoff をresetし、新しい
 connection-owned subscriptionを使う。input sequenceはclient-local connection epochが変わった場合だけ0へresetし、
 同じepoch上のcursor-gap/resync/detach→reattachではdaemon ledgerに合わせてnext sequenceを保持する。
 tab close / detach は予約済み retry を取り消す。
@@ -566,7 +625,7 @@ retry 中に replacement terminal を spawn せず、stale / orphaned / exited �
 
 primary screen から押し出された行は 10,000 行を上限とする local scrollback として保持し、right pane は live bottom を基準に
 表示する。alternate screen のスクロールは現在の full-screen frame の一部であり、過去 frame を scrollback へ混在させない。ホイール上/下でそれぞれ古い出力方向／live bottom 方向へ 1 行移動する。新しい
-replay で履歴が短くなった場合は offset を有効範囲へ正規化する。`↑` / `↓` は scrollback 操作に予約せず、PTY の
+snapshot で履歴が短くなった場合は offset を有効範囲へ正規化する。`↑` / `↓` は scrollback 操作に予約せず、PTY の
 history navigation へそのまま送る。right pane の footer の直前には常に 1 行の空白を置く。
 
 出力は mouse drag により選択でき、drag 開始時の press cell から終点までを含めて、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。drag 中も
@@ -856,6 +915,34 @@ planned restart は resume request を作らない。要求は選択中の exact
 同じ tab に対する重複操作（double click）は in-flight な operation へ収束し、2 つ目の request も spawn も作らない。
 拒否・失敗は interrupted tab をそのまま残し、provider ID を含まない safe reason と retry 可否だけを表示する。
 他の tab、他の history、selection、provider conversation、runtime record は変更しない。
+
+### tab strip の表示と操作
+
+投影された interrupted tab は live tab と同じ tab strip に並ぶ。target ごとの pane registry entry に入るため、
+root と managed session の history は互いに混ざらない。live restore は live membership だけを所有し、
+interrupted tab の membership・順序・selection は projection だけが所有する。
+
+| 状態 | tab label | 選択時の body |
+|---|---|---|
+| resume 可能 | `Claude (interrupted)` / `Codex (interrupted)`（metadata 無しは `Agent (interrupted)`） | `interrupted — Ctrl-O r resumes it` |
+| resume 不可 | 同上 | 当該 [safe reason](#投影規則)（provider ID を含まない 1 行） |
+| resume 中 | `Claude (resuming)` | `resuming this conversation` |
+
+操作は次の順に進む。
+
+1. `Ctrl-O r` が選択 tab の opaque `AgentResumeTarget` と新しい `OperationId` を daemon へ送り、**その tab だけ**を
+   resume 中にする。tab の位置・selection・他 tab は変わらない。
+2. 応答が[明示 resume の検証](#明示-resume-の検証)をすべて満たしたときだけ、同じ slot の tab を新しい exact
+   `TerminalRef` の live Agent tab へ置き換える。foreground だった tab だけが attach / resync する。
+3. 置換した lineage は #506 の slot intent へ新しい `TerminalRef` として commit するので、次の observation でも
+   同じ位置に残る。
+4. 拒否・失敗は tab を interrupted のまま残して safe feedback を出す。in-flight な operation を持つ tab は、
+   inventory から source が消えても消滅しない（利用者の request が答えを受け取るまで tab が残る）。
+5. `Ctrl-O x` は tab を閉じるだけで、provider conversation も runtime record も削除しない。閉じた lineage は
+   #506 の continuation-scoped dismissal に入り、`reopen` の明示操作だけが再表示する。
+
+resume 不可の tab、選択されていない tab、および interrupted tab を持たない selection に対する `Ctrl-O r` は
+daemon request を作らない。inventory refresh・reconnect・workspace open・planned restart も同様である。
 
 planned な `daemon restart` は旧 generation の PTY を保持したまま control authority だけを移す別 failure mode であり、
 その rollover と owner routing は [#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md) /

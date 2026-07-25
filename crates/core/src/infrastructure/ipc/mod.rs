@@ -541,6 +541,47 @@ pub fn negotiate(
     })
 }
 
+/// How a negotiated connection must treat attach / resync snapshots.
+///
+/// This is the client's fail-closed decision, not a transport detail: a peer
+/// that cannot serve a semantic checkpoint offers only a raw byte tail cut at an
+/// arbitrary boundary, and feeding that to a blank parser is what
+/// [`TERMINAL_CHECKPOINT_REVISION`] exists to end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalSnapshotMode {
+    /// Generation 1 revision 2 with [`TERMINAL_SCREEN_CHECKPOINT_CAPABILITY`]
+    /// advertised: snapshots carry a semantic screen checkpoint the client
+    /// restores, then resumes from `output_offset`.
+    Checkpoint,
+    /// The peer serves only the legacy raw tail. The client must not parse it:
+    /// it shows a limited, history-less view and renders live output from
+    /// `output_offset` onwards.
+    LegacyFailClosed,
+}
+
+/// Decide how a client treats snapshots on a negotiated connection.
+///
+/// The capability is the **truth source**: a daemon that negotiates revision 2
+/// but does not advertise [`TERMINAL_SCREEN_CHECKPOINT_CAPABILITY`] (an
+/// advertisement gap) is treated as legacy, never as a checkpoint peer.
+#[must_use]
+pub fn terminal_snapshot_mode(
+    protocol: ProtocolVersion,
+    capabilities: &[String],
+) -> TerminalSnapshotMode {
+    let advertised = capabilities
+        .iter()
+        .any(|capability| capability == TERMINAL_SCREEN_CHECKPOINT_CAPABILITY);
+    if advertised
+        && protocol.generation == TERMINAL_WIRE_GENERATION
+        && protocol.revision >= TERMINAL_CHECKPOINT_REVISION
+    {
+        TerminalSnapshotMode::Checkpoint
+    } else {
+        TerminalSnapshotMode::LegacyFailClosed
+    }
+}
+
 /// A cache entry ties a response to the exact request body digest.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CachedResponse {

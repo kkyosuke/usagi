@@ -11,3 +11,4 @@ pub(crate) mod daemon;
 pub(crate) mod launchd;
 pub(crate) mod terminal_pump;
 pub(crate) mod tui;
+pub(crate) mod user_env;

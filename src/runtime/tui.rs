@@ -26,7 +26,9 @@ use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session::{SessionOrigin, SessionRecord};
 use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycleProjection};
-use usagi_core::domain::settings::{LocalSettings, Settings};
+use usagi_core::domain::settings::{
+    EnvBindings, LocalSettings, Settings, format_env_bindings, parse_env_bindings,
+};
 use usagi_core::domain::terminal_launch::{
     TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
 };
@@ -34,6 +36,7 @@ use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::git::{clone as git_clone, diff_status};
+use usagi_core::infrastructure::ipc::TerminalSnapshotMode;
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
@@ -42,9 +45,10 @@ use usagi_core::usecase::client::{
     DaemonRequest, IpcClient, MetricsAction, PrAction, PrRequest, SessionAction, TerminalAction,
     TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
 };
-use usagi_core::usecase::environment as environment_usecase;
+use usagi_core::usecase::env::EnvScope;
 use usagi_core::usecase::note::Target as StoreTarget;
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
+use usagi_core::usecase::vt_screen::ScreenCheckpoint;
 use usagi_core::usecase::workspace as workspace_usecase;
 use usagi_daemon::usecase::session_runtime::SystemGit;
 use usagi_tui::infrastructure::metrics::MetricsHook;
@@ -56,8 +60,9 @@ use usagi_tui::presentation::views::workspace::GitDiff;
 use usagi_tui::presentation::{
     self, AgentCommandPort, AgentPaneAdmission, BannerScreenRunner, ControllerBackendComposition,
     ControllerBackendFactory, ControllerHost, DecisionCommandPort, DesktopNotificationPort,
-    EnvironmentStorePort, Exit, ExternalTerminalPort, MetricsPort, RestoreConnectionPort,
-    SessionCommandPort, SessionCommandResult, Start, WorkspaceLoader, WorkspaceSnapshot,
+    EnvironmentStorePort, ExactAgentResume, Exit, ExternalTerminalPort, MetricsPort,
+    RestoreConnectionPort, SessionCommandPort, SessionCommandResult, Start, WorkspaceLoader,
+    WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::agent_tab_intent::{
     AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabIntentPort,
@@ -74,7 +79,7 @@ use usagi_tui::usecase::application::daemon_backend::{
 use usagi_tui::usecase::application::pane_runtime::Geometry;
 use usagi_tui::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
 use usagi_tui::usecase::application::terminal_session::{
-    TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
+    TerminalAttach, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::overview;
@@ -205,27 +210,32 @@ impl DecisionCommandPort for DaemonDecisionCommandPort {
     }
 }
 
-/// Production environment store for the controller's `LoadEnvironment` /
-/// `SaveEnvironment` effects. The durable authority is the repository's
-/// `state.json` (the same store notes/todos/decisions use); this adapter maps
-/// the controller's stable [`Target`] identity to that name-keyed store and
-/// projects each read/write back as a controller [`BackendEvent`].
+/// Production store for the controller's notes and environment effects.
+///
+/// Notes stay in the repository's `state.json` (the same store todos/decisions
+/// use), keyed by the controller's stable [`Target`] identity. Environment
+/// bindings are configuration rather than session state, so they live in the two
+/// settings files and are reached through [`SettingsEnvironmentStore`]. Both
+/// project each read/write back as a controller [`BackendEvent`].
 struct RepoEnvironmentStore {
     store: WorkspaceStateStore,
     /// Stable session identities paired with their store names, captured from
     /// the snapshot the runtime opened with (the TUI never infers a name from an
     /// id elsewhere).
     session_names: Vec<(usagi_core::domain::id::SessionId, String)>,
+    environment: SettingsEnvironmentStore,
 }
 
 impl RepoEnvironmentStore {
     fn new(
         workspace_path: &Path,
         session_names: Vec<(usagi_core::domain::id::SessionId, String)>,
+        environment: SettingsEnvironmentStore,
     ) -> Self {
         Self {
             store: WorkspaceStateStore::new(workspace_path),
             session_names,
+            environment,
         }
     }
 
@@ -245,7 +255,7 @@ impl RepoEnvironmentStore {
     fn safe_error(reason: impl std::fmt::Display) -> SafeError {
         SafeError {
             message: SafeMessage::new(reason.to_string()),
-            error_id: "environment-store-error".to_owned(),
+            error_id: "target-store-error".to_owned(),
         }
     }
 
@@ -267,57 +277,87 @@ fn environment_map(entries: &[EnvironmentEntry]) -> BTreeMap<String, String> {
         .collect()
 }
 
-#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=repo_environment_store_persistence_contract
-impl EnvironmentStorePort for RepoEnvironmentStore {
-    fn load(&mut self, target: Target) -> BackendEvent {
-        let Some(scope) = self.resolve(target) else {
-            return BackendEvent::EnvironmentError {
-                target,
-                error: Self::stale_target(),
-            };
-        };
-        match environment_usecase::environment(&self.store, scope) {
-            Ok(map) => BackendEvent::EnvironmentLoaded {
-                target,
-                entries: environment_entries(map),
+/// The two settings files that own environment bindings: the per-user
+/// `settings.json` in the data directory (every workspace inherits it) and the
+/// workspace's own `<workspace>/.usagi/settings.json`.
+///
+/// A read reports the edited scope's own bindings plus what it inherits, so the
+/// workspace editor can show the global set without ever copying it into the
+/// workspace file. A write replaces exactly one scope's bindings under that
+/// scope's cross-process lock, leaving the rest of the settings file untouched.
+struct SettingsEnvironmentStore {
+    global: Storage,
+    workspace: WorkspaceSettingsStore,
+}
+
+impl SettingsEnvironmentStore {
+    fn new(data_dir: PathBuf, workspace_root: &Path) -> Self {
+        Self {
+            global: Storage::new(data_dir),
+            workspace: WorkspaceSettingsStore::new(workspace_root),
+        }
+    }
+
+    /// `(the scope's own bindings, the bindings it inherits)`.
+    fn read(&self, scope: EnvScope) -> anyhow::Result<(EnvBindings, EnvBindings)> {
+        let global = self.global.load_settings()?.env;
+        Ok(match scope {
+            // Global inherits nothing: it *is* what the others inherit.
+            EnvScope::Global => (global, EnvBindings::new()),
+            EnvScope::Workspace => (self.workspace.load()?.env, global),
+        })
+    }
+
+    fn write(&self, scope: EnvScope, bindings: EnvBindings) -> anyhow::Result<()> {
+        match scope {
+            EnvScope::Global => {
+                let _lock = self.global.lock()?;
+                let mut settings = self.global.load_settings()?;
+                settings.env = bindings;
+                self.global.save_settings(&settings)?;
+            }
+            EnvScope::Workspace => {
+                let _lock = self.workspace.lock()?;
+                let mut local = self.workspace.load()?;
+                local.env = bindings;
+                self.workspace.save(&local)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn safe_error(reason: impl std::fmt::Display) -> SafeError {
+        SafeError {
+            message: SafeMessage::new(reason.to_string()),
+            error_id: "environment-settings-error".to_owned(),
+        }
+    }
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=settings_environment_store_persistence_contract
+impl EnvironmentStorePort for SettingsEnvironmentStore {
+    fn load(&mut self, scope: EnvScope) -> BackendEvent {
+        match self.read(scope) {
+            Ok((entries, inherited)) => BackendEvent::EnvironmentLoaded {
+                scope,
+                entries: environment_entries(entries),
+                inherited: environment_entries(inherited),
             },
             Err(error) => BackendEvent::EnvironmentError {
-                target,
+                scope,
                 error: Self::safe_error(error),
             },
         }
     }
 
-    fn save(&mut self, target: Target, entries: Vec<EnvironmentEntry>) -> BackendEvent {
-        let Some(scope) = self.resolve(target) else {
-            return BackendEvent::EnvironmentError {
-                target,
-                error: Self::stale_target(),
-            };
-        };
-        match environment_usecase::set_environment(
-            &self.store,
-            scope,
-            environment_map(&entries),
-            Utc::now(),
-        ) {
-            // Reflux the persisted set so the editor mirrors exactly what landed.
-            Ok(true) => match environment_usecase::environment(&self.store, scope) {
-                Ok(map) => BackendEvent::EnvironmentLoaded {
-                    target,
-                    entries: environment_entries(map),
-                },
-                Err(error) => BackendEvent::EnvironmentError {
-                    target,
-                    error: Self::safe_error(error),
-                },
-            },
-            Ok(false) => BackendEvent::EnvironmentError {
-                target,
-                error: Self::stale_target(),
-            },
+    fn save(&mut self, scope: EnvScope, entries: Vec<EnvironmentEntry>) -> BackendEvent {
+        // Save through the same validation a launch applies, then reflux what
+        // actually landed so the editor mirrors the stored file.
+        let bindings = parse_env_bindings(&format_env_bindings(&environment_map(&entries)));
+        match self.write(scope, bindings) {
+            Ok(()) => EnvironmentStorePort::load(self, scope),
             Err(error) => BackendEvent::EnvironmentError {
-                target,
+                scope,
                 error: Self::safe_error(error),
             },
         }
@@ -386,23 +426,23 @@ impl BackendTargetStorePort for RepoEnvironmentStore {
         completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
     }
 
-    fn load_environment(&mut self, target: Target, completions: Completions) {
+    fn load_environment(&mut self, scope: EnvScope, completions: Completions) {
         completions.emit(
             usagi_tui::usecase::application::controller::AppEvent::Backend(
-                EnvironmentStorePort::load(self, target),
+                EnvironmentStorePort::load(&mut self.environment, scope),
             ),
         );
     }
 
     fn save_environment(
         &mut self,
-        target: Target,
+        scope: EnvScope,
         entries: Vec<EnvironmentEntry>,
         completions: Completions,
     ) {
         completions.emit(
             usagi_tui::usecase::application::controller::AppEvent::Backend(
-                EnvironmentStorePort::save(self, target, entries),
+                EnvironmentStorePort::save(&mut self.environment, scope, entries),
             ),
         );
     }
@@ -563,7 +603,13 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         host: ControllerHost,
     ) -> ControllerBackendComposition {
         let (session_names, sessions) = project_backend_sessions(snapshot);
-        let store = RepoEnvironmentStore::new(&snapshot.workspace.path, session_names);
+        let environment_data_dir = usagi_core::infrastructure::paths::data_dir()
+            .expect("workspace launch already resolved the daemon data directory");
+        let store = RepoEnvironmentStore::new(
+            &snapshot.workspace.path,
+            session_names,
+            SettingsEnvironmentStore::new(environment_data_dir, &snapshot.workspace.path),
+        );
         let backend = DaemonBackend::new(
             Box::new(host.clone()),
             Box::new(host),
@@ -1122,6 +1168,36 @@ fn decode_terminal_inventory(
         .collect()
 }
 
+/// Decode the screen an attach / resync snapshot carries, according to the
+/// contract the connection negotiated.
+///
+/// On the checkpoint path the frame must satisfy `base_offset == output_offset`
+/// (a checkpoint is complete at `output_offset`, so it has no tail) and carry a
+/// checkpoint this build accepts; anything else is refused rather than displayed.
+/// On the legacy path the retained `replay` tail is **not read at all**: a tail
+/// cut mid UTF-8 / CSI / OSC must never reach a parser, so the client fails
+/// closed to a history-less view and renders only output after `output_offset`.
+fn decode_attach_screen(
+    mode: TerminalSnapshotMode,
+    snapshot: &serde_json::Value,
+    base_offset: u64,
+    output_offset: u64,
+) -> Result<TerminalAttachScreen, TerminalError> {
+    match mode {
+        TerminalSnapshotMode::Checkpoint => {
+            if base_offset != output_offset {
+                return Err(TerminalError::Unavailable);
+            }
+            // The frame is already bounded by the negotiated IPC frame limit;
+            // the checkpoint's own bounds are enforced when it is restored.
+            let checkpoint: ScreenCheckpoint = serde_json::from_value(snapshot["screen"].clone())
+                .map_err(|_| TerminalError::Unavailable)?;
+            Ok(TerminalAttachScreen::Checkpoint(Box::new(checkpoint)))
+        }
+        TerminalSnapshotMode::LegacyFailClosed => Ok(TerminalAttachScreen::HistoryUnavailable),
+    }
+}
+
 fn terminal_inventory_matches_scope(
     entries: &[usagi_core::domain::terminal_launch::TerminalInventoryEntry],
     scope: &TerminalLaunchScope,
@@ -1145,6 +1221,35 @@ fn exact_agent_resume_request(
         operation_id: operation_id.to_string(),
         target,
     }
+}
+
+/// Decode one exact-target resume answer, keeping the daemon's own lineage and
+/// source-to-replacement relation. Nothing is inferred here: a body without a
+/// decodable relation yields `None` and the TUI refuses the replacement (#510).
+fn decode_exact_agent_resume(body: &serde_json::Value) -> Result<ExactAgentResume, String> {
+    let terminal = body
+        .get("terminal")
+        .cloned()
+        .ok_or_else(|| "provider resume returned no terminal".to_owned())
+        .and_then(|terminal| {
+            serde_json::from_value(terminal)
+                .map_err(|_| "provider resume returned an invalid terminal".to_owned())
+        })?;
+    let continuation = body
+        .get("continuation")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
+    let relation = body
+        .get("resume_relation")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
+    Ok(ExactAgentResume {
+        terminal,
+        continuation,
+        relation,
+    })
 }
 
 fn decode_agent_admission(
@@ -1247,7 +1352,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         &mut self,
         target: usagi_core::domain::agent::AgentResumeTarget,
         operation_id: usagi_core::domain::id::OperationId,
-    ) -> Result<usagi_core::domain::id::TerminalRef, String> {
+    ) -> Result<ExactAgentResume, String> {
         let mut client =
             crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
                 .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
@@ -1255,14 +1360,9 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             .request(exact_agent_resume_request(operation_id, target))
             .map_err(|_| "provider resume failed; refresh Agent inventory".to_owned())?
         {
-            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => body
-                .get("terminal")
-                .cloned()
-                .ok_or_else(|| "provider resume returned no terminal".to_owned())
-                .and_then(|terminal| {
-                    serde_json::from_value(terminal)
-                        .map_err(|_| "provider resume returned an invalid terminal".to_owned())
-                }),
+            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => {
+                decode_exact_agent_resume(&body)
+            }
         }
     }
 
@@ -1404,6 +1504,10 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         terminal: &usagi_core::domain::id::TerminalRef,
         _geometry: Geometry,
     ) -> Result<TerminalAttach, TerminalError> {
+        // The negotiated connection decides the snapshot contract before the
+        // request is sent, so a daemon without the checkpoint capability can
+        // never have its raw tail decoded into a screen.
+        let mode = self.terminal_client()?.terminal_snapshot_mode();
         let body = self.terminal_request(
             TerminalAction::Attach,
             TerminalRequest::Attach {
@@ -1420,13 +1524,10 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         let base_offset = snapshot["base_offset"]
             .as_u64()
             .ok_or(TerminalError::Unavailable)?;
-        let replay: Vec<u8> =
-            serde_json::from_value(snapshot["replay"].clone()).unwrap_or_default();
-        if base_offset.checked_add(u64::try_from(replay.len()).unwrap_or(u64::MAX))
-            != Some(output_offset)
-        {
-            return Err(TerminalError::Unavailable);
-        }
+        let revision = snapshot["revision"]
+            .as_u64()
+            .ok_or(TerminalError::Unavailable)?;
+        let screen = decode_attach_screen(mode, snapshot, base_offset, output_offset)?;
         // `exited` is `Option<i32>`: null while the process is still running.
         let exited = !snapshot["exited"].is_null();
         // Resume polling for this terminal on the background pump from the
@@ -1436,8 +1537,9 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         Ok(TerminalAttach {
             subscription,
             connection_epoch: self.terminal_epoch,
+            revision,
             output_offset,
-            replay,
+            screen,
             exited,
         })
     }
@@ -1637,17 +1739,22 @@ struct LifecycleSnapshot {
 }
 
 impl LifecycleSnapshot {
-    /// Sessions the sidebar lists: usable `Available` checkouts and `Failed`
-    /// reservations. A `Failed` row still owns its name, so listing it is what
-    /// lets a client see and remove it; capability gating (attach vs remove) is
-    /// derived per row from its lifecycle. Transient states (`Creating` /
-    /// `Initializing` / `Deleting`) are not surfaced as sidebar rows.
+    /// Sessions the sidebar lists: usable `Available` checkouts, `Failed`
+    /// reservations, and `Deleting` rows whose teardown is still running. A
+    /// `Failed` row still owns its name, so listing it is what lets a client see
+    /// and remove it; a `Deleting` row is the visible half of an accepted
+    /// removal, which the daemon's teardown worker finishes asynchronously and
+    /// which therefore lasts as long as the worktree takes to remove. Capability
+    /// gating (attach vs remove) is derived per row from its lifecycle, so
+    /// neither row is attachable and a `Deleting` row cannot be removed again.
+    /// The reservation states (`Creating` / `Initializing`) stay hidden: they are
+    /// bounded by one request and have their own pending-row treatment.
     fn listed_sessions(&self) -> impl Iterator<Item = &ManagedSession> {
         use usagi_core::domain::session_lifecycle::SessionLifecycle;
         self.sessions.iter().filter(|session| {
             matches!(
                 session.lifecycle,
-                SessionLifecycle::Available | SessionLifecycle::Failed
+                SessionLifecycle::Available | SessionLifecycle::Failed | SessionLifecycle::Deleting
             )
         })
     }
@@ -1695,7 +1802,6 @@ impl LifecycleSnapshot {
                         last_active: None,
                         notes: Scratchpad::default(),
                         prs: Vec::new(),
-                        environment: std::collections::BTreeMap::new(),
                     });
                 record.root = workspace
                     .path
@@ -2721,16 +2827,17 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        DaemonAgentCommandPort, DaemonDecisionCommandPort, DaemonRestoreConnectionPort,
+        DaemonAgentCommandPort, DaemonDecisionCommandPort, DaemonRestoreConnectionPort, EnvScope,
         EnvironmentStorePort, FsWorkspaceLoader, Geometry, LifecycleSnapshot,
-        PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore, Start,
-        TerminalChunk, TerminalError, TerminalInputOutcome, agent_inventory_request,
+        PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore,
+        SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen, TerminalChunk,
+        TerminalError, TerminalInputOutcome, TerminalSnapshotMode, agent_inventory_request,
         classify_terminal_input, created_session_hook, daemon_error_reason, decode_agent_admission,
-        decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
-        exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
-        load_workspace_state, map_terminal_error, passthrough_key, probe_path,
-        provider_resume_projection, session_snapshot_result, terminal_copy_key,
-        terminal_inventory_matches_scope, validate_workspace_directory,
+        decode_attach_screen, decode_exact_agent_resume, decode_terminal_input_ack,
+        decode_terminal_inventory, decode_terminal_poll, exact_agent_resume_request,
+        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
+        passthrough_key, probe_path, provider_resume_projection, session_snapshot_result,
+        terminal_copy_key, terminal_inventory_matches_scope, validate_workspace_directory,
     };
     use crate::runtime::terminal_pump::TerminalPollPump;
     use chrono::Utc;
@@ -2749,7 +2856,6 @@ mod tests {
     use usagi_core::domain::workspace_state::WorkspaceState;
     use usagi_core::infrastructure::paths::project_data_dir;
     use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
-    use usagi_core::infrastructure::store::state::WorkspaceStateStore;
     use usagi_core::infrastructure::store::workspace::Storage;
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
     use usagi_tui::presentation::views::workspace::ProjectedSession;
@@ -2780,12 +2886,39 @@ mod tests {
         }
     }
 
+    /// The serialized checkpoint a daemon at `rows`×`cols` produces after
+    /// receiving `bytes`. Mirrors the daemon's grid authority in one value.
+    fn screen_checkpoint_value(bytes: &[u8], rows: usize, cols: usize) -> serde_json::Value {
+        use usagi_core::usecase::vt_screen::VtScreen;
+
+        let mut screen = VtScreen::new(rows, cols);
+        screen.advance(bytes);
+        serde_json::to_value(screen.checkpoint()).expect("checkpoint serializes")
+    }
+
     #[cfg(unix)]
     fn terminal_input_port(
         replies: Vec<(
             usagi_core::infrastructure::ipc::ResponseOutcome,
             serde_json::Value,
         )>,
+    ) -> (
+        DaemonAgentCommandPort,
+        std::thread::JoinHandle<Vec<serde_json::Value>>,
+    ) {
+        terminal_input_port_with(replies, |_| {})
+    }
+
+    /// Same scripted daemon, with `adjust` narrowing what the server advertises
+    /// so the client's snapshot negotiation can be exercised against an older
+    /// daemon (absent capability, or a lower `max_revision`).
+    #[cfg(unix)]
+    fn terminal_input_port_with(
+        replies: Vec<(
+            usagi_core::infrastructure::ipc::ResponseOutcome,
+            serde_json::Value,
+        )>,
+        adjust: impl FnOnce(&mut usagi_core::infrastructure::ipc::ServerProtocol),
     ) -> (
         DaemonAgentCommandPort,
         std::thread::JoinHandle<Vec<serde_json::Value>>,
@@ -2806,12 +2939,13 @@ mod tests {
             target: "test".to_owned(),
             artifact: "test-artifact".to_owned(),
         };
-        let protocol = server_protocol(
+        let mut protocol = server_protocol(
             DaemonGeneration("input-ack-test".to_owned()),
             "input-ack-connection".to_owned(),
             build.clone(),
             usagi_core::domain::daemon::DaemonRecord::identified(2, "test-process"),
         );
+        adjust(&mut protocol);
         let server = std::thread::spawn(move || {
             let mut reader = server_stream.try_clone().unwrap();
             let mut writer = server_stream;
@@ -3011,9 +3145,10 @@ mod tests {
         let valid_attach = json!({
             "subscription": 8,
             "snapshot": {
+                "revision": 3,
                 "output_offset": 0,
                 "base_offset": 0,
-                "replay": [],
+                "screen": screen_checkpoint_value(b"", 3, 20),
                 "exited": null
             }
         });
@@ -3061,6 +3196,135 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(input_sequences, vec![0, 1]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_attach_uses_checkpoints_and_never_parses_a_legacy_tail() {
+        use usagi_core::infrastructure::ipc::{
+            ProtocolRange, ResponseOutcome, TERMINAL_SCREEN_CHECKPOINT_CAPABILITY,
+            TERMINAL_WIRE_GENERATION,
+        };
+        use usagi_tui::presentation::AgentCommandPort;
+
+        type Adjust = fn(&mut usagi_core::infrastructure::ipc::ServerProtocol);
+
+        // A raw tail cut mid-CSI. Whatever the negotiation outcome, no path may
+        // decode these bytes into a screen.
+        let truncated_tail = b"\x1b[31mred\x1b[".to_vec();
+        let snapshot = |replay: &[u8]| {
+            json!({
+                "subscription": 4,
+                "snapshot": {
+                    "revision": 2,
+                    "base_offset": 0,
+                    "output_offset": 0,
+                    "screen": screen_checkpoint_value(b"hi", 3, 20),
+                    "replay": replay,
+                    "exited": null
+                }
+            })
+        };
+
+        let cases: [(&str, Adjust, bool); 3] = [
+            // New client × new daemon: capability present, common revision 2.
+            ("checkpoint", |_| {}, true),
+            // New client × new-enough revision but no capability advertised:
+            // the capability is the truth source, so this stays legacy.
+            (
+                "capability absent",
+                |protocol| {
+                    protocol
+                        .capabilities
+                        .retain(|capability| capability != TERMINAL_SCREEN_CHECKPOINT_CAPABILITY);
+                },
+                false,
+            ),
+            // New client × old daemon: the common revision falls back to 1.
+            (
+                "revision 1 daemon",
+                |protocol| {
+                    protocol.supported_protocols = vec![ProtocolRange {
+                        generation: TERMINAL_WIRE_GENERATION,
+                        min_revision: 0,
+                        max_revision: 1,
+                    }];
+                },
+                false,
+            ),
+        ];
+
+        for (name, adjust, expects_checkpoint) in cases {
+            let (mut port, server) = terminal_input_port_with(
+                vec![(ResponseOutcome::Ok, snapshot(&truncated_tail))],
+                adjust,
+            );
+            let attach = port
+                .attach_terminal(&input_terminal_ref(), Geometry { cols: 20, rows: 3 })
+                .expect("scripted attach decodes");
+
+            match attach.screen {
+                TerminalAttachScreen::Checkpoint(checkpoint) => {
+                    assert!(
+                        expects_checkpoint,
+                        "{name} must not use the checkpoint path"
+                    );
+                    assert_eq!(checkpoint.geometry.rows, 3);
+                    assert_eq!(checkpoint.geometry.cols, 20);
+                }
+                TerminalAttachScreen::HistoryUnavailable => {
+                    assert!(!expects_checkpoint, "{name} must use the checkpoint path");
+                }
+            }
+            assert_eq!(attach.revision, 2, "{name}");
+            drop(port);
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn attach_screen_decoder_fails_closed_on_an_unusable_checkpoint_frame() {
+        let checkpoint = screen_checkpoint_value(b"ok", 2, 4);
+        let frame = |base: u64, screen: serde_json::Value| json!({ "revision": 1, "base_offset": base, "output_offset": 9, "screen": screen });
+
+        // A checkpoint is complete at `output_offset`; a frame that also claims a
+        // tail is refused instead of being restored and then double-fed.
+        assert_eq!(
+            decode_attach_screen(
+                TerminalSnapshotMode::Checkpoint,
+                &frame(0, checkpoint.clone()),
+                0,
+                9,
+            ),
+            Err(TerminalError::Unavailable)
+        );
+        // A missing or malformed checkpoint is refused rather than approximated.
+        for screen in [json!(null), json!({ "schema_version": 1 })] {
+            assert_eq!(
+                decode_attach_screen(TerminalSnapshotMode::Checkpoint, &frame(9, screen), 9, 9),
+                Err(TerminalError::Unavailable)
+            );
+        }
+        assert!(matches!(
+            decode_attach_screen(
+                TerminalSnapshotMode::Checkpoint,
+                &frame(9, checkpoint),
+                9,
+                9
+            ),
+            Ok(TerminalAttachScreen::Checkpoint(_))
+        ));
+        // The legacy path ignores the frame entirely: an offset mismatch or a
+        // mid-escape tail can never turn into parsed screen state.
+        assert_eq!(
+            decode_attach_screen(
+                TerminalSnapshotMode::LegacyFailClosed,
+                &json!({ "replay": b"\x1b[31m".to_vec() }),
+                0,
+                9,
+            ),
+            Ok(TerminalAttachScreen::HistoryUnavailable)
+        );
     }
 
     #[test]
@@ -3345,8 +3609,61 @@ mod tests {
         );
     }
 
+    /// #510: the exact-target resume answer carries the daemon's own lineage and
+    /// source-to-replacement relation, and never infers either.
     #[test]
-    fn lifecycle_snapshot_lists_failed_sessions_with_their_lifecycle_projection() {
+    fn exact_agent_resume_decodes_the_daemon_relation_or_leaves_it_absent() {
+        use usagi_core::domain::agent::AgentResumeRelation;
+        use usagi_core::domain::id::{AgentResumeSourceId, AgentRuntimeId};
+
+        let workspace = WorkspaceId::new();
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: None,
+            worktree_id: WorktreeId::new(),
+        };
+        let continuation = AgentContinuationRef::new();
+        let relation = AgentResumeRelation {
+            source: AgentResumeSourceId::new(),
+            replacement_runtime: AgentRuntimeId::new(),
+            replacement_terminal: terminal.clone(),
+        };
+
+        let resume = decode_exact_agent_resume(&json!({
+            "terminal": terminal,
+            "continuation": continuation,
+            "resume_relation": relation,
+        }))
+        .unwrap();
+        assert_eq!(resume.terminal, terminal);
+        assert_eq!(resume.continuation, Some(continuation));
+        assert_eq!(resume.relation, Some(relation));
+
+        // A body without a decodable relation or lineage yields none of either,
+        // so the TUI refuses the replacement instead of assuming one.
+        let bare = decode_exact_agent_resume(&json!({
+            "terminal": terminal,
+            "continuation": null,
+            "resume_relation": "provider-native-id",
+        }))
+        .unwrap();
+        assert_eq!(bare.continuation, None);
+        assert_eq!(bare.relation, None);
+
+        assert_eq!(
+            decode_exact_agent_resume(&json!({})).unwrap_err(),
+            "provider resume returned no terminal"
+        );
+        assert_eq!(
+            decode_exact_agent_resume(&json!({"terminal": "bad"})).unwrap_err(),
+            "provider resume returned an invalid terminal"
+        );
+    }
+
+    #[test]
+    fn lifecycle_snapshot_lists_failed_and_deleting_sessions_with_their_lifecycle_projection() {
         use usagi_core::domain::session_lifecycle::{Failure, FailureStage};
         let workspace = Workspace::new("work", "/tmp/work");
         let mut available =
@@ -3359,35 +3676,41 @@ mod tests {
             stage: FailureStage::Create,
             summary: "create failed".into(),
         });
+        // An accepted removal whose daemon-owned teardown is still running.
+        let mut deleting =
+            ManagedSession::new_creating("deleting".into(), OperationId::new(), Utc::now());
+        deleting.lifecycle = SessionLifecycle::Deleting;
         // A transient reservation is durable but not a sidebar row.
         let creating =
             ManagedSession::new_creating("creating".into(), OperationId::new(), Utc::now());
         let available_id = available.session_id;
         let failed_id = failed.session_id;
+        let deleting_id = deleting.session_id;
         let snapshot = LifecycleSnapshot {
             workspace_id: WorkspaceId::new(),
             root_worktree_id: usagi_core::domain::id::WorktreeId::new(),
             revision: 1,
-            sessions: vec![available, failed, creating],
+            sessions: vec![available, failed, deleting, creating],
             agent_resumes: std::collections::BTreeMap::new(),
         };
 
-        // Available and Failed are listed; the transient Creating row is not.
+        // Available, Failed and Deleting are listed; the Creating row is not.
         assert_eq!(
             snapshot
                 .listed_sessions()
                 .map(|session| session.name.as_str())
                 .collect::<Vec<_>>(),
-            ["available", "failed"]
+            ["available", "failed", "deleting"]
         );
-        // Both listed rows are projected, so a Failed row's name is visible.
+        // Every listed row is projected, so a Failed row's name is visible and a
+        // removal in progress keeps its row until the teardown finishes.
         assert_eq!(
             snapshot
                 .project(&workspace, &[])
                 .iter()
                 .map(|record| record.name.clone())
                 .collect::<Vec<_>>(),
-            ["available", "failed"]
+            ["available", "failed", "deleting"]
         );
         // The lifecycle projection carries each state and the Failed summary.
         let lifecycles = snapshot.session_lifecycles();
@@ -3403,6 +3726,13 @@ mod tests {
             failed_projection.failure_summary.as_deref(),
             Some("create failed")
         );
+        // A Deleting row is neither attachable nor removable again, so listing
+        // it cannot produce a second teardown of the same session.
+        let deleting_projection = lifecycles.get(&deleting_id).unwrap();
+        assert_eq!(deleting_projection.lifecycle, SessionLifecycle::Deleting);
+        assert!(!deleting_projection.capabilities().can_use);
+        assert!(!deleting_projection.capabilities().can_remove);
+        assert_eq!(deleting_projection.failure_summary, None);
     }
 
     #[test]
@@ -3653,7 +3983,6 @@ mod tests {
                 ..Default::default()
             },
             prs: Vec::new(),
-            environment: std::collections::BTreeMap::new(),
         };
 
         let projected = snapshot.project(&workspace, &[legacy]);
@@ -4040,83 +4369,122 @@ mod tests {
     }
 
     #[test]
-    fn repo_environment_store_persists_root_and_session_and_rejects_stale_targets() {
+    fn repo_store_resolves_targets_and_reports_a_stale_session() {
         let workspace = tempfile::tempdir().unwrap();
-        // Seed a session so a session-target save resolves in the store.
-        let seeded = SessionRecord {
-            name: "alpha".to_owned(),
-            display_name: None,
-            origin: SessionOrigin::Human,
-            started_from: None,
-            root: workspace.path().join(".usagi/sessions/alpha"),
-            created_at: Utc::now(),
-            last_active: None,
-            notes: Scratchpad::default(),
-            prs: Vec::new(),
-            environment: std::collections::BTreeMap::new(),
-        };
-        WorkspaceStateStore::new(workspace.path())
-            .save(&WorkspaceState {
-                sessions: vec![seeded],
-                ..Default::default()
-            })
-            .unwrap();
-
-        let alpha_id = SessionId::new();
-        let mut store = RepoEnvironmentStore {
-            store: WorkspaceStateStore::new(workspace.path()),
-            session_names: vec![(alpha_id, "alpha".to_owned())],
-        };
-        let root = Target::Root(WorkspaceId::new());
-
-        // Root starts empty, then a save persists and refluxes the stored set.
-        assert!(matches!(
-            store.load(root),
-            BackendEvent::EnvironmentLoaded { entries, .. } if entries.is_empty()
-        ));
-        let saved = store.save(
-            root,
-            vec![EnvironmentEntry {
-                name: "A".to_owned(),
-                value: "1".to_owned(),
-            }],
+        let alpha = SessionId::new();
+        let store = RepoEnvironmentStore::new(
+            workspace.path(),
+            vec![(alpha, "alpha".to_owned())],
+            SettingsEnvironmentStore::new(workspace.path().to_path_buf(), workspace.path()),
         );
+
+        // The root always resolves; a known session resolves to its store name.
         assert!(matches!(
-            &saved,
-            BackendEvent::EnvironmentLoaded { entries, .. }
-                if entries.len() == 1 && entries[0].name == "A" && entries[0].value == "1"
+            store.resolve(Target::Root(WorkspaceId::new())),
+            Some(StoreTarget::Root)
         ));
-        // A fresh read confirms the write actually landed in state.json.
         assert!(matches!(
-            store.load(root),
-            BackendEvent::EnvironmentLoaded { entries, .. } if entries.len() == 1
+            store.resolve(Target::Session(alpha)),
+            Some(StoreTarget::Session("alpha"))
+        ));
+        // A session absent from the snapshot mapping is stale, not guessed.
+        assert!(store.resolve(Target::Session(SessionId::new())).is_none());
+
+        let stale = RepoEnvironmentStore::stale_target();
+        assert_eq!(stale.error_id, "target-store-error");
+        assert!(stale.message.as_str().contains("no longer available"));
+        assert!(
+            RepoEnvironmentStore::safe_error(anyhow::anyhow!("state.json is unreadable"))
+                .message
+                .as_str()
+                .contains("state.json is unreadable")
+        );
+    }
+
+    #[test]
+    fn settings_environment_store_persistence_contract() {
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let mut store = SettingsEnvironmentStore::new(data.path().to_path_buf(), workspace.path());
+
+        // Both scopes start empty, and neither inherits anything yet.
+        assert!(matches!(
+            EnvironmentStorePort::load(&mut store, EnvScope::Workspace),
+            BackendEvent::EnvironmentLoaded { entries, inherited, .. }
+                if entries.is_empty() && inherited.is_empty()
         ));
 
-        // A session target resolves to its state.json record and persists there.
-        let alpha = Target::Session(alpha_id);
+        // A global save lands in the per-user settings file.
         assert!(matches!(
-            store.save(
-                alpha,
+            EnvironmentStorePort::save(
+                &mut store,
+                EnvScope::Global,
+                vec![
+                    EnvironmentEntry {
+                        name: "GH_TOKEN".to_owned(),
+                        value: "op://Private/GitHub/token".to_owned(),
+                    },
+                    // Unusable bindings are dropped rather than stored.
+                    EnvironmentEntry {
+                        name: "1BAD".to_owned(),
+                        value: "x".to_owned(),
+                    },
+                ],
+            ),
+            BackendEvent::EnvironmentLoaded { scope, entries, inherited }
+                if scope == EnvScope::Global
+                    && entries.len() == 1
+                    && entries[0].name == "GH_TOKEN"
+                    && inherited.is_empty()
+        ));
+
+        // The workspace scope owns only its own bindings but reports the global
+        // ones as inherited, so the editor can show what is already set.
+        assert!(matches!(
+            EnvironmentStorePort::save(
+                &mut store,
+                EnvScope::Workspace,
                 vec![EnvironmentEntry {
-                    name: "TOKEN".to_owned(),
-                    value: "xyz".to_owned(),
+                    name: "RUST_LOG".to_owned(),
+                    value: "debug".to_owned(),
                 }],
             ),
-            BackendEvent::EnvironmentLoaded { entries, .. } if entries[0].name == "TOKEN"
-        ));
-        assert!(matches!(
-            store.load(alpha),
-            BackendEvent::EnvironmentLoaded { entries, .. } if entries[0].value == "xyz"
+            BackendEvent::EnvironmentLoaded { entries, inherited, .. }
+                if entries.len() == 1
+                    && entries[0].name == "RUST_LOG"
+                    && inherited.len() == 1
+                    && inherited[0].name == "GH_TOKEN"
         ));
 
-        // A stale session id (absent from the snapshot mapping) fails safely.
-        let stale = Target::Session(SessionId::new());
+        // The writes landed in the two settings files, and the global save left
+        // the rest of the settings file intact.
+        assert_eq!(
+            Storage::new(data.path().to_path_buf())
+                .load_settings()
+                .unwrap()
+                .env
+                .get("GH_TOKEN")
+                .map(String::as_str),
+            Some("op://Private/GitHub/token")
+        );
+        assert_eq!(
+            WorkspaceSettingsStore::new(workspace.path())
+                .load()
+                .unwrap()
+                .env
+                .get("RUST_LOG")
+                .map(String::as_str),
+            Some("debug")
+        );
+
+        // An unreadable settings file fails safely: the editor keeps its values.
+        std::fs::write(data.path().join("settings.json"), "{ broken").unwrap();
         assert!(matches!(
-            store.load(stale),
+            EnvironmentStorePort::load(&mut store, EnvScope::Global),
             BackendEvent::EnvironmentError { .. }
         ));
         assert!(matches!(
-            store.save(stale, Vec::new()),
+            EnvironmentStorePort::save(&mut store, EnvScope::Global, Vec::new()),
             BackendEvent::EnvironmentError { .. }
         ));
     }
@@ -4271,6 +4639,7 @@ mod tests {
             default_model: usagi_core::domain::settings::DefaultModel::Claude,
             issue_enabled: false,
             memory_enabled: false,
+            env: usagi_core::domain::settings::EnvBindings::new(),
         };
         let storage = Storage::new(&global_dir);
         storage.save_settings(&initial).unwrap();
@@ -4339,7 +4708,6 @@ mod tests {
             last_active: None,
             notes: Scratchpad::default(),
             prs: Vec::new(),
-            environment: std::collections::BTreeMap::new(),
         };
         let snapshot = WorkspaceSnapshot::with_runtime_ids(
             Workspace::new("demo", temporary.path()),
@@ -4373,7 +4741,7 @@ mod tests {
             target: Target::Root(workspace_id),
         });
         composition.backend.dispatch(Effect::LoadEnvironment {
-            target: Target::Root(workspace_id),
+            scope: EnvScope::Workspace,
         });
         composition.backend.dispatch(Effect::LoadPreview {
             target: Target::Root(workspace_id),

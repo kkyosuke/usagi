@@ -1,6 +1,6 @@
 # 8. coverage exclusion inventory
 
-> [ドキュメント目次](README.md) ｜ ← 前へ [7. MCP サーバ](07-mcp.md)
+> [ドキュメント目次](README.md) ｜ ← 前へ [7. MCP サーバ](07-mcp.md) ｜ 次へ → [9. 環境変数設定](09-env.md)
 
 v2 の `#[coverage(off)]` の移行 inventory。許可条件と更新手順の正本は
 [6. 開発規約](06-conventions.md#coverageoff-例外)、symbol 単位の機械可読な正本は

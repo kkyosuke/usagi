@@ -18,6 +18,7 @@ v2（フルリライト）の仕様・規約の正本。**現在のビルドで�
 | 6 | [06-conventions.md](06-conventions.md) | 開発規約（ブランチ・コミット・PR・品質チェック・CI・リリース） |
 | 7 | [07-mcp.md](07-mcp.md) | MCP サーバ（agent 入口面）の JSON-RPC メソッド・tool 面・resource 面・orchestration ガイド |
 | 8 | [08-coverage.md](08-coverage.md) | `coverage(off)` の symbol inventory・領域別返済順序 |
+| 9 | [09-env.md](09-env.md) | 環境変数設定（global / workspace の 2 層・secret 解決・子プロセスへの注入） |
 | — | [proposals/](proposals/README.md) | 設計提案（未実装の構成・機構の設計判断。spec とは分離して管理） |
 
 ## v1 ドキュメントとの関係

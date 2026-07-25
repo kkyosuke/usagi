@@ -8,6 +8,8 @@
 //! - [`paths`] — 保存先の配置。リポジトリ内メタデータ（`<repo>/.usagi`）と、
 //!   既定データディレクトリ（`$USAGI_HOME` / `~/.usagi`）の解決。
 //! - [`error_log`] — 日次ローテーションする実行時エラーログ。
+//! - [`env_resolver`] — 設定された環境変数 binding の並列解決と、`op://` secret を読む
+//!   1Password CLI（実 subprocess）。
 //! - [`persistence`] — entity 非依存の永続化基盤（アトミック書き込み・ロック・
 //!   markdown ＋ 派生 `index.json` の汎用ストア）。
 //! - [`store`] — entity 別ストア（issue / memory / workspace レジストリ / state.json）。
@@ -17,6 +19,7 @@
 //!   フレーミング（transport は注入）。
 
 pub mod daemon;
+pub mod env_resolver;
 pub mod error_log;
 pub mod git;
 pub mod gitignore;

@@ -1,4 +1,13 @@
-use super::{AvailableModels, DefaultModel, LocalSettings, ModalSelectionMode, Settings, Theme};
+use super::{
+    AvailableModels, DefaultModel, EnvBindings, LocalSettings, ModalSelectionMode, Settings, Theme,
+};
+
+fn bindings(pairs: &[(&str, &str)]) -> EnvBindings {
+    pairs
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+        .collect()
+}
 
 #[test]
 fn theme_default_is_system() {
@@ -38,6 +47,7 @@ fn settings_default_uses_the_system_theme() {
     assert_eq!(settings.default_model, DefaultModel::OpenAi);
     assert!(settings.issue_enabled);
     assert!(settings.memory_enabled);
+    assert!(settings.env.is_empty());
 }
 
 #[test]
@@ -48,8 +58,10 @@ fn settings_round_trip_through_json() {
         default_model: DefaultModel::Claude,
         issue_enabled: false,
         memory_enabled: false,
+        env: bindings(&[("GH_TOKEN", "op://Private/GitHub/token")]),
     };
     let json = serde_json::to_string(&settings).unwrap();
+    assert!(json.contains("\"env\":{\"GH_TOKEN\":\"op://Private/GitHub/token\"}"));
     assert!(json.contains("\"theme\":\"dark\""));
     assert!(json.contains("\"modal_selection_mode\":\"prompt\""));
     assert!(json.contains("\"default_model\":\"claude\""));
@@ -222,6 +234,7 @@ fn local_settings_overlay_only_workspace_owned_fields() {
         default_model: DefaultModel::Claude,
         issue_enabled: true,
         memory_enabled: false,
+        env: EnvBindings::new(),
     };
     let local = LocalSettings {
         default_model: Some(DefaultModel::OpenAi),
@@ -237,8 +250,66 @@ fn local_settings_overlay_only_workspace_owned_fields() {
             default_model: DefaultModel::OpenAi,
             issue_enabled: false,
             memory_enabled: false,
+            env: EnvBindings::new(),
         }
     );
+}
+
+#[test]
+fn workspace_env_adds_to_and_overrides_the_global_bindings() {
+    let global = Settings {
+        env: bindings(&[
+            ("GH_TOKEN", "op://Private/GitHub/token"),
+            ("RUST_LOG", "info"),
+        ]),
+        ..Settings::default()
+    };
+    let local = LocalSettings {
+        env: bindings(&[
+            ("RUST_LOG", "debug"),
+            ("PROJECT", "usagi"),
+            // Unusable bindings never reach the effective environment.
+            ("1BAD", "value"),
+            ("BLANK", "  "),
+        ]),
+        ..LocalSettings::default()
+    };
+
+    let effective = global.with_local(&local);
+    assert_eq!(
+        effective.env_bindings().collect::<Vec<_>>(),
+        [
+            ("GH_TOKEN", "op://Private/GitHub/token"),
+            ("PROJECT", "usagi"),
+            ("RUST_LOG", "debug"),
+        ]
+    );
+    assert_eq!(
+        local.env_bindings().collect::<Vec<_>>(),
+        [("PROJECT", "usagi"), ("RUST_LOG", "debug")]
+    );
+}
+
+#[test]
+fn a_config_save_keeps_the_workspace_owned_env() {
+    // The Config surface edits the merged view; saving it must not copy the
+    // inherited global bindings into the workspace file.
+    let local = LocalSettings {
+        env: bindings(&[("PROJECT", "usagi")]),
+        ..LocalSettings::default()
+    };
+    let merged = Settings {
+        env: bindings(&[("GH_TOKEN", "op://Private/GitHub/token")]),
+        default_model: DefaultModel::Claude,
+        ..Settings::default()
+    }
+    .with_local(&local);
+
+    let saved = local.clone().with_config(&merged);
+    assert_eq!(saved.env, local.env);
+    assert_eq!(saved.default_model, Some(DefaultModel::Claude));
+    // A workspace initialized from global defaults starts with no bindings.
+    assert!(LocalSettings::from(&merged).env.is_empty());
 }
 
 #[test]
@@ -262,6 +333,7 @@ fn full_settings_convert_to_workspace_owned_values_only() {
         default_model: DefaultModel::Claude,
         issue_enabled: false,
         memory_enabled: true,
+        env: EnvBindings::new(),
     };
     let local = LocalSettings::from(&settings);
     assert_eq!(
@@ -272,6 +344,7 @@ fn full_settings_convert_to_workspace_owned_values_only() {
             default_model: DefaultModel::Claude,
             issue_enabled: false,
             memory_enabled: true,
+            env: EnvBindings::new(),
         }
     );
     let json = serde_json::to_string(&local).unwrap();

@@ -172,6 +172,84 @@ fn negotiation_uses_protocol_not_build_identity() {
 }
 
 #[test]
+fn terminal_snapshot_negotiation_matrix_fails_closed_without_the_capability() {
+    let checkpoint = || vec![TERMINAL_SCREEN_CHECKPOINT_CAPABILITY.to_owned()];
+    let version = |generation, revision| ProtocolVersion {
+        generation,
+        revision,
+    };
+
+    // Only an advertised capability on the checkpoint generation/revision
+    // enables the checkpoint path.
+    assert_eq!(
+        terminal_snapshot_mode(
+            version(TERMINAL_WIRE_GENERATION, TERMINAL_CHECKPOINT_REVISION),
+            &checkpoint(),
+        ),
+        TerminalSnapshotMode::Checkpoint
+    );
+    // A future revision of the same generation still advertises the capability.
+    assert_eq!(
+        terminal_snapshot_mode(
+            version(TERMINAL_WIRE_GENERATION, TERMINAL_CHECKPOINT_REVISION + 1),
+            &checkpoint(),
+        ),
+        TerminalSnapshotMode::Checkpoint
+    );
+    for (protocol, capabilities) in [
+        // Old daemon: the common revision falls back to the legacy raw tail.
+        (version(TERMINAL_WIRE_GENERATION, 1), checkpoint()),
+        // Advertisement gap: the capability, not the revision, is the truth
+        // source, so this stays legacy.
+        (
+            version(TERMINAL_WIRE_GENERATION, TERMINAL_CHECKPOINT_REVISION),
+            vec![],
+        ),
+        // Another generation's revision numbering says nothing about this one.
+        (
+            version(TERMINAL_WIRE_GENERATION + 1, TERMINAL_CHECKPOINT_REVISION),
+            checkpoint(),
+        ),
+    ] {
+        assert_eq!(
+            terminal_snapshot_mode(protocol, &capabilities),
+            TerminalSnapshotMode::LegacyFailClosed,
+            "{protocol:?} with {capabilities:?}"
+        );
+    }
+
+    // A new client and a revision-1 daemon negotiate down to the legacy tail…
+    let mut old_daemon = server();
+    old_daemon.supported_protocols = vec![ProtocolRange {
+        generation: TERMINAL_WIRE_GENERATION,
+        min_revision: 0,
+        max_revision: 1,
+    }];
+    old_daemon
+        .capabilities
+        .push(TERMINAL_SCREEN_CHECKPOINT_CAPABILITY.to_owned());
+    let negotiated = negotiate(&hello(), &old_daemon).unwrap();
+    assert_eq!(negotiated.protocol.revision, 1);
+    assert_eq!(
+        terminal_snapshot_mode(negotiated.protocol, &negotiated.capabilities),
+        TerminalSnapshotMode::LegacyFailClosed
+    );
+
+    // …while a peer that supports only revisions this client does not is a
+    // typed handshake failure rather than a silent downgrade.
+    let mut unknown_only = server();
+    unknown_only.supported_protocols = vec![ProtocolRange {
+        generation: TERMINAL_WIRE_GENERATION,
+        min_revision: TERMINAL_CHECKPOINT_REVISION + 5,
+        max_revision: TERMINAL_CHECKPOINT_REVISION + 6,
+    }];
+    assert_eq!(
+        negotiate(&hello(), &unknown_only).unwrap_err().code,
+        ErrorCode::ProtocolMismatch
+    );
+}
+
+#[test]
 fn artifact_identity_requires_a_canonical_artifact_and_compares_exactly() {
     let known = build();
     assert!(known.is_known());

@@ -1,13 +1,13 @@
 ---
 number: 543
 title: fix(daemon): session remove の worktree teardown を専用 worker へ逃がし、IPC を即応答にする
-status: todo
+status: done
 priority: high
 labels: [v2, daemon, lifecycle, ipc, mcp, tui, ux]
 dependson: []
 related: [540]
 created_at: 2026-07-24T22:40:07.703037+00:00
-updated_at: 2026-07-24T22:40:07.703037+00:00
+updated_at: 2026-07-25T00:44:56.531442+00:00
 ---
 
 ## 問題・根拠（コード調査で確定）

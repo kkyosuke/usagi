@@ -8,7 +8,7 @@ use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -28,6 +28,12 @@ use usagi_daemon::infrastructure::unix_transport::{
 };
 use usagi_tui::usecase::application::agent_tab_intent::AgentTabIntent;
 use usagi_tui::usecase::application::terminal_screen::TerminalScreen;
+
+/// 起動する usagi プロセスはすべてこの fixture 経由にする（cwd の fixture 固定と daemon の reap）。
+#[path = "support/daemon.rs"]
+mod daemon_fixture;
+
+use daemon_fixture::{Channel, DaemonHome};
 
 /// Claude は必ず OS sandbox launcher の中で起動するため、`bwrap` を持たない Linux CI では
 /// fail-closed で起動が拒否される。この debug ビルド専用 seam は launcher と `--settings` フックの
@@ -185,72 +191,8 @@ impl Drop for TuiChild {
     }
 }
 
-struct DaemonStopGuard(PathBuf);
-
-impl DaemonStopGuard {
-    fn new(home: &Path) -> Self {
-        Self(home.to_owned())
-    }
-}
-
-fn daemon_process_is_alive(pid: i32) -> bool {
-    // SAFETY: signal 0 does not alter the target process and is used only to
-    // probe the PID read from this test's unique temporary USAGI_HOME.
-    (unsafe { libc::kill(pid, 0) == 0 })
-        || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-fn wait_for_process_exit(pid: i32, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while daemon_process_is_alive(pid) {
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    true
-}
-
-impl Drop for DaemonStopGuard {
-    fn drop(&mut self) {
-        let daemon_pid = fs::read_to_string(channel_data_dir(&self.0).join("daemon/daemon.json"))
-            .ok()
-            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-            .and_then(|value| value["pid"].as_u64())
-            .and_then(|pid| i32::try_from(pid).ok());
-        let stopped = Command::new(env!("CARGO_BIN_EXE_usagi"))
-            .args(["daemon", "stop"])
-            .env("USAGI_HOME", &self.0)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()
-            .and_then(|mut child| wait_with_timeout(&mut child, Duration::from_secs(2)).ok())
-            .is_some_and(|status| status.success());
-        if let Some(pid) = daemon_pid {
-            if !stopped {
-                // SAFETY: the PID was read from this test's unique temporary
-                // USAGI_HOME. SIGTERM is a bounded cleanup fallback after the
-                // shipping stop client itself exceeded its deadline.
-                let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
-            }
-            if !wait_for_process_exit(pid, Duration::from_secs(2)) {
-                // SAFETY: the same test-owned daemon PID did not exit after a
-                // bounded graceful-stop interval, so force cleanup before its
-                // fixture directories are removed.
-                let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
-                let _ = wait_for_process_exit(pid, Duration::from_secs(1));
-            }
-        }
-    }
-}
-
-fn spawn_hop(home: &Path, workspace: &Path, slave: &File) -> io::Result<TuiChild> {
-    Command::new(env!("CARGO_BIN_EXE_usagi"))
-        .arg("hop")
-        .current_dir(workspace)
-        .env("USAGI_HOME", home)
+fn spawn_hop(home: &DaemonHome, workspace: &Path, slave: &File) -> io::Result<TuiChild> {
+    home.command_at(Channel::Local, workspace, &["hop".as_ref()])
         .env(SANDBOX_PASSTHROUGH, "1")
         .stdin(Stdio::from(slave.try_clone()?))
         .stdout(Stdio::from(slave.try_clone()?))
@@ -260,15 +202,12 @@ fn spawn_hop(home: &Path, workspace: &Path, slave: &File) -> io::Result<TuiChild
 }
 
 fn spawn_hop_with_path(
-    home: &Path,
+    home: &DaemonHome,
     workspace: &Path,
     path: &str,
     slave: &File,
 ) -> io::Result<TuiChild> {
-    Command::new(env!("CARGO_BIN_EXE_usagi"))
-        .arg("hop")
-        .current_dir(workspace)
-        .env("USAGI_HOME", home)
+    home.command_at(Channel::Local, workspace, &["hop".as_ref()])
         .env("PATH", path)
         .env(SANDBOX_PASSTHROUGH, "1")
         .stdin(Stdio::from(slave.try_clone()?))
@@ -283,21 +222,12 @@ fn send(master: &mut File, input: &[u8]) {
     master.flush().unwrap();
 }
 
-fn short_home() -> tempfile::TempDir {
-    // The daemon's generation socket is nested under USAGI_HOME. Keep this
-    // real-PTY fixture within the Unix sockaddr path-length limit.
-    tempfile::Builder::new()
-        .prefix("usagi-")
-        .tempdir_in("/tmp")
-        .expect("short daemon data directory")
+fn short_home() -> DaemonHome {
+    DaemonHome::new()
 }
 
-fn stop_daemon(home: &std::path::Path) {
-    let output = Command::new(env!("CARGO_BIN_EXE_usagi"))
-        .args(["daemon", "stop"])
-        .env("USAGI_HOME", home)
-        .output()
-        .expect("usagi daemon stop を起動できる");
+fn stop_daemon(home: &DaemonHome) {
+    let output = home.run(&["daemon".as_ref(), "stop".as_ref()]);
     assert!(
         output.status.success(),
         "{}",
@@ -723,10 +653,12 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     std::fs::create_dir(&workspace).unwrap();
 
     // 非対話 open も同じ本番合成ルートを通して Recent 用の registry entry を作る。
-    let registered = Command::new(env!("CARGO_BIN_EXE_usagi"))
-        .args(["open".as_ref(), workspace.as_os_str()])
-        .current_dir(&workspace)
-        .env("USAGI_HOME", home.path())
+    let registered = home
+        .command_at(
+            Channel::Local,
+            &workspace,
+            &["open".as_ref(), workspace.as_os_str()],
+        )
         .output()
         .expect("workspaceを事前登録できる");
     assert!(registered.status.success());
@@ -736,8 +668,7 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     let reader_master = master.try_clone().unwrap();
     let reader = thread::spawn(move || read_pty(reader_master));
 
-    let mut child =
-        spawn_hop(home.path(), &workspace, &slave).expect("PTY上でusagi hopを起動できる");
+    let mut child = spawn_hop(&home, &workspace, &slave).expect("PTY上でusagi hopを起動できる");
 
     // `1` は Welcome の予約 input で最初の Recent を開く。`x` は Workspace 上の
     // non-reserved input で、画面遷移や quit を起こさず次フレームだけを要求する。入力は
@@ -785,7 +716,7 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     assert_eq!(attributes_after.c_cc, attributes_before.c_cc);
 
     let mut reattached =
-        spawn_hop(home.path(), &workspace, &slave).expect("同じPTYへ再接続してhopを起動できる");
+        spawn_hop(&home, &workspace, &slave).expect("同じPTYへ再接続してhopを起動できる");
     thread::sleep(Duration::from_millis(150));
     send(&mut master, b"q");
     let reattached_status = wait_with_timeout(&mut reattached, Duration::from_secs(5)).unwrap();
@@ -826,7 +757,7 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     assert_eq!(attributes_reattached.c_cflag, attributes_before.c_cflag);
     assert_eq!(attributes_reattached.c_lflag, attributes_before.c_lflag);
     assert_eq!(attributes_reattached.c_cc, attributes_before.c_cc);
-    stop_daemon(home.path());
+    stop_daemon(&home);
 }
 
 #[test]
@@ -852,11 +783,12 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
     let shell = fixture.path().join("fixture-shell");
     let spawn_count = fixture.path().join("shell-spawn-count");
     write_terminal_fixture(&shell, &spawn_count);
-    let _daemon_stop = DaemonStopGuard::new(home.path());
-    let registered = Command::new(env!("CARGO_BIN_EXE_usagi"))
-        .args(["open".as_ref(), workspace.as_os_str()])
-        .current_dir(&workspace)
-        .env("USAGI_HOME", home.path())
+    let registered = home
+        .command_at(
+            Channel::Local,
+            &workspace,
+            &["open".as_ref(), workspace.as_os_str()],
+        )
         .env("SHELL", &shell)
         .output()
         .expect("workspace registers with fixture login shell");
@@ -871,7 +803,7 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
     // Launch the generic terminal through the shipping Closeup command, verify
     // live input, then perform the ordinary detach-and-quit path.
     let first_baseline = capture_len(&captured);
-    let mut first = spawn_hop(home.path(), &workspace, &slave).unwrap();
+    let mut first = spawn_hop(&home, &workspace, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, first_baseline);
     submit_closeup_command(&mut master, &captured, first_baseline, "terminal open");
     wait_for_screen_since(&captured, first_baseline, "generic-ready-unique:");
@@ -892,7 +824,7 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
     // then accepts new input. Kill this TUI process so the daemon observes an
     // abrupt EOF rather than a Detach request.
     let killed_baseline = capture_len(&captured);
-    let mut killed_tui = spawn_hop(home.path(), &workspace, &slave).unwrap();
+    let mut killed_tui = spawn_hop(&home, &workspace, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, killed_baseline);
     wait_for_screen_since(&captured, killed_baseline, "generic-input:generic-initial");
     activate_selected_live_pane(&mut master, &captured, killed_baseline);
@@ -913,7 +845,7 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
     // Fresh open after abrupt EOF proves replay and bidirectional input on the
     // same child process. Quit normally so a second reopen can repeat the fence.
     let after_kill_baseline = capture_len(&captured);
-    let mut after_kill = spawn_hop(home.path(), &workspace, &slave).unwrap();
+    let mut after_kill = spawn_hop(&home, &workspace, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, after_kill_baseline);
     wait_for_screen_since(
         &captured,
@@ -932,7 +864,7 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
     );
 
     let second_reopen_baseline = capture_len(&captured);
-    let mut second_reopen = spawn_hop(home.path(), &workspace, &slave).unwrap();
+    let mut second_reopen = spawn_hop(&home, &workspace, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, second_reopen_baseline);
     wait_for_screen_since(
         &captured,
@@ -992,12 +924,13 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     let claude_argv = fixtures.path().join("claude-argv");
     write_agent_fixtures(&bin, &codex_count, &claude_count, &claude_argv);
     let fixture_path = format!("{}:/usr/bin:/bin", bin.display());
-    let _daemon_stop = DaemonStopGuard::new(home.path());
 
-    let registered = Command::new(env!("CARGO_BIN_EXE_usagi"))
-        .args(["open".as_ref(), workspace.as_os_str()])
-        .current_dir(&workspace)
-        .env("USAGI_HOME", home.path())
+    let registered = home
+        .command_at(
+            Channel::Local,
+            &workspace,
+            &["open".as_ref(), workspace.as_os_str()],
+        )
         .env("PATH", &fixture_path)
         .env(SANDBOX_PASSTHROUGH, "1")
         .output()
@@ -1016,7 +949,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     // client so the next TUI open covers inventory-only deterministic append in
     // both root and managed-session scopes.
     let first_baseline = capture_len(&captured);
-    let mut first = spawn_hop_with_path(home.path(), &workspace, &fixture_path, &slave).unwrap();
+    let mut first = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, first_baseline);
     submit_closeup_command(&mut master, &captured, first_baseline, "agent codex");
     wait_for_screen_since(&captured, first_baseline, "codex-ready-unique:");
@@ -1103,7 +1036,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     // Claude runtimes. All order, selection, and dismissal mutations below go
     // through shipping TUI key handling; the fixture never mutates intent files.
     let reopened_baseline = capture_len(&captured);
-    let mut reopened = spawn_hop_with_path(home.path(), &workspace, &fixture_path, &slave).unwrap();
+    let mut reopened = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, reopened_baseline);
     wait_for_screen_since(&captured, reopened_baseline, "codex-input:codex-initial");
     let observed = wait_for_agent_tabs(home.path(), 3);
@@ -1207,7 +1140,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     // `reopen` clears its dismissal without a launch or resume request.
     let reopened_for_kill_baseline = capture_len(&captured);
     let mut reopened_for_kill =
-        spawn_hop_with_path(home.path(), &workspace, &fixture_path, &slave).unwrap();
+        spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, reopened_for_kill_baseline);
     wait_for_screen_since(
         &captured,
@@ -1297,8 +1230,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     // completion fence) before interacting, then switches to the session and
     // proves retained output plus new input on the same PTY.
     let after_kill_baseline = capture_len(&captured);
-    let mut after_kill =
-        spawn_hop_with_path(home.path(), &workspace, &fixture_path, &slave).unwrap();
+    let mut after_kill = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, after_kill_baseline);
     wait_for_screen_since(&captured, after_kill_baseline, "codex-input:codex-one");
     send(&mut master, b"\x1b[B\r");
@@ -1321,8 +1253,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     // A second fresh reopen retains the post-kill output and still addresses
     // the same daemon-owned terminal rather than replaying a launch intent.
     let second_reopen_baseline = capture_len(&captured);
-    let mut second_reopen =
-        spawn_hop_with_path(home.path(), &workspace, &fixture_path, &slave).unwrap();
+    let mut second_reopen = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, second_reopen_baseline);
     wait_for_screen_since(&captured, second_reopen_baseline, "codex-input:codex-one");
     send(&mut master, b"\x1b[B\r");

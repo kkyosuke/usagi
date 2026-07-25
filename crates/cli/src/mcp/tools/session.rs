@@ -346,7 +346,7 @@ impl Tool for SessionRemove {
         "session_remove"
     }
     fn description(&self) -> &'static str {
-        "不要になったセッション（worktree）を破棄するときに使う。name 必須。未コミットの変更（dirty）がある場合は force が必要。"
+        "不要になったセッション（worktree）を破棄するときに使う。name 必須。未コミットの変更（dirty）がある場合は force が必要。応答は受理で、worktree の撤去は daemon が続ける。完了は session_list で観測する（deleting=進行中 / 消滅=完了 / failed=失敗と理由）。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"},"force":{"type":"boolean"}},"required":["name"]}"#
