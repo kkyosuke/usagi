@@ -741,6 +741,10 @@ pub struct AppState {
     /// supplies only coordinates and a monotonic timestamp.
     pending_session_click: Option<(SessionId, std::time::Duration)>,
     has_live_pane: bool,
+    /// Whether the active target owns any pane tab — live, pending, ready, or
+    /// interrupted history. The Closeup action modal is the launcher for an empty
+    /// pane, so a target that owns a tab shows its tab strip instead (#510).
+    has_pane_tab: bool,
     closeup_action_forced: bool,
     ctrl_c_grace: bool,
     /// Focus of the quit confirmation's Yes/No buttons. `true` keeps Yes
@@ -783,6 +787,7 @@ impl AppState {
             size: None,
             pending_session_click: None,
             has_live_pane: false,
+            has_pane_tab: false,
             closeup_action_forced: false,
             ctrl_c_grace: false,
             quit_confirm_selected: true,
@@ -1307,6 +1312,15 @@ pub enum AppEvent {
     /// the same event batch (quit confirmation, PR / Preview, notes) and the
     /// Ctrl-C grace both survive the next sample.
     LivePaneAvailability(bool),
+    /// Whether the active target owns any pane tab, sampled by the shell from
+    /// the pane registry.
+    ///
+    /// Like [`Self::LivePaneAvailability`] this is a level, and only its edge
+    /// matters. Gaining a tab steps the auto-opened Closeup action launcher
+    /// aside so a non-live tab — an interrupted Agent history above all — can be
+    /// selected and acted on; losing the last tab restores the launcher. A
+    /// forced action modal and every other overlay are left untouched.
+    PaneTabAvailability(bool),
     /// キー入力。
     Key(AppKey),
     /// terminal size の変更。
@@ -2262,6 +2276,25 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 } else {
                     state.overlay = Some(Overlay::Closeup);
                 }
+            }
+            Vec::new()
+        }
+        AppEvent::PaneTabAvailability(has_pane_tab) => {
+            if has_pane_tab == state.has_pane_tab {
+                return Vec::new();
+            }
+            state.has_pane_tab = has_pane_tab;
+            if !matches!(state.route, Route::Home(HomeMode::Closeup)) {
+                return Vec::new();
+            }
+            if has_pane_tab {
+                // Only the launcher steps aside: a forced action modal the user
+                // opened explicitly, and every other overlay, stay as they are.
+                if !state.closeup_action_forced && state.overlay == Some(Overlay::Closeup) {
+                    state.overlay = None;
+                }
+            } else if !state.has_live_pane && state.overlay.is_none() {
+                state.overlay = Some(Overlay::Closeup);
             }
             Vec::new()
         }

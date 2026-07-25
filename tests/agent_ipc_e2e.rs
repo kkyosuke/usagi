@@ -28,6 +28,12 @@ use usagi_core::usecase::client::{
 };
 use usagi_daemon::infrastructure::unix_transport::connect_current;
 
+/// daemon の起動はすべて共有 fixture 経由にする（cwd の fixture 固定と exact reap）。
+#[path = "support/daemon.rs"]
+mod daemon_fixture;
+
+use daemon_fixture::{Channel, usagi_command};
+
 fn shipping_build_identity() -> usagi_core::infrastructure::ipc::BuildIdentity {
     usagi_core::infrastructure::ipc::build_identity(
         env!("CARGO_PKG_VERSION"),
@@ -50,10 +56,7 @@ const DAEMON_READINESS_TIMEOUT: Duration = Duration::from_secs(60);
 static DAEMON_START_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn short_dir(prefix: &str) -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix(prefix)
-        .tempdir_in("/tmp")
-        .expect("short Unix socket path")
+    daemon_fixture::short_dir(prefix)
 }
 
 fn channel_data_dir(home: &Path) -> PathBuf {
@@ -126,12 +129,20 @@ fn start_daemon(repo: &Path, home: &Path, path: &Path, shell: Option<&Path>) -> 
     let data_dir = channel_data_dir(home);
     fs::create_dir(&data_dir).expect("daemon data directory exists before serve");
     fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    spawn_daemon(repo, home, path, shell)
+}
+
+/// Start a daemon against an existing home, as a cold restart does. The data
+/// directory is already published, so it is not re-created here.
+fn spawn_daemon(repo: &Path, home: &Path, path: &Path, shell: Option<&Path>) -> Daemon {
     let fixture_path = format!("{}:/usr/bin:/bin", path.display());
-    let mut command = Command::new(env!("CARGO_BIN_EXE_usagi"));
+    let mut command = usagi_command(
+        home,
+        Channel::Local,
+        repo,
+        &["daemon".as_ref(), "serve".as_ref()],
+    );
     command
-        .args(["daemon", "serve"])
-        .current_dir(repo)
-        .env("USAGI_HOME", home)
         .env("PATH", fixture_path)
         .env("USAGI_PTY_SENTINEL", "must-not-leak")
         // Claude は OS sandbox launcher 経由で起動するため、backend を持たない CI でも live
@@ -139,11 +150,7 @@ fn start_daemon(repo: &Path, home: &Path, path: &Path, shell: Option<&Path>) -> 
         .env(
             usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE,
             "1",
-        )
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_INDEX_FILE");
+        );
     if let Some(shell) = shell {
         command.env("SHELL", shell);
     }
@@ -628,4 +635,237 @@ fn root_ipc_fixture_login_shell_is_fenced_and_replays_exit() {
         thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(fs::read_to_string(count).unwrap().lines().count(), 1);
+}
+
+/// Wait until the fixture provider has recorded `expected` spawns. The fixture
+/// appends one line per child, so this is the observable spawn count without
+/// depending on a fixed sleep.
+fn wait_for_spawns(count: &Path, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let observed = fs::read_to_string(count)
+            .map(|body| body.lines().count())
+            .unwrap_or_default();
+        assert!(
+            observed <= expected,
+            "the fixture spawned more children than the {expected} expected"
+        );
+        if observed == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the fixture provider did not reach {expected} spawns"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// #510 product E2E: after a cold restart every interrupted conversation becomes
+/// its own tab, and only an explicit per-tab resume starts a provider.
+///
+/// The daemon is `SIGKILL`ed (not stopped) so the old PTYs are genuinely gone,
+/// then a fresh daemon is started against the same home. Fresh start, inventory,
+/// and the TUI projection must invoke zero provider resumes; the one explicit
+/// action must produce exactly one operation, one child spawn, and one new
+/// `TerminalRef` for exactly the selected lineage.
+#[test]
+#[allow(clippy::too_many_lines)] // One cold-restart product flow, asserted end to end.
+fn root_ipc_cold_restart_projects_interrupted_history_and_resumes_one_exact_tab() {
+    use std::collections::BTreeSet;
+    use usagi_core::domain::agent::{
+        AgentInventory, AgentResumeRelation, AgentRuntimeInventoryState,
+    };
+    use usagi_tui::usecase::application::interrupted_tab::{
+        accept_replacement, project, resume_command,
+    };
+
+    let _serial = DAEMON_START_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let repo = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    let count = home.path().join("spawn-count");
+    write_codex(&bin, &count, 0);
+    let data_dir = channel_data_dir(home.path());
+
+    // One managed-session Agent and one workspace-root Agent, so the restart
+    // leaves two distinct conversation lineages in two distinct scopes.
+    let daemon = start_daemon(repo.path(), home.path(), &bin, None);
+    let mut first = client(&data_dir);
+    let (workspace, session, _) = available_scope(&mut first);
+    let (_, session_terminal) = launch(&mut first, workspace, session, None);
+    let root_operation = OperationId::new().to_string();
+    let root_reply = first
+        .request(DaemonRequest::Agent {
+            operation_id: root_operation.clone(),
+            intent: AgentLaunchIntent {
+                workspace,
+                session: None,
+                profile: None,
+            },
+        })
+        .expect("workspace-root fixture Codex is admitted");
+    let DaemonReply::Accepted { body, .. } = root_reply else {
+        panic!("root launch must be admitted as an operation");
+    };
+    let root_terminal: TerminalRef = serde_json::from_value(body["terminal"].clone()).unwrap();
+    assert_eq!(root_terminal.session_id, None);
+    // Both fixture children are running before the cold failure.
+    wait_for_spawns(&count, 2);
+    let spawns_before_restart = 2;
+
+    // A cold failure: SIGKILL, not a `daemon stop` that retires live resources.
+    drop(first);
+    drop(daemon);
+    let _restarted = spawn_daemon(repo.path(), home.path(), &bin, None);
+    let mut client = client(&data_dir);
+
+    let inventory = |client: &mut IpcClient<std::os::unix::net::UnixStream>| -> AgentInventory {
+        let reply = client
+            .request(DaemonRequest::AgentInventory { workspace })
+            .expect("Agent inventory is available after a cold restart");
+        let body = match reply {
+            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => body,
+        };
+        serde_json::from_value(body).expect("inventory decodes into the shared projection")
+    };
+    let observed = inventory(&mut client);
+    assert_eq!(observed.workspace_id, workspace);
+    // No old PTY was restored as live.
+    assert!(
+        observed
+            .runtimes
+            .iter()
+            .all(|item| item.state != AgentRuntimeInventoryState::Live),
+        "{observed:?}"
+    );
+
+    // The shipping TUI reducer projects the inventory. Nothing here resumes.
+    let allowed = BTreeSet::from([session]);
+    let projection = project(
+        &observed,
+        workspace,
+        &allowed,
+        &[],
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
+    assert_eq!(projection.tabs.len(), 2, "{projection:?}");
+    // Root and managed-session histories are separate, stable tabs.
+    assert!(
+        projection
+            .tabs
+            .iter()
+            .any(|tab| tab.session_id.is_none() && tab.last_terminal.fences(&root_terminal))
+    );
+    assert!(
+        projection
+            .tabs
+            .iter()
+            .any(|tab| tab.session_id == Some(session)
+                && tab.last_terminal.fences(&session_terminal))
+    );
+    // A repeated observation converges to the same tabs instead of duplicating.
+    let again = project(
+        &inventory(&mut client),
+        workspace,
+        &allowed,
+        &[],
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
+    assert_eq!(again.tabs, projection.tabs);
+    assert_eq!(
+        fs::read_to_string(&count).unwrap().lines().count(),
+        spawns_before_restart,
+        "fresh start, inventory, and projection must not invoke a provider resume"
+    );
+
+    // One explicit resume of the root tab, carrying only the daemon's own opaque
+    // target plus a fresh operation.
+    let selected = projection
+        .tabs
+        .iter()
+        .find(|tab| tab.session_id.is_none())
+        .expect("the root history is projected");
+    let other = projection
+        .tabs
+        .iter()
+        .find(|tab| tab.session_id == Some(session))
+        .expect("the managed-session history is projected");
+    assert!(selected.resumable(), "{selected:?}");
+    let command = resume_command(selected, None, OperationId::new()).expect("the tab is resumable");
+    let request = DaemonRequest::ResumeAgent {
+        operation_id: command.operation.to_string(),
+        target: command.target.clone(),
+    };
+    let DaemonReply::Accepted { body, .. } = client
+        .request(request)
+        .expect("the exact target resumes through root IPC")
+    else {
+        panic!("an exact resume must be admitted as a daemon operation");
+    };
+    let replacement: TerminalRef = serde_json::from_value(body["terminal"].clone()).unwrap();
+    let relation: AgentResumeRelation =
+        serde_json::from_value(body["resume_relation"].clone()).expect("the relation is returned");
+    let continuation = serde_json::from_value(body["continuation"].clone()).unwrap();
+    // The TUI accepts the replacement only because every fence agrees.
+    let accepted = accept_replacement(
+        selected,
+        command.operation,
+        command.operation,
+        continuation,
+        Some(&relation),
+        &replacement,
+    )
+    .expect("the daemon answer satisfies every resume fence");
+    assert_eq!(accepted.continuation, selected.continuation);
+    assert!(!replacement.fences(&root_terminal));
+    assert_eq!(replacement.session_id, None);
+
+    // A replayed click resolves to the same operation without a second spawn.
+    let replayed = client
+        .request(DaemonRequest::ResumeAgent {
+            operation_id: command.operation.to_string(),
+            target: command.target.clone(),
+        })
+        .expect("a replayed exact resume is idempotent");
+    let replayed_terminal: TerminalRef = match replayed {
+        DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => {
+            serde_json::from_value(body["terminal"].clone()).unwrap()
+        }
+    };
+    assert_eq!(replayed_terminal, replacement);
+    // One explicit resume spawns exactly one replacement child, and the replay
+    // never adds a second one.
+    wait_for_spawns(&count, spawns_before_restart + 1);
+
+    // The other lineage is untouched: still interrupted, still resumable, and
+    // never replaced by this operation.
+    let after = project(
+        &inventory(&mut client),
+        workspace,
+        &allowed,
+        &[],
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
+    let untouched = after
+        .tabs
+        .iter()
+        .find(|tab| tab.continuation == other.continuation)
+        .expect("the unselected history keeps its own tab");
+    assert_eq!(untouched.last_terminal, other.last_terminal);
+    assert!(untouched.resumable());
+    // The resumed lineage converged onto its live replacement, so it no longer
+    // projects an interrupted tab.
+    assert!(
+        after
+            .tabs
+            .iter()
+            .all(|tab| tab.continuation != selected.continuation),
+        "{after:?}"
+    );
 }

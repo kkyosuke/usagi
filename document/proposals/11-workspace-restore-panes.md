@@ -163,7 +163,7 @@ open workspace
 | #388 | tui | workspace open 時に scope inventory を pane tab へ投影する（#386 に依存） |
 | #506 | tui + composition root | Agent display intent、CAS/atomic store、coherent async restore、foreground-only attach、normal quit / SIGKILL reopen |
 | #507 / #508 | daemon + tui/ipc | planned active/draining lifecycle と generation-owner endpoint routing。#506 の current-endpoint restore には含めない |
-| [#510](../../.usagi/issues/510-feat-tui-interrupted-claude-codex-tab-resume.md) | tui | crash / cold restart 後の interrupted lineage を root / session 共通で別 tab へ投影し、選択 tab だけを明示 resume する。live-only restore（#506）とは別 projection である |
+| [#510](../../.usagi/issues/510-feat-tui-interrupted-claude-codex-tab-resume.md) | tui | crash / cold restart 後の interrupted lineage を root / session 共通で別 tab へ投影し、選択 tab だけを明示 resume する。live-only restore（#506）とは別 projection で、pane registry では両者が同じ tab strip を共有する（正本は [3. TUI#interrupted-agent-の-tab-投影と明示-resume](../03-tui.md#interrupted-agent-の-tab-投影と明示-resume)） |
 | [#521](../../.usagi/issues/521-fix-ipc-clientpolicy-request-deadline-reconnect-budget.md) | core/ipc + tui | `ClientPolicy` request deadline / reconnect budget。#506 は restore job の off-thread 隔離だけを所有する |
 | [#526](../../.usagi/issues/526-fix-daemon-terminal-agent-tombstone-retention-aggregate-bound-gc.md) | daemon | terminal / Agent history の aggregate allocator・retention・GC。inventory absence を削除根拠にしない |
 | [#527](../../.usagi/issues/527-perf-tui-terminal-polling-ui-loop-foreground-cadence.md) | tui | steady foreground poll を UI loop から分離する scheduler。#506 は background detach と foreground-only attach を所有する |

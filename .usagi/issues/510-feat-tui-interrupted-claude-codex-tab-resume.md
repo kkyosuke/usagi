@@ -1,11 +1,11 @@
 ---
 number: 510
 title: feat(tui): interrupted Claude/Codex を tab 単位で選択 resume する
-status: todo
+status: done
 priority: high
 labels: [review, v2, tui, agent, recovery]
 dependson: [504, 506, 509]
-related: [388, 503, 526]
+related: [388, 503, 526, 544]
 parent: 505
 created_at: 2026-07-21T21:20:53.225285+00:00
 updated_at: 2026-07-23T00:09:07.139578+00:00
@@ -30,12 +30,12 @@ TUI start、workspace open、inventory refresh、daemon reconnect / restart か�
 
 ## 受入条件
 
-- [ ] daemon cold restart 後、root と managed session の複数 interrupted Claude / Codex history を stable な別 tab として表示し、再 open / duplicate inventory でも二重 tab を作らない。
-- [ ] 利用者が選んだ exact tab だけを pending → new live `TerminalRef` へ置換し、他の tab、provider conversation、selection を誤変更しない。
-- [ ] TUI open / reconnect / inventory / planned restart は provider resume を発火せず、明示 Resume action だけが daemon request を送る。
-- [ ] root resume が managed session と同じ UX / fencing で動き、同一 session の複数履歴や Claude / Codex 混在を ambiguous にしない。
-- [ ] unavailable Codex capture、provider binary 不在、stale target、adapter / scope mismatch、duplicate click、transport failure を safe feedback にし、空 Agent / local process / 二重 pane を作らない。
-- [ ] provider ID、argv、cwd、transcript、raw daemon error を UI / resume state / log に露出しない。
+- [x] daemon cold restart 後、root と managed session の複数 interrupted Claude / Codex history を stable な別 tab として表示し、再 open / duplicate inventory でも二重 tab を作らない。
+- [x] 利用者が選んだ exact tab だけを pending → new live `TerminalRef` へ置換し、他の tab、provider conversation、selection を誤変更しない。
+- [x] TUI open / reconnect / inventory / planned restart は provider resume を発火せず、明示 Resume action だけが daemon request を送る。
+- [x] root resume が managed session と同じ UX / fencing で動き、同一 session の複数履歴や Claude / Codex 混在を ambiguous にしない。
+- [x] unavailable Codex capture、provider binary 不在、stale target、adapter / scope mismatch、duplicate click、transport failure を safe feedback にし、空 Agent / local process / 二重 pane を作らない。
+- [x] provider ID、argv、cwd、transcript、raw daemon error を UI / resume state / log に露出しない。
 
 ## 必須 product E2E
 
@@ -56,7 +56,7 @@ Codex success case は #504 の production structured capture を通す。captur
 
 ## 進捗（2026-07-25 時点）
 
-1/2 として次を landed した。
+### 1/2（landed）
 
 - `crates/tui/src/usecase/application/interrupted_tab.rs`: daemon inventory を interrupted tab へ投影する純粋 reducer
   （root / managed session 共通、continuation 単位の dedup、live/reserved との収束、#506 dismissal と明示 reopen、
@@ -66,6 +66,38 @@ Codex success case は #504 の production structured capture を通す。captur
 - `document/03-tui.md` に「interrupted Agent の tab 投影と明示 resume」節、`04-ipc.md` / `05-daemon.md` /
   `proposals/11-workspace-restore-panes.md` を更新。
 
-2/2 で残るのは pane registry / tab strip / resume worker への配線（`PaneTab` の interrupted variant、
-`resume_exact` port の relation 返却、tab label と body 表示、明示 Resume action）と、実 daemon / PTY / fixture を
-使う product E2E である。
+### 2/2（landed）
+
+- `pane.rs`: `PaneTab::Interrupted` / `TabSelection::Interrupted`（lineage が tab identity）と、
+  `RestoreInterrupted` / `ResumeStarted` / `ResumeReplaced` / `ResumeFailed` の reducer。projection が
+  interrupted membership の authority で、live restore はそれを落とさない。in-flight な resume を持つ tab は
+  inventory から source が消えても残す。置換は同じ slot で行い、foreground の tab だけ attach する。
+- `workspace_runtime.rs`: `PaneRestoreTarget.interrupted`、`focused_interrupted`、
+  `resume_selected_tab` / `complete_tab_resume` / `fail_tab_resume`。refusal は tab を残して safe feedback にし、
+  duplicate 活性化は in-flight operation を解放しない。
+- `presentation/mod.rs`: coherent observation から interrupted projection を作って target ごとに配線し、
+  `Ctrl-O r`（`LiveTerminalAction::ResumeTab`）→ `PaneLaunch::ResumeExact` worker → `resume_exact` →
+  応答検証 → live 置換 + #506 slot intent commit。tab close は continuation-scoped dismissal に流す。
+- controller: `AppEvent::PaneTabAvailability`。tab を持つ target では action launcher が退き、
+  live PTY を持たない interrupted tab も選択・操作できる。
+- `AgentCommandPort::resume_exact` は `ExactAgentResume`（terminal + lineage + `AgentResumeRelation`）を返し、
+  合成ルートが daemon reply の `resume_relation` を decode する。relation が無い応答は置換しない。
+- `document/03-tui.md` に tab strip 表示（label / body）・`Ctrl-O r`・操作フロー、`proposals/11` に責務境界を追記。
+
+### product E2E
+
+`tests/agent_ipc_e2e.rs::root_ipc_cold_restart_projects_interrupted_history_and_resumes_one_exact_tab` が
+実 daemon process / socket / PTY と Codex fixture、そして shipping TUI の reducer（`interrupted_tab::project` /
+`resume_command` / `accept_replacement`）を通して次を検証する。
+
+- root と managed session の 2 履歴を起動 → daemon SIGKILL（`daemon stop` ではない）→ fresh start。
+- 旧 PTY が live 復元されないこと、各 history が distinct interrupted tab になること、重複 observation でも
+  同じ tab 集合へ収束すること。
+- fresh start / inventory / projection の段階で provider resume invocation と replacement spawn が 0 であること。
+- 1 回の明示 resume が operation 1 件・child spawn 1 件・新しい exact `TerminalRef` 1 枚に収束し、request replay が
+  同じ terminal を返して 2 個目を spawn しないこと。
+- 選ばなかった lineage が interrupted / resumable のまま変わらないこと。
+
+mixed provider・failure 後 retry・double click・tab close / reopen・reconnect は unit / shell test 層で押さえている。
+**残る gap は「実 PTY で shipping TUI binary を起動し、`Ctrl-O r` の実キー入力から resume させる process-level E2E」**で、
+これは [#544](544-test-tui-interrupted-tab-resume-pty-shipping-tui-e2e.md) が所有する。

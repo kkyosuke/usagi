@@ -60,8 +60,9 @@ use usagi_tui::presentation::views::workspace::GitDiff;
 use usagi_tui::presentation::{
     self, AgentCommandPort, AgentPaneAdmission, BannerScreenRunner, ControllerBackendComposition,
     ControllerBackendFactory, ControllerHost, DecisionCommandPort, DesktopNotificationPort,
-    EnvironmentStorePort, Exit, ExternalTerminalPort, MetricsPort, RestoreConnectionPort,
-    SessionCommandPort, SessionCommandResult, Start, WorkspaceLoader, WorkspaceSnapshot,
+    EnvironmentStorePort, ExactAgentResume, Exit, ExternalTerminalPort, MetricsPort,
+    RestoreConnectionPort, SessionCommandPort, SessionCommandResult, Start, WorkspaceLoader,
+    WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::agent_tab_intent::{
     AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabIntentPort,
@@ -1222,6 +1223,35 @@ fn exact_agent_resume_request(
     }
 }
 
+/// Decode one exact-target resume answer, keeping the daemon's own lineage and
+/// source-to-replacement relation. Nothing is inferred here: a body without a
+/// decodable relation yields `None` and the TUI refuses the replacement (#510).
+fn decode_exact_agent_resume(body: &serde_json::Value) -> Result<ExactAgentResume, String> {
+    let terminal = body
+        .get("terminal")
+        .cloned()
+        .ok_or_else(|| "provider resume returned no terminal".to_owned())
+        .and_then(|terminal| {
+            serde_json::from_value(terminal)
+                .map_err(|_| "provider resume returned an invalid terminal".to_owned())
+        })?;
+    let continuation = body
+        .get("continuation")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
+    let relation = body
+        .get("resume_relation")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
+    Ok(ExactAgentResume {
+        terminal,
+        continuation,
+        relation,
+    })
+}
+
 fn decode_agent_admission(
     body: &serde_json::Value,
     operation: &str,
@@ -1322,7 +1352,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         &mut self,
         target: usagi_core::domain::agent::AgentResumeTarget,
         operation_id: usagi_core::domain::id::OperationId,
-    ) -> Result<usagi_core::domain::id::TerminalRef, String> {
+    ) -> Result<ExactAgentResume, String> {
         let mut client =
             crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
                 .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
@@ -1330,14 +1360,9 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             .request(exact_agent_resume_request(operation_id, target))
             .map_err(|_| "provider resume failed; refresh Agent inventory".to_owned())?
         {
-            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => body
-                .get("terminal")
-                .cloned()
-                .ok_or_else(|| "provider resume returned no terminal".to_owned())
-                .and_then(|terminal| {
-                    serde_json::from_value(terminal)
-                        .map_err(|_| "provider resume returned an invalid terminal".to_owned())
-                }),
+            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => {
+                decode_exact_agent_resume(&body)
+            }
         }
     }
 
@@ -2802,11 +2827,11 @@ mod tests {
         SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen, TerminalChunk,
         TerminalError, TerminalInputOutcome, TerminalSnapshotMode, agent_inventory_request,
         classify_terminal_input, created_session_hook, daemon_error_reason, decode_agent_admission,
-        decode_attach_screen, decode_terminal_input_ack, decode_terminal_inventory,
-        decode_terminal_poll, exact_agent_resume_request, lifecycle_snapshot,
-        load_screen_graph_data, load_workspace_state, map_terminal_error, passthrough_key,
-        probe_path, provider_resume_projection, session_snapshot_result, terminal_copy_key,
-        terminal_inventory_matches_scope, validate_workspace_directory,
+        decode_attach_screen, decode_exact_agent_resume, decode_terminal_input_ack,
+        decode_terminal_inventory, decode_terminal_poll, exact_agent_resume_request,
+        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
+        passthrough_key, probe_path, provider_resume_projection, session_snapshot_result,
+        terminal_copy_key, terminal_inventory_matches_scope, validate_workspace_directory,
     };
     use crate::runtime::terminal_pump::TerminalPollPump;
     use chrono::Utc;
@@ -3575,6 +3600,59 @@ mod tests {
             )
             .unwrap_err(),
             "agent launch returned an invalid continuation"
+        );
+    }
+
+    /// #510: the exact-target resume answer carries the daemon's own lineage and
+    /// source-to-replacement relation, and never infers either.
+    #[test]
+    fn exact_agent_resume_decodes_the_daemon_relation_or_leaves_it_absent() {
+        use usagi_core::domain::agent::AgentResumeRelation;
+        use usagi_core::domain::id::{AgentResumeSourceId, AgentRuntimeId};
+
+        let workspace = WorkspaceId::new();
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: None,
+            worktree_id: WorktreeId::new(),
+        };
+        let continuation = AgentContinuationRef::new();
+        let relation = AgentResumeRelation {
+            source: AgentResumeSourceId::new(),
+            replacement_runtime: AgentRuntimeId::new(),
+            replacement_terminal: terminal.clone(),
+        };
+
+        let resume = decode_exact_agent_resume(&json!({
+            "terminal": terminal,
+            "continuation": continuation,
+            "resume_relation": relation,
+        }))
+        .unwrap();
+        assert_eq!(resume.terminal, terminal);
+        assert_eq!(resume.continuation, Some(continuation));
+        assert_eq!(resume.relation, Some(relation));
+
+        // A body without a decodable relation or lineage yields none of either,
+        // so the TUI refuses the replacement instead of assuming one.
+        let bare = decode_exact_agent_resume(&json!({
+            "terminal": terminal,
+            "continuation": null,
+            "resume_relation": "provider-native-id",
+        }))
+        .unwrap();
+        assert_eq!(bare.continuation, None);
+        assert_eq!(bare.relation, None);
+
+        assert_eq!(
+            decode_exact_agent_resume(&json!({})).unwrap_err(),
+            "provider resume returned no terminal"
+        );
+        assert_eq!(
+            decode_exact_agent_resume(&json!({"terminal": "bad"})).unwrap_err(),
+            "provider resume returned an invalid terminal"
         );
     }
 

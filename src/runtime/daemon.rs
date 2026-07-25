@@ -59,6 +59,7 @@ use usagi_daemon::usecase::claude::{
 use usagi_daemon::usecase::codex::{
     CodexAdapter, CodexProvision, CodexProvisionFailure, CodexProvisioner,
 };
+use usagi_daemon::usecase::custody::{Custody, CustodyProbe, NodeIdentity};
 use usagi_daemon::usecase::generation::ProcessIdentity;
 use usagi_daemon::usecase::generic_terminal::{
     GenericPtySpawner, TerminalProfileResolver, TerminalStore, TerminalStoreSnapshot,
@@ -1179,6 +1180,10 @@ type SharedPrInventory = Arc<Mutex<OutputPrProjector<PrInventoryStore>>>;
 const PR_REFRESH_TICK: Duration = Duration::from_millis(250);
 const PR_REFRESH_FRESHNESS_MS: u64 = 60_000;
 const PR_REFRESH_PER_TICK: usize = 2;
+/// How often a serving daemon re-checks that it is still the authority for its
+/// data directory. One second is short enough that an abandoned daemon exits
+/// promptly and long enough that the two `stat`s are free.
+const CUSTODY_TICK: Duration = Duration::from_secs(1);
 
 /// How long the teardown worker waits for an admitted removal before deriving
 /// the pending set again anyway. An admission wakes it immediately, so this only
@@ -1341,8 +1346,10 @@ fn spawn_ipc_server(
     data_dir: &Path,
     build: &BuildIdentity,
     daemon_process: DaemonRecord,
+    custody: FsCustodyProbe,
     shutdown: Arc<AtomicBool>,
 ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
+    let owner = daemon_process.clone();
     let server = usagi_daemon::presentation::ipc::server_protocol(
         generation.clone(),
         generation.0.clone(),
@@ -1410,6 +1417,12 @@ fn spawn_ipc_server(
     start_decision_maintenance(Arc::clone(&decisions))?;
     start_pr_refresh_worker(Arc::clone(&pr_inventory), Arc::clone(&shutdown))?;
     let teardown = start_session_teardown_worker(Arc::clone(&runtime), Arc::clone(&shutdown))?;
+    start_custody_worker(
+        custody,
+        owner,
+        data_dir.to_path_buf(),
+        Arc::clone(&shutdown),
+    )?;
     start_ipc_accept_loop(
         listener,
         server,
@@ -1573,6 +1586,112 @@ where
                 signal.wait(tick);
             }
         })
+}
+
+/// Starts the only production custody supervisor. A daemon is deliberately
+/// detached from its launcher's process group, so nothing else reaps it when the
+/// launcher dies abnormally; this worker makes the daemon reap itself as soon as
+/// it stops being the authority for its data directory (see
+/// [`usagi_daemon::usecase::custody`]).
+fn start_custody_worker(
+    probe: FsCustodyProbe,
+    owner: DaemonRecord,
+    data_dir: PathBuf,
+    shutdown: Arc<AtomicBool>,
+) -> std::io::Result<()> {
+    spawn_custody_worker(probe, owner, data_dir, shutdown, CUSTODY_TICK).map(|_| ())
+}
+
+fn spawn_custody_worker<P>(
+    probe: P,
+    owner: DaemonRecord,
+    data_dir: PathBuf,
+    shutdown: Arc<AtomicBool>,
+    tick: Duration,
+) -> std::io::Result<std::thread::JoinHandle<()>>
+where
+    P: CustodyProbe + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("usagi-daemon-custody".to_string())
+        .spawn(move || {
+            while !shutdown.load(Ordering::Acquire) {
+                match usagi_daemon::usecase::custody::evaluate(&probe, &owner) {
+                    Ok(Custody::Lost(loss)) => {
+                        // The error log lives inside the data directory. Record
+                        // the reason only while that directory still exists: a
+                        // daemon exiting because its tree was deleted must not
+                        // re-create the tree it is releasing.
+                        if data_dir.exists() {
+                            ErrorLog::record(&format!(
+                                "daemon custody lost ({}); shutting down",
+                                loss.reason()
+                            ));
+                        }
+                        // Request the same graceful shutdown a SIGTERM does, so
+                        // endpoint retirement and record clearing stay on one path.
+                        shutdown.store(true, Ordering::Release);
+                        return;
+                    }
+                    // An undecidable observation is not a loss: keep serving and
+                    // re-evaluate on the next tick.
+                    Ok(Custody::Held) | Err(_) => {}
+                }
+                let deadline = Instant::now() + tick;
+                while !shutdown.load(Ordering::Acquire) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        })
+}
+
+/// Real filesystem observations behind [`usagi_daemon::usecase::custody`].
+///
+/// `locked` is observed through the descriptor the single-instance lock holds,
+/// so replacing the pathname afterwards cannot forge the identity it is
+/// compared against.
+struct FsCustodyProbe {
+    locked: Option<NodeIdentity>,
+    lock_path: PathBuf,
+    record: FsRecordFile,
+}
+
+impl CustodyProbe for FsCustodyProbe {
+    fn locked_inode(&self) -> std::io::Result<NodeIdentity> {
+        self.locked.ok_or_else(|| {
+            std::io::Error::other("daemon instance lock identity was never observed")
+        })
+    }
+
+    fn lock_pathname(&self) -> std::io::Result<Option<NodeIdentity>> {
+        match std::fs::symlink_metadata(&self.lock_path) {
+            Ok(metadata) => Ok(Some(node_identity(&metadata))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn owner_record(&self) -> std::io::Result<Option<DaemonRecord>> {
+        // Read without taking `record.lock`: records commit by rename, so a
+        // reader never observes a torn file, and locking would re-create a
+        // directory this daemon may already have lost.
+        self.record
+            .read_unlocked()?
+            .map(|contents| {
+                serde_json::from_str(&contents)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+            })
+            .transpose()
+    }
+}
+
+fn node_identity(metadata: &std::fs::Metadata) -> NodeIdentity {
+    use std::os::unix::fs::MetadataExt;
+
+    NodeIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    }
 }
 
 /// Keeps decision deadlines progressing even when no subsequent MCP/TUI
@@ -4273,6 +4392,13 @@ impl RecordFile for FsRecordFile {
     }
 
     fn remove_if(&self, expected: &str) -> std::io::Result<bool> {
+        // A daemon whose data directory was deleted underneath it still runs the
+        // ordinary shutdown path. There is no record left to clear, and
+        // `transaction` would re-create the directory purely to take a lock, so
+        // report the absent tree as a successful no-op.
+        if self.parent().is_ok_and(|parent| !parent.exists()) {
+            return Ok(false);
+        }
         self.transaction(|| match self.read_unlocked()? {
             Some(current) if current == expected => match std::fs::remove_file(&self.path) {
                 Ok(()) => {
@@ -4492,6 +4618,10 @@ fn signal_exact_process(_record: &DaemonRecord, _signal: libc::c_int) -> std::io
 /// future duplicate invocation a no-op instead of binding a second endpoint.
 struct IpcReady<'a> {
     data_dir: &'a Path,
+    /// The single-instance lock this daemon holds. Publication reads the locked
+    /// inode from it so the custody supervisor can prove, on every tick, that
+    /// this process is still the singleton for `data_dir`.
+    instance_lock: &'a FileInstanceLock,
     build: BuildIdentity,
     shutdown: Arc<AtomicBool>,
     published: AtomicBool,
@@ -4534,6 +4664,29 @@ impl IpcReady<'_> {
         }
         Ok(())
     }
+
+    /// Retires this daemon's published endpoint artifacts.
+    ///
+    /// A daemon that lost custody because its data directory was deleted has
+    /// nothing left to retire, and every cleanup step would re-create that tree
+    /// just to take a lock and prove absence. Treat the vanished directory as a
+    /// successful no-op, so shutdown stays fail-closed for a live directory
+    /// while never resurrecting a released one.
+    fn retire_endpoint(&self) -> std::io::Result<()> {
+        if !self.data_dir.exists() {
+            return Ok(());
+        }
+        if let Some(cleanup) = self.cleanup.borrow().as_ref() {
+            cleanup.retire()
+        } else if self.publication_attempted.load(Ordering::Acquire) {
+            // Binding itself can fail before returning a token. Scan only while
+            // this serve process still owns daemon.lock, and require a complete
+            // filesystem proof before permitting record cleanup.
+            self.recover_stale_endpoint()
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl DaemonReady for IpcReady<'_> {
@@ -4542,8 +4695,9 @@ impl DaemonReady for IpcReady<'_> {
     }
 
     fn publish(&self) -> std::io::Result<()> {
+        let daemon_dir = self.data_dir.join("daemon");
         let store = DaemonRecordStore::new(FsRecordFile {
-            path: self.data_dir.join("daemon/daemon.json"),
+            path: daemon_dir.join("daemon.json"),
         });
         let process = store.load()?.ok_or_else(|| {
             std::io::Error::new(
@@ -4551,6 +4705,15 @@ impl DaemonReady for IpcReady<'_> {
                 "daemon process record is unavailable for endpoint publication",
             )
         })?;
+        // Both invariants the custody supervisor watches are established here:
+        // the lock is held and the record names this process.
+        let custody = FsCustodyProbe {
+            locked: self.instance_lock.locked_inode(),
+            lock_path: daemon_dir.join("daemon.lock"),
+            record: FsRecordFile {
+                path: daemon_dir.join("daemon.json"),
+            },
+        };
         self.publish_with(|listener, generation| {
             spawn_ipc_server(
                 listener,
@@ -4558,6 +4721,7 @@ impl DaemonReady for IpcReady<'_> {
                 self.data_dir,
                 &self.build,
                 process,
+                custody,
                 Arc::clone(&self.shutdown),
             )
         })
@@ -4577,16 +4741,7 @@ impl DaemonReady for IpcReady<'_> {
 
     fn retire(&self) -> std::io::Result<()> {
         let quiesce = self.quiesce();
-        let cleanup = if let Some(cleanup) = self.cleanup.borrow().as_ref() {
-            cleanup.retire()
-        } else if self.publication_attempted.load(Ordering::Acquire) {
-            // Binding itself can fail before returning a token. Scan only while
-            // this serve process still owns daemon.lock, and require a complete
-            // filesystem proof before permitting record cleanup.
-            self.recover_stale_endpoint()
-        } else {
-            Ok(())
-        };
+        let cleanup = self.retire_endpoint();
 
         if cleanup.is_ok() {
             self.listener.borrow_mut().take();
@@ -4770,6 +4925,19 @@ struct FileInstanceLock {
     path: PathBuf,
     held: RefCell<Option<std::fs::File>>,
 }
+impl FileInstanceLock {
+    /// Identity of the inode this process locked, read from the held descriptor
+    /// rather than the pathname, so a later replacement of the pathname cannot
+    /// forge the identity custody supervision compares against.
+    ///
+    /// `None` means this lock was never acquired (or its descriptor cannot be
+    /// inspected), which leaves custody undecidable instead of lost.
+    fn locked_inode(&self) -> Option<NodeIdentity> {
+        let held = self.held.borrow();
+        let metadata = held.as_ref()?.metadata().ok()?;
+        Some(node_identity(&metadata))
+    }
+}
 impl InstanceLock for FileInstanceLock {
     fn acquire(&self) -> std::io::Result<bool> {
         const TIMEOUT: Duration = Duration::from_secs(2);
@@ -4913,6 +5081,7 @@ fn run_inner(
     };
     let ready = IpcReady {
         data_dir: &data_dir,
+        instance_lock: &lock,
         // The daemon advertises the exact artifact it started as for its whole
         // process lifetime. Atomic replacement of the executable path cannot
         // mutate this startup snapshot.
@@ -5301,9 +5470,22 @@ mod tests {
         }
     }
 
+    /// An instance lock fixture that was never acquired. These tests drive the
+    /// publication and retirement seams directly; custody supervision starts
+    /// only from the production `publish` path, which owns a real acquired lock.
+    /// The fixture is leaked so it can satisfy `IpcReady`'s borrow without every
+    /// call site threading an extra binding through its scope.
+    fn unacquired_instance_lock(data_dir: &Path) -> &'static FileInstanceLock {
+        Box::leak(Box::new(FileInstanceLock {
+            path: data_dir.join("daemon/daemon.lock"),
+            held: RefCell::new(None),
+        }))
+    }
+
     fn fresh_ipc_ready<'a>(data_dir: &'a Path, _info: &'a AppInfo) -> IpcReady<'a> {
         IpcReady {
             data_dir,
+            instance_lock: unacquired_instance_lock(data_dir),
             build: BuildIdentity {
                 version: "test".to_owned(),
                 commit: "test".to_owned(),
@@ -6776,6 +6958,165 @@ mod tests {
         .join()
         .unwrap();
         assert!(untouched.lock().unwrap().is_empty());
+    }
+
+    /// Prepares `<data>/daemon` with an acquired instance lock and a registered
+    /// owner record, exactly as `serve` leaves it before publishing, and returns
+    /// the production custody probe built from that state.
+    fn custody_fixture(data_dir: &Path) -> (FileInstanceLock, DaemonRecord, FsCustodyProbe) {
+        let daemon_dir = data_dir.join("daemon");
+        ensure_private_dir_all(&daemon_dir).unwrap();
+        let lock = FileInstanceLock {
+            path: daemon_dir.join("daemon.lock"),
+            held: RefCell::new(None),
+        };
+        assert!(lock.acquire().unwrap());
+        let record = FsRecordFile {
+            path: daemon_dir.join("daemon.json"),
+        };
+        let owner = DaemonRecord::identified(std::process::id(), "custody:test");
+        DaemonRecordStore::new(FsRecordFile {
+            path: daemon_dir.join("daemon.json"),
+        })
+        .save(&owner)
+        .unwrap();
+        let probe = FsCustodyProbe {
+            locked: lock.locked_inode(),
+            lock_path: daemon_dir.join("daemon.lock"),
+            record,
+        };
+        (lock, owner, probe)
+    }
+
+    fn custody_worker(
+        probe: FsCustodyProbe,
+        owner: DaemonRecord,
+        data_dir: &Path,
+        shutdown: &Arc<AtomicBool>,
+    ) -> std::thread::JoinHandle<()> {
+        spawn_custody_worker(
+            probe,
+            owner,
+            data_dir.to_path_buf(),
+            Arc::clone(shutdown),
+            Duration::from_millis(5),
+        )
+        .unwrap()
+    }
+
+    fn wait_for_flag(flag: &AtomicBool, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if flag.load(Ordering::Acquire) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        flag.load(Ordering::Acquire)
+    }
+
+    #[test]
+    fn production_custody_probe_observes_the_locked_inode_and_the_owner_record() {
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let (lock, owner, probe) = custody_fixture(home.path());
+        let daemon_dir = home.path().join("daemon");
+
+        assert_eq!(
+            usagi_daemon::usecase::custody::evaluate(&probe, &owner).unwrap(),
+            Custody::Held
+        );
+
+        // Replacing the pathname cannot forge the identity: it is read from the
+        // descriptor this process locked, not from the path.
+        let replacement = daemon_dir.join("replacement.lock");
+        std::fs::write(&replacement, "").unwrap();
+        std::fs::rename(&replacement, daemon_dir.join("daemon.lock")).unwrap();
+        assert_eq!(
+            usagi_daemon::usecase::custody::evaluate(&probe, &owner).unwrap(),
+            Custody::Lost(usagi_daemon::usecase::custody::CustodyLoss::LockInodeReplaced)
+        );
+        drop(lock);
+
+        // A malformed record is an undecidable observation, never a loss.
+        std::fs::write(daemon_dir.join("daemon.json"), "not json").unwrap();
+        std::fs::remove_file(daemon_dir.join("daemon.lock")).unwrap();
+        std::fs::write(daemon_dir.join("daemon.lock"), "").unwrap();
+        let unobserved = FsCustodyProbe {
+            locked: None,
+            lock_path: daemon_dir.join("daemon.lock"),
+            record: FsRecordFile {
+                path: daemon_dir.join("daemon.json"),
+            },
+        };
+        assert!(usagi_daemon::usecase::custody::evaluate(&unobserved, &owner).is_err());
+    }
+
+    #[test]
+    fn production_custody_worker_requests_shutdown_when_the_lock_path_disappears() {
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let (lock, owner, probe) = custody_fixture(home.path());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let handle = custody_worker(probe, owner, home.path(), &shutdown);
+
+        // A live daemon keeps serving across ticks.
+        assert!(!wait_for_flag(&shutdown, Duration::from_millis(50)));
+
+        std::fs::remove_file(home.path().join("daemon/daemon.lock")).unwrap();
+        assert!(wait_for_flag(&shutdown, Duration::from_secs(5)));
+        handle.join().unwrap();
+        drop(lock);
+    }
+
+    #[test]
+    fn production_custody_worker_requests_shutdown_when_another_owner_takes_the_record() {
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let (lock, owner, probe) = custody_fixture(home.path());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let handle = custody_worker(probe, owner, home.path(), &shutdown);
+
+        DaemonRecordStore::new(FsRecordFile {
+            path: home.path().join("daemon/daemon.json"),
+        })
+        .save(&DaemonRecord::identified(1, "custody:replacement"))
+        .unwrap();
+        assert!(wait_for_flag(&shutdown, Duration::from_secs(5)));
+        handle.join().unwrap();
+        drop(lock);
+    }
+
+    #[test]
+    fn production_custody_worker_stops_at_an_already_requested_shutdown() {
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let (lock, owner, probe) = custody_fixture(home.path());
+        let shutdown = Arc::new(AtomicBool::new(true));
+        custody_worker(probe, owner, home.path(), &shutdown)
+            .join()
+            .unwrap();
+        // The record and lock were left untouched by the supervisor itself.
+        assert!(home.path().join("daemon/daemon.json").is_file());
+        drop(lock);
+    }
+
+    #[test]
+    fn a_deleted_data_directory_makes_endpoint_and_record_cleanup_a_successful_no_op() {
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let data_dir = home.path().join("local");
+        let (lock, owner, _) = custody_fixture(&data_dir);
+        let record = FsRecordFile {
+            path: data_dir.join("daemon/daemon.json"),
+        };
+        let contents = serde_json::to_string(&owner).unwrap();
+        let info = daemon_test_info();
+        let ready = fresh_ipc_ready(&data_dir, &info);
+
+        drop(lock);
+        std::fs::remove_dir_all(&data_dir).unwrap();
+
+        // Neither step re-creates the released tree, and both succeed so the
+        // daemon exits through its ordinary path rather than failing closed.
+        DaemonReady::retire(&ready).unwrap();
+        assert!(!RecordFile::remove_if(&record, &contents).unwrap());
+        assert!(!data_dir.exists());
     }
 
     fn session_test_hello() -> usagi_core::infrastructure::ipc::ServerHello {
