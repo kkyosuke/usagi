@@ -16,6 +16,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [PR modal と browser effect](#pr-modal-と-browser-effect)
 - [Sidebar mascot](#sidebar-mascot)
 - [Closeup pane](#closeup-pane)
+- [Closeup の agent CLI 選択](#closeup-の-agent-cli-選択)
 - [Closeup Agent の手動確認](#closeup-agent-の手動確認)
 - [workspace open 時の pane 復元](#workspace-open-時の-pane-復元)
 - [resume data compatibility](#resume-data-compatibility)
@@ -101,6 +102,9 @@ TUI settings の保存先と解決順序は次のとおりである。この節�
 | Workspace | 対象 repository の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は `.usagi/local/settings.json`） | Agent・Issue・Memory だけを保持する。workspace 登録時に Global の初期値を一度コピーし、以後の Global 変更は反映しない。欠損 field と未知 token は安全な互換動作として Global を継承する |
 
 Agent は `default_model`、Issue と Memory はそれぞれ `issue_enabled` / `memory_enabled` として保存する。
+`default_model` は選択可能な agent CLI の closed vocabulary（`claude` / `codex` / `sakana.ai`）であり、Config 画面の
+Agent 行と Closeup の [`agent -m`](#closeup-の-agent-cli-選択) が同じ語彙を共有する。`sakana.ai` は Codex 互換 CLI で、
+実行するのは `codex-fugu`（daemon profile は `sakana-ai`）である。
 Issue と Memory の Global 初期値はどちらも `true` である。Workspace ファイルに残る旧 Theme / Modal mode field は読み飛ばし、
 全体設定を上書きしない。
 Workspace の Agent・Issue・Memory は個別値を持ち、MCP server は起動時に解決した実効値を tool 公開・実行へ適用する。
@@ -662,8 +666,8 @@ feedbackへ合成して隠さない。
 terminal は起動時点と resize 後の右ペイン実幅・高さで geometry を要求するため、shell の right prompt も pane 内に収まる。geometry が変わると TUI は PTY と decoded local screen を resize する。過去の cursor 移動列は新しい幅で再生せず、過去行を含む既存セルを clip して行数を増やさない。daemon 不通・stale・orphan は安全な
 feedback だけを表示し、local PTY を生成しない。
 
-Closeup の `agent [profile]` は既存 session だけで実行できる。profile を省略すると daemon の
-workspace policy を使い、指定時も product-neutral な profile ID だけを durable operation に渡す。
+Closeup の `agent [-m <cli>]` は既存 session だけで実行できる。TUI は選択した CLI を product-neutral な
+profile ID（`claude` / `codex` / `sakana-ai`）へ解決して durable operation に渡し、argv・model・secret は組み立てない。
 TUI は daemon の accepted response 後に Agent pending tab を置き、同じ operation の成功 final が返す
 完全な `TerminalRef` にだけ attach する。daemon 不通、拒否、未知・古い completion では local spawn や
 名前からの terminal 推測をしない。
@@ -675,8 +679,8 @@ daemon inventory、attach/resume、stream、resync は `pane_runtime` が結合�
 subscription を外すだけで、PTY を kill しない。daemon が exit を報告した terminal または Agent は、その
 live tab と client subscription を直ちに外し、残る tab または Closeup の空状態へ戻る。
 
-`agent [profile]` は active な session だけを対象にする。profile を省略した request は daemon の
-default policy に委ね、TUI は product 固有の argv、model、secret を組み立てない。controller が発行した
+`agent [-m <cli>]` は active な session だけを対象にする。`-m` を省略した request は
+[config の `default_model`](#settings-scope-と-workspace-entry) を解決して明示 profile として送る。controller が発行した
 `OperationId` は pending tab と IPC request で同一のまま保持され、adapter は同じ ID の effect を一度しか
 送らない。accepted の間は Agent pending tab を残し、replay を含む final は workspace と session が一致する
 完全な `TerminalRef` のときだけ既存の `PaneRuntime` へ渡す。
@@ -694,6 +698,31 @@ request retry、attach を行わない。failure は pending tab を除去し、
 として表示するとともに `<data dir>/logs/error-YYYY-MM-DD.log` に記録する。確認して閉じると、tab-less
 Closeup の action modal に戻る。
 
+## Closeup の agent CLI 選択
+
+Closeup の `agent` は `-m`（長形式 `--model`）で起動する agent CLI を選ぶ。この節が v2 の agent CLI 選択の正本である。
+
+| 入力 | 起動する CLI | daemon profile |
+|---|---|---|
+| `agent` | config の `default_model` | 解決した CLI の profile |
+| `agent -m claude` | Claude Code | `claude` |
+| `agent -m codex` | Codex | `codex` |
+| `agent -m sakana.ai` | sakana.ai（Codex 互換、実行は `codex-fugu`） | `sakana-ai` |
+
+- **候補は install 済みの CLI だけ**である。合成ルートが各 CLI の実行可能性を観測して TUI に注入し、Action menu の
+  展開行・Tab 補完・submit 時の検証はすべて同じ集合を使う。install されていない CLI は表示・補完せず、直接入力しても
+  `that agent CLI is not installed` として拒否する（daemon へ request を送らない）。
+- **default は config の `default_model`** である。Action menu の展開行は default の行に `(default)` を付け、
+  `-m` を省略した submit は `Requested agent codex (default)` のようにどの CLI を起動したかを表示する。
+  default の CLI が install されていない場合は `the configured agent CLI is not installed` として拒否する。
+- **Tab 補完**は Prompt mode の入力欄と Action menu の filter で同じ文法を使う。`agent -m sak` → `agent -m sakana.ai`、
+  `agent --` → `agent --model` のように候補が 1 つに定まるときだけ入力を置き換え、曖昧・未知の入力は変更しない。
+  Action mode では `→` で `agent` 行を展開し、`↑↓` で `-m <cli>` を選ぶ。
+- 位置引数（`agent codex`）も同じ語彙・同じ install 判定で受け付ける。`-m` の重複、値の欠落、複数選択、未知の flag は
+  安全な文言で拒否し、modal を閉じない。
+- CLI 名の解決は大文字小文字を区別せず、`-` / `_` / `.` を同じ区切りとして扱う（`sakana.ai` / `sakana_ai` /
+  `sakana-ai` / `codex-fugu` はすべて同じ CLI）。
+
 ## Closeup Agent の手動確認
 
 Agent profile を利用できる daemon を起動し、既存 session を選択して Closeup を開く。次の操作は実装済みの
@@ -701,7 +730,7 @@ runtime bridge を確認する手順である。profile の install 状態、認
 
 | 操作 | 確認結果 |
 | --- | --- |
-| Action menu の Agent、または `agent codex` を確定する | 同じ session の `Agent` tab が出て、wave が daemon の pending operation を示す |
+| Action menu の Agent、または `agent -m codex` を確定する | 同じ session の `Agent` tab が出て、wave が daemon の pending operation を示す |
 | matching final を daemon が replay する | pending が Agent tab に一度だけ置換され、選択中なら attach される |
 | Agent が stdout を出力する | 選択中 Agent tab の pane に出力が表示される |
 | 選択中 Agent tab で入力し、端末を resize する | 入力は一度だけ daemon に届き、geometry 変更時の resize は成功するまで再試行される |

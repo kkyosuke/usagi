@@ -815,6 +815,28 @@ struct WorkspaceConfigContext<'a> {
     available_models: AvailableAgentModels,
 }
 
+/// Which Agent CLIs the Closeup `agent` command may select, and which one an
+/// omitted `-m` uses.
+///
+/// Availability is observed by the composition root (the shell owns the PATH
+/// probe) and the default comes from the effective settings, so the TUI itself
+/// performs no IO to answer either question. The default fits callers without a
+/// probe or resolved settings: every CLI offered, `codex` selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AgentModelPolicy {
+    available: AvailableAgentModels,
+    default: usagi_core::domain::settings::DefaultModel,
+}
+
+impl Default for AgentModelPolicy {
+    fn default() -> Self {
+        Self {
+            available: AvailableAgentModels::all(),
+            default: usagi_core::domain::settings::DefaultModel::default(),
+        }
+    }
+}
+
 /// Overview の session command を daemon 所有の lifecycle runner へ渡す境界。
 ///
 /// TUI は session store や git worktree を直接操作しない。実行時の合成ルートが
@@ -3989,6 +4011,7 @@ fn drive_workspace_controller(
     snapshot: WorkspaceSnapshot,
     backend_factory: &mut dyn ControllerBackendFactory,
     modal_selection_mode: usagi_core::domain::settings::ModalSelectionMode,
+    agent_models: AgentModelPolicy,
     mut workspace_config: Option<WorkspaceConfigContext<'_>>,
 ) -> io::Result<WorkspaceStep> {
     let workspace_id = snapshot.workspace_id;
@@ -4022,6 +4045,7 @@ fn drive_workspace_controller(
         .with_external_terminal(composition.external_terminal);
     let mut runtime =
         WorkspaceRuntime::with_selection_mode(workspace_id, session_ids, modal_selection_mode);
+    runtime.set_agent_models(agent_models.available, agent_models.default);
     if let Some(error) = ui.take_agent_tab_intent_load_error() {
         surface_agent_tab_intent_error(&mut runtime, error);
     }
@@ -4221,6 +4245,9 @@ fn drive_workspace_controller(
                 let effective =
                     usagi_core::usecase::settings::read_for_workspace_entry(context.settings);
                 runtime.set_modal_selection_mode(effective.modal_selection_mode);
+                // A newly saved Agent default applies to the next `agent`
+                // command without reopening the workspace.
+                runtime.set_agent_models(context.available_models, effective.default_model);
                 continue;
             }
             if backend.dispatch(effect) == BackendFlow::Exit {
@@ -4246,6 +4273,7 @@ pub fn run_workspace_controller_with_backend(
         snapshot,
         backend_factory,
         usagi_core::domain::settings::ModalSelectionMode::Action,
+        AgentModelPolicy::default(),
         None,
     )
     .map(|_| Exit::Quit)
@@ -4268,6 +4296,10 @@ pub fn run_workspace_controller_with_backend_and_settings(
         snapshot,
         backend_factory,
         settings.modal_selection_mode,
+        AgentModelPolicy {
+            default: settings.default_model,
+            ..AgentModelPolicy::default()
+        },
         None,
     )
     .map(|_| Exit::Quit)
@@ -4293,6 +4325,10 @@ pub fn run_workspace_controller_with_backend_and_config(
         snapshot,
         backend_factory,
         effective.modal_selection_mode,
+        AgentModelPolicy {
+            available: available_models,
+            default: effective.default_model,
+        },
         Some(WorkspaceConfigContext {
             settings,
             available_models,
@@ -4552,6 +4588,10 @@ fn open_snapshot_via_controller(
         snapshot,
         backend_factory,
         effective.modal_selection_mode,
+        AgentModelPolicy {
+            available: available_models,
+            default: effective.default_model,
+        },
         Some(WorkspaceConfigContext {
             settings,
             available_models,

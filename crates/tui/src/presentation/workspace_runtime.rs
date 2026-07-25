@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use usagi_core::domain::agent::AgentResumeRelation;
 use usagi_core::domain::id::AgentContinuationRef;
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef};
-use usagi_core::domain::settings::ModalSelectionMode;
+use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
 use usagi_core::usecase::client::DaemonMetrics;
 
 use crate::presentation::views::closeup_modal::CloseupModal;
@@ -158,6 +158,16 @@ impl WorkspaceRuntime {
     /// palettes without rebuilding the workspace runtime or its live panes.
     pub fn set_modal_selection_mode(&mut self, mode: ModalSelectionMode) {
         self.modal_selection_mode = mode;
+    }
+
+    /// Apply the observed Agent CLI availability and the configured default
+    /// provider. An open Closeup modal is re-projected so its `agent -m` picker
+    /// and completion follow a newly saved setting immediately.
+    pub fn set_agent_models(&mut self, available: AvailableModels, default: DefaultModel) {
+        self.state.set_agent_models(available, default);
+        if let Some(modal) = self.closeup_modal.take() {
+            self.closeup_modal = Some(modal.with_agent_models(available, default));
+        }
     }
 
     /// Capture both fences carried by an off-thread restore dispatch.
@@ -461,6 +471,8 @@ impl WorkspaceRuntime {
     /// it (through submit, Escape, or a live-pane transition) drops the modal so
     /// its caret and filter never leak into the next time it opens.
     fn sync_overlay_modals(&mut self) {
+        let (available_models, default_model) =
+            (self.state.available_models(), self.state.default_model());
         if self.state.overlay() == Some(Overlay::Overview) {
             self.overview_modal.get_or_insert_with(|| {
                 OverviewModal::with_selection_mode(self.modal_selection_mode)
@@ -472,6 +484,7 @@ impl WorkspaceRuntime {
             self.closeup_modal.get_or_insert_with(|| {
                 CloseupModal::with_selection_mode(String::new(), self.modal_selection_mode)
                     .with_reopen_choices(self.reopen_choices.clone())
+                    .with_agent_models(available_models, default_model)
             });
         } else {
             self.closeup_modal = None;
@@ -1083,7 +1096,7 @@ mod tests {
     use usagi_core::domain::id::{
         DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
     };
-    use usagi_core::domain::settings::ModalSelectionMode;
+    use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
 
     #[test]
     fn effective_prompt_mode_is_used_for_both_workspace_modals() {
@@ -1293,6 +1306,50 @@ mod tests {
         // no longer re-opens it while the launched pane is still pending.
         assert_eq!(runtime.state().overlay(), None);
         assert!(runtime.closeup_modal().is_none());
+    }
+
+    #[test]
+    fn agent_model_policy_reaches_the_reducer_and_an_open_closeup_modal() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+
+        // A policy applied while Closeup is open re-projects the live modal, so
+        // its `-m` picker follows a newly saved setting immediately.
+        runtime.set_agent_models(
+            AvailableModels::new([DefaultModel::SakanaAi]),
+            DefaultModel::SakanaAi,
+        );
+        assert_eq!(
+            runtime.state().available_models(),
+            AvailableModels::new([DefaultModel::SakanaAi])
+        );
+        assert_eq!(runtime.state().default_model(), DefaultModel::SakanaAi);
+        let modal = runtime.closeup_modal().unwrap().clone();
+        assert_eq!(
+            modal.with_agent_models(
+                AvailableModels::new([DefaultModel::SakanaAi]),
+                DefaultModel::SakanaAi
+            ),
+            *runtime.closeup_modal().unwrap()
+        );
+
+        // Right expands the `agent` row into the single installed choice and
+        // Enter launches that profile.
+        let _ = runtime.handle_key(Key::Right);
+        assert_eq!(
+            runtime.closeup_modal().unwrap().submission(),
+            "agent -m sakana.ai"
+        );
+        let effects = runtime.handle_key(Key::Enter);
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::LaunchAgent { profile: Some(profile), .. }
+                    if profile.as_str() == "sakana-ai"
+            )),
+            "{effects:?}"
+        );
     }
 
     #[test]

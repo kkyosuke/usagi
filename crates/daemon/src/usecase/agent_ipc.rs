@@ -2193,10 +2193,12 @@ const fn runtime_inventory_state(
     }
 }
 
+/// `sakana-ai` is a Codex-compatible CLI, so its retained conversations carry
+/// [`ProviderKind::Codex`] and resume through the same provider metadata.
 fn provider_matches_profile(provider: ProviderKind, profile: &AgentProfileId) -> bool {
     matches!(
         (provider, profile.as_str()),
-        (ProviderKind::Claude, "claude") | (ProviderKind::Codex, "codex")
+        (ProviderKind::Claude, "claude") | (ProviderKind::Codex, "codex" | "sakana-ai")
     )
 }
 
@@ -4873,6 +4875,27 @@ mod tests {
             ErrorCode::OwnershipUnknown
         );
         assert_eq!(runtime.coordinator.occupied_slots(), 0);
+    }
+
+    #[test]
+    fn provider_metadata_matches_both_codex_grammar_profiles() {
+        // `sakana-ai` runs the Codex-compatible CLI, so its retained
+        // conversations carry `ProviderKind::Codex` and stay resumable. Claude
+        // metadata must never authorize a Codex-grammar profile, or vice versa.
+        for (provider, profile, expected) in [
+            (ProviderKind::Claude, "claude", true),
+            (ProviderKind::Codex, "codex", true),
+            (ProviderKind::Codex, "sakana-ai", true),
+            (ProviderKind::Claude, "sakana-ai", false),
+            (ProviderKind::Claude, "codex", false),
+            (ProviderKind::Codex, "claude", false),
+        ] {
+            assert_eq!(
+                provider_matches_profile(provider, &AgentProfileId::new(profile).unwrap()),
+                expected,
+                "{provider:?} {profile}"
+            );
+        }
     }
 
     #[test]

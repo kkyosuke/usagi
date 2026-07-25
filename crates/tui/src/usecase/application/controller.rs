@@ -15,12 +15,12 @@ use usagi_core::domain::id::{
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::pullrequest::PrLink;
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
-use usagi_core::domain::settings::is_valid_env_name;
+use usagi_core::domain::settings::{AvailableModels, DefaultModel, is_valid_env_name};
 use usagi_core::domain::user_decision::{UserDecision, UserDecisionAnswer, UserDecisionStatus};
 use usagi_core::usecase::env::EnvScope;
 
 use crate::usecase::terminal_input::{KeyCode, KeyEventKind, LiveInput, RuntimeEvent};
-use crate::usecase::{closeup, overview};
+use crate::usecase::{agent_command, closeup, overview};
 
 /// Home の常駐 route。これ以外の常駐 mode は作らない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,15 +190,10 @@ fn required_create_value(value: &str, message: &str) -> Result<String, Notice> {
         .ok_or_else(|| Notice::new(message))
 }
 
-fn optional_profile(value: &str) -> Result<Option<AgentProfileId>, Notice> {
-    let value = value.trim();
-    if value.is_empty() {
-        Ok(None)
-    } else {
-        AgentProfileId::new(value)
-            .map(Some)
-            .map_err(|_| Notice::new("invalid agent profile"))
-    }
+/// The daemon profile ID for a selected CLI. The mapping lives in the core
+/// settings vocabulary, so the TUI never spells a product profile itself.
+fn profile_for(model: DefaultModel) -> AgentProfileId {
+    AgentProfileId::new(model.profile_id()).expect("vocabulary profile ID is canonical")
 }
 
 /// Note editor で現在表示・編集している section。
@@ -746,6 +741,12 @@ pub struct AppState {
     /// pane, so a target that owns a tab shows its tab strip instead (#510).
     has_pane_tab: bool,
     closeup_action_forced: bool,
+    /// Agent CLIs installed on this machine, injected from the composition
+    /// root's probe. Closeup refuses a `-m` selection outside this set instead
+    /// of sending a launch the daemon cannot run.
+    available_models: AvailableModels,
+    /// The configured provider a Closeup `agent` without `-m` launches.
+    default_model: DefaultModel,
     ctrl_c_grace: bool,
     /// Focus of the quit confirmation's Yes/No buttons. `true` keeps Yes
     /// focused; opening the overlay resets it. The presentation layer projects
@@ -789,6 +790,8 @@ impl AppState {
             has_live_pane: false,
             has_pane_tab: false,
             closeup_action_forced: false,
+            available_models: AvailableModels::all(),
+            default_model: DefaultModel::default(),
             ctrl_c_grace: false,
             quit_confirm_selected: true,
         }
@@ -956,6 +959,23 @@ impl AppState {
     #[must_use]
     pub const fn quit_confirm_selected(&self) -> bool {
         self.quit_confirm_selected
+    }
+    /// The Agent CLIs a Closeup `agent` command may select.
+    #[must_use]
+    pub const fn available_models(&self) -> AvailableModels {
+        self.available_models
+    }
+    /// The provider a Closeup `agent` without `-m` launches.
+    #[must_use]
+    pub const fn default_model(&self) -> DefaultModel {
+        self.default_model
+    }
+    /// Apply the observed CLI availability and the configured default provider.
+    /// The composition root supplies both, so this usecase performs no PATH or
+    /// settings IO of its own.
+    pub const fn set_agent_models(&mut self, available: AvailableModels, default: DefaultModel) {
+        self.available_models = available;
+        self.default_model = default;
     }
 
     fn root(&self) -> Target {
@@ -3316,6 +3336,9 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
         }
     };
     let command_name = command.name();
+    // Which CLI an accepted `agent` resolved to, so the confirmation names the
+    // selection (including when it came from the configured default).
+    let mut selection = None;
     let effect = match command {
         closeup::Command::Terminal { arguments } => match terminal_arguments(&arguments) {
             Ok(arguments) if arguments == "new" => Some(Effect::OpenExternalTerminal {
@@ -3331,21 +3354,31 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
                 None
             }
         },
-        closeup::Command::Agent { arguments } => match optional_profile(&arguments) {
-            // A workspace-root Agent (`Target::Root`) runs in the trusted
-            // repository root; a session Agent runs in that session's worktree.
-            // The daemon resolves the checkout path in both cases.
-            Ok(profile) => Some(Effect::LaunchAgent {
-                workspace: state.workspace,
-                session: state.active.session_id(),
-                operation_id: OperationId::new(),
-                profile,
-            }),
-            Err(error) => {
-                state.notice = Some(error);
-                None
+        // `agent [-m <cli>]` selects one installed CLI; an omitted `-m` uses the
+        // configured default. A workspace-root Agent (`Target::Root`) runs in
+        // the trusted repository root; a session Agent runs in that session's
+        // worktree. The daemon resolves the checkout path in both cases.
+        closeup::Command::Agent { arguments } => {
+            match agent_command::parse(&arguments, state.default_model, state.available_models) {
+                Ok(request) => {
+                    selection = Some(if request.from_default {
+                        format!("{} (default)", request.model.selector())
+                    } else {
+                        request.model.selector().to_owned()
+                    });
+                    Some(Effect::LaunchAgent {
+                        workspace: state.workspace,
+                        session: state.active.session_id(),
+                        operation_id: OperationId::new(),
+                        profile: Some(profile_for(request.model)),
+                    })
+                }
+                Err(error) => {
+                    state.notice = Some(Notice::new(error));
+                    None
+                }
             }
-        },
+        }
         closeup::Command::Close { arguments } => match state.active {
             Target::Session(session) => {
                 if let Some(force) = parse_close_force(&arguments) {
@@ -3388,7 +3421,10 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
         if !matches!(effect, Some(Effect::OpenExternalTerminal { .. })) {
             state.overlay = None;
         }
-        state.notice = Some(Notice::new(format!("Requested {command_name}")));
+        state.notice = Some(Notice::new(match selection {
+            Some(selection) => format!("Requested {command_name} {selection}"),
+            None => format!("Requested {command_name}"),
+        }));
     }
     effect.into_iter().collect()
 }
@@ -3892,19 +3928,6 @@ mod tests {
         // defers to the daemon's workspace default policy.
         assert!(request.profile.is_none());
         assert!(request.model.is_none());
-    }
-
-    #[test]
-    fn optional_profile_maps_blank_valid_and_invalid_inputs() {
-        // `optional_profile` still backs the Closeup `agent [profile]` command, so
-        // its blank / valid / invalid branches (including the error closure) stay
-        // exercised even though the create form no longer takes a profile.
-        assert_eq!(optional_profile("").unwrap(), None);
-        assert_eq!(
-            optional_profile(" codex ").unwrap().unwrap().as_str(),
-            "codex"
-        );
-        assert!(optional_profile("invalid profile").is_err());
     }
 
     #[test]
@@ -5309,10 +5332,12 @@ mod tests {
             &mut state,
             AppEvent::Key(AppKey::SubmitCloseup("agent".to_owned())),
         );
+        // An `agent` without `-m` resolves the configured default provider, so
+        // the root launch carries that explicit profile.
         assert!(matches!(
             agent.as_slice(),
-            [Effect::LaunchAgent { workspace: actual, session: None, profile: None, .. }]
-                if *actual == workspace
+            [Effect::LaunchAgent { workspace: actual, session: None, profile: Some(profile), .. }]
+                if *actual == workspace && profile.as_str() == "codex"
         ));
 
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
@@ -5400,6 +5425,86 @@ mod tests {
             state.notice().map(|notice| notice.message.as_str()),
             Some("named session removal is available in the live TUI")
         );
+    }
+
+    #[test]
+    fn closeup_agent_selects_an_installed_cli_and_refuses_the_rest() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+
+        let launch = |state: &mut AppState, input: &str| {
+            let _ = update(state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+            update(
+                state,
+                AppEvent::Key(AppKey::SubmitCloseup(input.to_owned())),
+            )
+        };
+        let profile = |effects: &[Effect]| match effects {
+            [Effect::LaunchAgent { profile, .. }] => {
+                profile.as_ref().map(|id| id.as_str().to_owned())
+            }
+            _ => None,
+        };
+
+        // Every selectable CLI maps to its daemon profile; `sakana.ai` is
+        // presented under its product name but launches the `sakana-ai` profile.
+        for (input, expected) in [
+            ("agent -m claude", "claude"),
+            ("agent --model codex", "codex"),
+            ("agent -m sakana.ai", "sakana-ai"),
+        ] {
+            assert_eq!(
+                profile(&launch(&mut state, input)),
+                Some(expected.to_owned()),
+                "{input}"
+            );
+            assert_eq!(
+                state.notice().map(|notice| notice.message.as_str()),
+                Some(format!("Requested agent {}", input.split(' ').next_back().unwrap()).as_str())
+            );
+        }
+
+        // An omitted `-m` resolves the configured default and names it.
+        state.set_agent_models(AvailableModels::all(), DefaultModel::SakanaAi);
+        assert_eq!(
+            profile(&launch(&mut state, "agent")),
+            Some("sakana-ai".to_owned())
+        );
+        assert_eq!(
+            state.notice().map(|notice| notice.message.as_str()),
+            Some("Requested agent sakana.ai (default)")
+        );
+
+        // A CLI outside the vocabulary, and one that is not installed, are
+        // refused with safe feedback while the modal stays open.
+        state.set_agent_models(
+            AvailableModels::new([DefaultModel::SakanaAi]),
+            DefaultModel::SakanaAi,
+        );
+        for (input, message) in [
+            ("agent -m gemini", "unknown agent CLI"),
+            ("agent -m claude", "that agent CLI is not installed"),
+            ("agent -x", "unknown agent flag"),
+        ] {
+            assert!(launch(&mut state, input).is_empty(), "{input}");
+            assert_eq!(
+                state.notice().map(|notice| notice.message.as_str()),
+                Some(message)
+            );
+            assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        }
+
+        // With no CLI installed even the default is refused rather than sent.
+        state.set_agent_models(AvailableModels::default(), DefaultModel::OpenAi);
+        assert!(launch(&mut state, "agent").is_empty());
+        assert_eq!(
+            state.notice().map(|notice| notice.message.as_str()),
+            Some("the configured agent CLI is not installed")
+        );
+        assert_eq!(state.available_models(), AvailableModels::default());
+        assert_eq!(state.default_model(), DefaultModel::OpenAi);
     }
 
     #[test]

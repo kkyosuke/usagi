@@ -258,6 +258,9 @@ struct RootCodexProvisioner {
     readiness: Arc<dyn AgentReadinessProbe>,
     mcp_command: PathBuf,
     data_home: PathBuf,
+    /// The executable this profile launches: `codex`, or `codex-fugu` for the
+    /// Codex-compatible `sakana-ai` profile.
+    program: &'static str,
     /// The configured environment injected into the Agent child. `None` in tests
     /// that exercise only the MCP wiring.
     environment: Option<Arc<SharedUserEnvironment>>,
@@ -268,7 +271,7 @@ impl CodexProvisioner for RootCodexProvisioner {
         context: &ProvisionContext,
     ) -> Result<CodexProvision, CodexProvisionFailure> {
         self.readiness
-            .ready("codex")
+            .ready(self.program)
             .map_err(|()| CodexProvisionFailure::ExecutableUnavailable)?;
         let (working_directory, workspace_root) = working_directories(&self.sessions, context)
             .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
@@ -1735,6 +1738,15 @@ fn open_agent_runtime(
             readiness: Arc::clone(&readiness),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
+            program: "codex",
+            environment: Some(Arc::clone(&environment)),
+        }),
+        CodexAdapter::sakana(RootCodexProvisioner {
+            sessions: Arc::clone(&sessions),
+            readiness: Arc::clone(&readiness),
+            mcp_command: mcp_command.clone(),
+            data_home: data_home.clone(),
+            program: "codex-fugu",
             environment: Some(Arc::clone(&environment)),
         }),
         ClaudeAdapter::new(RootClaudeProvisioner {
