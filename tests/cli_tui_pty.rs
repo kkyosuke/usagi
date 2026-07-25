@@ -8,9 +8,9 @@ use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -42,6 +42,17 @@ use daemon_fixture::{Channel, DaemonHome};
 const SANDBOX_PASSTHROUGH: &str =
     usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE;
 
+/// 実 PTY テストは shipping binary・daemon・fixture provider を同時に走らせるため CPU を占有する。
+/// 1 binary 内で並行させると frame 待ちが product の失敗ではなく CPU 競合による timeout になるので、
+/// この file のテストは直列に実行する（`tests/agent_ipc_e2e.rs` の daemon 起動 lock と同じ方針）。
+static PTY_SERIAL: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    PTY_SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn shipping_build_identity() -> usagi_core::infrastructure::ipc::BuildIdentity {
     usagi_core::infrastructure::ipc::build_identity(
         env!("CARGO_PKG_VERSION"),
@@ -53,6 +64,13 @@ fn shipping_build_identity() -> usagi_core::infrastructure::ipc::BuildIdentity {
 }
 
 /// 100×24 の PTY master/slave pair を開く。
+///
+/// `openpty` の返す fd は close-on-exec ではないため、この pair を明示的に CLOEXEC にする。
+/// そうしないと、PTY を開いた後に起動した usagi プロセス（`hop`）だけでなく、そこから
+/// bootstrap される**常駐 daemon**まで master / slave を継承してしまう。daemon はテストより
+/// 長生きするので、テスト終了時に master / slave を閉じても reader が EOF を受け取れず
+/// `join()` が永久に待つ。子へ渡す stdio は `try_clone` → `dup2` 経路で CLOEXEC が外れるため、
+/// この設定は PTY 上の TUI 起動を妨げない。
 fn open_pty() -> io::Result<(File, File)> {
     let mut master_fd = -1;
     let mut slave_fd = -1;
@@ -75,6 +93,19 @@ fn open_pty() -> io::Result<(File, File)> {
     };
     if result == -1 {
         return Err(io::Error::last_os_error());
+    }
+    for fd in [master_fd, slave_fd] {
+        // SAFETY: `openpty` succeeded, so both descriptors are valid and owned here.
+        // `FD_CLOEXEC` is the only `F_SETFD` flag, so setting it clobbers nothing.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
+            let error = io::Error::last_os_error();
+            // SAFETY: both descriptors are still owned and unclosed at this point.
+            unsafe {
+                libc::close(master_fd);
+                libc::close(slave_fd);
+            }
+            return Err(error);
+        }
     }
     // SAFETY: `openpty` succeeded and transferred two distinct, valid descriptors to this caller.
     let pair = unsafe { (File::from_raw_fd(master_fd), File::from_raw_fd(slave_fd)) };
@@ -249,24 +280,102 @@ fn git(workspace: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
-fn write_agent_fixtures(bin: &Path, codex_count: &Path, claude_count: &Path, claude_argv: &Path) {
-    fs::create_dir_all(bin).unwrap();
-    let codex = format!(
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nprintf '%s' '{{\"session_id\":\"tui-codex-lineage\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | \"{}\" codex-session-capture || exit 8\nprintf 'spawn\\n' >> \"{}\"\nprintf 'codex-ready-unique:%s\\n' \"$$\"\nwhile IFS= read line; do printf 'codex-input:%s\\n' \"$line\"; done\n",
-        env!("CARGO_BIN_EXE_usagi"),
-        codex_count.display(),
-    );
-    // 起動 argv も 1 行として記録し、live 配線（`--settings` のフック JSON）を E2E で観測できるようにする。
-    let claude = format!(
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nif [ \"$1\" = auth ] && [ \"$2\" = status ]; then exit 0; fi\nprintf '%s\\n' \"$*\" >> \"{}\"\nprintf 'spawn\\n' >> \"{}\"\nprintf 'claude-ready-unique:%s\\n' \"$$\"\nwhile IFS= read line; do printf 'claude-input:%s\\n' \"$line\"; done\n",
-        claude_argv.display(),
-        claude_count.display(),
-    );
-    for (name, script) in [("codex", codex), ("claude", claude)] {
-        let path = bin.join(name);
-        fs::write(&path, script).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+/// provider-native な会話 ID。Codex fixture は #504 の production structured capture
+/// （`SessionStart` フック）でこれを報告し、resume argv にそのまま現れる。画面へ出てはならない。
+const CODEX_LINEAGE: &str = "tui-codex-lineage";
+/// capture が申告する transcript / cwd。どちらも provider 由来の sensitive metadata で、
+/// 画面にも log にも出てはならない。
+const CODEX_TRANSCRIPT: &str = "/must/not/be/read.jsonl";
+const CODEX_CAPTURED_CWD: &str = "/must/not/be/shown";
+
+/// PATH 上に置く Codex / Claude fixture と、その観測用ファイル群。
+///
+/// 各 provider は spawn ごとに count へ 1 行、argv へ 1 行を追記する。したがって
+/// 「child が何回起動したか」と「resume argv が exact な provider session ID を運んだか」を
+/// プロセス外から観測できる。argv は**ファイルにだけ**書くので、画面へ出ていないことの
+/// assertion と両立する。
+struct AgentFixtures {
+    bin: PathBuf,
+    codex_count: PathBuf,
+    codex_argv: PathBuf,
+    claude_count: PathBuf,
+    claude_argv: PathBuf,
+}
+
+impl AgentFixtures {
+    fn new(root: &Path) -> Self {
+        Self {
+            bin: root.join("bin"),
+            codex_count: root.join("codex-count"),
+            codex_argv: root.join("codex-argv"),
+            claude_count: root.join("claude-count"),
+            claude_argv: root.join("claude-argv"),
+        }
     }
+
+    /// 起動する usagi プロセスへ渡す PATH。
+    fn path_env(&self) -> String {
+        format!("{}:/usr/bin:/bin", self.bin.display())
+    }
+
+    fn write(&self) {
+        fs::create_dir_all(&self.bin).unwrap();
+        // resume 起動は `resume <provider session id>` を argv に持つ。initial 起動だけが
+        // production の structured capture を通す（resume で再 capture すると lineage が分岐する）。
+        let codex = format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nprintf '%s\\n' \"$*\" >> \"{argv}\"\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"{lineage}\",\"transcript_path\":\"{transcript}\",\"cwd\":\"{cwd}\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | \"{usagi}\" codex-session-capture || exit 8\nfi\nprintf 'spawn\\n' >> \"{count}\"\nif [ \"$resuming\" = true ]; then printf 'codex-resumed-unique:%s\\n' \"$$\"; else printf 'codex-ready-unique:%s\\n' \"$$\"; fi\nwhile IFS= read line; do printf 'codex-input:%s\\n' \"$line\"; done\n",
+            argv = self.codex_argv.display(),
+            lineage = CODEX_LINEAGE,
+            transcript = CODEX_TRANSCRIPT,
+            cwd = CODEX_CAPTURED_CWD,
+            usagi = env!("CARGO_BIN_EXE_usagi"),
+            count = self.codex_count.display(),
+        );
+        // 起動 argv も 1 行として記録し、live 配線（`--settings` のフック JSON）と、Claude の
+        // daemon-issued ID（initial は `--session-id`、resume は同じ ID の `--resume`）を観測する。
+        let claude = format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nif [ \"$1\" = auth ] && [ \"$2\" = status ]; then exit 0; fi\nprintf '%s\\n' \"$*\" >> \"{argv}\"\nprintf 'spawn\\n' >> \"{count}\"\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = --resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = true ]; then printf 'claude-resumed-unique:%s\\n' \"$$\"; else printf 'claude-ready-unique:%s\\n' \"$$\"; fi\nwhile IFS= read line; do printf 'claude-input:%s\\n' \"$line\"; done\n",
+            argv = self.claude_argv.display(),
+            count = self.claude_count.display(),
+        );
+        for (name, script) in [("codex", codex), ("claude", claude)] {
+            let path = self.bin.join(name);
+            fs::write(&path, script).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    fn codex_spawns(&self) -> usize {
+        spawn_count(&self.codex_count)
+    }
+
+    fn claude_spawns(&self) -> usize {
+        spawn_count(&self.claude_count)
+    }
+
+    fn codex_launch_argv(&self) -> Vec<String> {
+        argv_lines(&self.codex_argv)
+    }
+
+    fn claude_launch_argv(&self) -> Vec<String> {
+        argv_lines(&self.claude_argv)
+    }
+}
+
+/// fixture provider が今までに起動した child の数。
+fn spawn_count(provider: &Path) -> usize {
+    fs::read_to_string(provider)
+        .map(|text| text.lines().count())
+        .unwrap_or_default()
+}
+
+/// fixture provider が記録した起動 argv（1 spawn 1 行、起動順）。
+fn argv_lines(provider: &Path) -> Vec<String> {
+    fs::read_to_string(provider)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }
 
 fn write_terminal_fixture(path: &Path, count: &Path) {
@@ -646,8 +755,165 @@ fn quit_workspace(
     quit_from_switch(master, child, output, baseline)
 }
 
+/// 描画された tab strip が選択中として印を付けている tab の label。
+///
+/// widget は選択 chip の真下だけを `▔` で埋めるので、marker の列範囲で chip 行を切ると
+/// その chip だけが取れる。selection の判定を label 文字列の探索ではなく描画された marker から
+/// 行うため、同じ label が複数あっても取り違えない。
+fn selected_tab_label(screen: &str) -> Option<String> {
+    let rows = screen
+        .lines()
+        .map(|row| row.chars().collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    for index in 1..rows.len() {
+        let marker = &rows[index];
+        let Some(start) = marker.iter().position(|cell| *cell == '▔') else {
+            continue;
+        };
+        let width = marker[start..]
+            .iter()
+            .take_while(|cell| **cell == '▔')
+            .count();
+        let chips = &rows[index - 1];
+        if start + width > chips.len() {
+            continue;
+        }
+        let label = chips[start..start + width].iter().collect::<String>();
+        return Some(label.trim().to_owned());
+    }
+    None
+}
+
+/// `Ctrl-O Ctrl-N` の実キー入力で tab を巡回し、`label` の tab が選択されるまで待つ。
+///
+/// selection は描画された marker から読むので、durable な復元順に依存しない。
+fn select_tab_by_label(
+    master: &mut File,
+    output: &Arc<Mutex<Vec<u8>>>,
+    baseline: usize,
+    label: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let screen = screen_since(output, baseline).unwrap_or_default();
+        if selected_tab_label(&screen).as_deref() == Some(label) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "tab {label} was never selected; screen={screen:?}"
+        );
+        send(master, b"\x0f\x0e");
+        thread::sleep(Duration::from_millis(150));
+    }
+}
+
+/// `count` が `expected` に達し、そのまま留まることを確認する。
+///
+/// 「double click が child spawn 1 件へ収束する」のように「増えない」ことが主張の中身である
+/// 場合、到達を待つだけでは 2 個目の spawn を見逃す。到達後に settle 窓を置いて再確認する。
+fn assert_spawns_settle(count: &Path, expected: usize) {
+    wait_for_file_lines(count, expected);
+    let observed = fs::read_to_string(count)
+        .map(|text| text.lines().count())
+        .unwrap_or_default();
+    assert_eq!(
+        observed,
+        expected,
+        "{} spawned too many children",
+        count.display()
+    );
+    thread::sleep(Duration::from_millis(400));
+    let settled = fs::read_to_string(count)
+        .map(|text| text.lines().count())
+        .unwrap_or_default();
+    assert_eq!(
+        settled,
+        expected,
+        "{} spawned an extra child after settling",
+        count.display()
+    );
+}
+
+/// この home が記録した exact な daemon incarnation を SIGKILL する。
+///
+/// cold failure は `daemon stop` では代用できない（stop は live resource を retire して
+/// しまう）。pid だけでなく process-start identity も突き合わせるので、pid 再利用や
+/// 置き換わった daemon を撃つことはない。
+fn sigkill_daemon(home: &Path) -> (u64, String) {
+    let pid = daemon_pid(home);
+    let generation = daemon_generation(home);
+    let record = fs::read_to_string(channel_data_dir(home).join("daemon/daemon.json")).unwrap();
+    let recorded =
+        serde_json::from_str::<serde_json::Value>(&record).unwrap()["process_start_identity"]
+            .as_str()
+            .expect("daemon record carries its process-start identity")
+            .to_owned();
+    assert_eq!(
+        recorded,
+        daemon_fixture::process_start_identity(u32::try_from(pid).unwrap()),
+        "the recorded daemon pid is no longer that incarnation"
+    );
+    // SAFETY: identity を直前に照合した、このテストの home が記録した daemon だけを撃つ。
+    unsafe { libc::kill(libc::pid_t::try_from(pid).unwrap(), libc::SIGKILL) };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process_is_alive(pid) {
+        assert!(Instant::now() < deadline, "the daemon survived SIGKILL");
+        thread::sleep(Duration::from_millis(20));
+    }
+    (pid, generation)
+}
+
+/// `pids` のプロセスがすべて消えるまで待つ。
+///
+/// daemon を SIGKILL すると PTY master が閉じ、その子 provider は EOF で終了する。
+/// 「旧 PTY が live 復元されない」ことの前提は、まず旧 child が本当に消えていることである。
+fn wait_for_dead_processes(pids: &[u64]) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if pids.iter().all(|pid| !process_is_alive(*pid)) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "provider children survived the cold failure: {pids:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// `baseline` 以降に PTY へ書かれた**生バイト列**に、どの秘密も現れないことを確認する。
+///
+/// VT parse 後の frame ではなく生ストリームを見るため、描画された画面だけでなく
+/// stderr へ落ちた診断（log）も同じ 1 か所で押さえられる。
+fn assert_no_sensitive_output(output: &Arc<Mutex<Vec<u8>>>, baseline: usize, secrets: &[&str]) {
+    let captured = output.lock().unwrap();
+    let stream = String::from_utf8_lossy(&captured[baseline.min(captured.len())..]);
+    for secret in secrets {
+        assert!(
+            !stream.contains(secret),
+            "the shipping TUI leaked {secret} to its terminal"
+        );
+    }
+}
+
+/// argv 1 行から Claude の daemon-issued provider session ID を取り出す。
+fn claude_session_id(argv: &str, flag: &str) -> String {
+    let mut arguments = argv.split_whitespace();
+    while let Some(argument) = arguments.next() {
+        if argument == flag {
+            return arguments
+                .next()
+                .expect("the Claude flag carries its provider session ID")
+                .to_owned();
+        }
+    }
+    panic!("{flag} was not present in {argv}");
+}
+
 #[test]
 fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
+    let _serial = serial();
     let home = short_home();
     let roots = tempfile::tempdir().unwrap();
     let workspace = roots.path().join("pty-workspace");
@@ -764,6 +1030,7 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
 #[test]
 #[allow(clippy::too_many_lines)] // The normal-exit and SIGKILL lifecycle is intentionally chronological.
 fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respawn() {
+    let _serial = serial();
     let home = short_home();
     let workspace_root = tempfile::tempdir().unwrap();
     let workspace = workspace_root.path().join("generic-terminal-workspace");
@@ -902,6 +1169,7 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
 #[test]
 #[allow(clippy::too_many_lines)] // One chronological multi-open PTY lifecycle is easier to audit intact.
 fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_respawn() {
+    let _serial = serial();
     let home = short_home();
     let workspace_root = tempfile::tempdir().unwrap();
     let workspace = workspace_root.path().join("agent-tabs-workspace");
@@ -918,13 +1186,13 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
 
     write_prompt_settings(home.path());
 
-    let fixtures = tempfile::tempdir().unwrap();
-    let bin = fixtures.path().join("bin");
-    let codex_count = fixtures.path().join("codex-count");
-    let claude_count = fixtures.path().join("claude-count");
-    let claude_argv = fixtures.path().join("claude-argv");
-    write_agent_fixtures(&bin, &codex_count, &claude_count, &claude_argv);
-    let fixture_path = format!("{}:/usr/bin:/bin", bin.display());
+    let fixture_root = tempfile::tempdir().unwrap();
+    let fixtures = AgentFixtures::new(fixture_root.path());
+    fixtures.write();
+    let codex_count = fixtures.codex_count.clone();
+    let claude_count = fixtures.claude_count.clone();
+    let claude_argv = fixtures.claude_argv.clone();
+    let fixture_path = fixtures.path_env();
 
     let registered = home
         .command_at(
@@ -1314,6 +1582,419 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
         2
     );
 
+    drop(slave);
+    drop(master);
+    reader.join().unwrap();
+}
+
+/// One live Agent process identity for `terminal`, or a panic naming the snapshot.
+fn agent_process_for(processes: &[(TerminalRef, u64)], terminal: &TerminalRef) -> u64 {
+    processes
+        .iter()
+        .find(|(candidate, _)| candidate == terminal)
+        .map(|(_, pid)| *pid)
+        .expect("Agent TerminalRef has a live child PID")
+}
+
+/// #544: cold restart 後の interrupted tab を、実 PTY 上の shipping TUI と実キー入力だけで
+/// resume する product E2E。
+///
+/// `tests/agent_ipc_e2e.rs` の cold-restart flow は shipping TUI の reducer を直接呼ぶ。ここは
+/// TUI binary を実 PTY で起動し、`Ctrl-O r` / `Ctrl-O x` / `reopen` の実キー入力だけで操作して、
+/// 次を process 境界で押さえる。
+///
+/// * root と managed session の history が distinct な tab として描画され、label は closed
+///   vocabulary（`Claude (interrupted)` / `Codex (interrupted)` / `Agent (interrupted)`）だけである。
+/// * fresh start・TUI open・inventory・dismissal・reopen・reconnect は provider を 1 度も起動しない。
+///   provider を起動するのは `Ctrl-O r` の実キー入力だけである。
+/// * `Ctrl-O r` の 2 連打（double click）が daemon operation 1 件・child spawn 1 件・live tab 1 枚へ
+///   収束し、resume argv が exact な provider session ID を運ぶ。選ばなかった lineage は変わらない。
+/// * provider が使えない間の resume は tab を interrupted のまま残し、retry が成功する。
+/// * provider ID・argv・cwd・transcript は描画 frame と log（同じ PTY へ落ちる stderr）に出ない。
+#[test]
+#[allow(clippy::too_many_lines)] // 1 本の cold-restart product flow を時系列のまま検証する。
+fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_keys() {
+    let _serial = serial();
+    let home = short_home();
+    let workspace_root = tempfile::tempdir().unwrap();
+    let workspace = workspace_root.path().join("agent-resume-workspace");
+    fs::create_dir(&workspace).unwrap();
+    git(&workspace, &["init", "-q"]);
+    git(
+        &workspace,
+        &["config", "user.email", "tui-e2e@example.test"],
+    );
+    git(&workspace, &["config", "user.name", "TUI E2E"]);
+    fs::write(workspace.join("README.md"), "fixture\n").unwrap();
+    git(&workspace, &["add", "README.md"]);
+    git(&workspace, &["commit", "-qm", "fixture"]);
+
+    write_prompt_settings(home.path());
+
+    let fixture_root = tempfile::tempdir().unwrap();
+    let fixtures = AgentFixtures::new(fixture_root.path());
+    fixtures.write();
+    let fixture_path = fixtures.path_env();
+
+    let registered = home
+        .command_at(
+            Channel::Local,
+            &workspace,
+            &["open".as_ref(), workspace.as_os_str()],
+        )
+        .env("PATH", &fixture_path)
+        .env(SANDBOX_PASSTHROUGH, "1")
+        .output()
+        .expect("workspace registers");
+    assert!(registered.status.success());
+    let (workspace_id, session_id) = create_session(home.path(), "resume-scope");
+
+    // Three conversation lineages: two histories in the workspace-root scope (one
+    // per provider) and one in a managed session. Mixed provider and several
+    // histories inside one scope must stay separate tabs.
+    let codex_terminal = launch_agent(home.path(), workspace_id, None, "codex");
+    let root_claude_terminal = launch_agent(home.path(), workspace_id, None, "claude");
+    let session_claude_terminal =
+        launch_agent(home.path(), workspace_id, Some(session_id), "claude");
+    wait_for_file_lines(&fixtures.codex_count, 1);
+    wait_for_file_lines(&fixtures.claude_count, 2);
+
+    // Claude's provider-native ID is daemon-issued at launch (`--session-id`) and
+    // an exact resume must reuse that same ID (`--resume`). `guard-workspace` is
+    // wired only for a managed session, so the two argv lines map to their scopes.
+    let launch_argv = fixtures.claude_launch_argv();
+    assert_eq!(launch_argv.len(), 2, "{launch_argv:?}");
+    let root_claude_id = claude_session_id(
+        launch_argv
+            .iter()
+            .find(|argv| !argv.contains("guard-workspace"))
+            .expect("the root Claude launch is recorded"),
+        "--session-id",
+    );
+    let session_claude_id = claude_session_id(
+        launch_argv
+            .iter()
+            .find(|argv| argv.contains("guard-workspace"))
+            .expect("the managed-session Claude launch is recorded"),
+        "--session-id",
+    );
+    assert_ne!(root_claude_id, session_claude_id);
+    let secrets = [
+        CODEX_LINEAGE,
+        CODEX_TRANSCRIPT,
+        CODEX_CAPTURED_CWD,
+        root_claude_id.as_str(),
+        session_claude_id.as_str(),
+        "--session-id",
+        "--resume",
+        "hook_event_name",
+        "--dangerously-bypass-hook-trust",
+        "guard-workspace",
+        "claude-sandbox",
+    ];
+
+    let (mut master, slave) = open_pty().unwrap();
+    let reader_master = master.try_clone().unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let reader_capture = Arc::clone(&captured);
+    let reader = thread::spawn(move || read_pty_shared(reader_master, &reader_capture));
+
+    // ── 1. The shipping TUI observes all three runtimes and persists #506 tab
+    // intent, so the cold restart has durable display intent to restore from.
+    let seed_baseline = capture_len(&captured);
+    let mut seed = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
+    open_registered_workspace(&mut master, &captured, seed_baseline);
+    let intent = wait_for_agent_tabs(home.path(), 3);
+    assert_eq!(intent.workspace_id, workspace_id);
+    assert!(intent.dismissed.is_empty());
+    let codex = continuation_for(&intent, &codex_terminal);
+    let root_claude = continuation_for(&intent, &root_claude_terminal);
+    let session_claude = continuation_for(&intent, &session_claude_terminal);
+    assert_eq!(
+        std::collections::BTreeSet::from([codex, root_claude, session_claude]).len(),
+        3,
+        "each conversation keeps its own lineage"
+    );
+    let seeded = agent_processes(home.path(), 3);
+    let doomed = [
+        agent_process_for(&seeded, &codex_terminal),
+        agent_process_for(&seeded, &root_claude_terminal),
+        agent_process_for(&seeded, &session_claude_terminal),
+    ];
+    assert!(
+        quit_from_switch(&mut master, &mut seed, &captured, seed_baseline).success(),
+        "seeding TUI quits normally"
+    );
+
+    // ── 2. A cold failure: SIGKILL, not a `daemon stop` that retires live
+    // resources. Every old PTY is genuinely gone before anything restarts.
+    let (killed_daemon, killed_generation) = sigkill_daemon(home.path());
+    wait_for_dead_processes(&doomed);
+
+    // ── 3. A fresh daemon (ordinary client bootstrap) plus a fresh TUI on the real
+    // PTY. Both histories of the root scope are distinct interrupted tabs, and no
+    // provider ran: not for the restart, not for the open, not for the inventory.
+    let cold_baseline = capture_len(&captured);
+    let mut cold = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
+    open_registered_workspace(&mut master, &captured, cold_baseline);
+    wait_for_screen_since(&captured, cold_baseline, "Codex (interrupted)");
+    wait_for_screen_since(&captured, cold_baseline, "Claude (interrupted)");
+    let fresh_daemon = daemon_pid(home.path());
+    let fresh_generation = daemon_generation(home.path());
+    assert_ne!(
+        fresh_daemon, killed_daemon,
+        "the daemon must be a new process"
+    );
+    assert_ne!(fresh_generation, killed_generation);
+    assert!(
+        agent_processes(home.path(), 0).is_empty(),
+        "no old PTY may be restored as a live Agent"
+    );
+    assert_eq!(fixtures.codex_spawns(), 1);
+    assert_eq!(fixtures.claude_spawns(), 2);
+    let cold_screen = screen_since(&captured, cold_baseline).unwrap_or_default();
+    // Every rendered `(interrupted)` belongs to the closed provider vocabulary.
+    let safe_labels = [
+        "Claude (interrupted)",
+        "Codex (interrupted)",
+        "Agent (interrupted)",
+    ]
+    .iter()
+    .map(|label| cold_screen.matches(label).count())
+    .sum::<usize>();
+    assert_eq!(
+        cold_screen.matches("(interrupted)").count(),
+        safe_labels,
+        "{cold_screen}"
+    );
+    assert_no_sensitive_output(&captured, cold_baseline, &secrets);
+
+    // ── 4. Enter Closeup on the root scope, select the Codex history with real
+    // keys, and press `Ctrl-O r` twice. The double activation must converge onto
+    // one operation, one child, and one live tab for that lineage alone.
+    send(&mut master, b"\r");
+    wait_for_screen_since(&captured, cold_baseline, "[closeup]");
+    select_tab_by_label(&mut master, &captured, cold_baseline, "Codex (interrupted)");
+    wait_for_screen_since(
+        &captured,
+        cold_baseline,
+        "interrupted — Ctrl-O r resumes it",
+    );
+    send(&mut master, b"\x0fr");
+    send(&mut master, b"\x0fr");
+    assert_spawns_settle(&fixtures.codex_count, 2);
+    let resumed_codex = agent_processes(home.path(), 1);
+    let (resumed_codex_terminal, resumed_codex_pid) = resumed_codex[0].clone();
+    assert!(
+        !resumed_codex_terminal.fences(&codex_terminal),
+        "an explicit resume must create a new terminal incarnation"
+    );
+    assert_eq!(
+        resumed_codex_terminal.session_id, None,
+        "the root lineage resumes in the root scope"
+    );
+    assert!(!doomed.contains(&resumed_codex_pid));
+    wait_for_screen_since(
+        &captured,
+        cold_baseline,
+        &format!("codex-resumed-unique:{resumed_codex_pid}"),
+    );
+    // The resume argv carries the exact provider session ID the production
+    // structured capture retained — in the fixture's file, never on the screen.
+    let codex_argv = fixtures.codex_launch_argv();
+    assert_eq!(codex_argv.len(), 2, "{codex_argv:?}");
+    assert!(!codex_argv[0].contains(CODEX_LINEAGE), "{codex_argv:?}");
+    assert!(
+        codex_argv[1].contains(&format!("resume {CODEX_LINEAGE}")),
+        "{codex_argv:?}"
+    );
+    // The retained conversation accepts live input on its replacement PTY.
+    send(&mut master, b"codex-after-resume\r");
+    wait_for_screen_since(&captured, cold_baseline, "codex-input:codex-after-resume");
+    // The lineages that were not selected are untouched.
+    assert_eq!(fixtures.claude_spawns(), 2);
+    let after_codex = screen_since(&captured, cold_baseline).unwrap_or_default();
+    assert!(
+        !after_codex.contains("Codex (interrupted)"),
+        "{after_codex}"
+    );
+    assert!(
+        after_codex.contains("Claude (interrupted)"),
+        "{after_codex}"
+    );
+
+    // ── 5. A resume that the daemon refuses (the provider CLI is unavailable)
+    // leaves the tab interrupted with safe feedback and spawns nothing; the retry
+    // then succeeds against the same lineage.
+    let hidden = fixtures.bin.join("claude.unavailable");
+    fs::rename(fixtures.bin.join("claude"), &hidden).unwrap();
+    select_tab_by_label(
+        &mut master,
+        &captured,
+        cold_baseline,
+        "Claude (interrupted)",
+    );
+    send(&mut master, b"\x0fr");
+    wait_for_screen_since(
+        &captured,
+        cold_baseline,
+        "feedback: provider resume failed; refresh Agent inventory",
+    );
+    assert_eq!(
+        fixtures.claude_spawns(),
+        2,
+        "a refused resume must not spawn a provider"
+    );
+    let refused = screen_since(&captured, cold_baseline).unwrap_or_default();
+    assert_eq!(
+        selected_tab_label(&refused).as_deref(),
+        Some("Claude (interrupted)"),
+        "{refused}"
+    );
+
+    fs::rename(&hidden, fixtures.bin.join("claude")).unwrap();
+    send(&mut master, b"\x0fr");
+    assert_spawns_settle(&fixtures.claude_count, 3);
+    let resumed_root = agent_processes(home.path(), 2);
+    let (resumed_root_claude_terminal, resumed_root_claude_pid) = resumed_root
+        .iter()
+        .find(|(terminal, _)| terminal != &resumed_codex_terminal)
+        .cloned()
+        .expect("the retried resume produced a second live Agent");
+    assert!(!resumed_root_claude_terminal.fences(&root_claude_terminal));
+    assert_eq!(resumed_root_claude_terminal.session_id, None);
+    wait_for_screen_since(
+        &captured,
+        cold_baseline,
+        &format!("claude-resumed-unique:{resumed_root_claude_pid}"),
+    );
+    let root_resume_argv = fixtures.claude_launch_argv();
+    assert!(
+        root_resume_argv[2].contains(&format!("--resume {root_claude_id}")),
+        "{root_resume_argv:?}"
+    );
+    send(&mut master, b"claude-root-after-resume\r");
+    wait_for_screen_since(
+        &captured,
+        cold_baseline,
+        "claude-input:claude-root-after-resume",
+    );
+
+    // ── 6. The managed session resumes through the same UX and fencing. Its
+    // history is closed with `Ctrl-O x` (a continuation-scoped dismissal) and
+    // brought back with `reopen`; neither starts a provider.
+    send(&mut master, b"\x0f\x0f");
+    wait_for_screen_since(&captured, cold_baseline, "[switch]");
+    send(&mut master, b"\x1b[B\r");
+    wait_for_screen_since(&captured, cold_baseline, "[closeup]");
+    select_tab_by_label(
+        &mut master,
+        &captured,
+        cold_baseline,
+        "Claude (interrupted)",
+    );
+    send(&mut master, b"\x0fx");
+    let dismissed = wait_for_agent_intent(home.path(), |intent| {
+        intent.dismissed.contains(&session_claude)
+    });
+    assert_eq!(dismissed.dismissed.len(), 1);
+    wait_for_screen_since(&captured, cold_baseline, "Type a command:");
+    assert_eq!(
+        fixtures.claude_spawns(),
+        3,
+        "closing a history tab must not spawn a provider"
+    );
+    send(
+        &mut master,
+        format!("reopen {}\r", session_claude.as_str()).as_bytes(),
+    );
+    wait_for_screen_absent_since(&captured, cold_baseline, "Type a command:");
+    let _ = wait_for_agent_intent(home.path(), |intent| intent.dismissed.is_empty());
+    select_tab_by_label(
+        &mut master,
+        &captured,
+        cold_baseline,
+        "Claude (interrupted)",
+    );
+    assert_eq!(
+        fixtures.claude_spawns(),
+        3,
+        "reopen restores the tab without resuming the conversation"
+    );
+
+    send(&mut master, b"\x0fr");
+    assert_spawns_settle(&fixtures.claude_count, 4);
+    let resumed_session = agent_processes(home.path(), 3);
+    let (resumed_session_terminal, resumed_session_pid) = resumed_session
+        .iter()
+        .find(|(terminal, _)| terminal.session_id == Some(session_id))
+        .cloned()
+        .expect("the managed session owns a live replacement");
+    assert!(!resumed_session_terminal.fences(&session_claude_terminal));
+    wait_for_screen_since(
+        &captured,
+        cold_baseline,
+        &format!("claude-resumed-unique:{resumed_session_pid}"),
+    );
+    let session_resume_argv = fixtures.claude_launch_argv();
+    assert!(
+        session_resume_argv[3].contains(&format!("--resume {session_claude_id}")),
+        "{session_resume_argv:?}"
+    );
+    send(&mut master, b"claude-session-after-resume\r");
+    wait_for_screen_since(
+        &captured,
+        cold_baseline,
+        "claude-input:claude-session-after-resume",
+    );
+
+    // ── 7. Reconnect: closing and reopening the TUI keeps every replacement live
+    // and adds no spawn. The managed session owns exactly one tab, so its retained
+    // output is the deterministic reconnect fence.
+    assert!(
+        quit_workspace(&mut master, &mut cold, &captured, cold_baseline).success(),
+        "the resumed TUI quits normally"
+    );
+    let reconnect_baseline = capture_len(&captured);
+    let mut reconnected = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
+    open_registered_workspace(&mut master, &captured, reconnect_baseline);
+    send(&mut master, b"\x1b[B\r");
+    wait_for_screen_since(&captured, reconnect_baseline, "[closeup]");
+    wait_for_screen_since(
+        &captured,
+        reconnect_baseline,
+        "claude-input:claude-session-after-resume",
+    );
+    let reconnected_screen = screen_since(&captured, reconnect_baseline).unwrap_or_default();
+    assert!(
+        !reconnected_screen.contains("(interrupted)"),
+        "every lineage converged onto its live replacement: {reconnected_screen}"
+    );
+    assert_eq!(fixtures.codex_spawns(), 2);
+    assert_eq!(fixtures.claude_spawns(), 4);
+    assert_eq!(daemon_pid(home.path()), fresh_daemon, "daemon PID changed");
+    assert_eq!(
+        daemon_generation(home.path()),
+        fresh_generation,
+        "daemon generation changed"
+    );
+    assert_eq!(
+        agent_processes(home.path(), 3),
+        resumed_session,
+        "reconnect must not replace any Agent process"
+    );
+    assert!(
+        quit_workspace(&mut master, &mut reconnected, &captured, reconnect_baseline,).success()
+    );
+
+    // Nothing in the whole cold-restart flow put a provider-native ID, argv,
+    // captured cwd, or transcript path on the terminal — frame or log.
+    assert_no_sensitive_output(&captured, cold_baseline, &secrets);
+
+    // The replacement daemon was bootstrapped by a client running on this PTY, so
+    // retire it explicitly before the pair closes: a daemon that outlived the test
+    // while holding an inherited descriptor would leave the reader without EOF.
+    stop_daemon(&home);
     drop(slave);
     drop(master);
     reader.join().unwrap();
