@@ -1,13 +1,13 @@
 ---
 number: 546
 title: fix(v1/session): teardown の branch 照合を実際の branch に基づかせ、生きたセッションを orphaned 隔離しない
-status: todo
+status: done
 priority: high
 labels: [v1, session, durability, fail-closed]
 dependson: []
 related: [538, 541, 547]
 created_at: 2026-07-25T02:23:01.213786+00:00
-updated_at: 2026-07-25T02:24:08.480044+00:00
+updated_at: 2026-07-25T05:01:45.347238+00:00
 ---
 
 ## 問題・影響
