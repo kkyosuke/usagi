@@ -17,11 +17,14 @@ use std::time::{Duration, Instant};
 use usagi_core::domain::agent::AgentProfileId;
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId};
 use usagi_core::domain::settings::{ModalSelectionMode, Settings};
+use usagi_core::domain::terminal_launch::{
+    TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
+};
 use usagi_core::infrastructure::paths::channel_data_dir;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
     AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest, IpcClient,
-    SessionAction,
+    SessionAction, TerminalAction, TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
 };
 use usagi_daemon::infrastructure::unix_transport::{
     connect_current, ensure_private_dir_all, read_locator,
@@ -622,6 +625,93 @@ fn launch_agent(
     serde_json::from_value(body["terminal"].clone()).unwrap()
 }
 
+/// `expected` 件の live generic terminal が persist されるまで待ち、その exact ref と pid を返す。
+fn generic_terminal_processes(home: &Path, expected: usize) -> Vec<(TerminalRef, u64)> {
+    let path = channel_data_dir(home).join("daemon/terminals.json");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last_snapshot = String::new();
+    loop {
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        last_snapshot.clone_from(&text);
+        let processes = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|snapshot| snapshot["records"].as_array().cloned())
+            .map(|records| {
+                records
+                    .iter()
+                    .filter(|record| record["state"] == "running")
+                    .filter_map(|record| {
+                        let terminal = serde_json::from_value(record["terminal"].clone()).ok()?;
+                        let pid = record["process"]["pid"].as_u64()?;
+                        process_is_alive(pid).then_some((terminal, pid))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if processes.len() == expected {
+            return processes;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{expected} live generic terminal processes were not persisted: {last_snapshot}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// `sibling` と同じ scope に、TUI を介さない real IPC client から generic terminal を 1 本起動する。
+fn launch_generic_terminal(home: &Path, sibling: &TerminalRef) -> TerminalRef {
+    let mut client = daemon_client(home);
+    let payload = serde_json::to_value(TerminalRequest::Launch {
+        intent: TerminalLaunchIntent {
+            request: TerminalLaunchRequest {
+                profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                scope: TerminalLaunchScope {
+                    workspace_id: sibling.workspace_id,
+                    session_id: sibling.session_id,
+                    worktree_id: sibling.worktree_id,
+                },
+            },
+            geometry: TerminalGeometry { cols: 80, rows: 20 },
+        },
+    })
+    .unwrap();
+    let reply = client
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Launch,
+            payload,
+        })
+        .unwrap();
+    let (DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. }) = reply;
+    serde_json::from_value(body["terminal"].clone()).unwrap()
+}
+
+/// 右ペインに現在描かれている terminal の fixture pid。selected tab の replay だけが見えるので、
+/// これは foreground の process を指す。
+fn displayed_terminal_pid(output: &Arc<Mutex<Vec<u8>>>, baseline: usize) -> u64 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let screen = screen_since(output, baseline).unwrap_or_default();
+        let pid = screen
+            .split("generic-ready-unique:")
+            .nth(1)
+            .map(|tail| {
+                tail.chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+            })
+            .and_then(|digits| digits.parse::<u64>().ok());
+        if let Some(pid) = pid {
+            return pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no terminal replay marker was displayed; screen={screen:?}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn wait_for_file_lines(path: &Path, expected: usize) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -782,6 +872,57 @@ fn selected_tab_label(screen: &str) -> Option<String> {
         return Some(label.trim().to_owned());
     }
     None
+}
+
+/// 描画された tab strip が持つ generic terminal chip の数。
+///
+/// chip 行は選択 marker (`▔`) 行の直上なので、`selected_tab_label` と同じ方法で行を特定し、
+/// その行の label 出現数だけを数える。tab の identity ではなく「何枚描かれているか」だけを見る。
+fn terminal_tab_count(screen: &str) -> usize {
+    let rows = screen
+        .lines()
+        .map(|row| row.chars().collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    for index in 1..rows.len() {
+        if !rows[index].contains(&'▔') {
+            continue;
+        }
+        return rows[index - 1]
+            .iter()
+            .collect::<String>()
+            .matches("Terminal")
+            .count();
+    }
+    0
+}
+
+/// tab strip が `expected` 枚の generic terminal tab を描くまで待つ。
+///
+/// background exit の観測は inventory cadence（2s）＋ backoff に律速されるので、frame 単位ではなく
+/// この上限で待つ。
+fn wait_for_tab_count(output: &Arc<Mutex<Vec<u8>>>, baseline: usize, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let screen = screen_since(output, baseline).unwrap_or_default();
+        if terminal_tab_count(&screen) == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "tab strip never settled on {expected} terminal tabs; screen={screen:?}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// fixture terminal の子 process を落とす。TUI は attach していないので、これは daemon 側だけで
+/// 起きる exit である。
+fn kill_process(pid: u64) {
+    let pid = i32::try_from(pid).expect("fixture pid fits in pid_t");
+    // SAFETY: `pid` is a live child of the daemon observed by this test and the
+    // call only delivers a signal to it.
+    let result = unsafe { libc::kill(pid, libc::SIGKILL) };
+    assert_eq!(result, 0, "failed to kill the background terminal process");
 }
 
 /// `Ctrl-O Ctrl-N` の実キー入力で tab を巡回し、`label` の tab が選択されるまで待つ。
@@ -1161,6 +1302,106 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
     assert_eq!(generic_terminal_process(home.path()), original_process);
     assert_eq!(fs::read_to_string(&spawn_count).unwrap().lines().count(), 1);
 
+    drop(slave);
+    drop(master);
+    reader.join().unwrap();
+}
+
+/// 実 daemon・実 PTY 2 本: detach された background tab の process が exit したとき、
+/// scope inventory lane **だけ**がそれを観測して tab を閉じ、foreground pane は流れ続ける。
+///
+/// background tab には `Attach` も `Resume` も送らないので、観測しても process は増えない
+/// （[3. TUI#背景 observation lane](../document/03-tui.md)）。
+#[test]
+fn real_pty_background_terminal_exit_closes_its_tab_through_scope_inventory() {
+    let _serial = serial();
+    let home = short_home();
+    let workspace_root = tempfile::tempdir().unwrap();
+    let workspace = workspace_root.path().join("background-exit-workspace");
+    fs::create_dir(&workspace).unwrap();
+    git(&workspace, &["init", "-q"]);
+    git(
+        &workspace,
+        &["config", "user.email", "tui-e2e@example.test"],
+    );
+    git(&workspace, &["config", "user.name", "TUI E2E"]);
+    fs::write(workspace.join("README.md"), "fixture\n").unwrap();
+    git(&workspace, &["add", "README.md"]);
+    git(&workspace, &["commit", "-qm", "fixture"]);
+
+    write_prompt_settings(home.path());
+
+    let fixture = tempfile::tempdir().unwrap();
+    let shell = fixture.path().join("fixture-shell");
+    let spawn_count = fixture.path().join("shell-spawn-count");
+    write_terminal_fixture(&shell, &spawn_count);
+    let registered = home
+        .command_at(
+            Channel::Local,
+            &workspace,
+            &["open".as_ref(), workspace.as_os_str()],
+        )
+        .env("SHELL", &shell)
+        .output()
+        .expect("workspace registers with fixture login shell");
+    assert!(registered.status.success());
+
+    let (mut master, slave) = open_pty().unwrap();
+    let reader_master = master.try_clone().unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let reader_capture = Arc::clone(&captured);
+    let reader = thread::spawn(move || read_pty_shared(reader_master, &reader_capture));
+
+    // The first shipping TUI launches one terminal through the Closeup command,
+    // then quits. Its exact ref carries the launch scope the second terminal is
+    // started in.
+    let first_baseline = capture_len(&captured);
+    let mut first = spawn_hop(&home, &workspace, &slave).unwrap();
+    open_registered_workspace(&mut master, &captured, first_baseline);
+    submit_closeup_command(&mut master, &captured, first_baseline, "terminal open");
+    wait_for_screen_since(&captured, first_baseline, "generic-ready-unique:");
+    let (first_terminal, _) = generic_terminal_process(home.path());
+    assert!(quit_workspace(&mut master, &mut first, &captured, first_baseline).success());
+
+    // A second terminal in the same scope, launched by another real IPC client so
+    // the next TUI open restores two tabs: one foreground, one detached.
+    launch_generic_terminal(home.path(), &first_terminal);
+    wait_for_file_lines(&spawn_count, 2);
+    let processes = generic_terminal_processes(home.path(), 2);
+
+    let baseline = capture_len(&captured);
+    let mut tui = spawn_hop(&home, &workspace, &slave).unwrap();
+    open_registered_workspace(&mut master, &captured, baseline);
+    wait_for_tab_count(&captured, baseline, 2);
+    // The right pane replays the selected terminal, so the marker on screen names
+    // the foreground process; the other one is the detached background tab.
+    let foreground_pid = displayed_terminal_pid(&captured, baseline);
+    let background_pid = processes
+        .iter()
+        .map(|(_, pid)| *pid)
+        .find(|pid| *pid != foreground_pid)
+        .expect("the second terminal is the background tab");
+
+    // Kill the background terminal's process. Nothing in this TUI is attached to
+    // it, so the bounded per-scope inventory observation is the only thing that
+    // can make the exit visible.
+    assert!(process_is_alive(background_pid));
+    kill_process(background_pid);
+    wait_for_tab_count(&captured, baseline, 1);
+
+    // The foreground pane kept its own stream across that observation, and
+    // observing a background tab never attached or respawned anything.
+    activate_selected_live_pane(&mut master, &captured, baseline);
+    send(&mut master, b"foreground-after-background-exit\r");
+    wait_for_screen_since(
+        &captured,
+        baseline,
+        "generic-input:foreground-after-background-exit",
+    );
+    assert_eq!(fs::read_to_string(&spawn_count).unwrap().lines().count(), 2);
+    assert_eq!(displayed_terminal_pid(&captured, baseline), foreground_pid);
+
+    assert!(quit_workspace(&mut master, &mut tui, &captured, baseline).success());
     drop(slave);
     drop(master);
     reader.join().unwrap();

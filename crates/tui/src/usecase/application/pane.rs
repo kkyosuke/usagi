@@ -262,6 +262,23 @@ impl PaneRegistry {
             .pane
     }
 
+    /// 全 target の live tab を表示順に列挙する。
+    ///
+    /// selected foreground 以外は detach 済みなので stream を持たない
+    /// ([3. TUI](../../../../document/03-tui.md))。shell はこの一覧から
+    /// background 分を切り出し、scope inventory による exit 観測へ渡す。
+    #[must_use]
+    pub fn live_terminals(&self) -> Vec<TerminalRef> {
+        self.entries
+            .iter()
+            .flat_map(|entry| entry.pane.tabs())
+            .filter_map(|tab| match tab {
+                PaneTab::Live(live) => Some(live.terminal.clone()),
+                PaneTab::Pending(_) | PaneTab::Ready(_) | PaneTab::Interrupted(_) => None,
+            })
+            .collect()
+    }
+
     /// action modal の表示 predicate。空 pane は常に modal が所有する。
     #[must_use]
     pub fn action_modal_visible(&self, target: Target) -> bool {

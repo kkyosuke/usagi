@@ -273,6 +273,29 @@ pub trait AgentCommandPort: Send {
     /// touching the current transport or the attachments its peers hold.
     fn detach_terminal(&mut self, _terminal: &TerminalRef, _subscription: TerminalSubscription) {}
 
+    /// Declare the **detached background** terminals whose exit the client still
+    /// has to notice.
+    ///
+    /// Only the selected foreground terminal is attached, so a background tab
+    /// has no stream that could report its process exiting. The production
+    /// adapter observes these refs through a bounded per-scope terminal
+    /// inventory on its own thread — never by attaching or resuming one of them
+    /// — and reports each exit once through
+    /// [`take_exited_background_terminals`](Self::take_exited_background_terminals).
+    /// Their **final output bytes** are not fetched here: they are read when the
+    /// tab is brought to the foreground, or through the explicit read-only
+    /// reopen of the retained tombstone.
+    ///
+    /// The default keeps embedders without a daemon safe: nothing is observed,
+    /// so no tab is ever closed behind the user's back.
+    fn watch_background_terminals(&mut self, _terminals: &[TerminalRef]) {}
+
+    /// Drain the background terminals observed as no longer live since the last
+    /// call, at most `limit` per frame so one frame's work stays bounded.
+    fn take_exited_background_terminals(&mut self, _limit: usize) -> Vec<TerminalRef> {
+        Vec::new()
+    }
+
     /// List the daemon-owned runtimes in scope for this workspace so a freshly
     /// opened controller can re-project the terminals and Agents that are still
     /// live into pane tabs. The production adapter resolves the workspace root
@@ -1371,6 +1394,11 @@ enum RestoreJobOutcome {
     IntentFailed(AgentTabIntentError),
 }
 
+/// Background exits applied per frame. The observation lane queues them, so one
+/// frame's tab-closing work stays bounded however many background tabs exited at
+/// once; the rest are applied by the next frames.
+const MAX_BACKGROUND_EXITS_PER_FRAME: usize = 8;
+
 const RESTORE_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(250);
 const RESTORE_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(4);
 
@@ -1867,6 +1895,23 @@ impl WorkspaceUi {
             .collect();
         self.terminal_reconnected |= reconnected;
         exited
+    }
+
+    /// Hand the detached background tabs to the port's bounded scope-inventory
+    /// lane and drain the exits it has observed since the last frame.
+    ///
+    /// This is the whole background contract: metadata only, per scope, off the
+    /// render thread. No `Attach` and no terminal-specific `Resume` is ever sent
+    /// for a background tab, and the returned refs are exactly the tabs whose
+    /// runtime the daemon no longer reports as live.
+    fn sync_background_terminals(&mut self, background: &[TerminalRef]) -> Vec<TerminalRef> {
+        let Some(agent) = self.agent.as_mut() else {
+            return Vec::new();
+        };
+        agent.port.watch_background_terminals(background);
+        agent
+            .port
+            .take_exited_background_terminals(MAX_BACKGROUND_EXITS_PER_FRAME)
     }
 
     fn take_terminal_reconnected(&mut self) -> bool {
@@ -3182,13 +3227,22 @@ fn poll_and_project_terminals(
     (terminal_view, rows_len, scroll)
 }
 
-/// Poll the attached foreground terminal and auto-close it if the daemon reports exit:
-/// the runtime drops the tab (clearing `has_live_pane` when it was the last) and
-/// the shell detaches the client subscription. This restores the pre-migration
-/// `close_exited_terminal` sweep so an `exit` in a live shell no longer strands a
-/// Live tab.
+/// Close every pane the daemon reports as exited, from either observation lane:
+/// the attached foreground terminal's own `Resume` stream, and the bounded
+/// per-scope inventory that watches the detached background tabs. The runtime
+/// drops the tab (clearing `has_live_pane` when it was the last) and the shell
+/// releases whatever client state it held.
+///
+/// Both lanes complete on their own threads, so a slow, hung, or unavailable
+/// owner delays only the observation, never this frame.
 fn close_exited_panes(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime) {
-    for terminal in ui.poll_all_terminals() {
+    let background = runtime.background_terminals();
+    let exited = ui
+        .poll_all_terminals()
+        .into_iter()
+        .chain(ui.sync_background_terminals(&background))
+        .collect::<Vec<_>>();
+    for terminal in exited {
         let _ = runtime.exit_pane(shell_target_for_terminal(&terminal), terminal.clone());
         ui.close_terminal(&terminal);
     }
@@ -5279,9 +5333,9 @@ mod tests {
         AgentTabIntentPortCommit, BannerScreenRunner, BrowserOpener, Config, ConfigStep,
         ControllerHost, ControllerHostAction, DecisionCommandPort, DefaultSettingsPort,
         DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort,
-        FixedBackendFactory, Geometry, MetricsPort, MetricsPortFactory, NewStep,
-        NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep, PaneLaunch,
-        PaneLaunchCommandPort, SerializedPaneLaunchPort, SessionCommandPort,
+        FixedBackendFactory, Geometry, MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort,
+        MetricsPortFactory, NewStep, NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep,
+        PaneLaunch, PaneLaunchCommandPort, SerializedPaneLaunchPort, SessionCommandPort,
         SessionCommandPortFactory, SessionCommandResult, Start, TerminalAttach, TerminalChunk,
         TerminalError, TerminalInputOutcome, TerminalInputResolution, TerminalSubscription,
         UnavailableAgentCommandPort, UnavailableBackendPort, UnavailableBrowserOpener,
@@ -8457,6 +8511,201 @@ mod tests {
         assert!(runtime.active_pane().tabs().is_empty());
         assert!(!runtime.state().has_live_pane());
         assert_eq!(*detaches.lock().unwrap(), vec![5]);
+    }
+
+    /// What the shell asked of the daemon for each pane, so a test can assert
+    /// that a detached background tab costs no attach and no resume.
+    #[derive(Default)]
+    struct BackgroundLaneLog {
+        attaches: Vec<TerminalRef>,
+        polls: Vec<TerminalRef>,
+        watched: Vec<Vec<TerminalRef>>,
+    }
+
+    /// A port whose background lane is scripted: `exited` is what the bounded
+    /// per-scope inventory has observed, drained the way the production pump
+    /// hands its queue to the render thread.
+    struct BackgroundLanePort {
+        log: Arc<Mutex<BackgroundLaneLog>>,
+        exited: Arc<Mutex<Vec<TerminalRef>>>,
+    }
+
+    impl AgentCommandPort for BackgroundLanePort {
+        fn launch(
+            &mut self,
+            _workspace: WorkspaceId,
+            _session: Option<SessionId>,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<AgentPaneAdmission, String> {
+            Err("unused".to_owned())
+        }
+
+        fn attach_terminal(
+            &mut self,
+            terminal: &TerminalRef,
+            geometry: Geometry,
+        ) -> Result<TerminalAttach, TerminalError> {
+            self.log.lock().unwrap().attaches.push(terminal.clone());
+            Ok(TerminalAttach {
+                subscription: TerminalSubscription { id: 1, epoch: 1 },
+                revision: 1,
+                output_offset: 0,
+                screen: attach_checkpoint(b"", geometry),
+                exited: false,
+            })
+        }
+
+        fn poll_terminal(
+            &mut self,
+            terminal: &TerminalRef,
+            _after_offset: u64,
+        ) -> Result<Vec<TerminalChunk>, TerminalError> {
+            self.log.lock().unwrap().polls.push(terminal.clone());
+            Ok(Vec::new())
+        }
+
+        fn watch_background_terminals(&mut self, terminals: &[TerminalRef]) {
+            self.log.lock().unwrap().watched.push(terminals.to_vec());
+        }
+
+        fn take_exited_background_terminals(&mut self, limit: usize) -> Vec<TerminalRef> {
+            let mut exited = self.exited.lock().unwrap();
+            let taken = exited.len().min(limit);
+            exited.drain(..taken).collect()
+        }
+    }
+
+    /// A focused foreground tab plus one background tab in the same target, the
+    /// shape #506 leaves behind: only the selection is attached.
+    fn foreground_and_background_panes(
+        port: Box<dyn AgentCommandPort>,
+    ) -> (WorkspaceUi, WorkspaceRuntime, TerminalRef, TerminalRef) {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let background = live_terminal_ref(workspace, session);
+        let foreground = live_terminal_ref(workspace, session);
+        let (mut ui, mut runtime) = focused_live_pane(workspace, session, background.clone(), port);
+        let operation = OperationId::new();
+        let _ = runtime.request_pane(Target::Session(session), operation, PaneKind::Agent);
+        let _ = runtime.complete_pane(Target::Session(session), operation, foreground.clone());
+        let _ = runtime.focus_terminal(Target::Session(session), foreground.clone());
+        // The shell keeps exactly the selection attached; the first tab is now a
+        // detached background tab.
+        ui.sync_foreground_terminal(Some(&foreground), terminal_geometry(20, 80));
+        (ui, runtime, foreground, background)
+    }
+
+    #[test]
+    fn a_background_tab_is_watched_by_scope_inventory_and_never_attached_or_resumed() {
+        let log = Arc::new(Mutex::new(BackgroundLaneLog::default()));
+        let exited = Arc::new(Mutex::new(Vec::new()));
+        let (mut ui, mut runtime, foreground, background) =
+            foreground_and_background_panes(Box::new(BackgroundLanePort {
+                log: Arc::clone(&log),
+                exited: Arc::clone(&exited),
+            }));
+
+        close_exited_panes(&mut ui, &mut runtime);
+
+        let recorded = log.lock().unwrap();
+        assert_eq!(
+            recorded.watched.last().cloned(),
+            Some(vec![background.clone()]),
+            "only the detached background tab is observed by scope inventory"
+        );
+        assert!(
+            !recorded.polls.iter().any(|polled| polled == &background),
+            "a background tab is never resumed"
+        );
+        assert!(
+            !recorded
+                .attaches
+                .iter()
+                .skip(1)
+                .any(|attached| attached == &background),
+            "a background tab is never re-attached once it leaves the foreground"
+        );
+        assert_eq!(
+            recorded.polls,
+            vec![foreground.clone()],
+            "only the foreground selection is resumed"
+        );
+        assert_eq!(
+            runtime.active_pane().tabs().len(),
+            2,
+            "neither tab is closed while both runtimes are live"
+        );
+    }
+
+    #[test]
+    fn a_background_exit_observed_by_scope_inventory_closes_that_tab_only() {
+        let log = Arc::new(Mutex::new(BackgroundLaneLog::default()));
+        let exited = Arc::new(Mutex::new(Vec::new()));
+        let (mut ui, mut runtime, foreground, background) =
+            foreground_and_background_panes(Box::new(BackgroundLanePort {
+                log: Arc::clone(&log),
+                exited: Arc::clone(&exited),
+            }));
+        // The bounded inventory lane observed the background shell exiting.
+        exited.lock().unwrap().push(background.clone());
+
+        close_exited_panes(&mut ui, &mut runtime);
+
+        let tabs = runtime.active_pane().tabs().to_vec();
+        assert_eq!(tabs.len(), 1, "only the exited background tab is closed");
+        assert!(
+            matches!(&tabs[0], PaneTab::Live(live) if live.terminal.fences(&foreground)),
+            "the foreground selection keeps streaming"
+        );
+        assert!(runtime.state().has_live_pane());
+        // The closed tab stops being watched on the next frame.
+        close_exited_panes(&mut ui, &mut runtime);
+        assert_eq!(
+            log.lock().unwrap().watched.last().cloned(),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn background_exits_are_applied_at_a_bounded_rate_per_frame() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let log = Arc::new(Mutex::new(BackgroundLaneLog::default()));
+        let exited = Arc::new(Mutex::new(Vec::new()));
+        let first = live_terminal_ref(workspace, session);
+        let (mut ui, mut runtime) = focused_live_pane(
+            workspace,
+            session,
+            first.clone(),
+            Box::new(BackgroundLanePort {
+                log: Arc::clone(&log),
+                exited: Arc::clone(&exited),
+            }),
+        );
+        let mut background = vec![first];
+        for _ in 0..MAX_BACKGROUND_EXITS_PER_FRAME + 3 {
+            let terminal = live_terminal_ref(workspace, session);
+            let operation = OperationId::new();
+            let _ = runtime.request_pane(Target::Session(session), operation, PaneKind::Agent);
+            let _ = runtime.complete_pane(Target::Session(session), operation, terminal.clone());
+            background.push(terminal);
+        }
+        let foreground = background.pop().expect("the last tab stays selected");
+        let _ = runtime.focus_terminal(Target::Session(session), foreground.clone());
+        ui.sync_foreground_terminal(Some(&foreground), terminal_geometry(20, 80));
+        exited.lock().unwrap().extend(background.iter().cloned());
+
+        close_exited_panes(&mut ui, &mut runtime);
+        assert_eq!(
+            runtime.active_pane().tabs().len(),
+            background.len() + 1 - MAX_BACKGROUND_EXITS_PER_FRAME,
+            "one frame applies at most the bounded slice of background exits"
+        );
+        // The remainder lands on the following frames, none of it lost.
+        close_exited_panes(&mut ui, &mut runtime);
+        close_exited_panes(&mut ui, &mut runtime);
+        assert_eq!(runtime.active_pane().tabs().len(), 1);
+        assert!(runtime.state().has_live_pane());
     }
 
     /// The wire traffic one shared connection recorded, as `e<epoch> <op> <label>`.

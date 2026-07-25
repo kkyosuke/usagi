@@ -527,6 +527,23 @@ impl WorkspaceRuntime {
         }
     }
 
+    /// The live tabs of every target that are **not** the attached foreground
+    /// selection. They own no subscription, so their process exiting can only be
+    /// observed through the daemon's per-scope terminal inventory.
+    #[must_use]
+    pub fn background_terminals(&self) -> Vec<TerminalRef> {
+        let focused = self.focused_terminal();
+        self.panes
+            .live_terminals()
+            .into_iter()
+            .filter(|terminal| {
+                focused
+                    .as_ref()
+                    .is_none_or(|foreground| !foreground.fences(terminal))
+            })
+            .collect()
+    }
+
     /// Record a pane open request as a pending placeholder for `target`.
     ///
     /// The current interaction count is captured so a later
