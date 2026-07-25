@@ -5,10 +5,10 @@ status: todo
 priority: high
 labels: [review, v2, daemon, runtime, terminal, generation, durability, recovery]
 dependson: [516]
-related: [209, 221, 255, 350, 459, 474, 492, 508, 514, 515, 526, 528]
+related: [209, 221, 255, 350, 459, 474, 492, 508, 515, 526, 528, 550]
 parent: 507
 created_at: 2026-07-22T11:37:07.035271+00:00
-updated_at: 2026-07-22T12:07:38.933057+00:00
+updated_at: 2026-07-25T13:22:17.961023+00:00
 ---
 
 ## 問題・根拠
@@ -22,7 +22,7 @@ updated_at: 2026-07-22T12:07:38.933057+00:00
 - production Agent / generic PTY の `ProcessIdentity.start_identity` は固定文字列で、PID reuse と別 incarnation を区別できない。planned rollover で「この child はこの owner generation が起動した同じ process」と証明できず、exit/kill/reconcile authority に使えない。
 - #526 は runtime / final tombstone retention に限定され、global allocator の completed claim と Agent / generic launch operation outcome ledger は対象外である。本 issue が独自の retention / expiry / GC contract を持たなければ、repeated launch により別の unbounded growth が残る。
 
-endpoint/generation role の authority は #516、daemon owner process の exact identity と shutdown primitive は #514、locator publish の crash recovery は #515 が担当する。本 issue はそれらを再実装せず、resource state・allocation・child identity の cross-process contractを担当する。
+endpoint/generation role の authority は #516、locator publish の crash recovery は #515 が担当する。daemon owner process の exact identity と fenced shutdown primitive は main に実装済みの contract である（経緯は [#516 の依存の再判定](./516-refactor-daemon-cross-process-generation-registry-standby-handoff-authority.md#依存の再判定)）。本 issue はそれらを再実装せず、resource state・allocation・child identity の cross-process contractを担当する。
 
 ## 対象責務
 
@@ -31,7 +31,7 @@ owner generation ごとの single-writer shard と、全 generation が共有す
 1. Agent と generic Terminal の durable runtime record を owner `DaemonGeneration` ごとの shard に分離する。各 daemon process は自 shard だけを書き、別 generation の whole snapshot を置換しない。
 2. global allocator は resource ID、owner generation、resource kind、capacity pool、producer operation ID、semantic digest、capacity claim、state/revision を CAS で管理する。policy は現行の Agent / generic Terminal 別上限を暗黙に合算せず、pool/kindごとの上限を全active/draining processで一意に予約・解放する。
 3. TUI `Effect::OpenTerminal` / `OpenTerminalRequest` が既に持つ canonical producer `OperationId` を backend、wire、daemon、allocatorまで脱落させず end-to-end で保持する。同じ ID + 同じ canonical intent は予約済み/final outcome と同じ `TerminalRef` を replayし、異なる intent は idempotency conflict として effect zero で拒否する。global claimをauthorityとして先に保存し、owner shard reservationもdurableになった後だけ一度spawnする。片側だけ残ったclaim/reservationはleaked/ownership unknownとしてfail closedにし、推測spawn/releaseしない。Accepted responseはproducer IDとdurable revisionをそのまま返し、successだけでなくdefinite failure、ambiguous spawn、persist-after-spawnもdurable finalとして再送する。
-4. Agent と generic child spawn の `ProcessIdentity` に OS が検証できる process-start identity と process-group identity を記録する。固定文字列、wall clock、PID-only fallback は authority にしない。#514 の process identity primitiveを再利用できる場合は共通化するが、daemon lifecycle signal 契約は変更しない。
+4. Agent と generic child spawn の `ProcessIdentity` に OS が検証できる process-start identity と process-group identity を記録する。固定文字列、wall clock、PID-only fallback は authority にしない。daemon lifecycle が持つ process identity primitive（`ProcessIdentitySource` / `signal_exact_process`）を再利用できる場合は共通化するが、daemon lifecycle signal 契約は変更しない。
 5. draining owner は terminal output/exit/command completionとoutboxを自 shardへ一度だけcommitし、global consume ledgerへterminal identity、owner generation、event revisionを発行する。active consumerはold shardへ直接ACK writeせず、owner single writerがglobal consumed revisionを観測して自outboxを回収する。旧PTY observationから共有`pr-inventory.json`をwhole-saveする経路や旧processのsupervisor tickなど、draining processが触れ得る他のshared writerもinventory化し、owner-local eventをactive single writerがconsumeするか同等のgeneration fenceを設ける。Agent/Terminal shardだけ直して他のshared snapshotにlost updateを移さない。
 6. active generation は exit event を idempotently consumeし、global capacity と active projectionを一度だけ更新する。ACK loss、consumer restart、duplicate/late/wrong-owner event は同じ outcomeへ収束し、別 resourceを変更しない。
 7. standbyはowner shardをread-onlyでhydrateし、#516のreadiness中にreconcile/save、worker/tick、spawnを行わない。handoff commit後にだけ自 shardをactive writerとして開き、sealed hydrate revisionとglobal allocator revisionを再検証してadmissionを開始する。
@@ -44,7 +44,7 @@ owner generation ごとの single-writer shard と、全 generation が共有す
 - cross-process generation role、standby endpoint、locator handoff、request admission fence（#516）
 - shipping `daemon restart` / build replacement / stop の orchestration（親 #507）
 - draining endpoint を選択する client routing と multi-generation inventory merge（#508）
-- daemon owner PIDへの exact shutdown signal（#514）
+- daemon owner PIDへの exact shutdown signal（main 実装済み。PID 再利用 record の lifecycle command 側 reclaim だけが #550）
 - crash/SIGKILL 後の PTY fd回収（#221）
 - runtime record / terminal final tombstone 自体の retention（#526）。ただし global allocator claim と launch operation outcome ledger の retention / expiry / GC は本 issue の対象に残す。
 
@@ -83,7 +83,7 @@ owner generation ごとの single-writer shard と、全 generation が共有す
 ## 依存関係
 
 ```text
-#514 / #515 / #528 -> #516 generation registry/admission
+#515 / #528 -> #516 generation registry/admission
                               |
                               v
                本 issue (owner shards / allocator / handoff)
