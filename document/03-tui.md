@@ -140,6 +140,7 @@ canonical 化して `selected` として申告するため、daemon は「serve 
 | daemon が動いていない | 選択した workspace で daemon を起動する（起動する lifecycle child の cwd が選択した root になる）。起動した directory に束縛された daemon は作らない |
 | daemon が選択した workspace を serve している | そのまま開く。TUI の起動 directory は問わない（workspace 内・subdirectory・session worktree・workspace 外のいずれでもよい） |
 | daemon が別の workspace を serve している | 開かずに拒否し、serve している workspace root と復帰手順（`usagi daemon stop` して目的の workspace で起動する）を提示する。registry への登録も Recent の更新も行わない |
+| 選択した path が UTF-8 でない | 開かずに拒否する。daemon の権威記録（`sessions.json`）と workspace registry はどちらも JSON なので、その root は書き留められず**どの daemon も所有できない**。daemon を起動もしない |
 
 拒否の提示先は入口ごとに異なるが、内容は同じ 1 つの message である。
 

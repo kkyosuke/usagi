@@ -5332,9 +5332,26 @@ static OPENED_WORKSPACE: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// ([`run_lifecycle`]). A root that cannot be canonicalized is reported here
 /// instead of being declared as spelled: the surface has an explicit path to
 /// complain about, unlike an ambient working directory.
+///
+/// A root that has no wire spelling (a path that is not UTF-8) is reported too,
+/// before a connection or a daemon start is attempted. No daemon can serve such a
+/// workspace: its own durable authority record (`sessions.json`) and the
+/// workspace registry are JSON, so the root cannot even be written down. Opening
+/// it would therefore either be refused by the fence for a root nothing can
+/// compare, or — worse, and what used to happen — be answered by a daemon that
+/// owns a different workspace.
 pub(crate) fn declare_opened_workspace(root: &Path) -> std::io::Result<PathBuf> {
     let canonical = paths::canonical_workspace_root(root)
         .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+    if paths::wire_workspace_root(&canonical).is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "workspace path is not valid UTF-8: {}; usagi cannot serve a workspace it cannot name",
+                canonical.display()
+            ),
+        ));
+    }
     *OPENED_WORKSPACE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(canonical.clone());
@@ -6959,6 +6976,26 @@ mod tests {
             opened_workspace().as_deref(),
             Some(second_canonical.as_path())
         );
+
+        // A root with no wire spelling is reported before anything connects or
+        // starts a daemon: no daemon can own it, because its own authority record
+        // and the workspace registry are JSON.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+
+            let name = std::ffi::OsString::from_vec(b"workspace-\xff".to_vec());
+            let unnameable = directory.path().join(name);
+            if std::fs::create_dir(&unnameable).is_ok() {
+                let error = declare_opened_workspace(&unnameable).unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+                assert!(error.to_string().contains("not valid UTF-8"), "{error}");
+                assert_eq!(
+                    opened_workspace().as_deref(),
+                    Some(second_canonical.as_path())
+                );
+            }
+        }
 
         *OPENED_WORKSPACE
             .lock()

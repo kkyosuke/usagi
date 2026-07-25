@@ -1533,9 +1533,17 @@ fn special_entry_argv_errors_are_rejected_before_runtime_side_effects() {
     }
 }
 
+/// A workspace whose path is not UTF-8 cannot be served, so it cannot be opened.
+///
+/// The daemon's own authority record (`sessions.json`) and the workspace registry
+/// are JSON, so such a root cannot be written down: nothing can own the workspace,
+/// and the [workspace fence](../document/04-ipc.md) has no root to compare. Before
+/// the fence declared the *opened* workspace this path silently rendered the
+/// non-UTF-8 workspace's title over the session list of whatever workspace the
+/// daemon did own (#549). It is now refused, before any daemon is started.
 #[cfg(unix)]
 #[test]
-fn open_accepts_an_existing_non_utf8_workspace_path_when_supported() {
+fn open_refuses_a_non_utf8_workspace_path_it_cannot_serve() {
     use std::os::unix::ffi::OsStringExt;
 
     let home = short_home();
@@ -1551,13 +1559,25 @@ fn open_accepts_an_existing_non_utf8_workspace_path_when_supported() {
     }
     let output = run_with_home(&[OsStr::new("open"), path.as_os_str()], &home);
 
-    assert!(output.status.success());
-    assert!(stdout(&output).contains("main"));
-    // JSON の path は UTF-8 string なので、非 UTF-8 path は一時 workspace として開き、
-    // 壊れた registry を永続化しない。
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("not valid UTF-8"),
+        "{}",
+        stderr(&output)
+    );
+    // No workspace screen is rendered, so no other workspace's session list can
+    // appear under this path's name.
+    assert!(!stdout(&output).contains("main"), "{}", stdout(&output));
+    // 壊れた registry を永続化しない。JSON の path は UTF-8 string である。
     assert!(
         !channel_data_dir(home.path())
             .join("workspaces.json")
+            .exists()
+    );
+    // 名指せない workspace のために daemon を起動もしない。
+    assert!(
+        !channel_data_dir(home.path())
+            .join("daemon/daemon.json")
             .exists()
     );
 }
@@ -1576,17 +1596,20 @@ fn open_validates_non_utf8_workspace_paths() {
     assert!(!output.status.success());
     assert!(!output.stderr.is_empty());
 
-    // 相対の非 UTF-8 path も、filesystem が扱える場合は絶対 path へ解決して開ける。
+    // 相対の非 UTF-8 path は絶対 path へ解決できるが、解決できても serve できないので
+    // 開けない（解決不能な場合と同じく失敗し、理由を出す）。
     let relative = std::ffi::OsString::from_vec(b"relative-\xff".to_vec());
     let absolute_relative = roots.path().join(&relative);
     let relative_fixture_exists = std::fs::create_dir(&absolute_relative).is_ok();
     let output = home.run_at(roots.path(), &[OsStr::new("open"), relative.as_os_str()]);
+    assert!(!output.status.success());
+    assert!(!output.stderr.is_empty());
     if relative_fixture_exists {
-        assert!(output.status.success());
-        assert!(stdout(&output).contains("main"));
-    } else {
-        assert!(!output.status.success());
-        assert!(!output.stderr.is_empty());
+        assert!(
+            stderr(&output).contains("not valid UTF-8"),
+            "{}",
+            stderr(&output)
+        );
     }
 
     // 非 UTF-8 filename を扱える filesystem では、通常 file も directory と誤認しない。
