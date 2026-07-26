@@ -174,7 +174,7 @@ mod tests {
         // cannot notify, so a bounded wait observes it on its next tick.
         let flag = Arc::new(AtomicBool::new(false));
         let shutdown = ShutdownRequest::with_flag(Arc::clone(&flag));
-        assert_eq!(shutdown.flag().load(Ordering::Acquire), false);
+        assert!(!shutdown.flag().load(Ordering::Acquire));
         flag.store(true, Ordering::Release);
         assert!(shutdown.is_requested());
         assert!(shutdown.wait_for_tick(Duration::from_secs(30)));

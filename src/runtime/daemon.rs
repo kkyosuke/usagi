@@ -2233,6 +2233,16 @@ impl ShutdownPipe {
             read: ends[0],
             write: ends[1],
         };
+        // The daemon execs children (PTYs, the PR provider). Neither end may be
+        // inherited: this daemon guards every other descriptor it owns the same
+        // way, and a shutdown wake belongs to this process only. macOS has no
+        // `pipe2`, so close-on-exec is set right after the pipe exists.
+        for end in ends {
+            // SAFETY: `end` is an owned descriptor from the pipe above.
+            if unsafe { libc::fcntl(end, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
         let write = pipe.write;
         let requested = Arc::clone(shutdown);
         std::thread::Builder::new()
@@ -2267,10 +2277,13 @@ impl ShutdownPipe {
         // a timer, so an idle daemon performs no wakeups here at all.
         // SAFETY: both descriptors are owned and live for this call.
         let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
-        // An interrupted or failed wait is reported as "listener ready" so the
-        // caller re-checks the request flag and retries the accept, rather than
-        // treating an EINTR as a shutdown.
-        ready < 0 || fds[0].revents != 0
+        // Only readability means "accept now". An interrupted or failed wait is
+        // also reported ready so the caller re-checks the request flag and retries
+        // rather than treating an EINTR as a shutdown. Error bits on the listener
+        // deliberately fall through as "not ready": the caller then leaves the
+        // loop and the exit guard shuts the daemon down, instead of spinning on a
+        // descriptor that `poll` reports immediately and `accept` cannot use.
+        ready < 0 || fds[0].revents & libc::POLLIN != 0
     }
 }
 

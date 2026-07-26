@@ -1,13 +1,13 @@
 ---
 number: 557
 title: perf(daemon): background worker の idle wakeup と無条件 fsync を削る
-status: todo
+status: in-progress
 priority: medium
 labels: [review, v2, daemon, runtime, performance]
 dependson: []
 related: [518, 555]
 created_at: 2026-07-25T23:00:31.152370+00:00
-updated_at: 2026-07-25T23:00:31.152370+00:00
+updated_at: 2026-07-26T06:26:28.346217+00:00
 ---
 
 ## 問題・根拠（コード調査で確定）
@@ -144,3 +144,77 @@ decision maintenance worker は毎 tick で**無条件に fsync 付きの atomic
 - Rust 差分を含むため、fmt / `cargo check --workspace --all-targets` /
   `cargo clippy --workspace --all-targets -- -D warnings` / `scripts/recommend-tests.sh origin/main` の推奨 test を
   通し、full gate は PR CI で確認する。
+
+## 実装時の決定
+
+### shutdown signal は 1 つにまとめた
+
+`ShutdownRequest`（`crates/daemon/src/usecase/shutdown.rs`）1 つを全 worker が共有する。flag が権威で condvar が
+edge を運ぶ形にした。理由は 2 つある。
+
+- **signal handler は flag しか書けない**。`signal_hook::flag::register` は async-signal-safe な atomic store を
+  行うが condvar を notify できない。したがって flag を権威に残すのは選択ではなく制約である。
+- worker ごとに signal を持たせても、現状「起こす理由」は shutdown だけである。`TeardownSignal` が専用化されて
+  いるのは、そちらが shutdown ではなく **admission** で起きる必要があるからで、粒度を分ける根拠がそこにはある。
+  shutdown 以外の起床理由が増えたときに分ければよい。
+
+`wait_for_tick` は「tick 経過」と「shutdown 要求」の早い方まで park し、shutdown を要求されたかを返す。
+`request()` は store の前に mutex を取るので、waiter が predicate を評価してから wait に入るまでの隙間で
+通知を落とさない。
+
+### accept loop は poll(2) + mirror pipe にした（案 b）
+
+案 (a) の blocking accept + 自己接続は採らなかった。`SecureUnixListener` は bind 時に non-blocking を設定し、
+socket identity の fence をその前提で組んでいる（#516 が書き直した領域）。blocking へ切り替えると
+その契約に触るうえ、起こす側が listener を所有していない（accept worker が move で持ち、join で返す）ため
+自己接続の相手先 path を composition 側で再構成する必要が出る。
+
+案 (b) は listener に `readiness_fd()` を 1 つ足すだけで済み、non-blocking 契約も peer credential 検査も変えない。
+condvar は descriptor 待ちに混ぜられないので、shutdown 要求を descriptor へ写す thread を 1 つ置いた。この thread は
+condvar で park するので、idle の wakeup は増えない。`poll` の timeout は無期限にし、失敗・EINTR は
+「listener ready」として扱って呼び出し側に flag を再確認させる（EINTR を shutdown と誤認しない）。
+
+### lifecycle owner は signal を専用 thread で blocking 受信する
+
+`wait()` は `wait_until_requested()` の park だけになった。signal は `prepare()` が起こす
+`usagi-daemon-signal` thread が `signal_hook` の blocking iterator で受け、`request()` へ変換する。
+thread の起動は `prepare()` の中、**worker spawn より前**なので
+[daemon process lifecycle](../../document/05-daemon.md#daemon-process-lifecycle) の順序は変わらない。
+`flag::register` は async-signal-safe な backstop として残す。
+
+### `mutate` は変えず `expire_due` に read-only fast path を置いた（案 b）
+
+案 (a)（`mutate` に「変化した」を返させる）は 6 箇所の呼び出し元すべてを書き換える必要があり、1 つ間違えると
+**durable write の消失**という silent なデータ損失になる。得られるものは idle 経路以外では小さい。
+
+案 (b) は `expire_due` の中だけで閉じる。lock を取る前に lock-free の `load()` で「期限到来が 1 件も無い」ことを
+確かめ、その場合は空を返す。atomically replaced な document を lock 無しで読むのは `get` / `pending` / `events` が
+既に採っている形なので、新しい前提を持ち込まない。権威ある判定は従来どおり lock の中で再度行うので TOCTOU も無い。
+read は 1 tick あたり 2 回残る（expiry 判定と outbox drain）。これを削るには外部 process の書き込みを知る
+invalidation が必要で、本 issue の範囲を超える。
+
+### tick 定数は値を変えず、根拠を書いた
+
+wakeup が tick 1 回あたり 1 回になった時点で、どの定数も「短いから高コスト」ではなくなったため、
+**観測したい状態の粒度で決まる値をそのまま残した**。`PR_REFRESH_TICK` 250 ms / `CUSTODY_TICK` 1 s /
+`SESSION_TEARDOWN_TICK` 1 s / `RETENTION_GC_TICK` 30 s は据え置き。decision maintenance の 250 ms は
+`DECISION_MAINTENANCE_TICK` として定数化した（従来は直書きで根拠も無かった）。値の意味は
+[document/05-daemon.md#background-worker-の待ち方](../../document/05-daemon.md#background-worker-の待ち方) の表に載せた。
+
+### 実測（idle daemon、before / after）
+
+fixture workspace（`/tmp` 配下）と専用 `USAGI_HOME` で `daemon serve` を起動し、3 秒の起動安定後 20 秒間 idle に
+置いて `ps -o time=` で CPU 時間を測った。before は本 issue の親 commit（47b9e1f2）を同じ harness で測った。
+
+| | CPU 時間 / 20 s | core 使用率 |
+|---|---|---|
+| before | 0.370 s | **1.848%** |
+| after | 0.010 s | **0.050%** |
+
+**idle の CPU は約 37 分の 1 になった。**
+
+fsync の削減について、この process 単位の probe では before / after のどちらでも
+`<data-dir>/daemon/user-decisions.json` の作成を観測できなかった（probe が見ていた path が daemon の実際の書き込み先と
+一致していたことを確認できていない）。したがって「期限到来が無ければ書かない」性質は process probe ではなく
+**unit test で固定した**（core: document も store lock も作られず inode も変わらない / bin: worker を数 tick 回しても
+document と `.lock` が存在しない）。
