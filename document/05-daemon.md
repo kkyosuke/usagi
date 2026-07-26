@@ -1299,9 +1299,16 @@ standby の custody は自分の registry entry である。lock も record も�
 | entry が retired | handoff の fail closed、active 消滅後の recovery、または collection が退役させた |
 | entry が別 process を名指す | この process はもうその generation ではない |
 
-active から standby / draining への昇格は loss ではない（退役だけが loss である）。この監視があるため、
+standby から active / draining への昇格は loss ではない（退役だけが loss である）。この監視があるため、
 active が crash して次の start が [recovery](#handoff-protocol) で全 generation を retired にした場合、
 その standby は孤児として残らず自分で終了する。
+
+standby の endpoint が答えるのは handshake と typed refusal だけである。`ServerHello` は role を `standby` と名乗り
+（owner binding は `active` を要求するので、client がこれを data directory の authority と誤認することはない）、
+`daemon.generation-handoff.v1` を advertise する。handshake 後の request は
+[admission fence](#admission-fence) を通し、control / spawn / 他 generation の terminal は fence が拒否する。
+fence が受理する read も、この build の standby は読む runtime state を所有していないため typed に拒否する
+（owner shard の接続は [#562](../.usagi/issues/562-refactor-daemon-durable-runtime-state-owner-shard-global-allocator.md)）。
 
 ### handoff protocol
 
