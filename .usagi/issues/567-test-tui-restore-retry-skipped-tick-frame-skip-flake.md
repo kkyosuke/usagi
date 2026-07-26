@@ -1,13 +1,13 @@
 ---
 number: 567
 title: test(tui): restore retry の skipped-tick 受入テストが frame skip を待たず flake する
-status: todo
+status: done
 priority: high
 labels: [v2, tui, test, ci]
 dependson: []
 related: [554]
 created_at: 2026-07-26T14:58:29.514342+00:00
-updated_at: 2026-07-26T15:37:19.657319+00:00
+updated_at: 2026-07-26T22:50:01.275744+00:00
 ---
 
 ## 問題・影響
