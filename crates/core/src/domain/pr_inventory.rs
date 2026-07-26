@@ -55,12 +55,37 @@ pub fn canonicalize(candidate: &str) -> Option<PrIdentity> {
     )))
 }
 
+/// Whether `byte` ends a candidate token.
+///
+/// An incremental caller carries the bytes after the last such byte into its
+/// next scan, so this predicate is the shared boundary rule rather than one
+/// duplicated per caller.
+#[must_use]
+pub fn is_candidate_terminator(byte: u8) -> bool {
+    byte.is_ascii_whitespace()
+        || byte.is_ascii_control()
+        || matches!(byte, b'\'' | b'\"' | b'<' | b'>')
+}
+
+/// The longest candidate prefix a detection can need.
+///
+/// [`canonicalize`] reads only `https://github.com/<owner>/<repo>/pull/<number>`
+/// and ignores every later path segment, query and fragment, and [`extract`]
+/// already canonicalizes a trailing token that the buffer cut short. An
+/// incremental caller therefore never needs to carry more than this many bytes
+/// to join a candidate split across two buffers. GitHub bounds a login at 39 and
+/// a repository name at 100 characters, so the worst prefix that can canonicalize
+/// is about 185 bytes; this leaves generous headroom without making the carry
+/// unbounded.
+pub const CANDIDATE_PREFIX_MAX: usize = 512;
+
 /// Extracts canonical PRs from one complete byte sequence.
 ///
 /// A candidate is one scheme-delimited *token*: it starts at a scheme and ends
-/// at the first whitespace, control byte or quote. A token that fails
-/// [`canonicalize`] is not re-scanned for a scheme embedded inside it, so a PR
-/// URL carried as another URL's query parameter is deliberately not a detection.
+/// at the first [candidate terminator](is_candidate_terminator). A token that
+/// fails [`canonicalize`] is not re-scanned for a scheme embedded inside it, so a
+/// PR URL carried as another URL's query parameter is deliberately not a
+/// detection.
 #[must_use]
 pub fn extract(bytes: &[u8]) -> Vec<PrIdentity> {
     let mut identities = Vec::new();
@@ -78,11 +103,7 @@ pub fn extract(bytes: &[u8]) -> Vec<PrIdentity> {
         let begin = start + relative;
         let end = bytes[begin..]
             .iter()
-            .position(|byte| {
-                byte.is_ascii_whitespace()
-                    || byte.is_ascii_control()
-                    || matches!(byte, b'\'' | b'\"' | b'<' | b'>')
-            })
+            .position(|byte| is_candidate_terminator(*byte))
             .map_or(bytes.len(), |offset| begin + offset);
         let mut candidate = &bytes[begin..end];
         while matches!(

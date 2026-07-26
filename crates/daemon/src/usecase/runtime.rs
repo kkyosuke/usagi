@@ -925,8 +925,11 @@ impl RuntimeCoordinator {
         journal
             .append(&output)
             .map_err(|()| RuntimeError::Journal)?;
+        // The journal borrowed the chunk and is done with it, so the retention
+        // registry takes the same allocation rather than a second copy of it.
+        let Output { data, .. } = output;
         self.terminals
-            .append_output(&runtime.terminal, output.data.clone())
+            .append_output(&runtime.terminal, data)
             .map_err(RuntimeError::Terminal)
     }
 

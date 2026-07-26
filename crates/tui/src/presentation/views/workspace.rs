@@ -2472,6 +2472,9 @@ mod tests {
             terminal_dropped_bytes: 0,
             terminal_coalesced_bytes: 0,
             terminal_backpressured_bytes: 0,
+            pr_projection_dropped_bytes: 0,
+            pr_projection_coalesced_bytes: 0,
+            pr_projection_gaps: 0,
         };
         let sidecar = super::mascot_metrics(Some(&metrics), 0);
         let with_metrics = sidebar_block_with_sidecar(LEFT_WIDTH, 0, None, &sidecar)
@@ -2802,6 +2805,9 @@ mod tests {
             terminal_dropped_bytes: 0,
             terminal_coalesced_bytes: 0,
             terminal_backpressured_bytes: 0,
+            pr_projection_dropped_bytes: 0,
+            pr_projection_coalesced_bytes: 0,
+            pr_projection_gaps: 0,
         };
         ws.set_metrics(Some(metrics.clone()));
         assert_eq!(ws.metrics(), Some(metrics));
@@ -2830,6 +2836,9 @@ mod tests {
             terminal_dropped_bytes: 0,
             terminal_coalesced_bytes: 0,
             terminal_backpressured_bytes: 0,
+            pr_projection_dropped_bytes: 0,
+            pr_projection_coalesced_bytes: 0,
+            pr_projection_gaps: 0,
         };
 
         // The daemon observation flows through `with_metrics` into the sidecar row

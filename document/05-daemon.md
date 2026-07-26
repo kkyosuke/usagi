@@ -12,6 +12,7 @@ managed session と terminal を所有する daemon の現在の契約である�
 - [daemon process lifecycle](#daemon-process-lifecycle)
 - [launchd supervision](#launchd-supervision)
 - [daemon data directory](#daemon-data-directory)
+- [PR 検出の投影](#pr-検出の投影)
 - [PR refresh scheduler](#pr-refresh-scheduler)
 - [failure logging](#failure-logging)
 - [durable operation](#durable-operation)
@@ -411,6 +412,54 @@ scope / generation / operation fence の不整合、または reconcile write fa
 や outcome から成功を捏造せず、該当 operation を `identity_unknown` の非 spawnable safe failure として現 schema
 に移行する。credential は hydrate せず、restart 後も ephemeral に失効する。旧 PTY 自体は resume せず、利用者には
 inventory の `live: false` と typed safe error で非 live を明示する。
+
+## PR 検出の投影
+
+committed PTY output から PR identity を検出する経路の正本はこの節である。検出結果を remote と突き合わせる
+cadence は [PR refresh scheduler](#pr-refresh-scheduler) が正本で、別の関心事である。
+
+**検出は output の受理と同じ critical section では行わない**。PTY observer が runtime lock 内で行うのは journal への
+commit だけで、lock を解放した後に同じ bytes を bounded queue へ submit する。scan と durable write は専用の
+projection worker が所有する。したがって runtime lock の保持時間は子プロセスの出力量に依存しない。
+
+| 段 | 実行主体 | lock | IO |
+|---|---|---|---|
+| journal への commit | PTY observer | runtime lock | なし |
+| queue への submit | PTY observer | projection queue のみ | なし |
+| scan と inventory 更新 | projection worker | inventory lock | 変化時だけ atomic write |
+
+### 増分検出と carry
+
+scan は「最後の candidate terminator（空白・制御文字・`'"<>`）まで」を対象とし、未終端の残りを次の chunk へ
+carry する。**未終端の token を canonicalize しない**ため、chunk が `pull/423` を `pull/42` で切っても誤った PR を
+記録しない。carry は canonical PR URL の prefix 長から導いた上限を持ち、超える run は捨てる（その長さの token は
+carry で救えない）。carry を保持する terminal 数にも上限がある。
+
+terminal が exit すると carry を flush して回収する。これにより、出力の最後の行が terminator を伴わない場合でも
+検出される。
+
+### bounded queue
+
+queue は未投影 byte 数で bound する。満杯なら **incoming chunk を捨て、同じ順序位置に gap を記録する**。gap は
+carry を破棄させる: dropped bytes を跨いで連結すると、出力に存在しなかった PR URL を合成し得るためである。
+同一 terminal の隣接 chunk は merge 上限まで coalesce し、entry 数が chunk 数ではなく byte 数に比例するようにする。
+
+worker の停止は queue の close で行う。close 後に drain し終えると `recv` が終端を返して thread が終わるため、
+worker は timer も shutdown flag の polling も持たない。
+
+### durable snapshot の cache
+
+`pr-inventory.json` は process 内で cache し、write-through で更新する。**PR を含まない chunk は store を読み書き
+しない**。read は process ごとに 1 回の hydrate だけで、snapshot 応答も同じ cache から返す。write が失敗した場合は
+cache を破棄する（memory が durable より先に進んだ状態を残さない）。
+
+同一 process 内で inventory を書くのは projector だけであり、cross-generation の single writer 契約は
+[#518](../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md) が扱う。
+
+### metrics
+
+queue が落とした byte 数、coalesce した byte 数、記録した gap 数を公開する。いずれも byte と件数だけで、
+terminal output・terminal identity・session identity は含まない。
 
 ## PR refresh scheduler
 

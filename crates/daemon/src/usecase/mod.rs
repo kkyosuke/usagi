@@ -21,6 +21,7 @@ pub mod generic_terminal;
 pub mod metrics;
 pub mod orchestration;
 pub mod pr_inventory;
+pub mod pr_projection;
 pub mod restart;
 pub mod runtime;
 pub mod serve;

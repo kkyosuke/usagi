@@ -13790,6 +13790,9 @@ mod tests {
                 terminal_dropped_bytes: 0,
                 terminal_coalesced_bytes: 0,
                 terminal_backpressured_bytes: 0,
+                pr_projection_dropped_bytes: 0,
+                pr_projection_coalesced_bytes: 0,
+                pr_projection_gaps: 0,
             })
         }
     }

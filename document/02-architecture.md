@@ -630,6 +630,8 @@ daemon は journal に commit 済みの PTY output から HTTP(S) の `github.co
 だけを検出し、suffix・query・fragment を除いた canonical URL を stable `SessionId` ごとの PR inventory
 へ投影する。inventory は daemon data directory の atomically replaced JSON snapshot であり、terminal ID、
 worktree path、TUI selection を identity に使わない。検出は増分で行い、chunk / UTF-8 境界をまたぐ候補も扱う。
+検出は output を受理する critical section の外で行い、投影の詳細は
+[5. daemon#PR 検出の投影](05-daemon.md#pr-検出の投影) が正本である。
 credential・control character・不正 percent encoding・非 GitHub host・0 または overflow の番号は fail-closed
 で除外する。再検出は revision を増やさず、ユーザーが pin または dismiss した entry を復活・上書きしない。
 IPC wire、`gh` enrichment、TUI 表示はこの projection を読む後続の面の責務である。

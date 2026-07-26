@@ -1,18 +1,42 @@
 //! Incremental projection of committed PTY output into durable PR inventories.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
 use usagi_core::{
     domain::{
         id::{SessionId, TerminalId},
-        pr_inventory::{PrIdentity, PrState, extract},
+        pr_inventory::{
+            CANDIDATE_PREFIX_MAX, PrIdentity, PrInventory, PrState, extract,
+            is_candidate_terminator,
+        },
     },
     usecase::pr_inventory::PrInventoryPort,
 };
 
+/// How many terminals may hold a carry buffer at once.
+///
+/// [`OutputPrProjector::release_terminal`] reclaims eagerly on exit, so this only
+/// backstops a terminal whose exit this projector never observes. Each carry is
+/// at most [`CANDIDATE_PREFIX_MAX`] bytes.
+const CARRY_TERMINALS_MAX: usize = 256;
+
 /// Parses only bytes supplied after the terminal journal has committed them.
+///
+/// The durable snapshot is cached in memory and written through, so projecting a
+/// chunk performs no read. A chunk that mentions no PR at all — nearly every
+/// chunk — does not touch the store in either direction.
+///
+/// Detection is incremental: only the region up to the last candidate terminator
+/// is extracted, and the unterminated remainder is carried into the next chunk.
+/// A truncated token is therefore never canonicalized, so a chunk that cuts
+/// `pull/423` after `pull/42` cannot record the wrong PR.
 pub struct OutputPrProjector<P> {
     store: P,
-    tails: BTreeMap<TerminalId, VecDeque<u8>>,
+    hydrated: bool,
+    sessions: BTreeMap<SessionId, PrInventory>,
+    carries: BTreeMap<TerminalId, Vec<u8>>,
 }
 
 /// The only process boundary needed by PR refresh. Implementations must spawn
@@ -178,7 +202,7 @@ impl<R: GhProcessPort, C: RefreshClock> RefreshWorker<R, C> {
     /// Returns the durable inventory port's read error.
     pub fn rebuild<P: PrInventoryPort>(
         &mut self,
-        projector: &OutputPrProjector<P>,
+        projector: &mut OutputPrProjector<P>,
     ) -> Result<(), P::Error> {
         let now_ms = self.clock.now_ms();
         for identity in projector.refresh_candidates()? {
@@ -194,7 +218,7 @@ impl<R: GhProcessPort, C: RefreshClock> RefreshWorker<R, C> {
     /// Returns the durable inventory port's read error.
     pub fn claim_due<P: PrInventoryPort>(
         &mut self,
-        projector: &OutputPrProjector<P>,
+        projector: &mut OutputPrProjector<P>,
     ) -> Result<Vec<PrIdentity>, P::Error> {
         let now_ms = self.clock.now_ms();
         for identity in projector.refresh_candidates()? {
@@ -250,9 +274,90 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
     pub fn new(store: P) -> Self {
         Self {
             store,
-            tails: BTreeMap::new(),
+            hydrated: false,
+            sessions: BTreeMap::new(),
+            carries: BTreeMap::new(),
         }
     }
+
+    /// Reads the durable snapshot once per process. Every later access is served
+    /// from memory.
+    fn hydrate(&mut self) -> Result<(), P::Error> {
+        if !self.hydrated {
+            self.sessions = self.store.load()?;
+            self.hydrated = true;
+        }
+        Ok(())
+    }
+
+    /// Writes the cache through to the durable snapshot.
+    ///
+    /// A failed write drops the cache: memory must never stay ahead of what
+    /// actually persisted, or a restart would silently lose discoveries this
+    /// process still believes are durable.
+    fn save(&mut self) -> Result<(), P::Error> {
+        if let Err(error) = self.store.save(&self.sessions) {
+            self.hydrated = false;
+            self.sessions = BTreeMap::new();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Records `identities` against `session`, persisting only a real change.
+    fn discover(
+        &mut self,
+        session: SessionId,
+        identities: Vec<PrIdentity>,
+    ) -> Result<bool, P::Error> {
+        if identities.is_empty() {
+            return Ok(false);
+        }
+        self.hydrate()?;
+        let changed = self
+            .sessions
+            .entry(session)
+            .or_default()
+            .discover(identities);
+        if changed {
+            self.save()?;
+        }
+        Ok(changed)
+    }
+
+    /// Extracts from the terminated region of `carry + bytes` and carries the
+    /// unterminated remainder into the next chunk.
+    fn scan(&mut self, terminal: TerminalId, bytes: &[u8]) -> Vec<PrIdentity> {
+        let carry = self.carries.remove(&terminal).unwrap_or_default();
+        let scanned: Cow<'_, [u8]> = if carry.is_empty() {
+            Cow::Borrowed(bytes)
+        } else {
+            let mut combined = carry;
+            combined.extend_from_slice(bytes);
+            Cow::Owned(combined)
+        };
+        let boundary = scanned
+            .iter()
+            .rposition(|byte| is_candidate_terminator(*byte))
+            .map_or(0, |index| index + 1);
+        let identities = extract(&scanned[..boundary]);
+        self.remember_carry(terminal, &scanned[boundary..]);
+        identities
+    }
+
+    /// Retains an unterminated trailing token so the next chunk can complete it.
+    fn remember_carry(&mut self, terminal: TerminalId, carry: &[u8]) {
+        // A run longer than the longest prefix a detection can need cannot become
+        // a candidate this carry would rescue, so it is dropped rather than grown.
+        if carry.is_empty() || carry.len() > CANDIDATE_PREFIX_MAX {
+            return;
+        }
+        if self.carries.len() >= CARRY_TERMINALS_MAX && !self.carries.contains_key(&terminal) {
+            return;
+        }
+        self.carries.insert(terminal, carry.to_vec());
+    }
+
     /// Projects a committed terminal segment. Root terminals have no session inventory.
     ///
     /// # Errors
@@ -267,21 +372,43 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
         let Some(session) = session else {
             return Ok(false);
         };
-        let tail = self.tails.entry(terminal).or_default();
-        let mut combined: Vec<u8> = tail.iter().copied().collect();
-        combined.extend_from_slice(bytes);
-        let identities = extract(&combined);
-        tail.extend(bytes.iter().copied());
-        while tail.len() > 4096 {
-            tail.pop_front();
-        }
-        let mut sessions = self.store.load()?;
-        let changed = sessions.entry(session).or_default().discover(identities);
-        if changed {
-            self.store.save(&sessions)?;
-        }
-        Ok(changed)
+        let identities = self.scan(terminal, bytes);
+        self.discover(session, identities)
     }
+
+    /// Forgets the carry for `terminal` because bytes between the carry and the
+    /// next chunk were dropped.
+    ///
+    /// Joining across a gap could synthesize a PR URL that never appeared in the
+    /// output, so a gap discards the carry instead of completing it.
+    pub fn mark_gap(&mut self, terminal: TerminalId) {
+        self.carries.remove(&terminal);
+    }
+
+    /// Reclaims the carry for an exited terminal, crediting a candidate that the
+    /// output never terminated.
+    ///
+    /// # Errors
+    ///
+    /// Returns the durable inventory port's read or write error.
+    pub fn release_terminal(
+        &mut self,
+        terminal: TerminalId,
+        session: Option<SessionId>,
+    ) -> Result<bool, P::Error> {
+        let carry = self.carries.remove(&terminal).unwrap_or_default();
+        let Some(session) = session else {
+            return Ok(false);
+        };
+        self.discover(session, extract(&carry))
+    }
+
+    /// How many terminals currently hold a carry buffer. Tests assert the bound.
+    #[must_use]
+    pub fn carried_terminals(&self) -> usize {
+        self.carries.len()
+    }
+
     #[must_use]
     pub fn into_store(self) -> P {
         self.store
@@ -293,9 +420,10 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
     /// # Errors
     ///
     /// Returns the durable inventory port's read error.
-    pub fn refresh_candidates(&self) -> Result<Vec<PrIdentity>, P::Error> {
-        let sessions = self.store.load()?;
-        Ok(sessions
+    pub fn refresh_candidates(&mut self) -> Result<Vec<PrIdentity>, P::Error> {
+        self.hydrate()?;
+        Ok(self
+            .sessions
             .values()
             .flat_map(|inventory| inventory.entries.values())
             .filter(|entry| !entry.pinned && entry.state != PrState::Dismissed)
@@ -315,13 +443,13 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
         identity: &PrIdentity,
         view: &GhPrView,
     ) -> Result<bool, P::Error> {
-        let mut sessions = self.store.load()?;
+        self.hydrate()?;
         let mut changed = false;
-        for inventory in sessions.values_mut() {
+        for inventory in self.sessions.values_mut() {
             changed = inventory.apply_refresh(identity, view.title.clone(), view.state) || changed;
         }
         if changed {
-            self.store.save(&sessions)?;
+            self.save()?;
             return Ok(true);
         }
         Ok(false)
@@ -332,13 +460,13 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
     ///
     /// Returns the durable inventory port's read or write error.
     pub fn publish_failure(&mut self, identity: &PrIdentity) -> Result<bool, P::Error> {
-        let mut sessions = self.store.load()?;
+        self.hydrate()?;
         let mut changed = false;
-        for inventory in sessions.values_mut() {
+        for inventory in self.sessions.values_mut() {
             changed = inventory.mark_refresh_backoff(identity) || changed;
         }
         if changed {
-            self.store.save(&sessions)?;
+            self.save()?;
             return Ok(true);
         }
         Ok(false)
@@ -350,10 +478,11 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
     ///
     /// Returns the durable inventory port's read error.
     pub fn snapshot(
-        &self,
+        &mut self,
         session: SessionId,
     ) -> Result<usagi_core::usecase::client::PrSnapshot, P::Error> {
-        let inventory = self.store.load()?.remove(&session).unwrap_or_default();
+        self.hydrate()?;
+        let inventory = self.sessions.get(&session).cloned().unwrap_or_default();
         Ok((session, inventory).into())
     }
 }
@@ -371,6 +500,9 @@ mod tests {
     struct Store {
         values: RefCell<BTreeMap<SessionId, usagi_core::domain::pr_inventory::PrInventory>>,
         fail_save: Cell<bool>,
+        fail_load: Cell<bool>,
+        loads: Cell<usize>,
+        saves: Cell<usize>,
     }
     impl PrInventoryPort for Store {
         type Error = ();
@@ -378,12 +510,17 @@ mod tests {
             &self,
         ) -> Result<BTreeMap<SessionId, usagi_core::domain::pr_inventory::PrInventory>, ()>
         {
+            self.loads.set(self.loads.get() + 1);
+            if self.fail_load.get() {
+                return Err(());
+            }
             Ok(self.values.borrow().clone())
         }
         fn save(
             &self,
             value: &BTreeMap<SessionId, usagi_core::domain::pr_inventory::PrInventory>,
         ) -> Result<(), ()> {
+            self.saves.set(self.saves.get() + 1);
             if self.fail_save.get() {
                 return Err(());
             }
@@ -423,19 +560,20 @@ mod tests {
         projector
             .observe_committed(terminal, Some(a), b"https://github.com/o/r/pull/1\n")
             .unwrap();
-        let id = projector.store.values.borrow()[&a]
+        let id = projector.sessions[&a]
             .entries
             .keys()
             .next()
             .unwrap()
             .clone();
+        // The cache is the in-process authority, so a user-owned transition is
+        // applied through it rather than behind it.
         projector
-            .store
-            .values
-            .borrow_mut()
+            .sessions
             .get_mut(&a)
             .unwrap()
             .set_user_state(&id, PrState::Dismissed, true);
+        projector.save().unwrap();
         projector
             .observe_committed(terminal, Some(a), b"https://github.com/o/r/pull/1\n")
             .unwrap();
@@ -446,14 +584,21 @@ mod tests {
                 b"https://github.com/o/r/pull/1\n",
             )
             .unwrap();
+        // A user-owned tombstone survives re-detection, and it survives it in the
+        // durable snapshot too, not only in memory.
         assert_eq!(
-            projector.store.values.borrow()[&a].entries[&id].state,
+            projector.snapshot(a).unwrap().entries[0].state,
             PrState::Dismissed
         );
-        assert_eq!(projector.store.values.borrow()[&b].entries.len(), 1);
+        let store = projector.into_store();
+        assert_eq!(
+            store.values.borrow()[&a].entries[&id].state,
+            PrState::Dismissed
+        );
+        assert_eq!(store.values.borrow()[&b].entries.len(), 1);
     }
     #[test]
-    fn ignores_root_output_and_bounds_the_terminal_tail() {
+    fn ignores_root_output_and_bounds_the_carry() {
         let mut projector = OutputPrProjector::new(Store::default());
         let terminal = TerminalId::new();
         assert!(
@@ -461,11 +606,192 @@ mod tests {
                 .observe_committed(terminal, None, b"https://github.com/o/r/pull/1\n")
                 .unwrap()
         );
+        // Root output must not even reserve a carry.
+        assert_eq!(projector.carried_terminals(), 0);
+        let session = SessionId::new();
+        // An unterminated run longer than the longest prefix a detection needs is
+        // dropped rather than carried.
+        projector
+            .observe_committed(
+                terminal,
+                Some(session),
+                &vec![b'x'; CANDIDATE_PREFIX_MAX + 1],
+            )
+            .unwrap();
+        assert_eq!(projector.carried_terminals(), 0);
+        // A short unterminated run is carried.
+        projector
+            .observe_committed(terminal, Some(session), b" short")
+            .unwrap();
+        assert_eq!(projector.carried_terminals(), 1);
+    }
+    #[test]
+    fn a_plain_output_chunk_never_touches_the_durable_store() {
+        let mut projector = OutputPrProjector::new(Store::default());
+        let terminal = TerminalId::new();
+        let session = SessionId::new();
+        for _ in 0..64 {
+            assert!(
+                !projector
+                    .observe_committed(terminal, Some(session), b"compiling usagi-core ... ok\n")
+                    .unwrap()
+            );
+        }
+        let store = projector.into_store();
+        assert_eq!(store.loads.get(), 0, "a chunk with no PR must not read");
+        assert_eq!(store.saves.get(), 0);
+    }
+    #[test]
+    fn the_durable_snapshot_is_read_once_however_many_chunks_arrive() {
+        let mut projector = OutputPrProjector::new(Store::default());
+        let terminal = TerminalId::new();
+        let session = SessionId::new();
+        for number in 1..=32 {
+            projector
+                .observe_committed(
+                    terminal,
+                    Some(session),
+                    format!("https://github.com/o/r/pull/{number}\n").as_bytes(),
+                )
+                .unwrap();
+        }
+        // Re-detecting an existing identity must not write again either.
+        for number in 1..=32 {
+            assert!(
+                !projector
+                    .observe_committed(
+                        terminal,
+                        Some(session),
+                        format!("https://github.com/o/r/pull/{number}\n").as_bytes(),
+                    )
+                    .unwrap()
+            );
+        }
+        let store = projector.into_store();
+        assert_eq!(store.loads.get(), 1, "hydration happens once per process");
+        assert_eq!(store.saves.get(), 32, "one write per real change");
+    }
+    #[test]
+    fn a_truncated_number_is_never_credited_to_the_wrong_pr() {
+        let mut projector = OutputPrProjector::new(Store::default());
+        let terminal = TerminalId::new();
+        let session = SessionId::new();
+        // The chunk ends mid-number. Crediting `pull/42` here would be a false
+        // detection, so nothing is recorded until the token terminates.
+        assert!(
+            !projector
+                .observe_committed(
+                    terminal,
+                    Some(session),
+                    b"see https://github.com/o/r/pull/42"
+                )
+                .unwrap()
+        );
+        assert!(
+            projector
+                .observe_committed(terminal, Some(session), b"3\n")
+                .unwrap()
+        );
+        let store = projector.into_store();
+        let urls: Vec<String> = store.values.borrow()[&session]
+            .entries
+            .keys()
+            .map(|identity| identity.as_url().to_owned())
+            .collect();
+        assert_eq!(urls, ["https://github.com/o/r/pull/423"]);
+    }
+    #[test]
+    fn a_gap_discards_the_carry_instead_of_joining_across_dropped_bytes() {
+        let mut projector = OutputPrProjector::new(Store::default());
+        let terminal = TerminalId::new();
         let session = SessionId::new();
         projector
-            .observe_committed(terminal, Some(session), &vec![b'x'; 4097])
+            .observe_committed(terminal, Some(session), b"https://github.com/o/r/pu")
             .unwrap();
-        assert_eq!(projector.tails[&terminal].len(), 4096);
+        assert_eq!(projector.carried_terminals(), 1);
+        projector.mark_gap(terminal);
+        assert_eq!(projector.carried_terminals(), 0);
+        // Joining across the gap would synthesize a PR that never appeared.
+        assert!(
+            !projector
+                .observe_committed(terminal, Some(session), b"ll/42\n")
+                .unwrap()
+        );
+        assert!(projector.into_store().values.borrow().is_empty());
+    }
+    #[test]
+    fn exit_reclaims_the_carry_and_credits_an_unterminated_candidate() {
+        let mut projector = OutputPrProjector::new(Store::default());
+        let terminal = TerminalId::new();
+        let session = SessionId::new();
+        // The very last line of a run may never be followed by a terminator.
+        assert!(
+            !projector
+                .observe_committed(
+                    terminal,
+                    Some(session),
+                    b"opened https://github.com/o/r/pull/7"
+                )
+                .unwrap()
+        );
+        assert!(projector.release_terminal(terminal, Some(session)).unwrap());
+        assert_eq!(projector.carried_terminals(), 0);
+        // A root terminal has no inventory to flush into, and a second release is
+        // a no-op rather than a duplicate.
+        assert!(!projector.release_terminal(terminal, None).unwrap());
+        assert!(!projector.release_terminal(terminal, Some(session)).unwrap());
+        let store = projector.into_store();
+        assert_eq!(store.values.borrow()[&session].entries.len(), 1);
+    }
+    #[test]
+    fn the_carry_table_is_bounded_by_terminal_count() {
+        let mut projector = OutputPrProjector::new(Store::default());
+        let session = SessionId::new();
+        for _ in 0..CARRY_TERMINALS_MAX + 8 {
+            projector
+                .observe_committed(TerminalId::new(), Some(session), b"unterminated")
+                .unwrap();
+        }
+        assert_eq!(projector.carried_terminals(), CARRY_TERMINALS_MAX);
+    }
+    #[test]
+    fn a_failed_read_is_retried_and_a_failed_write_forgets_the_cache() {
+        let mut projector = OutputPrProjector::new(Store::default());
+        projector.store.fail_load.set(true);
+        assert!(
+            projector
+                .observe_committed(
+                    TerminalId::new(),
+                    Some(SessionId::new()),
+                    b"https://github.com/o/r/pull/1\n",
+                )
+                .is_err()
+        );
+        projector.store.fail_load.set(false);
+        projector.store.fail_save.set(true);
+        let session = SessionId::new();
+        assert!(
+            projector
+                .observe_committed(
+                    TerminalId::new(),
+                    Some(session),
+                    b"https://github.com/o/r/pull/2\n",
+                )
+                .is_err()
+        );
+        // The write failed, so memory must not keep claiming the entry is durable.
+        projector.store.fail_save.set(false);
+        assert!(
+            projector
+                .observe_committed(
+                    TerminalId::new(),
+                    Some(session),
+                    b"https://github.com/o/r/pull/2\n",
+                )
+                .unwrap()
+        );
+        let store = projector.into_store();
+        assert_eq!(store.values.borrow()[&session].entries.len(), 1);
     }
     #[derive(Clone, Default)]
     struct FakeClock(Rc<Cell<u64>>);
@@ -497,9 +823,16 @@ mod tests {
         }
     }
 
+    /// Feeds one URL as committed output. The newline terminates the candidate,
+    /// which is what makes it eligible for detection in this chunk rather than
+    /// being carried into the next one.
     fn discover(projector: &mut OutputPrProjector<Store>, session: SessionId, url: &str) {
         projector
-            .observe_committed(TerminalId::new(), Some(session), url.as_bytes())
+            .observe_committed(
+                TerminalId::new(),
+                Some(session),
+                format!("{url}\n").as_bytes(),
+            )
             .unwrap();
     }
 
@@ -519,8 +852,8 @@ mod tests {
             .push_back(Ok("{\"title\":\"Done\",\"state\":\"MERGED\"}".into()));
         let calls = Rc::clone(&runner.calls);
         let mut worker = RefreshWorker::new(runner, FakeClock::default(), 2, 60_000);
-        worker.rebuild(&projector).unwrap();
-        let due = worker.claim_due(&projector).unwrap();
+        worker.rebuild(&mut projector).unwrap();
+        let due = worker.claim_due(&mut projector).unwrap();
         assert_eq!(due, vec![id.clone()]);
         let result = worker.fetch(&id);
         assert!(worker.complete(&mut projector, &id, result).unwrap());
@@ -619,8 +952,8 @@ mod tests {
         ]);
         let clock = FakeClock::default();
         let mut worker = RefreshWorker::new(runner, clock.clone(), 1, 10_000);
-        worker.rebuild(&projector).unwrap();
-        let due = worker.claim_due(&projector).unwrap();
+        worker.rebuild(&mut projector).unwrap();
+        let due = worker.claim_due(&mut projector).unwrap();
         let result = worker.fetch(&due[0]);
         assert!(worker.complete(&mut projector, &id, result).unwrap());
         let stale = projector.snapshot(session).unwrap();
@@ -631,9 +964,9 @@ mod tests {
         );
         assert!(!projector.publish_failure(&id).unwrap());
         clock.set(1_999);
-        assert!(worker.claim_due(&projector).unwrap().is_empty());
+        assert!(worker.claim_due(&mut projector).unwrap().is_empty());
         clock.set(2_000);
-        let due = worker.claim_due(&projector).unwrap();
+        let due = worker.claim_due(&mut projector).unwrap();
         let result = worker.fetch(&due[0]);
         assert!(worker.complete(&mut projector, &id, result).unwrap());
         assert!(
@@ -647,9 +980,9 @@ mod tests {
                 )
                 .unwrap()
         );
-        assert!(worker.claim_due(&projector).unwrap().is_empty());
+        assert!(worker.claim_due(&mut projector).unwrap().is_empty());
         clock.set(12_000);
-        assert_eq!(worker.claim_due(&projector).unwrap(), vec![id]);
+        assert_eq!(worker.claim_due(&mut projector).unwrap(), vec![id]);
     }
 
     #[test]
@@ -666,16 +999,16 @@ mod tests {
         let clock = FakeClock::default();
         clock.set(50_000);
         let mut first = RefreshWorker::new(FakeRunner::default(), clock.clone(), 2, 60_000);
-        first.rebuild(&projector).unwrap();
-        let selected = first.claim_due(&projector).unwrap();
+        first.rebuild(&mut projector).unwrap();
+        let selected = first.claim_due(&mut projector).unwrap();
         assert_eq!(selected.len(), 2);
         assert_eq!(selected[0].as_url(), "https://github.com/o/r/pull/1");
         assert_eq!(selected[1].as_url(), "https://github.com/o/r/pull/2");
-        assert!(first.claim_due(&projector).unwrap().len() <= 1);
+        assert!(first.claim_due(&mut projector).unwrap().len() <= 1);
 
         let mut restarted = RefreshWorker::new(FakeRunner::default(), clock, 2, 60_000);
-        restarted.rebuild(&projector).unwrap();
-        assert_eq!(restarted.claim_due(&projector).unwrap(), selected);
+        restarted.rebuild(&mut projector).unwrap();
+        assert_eq!(restarted.claim_due(&mut projector).unwrap(), selected);
     }
 
     #[test]
@@ -692,15 +1025,15 @@ mod tests {
             .push_back(Ok("{\"title\":\"remote\",\"state\":\"OPEN\"}".into()));
         let clock = FakeClock::default();
         let mut worker = RefreshWorker::new(runner, clock.clone(), 1, 10_000);
-        worker.rebuild(&projector).unwrap();
-        let due = worker.claim_due(&projector).unwrap();
+        worker.rebuild(&mut projector).unwrap();
+        let due = worker.claim_due(&mut projector).unwrap();
         let result = worker.fetch(&due[0]);
         projector.store.fail_save.set(true);
         assert!(worker.complete(&mut projector, &id, result).is_err());
         clock.set(1_999);
-        assert!(worker.claim_due(&projector).unwrap().is_empty());
+        assert!(worker.claim_due(&mut projector).unwrap().is_empty());
         clock.set(2_000);
-        assert_eq!(worker.claim_due(&projector).unwrap(), vec![id.clone()]);
+        assert_eq!(worker.claim_due(&mut projector).unwrap(), vec![id.clone()]);
 
         let mut failure_projector = OutputPrProjector::new(Store::default());
         discover(&mut failure_projector, session, id.as_url());

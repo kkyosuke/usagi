@@ -70,6 +70,9 @@ use usagi_daemon::usecase::orchestration::AdapterRegistry;
 use usagi_daemon::usecase::pr_inventory::{
     GhProcessPort, OutputPrProjector, RefreshClock, RefreshWorker,
 };
+use usagi_daemon::usecase::pr_projection::{
+    PrProjection, PrProjectionQueue, pr_projection_counters,
+};
 use usagi_daemon::usecase::runtime::{
     OutputJournal, ProvisionContext, PtySpawner, RuntimeStore, RuntimeStoreSnapshot,
     SandboxLauncher, SpawnProvision, TerminateReapError,
@@ -1370,6 +1373,10 @@ fn spawn_ipc_server(
     let pr_inventory = Arc::new(Mutex::new(OutputPrProjector::new(PrInventoryStore::new(
         data_dir.join("daemon"),
     ))));
+    // Deferred PR detection. The observers submit committed bytes here after
+    // releasing the runtime lock, so no scan and no durable write happens inside
+    // it (#555).
+    let projection = Arc::new(PrProjectionQueue::new());
     let pipeline_metrics = Arc::new(TerminalPipelineMetrics::default());
     // One daemon-wide aggregate retention budget for exited terminal and Agent
     // finals (#526). Both owners reserve from it before spawning and commit
@@ -1400,11 +1407,7 @@ fn spawn_ipc_server(
         Arc::clone(&user_environment),
         retention.clone(),
     )?;
-    start_terminal_observer(
-        Arc::clone(&terminal),
-        observations,
-        Arc::clone(&pr_inventory),
-    )?;
+    start_terminal_observer(Arc::clone(&terminal), observations, Arc::clone(&projection))?;
     let (agent_pty, agent_observations) =
         AgentPty::new(terminal_environment(), Arc::clone(&pipeline_metrics));
     let mcp_command = std::env::current_exe()?;
@@ -1428,9 +1431,10 @@ fn spawn_ipc_server(
     start_agent_observer(
         Arc::clone(&agent),
         agent_observations,
-        Arc::clone(&pr_inventory),
+        Arc::clone(&projection),
         Arc::clone(&supervisor),
     )?;
+    start_pr_projection_worker(Arc::clone(&pr_inventory), Arc::clone(&projection))?;
     let decisions = Arc::new(UserDecisionStore::new(data_dir.join("daemon")));
     consume_user_decision_events(&decisions)
         .map_err(|error| std::io::Error::other(error.message))?;
@@ -1457,6 +1461,7 @@ fn spawn_ipc_server(
         agent,
         retention,
         pr_inventory,
+        projection,
         decisions,
         Arc::new(Mutex::new(MetricsBroker::default())),
         Arc::new(Mutex::new(ProcessResourceSampler { previous: None })),
@@ -1516,8 +1521,8 @@ where
         .spawn(move || {
             let mut worker =
                 RefreshWorker::new(runner, clock, PR_REFRESH_PER_TICK, PR_REFRESH_FRESHNESS_MS);
-            if let Ok(projector) = pr_inventory.lock()
-                && worker.rebuild(&projector).is_err()
+            if let Ok(mut projector) = pr_inventory.lock()
+                && worker.rebuild(&mut projector).is_err()
             {
                 ErrorLog::record("PR refresh schedule rebuild failed");
             }
@@ -1525,7 +1530,7 @@ where
                 let due = pr_inventory
                     .lock()
                     .ok()
-                    .and_then(|projector| worker.claim_due(&projector).ok())
+                    .and_then(|mut projector| worker.claim_due(&mut projector).ok())
                     .unwrap_or_default();
                 for identity in due {
                     if shutdown.load(Ordering::Acquire) {
@@ -1864,30 +1869,42 @@ fn open_agent_runtime(
 fn start_agent_observer(
     agent: SharedAgentRuntime,
     observations: Receiver<AgentPtyObservation>,
-    pr_inventory: SharedPrInventory,
+    projection: Arc<PrProjectionQueue>,
     supervisor: SharedSupervisorRuntime,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("usagi-agent-observer".to_string())
         .spawn(move || {
             while let Ok(observation) = observations.recv() {
-                let Ok(mut agent) = agent.lock() else {
-                    break;
-                };
                 match observation {
                     AgentPtyObservation::Output(reference, bytes) => {
-                        if agent.output(&reference, bytes.clone()).is_ok()
-                            && let Ok(mut projector) = pr_inventory.lock()
-                        {
-                            let _ = projector.observe_committed(
+                        // The runtime lock covers journaling this chunk and
+                        // nothing else. PR detection is submitted afterwards, so
+                        // the lock is never held for a scan or for durable IO.
+                        let committed = {
+                            let Ok(mut agent) = agent.lock() else {
+                                break;
+                            };
+                            agent.output(&reference, bytes.clone()).is_ok()
+                        };
+                        if committed {
+                            projection.submit_output(
                                 reference.terminal_id,
                                 reference.session_id,
-                                &bytes,
+                                bytes,
                             );
                         }
                     }
                     AgentPtyObservation::Exited(reference, status) => {
-                        let _ = agent.exit(&reference, status);
+                        {
+                            let Ok(mut agent) = agent.lock() else {
+                                break;
+                            };
+                            let _ = agent.exit(&reference, status);
+                        }
+                        // A candidate the output never terminated is only
+                        // creditable once nothing more can arrive for it.
+                        projection.submit_closed(reference.terminal_id, reference.session_id);
                         if let Ok(runtime) = supervisor.lock()
                             && let Err(error) =
                                 runtime.tick_all(chrono::Utc::now(), &mut DeferredDecisionWaker)
@@ -1896,6 +1913,40 @@ fn start_agent_observer(
                                 "supervisor completion reconciliation deferred: {error}"
                             ));
                         }
+                    }
+                }
+            }
+        })
+        .map(|_| ())
+}
+
+/// Starts the only production PR projection worker.
+///
+/// It owns every scan and every durable inventory write that PTY output causes.
+/// The queue's `recv` parks on a condvar and returns `None` once the queue is
+/// closed and drained, so this thread has no timer and no polling.
+fn start_pr_projection_worker(
+    pr_inventory: SharedPrInventory,
+    projection: Arc<PrProjectionQueue>,
+) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("usagi-pr-projection".to_string())
+        .spawn(move || {
+            while let Some(item) = projection.recv() {
+                let Ok(mut projector) = pr_inventory.lock() else {
+                    break;
+                };
+                match item {
+                    PrProjection::Output {
+                        terminal,
+                        session,
+                        bytes,
+                    } => {
+                        let _ = projector.observe_committed(terminal, session, &bytes);
+                    }
+                    PrProjection::Gap { terminal } => projector.mark_gap(terminal),
+                    PrProjection::Closed { terminal, session } => {
+                        let _ = projector.release_terminal(terminal, session);
                     }
                 }
             }
@@ -1959,7 +2010,7 @@ fn new_terminal_runtime(
 fn start_terminal_observer<S, Q>(
     terminal: Arc<Mutex<GenericTerminalRuntime<TrustedLoginShell, S, DaemonPty, Q>>>,
     observations: Receiver<PtyObservation>,
-    pr_inventory: SharedPrInventory,
+    projection: Arc<PrProjectionQueue>,
 ) -> std::io::Result<()>
 where
     S: TerminalStore + Send + 'static,
@@ -1969,23 +2020,32 @@ where
         .name("usagi-terminal-observer".to_string())
         .spawn(move || {
             while let Ok(observation) = observations.recv() {
-                let Ok(mut terminal) = terminal.lock() else {
-                    break;
-                };
                 match observation {
                     PtyObservation::Output(reference, bytes) => {
-                        if terminal.output(&reference, bytes.clone()).is_ok()
-                            && let Ok(mut projector) = pr_inventory.lock()
-                        {
-                            let _ = projector.observe_committed(
+                        // As in the Agent observer: the lock covers journaling
+                        // only, and PR detection happens after it is released.
+                        let committed = {
+                            let Ok(mut terminal) = terminal.lock() else {
+                                break;
+                            };
+                            terminal.output(&reference, bytes.clone()).is_ok()
+                        };
+                        if committed {
+                            projection.submit_output(
                                 reference.terminal_id,
                                 reference.session_id,
-                                &bytes,
+                                bytes,
                             );
                         }
                     }
                     PtyObservation::Exited(reference, status) => {
-                        let _ = terminal.exit(&reference, status);
+                        {
+                            let Ok(mut terminal) = terminal.lock() else {
+                                break;
+                            };
+                            let _ = terminal.exit(&reference, status);
+                        }
+                        projection.submit_closed(reference.terminal_id, reference.session_id);
                     }
                 }
             }
@@ -2003,6 +2063,7 @@ fn start_ipc_accept_loop(
     agent: SharedAgentRuntime,
     retention: usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention,
     pr_inventory: SharedPrInventory,
+    projection: Arc<PrProjectionQueue>,
     decisions: Arc<UserDecisionStore>,
     metrics: SharedMetricsBroker,
     process_metrics: SharedProcessResourceSampler,
@@ -2016,6 +2077,10 @@ fn start_ipc_accept_loop(
             let _exit = ShutdownOnIpcWorkerExit {
                 shutdown: Arc::clone(&shutdown),
             };
+            // Closing the projection queue is what retires its worker: `recv`
+            // returns `None` once the queue is closed and drained, so the thread
+            // needs no shutdown flag of its own and never polls one.
+            let _projection = ClosePrProjectionOnExit { projection };
             // One workspace-global visibility authority for exited terminal
             // tombstones (#525), shared by every client connection so multiple
             // TUIs converge on the same Observed / Dismissed state.
@@ -2096,6 +2161,18 @@ fn start_ipc_accept_loop(
             }
             listener
         })
+}
+
+/// Retires the PR projection worker whenever the accept worker exits, including
+/// on an unwind, so no thread is left parked on a queue nothing will feed.
+struct ClosePrProjectionOnExit {
+    projection: Arc<PrProjectionQueue>,
+}
+
+impl Drop for ClosePrProjectionOnExit {
+    fn drop(&mut self) {
+        self.projection.close();
+    }
 }
 
 /// Wakes the lifecycle owner whenever the accept worker unwinds or exits.
@@ -2780,7 +2857,7 @@ fn dispatch_pr_snapshot(
             } => inventory
                 .lock()
                 .ok()
-                .and_then(|projector| projector.snapshot(payload.session_id).ok())
+                .and_then(|mut projector| projector.snapshot(payload.session_id).ok())
                 .and_then(|snapshot| serde_json::to_value(snapshot).ok()),
             _ => None,
         });
@@ -3253,6 +3330,7 @@ fn dispatch_metrics(
                     })?
                     .snapshot();
                 let retention = output_pipeline_counters();
+                let projection_counters = pr_projection_counters();
                 let sampled_at_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |duration| {
@@ -3267,6 +3345,9 @@ fn dispatch_metrics(
                     terminal_backpressured_bytes: pipeline_metrics
                         .backpressured_bytes
                         .load(Ordering::Relaxed),
+                    pr_projection_dropped_bytes: projection_counters.dropped_bytes,
+                    pr_projection_coalesced_bytes: projection_counters.coalesced_bytes,
+                    pr_projection_gaps: projection_counters.gaps,
                 }))
             }
         }
@@ -7826,7 +7907,10 @@ mod tests {
             .observe_committed(
                 TerminalId::new(),
                 Some(session),
-                identity.as_url().as_bytes(),
+                // The newline terminates the candidate. Without it the projector
+                // carries the token into the next chunk instead of crediting a
+                // token the output may not have finished writing.
+                format!("{}\n", identity.as_url()).as_bytes(),
             )
             .unwrap();
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -8803,6 +8887,90 @@ mod tests {
         }
     }
 
+    /// Waits for `condition`, failing the test rather than hanging if the
+    /// projection worker never applies the queued work.
+    fn await_projection(condition: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !condition() {
+            assert!(
+                Instant::now() < deadline,
+                "the projection worker did not apply queued work"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn the_projection_worker_owns_every_scan_and_durable_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let projector = Arc::new(Mutex::new(OutputPrProjector::new(PrInventoryStore::new(
+            directory.path(),
+        ))));
+        let projection = Arc::new(PrProjectionQueue::new());
+        start_pr_projection_worker(Arc::clone(&projector), Arc::clone(&projection)).unwrap();
+        let session = SessionId::new();
+        let terminal = TerminalId::new();
+
+        // A terminated candidate is credited by the worker, not by the submitter.
+        projection.submit_output(
+            terminal,
+            Some(session),
+            b"opened https://github.com/o/r/pull/11\n".to_vec(),
+        );
+        await_projection(|| {
+            projector
+                .lock()
+                .is_ok_and(|mut projector| !projector.snapshot(session).unwrap().entries.is_empty())
+        });
+
+        // A gap must discard the carry instead of joining across dropped bytes.
+        projection.submit_output(
+            terminal,
+            Some(session),
+            b" https://github.com/o/r/pu".to_vec(),
+        );
+        projection.submit_gap(terminal);
+        projection.submit_output(terminal, Some(session), b"ll/12\n".to_vec());
+        // A candidate the output never terminated is credited when the terminal
+        // closes, and not before.
+        projection.submit_output(
+            terminal,
+            Some(session),
+            b" https://github.com/o/r/pull/13".to_vec(),
+        );
+        projection.submit_closed(terminal, Some(session));
+        await_projection(|| {
+            projector
+                .lock()
+                .is_ok_and(|mut projector| projector.snapshot(session).unwrap().entries.len() == 2)
+        });
+        let urls: Vec<String> = projector
+            .lock()
+            .unwrap()
+            .snapshot(session)
+            .unwrap()
+            .entries
+            .iter()
+            .map(|entry| entry.identity.as_url().to_owned())
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                "https://github.com/o/r/pull/11",
+                "https://github.com/o/r/pull/13"
+            ],
+            "pull/12 was split across a gap and must not be synthesized"
+        );
+
+        // Closing retires the worker: `recv` returns `None` once drained. The
+        // accept worker's guard is what closes it in production, including on an
+        // unwind, so the guard's drop is the path under test.
+        drop(ClosePrProjectionOnExit {
+            projection: Arc::clone(&projection),
+        });
+        assert_eq!(projection.recv(), None);
+    }
+
     #[test]
     #[allow(clippy::too_many_lines)] // PTY-to-IPC exit observation is one integration scenario.
     fn generic_terminal_exit_reaches_its_resume_response() {
@@ -8831,12 +8999,14 @@ mod tests {
                 working_directory: directory.path().to_path_buf(),
             },
         )));
-        start_terminal_observer(
-            Arc::clone(&runtime),
-            observations,
+        let projection = Arc::new(PrProjectionQueue::new());
+        start_terminal_observer(Arc::clone(&runtime), observations, Arc::clone(&projection))
+            .unwrap();
+        start_pr_projection_worker(
             Arc::new(Mutex::new(OutputPrProjector::new(PrInventoryStore::new(
                 directory.path(),
             )))),
+            Arc::clone(&projection),
         )
         .unwrap();
         let connection = ConnectionId::new();
