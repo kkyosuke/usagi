@@ -61,6 +61,11 @@ impl<S: std::io::Read + std::io::Write> AgentLaunchPort for IpcClient<S> {
         intent: AgentLaunchIntent,
     ) -> Result<AgentLaunchEvent, String> {
         let expected = operation.as_str();
+        // The digest of the very intent submitted here. A final that means another
+        // intent cannot be projected onto this operation (#522).
+        let expected_digest = usagi_core::infrastructure::ipc::agent_operation_digest(
+            &usagi_core::usecase::client::agent_launch_semantic_key(&intent),
+        );
         match self
             .request(DaemonRequest::Agent {
                 operation_id: expected.clone(),
@@ -81,6 +86,9 @@ impl<S: std::io::Read + std::io::Write> AgentLaunchPort for IpcClient<S> {
             DaemonReply::Accepted { .. } => {
                 Err("daemon returned a mismatched operation".to_owned())
             }
+            // A final carries no envelope operation identity, so its body has to
+            // state both the operation it belongs to and the intent's digest before
+            // its terminal may be attributed to this pending operation.
             DaemonReply::Ok(value) => {
                 let Some(terminal) = value.get("terminal").cloned() else {
                     return Err("daemon did not accept agent launch".to_owned());
@@ -88,6 +96,17 @@ impl<S: std::io::Read + std::io::Write> AgentLaunchPort for IpcClient<S> {
                 let Ok(terminal) = serde_json::from_value(terminal) else {
                     return Err("daemon final had an invalid terminal".to_owned());
                 };
+                if value
+                    .get("operation_id")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(expected.as_str())
+                    || value
+                        .get("semantic_digest")
+                        .and_then(serde_json::Value::as_str)
+                        != Some(expected_digest.as_str())
+                {
+                    return Err("daemon final did not identify this operation".to_owned());
+                }
                 if value.get("completed").and_then(serde_json::Value::as_bool) == Some(true) {
                     Ok(AgentLaunchEvent::Succeeded {
                         operation,
@@ -516,6 +535,55 @@ mod tests {
         assert_eq!(
             not_accepted.launch(operation, intent.clone()),
             Err("daemon did not accept agent launch".to_owned())
+        );
+
+        // A final is projected onto this operation only when its body states the
+        // same operation and the digest of this very intent (#522).
+        let digest = usagi_core::infrastructure::ipc::agent_operation_digest(
+            &usagi_core::usecase::client::agent_launch_semantic_key(&intent),
+        );
+        let final_body = |operation_id: &str, digest: &str, completed: bool| {
+            serde_json::json!({
+                "operation_id": operation_id,
+                "semantic_digest": digest,
+                "terminal": terminal(workspace, session),
+                "completed": completed,
+            })
+        };
+        let identified = final_body(&operation.as_str(), &digest, true);
+        let expected_terminal =
+            serde_json::from_value(identified["terminal"].clone()).expect("fixture terminal");
+        assert_eq!(
+            ipc_client(ResponseOutcome::Ok, identified).launch(operation, intent.clone()),
+            Ok(AgentLaunchEvent::Succeeded {
+                operation,
+                terminal: expected_terminal,
+            })
+        );
+        for refused in [
+            // Another operation's final, and this operation with another intent.
+            final_body(&OperationId::new().as_str(), &digest, true),
+            final_body(
+                &operation.as_str(),
+                &usagi_core::infrastructure::ipc::agent_operation_digest("other-intent"),
+                true,
+            ),
+            // A legacy final that identifies nothing.
+            serde_json::json!({"terminal": terminal(workspace, session), "completed": true}),
+        ] {
+            assert_eq!(
+                ipc_client(ResponseOutcome::Ok, refused.clone()).launch(operation, intent.clone()),
+                Err("daemon final did not identify this operation".to_owned()),
+                "{refused}"
+            );
+        }
+        assert_eq!(
+            ipc_client(
+                ResponseOutcome::Ok,
+                final_body(&operation.as_str(), &digest, false)
+            )
+            .launch(operation, intent.clone()),
+            Err("daemon did not complete agent launch".to_owned())
         );
         let mut unavailable = ipc_client(
             ResponseOutcome::Error(ProtocolError::new(ErrorCode::Unavailable, "private detail")),

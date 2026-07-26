@@ -21,6 +21,7 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 - [daemon metrics subscription](#daemon-metrics-subscription)
 - [PR inventory snapshot](#pr-inventory-snapshot)
 - [agent launch request](#agent-launch-request)
+  - [agent operation identity と final の相関](#agent-operation-identity-と-final-の相関)
 - [Codex structured capture request](#codex-structured-capture-request)
 - [agent phase report request](#agent-phase-report-request)
 - [dispatch request](#dispatch-request)
@@ -370,6 +371,46 @@ Agent request / PTY observation / completion
 ```
 
 Agent の pending pane は、同じ `OperationId` の成功 final が返した `TerminalRef` にだけ attach する。attach 以降の stream（`attach` / `resume` / `resync` / `input` / `resize` / `detach`）は [generic terminal request](#generic-terminal-request) と同じ vocabulary を共有し、daemon は `TerminalRef` の所有元（agent または generic）へ透過的に routing する。この pending pane の attach policy は [3. TUI](03-tui.md) を正本とする。
+
+### agent operation identity と final の相関
+
+`agent` の答えを producer 側の 1 operation へ相関させる規則は本節が正本である。generic Terminal Launch 側の
+producer `OperationId` と replay 契約は [generic terminal request](#generic-terminal-request) が正本で、Agent はそれを
+複製せず自分の final identity だけを持つ。
+
+request の `operation_id` は **client が発行した durable identity をそのまま載せたもの**である。daemon 側は request ごとに
+別 identity を作らず、client 側の adapter も別 identity を作らない（TUI 側の pending pane との対応は
+[3. TUI#同一 process の pending operation identity](03-tui.md#同一-process-の-pending-operation-identity) を正本とする）。
+
+accepted / final のどちらの response も、body に次の 2 つを必ず持つ。`ResponseOutcome::Ok` の final は envelope に
+operation identity を持たないため、body がその final を相関させる唯一の根拠になる。
+
+| body field | 内容 |
+|---|---|
+| `operation_id` | この答えが属する producer `OperationId` |
+| `semantic_digest` | 受理した intent の canonical semantic key の digest |
+
+canonical semantic key は launch では `(WorkspaceId, SessionId?, profile ID?)`、exact resume では target 全体
+（continuation・source・scope・worktree・runtime・adapter revision）から作る。key の書式は daemon と client が共有する
+1 か所（`usagi-core` の client vocabulary）が持ち、digest は domain-separated hash で
+[terminal input digest](#terminal-input-identity-と-cross-connection-replay) と衝突しない。
+
+**launch** の答えについて、client は次を全て満たした答えだけを自分の pending operation の答えとして扱う。1 つでも
+欠けた答えは safe correlation failure とし、`TerminalRef` を pending へ promote しない。exact resume の replacement を
+受理する条件は identity ではなく daemon 自身の relation / lineage であり、
+[3. TUI#明示 resume の検証](03-tui.md#明示-resume-の検証) が正本である。
+
+| 検証 | 内容 |
+|---|---|
+| identity | envelope（accepted）と body の `operation_id` が request の identity と一致する |
+| digest | body の `semantic_digest` が client 自身が request intent から計算した digest と一致する |
+| 種別 | accepted は `completed: false`、final は `completed: true` を持つ（`completed: false` を final として受けない） |
+| fence | `TerminalRef` が request の workspace / session scope に属する |
+| relation | 通常の launch の答えは resume replacement relation を持たない |
+
+cached replay は direct final と同じ body（同じ identity・digest・`TerminalRef`）を返し、client は経路によって検証を
+省略しない。semantic key を持たない旧 durable record は digest を持たないため replay しても intent の一致を証明できず、
+client は final として受けずに安全に失敗する。
 
 ## Codex structured capture request
 

@@ -812,6 +812,37 @@ pub fn terminal_input_digest(target: &str, bytes: &[u8]) -> String {
         })
 }
 
+/// The semantic digest of one Agent launch / resume operation.
+///
+/// A producer-issued `OperationId` alone cannot prove that a final or replayed
+/// answer belongs to the intent the caller asked for, so the daemon carries this
+/// digest of the canonical semantic key beside the recorded final and the client
+/// refuses a final whose digest differs from the one it computed for its own
+/// request. `semantic_key` is the canonical intent string produced by
+/// [`agent_launch_semantic_key`](crate::usecase::client::agent_launch_semantic_key)
+/// or [`agent_resume_semantic_key`](crate::usecase::client::agent_resume_semantic_key);
+/// it is length-prefixed so no key can collide with another through the domain
+/// separator.
+#[must_use]
+pub fn agent_operation_digest(semantic_key: &str) -> String {
+    let mut digest = Sha256::new();
+    for component in [
+        b"usagi-agent-operation-v1".as_slice(),
+        semantic_key.as_bytes(),
+    ] {
+        digest.update((component.len() as u64).to_be_bytes());
+        digest.update(component);
+    }
+    digest
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut acc, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(acc, "{byte:02x}");
+            acc
+        })
+}
+
 /// A cache entry ties a response to the exact request body digest.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CachedResponse {

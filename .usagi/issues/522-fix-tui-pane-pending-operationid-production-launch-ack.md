@@ -1,13 +1,13 @@
 ---
 number: 522
 title: fix(tui): pane pending OperationIdをproduction launch ACKまで同一に保つ
-status: todo
+status: done
 priority: high
 labels: [review, v2, tui, agent, terminal, ipc, idempotency]
 dependson: [518]
 related: [215, 271, 506]
 created_at: 2026-07-22T11:40:51.774650+00:00
-updated_at: 2026-07-22T12:18:35.275636+00:00
+updated_at: 2026-07-26T09:30:14.042064+00:00
 ---
 
 ## 問題・影響

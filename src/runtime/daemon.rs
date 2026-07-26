@@ -4166,12 +4166,18 @@ fn dispatch_agent(
     });
     match result {
         Ok(admission) => {
+            // `Ok` is the durable final — direct or replayed after a reconnect —
+            // and `ResponseOutcome::Ok` carries no envelope operation identity, so
+            // the body is what makes the final correlatable to the producer's
+            // pending operation. Every answer therefore states its own
+            // `operation_id` and the digest of the intent it was admitted for
+            // (#522); the client refuses a final that does not match both.
             let outcome = if admission.completed {
                 ResponseOutcome::Ok
             } else {
                 ResponseOutcome::Accepted {
                     operation_id: usagi_core::infrastructure::ipc::OperationId(
-                        admission.operation_id,
+                        admission.operation_id.clone(),
                     ),
                     operation_revision: admission.revision,
                 }
@@ -4181,6 +4187,8 @@ fn dispatch_agent(
                 request_id,
                 outcome,
                 serde_json::json!({
+                    "operation_id": admission.operation_id,
+                    "semantic_digest": admission.semantic_digest,
                     "terminal": admission.terminal,
                     "continuation": admission.continuation,
                     "resume_relation": admission.resume_relation,

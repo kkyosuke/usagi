@@ -879,3 +879,28 @@ fn the_terminal_input_digest_separates_target_from_bytes() {
         terminal_input_digest("a", b"bc")
     );
 }
+
+/// #522: the digest is what makes an Agent final answer *about* one intent, so it
+/// must be stable for the same canonical key, different for any other key, and
+/// separate from the terminal-input digest that shares the same hash.
+#[test]
+fn the_agent_operation_digest_is_stable_and_domain_separated() {
+    use super::agent_operation_digest;
+
+    let digest = agent_operation_digest("workspace:session:<default>");
+    assert_eq!(digest.len(), 64);
+    assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_eq!(
+        digest,
+        agent_operation_digest("workspace:session:<default>")
+    );
+    assert_ne!(digest, agent_operation_digest("workspace:session:codex"));
+    assert_ne!(
+        digest,
+        agent_operation_digest("workspace:workspace-root:<default>")
+    );
+    assert_ne!(
+        digest,
+        terminal_input_digest("workspace:session:<default>", b"")
+    );
+}
