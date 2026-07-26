@@ -43,7 +43,7 @@ use usagi_core::domain::id::{DaemonGeneration, OperationId, TerminalRef};
 use crate::usecase::generation::ProcessIdentity;
 use crate::usecase::generic_terminal::{TerminalStore, TerminalStoreSnapshot};
 use crate::usecase::resources::allocator::{LaunchFailure, ResourceAllocator, ResourceKind};
-use crate::usecase::resources::drain::ActiveConsumer;
+use crate::usecase::resources::drain::{ActiveConsumer, ConsumeReport};
 use crate::usecase::resources::identity::{
     ChildIdentity, ChildObservation, ChildProcessProbe, IDENTITY_SOURCE_OS, observe_child,
 };
@@ -70,9 +70,14 @@ pub const RETIRED_LEGACY_SUFFIX: &str = ".migrated";
 const CAS_ATTEMPTS: usize = 8;
 
 /// Run one compare-and-swap until it is not simply losing a race.
-fn with_retry<T>(
-    mut attempt: impl FnMut() -> Result<T, ResourceFailure>,
-) -> Result<T, ResourceFailure> {
+///
+/// The attempt is a trait object rather than a type parameter so every caller
+/// shares one compiled copy of the loop: a monomorphized retry would be a separate
+/// loop per call site, and the ones that never lose a race would read as code
+/// nothing exercises. A caller that needs the swap's value captures it.
+fn with_retry(
+    attempt: &mut dyn FnMut() -> Result<(), ResourceFailure>,
+) -> Result<(), ResourceFailure> {
     for _ in 1..CAS_ATTEMPTS {
         match attempt() {
             Err(failure) if failure.refusal() == Some(ResourceError::StaleRevision) => {}
@@ -249,16 +254,22 @@ impl OwnerRuntimeState {
     /// reserved, [`ResourceError::WrongState`] for a record that never held a
     /// child, or a store failure.
     pub fn publish_exit(&self, resource: &TerminalRef, status: i32) -> Result<(), ResourceFailure> {
-        with_retry(|| {
+        with_retry(&mut || {
             self.shard
                 .update(|document| document.commit_exit(resource, status))
+                .map(|_| ())
         })?;
         let published = self.shard.load()?.to_document();
-        with_retry(|| ActiveConsumer::new(&self.allocator).consume(&published))?;
+        with_retry(&mut || {
+            ActiveConsumer::new(&self.allocator)
+                .consume(&published)
+                .map(|_| ())
+        })?;
         let consumed = self.allocator.load()?.to_document();
-        with_retry(|| {
+        with_retry(&mut || {
             self.shard
                 .update(|document| Ok(document.reclaim(&consumed)))
+                .map(|_| ())
         })?;
         Ok(())
     }
@@ -288,27 +299,29 @@ impl OwnerRuntimeState {
     fn claim_capacity(&self, records: &[ResolvedRecord<'_>]) -> Result<(), ResourceFailure> {
         let owner = self.owner();
         let policy = self.allocator.policy();
-        with_retry(|| {
-            self.allocator.update(|document| {
-                for resolved in records {
-                    let projection = resolved.projection;
-                    if !matches!(
-                        projection.state,
-                        ProjectedState::Reserved | ProjectedState::Running(_)
-                    ) {
-                        continue;
+        with_retry(&mut || {
+            self.allocator
+                .update(|document| {
+                    for resolved in records {
+                        let projection = resolved.projection;
+                        if !matches!(
+                            projection.state,
+                            ProjectedState::Reserved | ProjectedState::Running(_)
+                        ) {
+                            continue;
+                        }
+                        document.reserve(
+                            &projection.operation,
+                            &projection.digest,
+                            projection.kind,
+                            owner,
+                            &projection.resource,
+                            policy,
+                        )?;
                     }
-                    document.reserve(
-                        &projection.operation,
-                        &projection.digest,
-                        projection.kind,
-                        owner,
-                        &projection.resource,
-                        policy,
-                    )?;
-                }
-                Ok(())
-            })
+                    Ok(())
+                })
+                .map(|_| ())
         })?;
         Ok(())
     }
@@ -320,14 +333,16 @@ impl OwnerRuntimeState {
         records: &[ResolvedRecord<'_>],
     ) -> Result<(), ResourceFailure> {
         let kind = self.kind;
-        with_retry(|| {
-            self.shard.update(|document| {
-                document.set_payload(kind, payload.clone());
-                for resolved in records {
-                    apply_record(document, resolved)?;
-                }
-                Ok(())
-            })
+        with_retry(&mut || {
+            self.shard
+                .update(|document| {
+                    document.set_payload(kind, payload.clone());
+                    for resolved in records {
+                        apply_record(document, resolved)?;
+                    }
+                    Ok(())
+                })
+                .map(|_| ())
         })?;
         Ok(())
     }
@@ -335,37 +350,42 @@ impl OwnerRuntimeState {
     /// L5: the producer's answer becomes durable for everything the shard proves.
     fn seal_finals(&self, records: &[ResolvedRecord<'_>]) -> Result<SaveReport, ResourceFailure> {
         let now = self.clock.now();
-        let (report, _) = with_retry(|| {
-            self.allocator.update(|document| {
-                let mut report = SaveReport::default();
-                for resolved in records {
-                    let operation = &resolved.projection.operation;
-                    match resolved.projection.state {
-                        ProjectedState::Reserved => report.reserved += 1,
-                        ProjectedState::Running(_) if resolved.verified.is_some() => {
-                            document.mark_spawned(operation, now)?;
-                            report.running += 1;
-                        }
-                        ProjectedState::Running(_) | ProjectedState::Unknown => report.unknown += 1,
-                        ProjectedState::Failed => {
-                            // A definite failure releases the capacity its
-                            // reservation took, exactly once and only if this build
-                            // is the one that took it.
-                            if document
-                                .operation(operation)
-                                .is_some_and(|record| !record.outcome.is_final())
-                            {
-                                document.mark_failed(operation, LaunchFailure::Spawn, now)?;
+        let mut sealed = SaveReport::default();
+        with_retry(&mut || {
+            self.allocator
+                .update(|document| {
+                    let mut report = SaveReport::default();
+                    for resolved in records {
+                        let operation = &resolved.projection.operation;
+                        match resolved.projection.state {
+                            ProjectedState::Reserved => report.reserved += 1,
+                            ProjectedState::Running(_) if resolved.verified.is_some() => {
+                                document.mark_spawned(operation, now)?;
+                                report.running += 1;
                             }
-                            report.failed += 1;
+                            ProjectedState::Running(_) | ProjectedState::Unknown => {
+                                report.unknown += 1
+                            }
+                            ProjectedState::Failed => {
+                                // A definite failure releases the capacity its
+                                // reservation took, exactly once and only if this build
+                                // is the one that took it.
+                                if document
+                                    .operation(operation)
+                                    .is_some_and(|record| !record.outcome.is_final())
+                                {
+                                    document.mark_failed(operation, LaunchFailure::Spawn, now)?;
+                                }
+                                report.failed += 1;
+                            }
+                            ProjectedState::Ended => report.ended += 1,
                         }
-                        ProjectedState::Ended => report.ended += 1,
                     }
-                }
-                Ok(report)
-            })
+                    Ok(report)
+                })
+                .map(|(report, _)| sealed = report)
         })?;
-        Ok(report)
+        Ok(sealed)
     }
 }
 
@@ -739,7 +759,7 @@ pub fn migrate_terminals(
 }
 
 /// Whether a legacy record claimed to still hold a child.
-const fn owns_child(state: TerminalRuntimeState) -> bool {
+fn owns_child(state: TerminalRuntimeState) -> bool {
     matches!(
         state,
         TerminalRuntimeState::Reserved | TerminalRuntimeState::Running
@@ -787,34 +807,38 @@ fn migrate(
         // held and its operation is already answered.
         let now = clock.now();
         let policy = allocator.policy();
-        with_retry(|| {
-            allocator.update(|document| {
-                for entry in &live {
-                    document.reserve(
-                        &entry.operation,
-                        &entry.digest,
-                        entry.kind,
-                        owner,
-                        &entry.resource,
-                        policy,
-                    )?;
-                    document.mark_spawned(&entry.operation, now)?;
-                }
-                Ok(())
-            })
+        with_retry(&mut || {
+            allocator
+                .update(|document| {
+                    for entry in &live {
+                        document.reserve(
+                            &entry.operation,
+                            &entry.digest,
+                            entry.kind,
+                            owner,
+                            &entry.resource,
+                            policy,
+                        )?;
+                        document.mark_spawned(&entry.operation, now)?;
+                    }
+                    Ok(())
+                })
+                .map(|_| ())
         })?;
         let payload = payload_of(owner).map_err(|_| ResourceError::Corrupt)?;
         let shard = source.open(owner)?;
-        with_retry(|| {
-            shard.update(|document| {
-                document.set_payload(kind, payload.clone());
-                for entry in &report.shard.resources {
-                    if document.resource(&entry.resource).is_none() {
-                        document.resources.push(entry.clone());
+        with_retry(&mut || {
+            shard
+                .update(|document| {
+                    document.set_payload(kind, payload.clone());
+                    for entry in &report.shard.resources {
+                        if document.resource(&entry.resource).is_none() {
+                            document.resources.push(entry.clone());
+                        }
                     }
-                }
-                Ok(())
-            })
+                    Ok(())
+                })
+                .map(|_| ())
         })?;
         summary.owners += 1;
         summary.adopted += live.len();
@@ -891,7 +915,12 @@ pub fn collect_dead_owner(
     let owner = shard.owner();
     let mut report = CollectionReport::default();
     let published = shard.load()?.to_document();
-    let consumed = with_retry(|| ActiveConsumer::new(allocator).consume(&published))?;
+    let mut consumed = ConsumeReport::default();
+    with_retry(&mut || {
+        ActiveConsumer::new(allocator)
+            .consume(&published)
+            .map(|applied| consumed = applied)
+    })?;
     report.consumed = consumed.applied;
     let now = clock.now();
     let live: Vec<_> = published
@@ -911,21 +940,23 @@ pub fn collect_dead_owner(
         })
         .collect();
     for (entry, observation) in &live {
-        with_retry(|| {
-            allocator.update(|document| {
-                match entry.state {
-                    // A reservation without a running record may have spawned a
-                    // child this owner never got to write down. Nothing may be
-                    // inferred from it, so the operation ends ambiguous and keeps
-                    // its capacity.
-                    ResourceState::Reserved => document.mark_ambiguous(&entry.operation, now),
-                    _ if observation.is_definitely_gone() => {
-                        document.mark_spawned(&entry.operation, now)?;
-                        document.release_gone(owner, &entry.resource)
+        with_retry(&mut || {
+            allocator
+                .update(|document| {
+                    match entry.state {
+                        // A reservation without a running record may have spawned
+                        // a child this owner never got to write down. Nothing may
+                        // be inferred from it, so the operation ends ambiguous and
+                        // keeps its capacity.
+                        ResourceState::Reserved => document.mark_ambiguous(&entry.operation, now),
+                        _ if observation.is_definitely_gone() => {
+                            document.mark_spawned(&entry.operation, now)?;
+                            document.release_gone(owner, &entry.resource)
+                        }
+                        _ => document.mark_spawned(&entry.operation, now),
                     }
-                    _ => document.mark_spawned(&entry.operation, now),
-                }
-            })
+                })
+                .map(|_| ())
         })?;
         if entry.state == ResourceState::Reserved || !observation.is_definitely_gone() {
             report.retained += 1;
@@ -933,19 +964,27 @@ pub fn collect_dead_owner(
             report.released += 1;
         }
     }
-    let (unknown, _) = with_retry(|| {
-        shard.update(|document| {
-            let mut unknown = 0;
-            for (entry, _) in &live {
-                document.mark_ownership_unknown(&entry.resource)?;
-                unknown += 1;
-            }
-            Ok(unknown)
-        })
+    let mut unknown = 0;
+    with_retry(&mut || {
+        shard
+            .update(|document| {
+                let mut fenced = 0;
+                for (entry, _) in &live {
+                    document.mark_ownership_unknown(&entry.resource)?;
+                    fenced += 1;
+                }
+                Ok(fenced)
+            })
+            .map(|(fenced, _)| unknown = fenced)
     })?;
     report.unknown = unknown;
     let ledger = allocator.load()?.to_document();
-    let (reclaimed, _) = with_retry(|| shard.update(|document| Ok(document.reclaim(&ledger))))?;
+    let mut reclaimed = 0;
+    with_retry(&mut || {
+        shard
+            .update(|document| Ok(document.reclaim(&ledger)))
+            .map(|(dropped, _)| reclaimed = dropped)
+    })?;
     report.reclaimed = reclaimed;
     Ok(report)
 }

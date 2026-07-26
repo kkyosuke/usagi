@@ -1579,3 +1579,203 @@ fn collecting_a_generation_with_nothing_to_collect_changes_nothing() {
 fn the_retired_legacy_suffix_is_stable() {
     assert_eq!(RETIRED_LEGACY_SUFFIX, ".migrated");
 }
+
+#[test]
+fn a_record_that_contradicts_the_shards_reservation_refuses_the_save() {
+    let owner = DaemonGeneration::new();
+    let (shard, ledger) = (SharedBytes::default(), SharedBytes::default());
+    let resource = terminal_of(owner);
+    let state = writer(
+        ResourceKind::Terminal,
+        owner,
+        &shard,
+        &ledger,
+        FakeProbe::new(),
+        (4, 4),
+    );
+    state
+        .commit(
+            &json!({}),
+            &project_terminals(
+                &terminal_snapshot(vec![terminal_record(
+                    &resource,
+                    OperationId::new(),
+                    TerminalRuntimeState::Reserved,
+                    None,
+                )]),
+                owner,
+            ),
+        )
+        .unwrap();
+    let before = shard.get();
+
+    // The same resource under a different producer operation is not the record
+    // this shard reserved, and no state takes capacity for it: the shard refuses
+    // rather than rewriting whose reservation it is.
+    let contradicting = terminal_snapshot(vec![terminal_record(
+        &resource,
+        OperationId::new(),
+        TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::PersistAfterSpawn),
+        None,
+    )]);
+    assert_eq!(
+        state
+            .commit(&json!({}), &project_terminals(&contradicting, owner))
+            .unwrap_err()
+            .refusal(),
+        Some(ResourceError::DuplicateResource)
+    );
+    assert_eq!(shard.get(), before, "the refusal left the shard untouched");
+}
+
+#[test]
+fn a_legacy_record_the_ledger_already_answered_differently_is_not_adopted() {
+    let source = MemorySource::new();
+    let ledger = SharedBytes::default();
+    let allocator = ResourceAllocator::new(MemoryFile::new(&ledger), policy(4, 4));
+    let owner = DaemonGeneration::new();
+    let resource = terminal_of(owner);
+    let operation = OperationId::new();
+    // The allocator already sealed this operation as a definite failure, so no
+    // adoption may turn it into a spawned child.
+    allocator
+        .update(|document| {
+            document.reserve(
+                &operation,
+                "digest",
+                ResourceKind::Terminal,
+                owner,
+                &resource,
+                policy(4, 4),
+            )?;
+            document.mark_failed(&operation, LaunchFailure::Spawn, 1)
+        })
+        .unwrap();
+    let legacy = terminal_snapshot(vec![terminal_record(
+        &resource,
+        operation,
+        TerminalRuntimeState::Running,
+        Some(process(151, "real")),
+    )]);
+
+    assert_eq!(
+        migrate_terminals(
+            &source,
+            &allocator,
+            &probe_for(151, "real"),
+            &FakeClock::at(5),
+            &legacy,
+        )
+        .unwrap_err()
+        .refusal(),
+        Some(ResourceError::WrongState)
+    );
+    assert!(
+        shard_of(&source.bytes(owner), owner).resources.is_empty(),
+        "a refused adoption writes no shard record"
+    );
+}
+
+#[test]
+fn adoption_cannot_take_more_capacity_than_the_pool_holds() {
+    let source = MemorySource::new();
+    let ledger = SharedBytes::default();
+    let allocator = ResourceAllocator::new(MemoryFile::new(&ledger), policy(1, 1));
+    let owner = DaemonGeneration::new();
+    let legacy = terminal_snapshot(vec![
+        terminal_record(
+            &terminal_of(owner),
+            OperationId::new(),
+            TerminalRuntimeState::Running,
+            Some(process(161, "real")),
+        ),
+        terminal_record(
+            &terminal_of(owner),
+            OperationId::new(),
+            TerminalRuntimeState::Running,
+            Some(process(162, "real")),
+        ),
+    ]);
+    let probe = probe_for(161, "real").with(
+        162,
+        ProbeAnswer::Alive {
+            start: "real".to_owned(),
+            group: 162,
+        },
+    );
+
+    // Two confirmed children do not fit a pool of one. Adoption refuses rather
+    // than admitting state the configured limit says cannot exist.
+    assert_eq!(
+        migrate_terminals(&source, &allocator, &probe, &FakeClock::at(5), &legacy)
+            .unwrap_err()
+            .refusal(),
+        Some(ResourceError::CapacityExhausted)
+    );
+    assert!(shard_of(&source.bytes(owner), owner).resources.is_empty());
+}
+
+#[test]
+fn only_an_unterminated_legacy_state_claims_a_child() {
+    for state in [
+        TerminalRuntimeState::Reserved,
+        TerminalRuntimeState::Running,
+    ] {
+        assert!(owns_child(state), "{state:?}");
+    }
+    for state in [
+        TerminalRuntimeState::Exited,
+        TerminalRuntimeState::Reclaimed,
+        TerminalRuntimeState::SpawnFailed,
+        TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::IdentityUnknown),
+    ] {
+        assert!(!owns_child(state), "{state:?}");
+    }
+}
+
+#[test]
+fn scoping_a_snapshot_keeps_one_owners_records_and_its_ownership_binding() {
+    let owner = DaemonGeneration::new();
+    let foreign = DaemonGeneration::new();
+    let mine = terminal_of(owner);
+    let theirs = terminal_of(foreign);
+    let (reconciled, _) = agent_snapshot(vec![
+        agent_record(
+            &mine,
+            OperationId::new(),
+            TerminalRuntimeState::Running,
+            Some(process(171, "token")),
+        ),
+        agent_record(
+            &theirs,
+            OperationId::new(),
+            TerminalRuntimeState::Running,
+            Some(process(172, "token")),
+        ),
+    ])
+    .reconcile_after_daemon_restart();
+    assert_eq!(reconciled.generation.terminals.len(), 2);
+
+    let scoped = owned_agents(&reconciled, owner);
+
+    assert_eq!(scoped.records.len(), 1);
+    assert_eq!(scoped.records[0].runtime.terminal, mine);
+    assert_eq!(
+        scoped
+            .generation
+            .terminals
+            .iter()
+            .map(|ownership| ownership.terminal.clone())
+            .collect::<Vec<_>>(),
+        vec![mine],
+        "the ownership binding is scoped with the records it describes"
+    );
+    // A snapshot restricted to its own owner still describes itself.
+    scoped.validate_ownership().unwrap();
+    assert_eq!(
+        owned_terminals(&terminal_snapshot(vec![]), owner)
+            .records
+            .len(),
+        0
+    );
+}
