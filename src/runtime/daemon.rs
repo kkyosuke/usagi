@@ -1204,6 +1204,11 @@ const CUSTODY_TICK: Duration = Duration::from_secs(1);
 /// bounds the retry of a teardown whose durable finalization failed.
 const SESSION_TEARDOWN_TICK: Duration = Duration::from_secs(1);
 
+/// How long the accept loop waits after an accept error that may have left the
+/// connection queued. This is the error path only: an idle daemon parks on
+/// descriptor readiness and never reaches it.
+const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(10);
+
 /// How often the decision maintenance worker makes due expiries durable and
 /// drains the resolved-decision outbox.
 ///
@@ -2132,6 +2137,12 @@ fn start_ipc_accept_loop(
                 if !wake.wait_for_listener(listener.readiness_fd()) {
                     break;
                 }
+                // One readiness report can cover several queued connections, and
+                // it is not repeated for the ones left behind. Accepting only the
+                // first would park this loop while a client waits — which a
+                // reconnecting terminal sees as an undelivered keystroke — so every
+                // queued connection is drained before waiting again.
+                while !shutdown.is_requested() {
                 match listener.accept() {
                     Ok(stream) => {
                         if shutdown.is_requested() {
@@ -2198,11 +2209,15 @@ fn start_ipc_accept_loop(
                                 let _ = result;
                             });
                     }
-                    // A readiness wait can still race another accept or see a
-                    // connection that went away, so `WouldBlock` simply means
-                    // "wait again" rather than "retry on a timer".
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                    Err(_) => {}
+                    // Drained: nothing more is queued, so wait for readiness.
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    // A peer that failed the credential check was still accepted
+                    // and dropped, so draining continues. An error that leaves the
+                    // connection queued (descriptor exhaustion) would otherwise
+                    // spin, so that path — and only that path, never the idle one —
+                    // backs off before trying again.
+                    Err(_) => std::thread::sleep(ACCEPT_ERROR_BACKOFF),
+                }
                 }
             }
             listener

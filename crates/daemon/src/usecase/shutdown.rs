@@ -16,7 +16,7 @@
 
 use std::{
     sync::{
-        Arc, Condvar, Mutex,
+        Arc, Condvar, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -68,7 +68,11 @@ impl ShutdownRequest {
     pub fn request(&self) {
         // Take the lock before storing so a waiter cannot evaluate the predicate
         // and start waiting in between the store and the notification.
-        let locked = self.guard.lock();
+        //
+        // Poisoning is recovered from rather than branched on: this mutex guards no
+        // invariant — `requested` is the authority — so a panic elsewhere must not
+        // stop shutdown from being requested.
+        let locked = self.guard.lock().unwrap_or_else(PoisonError::into_inner);
         self.requested.store(true, Ordering::Release);
         drop(locked);
         self.changed.notify_all();
@@ -80,17 +84,18 @@ impl ShutdownRequest {
     /// An idle daemon wakes once per `tick`, not once per poll interval.
     pub fn wait_for_tick(&self, tick: Duration) -> bool {
         let deadline = Instant::now() + tick;
-        let Ok(mut locked) = self.guard.lock() else {
-            return true;
-        };
+        // The predicate is evaluated while the lock is held, so a request that
+        // lands between the check and the wait cannot be missed.
+        let mut locked = self.guard.lock().unwrap_or_else(PoisonError::into_inner);
         while !self.is_requested() {
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 return false;
             };
-            let Ok((next, _)) = self.changed.wait_timeout(locked, remaining) else {
-                return true;
-            };
-            locked = next;
+            locked = self
+                .changed
+                .wait_timeout(locked, remaining)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
         }
         true
     }
@@ -101,14 +106,12 @@ impl ShutdownRequest {
     /// must arrange for that signal to reach [`request`](Self::request); this
     /// wait is edge-driven and does not poll.
     pub fn wait_until_requested(&self) {
-        let Ok(mut locked) = self.guard.lock() else {
-            return;
-        };
+        let mut locked = self.guard.lock().unwrap_or_else(PoisonError::into_inner);
         while !self.is_requested() {
-            let Ok(next) = self.changed.wait(locked) else {
-                return;
-            };
-            locked = next;
+            locked = self
+                .changed
+                .wait(locked)
+                .unwrap_or_else(PoisonError::into_inner);
         }
     }
 }
