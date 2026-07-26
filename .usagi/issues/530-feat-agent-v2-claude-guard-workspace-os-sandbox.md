@@ -1,13 +1,13 @@
 ---
 number: 530
 title: feat(agent): v2 で Claude 起動へ guard-workspace フックと OS sandbox を配線する
-status: in-progress
+status: done
 priority: high
 labels: [agent, daemon, security, claude, sandbox]
 dependson: []
 related: [531, 537]
 created_at: 2026-07-24T03:49:25.984667+00:00
-updated_at: 2026-07-24T13:01:47.981406+00:00
+updated_at: 2026-07-26T13:58:39.153918+00:00
 ---
 
 ## 背景
