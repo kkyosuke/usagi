@@ -73,10 +73,34 @@ fn save_then_load_round_trips() {
 #[test]
 fn save_overwrites_existing_record() {
     let store = DaemonRecordStore::new(InMemoryFile::default());
-    store.save(&DaemonRecord::new(1)).unwrap();
-    let latest = DaemonRecord::new(2);
+    store.save(&DaemonRecord::new(4321)).unwrap();
+    let latest = DaemonRecord::new(4322);
     store.save(&latest).unwrap();
     assert_eq!(store.load().unwrap(), Some(latest));
+}
+
+#[test]
+fn registration_refuses_a_pid_that_cannot_name_a_process() {
+    let store = DaemonRecordStore::new(InMemoryFile::default());
+    for pid in [0, 1, crate::domain::daemon::MAX_RECORD_PID + 1, u32::MAX] {
+        let error = store.save(&DaemonRecord::new(pid)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{pid}");
+        assert!(error.to_string().contains("cannot name a process"), "{pid}");
+        // Nothing was written, so no later reader can act on the value.
+        assert_eq!(store.load().unwrap(), None);
+    }
+}
+
+#[test]
+fn load_rejects_a_persisted_pid_that_cannot_name_a_process() {
+    // The value can only arrive by corruption or hand-editing, and rejecting it
+    // as unreadable keeps it out of every classification and signal path.
+    let store = DaemonRecordStore::new(InMemoryFile::with(
+        r#"{"pid":1,"process_start_identity":"linux:1","started_at":"2026-07-23T00:00:00Z"}"#,
+    ));
+    let error = store.load().unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("cannot name a process"));
 }
 
 #[test]

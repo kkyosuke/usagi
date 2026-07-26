@@ -4669,6 +4669,16 @@ impl LivenessProbe for ExactProcessControl {
 struct SigtermTerminator;
 impl Terminator for SigtermTerminator {
     fn terminate(&self, record: &DaemonRecord) -> std::io::Result<()> {
+        // The record boundary already rejects a pid that cannot name a process,
+        // so this is the last backstop rather than the fence: whatever route a
+        // record took to get here, no `kill`-family call may be reached with a
+        // value that would address a process group.
+        if !usagi_core::domain::daemon::is_record_pid(record.pid) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                usagi_core::domain::daemon::InvalidRecordPid(record.pid),
+            ));
+        }
         signal_exact_process(record, libc::SIGTERM)
     }
 }
@@ -5902,8 +5912,13 @@ fn runtime_channel() -> &'static str {
 /// The caller holds `bootstrap.lock`, so only one ordinary client may cross
 /// this recovery/start boundary. `daemon.lock` is the authoritative process
 /// ownership proof: unlike a raw PID probe it remains safe when a PID has been
-/// reused, and this path never signals a process. Future exact identity fields
-/// added by #514 remain part of the whole-record equality fence below.
+/// reused, and this path never signals a process. The record's exact identity
+/// fields are part of the whole-record equality fence below.
+///
+/// The reclaim verdict comes from the domain
+/// [`classify`](usagi_core::domain::daemon::classify), the same decision the
+/// `stop` / `start` / `restart` lifecycle commands make, so one observation can
+/// never mean "reclaimable" here and "refuse" there.
 fn recover_stale_client_endpoint(data_dir: &Path) -> std::io::Result<bootstrap::StaleRecovery> {
     recover_stale_client_endpoint_with(data_dir, InstanceLock::acquire, || {})
 }
@@ -5934,12 +5949,20 @@ fn recover_stale_client_endpoint_with(
     if store.load()?.as_ref() != Some(&expected) {
         return Ok(bootstrap::StaleRecovery::NotProven);
     }
-    match ExactProcessControl.observe(&expected) {
-        DaemonProcessObservation::Gone | DaemonProcessObservation::IdentityMismatch => {}
-        DaemonProcessObservation::Exact => {
+    match usagi_core::domain::daemon::classify(
+        Some(&expected),
+        ExactProcessControl.observe(&expected),
+    ) {
+        // Owner gone or its pid reused: the OS has proved the recorded
+        // incarnation no longer exists, so its endpoint is reclaimable.
+        usagi_core::domain::daemon::DaemonState::Stale(_) => {}
+        usagi_core::domain::daemon::DaemonState::Alive => {
             return Ok(bootstrap::StaleRecovery::OwnerActive);
         }
-        DaemonProcessObservation::Unknown => {
+        // Ownership undecided, or the record vanished under us: preserve every
+        // artifact.
+        usagi_core::domain::daemon::DaemonState::Unverified
+        | usagi_core::domain::daemon::DaemonState::Absent => {
             return Ok(bootstrap::StaleRecovery::NotProven);
         }
     }
@@ -7488,6 +7511,53 @@ mod tests {
     }
 
     #[test]
+    fn client_bootstrap_recovery_and_stop_agree_on_an_unverified_owner() {
+        use std::mem::ManuallyDrop;
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let info = daemon_test_info();
+        let daemon = data.join("daemon");
+        let mut listener =
+            ManuallyDrop::new(SecureUnixListener::bind(data, ipc_generation()).unwrap());
+        let socket = daemon.join(&listener.locator().endpoint);
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: daemon.join("daemon.json"),
+        });
+        // A legacy record carries no identity, so ownership stays undecided. Both
+        // the bootstrap recovery and the lifecycle `stop` read the same
+        // observation through the same domain decision, so neither reclaims it.
+        let record = DaemonRecord::new(std::process::id());
+        store.save(&record).unwrap();
+        assert_eq!(
+            ExactProcessControl.observe(&record),
+            DaemonProcessObservation::Unknown
+        );
+
+        assert_eq!(
+            recover_stale_client_endpoint(data).unwrap(),
+            bootstrap::StaleRecovery::NotProven
+        );
+        assert!(
+            usagi_daemon::usecase::stop::stop(
+                &store,
+                &ExactProcessControl,
+                &SigtermTerminator,
+                &RealSleeper,
+                &fresh_ipc_ready(data, &info),
+                &info,
+            )
+            .is_err()
+        );
+        assert_eq!(store.load().unwrap(), Some(record));
+        assert!(socket.exists());
+        assert!(daemon.join("current.json").exists());
+
+        // SAFETY: the listener has not moved and still owns normal cleanup.
+        unsafe { ManuallyDrop::drop(&mut listener) };
+    }
+
+    #[test]
     fn client_bootstrap_recovery_requires_an_exact_lifecycle_record() {
         use std::mem::ManuallyDrop;
 
@@ -7774,6 +7844,109 @@ mod tests {
         let client = usagi_daemon::infrastructure::unix_transport::connect_current(data).unwrap();
         let accepted = replacement_listener.accept().unwrap();
         drop((client, accepted, old_listener, replacement_listener));
+    }
+
+    #[test]
+    fn production_stop_reclaims_a_reused_pid_in_socket_first_order_without_signalling() {
+        use std::mem::ManuallyDrop;
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let info = daemon_test_info();
+        let daemon = data.join("daemon");
+        let mut listener =
+            ManuallyDrop::new(SecureUnixListener::bind(data, ipc_generation()).unwrap());
+        let socket = daemon.join(&listener.locator().endpoint);
+        let current = daemon.join("current.json");
+        let socket_alias = socket.with_extension("alias");
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: daemon.join("daemon.json"),
+        });
+
+        // A live, unrelated process occupies the recorded pid, which is what the
+        // OS leaves behind once a crashed owner's pid is handed out again. Only
+        // the identity distinguishes it from the owner, so the record is
+        // byte-identical to what the crashed daemon wrote apart from that field.
+        let mut occupant = Command::new("sleep").arg("30").spawn().unwrap();
+        let identity = ExactProcessControl
+            .process_start_identity(occupant.id())
+            .unwrap();
+        let record = DaemonRecord::identified(occupant.id(), format!("{identity}-crashed-owner"));
+        store.save(&record).unwrap();
+        assert_eq!(
+            ExactProcessControl.observe(&record),
+            DaemonProcessObservation::IdentityMismatch
+        );
+
+        let stop = |ready: &IpcReady<'_>| {
+            usagi_daemon::usecase::stop::stop(
+                &store,
+                &ExactProcessControl,
+                &SigtermTerminator,
+                &RealSleeper,
+                ready,
+                &info,
+            )
+        };
+
+        // A second link to the socket makes its removal unsafe, so the reclaim
+        // fails at its first step. The locator surviving that failure is what
+        // pins the order: it is the commit fence, retired only after the socket,
+        // so this crash point stays retryable through the retained record.
+        std::fs::hard_link(&socket, &socket_alias).unwrap();
+        let error = stop(&fresh_ipc_ready(data, &info)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            socket.exists(),
+            "the socket step failed, so nothing committed"
+        );
+        assert!(current.exists(), "the locator commits after the socket");
+        assert_eq!(store.load().unwrap(), Some(record.clone()));
+        assert!(
+            occupant.try_wait().unwrap().is_none(),
+            "a failed reclaim must not signal the process holding the reused pid"
+        );
+
+        std::fs::remove_file(&socket_alias).unwrap();
+        assert_eq!(
+            stop(&fresh_ipc_ready(data, &info)).unwrap(),
+            format!("{}: cleared stale daemon record", info.describe())
+        );
+        assert_eq!(store.load().unwrap(), None);
+        assert!(!socket.exists());
+        assert!(!current.exists());
+        assert!(
+            occupant.try_wait().unwrap().is_none(),
+            "the reclaim completed with zero signals"
+        );
+
+        occupant.kill().unwrap();
+        occupant.wait().unwrap();
+        // SAFETY: reclaim removed only filesystem artifacts; dropping closes the
+        // still-owned listener fd and its cleanup is idempotent.
+        unsafe { ManuallyDrop::drop(&mut listener) };
+    }
+
+    #[test]
+    fn a_record_pid_that_cannot_name_a_process_reaches_no_signal_path() {
+        // Neither boundary lets such a value become durable state, and the
+        // terminator refuses it even if one were handed to it directly.
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: directory.path().join("daemon").join("daemon.json"),
+        });
+        for pid in [0, 1] {
+            let record = DaemonRecord::identified(pid, "forged");
+            assert_eq!(
+                store.save(&record).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                SigtermTerminator.terminate(&record).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+        }
+        assert_eq!(store.load().unwrap(), None);
     }
 
     #[test]
@@ -8171,7 +8344,7 @@ mod tests {
         DaemonRecordStore::new(FsRecordFile {
             path: home.path().join("daemon/daemon.json"),
         })
-        .save(&DaemonRecord::identified(1, "custody:replacement"))
+        .save(&DaemonRecord::identified(4321, "custody:replacement"))
         .unwrap();
         assert!(wait_for_flag(&shutdown, Duration::from_secs(5)));
         handle.join().unwrap();
