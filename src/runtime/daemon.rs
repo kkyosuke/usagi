@@ -73,6 +73,10 @@ use usagi_daemon::usecase::pr_inventory::{
 use usagi_daemon::usecase::pr_projection::{
     PrProjection, PrProjectionQueue, pr_projection_counters,
 };
+use usagi_daemon::usecase::replacement::{
+    LiveResources, ResourceCensus, SeamlessRefusal, TransitionMode, census_of, manual_operation_id,
+    seamless_refusal,
+};
 use usagi_daemon::usecase::runtime::{
     OutputJournal, ProvisionContext, PtySpawner, RuntimeStore, RuntimeStoreSnapshot,
     SandboxLauncher, SpawnProvision, TerminateReapError,
@@ -186,6 +190,59 @@ impl FileTerminalStore {
                 .map_err(|()| std::io::Error::other("could not reconcile terminal snapshot"))?;
         }
         Ok((snapshot, interrupted))
+    }
+}
+
+/// Counts the live runtime a daemon owns, read from the two durable snapshots
+/// it is the single writer of.
+///
+/// It deliberately reads rather than reconciles: a lifecycle verb that is about
+/// to refuse must not rewrite the state it is refusing to destroy. Absent
+/// snapshots mean a daemon that has never launched anything, and unreadable
+/// ones are an error — never "nothing is live".
+struct DurableResourceCensus {
+    daemon_dir: PathBuf,
+}
+
+impl ResourceCensus for DurableResourceCensus {
+    fn live(&self) -> std::io::Result<LiveResources> {
+        let agents = json_file::read::<RuntimeStoreSnapshot>(&self.daemon_dir.join("agents.json"))
+            .map_err(std::io::Error::other)?
+            .unwrap_or_default();
+        let terminals =
+            json_file::read::<TerminalStoreSnapshot>(&self.daemon_dir.join("terminals.json"))
+                .map_err(std::io::Error::other)?
+                .unwrap_or_default();
+        let agents: Vec<_> = agents.records.iter().map(|record| record.state).collect();
+        let terminals: Vec<_> = terminals
+            .records
+            .iter()
+            .map(|record| record.state)
+            .collect();
+        Ok(census_of(&agents, &terminals))
+    }
+}
+
+/// Why this build cannot hand authority to a live successor, read from the
+/// durable generation registry.
+///
+/// An unreadable or unparsable registry is reported as such rather than treated
+/// as absent, so an operator sees the difference between "no daemon ever
+/// registered a generation" and "the registry cannot be trusted".
+fn observed_seamless_refusal(data_dir: &Path) -> SeamlessRefusal {
+    match usagi_daemon::infrastructure::generation_registry::read_registry_document(data_dir) {
+        Ok(document) => seamless_refusal(document.as_ref()),
+        Err(error) => SeamlessRefusal::RegistryUnreadable(error.to_string()),
+    }
+}
+
+/// Whether the operator explicitly gave up the live runtime a transition would
+/// destroy.
+const fn transition_mode(force: bool) -> TransitionMode {
+    if force {
+        TransitionMode::Cold
+    } else {
+        TransitionMode::Planned
     }
 }
 
@@ -5467,9 +5524,12 @@ pub(crate) fn run(
     out: &mut dyn Write,
     command: CliDaemonCommand,
     info: &AppInfo,
+    operation: Option<usagi_core::infrastructure::ipc::OperationId>,
 ) -> std::io::Result<()> {
     install_panic_logger();
-    match panic::catch_unwind(AssertUnwindSafe(|| run_inner(out, command, info))) {
+    match panic::catch_unwind(AssertUnwindSafe(|| {
+        run_inner(out, command, info, operation)
+    })) {
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => {
             ErrorLog::record(&format!("daemon failed: {error}"));
@@ -5529,6 +5589,7 @@ fn run_inner(
     out: &mut dyn Write,
     command: CliDaemonCommand,
     info: &AppInfo,
+    operation: Option<usagi_core::infrastructure::ipc::OperationId>,
 ) -> std::io::Result<()> {
     let data_dir = prepare_private_data_dir()?;
     let daemon_dir = data_dir.join("daemon");
@@ -5554,9 +5615,16 @@ fn run_inner(
         CliDaemonCommand::Serve => PresentationDaemonCommand::Serve,
         CliDaemonCommand::Start => PresentationDaemonCommand::Start,
         CliDaemonCommand::Status => PresentationDaemonCommand::Status,
-        CliDaemonCommand::Stop => PresentationDaemonCommand::Stop,
-        CliDaemonCommand::Restart => PresentationDaemonCommand::Restart,
-        CliDaemonCommand::Replace => {
+        CliDaemonCommand::Stop { force } => PresentationDaemonCommand::Stop(transition_mode(force)),
+        // A manual restart is a forced replacement of the artifact that is
+        // already running, so it carries exactly the operation id the build
+        // trigger derives for that case. A repeated restart converges on it.
+        CliDaemonCommand::Restart { force } => PresentationDaemonCommand::Replace {
+            operation: operation
+                .or_else(|| manual_operation_id(&current_build(), runtime_channel())),
+            mode: transition_mode(force),
+        },
+        CliDaemonCommand::Replace { .. } => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "daemon replace must be routed through the client trigger",
@@ -5602,6 +5670,9 @@ fn run_inner(
         cleanup: RefCell::new(None),
     };
     let shutdown = SignalShutdown::new(Arc::clone(&ready.shutdown));
+    let census = DurableResourceCensus {
+        daemon_dir: daemon_dir.clone(),
+    };
     let env = DaemonEnv {
         store: &store,
         probe: &ExactProcessControl,
@@ -5613,6 +5684,8 @@ fn run_inner(
         lock: &lock,
         workspace: &workspace,
         pid,
+        census: &census,
+        seamless: observed_seamless_refusal(&data_dir),
     };
     usagi_daemon::presentation::run(out, command, info, &env)
 }
@@ -5815,7 +5888,10 @@ fn bootstrap_client<S: Read + Write>(
         {
             bootstrap::restart_and_connect(
                 || connect(&data_dir, &expected_build),
-                || run_lifecycle(&exe, "restart"),
+                // Development has already chosen a destructive replacement of a
+                // different build: the cold transition must not be refused by
+                // the live-runtime guard it deliberately overrides (#507).
+                || run_lifecycle_with(&exe, &["daemon", "restart", "--force"], "restart"),
                 &expected_build,
                 IpcClient::server_build,
             )
@@ -6038,13 +6114,36 @@ pub(crate) fn attached_client(policy: ClientPolicy) -> Result<impl DaemonClient,
     Ok(PolicyClient::new(clock, policy, connect, Some(initial)))
 }
 
+/// Requests and performs an intentional replacement of the running daemon
+/// artifact.
+///
+/// The trigger is derived first, effect free, from the two advertised artifact
+/// identities; the replacement it keys is then carried out on exactly the path
+/// `usagi daemon restart` takes, so a build/update swap can never reach a
+/// `stop` → fresh `start` the manual verb is guarded against.
+pub(crate) fn replace_running_daemon(
+    out: &mut dyn Write,
+    policy: ClientPolicy,
+    force: bool,
+    info: &AppInfo,
+) -> std::io::Result<Result<(), ClientError>> {
+    let trigger = match request_replacement(policy) {
+        Ok(trigger) => trigger,
+        Err(error) => return Ok(Err(error)),
+    };
+    run(
+        out,
+        CliDaemonCommand::Restart { force },
+        info,
+        Some(trigger.operation_id),
+    )
+    .map(Ok)
+}
+
 /// Requests intentional replacement of the currently running daemon artifact.
 /// This only creates the deterministic trigger; it never sends a stop signal or
-/// spawns a second daemon. Cross-process generation admission consumes the
-/// trigger in the handoff layer.
-pub(crate) fn request_replacement(
-    policy: ClientPolicy,
-) -> Result<BuildRolloverTrigger, ClientError> {
+/// spawns a second daemon. [`replace_running_daemon`] consumes it.
+fn request_replacement(policy: ClientPolicy) -> Result<BuildRolloverTrigger, ClientError> {
     let data_dir =
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
     let _bootstrap_lock = acquire_bootstrap_lock(&data_dir)?;
@@ -6214,10 +6313,10 @@ fn connect_client<S: Read + Write>(
 /// workspace starts the daemon *in* that workspace. Without this, opening
 /// `~/project` from `~` would cold-start a daemon bound to `~` and then be
 /// refused by the very fence that connection declares.
-fn lifecycle_command(exe: &Path, command: &str, opened: Option<PathBuf>) -> std::process::Command {
+fn lifecycle_command(exe: &Path, args: &[&str], opened: Option<PathBuf>) -> std::process::Command {
     let mut child = std::process::Command::new(exe);
     child
-        .args(["daemon", command])
+        .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -6228,7 +6327,11 @@ fn lifecycle_command(exe: &Path, command: &str, opened: Option<PathBuf>) -> std:
 }
 
 fn run_lifecycle(exe: &Path, command: &str) -> std::io::Result<()> {
-    let status = lifecycle_command(exe, command, opened_workspace()).status()?;
+    run_lifecycle_with(exe, &["daemon", command], command)
+}
+
+fn run_lifecycle_with(exe: &Path, args: &[&str], command: &str) -> std::io::Result<()> {
+    let status = lifecycle_command(exe, args, opened_workspace()).status()?;
     status
         .success()
         .then_some(())
@@ -7568,7 +7671,7 @@ mod tests {
     #[test]
     fn a_lifecycle_start_runs_in_the_workspace_being_opened() {
         let exe = PathBuf::from("/usr/bin/usagi");
-        let start = lifecycle_command(&exe, "start", None);
+        let start = lifecycle_command(&exe, &["daemon", "start"], None);
         // Without a selection the child inherits this process's directory, which
         // is what a plain `usagi daemon start` means.
         assert_eq!(start.get_current_dir(), None);
@@ -7582,11 +7685,17 @@ mod tests {
         // fresh daemon would bind this process's directory and then refuse the
         // very connection that started it.
         let opened = PathBuf::from("/workspace/root");
-        let restart = lifecycle_command(&exe, "restart", Some(opened.clone()));
+        let restart = lifecycle_command(
+            &exe,
+            &["daemon", "restart", "--force"],
+            Some(opened.clone()),
+        );
         assert_eq!(restart.get_current_dir(), Some(opened.as_path()));
+        // Development consumes a build-mismatch trigger by an explicit cold
+        // transition, so its restart carries the guard override it chose.
         assert_eq!(
             restart.get_args().collect::<Vec<_>>(),
-            vec!["daemon", "restart"]
+            vec!["daemon", "restart", "--force"]
         );
     }
 

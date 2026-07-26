@@ -51,9 +51,10 @@ pub enum RunOutcome {
     LaunchTui(TuiRequest),
     /// daemon control plane の起動を依頼する。
     LaunchDaemon(DaemonCommand),
-    /// Ask for an effect-free, coalesced build-artifact replacement trigger.
-    /// The running daemon is not stopped by this ordinary client request.
-    RequestDaemonReplacement,
+    /// Ask for a coalesced build-artifact replacement trigger and perform the
+    /// replacement it keys. `force` gives up the live runtime the running
+    /// daemon owns; without it a busy daemon is refused untouched.
+    RequestDaemonReplacement { force: bool },
     /// stdio MCP server の起動を依頼する。
     LaunchMcp,
     /// Codex `SessionStart` hook の structured payload を daemon へ渡す。
@@ -226,11 +227,23 @@ pub enum DaemonCommand {
     /// daemon の状態を表示する
     Status,
     /// daemon を停止する
-    Stop,
+    Stop {
+        /// live な Agent / generic terminal を巻き添えに停止することを明示する
+        #[arg(long)]
+        force: bool,
+    },
     /// daemon を再起動する
-    Restart,
+    Restart {
+        /// live な Agent / generic terminal を巻き添えに入れ替えることを明示する
+        #[arg(long)]
+        force: bool,
+    },
     /// 現在 daemon の artifact を明示的に入れ替える trigger を要求する
-    Replace,
+    Replace {
+        /// live な Agent / generic terminal を巻き添えに入れ替えることを明示する
+        #[arg(long)]
+        force: bool,
+    },
     /// macOS `LaunchAgent` を install する
     InstallService,
     /// macOS `LaunchAgent` を uninstall する
@@ -323,10 +336,9 @@ struct DaemonEntry {
 
 impl Run for DaemonEntry {
     fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
-        Ok(if self.command == DaemonCommand::Replace {
-            RunOutcome::RequestDaemonReplacement
-        } else {
-            RunOutcome::LaunchDaemon(self.command)
+        Ok(match self.command {
+            DaemonCommand::Replace { force } => RunOutcome::RequestDaemonReplacement { force },
+            command => RunOutcome::LaunchDaemon(command),
         })
     }
 }
@@ -537,8 +549,22 @@ mod tests {
             (&["usagi", "daemon", "serve"][..], DaemonCommand::Serve),
             (&["usagi", "daemon", "start"][..], DaemonCommand::Start),
             (&["usagi", "daemon", "status"][..], DaemonCommand::Status),
-            (&["usagi", "daemon", "stop"][..], DaemonCommand::Stop),
-            (&["usagi", "daemon", "restart"][..], DaemonCommand::Restart),
+            (
+                &["usagi", "daemon", "stop"][..],
+                DaemonCommand::Stop { force: false },
+            ),
+            (
+                &["usagi", "daemon", "stop", "--force"][..],
+                DaemonCommand::Stop { force: true },
+            ),
+            (
+                &["usagi", "daemon", "restart"][..],
+                DaemonCommand::Restart { force: false },
+            ),
+            (
+                &["usagi", "daemon", "restart", "--force"][..],
+                DaemonCommand::Restart { force: true },
+            ),
             (
                 &["usagi", "daemon", "install-service"][..],
                 DaemonCommand::InstallService,
@@ -565,7 +591,26 @@ mod tests {
             &mut err,
         )
         .unwrap();
-        assert_eq!(outcome, RunOutcome::RequestDaemonReplacement);
+        assert_eq!(
+            outcome,
+            RunOutcome::RequestDaemonReplacement { force: false }
+        );
+        assert!(out.is_empty());
+        assert!(err.is_empty());
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let outcome = run(
+            argv(&["usagi", "daemon", "replace", "--force"]),
+            "9.9.9",
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            RunOutcome::RequestDaemonReplacement { force: true }
+        );
         assert!(out.is_empty());
         assert!(err.is_empty());
 
