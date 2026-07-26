@@ -635,6 +635,22 @@ mod tests {
         *release
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        // Observe the release instead of just requesting it. Returning here
+        // would leave the worker's exit path racing the end of the test: it
+        // usually wins locally and sometimes loses in CI, which shows up as
+        // three coverage-missing lines rather than as a failure.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if pump.take().is_some() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the released lane never left its fetch"
+            );
+            pump.wake();
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]
