@@ -8469,6 +8469,7 @@ mod tests {
     impl AgentCommandPort for AdmissionCountingRestorePort {
         fn launch(
             &mut self,
+            _operation: OperationId,
             _workspace: WorkspaceId,
             _session: Option<SessionId>,
             _profile: Option<AgentProfileId>,
