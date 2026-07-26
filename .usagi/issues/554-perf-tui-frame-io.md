@@ -5,7 +5,7 @@ status: done
 priority: medium
 labels: [review, v2, tui, performance, rendering]
 dependson: []
-related: [527, 551, 553, 556]
+related: [527, 551, 553, 556, 557]
 created_at: 2026-07-25T22:58:15.805403+00:00
 updated_at: 2026-07-26T07:24:33.618723+00:00
 ---

@@ -5,9 +5,9 @@ status: done
 priority: high
 labels: [review, v2, daemon, core, terminal, pullrequest, performance]
 dependson: [552]
-related: [493, 518, 524, 526, 527, 534]
+related: [493, 518, 524, 526, 527, 534, 551, 557]
 created_at: 2026-07-25T22:58:44.664415+00:00
-updated_at: 2026-07-26T01:45:22.890988+00:00
+updated_at: 2026-07-26T06:27:33.024542+00:00
 ---
 
 ## 問題・根拠（コード調査で確定）

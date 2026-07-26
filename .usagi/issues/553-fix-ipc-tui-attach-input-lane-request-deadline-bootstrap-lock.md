@@ -5,9 +5,9 @@ status: done
 priority: high
 labels: [review, v2, ipc, tui, client, timeout, resilience]
 dependson: []
-related: [508, 517, 519, 521, 523, 551, 554, 556]
+related: [508, 517, 519, 521, 523, 551, 554, 556, 557]
 created_at: 2026-07-25T22:57:20.001062+00:00
-updated_at: 2026-07-26T01:26:32.584703+00:00
+updated_at: 2026-07-26T06:27:44.129844+00:00
 ---
 
 ## 問題・根拠（コード調査で確定）
