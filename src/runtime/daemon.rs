@@ -5639,6 +5639,42 @@ pub(crate) fn observation_client(policy: ClientPolicy) -> Result<impl DaemonClie
     Ok(PolicyClient::new(clock, policy, connect, Some(initial)))
 }
 
+/// A workspace-bound daemon client for a background observation lane.
+///
+/// It is [`policy_client`] without the bootstrap: same declared workspace, same
+/// end-to-end deadline and reconnect budget, but it only connects to a daemon
+/// that is already running. That is what makes it safe to hold resident on a
+/// pump thread — a lane that observes every few hundred milliseconds must never
+/// take the shared `bootstrap.lock`, spawn a lifecycle subprocess, or sleep out
+/// a readiness wait, because doing so at that cadence serialises every other
+/// client on this machine (#551).
+///
+/// Cold-start authority therefore stays with the surfaces that act on the user's
+/// behalf: workspace entry, and the session-lifecycle lane that may retry it a
+/// bounded number of times. Without a running daemon an observation lane simply
+/// reports the failure and backs off.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=cli_tui_pty
+pub(crate) fn attached_client(policy: ClientPolicy) -> Result<impl DaemonClient, ClientError> {
+    let clock = SystemClock::new();
+    let data_dir =
+        paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let build = current_build();
+    let workspace = client_workspace();
+    let connect = move |clock: SystemClock, budget_ms: u64| {
+        connect_deadline_client(
+            &data_dir,
+            policy,
+            build.clone(),
+            workspace.clone(),
+            clock,
+            budget_ms,
+        )
+        .map_err(|error| ClientError::Unavailable(error.to_string()))
+    };
+    let initial = connect(clock, policy.timeout_ms)?;
+    Ok(PolicyClient::new(clock, policy, connect, Some(initial)))
+}
+
 /// Requests intentional replacement of the currently running daemon artifact.
 /// This only creates the deterministic trigger; it never sends a stop signal or
 /// spawns a second daemon. Cross-process generation admission consumes the

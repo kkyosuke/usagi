@@ -62,7 +62,7 @@ use usagi_tui::presentation::{
     ControllerBackendFactory, ControllerHost, DecisionCommandPort, DesktopNotificationPort,
     EnvironmentStorePort, ExactAgentResume, Exit, ExternalTerminalPort, MetricsPort,
     RestoreConnectionPort, SerializedPaneLaunchPort, SessionCommandPort, SessionCommandResult,
-    Start, WorkspaceLoader, WorkspaceSnapshot,
+    SessionRefreshPort, Start, WorkspaceLoader, WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::agent_tab_intent::{
     AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabIntentPort,
@@ -93,6 +93,7 @@ use usagi_tui::usecase::terminal_input::{
 use crate::runtime::agent_tab_intent::FileAgentTabIntentStore;
 use crate::runtime::clipboard::PlatformClipboard;
 use crate::runtime::inventory_pump::TerminalInventoryPump;
+use crate::runtime::refresh_pump::{RefreshCadence, RefreshPump};
 use crate::runtime::terminal_pump::TerminalPollPump;
 use crate::tui_input::{CrosstermSource, EventPump, NoBackend};
 
@@ -450,25 +451,71 @@ impl BackendTargetStorePort for RepoEnvironmentStore {
     }
 }
 
+/// Home's durable-decision lane.
+///
+/// The snapshot used to be fetched inline: every terminal wake-up dispatched
+/// `Effect::RefreshDecisions`, and this port ran the whole `bootstrap_client` →
+/// request → close round trip on the render thread at the 16ms frame tick
+/// (#551). It now owns a [`RefreshPump`] instead: a resident worker observes on
+/// its own persistent connection at a bounded cadence and this port only hands
+/// the newest snapshot over, so `refresh` is a wake and `poll` is a drain.
+///
+/// Desktop notification stays here rather than in the worker: the dedup set is
+/// render-thread state, and `notify` only spawns a detached process.
 struct ProductionDecisionPort {
     daemon: DaemonDecisionCommandPort,
     notifier: PlatformDesktopNotifier,
     notified: std::collections::BTreeSet<UserDecisionId>,
+    /// The workspace every observation of this lane belongs to, fixed when the
+    /// composition opened it.
+    workspace: WorkspaceId,
+    pump: RefreshPump<Vec<usagi_core::domain::user_decision::UserDecision>>,
+}
+
+impl ProductionDecisionPort {
+    /// Turn one completed observation into the reducer's event vocabulary,
+    /// notifying the desktop about decisions this run has not announced yet.
+    #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=refresh_pump_lane_contract
+    fn publish(
+        &mut self,
+        result: Result<Vec<usagi_core::domain::user_decision::UserDecision>, String>,
+        completions: &Completions,
+    ) {
+        let event = match result {
+            Ok(decisions) => {
+                for decision in &decisions {
+                    if self.notified.insert(decision.decision_id) {
+                        self.notifier
+                            .notify("usagi: decision needed", &decision.title);
+                    }
+                }
+                BackendEvent::Decisions {
+                    workspace: self.workspace,
+                    decisions,
+                }
+            }
+            Err(error) => BackendEvent::Notice(Notice::new(error)),
+        };
+        completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
+    }
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
 impl BackendDecisionPort for ProductionDecisionPort {
-    fn refresh(&mut self, workspace: WorkspaceId, completions: Completions) {
-        let event = self.daemon.refresh(workspace);
-        if let BackendEvent::Decisions { decisions, .. } = &event {
-            for decision in decisions {
-                if self.notified.insert(decision.decision_id) {
-                    self.notifier
-                        .notify("usagi: decision needed", &decision.title);
-                }
-            }
+    fn poll(&mut self, completions: &Completions) {
+        if let Some(result) = self.pump.take() {
+            self.publish(result, completions);
         }
-        completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
+    }
+
+    fn refresh(&mut self, _workspace: WorkspaceId, completions: Completions) {
+        // An explicit refresh is an out-of-cadence wake, never a request on this
+        // thread. Whatever the lane has already observed is handed over now; the
+        // wake's own result arrives through `poll` on a later frame.
+        self.pump.wake();
+        if let Some(result) = self.pump.take() {
+            self.publish(result, &completions);
+        }
     }
 
     fn resolve(
@@ -622,6 +669,8 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             daemon: DaemonDecisionCommandPort,
             notifier: PlatformDesktopNotifier,
             notified: std::collections::BTreeSet::new(),
+            workspace: snapshot.workspace_id,
+            pump: spawn_decision_pump(),
         }))
         .with_overlay(Box::new(ProductionOverlayPort {
             workspace_name: snapshot.workspace.name.clone(),
@@ -637,6 +686,12 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         ControllerBackendComposition {
             backend,
             session_commands: Box::new(DaemonSessionCommandPort),
+            // The resident session-inventory lane. It is a separate client from
+            // `session_commands` on purpose: a user-initiated create/remove and
+            // the background observation must not queue behind each other.
+            session_refresh: Box::new(DaemonSessionRefreshPort {
+                pump: spawn_session_refresh_pump(snapshot.workspace.clone()),
+            }),
             agent_commands: Box::new(
                 DaemonAgentCommandPort::new(spawn_poll_pump())
                     .with_inventory_pump(spawn_inventory_pump()),
@@ -662,8 +717,37 @@ impl ControllerBackendFactory for ProductionBackendFactory {
     }
 }
 
+/// Home's resident session-inventory lane.
+///
+/// It replaces the per-tick `SessionCommand::List` worker: that spawned one OS
+/// thread and one bootstrapped daemon connection for every completed round, at
+/// the frame tick's cadence (#551). This port owns neither policy nor IO — the
+/// [`RefreshPump`] owns the cadence and the connection, and the frame loop only
+/// wakes and drains.
+struct DaemonSessionRefreshPort {
+    pump: RefreshPump<SessionCommandResult>,
+}
+
+#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=refresh_pump_lane_contract
+impl SessionRefreshPort for DaemonSessionRefreshPort {
+    fn wake(&mut self) {
+        self.pump.wake();
+    }
+
+    fn take(&mut self) -> Option<Result<SessionCommandResult, String>> {
+        self.pump.take()
+    }
+}
+
+/// The mascot's metrics and the sidebar's git columns.
+///
+/// `latest` used to sample the daemon inline behind a one-second cache, but that
+/// one sample per second still opened a fresh bootstrapped connection **on the
+/// render thread** (#551). The sampling rate is unchanged; the request now
+/// belongs to a resident lane and `latest` is a cache read that cannot block.
+/// Git diffs were already on a worker thread and keep that shape.
 struct DaemonMetricsPort {
-    last_sample: Option<Instant>,
+    metrics: RefreshPump<Option<DaemonMetrics>>,
     latest: Option<DaemonMetrics>,
     git_diffs: BTreeMap<usagi_core::domain::id::SessionId, GitDiff>,
     git_receiver: Option<mpsc::Receiver<(usagi_core::domain::id::SessionId, GitDiff)>>,
@@ -671,11 +755,12 @@ struct DaemonMetricsPort {
 }
 
 impl DaemonMetricsPort {
-    // Composition-only adapter: it constructs the real daemon client and uses
-    // the monotonic clock. The presentation `MetricsPort` is covered with fakes.
-    const fn new() -> Self {
+    // Composition-only adapter: it spawns the real daemon lane and uses the
+    // monotonic clock. The presentation `MetricsPort` is covered with fakes.
+    #[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=production_metrics_projection_contract
+    fn new() -> Self {
         Self {
-            last_sample: None,
+            metrics: spawn_metrics_pump(),
             latest: None,
             git_diffs: BTreeMap::new(),
             git_receiver: None,
@@ -688,26 +773,13 @@ impl MetricsPort for DaemonMetricsPort {
     // Real daemon I/O belongs to the composition root; UI behaviour is tested
     // through its injected MetricsPort boundary.
     fn latest(&mut self) -> Option<DaemonMetrics> {
-        if self
-            .last_sample
-            .is_some_and(|sample| sample.elapsed() < Duration::from_secs(1))
-        {
-            return self.latest.clone();
+        // A failed observation keeps the previous sample rather than blanking
+        // the mascot: the lane's backoff already reports the outage rate, and a
+        // momentary daemon hiccup should not flicker the frame.
+        if let Some(Ok(sample)) = self.metrics.take() {
+            self.latest = sample;
         }
-        self.last_sample = Some(Instant::now());
-        let mut client = crate::runtime::daemon::policy_client(ClientPolicy::tui()).ok()?;
-        match client
-            .request(DaemonRequest::Metrics {
-                action: MetricsAction::Snapshot,
-            })
-            .ok()?
-        {
-            DaemonReply::Ok(value) => {
-                self.latest = serde_json::from_value(value).ok();
-                self.latest.clone()
-            }
-            DaemonReply::Accepted { .. } => None,
-        }
+        self.latest.clone()
     }
 
     fn git_diffs(
@@ -1863,6 +1935,180 @@ impl AgentCommandPort for DaemonAgentCommandPort {
     }
 }
 
+/// Cadence of Home's durable-decision lane. A pending decision blocks an agent,
+/// so this is the most responsive of the three; the bound is what matters, not
+/// the exact value.
+fn decision_cadence() -> RefreshCadence {
+    RefreshCadence::new(
+        Duration::from_millis(500),
+        Duration::from_millis(500),
+        Duration::from_millis(8_000),
+    )
+}
+
+/// Cadence of Home's session-inventory lane. It only has to notice lifecycle
+/// changes another client made (an MCP server creating a session); anything the
+/// user does here is adopted from the command's own result or an explicit wake,
+/// so a one-second worst case for a foreign change is the accepted visible cost
+/// of coalescing (#551).
+fn session_cadence() -> RefreshCadence {
+    RefreshCadence::new(
+        Duration::from_millis(1_000),
+        Duration::from_millis(1_000),
+        Duration::from_millis(8_000),
+    )
+}
+
+/// Cadence of the mascot's metrics lane. It matches the one-second throttle the
+/// inline port already applied, so the sampling rate is unchanged and only the
+/// thread it runs on differs.
+fn metrics_cadence() -> RefreshCadence {
+    RefreshCadence::new(
+        Duration::from_millis(1_000),
+        Duration::from_millis(1_000),
+        Duration::from_millis(8_000),
+    )
+}
+
+/// How many times a lane that is allowed to cold-start may pay for one, per
+/// workspace launch. Cold-start runs a lifecycle subprocess and can sleep out a
+/// two-second readiness wait, so an observation lane retrying it every cadence
+/// period would keep the shared bootstrap lock hot forever (#551).
+const LANE_COLD_START_BUDGET: u32 = 3;
+
+/// One background observation lane's persistent daemon connection.
+///
+/// The lane opens it once and keeps it for the whole workspace, so the steady
+/// state costs one request per cadence period instead of a full
+/// `bootstrap_client` (data-dir `flock` ×2, `bootstrap.lock`, `current_exe`,
+/// locator read, handshake) per frame tick (#551). A transport failure drops the
+/// connection so the next round reconnects; the pump's backoff bounds how often
+/// that happens.
+///
+/// Cold-start authority is a property of the lane, decided once here:
+/// [`Self::observing`] never starts a daemon, while [`Self::lifecycle`] may pay
+/// for a bounded number of cold starts when — and only when — a plain attach
+/// fails.
+struct LaneConnection {
+    client: Option<Box<dyn DaemonClient + Send>>,
+    cold_start_budget: u32,
+}
+
+impl LaneConnection {
+    /// A display/observation lane: it reports the daemon's absence and never
+    /// starts one.
+    const fn observing() -> Self {
+        Self {
+            client: None,
+            cold_start_budget: 0,
+        }
+    }
+
+    /// The session-lifecycle lane: the one lane whose data the user acts on, so
+    /// it is the one allowed to bring a missing daemon back.
+    const fn lifecycle() -> Self {
+        Self {
+            client: None,
+            cold_start_budget: LANE_COLD_START_BUDGET,
+        }
+    }
+
+    /// Perform one request on the lane's connection, opening it first when
+    /// needed and dropping it on any transport failure.
+    #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=refresh_pump_lane_contract
+    fn request(&mut self, request: DaemonRequest) -> Result<DaemonReply, String> {
+        if self.client.is_none() {
+            self.client = Some(self.connect()?);
+        }
+        match self
+            .client
+            .as_mut()
+            .expect("the lane connection was just opened")
+            .request(request)
+        {
+            Ok(reply) => Ok(reply),
+            Err(error) => {
+                self.client = None;
+                Err(daemon_error_reason(error))
+            }
+        }
+    }
+
+    /// Attach to a running daemon; only a lane with cold-start budget falls back
+    /// to the bootstrapping client, and each fallback spends one unit of it.
+    #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=refresh_pump_lane_contract
+    fn connect(&mut self) -> Result<Box<dyn DaemonClient + Send>, String> {
+        match crate::runtime::daemon::attached_client(ClientPolicy::tui()) {
+            Ok(client) => Ok(Box::new(client)),
+            Err(error) if self.cold_start_budget == 0 => {
+                Err(format!("daemon unavailable: {error}"))
+            }
+            Err(_) => {
+                self.cold_start_budget -= 1;
+                crate::runtime::daemon::policy_client(ClientPolicy::tui())
+                    .map(|client| Box::new(client) as Box<dyn DaemonClient + Send>)
+                    .map_err(|error| format!("daemon unavailable: {error}"))
+            }
+        }
+    }
+}
+
+/// Spawns Home's resident durable-decision lane. Observation only: a missing
+/// daemon is reported, never started (#551).
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=refresh_pump_lane_contract
+fn spawn_decision_pump() -> RefreshPump<Vec<usagi_core::domain::user_decision::UserDecision>> {
+    let mut lane = LaneConnection::observing();
+    RefreshPump::spawn(decision_cadence(), move || {
+        let reply = lane.request(DaemonRequest::UserDecision {
+            action: usagi_core::usecase::client::TuiUserDecisionAction::List,
+            payload: serde_json::json!({}),
+        })?;
+        let DaemonReply::Ok(value) = reply else {
+            return Err("daemon did not return a decision snapshot".to_owned());
+        };
+        serde_json::from_value(value.get("decisions").cloned().unwrap_or(value))
+            .map_err(|_| "daemon returned an invalid decision snapshot".to_owned())
+    })
+}
+
+/// Spawns Home's resident session-inventory lane on its own connection, so a
+/// slow user-initiated create/remove and the background observation never block
+/// each other (#551).
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=refresh_pump_lane_contract
+fn spawn_session_refresh_pump(workspace: Workspace) -> RefreshPump<SessionCommandResult> {
+    let mut lane = LaneConnection::lifecycle();
+    RefreshPump::spawn(session_cadence(), move || {
+        let reply = lane.request(DaemonRequest::Session {
+            action: SessionAction::List,
+            operation_id: usagi_core::domain::id::OperationId::new().to_string(),
+            payload: serde_json::json!({}),
+        })?;
+        let (DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. }) = reply;
+        let snapshot = lifecycle_snapshot(&body)?;
+        // The `state.json` read this performs is workspace-local file IO; it
+        // belongs on this thread with the request, not on the render thread.
+        session_snapshot_result("daemon snapshot refreshed", &snapshot, &workspace)
+    })
+}
+
+/// Spawns the mascot's resident metrics lane. Display-only, so like
+/// `observation_client` before it, it never cold-starts a daemon (#551).
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=refresh_pump_lane_contract
+fn spawn_metrics_pump() -> RefreshPump<Option<DaemonMetrics>> {
+    let mut lane = LaneConnection::observing();
+    RefreshPump::spawn(metrics_cadence(), move || {
+        let reply = lane.request(DaemonRequest::Metrics {
+            action: MetricsAction::Snapshot,
+        })?;
+        match reply {
+            DaemonReply::Ok(value) => Ok(serde_json::from_value(value).ok()),
+            DaemonReply::Accepted { .. } => {
+                Err("daemon did not return a metrics snapshot".to_owned())
+            }
+        }
+    })
+}
+
 /// Spawns a background poll pump backed by a dedicated, deadline-bounded daemon
 /// connection so every `Resume` fetch runs off the render thread.
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
@@ -2520,9 +2766,13 @@ impl Terminal for CrosstermTerminal {
                         return Ok(key);
                     }
                 }
+                // A resize is reported as itself, not as a generic wake-up. The
+                // frame loop used to treat the two identically and fired the
+                // decision + session RPCs for both, so dragging a window edge
+                // produced one daemon round trip per resize event (#551).
                 RuntimeEvent::Resize { .. } => {
                     self.renderer.reset_surface();
-                    return Ok(Key::Other);
+                    return Ok(Key::Resize);
                 }
                 // Tick wakes the TUI while a background session command owns
                 // the daemon port, so the pending skeleton can redraw.
@@ -3184,20 +3434,50 @@ mod tests {
 
     use super::{
         DaemonAgentCommandPort, DaemonDecisionCommandPort, DaemonRestoreConnectionPort, EnvScope,
-        EnvironmentStorePort, FsWorkspaceLoader, Geometry, LifecycleRequestError,
-        LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore,
-        SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen, TerminalChunk,
-        TerminalError, TerminalInputOutcome, TerminalSnapshotMode, TerminalSubscription,
-        agent_inventory_request, classify_terminal_input, created_session_hook,
-        daemon_error_reason, decode_agent_admission, decode_attach_screen,
-        decode_exact_agent_resume, decode_terminal_input_ack, decode_terminal_inventory,
-        decode_terminal_poll, exact_agent_resume_request, lifecycle_snapshot,
-        load_screen_graph_data, load_workspace_state, map_terminal_error, passthrough_key,
-        probe_path, provider_resume_projection, session_snapshot_result, terminal_copy_key,
-        terminal_inventory_matches_scope, validate_workspace_directory, workspace_open_error,
+        EnvironmentStorePort, FsWorkspaceLoader, Geometry, LANE_COLD_START_BUDGET, LaneConnection,
+        LifecycleRequestError, LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory,
+        RepoEnvironmentStore, SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen,
+        TerminalChunk, TerminalError, TerminalInputOutcome, TerminalSnapshotMode,
+        TerminalSubscription, agent_inventory_request, classify_terminal_input,
+        created_session_hook, daemon_error_reason, decision_cadence, decode_agent_admission,
+        decode_attach_screen, decode_exact_agent_resume, decode_terminal_input_ack,
+        decode_terminal_inventory, decode_terminal_poll, exact_agent_resume_request,
+        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
+        metrics_cadence, passthrough_key, probe_path, provider_resume_projection, session_cadence,
+        session_snapshot_result, terminal_copy_key, terminal_inventory_matches_scope,
+        validate_workspace_directory, workspace_open_error,
     };
+    use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
     use chrono::Utc;
+
+    /// The contract of Home's three background observation lanes (#551).
+    ///
+    /// Each lane's cadence must sit inside the pump's bounded window — that is
+    /// what caps the idle request rate — and cold-start authority must belong to
+    /// exactly one lane, so a missing daemon cannot be raced for by three
+    /// resident threads.
+    #[test]
+    fn refresh_pump_lane_contract() {
+        for cadence in [decision_cadence(), session_cadence(), metrics_cadence()] {
+            assert!(cadence.interval >= MIN_INTERVAL);
+            assert!(cadence.interval <= MAX_INTERVAL);
+            assert!(cadence.backoff_base >= cadence.interval / 2);
+            assert!(cadence.backoff_max >= cadence.backoff_base);
+        }
+        // A pending decision should surface sooner than a foreign lifecycle
+        // change, and the metrics sample keeps the rate it always had.
+        assert!(decision_cadence().interval < session_cadence().interval);
+        assert_eq!(metrics_cadence().interval, Duration::from_secs(1));
+
+        let observing = LaneConnection::observing();
+        assert_eq!(observing.cold_start_budget, 0);
+        assert!(observing.client.is_none());
+        assert_eq!(
+            LaneConnection::lifecycle().cold_start_budget,
+            LANE_COLD_START_BUDGET
+        );
+    }
     use serde_json::json;
     use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
     use usagi_core::domain::id::{

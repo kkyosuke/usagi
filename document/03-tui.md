@@ -12,6 +12,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [settings scope と workspace entry](#settings-scope-と-workspace-entry)
 - [workspace の選択と daemon](#workspace-の選択と-daemon)
 - [Home と target](#home-と-target)
+- [Home frame loop と背景観測 lane](#home-frame-loop-と背景観測-lane)
 - [Session sidebar rows](#session-sidebar-rows)
 - [Overview と modal](#overview-と-modal)
 - [PR modal と browser effect](#pr-modal-と-browser-effect)
@@ -307,6 +308,41 @@ auto-repeat は press と同じ follow-up として 1 件だけ解決する。�
 control byte と semantic control event は同じ global shortcut に解決する。
 
 Windows の `Ctrl+C` は terminal 出力を選択中なら copy とし、選択が無い場合は PTY へ SIGINT として送る。
+
+## Home frame loop と背景観測 lane
+
+**描画スレッドは daemon を同期で叩かない。** Home の 1 frame は `非ブロッキング drain → 純粋な projection → draw →
+入力` だけで構成し、daemon への request はすべて背景 lane が発行する。この不変条件は Home の 3 lane（decision /
+session / metrics）と、live terminal の
+[背景 observation lane](#背景-observation-lane)（foreground poll pump / background inventory pump）に共通である。
+
+Home の 3 lane はそれぞれ**専用の常駐 worker thread と専用の永続接続**を持ち、cadence は 250ms〜1s の範囲に clamp する。
+worker は workspace を開いたときに 1 本ずつ起動して閉じるまで生存するため、frame が thread を作ることはない。
+
+| lane | 観測対象 | primitive | cadence | cold-start |
+|---|---|---|---|---|
+| decision | 保留中の user decision | `UserDecision::List` | 500ms。失敗中は 500ms から 8s 上限の指数 backoff | しない |
+| session | 他 client（MCP server / CLI）が変えた session lifecycle | `Session::List` | 1s。失敗中は 1s から 8s 上限の指数 backoff | する（高々 3 回） |
+| metrics | mascot の daemon metrics | `Metrics::Snapshot` | 1s。失敗中は 1s から 8s 上限の指数 backoff | しない |
+
+- **request rate は frame rate に比例しない**。idle な Home が生む daemon request は上表の cadence だけで決まり、
+  接続確立は lane あたり workspace の生存中に原則 1 回（transport 断のあとの再接続のみ追加）である。
+- **同種の未処理要求は最新 1 件に畳む**（coalesce）。lane の in-flight request は高々 1 件で、cadence 1 周期に何度
+  refresh を要求しても発行される request は 1 件である。畳んだぶん、他 client が作った session の反映は最大で
+  cadence 1 周期ぶん遅れる。これは受け入れる遅延であり、利用者自身の操作（作成・削除）は lane を待たず command 自身の
+  結果で反映する。
+- **順序は daemon の lifecycle revision で調停する**。lane の観測が利用者の command より前に始まって後に届いた場合、
+  revision が古いので破棄する。どの lane が観測したかに関わらず最新の daemon 状態が勝つ。
+- **cold-start の権限は session lane だけが持つ**。observation lane（decision / metrics）は起動中の daemon へ attach
+  するだけで、`bootstrap.lock` の取得も lifecycle subprocess の起動も readiness 待ちも行わない。session lane は attach に
+  失敗したときだけ cold-start へ落ち、その回数は workspace あたり 3 回に bound する。いずれも背景 thread 上で起き、
+  描画スレッドが subprocess や sleep を実行することはない。
+- **tick と resize は inventory を触らない**。terminal の wake-up（tick）と端末リサイズはどちらも再描画の機会であって
+  観測の機会ではない。frame loop はこの 2 つを別のキーとして受け取り、どちらでも lane を起こさないため、ウィンドウの
+  ドラッグリサイズは 1 event につき 1 回の再描画だけを費やす。実サイズは frame 先頭の `term.size()` から読む。
+- **lane が応答しなくても frame は進む**。lane が hung / 不在でも frame loop は drain が空振りするだけなので、描画・
+  入力・modal・quit は待たされない。decision lane の失敗は notice として、session lane の失敗は refresh を要求した
+  完了経路の notice として 1 回だけ出る。metrics lane の失敗は直前の sample を保持して mascot をちらつかせない。
 
 ## Session sidebar rows
 
@@ -649,6 +685,8 @@ ledger・input sequence に影響しない。`Resize` は attach / input とは�
 #### 背景 observation lane
 
 daemon の出力・exit を観測する lane は 2 本あり、どちらも描画スレッドの外で、専用接続と bounded cadence を持つ。
+Home の inventory（decision / session / metrics）を観測する 3 lane は
+[Home frame loop と背景観測 lane](#home-frame-loop-と背景観測-lane) が正本で、この 2 本とは観測対象も cadence も別である。
 
 | lane | 観測対象 | primitive | cadence |
 |---|---|---|---|

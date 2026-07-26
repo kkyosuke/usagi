@@ -197,6 +197,17 @@ pub trait WorkspaceCommandPort {
 
 /// Daemon-owned durable decision snapshot and resolve boundary.
 pub trait DecisionPort {
+    /// Non-blocking drain of a resident observation worker, called once per
+    /// frame from [`DaemonBackend::drain_events`].
+    ///
+    /// The production port observes decisions on its own thread at a bounded
+    /// cadence (#551) and only publishes what that worker has already
+    /// completed, so the render thread never waits on the daemon. Ports without
+    /// a worker (tests, embedders) keep the default no-op.
+    fn poll(&mut self, _completions: &Completions) {}
+    /// Ask for an observation. The production port treats this as an
+    /// out-of-cadence wake of its resident worker rather than as a synchronous
+    /// request, so a slow daemon cannot stall the caller.
     fn refresh(&mut self, workspace: WorkspaceId, completions: Completions);
     fn resolve(
         &mut self,
@@ -450,8 +461,15 @@ impl DaemonBackend {
 
     /// Drain every completion that a port has reported since the last call,
     /// without blocking.  The frame loop feeds these to `update()` at its head.
+    ///
+    /// Resident observation workers publish through the same channel: this
+    /// first gives the decision port a non-blocking chance to hand over what its
+    /// background lane already fetched (#551), so the frame loop's single drain
+    /// covers both effect completions and cadence-driven observations.
     #[must_use]
     pub fn drain_events(&mut self) -> Vec<AppEvent> {
+        let completions = self.completions();
+        self.decisions.poll(&completions);
         self.completions_rx.try_iter().collect()
     }
 
