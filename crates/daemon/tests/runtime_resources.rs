@@ -18,8 +18,10 @@
 //! The second process is this test binary re-executed in a worker role, so the
 //! two writers are genuinely separate address spaces.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
@@ -41,7 +43,12 @@ use usagi_daemon::usecase::resources::launch::{
 };
 use usagi_daemon::usecase::resources::retention::{LogicalClock, RetentionLimits};
 use usagi_daemon::usecase::resources::shard::{OwnerShard, ResourceState, collectable};
-use usagi_daemon::usecase::terminal::Geometry;
+use usagi_daemon::usecase::terminal::{Geometry, PtyWriter};
+
+/// Real processes and real PTYs occupy the CPU, so the heavy runs in this binary
+/// are serialized: a frame or exit wait must fail because the product failed, not
+/// because two of these tests were competing.
+static SERIAL: Mutex<()> = Mutex::new(());
 
 const WORKER_ROLE: &str = "USAGI_RESOURCE_WORKER";
 const WORKER_DATA_DIR: &str = "USAGI_RESOURCE_DATA_DIR";
@@ -73,6 +80,22 @@ impl RealPtySpawner {
             children: Vec::new(),
         }
     }
+
+    /// End the children the way their owner does: ask each shell to exit through
+    /// the PTY, then wait for its status. The wait is what reaps the process — a
+    /// bare signal leaves something the OS still reports at that pid, and a killed
+    /// session leader may not even finish exiting while its master is open.
+    fn end_children(&mut self) -> Vec<i32> {
+        let mut statuses = Vec::new();
+        for child in &mut self.children {
+            child
+                .write_all(b"exit\n")
+                .expect("the PTY master accepts the exit command");
+            statuses.push(child.wait().expect("the child reports an exit status"));
+        }
+        self.children.clear();
+        statuses
+    }
 }
 
 impl ResourceSpawner for RealPtySpawner {
@@ -82,6 +105,14 @@ impl ResourceSpawner for RealPtySpawner {
                 .map_err(|_| SpawnRefusal::Definite)?;
         let pid = terminal.process_id().ok_or(SpawnRefusal::Ambiguous)?;
         let identity = record_child(&UnixChildProbe, pid).map_err(|_| SpawnRefusal::Ambiguous)?;
+        // A real owner always drains the master; a shell that cannot flush its tty
+        // never finishes exiting, so without this the child would hang on the way
+        // out instead of reporting a status.
+        let mut reader = terminal.reader().map_err(|_| SpawnRefusal::Ambiguous)?;
+        std::thread::spawn(move || {
+            let mut sink = [0u8; 4096];
+            while reader.read(&mut sink).unwrap_or(0) > 0 {}
+        });
         // Keeping the master alive keeps the child alive, which is what makes the
         // later observation a real "still running" answer.
         self.children.push(terminal);
@@ -174,7 +205,8 @@ fn worker_process_entry_point() {
     assert_eq!(replay.resource, accepted.resource);
     assert_eq!(replay.revision, accepted.revision);
     assert!(again.children.is_empty());
-    drop(held);
+    let mut held = held;
+    assert_eq!(held.end_children().len(), 1);
 }
 
 fn spawn_worker(
@@ -194,7 +226,9 @@ fn spawn_worker(
         .unwrap()
 }
 
-fn await_until(mut ready: impl FnMut() -> bool) {
+/// Wait for a named condition. The name is part of the panic so a timeout says
+/// *which* wait gave up instead of only where the helper is.
+fn await_until(what: &str, mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + DEADLINE;
     while Instant::now() < deadline {
         if ready() {
@@ -202,12 +236,15 @@ fn await_until(mut ready: impl FnMut() -> bool) {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    panic!("condition was not reached within {DEADLINE:?}");
+    panic!("{what} was not reached within {DEADLINE:?}");
 }
 
 #[test]
 #[allow(clippy::too_many_lines)] // One end-to-end run: splitting it would hide the ordering.
 fn an_old_exit_and_a_new_spawn_run_in_two_processes_without_losing_either() {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let home = TempDir::new_in("/tmp").unwrap();
     let data_dir = home.path();
     let old = DaemonGeneration::new();
@@ -244,7 +281,7 @@ fn an_old_exit_and_a_new_spawn_run_in_two_processes_without_losing_either() {
         .join("daemon")
         .join("shards")
         .join(format!("{}.json", new.as_str()));
-    await_until(|| new_shard_path.exists());
+    await_until("the new generation's shard", || new_shard_path.exists());
     let old_bytes = std::fs::read(
         data_dir
             .join("daemon")
@@ -253,7 +290,9 @@ fn an_old_exit_and_a_new_spawn_run_in_two_processes_without_losing_either() {
     )
     .unwrap();
 
-    // Meanwhile the draining owner reaps its child and publishes the exit.
+    // Meanwhile the draining owner reaps its child and publishes the exit. It
+    // terminates *and waits* through its own PTY handle: a bare signal would leave
+    // a zombie, and a zombie still answers the process table as the exact child.
     let child = shard(data_dir, old)
         .load()
         .unwrap()
@@ -261,13 +300,12 @@ fn an_old_exit_and_a_new_spawn_run_in_two_processes_without_losing_either() {
         .resource(&old_resource)
         .unwrap()
         .clone();
-    let pid = child.process.as_ref().unwrap().pid;
-    // SAFETY: SIGKILL to the exact pid this test spawned under its own PTY.
-    unsafe { libc::kill(libc::pid_t::try_from(pid).unwrap(), libc::SIGKILL) };
-    await_until(|| {
+    let mut held = held;
+    let status = held.end_children()[0];
+    await_until("the draining owner's child being gone", || {
         observe_child(&UnixChildProbe, child.process.as_ref().unwrap()).is_definitely_gone()
     });
-    publish_exit(&shard(data_dir, old), &old_resource, 137).unwrap();
+    publish_exit(&shard(data_dir, old), &old_resource, status).unwrap();
 
     assert!(
         worker.wait().unwrap().success(),
@@ -366,12 +404,16 @@ fn an_old_exit_and_a_new_spawn_run_in_two_processes_without_losing_either() {
     // The worker process exited, taking its PTY master with it. The identity is
     // still exact enough to answer the only question that matters: this child is
     // definitely gone, so nothing signals or adopts its pid.
-    await_until(|| observe_child(&UnixChildProbe, &new_child).is_definitely_gone());
-    drop(held);
+    await_until("the other process's child being gone", || {
+        observe_child(&UnixChildProbe, &new_child).is_definitely_gone()
+    });
 }
 
 #[test]
 fn a_repeated_operation_replays_across_a_process_boundary_without_a_second_child() {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let home = TempDir::new_in("/tmp").unwrap();
     let data_dir = home.path();
     let generation = DaemonGeneration::new();
@@ -406,5 +448,7 @@ fn a_repeated_operation_replays_across_a_process_boundary_without_a_second_child
         .unwrap();
     // The worker exited, so its PTY master closed and the shell was reaped: the
     // OS answer is "gone" (or "reused"), never "this is still my child".
-    await_until(|| observe_child(&UnixChildProbe, &child).is_definitely_gone());
+    await_until("the worker's child being gone", || {
+        observe_child(&UnixChildProbe, &child).is_definitely_gone()
+    });
 }
