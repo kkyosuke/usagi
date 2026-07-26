@@ -2,19 +2,18 @@
 number: 567
 title: test(tui): restore retry の skipped-tick 受入テストが frame skip を待たず flake する
 status: todo
-priority: medium
-labels: [v2, tui, test]
+priority: high
+labels: [v2, tui, test, ci]
 dependson: []
 related: [554]
 created_at: 2026-07-26T14:58:29.514342+00:00
-updated_at: 2026-07-26T14:58:29.514342+00:00
+updated_at: 2026-07-26T15:37:19.657319+00:00
 ---
 
 ## 問題・影響
 
 `usagi-tui` の `presentation::tests::a_skipped_tick_still_admits_the_restore_retry`
 （[#554](./554-perf-tui-frame-budget-file-io-full-rebuild.md) の受入テスト）が run ごとに揺れる。
-手元では 6 回に 1 回程度失敗する。
 
 ```text
 thread 'presentation::tests::a_skipped_tick_still_admits_the_restore_retry' panicked at
@@ -30,10 +29,19 @@ assert する。`[1, 2, 3]` は 3 回の admission すべてが redraw の直後
 frame skip は renderer の入力比較で決まるため、controller が何 tick 回るか・どの tick で material が
 変わるかに依存する。テストは skip が起きるまで待たず、observed 列に skip が現れることを期待している。
 
-failure は coverage gate（`cargo llvm-cov` 経由の workspace test）を abort させるため、
-自分の差分と無関係な PR の coverage 計測が落ちる。実際に
-[#559](./559-feat-daemon-serve-durable-generation-registry-active-generation.md) の daemon 側 PR で
-（`crates/tui` に一切触っていない差分で）coverage run が abort した。
+## これは共有 gate を壊す
+
+**failure は `coverage` job の test 実行を abort させるため、`crates/tui` に一切触っていない PR の
+coverage gate が落ちる。** 手元でもローカル `coverage_enforce` を 2 回連続で abort させ、**CI でも再現した**。
+
+| 観測 | 場所 |
+|---|---|
+| ローカル `cargo test -p usagi-tui --lib <name>` を 6 回回して 1 回失敗 | macOS |
+| ローカル `coverage_enforce` を 2 回連続で abort | macOS |
+| CI `coverage` job の test 実行が abort（[#559](./559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) 系列の daemon 側 PR） | ubuntu-latest |
+
+test 実行が abort すると report 生成まで到達しないため、**sticky な coverage comment は前 run の内容が
+残り**、実際には未計測なのに「未達ファイルがある」と読める。これは診断を誤らせる。
 
 ## 対象責務
 
