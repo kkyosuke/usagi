@@ -1,14 +1,14 @@
 ---
 number: 561
 title: refactor(daemon): serve を role-aware にして standby process の起動を可能にする
-status: todo
+status: done
 priority: high
 labels: [review, v2, daemon, lifecycle, durability]
 dependson: [568]
 related: [515, 516, 542, 550, 559]
 parent: 559
 created_at: 2026-07-26T13:58:19.336697+00:00
-updated_at: 2026-07-26T15:01:58.946415+00:00
+updated_at: 2026-07-26T22:29:27.685301+00:00
 ---
 
 ## 問題・根拠（コード調査で確定）
@@ -62,14 +62,14 @@ durable state 移行と混ぜず、単独でレビュー・検証できる形に
 
 ## 受入条件
 
-- [ ] 同じ data directory に 2 個目の **active** daemon は起動できない（registry と fence で拒否され、typed error になる）。
-- [ ] standby は起動でき、private endpoint を bind して registry へ standby として登録され、readiness 後に
+- [x] 同じ data directory に 2 個目の **active** daemon は起動できない（registry と fence で拒否され、typed error になる）。
+- [x] standby は起動でき、private endpoint を bind して registry へ standby として登録され、readiness 後に
       `verified_build` が立つ。**locator は publish されない**。
-- [ ] standby は hydrate を read-only で行い、worker / tick / spawn を開始しない。
-- [ ] crash した active の stale registry entry が回収され、その後に新しい active が起動できる。
-- [ ] `replacement::seamless_refusal` が `no generation registry` 以外の理由を返せるようになる
+- [x] standby は hydrate を read-only で行い、worker / tick / spawn を開始しない。
+- [x] crash した active の stale registry entry が回収され、その後に新しい active が起動できる。
+- [x] `replacement::seamless_refusal` が `no generation registry` 以外の理由を返せるようになる
       （**rollover の有効化そのものは #559**）。
-- [ ] カバレッジ 100% を維持する。[document/05-daemon.md](../../document/05-daemon.md) の
+- [x] カバレッジ 100% を維持する。[document/05-daemon.md](../../document/05-daemon.md) の
       [単一 daemon の 2 段 fence](../../document/05-daemon.md#単一-daemon-の-2-段-fence) を実装に合わせて更新する。
 
 ## 必須回帰テスト・計測
