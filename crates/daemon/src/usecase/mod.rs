@@ -22,6 +22,7 @@ pub mod metrics;
 pub mod orchestration;
 pub mod pr_inventory;
 pub mod pr_projection;
+pub mod resources;
 pub mod restart;
 pub mod runtime;
 pub mod serve;

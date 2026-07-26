@@ -5586,6 +5586,7 @@ mod tests {
                             cols: 80,
                             rows: 24,
                         },
+                        launch_operation: None,
                     },
                 })
                 .unwrap(),

@@ -103,7 +103,7 @@ impl<P: TerminalLaunchPort + TerminalPort> TerminalLaunchAdapter<P> {
                 kind: PaneKind::Terminal,
             },
         );
-        let result = self.resolve(target, &arguments);
+        let result = self.resolve(target, &arguments, operation_id);
         match result {
             Ok(terminal) => runtime.dispatch(
                 &mut self.port,
@@ -122,19 +122,27 @@ impl<P: TerminalLaunchPort + TerminalPort> TerminalLaunchAdapter<P> {
         }
     }
 
-    fn resolve(&mut self, target: Target, mode: &str) -> Result<TerminalRef, String> {
+    fn resolve(
+        &mut self,
+        target: Target,
+        mode: &str,
+        operation: OperationId,
+    ) -> Result<TerminalRef, String> {
         let scope = self.port.terminal_scope(target)?;
         if mode == "open"
             && let Some(terminal) = self.port.terminal_inventory(&scope)?.into_iter().next()
         {
             return Ok(terminal);
         }
+        // The controller's durable operation goes on the wire unchanged, so a
+        // lost response replays the same terminal instead of launching another.
         self.port.launch_terminal(TerminalLaunchIntent {
             request: scope,
             geometry: TerminalGeometry {
                 cols: self.geometry.cols,
                 rows: self.geometry.rows,
             },
+            launch_operation: Some(operation),
         })
     }
 }
@@ -156,6 +164,7 @@ mod tests {
         scope: TerminalLaunchRequest,
         inventory: Vec<TerminalRef>,
         launched: usize,
+        launch_operations: Vec<Option<OperationId>>,
         attached: Vec<TerminalRef>,
         scope_error: Option<String>,
     }
@@ -173,8 +182,9 @@ mod tests {
         ) -> Result<Vec<TerminalRef>, String> {
             Ok(self.inventory.clone())
         }
-        fn launch_terminal(&mut self, _: TerminalLaunchIntent) -> Result<TerminalRef, String> {
+        fn launch_terminal(&mut self, intent: TerminalLaunchIntent) -> Result<TerminalRef, String> {
             self.launched += 1;
+            self.launch_operations.push(intent.launch_operation);
             Ok(self.inventory[0].clone())
         }
     }
@@ -259,6 +269,7 @@ mod tests {
             scope,
             inventory: vec![terminal.clone()],
             launched: 0,
+            launch_operations: vec![],
             attached: vec![],
             scope_error: None,
         };
@@ -292,6 +303,7 @@ mod tests {
             scope,
             inventory: vec![terminal.clone()],
             launched: 0,
+            launch_operations: vec![],
             attached: vec![],
             scope_error: None,
         };
@@ -299,16 +311,22 @@ mod tests {
         let mut runtime = PaneRuntime::new(super::super::pane::PaneState::new(
             PaneSelection::Target(target),
         ));
+        let operation_id = OperationId::new();
         adapter.dispatch(
             &mut runtime,
             Effect::OpenTerminal {
                 target,
-                operation_id: OperationId::new(),
+                operation_id,
                 arguments: "new".into(),
             },
         );
         assert_eq!(adapter.port().launched, 1);
         assert_eq!(adapter.port().attached, vec![terminal]);
+        assert_eq!(
+            adapter.port().launch_operations,
+            vec![Some(operation_id)],
+            "the controller's durable operation reaches the wire intent unchanged"
+        );
     }
 
     #[test]
@@ -318,6 +336,7 @@ mod tests {
             scope,
             inventory: vec![terminal],
             launched: 0,
+            launch_operations: vec![],
             attached: vec![],
             scope_error: Some("terminal scope is unavailable".to_owned()),
         };

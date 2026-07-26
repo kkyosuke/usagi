@@ -401,6 +401,32 @@ pub enum TerminalAction {
 pub struct TerminalLaunchIntent {
     pub request: TerminalLaunchRequest,
     pub geometry: TerminalGeometry,
+    /// Producer-issued durable identity of this logical launch, carried
+    /// unchanged from the UI effect that decided to open a terminal. The daemon
+    /// keys its durable record on it, so a lost response, a reconnect, or a
+    /// restart replays the same terminal instead of spawning a second one, and
+    /// the same id with a different canonical intent is an idempotency conflict.
+    /// Additive on the wire: a peer that predates it omits the field and keeps
+    /// the previous server-issued identity (#518).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_operation: Option<OperationId>,
+}
+
+impl TerminalLaunchIntent {
+    /// The canonical intent digest a repeated `launch_operation` must match.
+    ///
+    /// It covers exactly what makes two launches the same request: the trusted
+    /// profile selector, the fully fenced scope, and the screen geometry. A
+    /// different scope, profile, or geometry under the same producer id is a
+    /// conflict rather than a replay.
+    #[must_use]
+    pub fn canonical_digest(&self) -> String {
+        crate::domain::terminal_launch::canonical_launch_digest(
+            &self.request,
+            self.geometry.cols,
+            self.geometry.rows,
+        )
+    }
 }
 
 /// Geometry supplied by a terminal client.
@@ -3277,5 +3303,54 @@ mod deadline_and_retry_tests {
             assert!(started.elapsed() < Duration::from_secs(5));
             server.join().unwrap();
         }
+    }
+
+    #[test]
+    fn the_launch_intent_carries_a_producer_id_additively_and_digests_its_intent() {
+        use crate::domain::terminal_launch::{
+            TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
+        };
+        let request = TerminalLaunchRequest {
+            profile_id: TerminalProfileId::new("login-shell").unwrap(),
+            scope: TerminalLaunchScope {
+                workspace_id: WorkspaceId::new(),
+                session_id: None,
+                worktree_id: crate::domain::id::WorktreeId::new(),
+            },
+        };
+        let anonymous = TerminalLaunchIntent {
+            request: request.clone(),
+            geometry: TerminalGeometry { cols: 80, rows: 24 },
+            launch_operation: None,
+        };
+        let json = serde_json::to_value(&anonymous).unwrap();
+        assert!(
+            json.get("launch_operation").is_none(),
+            "a peer without a producer id sends the previous wire shape"
+        );
+        assert_eq!(
+            serde_json::from_value::<TerminalLaunchIntent>(json).unwrap(),
+            anonymous
+        );
+
+        let operation = OperationId::new();
+        let keyed = TerminalLaunchIntent {
+            launch_operation: Some(operation),
+            ..anonymous.clone()
+        };
+        let round_trip: TerminalLaunchIntent =
+            serde_json::from_value(serde_json::to_value(&keyed).unwrap()).unwrap();
+        assert_eq!(round_trip.launch_operation, Some(operation));
+        // The producer id is not part of the intent's identity: the same request
+        // under two ids digests the same, and a changed geometry does not.
+        assert_eq!(keyed.canonical_digest(), anonymous.canonical_digest());
+        let resized = TerminalLaunchIntent {
+            geometry: TerminalGeometry {
+                cols: 100,
+                rows: 24,
+            },
+            ..keyed
+        };
+        assert_ne!(resized.canonical_digest(), anonymous.canonical_digest());
     }
 }

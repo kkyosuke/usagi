@@ -9190,6 +9190,7 @@ mod tests {
                 scope,
             },
             geometry: TerminalGeometry { cols: 80, rows: 24 },
+            launch_operation: None,
         };
         let terminal: TerminalRef = serde_json::from_value(
             runtime
@@ -9440,6 +9441,7 @@ mod tests {
                         intent: TerminalLaunchIntent {
                             request: request.clone(),
                             geometry: TerminalGeometry { cols: 80, rows: 24 },
+                            launch_operation: None,
                         },
                     })
                     .unwrap(),
@@ -9536,6 +9538,7 @@ mod tests {
                         intent: TerminalLaunchIntent {
                             request,
                             geometry: TerminalGeometry { cols: 80, rows: 24 },
+                            launch_operation: None,
                         },
                     })
                     .unwrap(),

@@ -673,6 +673,7 @@ fn launch_generic_terminal(home: &Path, sibling: &TerminalRef) -> TerminalRef {
                 },
             },
             geometry: TerminalGeometry { cols: 80, rows: 20 },
+            launch_operation: None,
         },
     })
     .unwrap();

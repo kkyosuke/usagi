@@ -681,6 +681,7 @@ fn generic_scenario() -> Scenario<GenericOwner> {
                     cols: GEOMETRY.cols,
                     rows: GEOMETRY.rows,
                 },
+                launch_operation: None,
             },
         },
         SnapshotWire::ScreenCheckpoint,

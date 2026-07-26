@@ -578,6 +578,7 @@ fn root_ipc_fixture_login_shell_is_fenced_and_replays_exit() {
                         scope,
                     },
                     geometry: TerminalGeometry { cols: 80, rows: 24 },
+                    launch_operation: None,
                 },
             })
             .unwrap(),
