@@ -354,6 +354,22 @@ pub trait Terminal {
     /// 端末ランタイムが待機に失敗した場合、そのエラーを返す。
     fn wait(&mut self, duration: Duration) -> io::Result<()>;
 
+    /// `duration` を上限に待機し、その間に届いた入力を 1 つ返す。入力が無ければ
+    /// `None` を返す。中断できるアニメーション（起動スプラッシュ）が「待つあいだ
+    /// 打鍵を取りこぼさない」ためだけの契約であり、[`Self::read_key`] のように
+    /// 入力があるまでブロックしない。
+    ///
+    /// 既定実装は [`Self::wait`] で待ち切って「入力なし」を返すため、待機と入力を
+    /// 分けて持たない埋め込み側は従来どおりのアニメーション速度を保つ。
+    ///
+    /// # Errors
+    ///
+    /// 待機または入力の読み取りに失敗した場合、そのエラーを返す。
+    fn wait_for_key(&mut self, duration: Duration) -> io::Result<Option<Key>> {
+        self.wait(duration)?;
+        Ok(None)
+    }
+
     /// 次のキー入力を 1 つ読む（入力があるまでブロックする）。
     ///
     /// # Errors
@@ -432,6 +448,17 @@ mod tests {
             Ok(Key::Quit)
         }
     }
+
+    /// A terminal that implements only the required port methods keeps the
+    /// previous animation contract: `wait_for_key` waits the whole duration and
+    /// reports that no input arrived (#556).
+    #[test]
+    fn wait_for_key_defaults_to_waiting_the_whole_duration_without_input() {
+        let mut term = DefaultClipboardTerminal;
+
+        assert_eq!(term.wait_for_key(Duration::from_millis(1)).unwrap(), None);
+    }
+
     impl ScreenRunner for RecordingRunner {
         fn welcome(&mut self) -> io::Result<()> {
             self.calls.push(Call::Welcome);

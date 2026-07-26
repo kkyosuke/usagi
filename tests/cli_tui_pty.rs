@@ -160,6 +160,8 @@ fn read_pty_shared(mut master: File, output: &Arc<Mutex<Vec<u8>>>) {
         match master.read(&mut chunk) {
             Ok(0) => break,
             Ok(read) => output.lock().unwrap().extend_from_slice(&chunk[..read]),
+            // Linux PTYs report EIO, while Darwin normally reports EOF, after the final slave
+            // descriptor closes. Both mean the captured stream is complete.
             Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
             Err(error) => panic!("PTY outputの読み取りに失敗: {error}"),
         }
@@ -813,7 +815,7 @@ fn quit_from_switch(
 ) -> ExitStatus {
     wait_for_screen_since(output, baseline, "[switch]");
     send(master, b"\x11");
-    wait_for_screen_since(output, baseline, "Detach from this workspace?");
+    wait_for_screen_since(output, baseline, "Leave this workspace?");
     send(master, b"\r");
     wait_with_timeout(child, Duration::from_secs(10)).expect("TUI quits normally")
 }
@@ -1062,16 +1064,18 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let reader_capture = Arc::clone(&captured);
     let reader = thread::spawn(move || read_pty_shared(reader_master, &reader_capture));
-    let baseline = capture_len(&captured);
 
+    let baseline = capture_len(&captured);
     let mut child = spawn_hop(&home, &workspace, &slave).expect("PTY上でusagi hopを起動できる");
 
     // #554. Since the frame loop skips a redraw whose material is unchanged,
     // every step below waits for the *screen* rather than sleeping. Welcome is
     // the strongest place to pin it: that screen has no animation at all, so a
     // gate that swallowed an input would leave it frozen forever instead of
-    // being rescued by the next tick. `1` は Welcome の予約 input で最初の
-    // Recent を開く。
+    // being rescued by the next tick. #556 makes the wait load-bearing for a
+    // second reason: a key typed during the startup splash is consumed as its
+    // skip, so `1` has to reach Welcome itself. `1` は Welcome の予約 input で
+    // 最初の Recent を開く。
     wait_for_screen_since(&captured, baseline, "Recent");
     send(&mut master, b"1");
     wait_for_screen_since(&captured, baseline, "[switch]");
@@ -1085,7 +1089,7 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     // (`q` alone is inert in the controller Home loop.) Waiting for the
     // confirmation instead of sleeping is what pins the keystroke's reflection.
     send(&mut master, b"\x11");
-    wait_for_screen_since(&captured, baseline, "Detach from this workspace?");
+    wait_for_screen_since(&captured, baseline, "Leave this workspace?");
     send(&mut master, b"\r");
 
     let status = match wait_with_timeout(&mut child, Duration::from_secs(5)) {
@@ -1156,6 +1160,79 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     assert_eq!(attributes_reattached.c_cflag, attributes_before.c_cflag);
     assert_eq!(attributes_reattached.c_lflag, attributes_before.c_lflag);
     assert_eq!(attributes_reattached.c_cc, attributes_before.c_cc);
+    stop_daemon(&home);
+}
+
+/// #556: leaving a workspace returns to Welcome inside the same process, and
+/// re-entering it from there completes instead of hanging. The workspace's ports
+/// are dropped on the way out, so the second entry establishes a fresh daemon
+/// connection, pumps, and lanes — a leaked subscription or an un-joined pump
+/// would stall this second `[switch]` frame.
+#[test]
+fn real_pty_leaving_a_workspace_returns_to_welcome_and_re_entry_does_not_hang() {
+    let _serial = serial();
+    let home = short_home();
+    let roots = tempfile::tempdir().unwrap();
+    let workspace = roots.path().join("leave-workspace");
+    std::fs::create_dir(&workspace).unwrap();
+
+    let registered = home
+        .command_at(
+            Channel::Local,
+            &workspace,
+            &["open".as_ref(), workspace.as_os_str()],
+        )
+        .output()
+        .expect("workspace registers before the TUI opens it");
+    assert!(registered.status.success());
+
+    let (mut master, slave) = open_pty().unwrap();
+    let reader_master = master.try_clone().unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let reader_capture = Arc::clone(&captured);
+    let reader = thread::spawn(move || read_pty_shared(reader_master, &reader_capture));
+
+    let baseline = capture_len(&captured);
+    let mut child = spawn_hop(&home, &workspace, &slave).expect("usagi hop starts on the PTY");
+
+    // Welcome → workspace.
+    open_registered_workspace(&mut master, &captured, baseline);
+
+    // Ctrl-Q opens the exit prompt; `w` leaves for Welcome without ending the
+    // process. The workspace surface goes away and the switcher comes back.
+    send(&mut master, b"\x11");
+    wait_for_screen_since(&captured, baseline, "Leave this workspace?");
+    send(&mut master, b"w");
+    wait_for_screen_absent_since(&captured, baseline, "[switch]");
+    wait_for_screen_since(&captured, baseline, "Recent");
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "leaving a workspace must not end the process"
+    );
+
+    // Re-entry from the returned Welcome reaches Home again, then `q` at the
+    // prompt ends the process.
+    send(&mut master, b"1");
+    wait_for_screen_since(&captured, baseline, "[switch]");
+    send(&mut master, b"\x11");
+    wait_for_screen_since(&captured, baseline, "Leave this workspace?");
+    send(&mut master, b"q");
+
+    let status = match wait_with_timeout(&mut child, Duration::from_secs(10)) {
+        Ok(status) => status,
+        Err(error) => {
+            drop(slave);
+            drop(master);
+            let _ = reader.join();
+            let screen = screen_since(&captured, baseline).unwrap_or_default();
+            panic!("{error}: screen={screen:?}");
+        }
+    };
+    assert!(status.success());
+
+    drop(slave);
+    drop(master);
+    let _ = reader.join();
     stop_daemon(&home);
 }
 
@@ -1390,7 +1467,7 @@ fn real_pty_hung_daemon_bounds_redraw_and_quit_with_an_attached_pane() {
     // drawing, and the exit proves the release did not wait forever.
     let frozen_at = Instant::now();
     send(&mut master, b"\x11");
-    wait_for_screen_since(&captured, baseline, "Detach from this workspace?");
+    wait_for_screen_since(&captured, baseline, "Leave this workspace?");
     send(&mut master, b"\r");
     let status =
         wait_with_timeout(&mut tui, QUIT_BOUND).expect("the TUI quits within a wall-clock bound");

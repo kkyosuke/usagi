@@ -61,8 +61,8 @@ use crate::usecase::application::agent_tab_intent::{
     AgentTabIntentPortCommit, AgentTabProjection,
 };
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, BackendEvent, Effect, EnvironmentEntry, Feedback, NewRequest,
-    Notice, OperationResult, Overlay, PendingToken, Target,
+    AppEvent, AppKey, AppState, BackendEvent, Effect, EnvironmentEntry, ExitChoice, Feedback,
+    NewRequest, Notice, OperationResult, Overlay, PendingToken, Target,
 };
 #[cfg(test)]
 use crate::usecase::application::controller::{SafeError, SafeMessage};
@@ -960,8 +960,14 @@ pub fn write_banner(out: &mut impl Write, info: &AppInfo) -> std::io::Result<()>
 /// 対話ループが終了する理由。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Exit {
-    /// ユーザーが終了した（`q` / Ctrl-C、または起点画面で Esc）。
+    /// ユーザーが終了した（`q` / Ctrl-C、または起点画面で Esc）。プロセスを終える。
     Quit,
+    /// 利用者が workspace を離れて Welcome へ戻ることを選んだ。プロセスは終わらない。
+    ///
+    /// 返すのは workspace 単体の runner だけである。screen graph はこの理由を自分の
+    /// ループ内で `Screen::Welcome` へ解決するため、[`run_screen_graph_with_backend`]
+    /// がこれを返すことはない（#556）。
+    Welcome,
 }
 
 /// 対話ループの開始画面。合成ルートが `usagi`（Welcome）か `usagi config`（Config）かで選ぶ。
@@ -1066,7 +1072,23 @@ enum OpenStep {
 /// Workspace 画面のキー処理結果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkspaceStep {
+    /// TUI を終了する。
     Quit,
+    /// workspace を離れて Welcome へ戻る。呼び出し側がこの workspace のために
+    /// 確立した資源を落としたあと、entry 画面を描き直す（#556）。
+    Back,
+}
+
+impl WorkspaceStep {
+    /// workspace ループの停止理由を TUI 全体の終了理由へ投影する。workspace を
+    /// 直接開いた入口（`usagi <path>`）は Welcome を持たないため、合成ルートが
+    /// [`Exit::Welcome`] を受けて screen graph へ入り直す。
+    const fn exit(self) -> Exit {
+        match self {
+            Self::Quit => Exit::Quit,
+            Self::Back => Exit::Welcome,
+        }
+    }
 }
 
 struct WorkspaceConfigContext<'a> {
@@ -4104,8 +4126,9 @@ struct HomeFrameMaterial {
     height: usize,
     width: usize,
     projection: HomeProjection,
-    /// `Some(selected)` exactly while the quit confirmation covers the frame.
-    quit_confirmation: Option<bool>,
+    /// `Some(choice)` exactly while the exit prompt covers the frame, carrying
+    /// the answer its focused button would commit (#556).
+    quit_confirmation: Option<ExitChoice>,
     /// The create-failure dialog's safe message, present exactly while its
     /// overlay is open. Keying off the message avoids an unreachable "error
     /// overlay without a message" branch.
@@ -4151,7 +4174,7 @@ fn home_frame_material(
         width,
         projection,
         quit_confirmation: (runtime.state().overlay() == Some(Overlay::QuitConfirmation))
-            .then(|| runtime.state().quit_confirm_selected()),
+            .then(|| runtime.state().exit_choice()),
         create_error: runtime
             .state()
             .create_session_error()
@@ -4171,8 +4194,8 @@ fn render_home_material(material: &HomeFrameMaterial) -> Vec<String> {
     );
     // The create form renders inline in the `+ new session` sidebar row (see
     // `render_home`), so no overlay composite is needed here.
-    if let Some(selected) = material.quit_confirmation {
-        return quit_modal::render_over(material.height, material.width, &frame, selected);
+    if let Some(choice) = material.quit_confirmation {
+        return quit_modal::render_over(material.height, material.width, &frame, choice);
     }
     if let Some(message) = &material.create_error {
         return create_session_error_modal::render_over(
@@ -4881,8 +4904,14 @@ fn drive_workspace_controller(
                 runtime.set_agent_models(context.available_models, effective.default_model);
                 continue;
             }
-            if backend.dispatch(effect) == BackendFlow::Exit {
-                return Ok(WorkspaceStep::Quit);
+            // Both stops return from here, which is what performs the teardown:
+            // every port, pump, worker, and live-terminal subscription this
+            // workspace established is owned by this frame, so returning drops
+            // them before the caller can open another workspace (#556).
+            match backend.dispatch(effect) {
+                BackendFlow::Continue => {}
+                BackendFlow::Exit => return Ok(WorkspaceStep::Quit),
+                BackendFlow::Leave => return Ok(WorkspaceStep::Back),
             }
         }
     }
@@ -4907,7 +4936,7 @@ pub fn run_workspace_controller_with_backend(
         AgentModelPolicy::default(),
         None,
     )
-    .map(|_| Exit::Quit)
+    .map(WorkspaceStep::exit)
 }
 
 /// Run a direct workspace entry with settings already resolved for that
@@ -4933,7 +4962,7 @@ pub fn run_workspace_controller_with_backend_and_settings(
         },
         None,
     )
-    .map(|_| Exit::Quit)
+    .map(WorkspaceStep::exit)
 }
 
 /// Run a direct workspace entry with a writable settings port for Overview's
@@ -4965,7 +4994,7 @@ pub fn run_workspace_controller_with_backend_and_config(
             available_models,
         }),
     )
-    .map(|_| Exit::Quit)
+    .map(WorkspaceStep::exit)
 }
 
 struct FixedBackendFactory {
@@ -5265,6 +5294,28 @@ fn open_snapshot_via_controller(
     )
 }
 
+/// Open one workspace through the controller runtime, then say where the screen
+/// graph goes next.
+///
+/// `Some(exit)` means the TUI itself is finished; `None` means the workspace was
+/// left for Welcome and the graph keeps running. Recent, Open, and New all route
+/// through this one decision so leaving and quitting cannot diverge between the
+/// three entries (#556).
+fn enter_workspace(
+    term: &mut dyn Terminal,
+    snapshot: WorkspaceSnapshot,
+    settings: &mut dyn SettingsPort,
+    backend_factory: &mut dyn ControllerBackendFactory,
+    available_models: AvailableAgentModels,
+) -> io::Result<Option<Exit>> {
+    let step =
+        open_snapshot_via_controller(term, snapshot, settings, backend_factory, available_models)?;
+    Ok(match step {
+        WorkspaceStep::Quit => Some(Exit::Quit),
+        WorkspaceStep::Back => None,
+    })
+}
+
 struct CompatibilityBackendFactory<'a, 'b, 'c> {
     sessions: &'a mut dyn SessionCommandPortFactory,
     agents: Option<&'b mut dyn AgentCommandPortFactory>,
@@ -5496,15 +5547,16 @@ pub fn run_screen_graph_with_backend(
                     welcome.set_notice(None);
                     welcome.record_opened(&snapshot.workspace);
                     open.record_opened(&snapshot.workspace);
-                    let workspace_step = open_snapshot_via_controller(
+                    if let Some(exit) = enter_workspace(
                         term,
                         snapshot,
                         settings,
                         backend_factory,
                         available_models,
-                    );
-                    workspace_step?;
-                    return Ok(Exit::Quit);
+                    )? {
+                        return Ok(exit);
+                    }
+                    screen = Screen::Welcome;
                 }
             },
             Screen::Open => match step_open(&mut open, key) {
@@ -5527,14 +5579,19 @@ pub fn run_screen_graph_with_backend(
                     open.set_notice(None);
                     welcome.record_opened(&snapshot.workspace);
                     open.record_opened(&snapshot.workspace);
-                    return open_snapshot_via_controller(
+                    // Leaving returns to Welcome, not to the list that was used
+                    // to get here: all three entries share one way back so the
+                    // switcher is always reachable from a workspace.
+                    if let Some(exit) = enter_workspace(
                         term,
                         snapshot,
                         settings,
                         backend_factory,
                         available_models,
-                    )
-                    .map(|_| Exit::Quit);
+                    )? {
+                        return Ok(exit);
+                    }
+                    screen = Screen::Welcome;
                 }
                 OpenStep::ConfirmCleanup => {
                     let removed = loader.cleanup_missing(&open.workspaces())?;
@@ -5554,14 +5611,16 @@ pub fn run_screen_graph_with_backend(
                         new_form.set_notice(None);
                         welcome.record_opened(&snapshot.workspace);
                         open.record_opened(&snapshot.workspace);
-                        return open_snapshot_via_controller(
+                        if let Some(exit) = enter_workspace(
                             term,
                             snapshot,
                             settings,
                             backend_factory,
                             available_models,
-                        )
-                        .map(|_| Exit::Quit);
+                        )? {
+                            return Ok(exit);
+                        }
+                        screen = Screen::Welcome;
                     }
                     // 失敗時は入力中の draft を保持したまま notice を出して同画面に留まる。
                     Err(error) => new_form.set_notice(Some(new_project_notice(&error))),
@@ -5593,19 +5652,62 @@ pub fn run_screen_graph_with_backend(
     }
 }
 
-/// v1 と同じ Welcome 起動エフェクトを再生する。入力は読まないため、スプラッシュ中の
-/// type-ahead はそのまま Welcome の最初のキー入力へ渡る。
+/// v1 と同じ Welcome 起動エフェクトを再生し、実際に描いたフレーム数を返す。
+///
+/// **打鍵で中断できる**。フレーム間の待機は [`Terminal::wait_for_key`] で行い、
+/// キーが届いた時点で残りのフレームを捨てて抜ける。中断に使ったキーは
+/// **スキップとして消費する**（「何かキーを押すと飛ばせる」の標準的な契約）。
+/// これは splash 中に紛れ込んだ端末由来のバイトを次の画面へ流し込まないという
+/// 意味でもあり、入力を読まなかった以前の実装よりも取り違えが起きにくい。
+/// 起こし待ちの tick と端末リサイズは打鍵ではないため、アニメーションの速度を保つ。
 ///
 /// # Errors
 ///
 /// 端末サイズの取得、描画、フレーム間待機のいずれかに失敗した場合、そのエラーを返す。
-pub fn play_startup_splash(term: &mut dyn Terminal) -> io::Result<()> {
+pub fn play_startup_splash(term: &mut dyn Terminal) -> io::Result<usize> {
     for frame in 0..splash::FRAMES {
         let (height, width) = term.size()?;
         term.draw(&splash::render(height, width, frame))?;
-        term.wait(splash::ANIM_TICK)?;
+        match term.wait_for_key(splash::ANIM_TICK)? {
+            // 起こし待ちの tick とリサイズは入力ではない。次のフレームは先頭で
+            // 端末サイズを読み直すので、リサイズもそのまま追従する。
+            None | Some(Key::Other | Key::Resize) => {}
+            // それ以外の打鍵は残りのアニメーションをスキップする。
+            Some(_) => return Ok(frame + 1),
+        }
     }
-    Ok(())
+    Ok(splash::FRAMES)
+}
+
+/// 起動スプラッシュの再生権。**1 プロセスで 1 回だけ**再生する。
+///
+/// workspace を離れて戻ってきた Welcome は「起動」ではないため、2 回目以降の
+/// [`Self::play`] は 0 フレームで何も描かない。プロセス内で workspace を切り替える
+/// たびに 1.5 秒のアニメーションを見せないための policy であり、合成ルートの都合では
+/// なくこの層が持つ（#556）。
+#[derive(Debug, Default)]
+pub struct StartupSplash {
+    played: bool,
+}
+
+impl StartupSplash {
+    /// まだ再生していない splash を作る。
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { played: false }
+    }
+
+    /// 初回だけ splash を再生し、描いたフレーム数を返す。2 回目以降は 0 を返す。
+    ///
+    /// # Errors
+    ///
+    /// 再生中の端末操作に失敗した場合、そのエラーを返す。
+    pub fn play(&mut self, term: &mut dyn Terminal) -> io::Result<usize> {
+        if std::mem::replace(&mut self.played, true) {
+            return Ok(0);
+        }
+        play_startup_splash(term)
+    }
 }
 
 /// Run the screen graph with transient default settings. Embedders that own a
@@ -5719,7 +5821,7 @@ mod tests {
         home_frame_material, intercept_live_terminal_control, key_to_terminal_bytes,
         new_project_notice, play_startup_splash, poll_and_project_terminals,
         render_controller_frame, render_home_snapshot, restore_open_panes, run as run_from_start,
-        run_with_settings,
+        run_screen_graph_with_backend, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
@@ -7631,18 +7733,19 @@ mod tests {
         assert!(create.join("\n").contains("beta"));
         assert!(!create.join("\n").contains("New session"));
 
-        // Quit confirmation overlay: the shared Yes/No buttons and shortcut line
-        // render, defaulting to Yes focused.
+        // Exit prompt overlay: the shared choice buttons and shortcut lines
+        // render, defaulting to `quit` focused.
         let mut quitting = WorkspaceRuntime::new(workspace, vec![session]);
         let _ = quitting.apply_event(AppEvent::Key(AppKey::CtrlQ));
         let quit = render_controller_frame(
             20, 80, &quitting, "atlas", root, sessions, None, &git, None, None,
         );
         let quit_text = quit.join("\n");
-        assert!(quit_text.contains("Detach from this workspace?"));
-        assert!(quit_text.contains("[ yes ]"));
-        assert!(quit_text.contains("[ no  ]"));
-        assert!(quit_text.contains("←→/Tab: choose"));
+        assert!(quit_text.contains("Leave this workspace?"));
+        assert!(quit_text.contains("[ welcome ]"));
+        assert!(quit_text.contains("[ quit    ]"));
+        assert!(quit_text.contains("[ stay    ]"));
+        assert!(quit_text.contains("←→/Tab: move"));
 
         // The runtime's persisted Overview palette renders through this path.
         let mut palette = WorkspaceRuntime::new(workspace, vec![session]);
@@ -7789,27 +7892,34 @@ mod tests {
         assert!(
             term.frames
                 .iter()
-                .any(|frame| frame.join("\n").contains("Detach from this workspace?"))
+                .any(|frame| frame.join("\n").contains("Leave this workspace?"))
         );
-        // Regression: the real Ctrl-Q frame carries the shared Yes/No buttons and
-        // the ←→/Tab shortcut, not the old free-text y/n prompt.
+        // Regression: the real Ctrl-Q frame carries the shared choice buttons and
+        // the ←→/Tab shortcut, not the old free-text y/n prompt. Leaving and
+        // quitting are separate buttons (#556).
         assert!(
             term.frames
                 .iter()
-                .any(|frame| frame.join("\n").contains("[ yes ]")),
-            "quit confirmation frame is missing the [ yes ] button"
-        );
-        assert!(
-            term.frames
-                .iter()
-                .any(|frame| frame.join("\n").contains("[ no  ]")),
-            "quit confirmation frame is missing the [ no  ] button"
+                .any(|frame| frame.join("\n").contains("[ quit    ]")),
+            "exit prompt frame is missing the [ quit ] button"
         );
         assert!(
             term.frames
                 .iter()
-                .any(|frame| frame.join("\n").contains("←→/Tab: choose")),
-            "quit confirmation frame is missing the choose shortcut"
+                .any(|frame| frame.join("\n").contains("[ welcome ]")),
+            "exit prompt frame is missing the [ welcome ] button"
+        );
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("[ stay    ]")),
+            "exit prompt frame is missing the [ stay ] button"
+        );
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("←→/Tab: move")),
+            "exit prompt frame is missing the move shortcut"
         );
     }
 
@@ -7915,7 +8025,7 @@ mod tests {
         assert!(
             term.frames
                 .iter()
-                .any(|frame| { frame.join("\n").contains("Detach from this workspace?") })
+                .any(|frame| { frame.join("\n").contains("Leave this workspace?") })
         );
     }
 
@@ -14672,6 +14782,9 @@ mod tests {
         /// opened because it serves a different one: the loader reports it as
         /// `PermissionDenied`, which entry screens present in place.
         refuse: Option<String>,
+        /// Which paths `refuse` applies to. Empty means every path, so a fence
+        /// that rejects only some registered workspaces can be expressed.
+        refuse_paths: Vec<PathBuf>,
         /// Number of leading `create_workspace` calls that reject before the
         /// loader starts succeeding, standing in for a pre-flight rejection
         /// (e.g. the workspace already exists) that the user then corrects.
@@ -14682,7 +14795,9 @@ mod tests {
     impl WorkspaceLoader for FakeLoader {
         fn open(&mut self, path: &Path) -> io::Result<WorkspaceSnapshot> {
             self.opened.push(path.to_path_buf());
-            if let Some(refusal) = &self.refuse {
+            let fenced = self.refuse_paths.is_empty()
+                || self.refuse_paths.iter().any(|fenced| fenced == path);
+            if let Some(refusal) = self.refuse.as_ref().filter(|_| fenced) {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     refusal.clone(),
@@ -16451,6 +16566,10 @@ mod tests {
         let quit = Exit::Quit;
         assert_eq!(quit.clone(), Exit::Quit);
         assert!(format!("{quit:?}").contains("Quit"));
+        let welcome = Exit::Welcome;
+        assert_eq!(welcome.clone(), Exit::Welcome);
+        assert_ne!(welcome, quit);
+        assert!(format!("{welcome:?}").contains("Welcome"));
     }
 
     fn info() -> AppInfo {
@@ -17096,5 +17215,720 @@ mod tests {
         // display-intent save is reported as a typed notice, not as a lost tab.
         assert_eq!(runtime.focused_terminal(), Some(answer.terminal));
         assert!(runtime.state().notice().is_some());
+    }
+
+    /// One counted stand-in for every port slot of a workspace composition.
+    ///
+    /// It answers like the `Unavailable*` ports and counts its own drop, so
+    /// "nothing this workspace established survives into the next one" is a
+    /// single number rather than a per-port inspection (#556).
+    struct CountedPort(Arc<AtomicUsize>);
+
+    impl Drop for CountedPort {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl SessionCommandPort for CountedPort {}
+
+    impl SessionRefreshPort for CountedPort {}
+
+    impl AgentCommandPort for CountedPort {
+        fn launch(
+            &mut self,
+            _workspace: WorkspaceId,
+            _session: Option<SessionId>,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<AgentPaneAdmission, String> {
+            Err("Agent launch is unavailable".to_owned())
+        }
+    }
+
+    impl PaneLaunchCommandPort for CountedPort {
+        fn launch(
+            &self,
+            _workspace: WorkspaceId,
+            _session: Option<SessionId>,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<AgentPaneAdmission, String> {
+            Err("Agent launch is unavailable".to_owned())
+        }
+
+        fn resume(
+            &self,
+            _workspace: WorkspaceId,
+            _session: SessionId,
+            _operation: OperationId,
+        ) -> Result<AgentPaneAdmission, String> {
+            Err("Agent resume is unavailable.".to_owned())
+        }
+
+        fn resume_exact(
+            &self,
+            _target: super::AgentResumeTarget,
+            _operation: OperationId,
+        ) -> Result<super::ExactAgentResume, String> {
+            Err("Exact Agent resume is unavailable.".to_owned())
+        }
+
+        fn launch_terminal(
+            &self,
+            _workspace: WorkspaceId,
+            _session: Option<SessionId>,
+            _geometry: Geometry,
+            _arguments: &str,
+            _operation: OperationId,
+        ) -> Result<TerminalRef, String> {
+            Err("terminal launch is unavailable".to_owned())
+        }
+    }
+
+    impl super::RestoreConnectionPort for CountedPort {
+        fn take_reconnected_epoch(&mut self) -> Option<u64> {
+            None
+        }
+    }
+
+    impl AgentTabIntentPort for CountedPort {
+        fn load(&mut self, workspace: WorkspaceId) -> Result<AgentTabIntent, AgentTabIntentError> {
+            Ok(AgentTabIntent::empty(workspace))
+        }
+
+        fn mutate(
+            &mut self,
+            workspace: WorkspaceId,
+            _expected_revision: u64,
+            mutation: AgentTabIntentMutation,
+        ) -> Result<AgentTabIntentPortCommit, AgentTabIntentError> {
+            let mut intent = AgentTabIntent::empty(workspace);
+            let projection = intent.apply(mutation);
+            Ok(AgentTabIntentPortCommit {
+                intent,
+                projection,
+                mutation_applied: true,
+                cas_conflict: false,
+            })
+        }
+    }
+
+    impl ExternalTerminalPort for CountedPort {
+        fn open(&mut self, _directory: &Path) -> Result<(), String> {
+            Err("external terminal launch is unavailable".to_owned())
+        }
+    }
+
+    impl MetricsPort for CountedPort {
+        fn latest(&mut self) -> Option<DaemonMetrics> {
+            None
+        }
+    }
+
+    impl BrowserOpener for CountedPort {
+        fn open(&mut self, _url: &str) -> Result<(), String> {
+            Err("browser opening is unavailable".to_owned())
+        }
+    }
+
+    impl super::SessionWorktreeScanPort for CountedPort {
+        fn scan(&mut self, _workspace: &Path) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    impl BackendDecisionPort for CountedPort {
+        fn refresh(&mut self, _workspace: WorkspaceId, _completions: Completions) {}
+
+        fn resolve(
+            &mut self,
+            _workspace: WorkspaceId,
+            _decision_id: UserDecisionId,
+            _answer: UserDecisionAnswer,
+            _completions: Completions,
+        ) {
+        }
+    }
+
+    /// Ports of one composition that the frame loop itself owns for the whole
+    /// life of the workspace, and therefore drops by returning.
+    ///
+    /// The restore client is deliberately excluded and left uncounted: it is the
+    /// one port handed to a detached worker, because quitting must never wait for
+    /// a hung restore observation (#551, fixed by
+    /// `blocked_restore_inventory_never_blocks_render_or_quit`). Its drop
+    /// therefore happens on that worker and is not ordered against the next
+    /// workspace's composition.
+    const RESIDENT_PORTS_PER_COMPOSITION: usize = 11;
+
+    /// A production-shaped factory whose every port counts its own drop, and
+    /// which records how many ports had been dropped when each workspace's
+    /// composition was created.
+    struct CountingBackendFactory {
+        drops: Arc<AtomicUsize>,
+        /// `drops` observed at the start of each `create`, in entry order.
+        drops_at_create: Vec<usize>,
+    }
+
+    impl CountingBackendFactory {
+        fn new() -> Self {
+            Self {
+                drops: Arc::new(AtomicUsize::new(0)),
+                drops_at_create: Vec::new(),
+            }
+        }
+
+        fn port(&self) -> CountedPort {
+            CountedPort(Arc::clone(&self.drops))
+        }
+    }
+
+    impl super::ControllerBackendFactory for CountingBackendFactory {
+        fn create(
+            &mut self,
+            _: &WorkspaceSnapshot,
+            host: ControllerHost,
+        ) -> super::ControllerBackendComposition {
+            self.drops_at_create.push(self.drops.load(Ordering::SeqCst));
+            super::ControllerBackendComposition {
+                backend: DaemonBackend::new(
+                    Box::new(host.clone()),
+                    Box::new(host),
+                    Box::new(UnavailableBackendPort),
+                    Box::new(UnavailableBackendPort),
+                )
+                .with_decisions(Box::new(self.port()))
+                .with_overlay(Box::new(UnavailableBackendPort)),
+                session_commands: Box::new(self.port()),
+                session_refresh: Box::new(self.port()),
+                agent_commands: Box::new(self.port()),
+                pane_launch_commands: Box::new(self.port()),
+                // Uncounted on purpose: see `RESIDENT_PORTS_PER_COMPOSITION`.
+                restore_commands: Box::new(UnavailableAgentCommandPort),
+                session_worktrees: Box::new(self.port()),
+                restore_connection: Box::new(self.port()),
+                agent_tab_intents: Box::new(self.port()),
+                external_terminal: Box::new(self.port()),
+                metrics: Box::new(self.port()),
+                browser: Box::new(self.port()),
+            }
+        }
+    }
+
+    /// A Recent entry with a pinned `updated_at`, so the switcher's order — and
+    /// therefore which number key opens which workspace — is deterministic.
+    fn recent_at(name: &str, updated_at: DateTime<Utc>) -> Recent {
+        let mut workspace = ws(name);
+        workspace.updated_at = updated_at;
+        Recent::Workspace(WorkspaceOverview::new(workspace, 1, 0, 0))
+    }
+
+    /// #556 acceptance. Home can return to Welcome, another workspace opens from
+    /// there, and none of it needs a restarted process. All three entries —
+    /// Recent, Open, New — lead back to the switcher, and `Exit::Quit` stays the
+    /// process-exit answer reached only by choosing `quit`.
+    #[test]
+    fn every_workspace_entry_returns_to_welcome_without_restarting() {
+        // Recent `1` (first) → leave → Open `o`/↓/Enter (second) → leave →
+        // New Existing (`x`) → leave → quit from Welcome. Each `w` is the exit
+        // prompt's leave answer.
+        let mut keys = vec![Key::Char('1'), Key::CtrlQ, Key::Char('w')];
+        keys.extend([
+            Key::Char('o'),
+            Key::Down,
+            Key::Enter,
+            Key::CtrlQ,
+            Key::Char('w'),
+        ]);
+        keys.extend([
+            Key::Char('e'),
+            Key::Right,
+            Key::Down,
+            Key::Char('x'),
+            Key::Enter,
+            Key::CtrlQ,
+            Key::Char('w'),
+        ]);
+        // Back on Welcome for the third time, `q` ends the process.
+        keys.push(Key::Char('q'));
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut loader = FakeLoader {
+            opened_at: Some(now() + Duration::hours(1)),
+            ..FakeLoader::default()
+        };
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        assert_eq!(
+            run_screen_graph_with_backend(
+                &mut term,
+                Vec::new(),
+                vec![
+                    recent_at("first", now()),
+                    recent_at("second", now() - Duration::hours(1)),
+                ],
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut settings,
+                &mut factory,
+                AvailableAgentModels::all(),
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        // Three distinct workspaces opened by the one process, in entry order,
+        // each one rebinding the settings port to its own root. (`loader.opened`
+        // records the New form's relative path; the snapshot resolves it.)
+        assert_eq!(
+            loader.opened,
+            vec![
+                PathBuf::from("/tmp/first"),
+                PathBuf::from("/tmp/second"),
+                PathBuf::from("x"),
+            ]
+        );
+        assert_eq!(
+            settings.selected,
+            vec![
+                PathBuf::from("/tmp/first"),
+                PathBuf::from("/tmp/second"),
+                PathBuf::from("/tmp/x"),
+            ]
+        );
+        assert_eq!(factory.drops_at_create.len(), 3);
+
+        // Every departure landed on Welcome — the `Menu` heading belongs to the
+        // switcher alone, so it is absent from the Open list and the New form
+        // that were used to get there.
+        let frames = term
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .collect::<Vec<_>>();
+        let mut from = 0;
+        for workspace in ["first", "second", "x"] {
+            let home = frames
+                .iter()
+                .skip(from)
+                .position(|frame| frame.contains(workspace))
+                .unwrap_or_else(|| panic!("{workspace} opens"))
+                + from;
+            let welcome = frames
+                .iter()
+                .skip(home + 1)
+                .position(|frame| frame.contains("Menu"))
+                .unwrap_or_else(|| panic!("leaving {workspace} draws Welcome"))
+                + home
+                + 1;
+            assert!(
+                !frames[welcome].contains("Open Workspace"),
+                "leaving {workspace} must land on Welcome, not the Open list: {}",
+                frames[welcome]
+            );
+            from = welcome;
+        }
+    }
+
+    /// A workspace whose settings cannot be bound is a failure to report, not a
+    /// silent entry: the error propagates out of the screen graph instead of the
+    /// graph continuing with the previous workspace's settings. Every entry —
+    /// Recent, Open, New — propagates it the same way.
+    #[test]
+    fn a_settings_binding_failure_while_opening_a_workspace_propagates() {
+        struct UnbindableSettings;
+
+        impl SettingsPort for UnbindableSettings {
+            fn select_workspace(&mut self, _workspace_root: &Path) -> io::Result<()> {
+                Err(io::Error::other("settings directory is unavailable"))
+            }
+
+            fn read(
+                &mut self,
+                _scope: usagi_core::usecase::settings::SettingsScope,
+            ) -> io::Result<Settings> {
+                Ok(Settings::default())
+            }
+
+            fn save(
+                &mut self,
+                _scope: usagi_core::usecase::settings::SettingsScope,
+                _settings: &Settings,
+            ) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let cases = [
+            (
+                vec![Key::Char('1')],
+                Vec::new(),
+                vec![recent_at("first", now())],
+            ),
+            (
+                vec![Key::Char('o'), Key::Enter],
+                vec![ws("listed")],
+                Vec::new(),
+            ),
+            (
+                vec![
+                    Key::Char('e'),
+                    Key::Right,
+                    Key::Down,
+                    Key::Char('x'),
+                    Key::Enter,
+                ],
+                Vec::new(),
+                Vec::new(),
+            ),
+        ];
+
+        for (keys, workspaces, recent) in cases {
+            let mut term = FakeTerminal::with_keys(&keys);
+            let mut loader = FakeLoader::default();
+            let mut factory = CountingBackendFactory::new();
+
+            let error = run_screen_graph_with_backend(
+                &mut term,
+                workspaces,
+                recent,
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut UnbindableSettings,
+                &mut factory,
+                AvailableAgentModels::all(),
+            )
+            .unwrap_err();
+
+            assert_eq!(error.to_string(), "settings directory is unavailable");
+            // The failure happened before any daemon port was created, so nothing
+            // was established for a workspace that never opened.
+            assert!(factory.drops_at_create.is_empty());
+            assert_eq!(factory.drops.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    /// #556 acceptance: leaving tears the workspace down. Every port of the
+    /// first composition — command clients, resident lanes, restore worker
+    /// connection, metrics — is dropped before the second composition exists, so
+    /// no pump or subscription of the workspace that was left is still running.
+    #[test]
+    fn leaving_a_workspace_drops_every_port_before_the_next_one_is_created() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('1'),
+            Key::CtrlQ,
+            Key::Char('w'),
+            Key::Char('2'),
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        let mut loader = FakeLoader {
+            opened_at: Some(now() + Duration::hours(1)),
+            ..FakeLoader::default()
+        };
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        run_screen_graph_with_backend(
+            &mut term,
+            Vec::new(),
+            vec![
+                recent_at("first", now()),
+                recent_at("second", now() - Duration::hours(1)),
+            ],
+            now(),
+            Start::Welcome,
+            &mut loader,
+            &mut settings,
+            &mut factory,
+            AvailableAgentModels::all(),
+        )
+        .unwrap();
+
+        // Exactly two compositions, and the second one started with the first
+        // one already fully torn down: residue would show as a shortfall here.
+        assert_eq!(
+            factory.drops_at_create,
+            vec![0, RESIDENT_PORTS_PER_COMPOSITION]
+        );
+        // After the run, the second composition is gone too: nothing outlives it.
+        assert_eq!(
+            factory.drops.load(Ordering::SeqCst),
+            2 * RESIDENT_PORTS_PER_COMPOSITION
+        );
+    }
+
+    /// #556 acceptance: the workspace fence still refuses, and it refuses as a
+    /// notice on the screen the user is standing on — including the Welcome that
+    /// was reached by leaving a workspace. No silent fallback to the workspace
+    /// that was left.
+    #[test]
+    fn a_fenced_workspace_refuses_on_the_welcome_reached_by_leaving() {
+        const REFUSAL: &str = "cannot open /tmp/second: this daemon does not serve the selected \
+             workspace; this daemon serves the workspace /tmp/first.";
+
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('1'),
+            Key::CtrlQ,
+            Key::Char('w'),
+            // The fenced workspace keeps Welcome up; the served one still opens.
+            Key::Char('2'),
+            Key::Char('1'),
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        let mut loader = FakeLoader {
+            refuse: Some(REFUSAL.to_owned()),
+            refuse_paths: vec![PathBuf::from("/tmp/second")],
+            opened_at: Some(now() + Duration::hours(1)),
+            ..FakeLoader::default()
+        };
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        assert_eq!(
+            run_screen_graph_with_backend(
+                &mut term,
+                Vec::new(),
+                vec![
+                    recent_at("first", now()),
+                    recent_at("second", now() - Duration::hours(1)),
+                ],
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut settings,
+                &mut factory,
+                AvailableAgentModels::all(),
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        // The refused open was attempted and reported; only the served workspace
+        // ever became a composition.
+        assert_eq!(
+            loader.opened,
+            vec![
+                PathBuf::from("/tmp/first"),
+                PathBuf::from("/tmp/second"),
+                PathBuf::from("/tmp/first"),
+            ]
+        );
+        assert_eq!(factory.drops_at_create.len(), 2);
+        let welcome = term
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .rev()
+            .find(|frame| frame.contains("Menu"))
+            .expect("the switcher stays on screen after the refusal");
+        assert!(contains_wrapped(&welcome, REFUSAL), "{welcome}");
+    }
+
+    /// A workspace opened directly (`usagi <path>`) has no Welcome behind it, so
+    /// the runner reports the choice and the composition root decides. Quitting
+    /// and leaving must be different answers here too.
+    #[test]
+    fn a_direct_workspace_reports_leaving_and_quitting_as_different_exits() {
+        for (key, expected) in [
+            (Key::Char('w'), Exit::Welcome),
+            (Key::Char('q'), Exit::Quit),
+        ] {
+            let mut term = FakeTerminal::with_keys(&[Key::CtrlQ, key.clone()]);
+            let mut factory = FixedBackendFactory {
+                sessions: Some(Box::new(UnavailableSessionCommandPort)),
+                agent: Some(Box::new(UnavailableAgentCommandPort)),
+                launch: None,
+                restore: None,
+                metrics: Some(Box::new(NoMetrics)),
+                browser: Some(Box::new(UnavailableBrowserOpener)),
+                session_refresh: None,
+                decisions: None,
+                session_worktrees: None,
+            };
+
+            assert_eq!(
+                run_workspace_controller_with_backend(&mut term, snapshot("direct"), &mut factory,)
+                    .unwrap(),
+                expected,
+                "{key:?}"
+            );
+        }
+    }
+
+    /// A terminal that only implements the required port methods keeps the old
+    /// pacing: `wait_for_key` waits the frame out and reports no input.
+    #[derive(Default)]
+    struct SleepingTerminal {
+        frames: usize,
+        waits: Vec<std::time::Duration>,
+    }
+
+    impl Terminal for SleepingTerminal {
+        fn size(&mut self) -> io::Result<(usize, usize)> {
+            Ok((24, 80))
+        }
+
+        fn draw(&mut self, _frame: &[String]) -> io::Result<()> {
+            self.frames += 1;
+            Ok(())
+        }
+
+        fn wait(&mut self, duration: std::time::Duration) -> io::Result<()> {
+            self.waits.push(duration);
+            Ok(())
+        }
+
+        fn read_key(&mut self) -> io::Result<Key> {
+            Ok(Key::Quit)
+        }
+    }
+
+    /// Feeds one key at a chosen splash frame; every other frame reports the
+    /// keys given for it, then no input.
+    struct SplashTerminal {
+        frames: Vec<Vec<String>>,
+        answers: VecDeque<Option<Key>>,
+        keys: VecDeque<Key>,
+    }
+
+    impl SplashTerminal {
+        fn new(answers: Vec<Option<Key>>) -> Self {
+            Self {
+                frames: Vec::new(),
+                answers: answers.into(),
+                keys: VecDeque::new(),
+            }
+        }
+
+        fn with_keys(mut self, keys: &[Key]) -> Self {
+            self.keys = keys.iter().cloned().collect();
+            self
+        }
+    }
+
+    impl Terminal for SplashTerminal {
+        fn size(&mut self) -> io::Result<(usize, usize)> {
+            Ok((24, 80))
+        }
+
+        fn draw(&mut self, frame: &[String]) -> io::Result<()> {
+            self.frames.push(frame.to_vec());
+            Ok(())
+        }
+
+        fn wait(&mut self, _duration: std::time::Duration) -> io::Result<()> {
+            panic!("the splash waits on the input-aware path, not on a bare sleep");
+        }
+
+        fn read_key(&mut self) -> io::Result<Key> {
+            self.keys
+                .pop_front()
+                .ok_or_else(|| io::Error::other("no more keys"))
+        }
+
+        fn wait_for_key(&mut self, _duration: std::time::Duration) -> io::Result<Option<Key>> {
+            Ok(self.answers.pop_front().flatten())
+        }
+    }
+
+    /// #556 acceptance: the splash is skippable. A key press during it ends the
+    /// animation at that frame instead of holding the terminal for its full
+    /// 14-frame run.
+    #[test]
+    fn a_key_press_skips_the_rest_of_the_startup_splash() {
+        let frames = crate::presentation::views::splash::FRAMES;
+        // No input at all: every frame plays, as before.
+        let mut full = SplashTerminal::new(vec![None; frames]);
+        assert_eq!(play_startup_splash(&mut full).unwrap(), frames);
+        assert_eq!(full.frames.len(), frames);
+
+        // A key on the third frame ends it there.
+        let mut skipped = SplashTerminal::new(vec![None, None, Some(Key::Char('o'))]);
+        assert_eq!(play_startup_splash(&mut skipped).unwrap(), 3);
+        assert_eq!(skipped.frames.len(), 3);
+
+        // A wake-up tick and a resize are not key presses: they keep the pace,
+        // and the next frame re-reads the terminal size.
+        let mut paced = SplashTerminal::new(
+            std::iter::repeat_n(Some(Key::Other), frames / 2)
+                .chain(std::iter::repeat_n(Some(Key::Resize), frames - frames / 2))
+                .collect(),
+        );
+        assert_eq!(play_startup_splash(&mut paced).unwrap(), frames);
+        assert_eq!(paced.frames.len(), frames);
+    }
+
+    #[test]
+    fn a_terminal_without_an_input_aware_wait_keeps_the_old_splash_pacing() {
+        let mut term = SleepingTerminal::default();
+
+        let played = play_startup_splash(&mut term).unwrap();
+
+        let frames = crate::presentation::views::splash::FRAMES;
+        assert_eq!(played, frames);
+        assert_eq!(term.frames, frames);
+        assert_eq!(term.waits.len(), frames);
+        assert!(
+            term.waits
+                .iter()
+                .all(|wait| *wait == crate::presentation::views::splash::ANIM_TICK)
+        );
+    }
+
+    /// #556 acceptance: the splash belongs to launching the process, not to
+    /// arriving at Welcome. The Welcome reached by leaving a workspace draws no
+    /// splash frame at all.
+    #[test]
+    fn the_startup_splash_plays_once_per_process() {
+        let mut splash = super::StartupSplash::new();
+        let frames = crate::presentation::views::splash::FRAMES;
+
+        let mut term = SplashTerminal::new(vec![None; frames]);
+        assert_eq!(splash.play(&mut term).unwrap(), frames);
+        assert_eq!(term.frames.len(), frames);
+
+        // Returning to Welcome is not a launch: no size read, no draw, no wait.
+        let mut again = SplashTerminal::new(Vec::new());
+        assert_eq!(splash.play(&mut again).unwrap(), 0);
+        assert!(again.frames.is_empty());
+    }
+
+    /// #556 acceptance: an interrupted splash still hands Welcome its correct
+    /// initial state. The skip key is consumed by the skip, so Welcome starts on
+    /// its own first frame and reads its own first input.
+    #[test]
+    fn welcome_starts_correctly_after_an_interrupted_splash() {
+        let mut term = SplashTerminal::new(vec![Some(Key::Char('o'))]).with_keys(&[
+            Key::Char('1'),
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        let mut splash = super::StartupSplash::new();
+        let played = splash.play(&mut term).unwrap();
+        assert_eq!(played, 1);
+
+        let mut loader = FakeLoader::default();
+        assert_eq!(
+            run_from_start(
+                &mut term,
+                Vec::new(),
+                vec![recent_at("first", now())],
+                now(),
+                Start::Welcome,
+                &mut loader,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        // The frame right after the skipped splash is the switcher, drawn from
+        // the given Recent; Welcome's own keys then drive it as usual.
+        let welcome = term.frames[played].join("\n");
+        assert!(welcome.contains("Menu"), "{welcome}");
+        assert!(welcome.contains("first"), "{welcome}");
+        assert_eq!(loader.opened, vec![PathBuf::from("/tmp/first")]);
     }
 }

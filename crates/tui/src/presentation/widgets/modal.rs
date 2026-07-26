@@ -397,9 +397,39 @@ impl<'a> ConfirmationView<'a> {
     }
 }
 
-/// Two fixed-width Yes/No buttons shared by confirmation modals. Labels are
-/// padded to a common width so focus never changes the bracket geometry;
-/// selection uses role-coloured text and bold weight.
+/// A row of fixed-width choice buttons. Labels are padded to a common width so
+/// focus never changes the bracket geometry; the focused button uses its own
+/// role colour in bold and the rest are dimmed.
+///
+/// This is the single geometry and focus rule for every button row: the Yes/No
+/// [`confirmation_buttons`] and the three-way exit prompt both go through it, so
+/// a two-choice and a three-choice modal cannot drift apart visually.
+#[must_use]
+pub fn choice_buttons(selected: usize, choices: &[(&str, Role)]) -> String {
+    let label_width = choices
+        .iter()
+        .map(|(label, _)| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    // `dim` alone inherits the terminal's current foreground colour. Give idle
+    // labels an explicit white base so focus changes cannot leave a stale
+    // success/danger colour behind.
+    let idle = Style::new().fg(Color::White).dim();
+    let mut row = String::new();
+    for (index, (label, role)) in choices.iter().enumerate() {
+        let text = format!("[ {label:<label_width$} ]");
+        let style = if index == selected {
+            role.style().bold()
+        } else {
+            idle
+        };
+        row.push_str("  ");
+        row.push_str(&style.paint(&text));
+    }
+    row
+}
+
+/// Two fixed-width Yes/No buttons shared by confirmation modals.
 #[must_use]
 pub fn confirmation_buttons(
     confirm_selected: bool,
@@ -408,31 +438,54 @@ pub fn confirmation_buttons(
     confirm_label: &str,
     cancel_label: &str,
 ) -> String {
-    // Pad both labels to a common width so the two buttons stay the same size
-    // regardless of which word is longer (`yes`/`no` → `[ yes ]` / `[ no  ]`).
-    let label_width = confirm_label
-        .chars()
-        .count()
-        .max(cancel_label.chars().count());
-    let confirm_text = format!("[ {confirm_label:<label_width$} ]");
-    let cancel_text = format!("[ {cancel_label:<label_width$} ]");
-    let selected = |role: Role| role.style().bold();
-    // `dim` alone inherits the terminal's current foreground colour. Give idle
-    // labels an explicit white base so focus changes cannot leave a stale
-    // success/danger colour behind.
-    let idle = Style::new().fg(Color::White).dim();
-    let (yes, no) = if confirm_selected {
-        (
-            selected(confirm_role).paint(&confirm_text),
-            idle.paint(&cancel_text),
-        )
-    } else {
-        (
-            idle.paint(&confirm_text),
-            selected(cancel_role).paint(&cancel_text),
-        )
-    };
-    format!("  {yes}  {no}")
+    choice_buttons(
+        usize::from(!confirm_selected),
+        &[(confirm_label, confirm_role), (cancel_label, cancel_role)],
+    )
+}
+
+/// Display content for a prompt that offers more than two answers.
+///
+/// The two-choice [`ConfirmationView`] stays the vocabulary for Yes/No; this one
+/// exists for prompts whose answers are not opposites — the workspace exit prompt
+/// has to keep "return to Welcome" and "quit" visibly distinct (#556).
+pub struct ChoiceView<'a> {
+    pub title: &'a str,
+    pub inner_width: usize,
+    pub heading: String,
+    pub message: &'a str,
+    /// Button labels with the role each uses when focused, in display order.
+    pub choices: &'a [(&'a str, Role)],
+    /// Footer key-hint lines, each indented and dimmed by the shared [`footer`].
+    /// More than one line keeps a three-answer prompt's hints inside the frame.
+    pub hints: &'a [&'a str],
+}
+
+/// Render a multi-choice prompt over an existing frame through the shared
+/// component, focusing the button at `selected`.
+#[must_use]
+pub fn render_choice_over(
+    raw_height: usize,
+    raw_width: usize,
+    base: &[String],
+    selected: usize,
+    view: ChoiceView<'_>,
+) -> Vec<String> {
+    let mut body = vec![
+        view.heading,
+        Style::new().fg(Color::White).paint(view.message),
+        String::new(),
+        choice_buttons(selected, view.choices),
+    ];
+    body.extend(view.hints.iter().map(|hints| footer(hints)));
+    render_over(
+        raw_height,
+        raw_width,
+        base,
+        view.title,
+        view.inner_width,
+        &body,
+    )
 }
 
 /// Render a confirmation over an existing frame through the shared component.

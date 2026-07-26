@@ -748,11 +748,65 @@ pub struct AppState {
     /// The configured provider a Closeup `agent` without `-m` launches.
     default_model: DefaultModel,
     ctrl_c_grace: bool,
-    /// Focus of the quit confirmation's Yes/No buttons. `true` keeps Yes
-    /// focused; opening the overlay resets it. The presentation layer projects
-    /// this into a `ConfirmationModal`, keeping the shared widget out of this
-    /// usecase-layer state.
-    quit_confirm_selected: bool,
+    /// Focus of the exit prompt's three buttons. Opening the overlay resets it
+    /// to [`ExitChoice::Quit`], so the historical `Ctrl-Q` + `Enter` still ends
+    /// the process. The presentation layer projects this into the shared choice
+    /// widget, keeping that widget out of this usecase-layer state.
+    exit_choice: ExitChoice,
+}
+
+/// The three answers the workspace exit prompt accepts.
+///
+/// Leaving and quitting are deliberately distinct: `Welcome` keeps the process
+/// alive so another workspace can be opened without a restart, while `Quit` ends
+/// the TUI. Neither is reachable without passing through the prompt, so a
+/// mis-typed chord cannot fall into the wrong one (#556).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitChoice {
+    /// Leave this workspace and return to the Welcome switcher. The process, and
+    /// every daemon-owned terminal, keeps running.
+    Welcome,
+    /// End this TUI client. Daemon-owned terminals keep running.
+    Quit,
+    /// Stay in this workspace.
+    Stay,
+}
+
+impl ExitChoice {
+    /// The prompt's buttons in display order. `Stay` is the cancel button and is
+    /// therefore last, matching the `[ yes ] [ no ]` ordering of the two-choice
+    /// confirmations.
+    pub const ORDER: [Self; 3] = [Self::Welcome, Self::Quit, Self::Stay];
+
+    /// Index of this choice in [`Self::ORDER`], for the button row's focus.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Welcome => 0,
+            Self::Quit => 1,
+            Self::Stay => 2,
+        }
+    }
+
+    /// Move focus by one button, wrapping at both ends.
+    #[must_use]
+    const fn shifted(self, forward: bool) -> Self {
+        match (self, forward) {
+            (Self::Welcome, true) | (Self::Stay, false) => Self::Quit,
+            (Self::Quit, true) | (Self::Welcome, false) => Self::Stay,
+            (Self::Stay, true) | (Self::Quit, false) => Self::Welcome,
+        }
+    }
+
+    /// The effects committing this choice asks the backend to run. Staying is the
+    /// only answer with no effect.
+    fn effects(self) -> Vec<Effect> {
+        match self {
+            Self::Welcome => vec![Effect::LeaveWorkspace],
+            Self::Quit => vec![Effect::Detach],
+            Self::Stay => Vec::new(),
+        }
+    }
 }
 
 impl AppState {
@@ -793,7 +847,7 @@ impl AppState {
             available_models: AvailableModels::all(),
             default_model: DefaultModel::default(),
             ctrl_c_grace: false,
-            quit_confirm_selected: true,
+            exit_choice: ExitChoice::Quit,
         }
     }
 
@@ -954,11 +1008,11 @@ impl AppState {
     pub const fn ctrl_c_grace(&self) -> bool {
         self.ctrl_c_grace
     }
-    /// Whether the quit confirmation currently focuses Yes. The presentation
-    /// layer reads this to draw the shared Yes/No buttons in the right state.
+    /// Which button the exit prompt currently focuses. The presentation layer
+    /// reads this to draw the shared choice buttons in the right state.
     #[must_use]
-    pub const fn quit_confirm_selected(&self) -> bool {
-        self.quit_confirm_selected
+    pub const fn exit_choice(&self) -> ExitChoice {
+        self.exit_choice
     }
     /// The Agent CLIs a Closeup `agent` command may select.
     #[must_use]
@@ -1563,9 +1617,17 @@ pub enum Effect {
         name: String,
         token: PendingToken,
     },
-    /// Detach this TUI client. The adapter owns the connection cleanup; this
-    /// effect intentionally carries no terminal or operation cancellation.
+    /// Detach this TUI client and end the process. The adapter owns the
+    /// connection cleanup; this effect intentionally carries no terminal or
+    /// operation cancellation.
     Detach,
+    /// Leave this workspace for the Welcome switcher without ending the process.
+    ///
+    /// The connection cleanup is identical to [`Self::Detach`] — the adapter
+    /// drops this workspace's ports, so the daemon releases the subscriptions and
+    /// its terminals keep running. What differs is only what the shell does next:
+    /// it re-enters the entry screens instead of returning from the TUI (#556).
+    LeaveWorkspace,
     /// Read a target's Pull Request list through the daemon snapshot owner.
     /// The completion returns as [`BackendEvent::PullRequestsLoaded`] / `Error`.
     LoadPullRequests { target: Target },
@@ -2550,7 +2612,7 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
                 state.notice = Some(Notice::new("Ctrl-C ignored after leaving live pane"));
                 Vec::new()
             } else if state.has_live_pane {
-                state.quit_confirm_selected = true;
+                state.exit_choice = ExitChoice::Quit;
                 state.overlay = Some(Overlay::QuitConfirmation);
                 Vec::new()
             } else {
@@ -2558,7 +2620,7 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
             }
         }
         AppKey::CtrlQ | AppKey::OpenQuitConfirmation => {
-            state.quit_confirm_selected = true;
+            state.exit_choice = ExitChoice::Quit;
             state.overlay = Some(Overlay::QuitConfirmation);
             Vec::new()
         }
@@ -2567,6 +2629,15 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         }
         key => update_management_key(state, key),
     }
+}
+
+/// Close the exit prompt and hand its answer to the backend. The overlay always
+/// closes, so a committed answer never leaves the prompt on screen even when the
+/// answer itself is "stay".
+fn commit_exit_choice(state: &mut AppState, choice: ExitChoice) -> Vec<Effect> {
+    state.overlay = None;
+    state.exit_choice = choice;
+    choice.effects()
 }
 
 fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Effect> {
@@ -2589,27 +2660,21 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
     match overlay {
         Overlay::Decisions => update_decisions_overlay(state, key),
         Overlay::QuitConfirmation => match key {
-            // `y` forces detach and `n`/Esc forces stay regardless of focus;
-            // Enter commits whichever button is focused. Opening the overlay
-            // resets focus to Yes, so a bare Ctrl-Q + Enter still detaches.
-            AppKey::Char('y' | 'Y') => {
-                state.overlay = None;
-                vec![Effect::Detach]
-            }
-            AppKey::Char('n' | 'N') | AppKey::Escape => {
-                state.overlay = None;
+            // Each answer has its own letter so leaving and quitting are never
+            // the same keystroke: `w` returns to Welcome, `q`/`y` end the
+            // process, `n`/Esc stay. Enter commits whichever button is focused,
+            // and opening the overlay resets focus to Quit, so the historical
+            // `Ctrl-Q` + `Enter` still ends the process (#556).
+            AppKey::Char('w' | 'W') => commit_exit_choice(state, ExitChoice::Welcome),
+            AppKey::Char('q' | 'Q' | 'y' | 'Y') => commit_exit_choice(state, ExitChoice::Quit),
+            AppKey::Char('n' | 'N') | AppKey::Escape => commit_exit_choice(state, ExitChoice::Stay),
+            AppKey::Enter => commit_exit_choice(state, state.exit_choice),
+            AppKey::Right | AppKey::Tab => {
+                state.exit_choice = state.exit_choice.shifted(true);
                 Vec::new()
             }
-            AppKey::Enter => {
-                state.overlay = None;
-                if state.quit_confirm_selected {
-                    vec![Effect::Detach]
-                } else {
-                    Vec::new()
-                }
-            }
-            AppKey::Left | AppKey::Right | AppKey::Tab => {
-                state.quit_confirm_selected = !state.quit_confirm_selected;
+            AppKey::Left => {
+                state.exit_choice = state.exit_choice.shifted(false);
                 Vec::new()
             }
             _ => Vec::new(),
@@ -4518,8 +4583,9 @@ mod tests {
         let mut state = AppState::home(workspace, Vec::new());
         assert!(update(&mut state, AppEvent::Key(AppKey::CtrlQ)).is_empty());
         assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
-        // Opening the confirmation focuses Yes by default.
-        assert!(state.quit_confirm_selected());
+        // Opening the prompt focuses Quit by default, so the historical
+        // `Ctrl-Q` + `Enter` still ends the process rather than leaving.
+        assert_eq!(state.exit_choice(), ExitChoice::Quit);
         assert!(update(&mut state, AppEvent::Key(AppKey::Char('n'))).is_empty());
         assert_eq!(state.overlay(), None);
 
@@ -4530,42 +4596,95 @@ mod tests {
         );
     }
 
+    /// #556: quitting the process and leaving for Welcome are separate answers
+    /// with separate letters and separate effects, so neither is reachable by
+    /// mistyping the other.
     #[test]
-    fn quit_confirmation_focus_moves_and_enter_commits_the_selected_button() {
+    fn exit_prompt_separates_leaving_from_quitting_on_every_route() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
 
-        // ←→/Tab all toggle the two-button focus, and re-opening resets to Yes.
-        for toggle in [AppKey::Left, AppKey::Right, AppKey::Tab] {
+        // Each letter commits its own answer regardless of the focused button,
+        // and every answer closes the prompt.
+        for (key, choice, effects) in [
+            (
+                AppKey::Char('w'),
+                ExitChoice::Welcome,
+                vec![Effect::LeaveWorkspace],
+            ),
+            (
+                AppKey::Char('W'),
+                ExitChoice::Welcome,
+                vec![Effect::LeaveWorkspace],
+            ),
+            (AppKey::Char('q'), ExitChoice::Quit, vec![Effect::Detach]),
+            (AppKey::Char('Q'), ExitChoice::Quit, vec![Effect::Detach]),
+            (AppKey::Char('y'), ExitChoice::Quit, vec![Effect::Detach]),
+            (AppKey::Char('n'), ExitChoice::Stay, Vec::new()),
+            (AppKey::Char('N'), ExitChoice::Stay, Vec::new()),
+            (AppKey::Escape, ExitChoice::Stay, Vec::new()),
+        ] {
             let _ = update(&mut state, AppEvent::Key(AppKey::CtrlQ));
-            assert!(state.quit_confirm_selected());
-            assert!(update(&mut state, AppEvent::Key(toggle)).is_empty());
-            assert!(!state.quit_confirm_selected());
-            assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
-            // Enter on the No button stays instead of detaching.
-            assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
-            assert_eq!(state.overlay(), None);
+            assert_eq!(state.exit_choice(), ExitChoice::Quit, "{key:?}");
+            assert_eq!(
+                update(&mut state, AppEvent::Key(key.clone())),
+                effects,
+                "{key:?}"
+            );
+            assert_eq!(state.exit_choice(), choice, "{key:?}");
+            assert_eq!(state.overlay(), None, "{key:?}");
         }
 
-        // With No focused, `y` still forces detach and `n`/Esc still stay.
+        // Unknown keys neither commit nor close: the prompt is the only way out.
         let _ = update(&mut state, AppEvent::Key(AppKey::CtrlQ));
-        let _ = update(&mut state, AppEvent::Key(AppKey::Left));
-        assert!(!state.quit_confirm_selected());
-        assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::Char('y'))),
-            vec![Effect::Detach]
-        );
-        assert_eq!(state.overlay(), None);
+        assert!(update(&mut state, AppEvent::Key(AppKey::Char('z'))).is_empty());
+        assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
+        assert!(update(&mut state, AppEvent::Key(AppKey::Escape)).is_empty());
+    }
 
-        // Toggling back to Yes then Enter detaches.
+    #[test]
+    fn exit_prompt_focus_wraps_in_both_directions_and_enter_commits_it() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+
+        // Right and Tab step forward through welcome → quit → stay, wrapping.
+        for forward in [AppKey::Right, AppKey::Tab] {
+            let _ = update(&mut state, AppEvent::Key(AppKey::CtrlQ));
+            for expected in [ExitChoice::Stay, ExitChoice::Welcome, ExitChoice::Quit] {
+                assert!(update(&mut state, AppEvent::Key(forward.clone())).is_empty());
+                assert_eq!(state.exit_choice(), expected, "{forward:?}");
+                assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
+            }
+            let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        }
+
+        // Left steps backward through the same ring.
         let _ = update(&mut state, AppEvent::Key(AppKey::CtrlQ));
-        let _ = update(&mut state, AppEvent::Key(AppKey::Left));
-        let _ = update(&mut state, AppEvent::Key(AppKey::Right));
-        assert!(state.quit_confirm_selected());
-        assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::Enter)),
-            vec![Effect::Detach]
-        );
+        for expected in [ExitChoice::Welcome, ExitChoice::Stay, ExitChoice::Quit] {
+            assert!(update(&mut state, AppEvent::Key(AppKey::Left)).is_empty());
+            assert_eq!(state.exit_choice(), expected);
+        }
+
+        // Enter commits whichever button is focused: each of the three in turn.
+        for (steps, effects) in [
+            (0, vec![Effect::Detach]),
+            (1, Vec::new()),
+            (2, vec![Effect::LeaveWorkspace]),
+        ] {
+            let _ = update(&mut state, AppEvent::Key(AppKey::CtrlQ));
+            for _ in 0..steps {
+                let _ = update(&mut state, AppEvent::Key(AppKey::Right));
+            }
+            assert_eq!(update(&mut state, AppEvent::Key(AppKey::Enter)), effects);
+            assert_eq!(state.overlay(), None);
+        }
+    }
+
+    #[test]
+    fn exit_choice_order_matches_its_button_indices() {
+        for (index, choice) in ExitChoice::ORDER.into_iter().enumerate() {
+            assert_eq!(choice.index(), index);
+        }
     }
 
     #[test]

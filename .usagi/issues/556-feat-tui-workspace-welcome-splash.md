@@ -1,13 +1,13 @@
 ---
 number: 556
 title: feat(tui): workspace から Welcome へ戻る動線と起動 splash のスキップ
-status: todo
+status: done
 priority: medium
 labels: [review, v2, tui, ux, navigation]
 dependson: []
 related: [523, 542, 548, 551, 553, 554]
 created_at: 2026-07-25T22:59:10.749919+00:00
-updated_at: 2026-07-25T22:59:10.749919+00:00
+updated_at: 2026-07-26T07:32:58.442150+00:00
 ---
 
 ## 問題・根拠（コード調査で確定）
