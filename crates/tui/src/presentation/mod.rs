@@ -16718,7 +16718,8 @@ mod tests {
 
     /// A workspace whose settings cannot be bound is a failure to report, not a
     /// silent entry: the error propagates out of the screen graph instead of the
-    /// graph continuing with the previous workspace's settings.
+    /// graph continuing with the previous workspace's settings. Every entry —
+    /// Recent, Open, New — propagates it the same way.
     #[test]
     fn a_settings_binding_failure_while_opening_a_workspace_propagates() {
         struct UnbindableSettings;
@@ -16744,28 +16745,54 @@ mod tests {
             }
         }
 
-        let mut term = FakeTerminal::with_keys(&[Key::Char('1')]);
-        let mut loader = FakeLoader::default();
-        let mut factory = CountingBackendFactory::new();
+        let cases = [
+            (
+                vec![Key::Char('1')],
+                Vec::new(),
+                vec![recent_at("first", now())],
+            ),
+            (
+                vec![Key::Char('o'), Key::Enter],
+                vec![ws("listed")],
+                Vec::new(),
+            ),
+            (
+                vec![
+                    Key::Char('e'),
+                    Key::Right,
+                    Key::Down,
+                    Key::Char('x'),
+                    Key::Enter,
+                ],
+                Vec::new(),
+                Vec::new(),
+            ),
+        ];
 
-        let error = run_screen_graph_with_backend(
-            &mut term,
-            Vec::new(),
-            vec![recent_at("first", now())],
-            now(),
-            Start::Welcome,
-            &mut loader,
-            &mut UnbindableSettings,
-            &mut factory,
-            AvailableAgentModels::all(),
-        )
-        .unwrap_err();
+        for (keys, workspaces, recent) in cases {
+            let mut term = FakeTerminal::with_keys(&keys);
+            let mut loader = FakeLoader::default();
+            let mut factory = CountingBackendFactory::new();
 
-        assert_eq!(error.to_string(), "settings directory is unavailable");
-        // The failure happened before any daemon port was created, so nothing was
-        // established for a workspace that never opened.
-        assert!(factory.drops_at_create.is_empty());
-        assert_eq!(factory.drops.load(Ordering::SeqCst), 0);
+            let error = run_screen_graph_with_backend(
+                &mut term,
+                workspaces,
+                recent,
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut UnbindableSettings,
+                &mut factory,
+                AvailableAgentModels::all(),
+            )
+            .unwrap_err();
+
+            assert_eq!(error.to_string(), "settings directory is unavailable");
+            // The failure happened before any daemon port was created, so nothing
+            // was established for a workspace that never opened.
+            assert!(factory.drops_at_create.is_empty());
+            assert_eq!(factory.drops.load(Ordering::SeqCst), 0);
+        }
     }
 
     /// #556 acceptance: leaving tears the workspace down. Every port of the
