@@ -709,13 +709,16 @@ fn a_client_started_daemon_binds_the_fixture_workspace_root() {
     stop_daemon(&home);
 }
 
+/// `daemon replace` performs the replacement its trigger keys, on exactly the
+/// path `daemon restart` takes — there is no second, unguarded route to
+/// `stop` → fresh `start` (#507).
 #[test]
-fn explicit_artifact_replacement_coalesces_without_stopping_the_running_daemon() {
+fn explicit_artifact_replacement_runs_under_one_coalesced_operation() {
     let _guard = DAEMON_LIFECYCLE_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let home = short_home();
-    let cleanup = home.spawn_serve();
+    let mut cleanup = home.spawn_serve();
     let daemon_dir = home.path().join("daemon");
     assert!(
         wait_until(Duration::from_secs(5), || {
@@ -727,14 +730,42 @@ fn explicit_artifact_replacement_coalesces_without_stopping_the_running_daemon()
     let old_locator = read_locator(&daemon_dir).unwrap();
 
     let first = run_in_production(&[OsStr::new("daemon"), OsStr::new("replace")], &home);
-    let second = run_in_production(&[OsStr::new("daemon"), OsStr::new("replace")], &home);
     assert!(first.status.success(), "{}", stderr(&first));
+    // The daemon owns no runtime, so the replacement is a cold transition: the
+    // old owner exits and a fresh one publishes its own endpoint.
+    assert!(
+        cleanup.wait_for_exit(Duration::from_secs(5)),
+        "the replacement did not exit the old daemon process"
+    );
+    assert!(wait_until(Duration::from_secs(5), || {
+        daemon_pid(home.path()).is_some_and(|pid| pid != old_pid)
+    }));
+    let replaced_pid = daemon_pid(home.path()).unwrap();
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            read_locator(&daemon_dir).is_ok_and(|locator| locator != old_locator)
+        }),
+        "the fresh daemon did not publish its own endpoint"
+    );
+
+    // Two invocations against the same artifact pair and channel derive the
+    // same durable operation, so the transition is always attributable to one
+    // key rather than to a fresh identity each time.
+    let second = run_in_production(&[OsStr::new("daemon"), OsStr::new("replace")], &home);
     assert!(second.status.success(), "{}", stderr(&second));
-    assert_eq!(stdout(&first), stdout(&second));
-    assert!(stdout(&first).contains("operation build-rollover-v1-"));
-    assert_eq!(daemon_pid(home.path()), Some(old_pid));
-    assert!(process_alive(old_pid));
-    assert_eq!(read_locator(&daemon_dir).unwrap(), old_locator);
+    let operation = |output: &std::process::Output| {
+        stdout(output)
+            .split("(operation ")
+            .nth(1)
+            .and_then(|tail| tail.split(')').next())
+            .map(str::to_owned)
+            .expect("the replacement reports its operation")
+    };
+    assert_eq!(operation(&first), operation(&second));
+    assert!(operation(&first).starts_with("build-rollover-v1-"));
+    assert!(wait_until(Duration::from_secs(5), || {
+        daemon_pid(home.path()).is_some_and(|pid| pid != replaced_pid)
+    }));
 }
 
 #[test]

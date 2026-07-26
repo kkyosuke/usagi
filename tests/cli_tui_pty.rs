@@ -246,8 +246,10 @@ fn short_home() -> DaemonHome {
     DaemonHome::new()
 }
 
+/// Teardown gives up whatever the fixture daemon still owns: a planned stop
+/// refuses while a runtime is live (#507), and these flows end with live panes.
 fn stop_daemon(home: &DaemonHome) {
-    let output = home.run(&["daemon".as_ref(), "stop".as_ref()]);
+    let output = home.run(&["daemon".as_ref(), "stop".as_ref(), "--force".as_ref()]);
     assert!(
         output.status.success(),
         "{}",
