@@ -44,8 +44,8 @@ use usagi_core::infrastructure::ipc::{
     read_json_frame, write_json_frame,
 };
 use usagi_core::usecase::client::{
-    ClientError, ClientPolicy, DaemonRequest, IpcClient, RearmableStream, TerminalGeometry,
-    TerminalRequest,
+    ClientError, ClientPolicy, DaemonRequest, DaemonSession, IpcClient, RearmableStream,
+    TerminalGeometry, TerminalRequest,
 };
 use usagi_core::usecase::owner_routing::{
     GenerationDirectory, GenerationTransport, OwnerPresence, OwnerRouter, TrustedEndpoint,
@@ -400,21 +400,23 @@ struct Transport {
 }
 
 impl GenerationTransport for Transport {
-    type Session = IpcClient<PlainStream>;
-
-    fn connect(&mut self, endpoint: &TrustedEndpoint) -> Result<Self::Session, ClientError> {
+    fn connect(
+        &mut self,
+        endpoint: &TrustedEndpoint,
+    ) -> Result<Box<dyn DaemonSession>, ClientError> {
         let stream = connect_generation(&self.data_dir, endpoint)
             .map_err(|error| ClientError::Unavailable(error.to_string()))?;
         stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
         self.connects.lock().unwrap().push(endpoint.generation);
-        IpcClient::connect(
+        let session = IpcClient::connect(
             PlainStream(stream),
             usagi_core::domain::id::ClientId::new().as_str(),
             "nonce".into(),
             ClientPolicy::tui(),
             artifact(),
             ClientWorkspace::Unbound,
-        )
+        )?;
+        Ok(Box::new(session))
     }
 }
 
@@ -465,7 +467,7 @@ impl World {
         }
     }
 
-    fn router(&self) -> OwnerRouter<TrustedGenerationDirectory, Transport> {
+    fn router(&self) -> OwnerRouter {
         OwnerRouter::new(
             TrustedGenerationDirectory::new(&self.data_dir),
             Transport {

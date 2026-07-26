@@ -162,6 +162,11 @@ impl TrustedEndpoints {
     }
 }
 
+/// Establishes one generation's connection on demand, as a callback the link
+/// set can hold without knowing the transport.
+pub type Connect<'a> =
+    &'a mut dyn FnMut(&TrustedEndpoint) -> Result<Box<dyn DaemonSession>, ClientError>;
+
 /// The daemon-written records a client resolves endpoints from.
 ///
 /// The port takes no path and returns no path a caller may substitute: the
@@ -522,9 +527,9 @@ pub fn presence_of(
 }
 
 /// One generation's client-side link: its connection and its output cursors.
-struct GenerationLink<S> {
+struct GenerationLink {
     endpoint: String,
-    session: Option<S>,
+    session: Option<Box<dyn DaemonSession>>,
     cursors: BTreeMap<TerminalRef, u64>,
 }
 
@@ -536,17 +541,15 @@ struct GenerationLink<S> {
 /// failure drops only that generation's socket and *keeps* its cursors, so the
 /// reconnect resumes from the last applied offset instead of replaying output
 /// the tab already has.
-pub struct GenerationLinks<S> {
-    links: BTreeMap<DaemonGeneration, GenerationLink<S>>,
+/// The session type is erased on purpose: one router holds connections of the
+/// same kind to different generations, so nothing here needs to be generic over
+/// it, and dynamic dispatch on a per-request path costs nothing measurable.
+#[derive(Default)]
+pub struct GenerationLinks {
+    links: BTreeMap<DaemonGeneration, GenerationLink>,
 }
 
-impl<S> Default for GenerationLinks<S> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<S> GenerationLinks<S> {
+impl GenerationLinks {
     /// An empty set of links.
     #[must_use]
     pub fn new() -> Self {
@@ -583,11 +586,11 @@ impl<S> GenerationLinks<S> {
     ///
     /// # Errors
     /// Returns `connect`'s error, leaving the link without a session.
-    pub fn session<E>(
+    pub fn session(
         &mut self,
         endpoint: &TrustedEndpoint,
-        connect: impl FnOnce(&TrustedEndpoint) -> Result<S, E>,
-    ) -> Result<&mut S, E> {
+        connect: Connect<'_>,
+    ) -> Result<&mut dyn DaemonSession, ClientError> {
         let link = self
             .links
             .entry(endpoint.generation)
@@ -601,8 +604,8 @@ impl<S> GenerationLinks<S> {
             link.session = None;
         }
         match &mut link.session {
-            Some(session) => Ok(session),
-            slot @ None => Ok(slot.insert(connect(endpoint)?)),
+            Some(session) => Ok(session.as_mut()),
+            slot @ None => Ok(slot.insert(connect(endpoint)?).as_mut()),
         }
     }
 
@@ -661,14 +664,14 @@ impl<S> GenerationLinks<S> {
 /// The implementation is given a [`TrustedEndpoint`] that came from the
 /// directory, never a caller-chosen address.
 pub trait GenerationTransport {
-    /// The connected session type.
-    type Session: DaemonSession;
-
     /// Connect to one trusted generation endpoint.
     ///
     /// # Errors
     /// Returns the typed failure that leaves the generation unreachable.
-    fn connect(&mut self, endpoint: &TrustedEndpoint) -> Result<Self::Session, ClientError>;
+    fn connect(
+        &mut self,
+        endpoint: &TrustedEndpoint,
+    ) -> Result<Box<dyn DaemonSession>, ClientError>;
 }
 
 /// The production route: a client that addresses every request by its owner.
@@ -678,20 +681,23 @@ pub trait GenerationTransport {
 /// cannot resolve, or a transport failure. A request whose owner is still not
 /// addressable after a refresh is refused; nothing is retried against a
 /// different endpoint.
-pub struct OwnerRouter<D, T: GenerationTransport> {
-    directory: D,
-    transport: T,
+pub struct OwnerRouter {
+    directory: Box<dyn GenerationDirectory>,
+    transport: Box<dyn GenerationTransport>,
     endpoints: TrustedEndpoints,
     loaded: bool,
-    links: GenerationLinks<T::Session>,
+    links: GenerationLinks,
 }
 
-impl<D: GenerationDirectory, T: GenerationTransport> OwnerRouter<D, T> {
+impl OwnerRouter {
     /// Build a router over a trusted directory and a transport.
-    pub fn new(directory: D, transport: T) -> Self {
+    pub fn new(
+        directory: impl GenerationDirectory + 'static,
+        transport: impl GenerationTransport + 'static,
+    ) -> Self {
         Self {
-            directory,
-            transport,
+            directory: Box::new(directory),
+            transport: Box::new(transport),
             endpoints: TrustedEndpoints::default(),
             loaded: false,
             links: GenerationLinks::new(),
@@ -706,12 +712,12 @@ impl<D: GenerationDirectory, T: GenerationTransport> OwnerRouter<D, T> {
 
     /// The per-generation links, for cursor bookkeeping.
     #[must_use]
-    pub fn links(&self) -> &GenerationLinks<T::Session> {
+    pub fn links(&self) -> &GenerationLinks {
         &self.links
     }
 
     /// Mutable access to the per-generation links.
-    pub fn links_mut(&mut self) -> &mut GenerationLinks<T::Session> {
+    pub fn links_mut(&mut self) -> &mut GenerationLinks {
         &mut self.links
     }
 
@@ -812,7 +818,7 @@ impl<D: GenerationDirectory, T: GenerationTransport> OwnerRouter<D, T> {
         let transport = &mut self.transport;
         let session = self
             .links
-            .session(endpoint, |target| transport.connect(target))?;
+            .session(endpoint, &mut |target| transport.connect(target))?;
         match session.exchange(request) {
             Ok(reply) => Ok(reply),
             Err(error) => {

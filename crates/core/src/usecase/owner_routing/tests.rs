@@ -478,18 +478,29 @@ fn presence_collects_a_tab_only_on_an_authoritative_answer_or_a_verified_retirem
 
 // ------------------------------------------------------- per-generation links
 
+/// A connected session for the link tests. They are about which link is held,
+/// reused, or dropped — never about the traffic over it — so this reuses the
+/// router's own fake rather than introducing a second one.
+fn connected(endpoint: &TrustedEndpoint) -> Box<dyn DaemonSession> {
+    Box::new(FakeSession {
+        generation: endpoint.generation,
+        recorder: Rc::new(RefCell::new(Recorder::default())),
+        replies: Rc::new(RefCell::new(BTreeMap::new())),
+    })
+}
+
 #[test]
 fn links_are_kept_per_generation_across_an_active_locator_change() {
-    let mut links: GenerationLinks<String> = GenerationLinks::new();
+    let mut links = GenerationLinks::new();
     assert!(links.is_empty());
     let old = draining(1);
     let new = active(2);
     let mut connects = 0;
     for endpoint in [&old, &new, &old] {
         links
-            .session(endpoint, |target| {
+            .session(endpoint, &mut |target| {
                 connects += 1;
-                Ok::<_, ()>(target.endpoint.clone())
+                Ok(connected(target))
             })
             .unwrap();
     }
@@ -513,11 +524,11 @@ fn links_are_kept_per_generation_across_an_active_locator_change() {
 
 #[test]
 fn a_transport_failure_drops_only_that_generation_socket_and_keeps_its_cursor() {
-    let mut links: GenerationLinks<String> = GenerationLinks::new();
+    let mut links = GenerationLinks::new();
     let old = draining(1);
     let tracked = terminal(generation(1), 10);
     links
-        .session(&old, |target| Ok::<_, ()>(target.endpoint.clone()))
+        .session(&old, &mut |target| Ok(connected(target)))
         .unwrap();
     assert!(links.advance_cursor(&tracked, 100));
     assert!(
@@ -537,9 +548,9 @@ fn a_transport_failure_drops_only_that_generation_socket_and_keeps_its_cursor() 
 
     let mut reconnects = 0;
     links
-        .session(&old, |target| {
+        .session(&old, &mut |target| {
             reconnects += 1;
-            Ok::<_, ()>(target.endpoint.clone())
+            Ok(connected(target))
         })
         .unwrap();
     assert_eq!(reconnects, 1);
@@ -554,7 +565,7 @@ fn a_transport_failure_drops_only_that_generation_socket_and_keeps_its_cursor() 
 
 #[test]
 fn a_republished_endpoint_for_the_same_generation_is_not_reused() {
-    let mut links: GenerationLinks<String> = GenerationLinks::new();
+    let mut links = GenerationLinks::new();
     let first = draining(1);
     let moved = TrustedEndpoint {
         endpoint: "generations/other/sock".into(),
@@ -563,17 +574,23 @@ fn a_republished_endpoint_for_the_same_generation_is_not_reused() {
     let mut connects = 0;
     for endpoint in [&first, &moved] {
         links
-            .session(endpoint, |target| {
+            .session(endpoint, &mut |target| {
                 connects += 1;
-                Ok::<_, ()>(target.endpoint.clone())
+                Ok(connected(target))
             })
             .unwrap();
     }
     assert_eq!(connects, 2);
-    assert_eq!(GenerationLinks::<String>::default().len(), 0);
+    assert_eq!(GenerationLinks::default().len(), 0);
 
-    let mut failing: GenerationLinks<String> = GenerationLinks::new();
-    assert_eq!(failing.session(&first, |_| Err::<String, _>(())), Err(()));
+    let mut failing = GenerationLinks::new();
+    assert!(
+        failing
+            .session(&first, &mut |_| Err(ClientError::Unavailable(
+                "refused".into()
+            )))
+            .is_err()
+    );
     assert!(!failing.is_connected(generation(1)));
 }
 
@@ -621,9 +638,10 @@ struct FakeTransport {
 }
 
 impl GenerationTransport for FakeTransport {
-    type Session = FakeSession;
-
-    fn connect(&mut self, endpoint: &TrustedEndpoint) -> Result<Self::Session, ClientError> {
+    fn connect(
+        &mut self,
+        endpoint: &TrustedEndpoint,
+    ) -> Result<Box<dyn DaemonSession>, ClientError> {
         if self.refuse == Some(endpoint.generation) {
             return Err(ClientError::Unavailable("endpoint refused".into()));
         }
@@ -631,11 +649,11 @@ impl GenerationTransport for FakeTransport {
             .borrow_mut()
             .connects
             .push(endpoint.generation);
-        Ok(FakeSession {
+        Ok(Box::new(FakeSession {
             generation: endpoint.generation,
             recorder: Rc::clone(&self.recorder),
             replies: Rc::clone(&self.replies),
-        })
+        }))
     }
 }
 
@@ -666,7 +684,7 @@ impl GenerationDirectory for FakeDirectory {
 }
 
 struct Harness {
-    router: OwnerRouter<FakeDirectory, FakeTransport>,
+    router: OwnerRouter,
     recorder: Shared,
     replies: Scripted,
 }
@@ -716,6 +734,26 @@ fn the_router_sends_old_terminal_work_to_its_owner_and_new_control_to_the_active
         "no request lands on the wrong generation, and the owner link is reused"
     );
     assert_eq!(harness.router.links().len(), 2);
+}
+
+#[test]
+fn the_router_refuses_a_payload_that_cannot_name_its_owner_without_connecting() {
+    let mut harness = router_harness(vec![Ok(two_generations())]);
+    let mismatched = DaemonRequest::Terminal {
+        action: TerminalAction::Input,
+        payload: serde_json::to_value(TerminalRequest::Attach {
+            terminal: terminal(generation(1), 10),
+        })
+        .unwrap(),
+    };
+    let ClientError::Protocol(error) = harness.router.request(mismatched).unwrap_err() else {
+        panic!("an unroutable payload is a typed refusal");
+    };
+    assert_eq!(error.code, ErrorCode::StaleTarget);
+    // The refusal precedes the directory entirely: nothing was connected, and
+    // nothing was sent under an action the payload does not describe.
+    assert!(harness.recorder.borrow().connects.is_empty());
+    assert!(harness.recorder.borrow().sent.is_empty());
 }
 
 #[test]
