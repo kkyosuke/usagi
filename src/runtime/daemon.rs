@@ -6331,6 +6331,187 @@ pub(crate) fn attached_client(policy: ClientPolicy) -> Result<impl DaemonClient,
     Ok(PolicyClient::new(clock, policy, connect, Some(initial)))
 }
 
+// ------------------------------------------------- owner generation routing
+
+/// This process's client-side view of the generations it may address.
+///
+/// The registry and the current locator are files, so reading them per request
+/// would put a directory traversal and two `open`/`read` pairs on the IPC hot
+/// path — the exact cost that had to be removed from the daemon's own PTY path
+/// (#555). One [`RouteCache`] per process reads them on the first owner
+/// resolution and then only when it has a reason to: a resolution that fails, or
+/// [`invalidate_routes`] after the endpoint it named turned out not to be that
+/// generation's. Reusing an already open lane resolves nothing at all.
+///
+/// The directory is bound to the first caller's data directory. That is the same
+/// directory every other lane in this process uses ([`paths::data_dir`] is
+/// process-stable), so there is no second authority to disagree with.
+fn route_cache(data_dir: &Path) -> &'static Mutex<usagi_core::usecase::owner_routing::RouteCache> {
+    static CACHE: OnceLock<Mutex<usagi_core::usecase::owner_routing::RouteCache>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        Mutex::new(usagi_core::usecase::owner_routing::RouteCache::new(
+            usagi_daemon::infrastructure::generation_registry::TrustedGenerationDirectory::new(
+                data_dir,
+            ),
+        ))
+    })
+}
+
+/// Report that the routing snapshot may no longer describe reality, so the next
+/// owner resolution re-reads the durable records.
+///
+/// A client cannot observe a handoff by itself. What it can observe is that the
+/// endpoint the snapshot named did not answer, or answered as a *different*
+/// generation. That is the evidence this turns into a re-read, which keeps the
+/// read off the per-request path without letting the snapshot outlive a
+/// generation change indefinitely.
+fn invalidate_routes() {
+    let Ok(data_dir) = paths::data_dir() else {
+        return;
+    };
+    if let Ok(mut cache) = route_cache(&data_dir).lock() {
+        cache.invalidate();
+    }
+}
+
+/// Resolve the endpoint of the generation that owns a terminal, fail closed.
+///
+/// A `TerminalRef` names its owner, and only the daemon-written records may turn
+/// that name into an address. An owner that is not in the trusted set — never
+/// registered, already retired, or forged — is a typed `stale_target`; it is
+/// never answered with the active endpoint, because the active generation would
+/// happily serve a *different* terminal that merely shares a name.
+fn owner_endpoint(
+    generation: usagi_core::domain::id::DaemonGeneration,
+) -> Result<usagi_core::usecase::owner_routing::TrustedEndpoint, ClientError> {
+    let data_dir =
+        paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let mut cache = route_cache(&data_dir)
+        .lock()
+        .map_err(|_| ClientError::Unavailable("generation routing cache is poisoned".into()))?;
+    cache
+        .owner(generation)
+        .map_err(|error| error.to_client_error())
+}
+
+/// Every generation a scope inventory must be asked, active first.
+///
+/// A scope query has more than one answer while a generation is draining, and
+/// taking only the active one's would read the draining generation's terminals
+/// as absent. Absence is what collects a tab, so the fan-out is what keeps a
+/// terminal whose owner is merely busy from being reaped.
+pub(crate) fn trusted_generations()
+-> Result<Vec<usagi_core::usecase::owner_routing::TrustedEndpoint>, ClientError> {
+    let data_dir =
+        paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let mut cache = route_cache(&data_dir)
+        .lock()
+        .map_err(|_| ClientError::Unavailable("generation routing cache is poisoned".into()))?;
+    cache
+        .every_generation()
+        .map_err(|error| error.to_client_error())
+}
+
+/// One lane, together with the role of the generation it reached.
+pub(crate) struct OwnerLane {
+    pub(crate) client: LaneClient,
+    pub(crate) role: usagi_core::infrastructure::ipc::GenerationRole,
+}
+
+impl OwnerLane {
+    /// Whether this lane reached the generation that currently holds `current`.
+    pub(crate) fn is_active(&self) -> bool {
+        self.role == usagi_core::infrastructure::ipc::GenerationRole::Active
+    }
+}
+
+/// Open a lane to the exact generation that owns a terminal.
+///
+/// The two roles take deliberately different paths:
+///
+/// | owner role | path |
+/// |---|---|
+/// | active | [`client`] — the published locator, the bootstrap that may cold-start a daemon, and the exact-owner process fence, all unchanged |
+/// | draining | [`connect_generation`] on that generation's own verified socket, with no bootstrap at all |
+///
+/// A draining generation is never cold-started and never re-published, so
+/// starting a daemon because it did not answer would produce a *different*
+/// daemon rather than the owner that was asked for. It is reached over its own
+/// socket or not at all.
+///
+/// With one generation published — every build that cannot yet roll over — the
+/// resolution always lands on `Active`, so this is the connection [`client`] has
+/// always made, over the same locator and behind the same fences.
+///
+/// Whichever path is taken, the peer must then **say** it is the generation that
+/// was asked for before the lane is handed out. That is what makes a stale
+/// snapshot harmless: resolving an owner the records no longer name as active
+/// would otherwise hand back a lane onto the daemon that replaced it, keyed as
+/// if it were the old one. A mismatch refuses the lane and marks the snapshot
+/// stale, so the next resolution reads the records again and answers with the
+/// typed refusal the reference deserves.
+///
+/// [`connect_generation`]: usagi_daemon::infrastructure::unix_transport::connect_generation
+pub(crate) fn owner_client(
+    policy: ClientPolicy,
+    generation: usagi_core::domain::id::DaemonGeneration,
+    connect_budget_ms: u64,
+) -> Result<OwnerLane, ClientError> {
+    let endpoint = owner_endpoint(generation)?;
+    let opened = if endpoint.role == usagi_core::infrastructure::ipc::GenerationRole::Active {
+        client(policy, connect_budget_ms)
+    } else {
+        connect_draining(policy, &endpoint, connect_budget_ms)
+    };
+    let opened = opened.inspect_err(|_| {
+        // The endpoint the snapshot named could not be reached. Either the owner
+        // is momentarily unavailable or the records have moved on; a re-read is
+        // the only way to tell, and it happens on the next resolution rather
+        // than on this failed one.
+        invalidate_routes();
+    })?;
+    if opened.daemon_generation().0 != generation.as_str() {
+        invalidate_routes();
+        return Err(
+            usagi_core::usecase::owner_routing::RoutingError::UnknownGeneration(generation)
+                .to_client_error(),
+        );
+    }
+    Ok(OwnerLane {
+        client: opened,
+        role: endpoint.role,
+    })
+}
+
+/// Connect one draining generation over its own socket.
+///
+/// The handshake is the ordinary one: a draining generation has no `current`
+/// locator entry and no active record to bind to, so the active path's
+/// process-start fence cannot apply. What replaces it is the endpoint check —
+/// the socket is re-derived and re-verified as that generation's own private
+/// endpoint by `connect_generation` — plus the generation the peer names, which
+/// [`owner_client`] checks for both roles alike.
+fn connect_draining(
+    policy: ClientPolicy,
+    endpoint: &usagi_core::usecase::owner_routing::TrustedEndpoint,
+    connect_budget_ms: u64,
+) -> Result<LaneClient, ClientError> {
+    let data_dir =
+        paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let stream =
+        usagi_daemon::infrastructure::unix_transport::connect_generation(&data_dir, endpoint)
+            .map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let clock = SystemClock::new();
+    IpcClient::connect(
+        deadline_transport(clock, stream, connect_budget_ms),
+        client_incarnation().to_owned(),
+        format!("{}", std::process::id()),
+        policy,
+        current_build(),
+        client_workspace(),
+    )
+}
+
 /// Requests and performs an intentional replacement of the running daemon
 /// artifact.
 ///

@@ -872,6 +872,50 @@ monotonic であり、遅れて届いた frame が tab を巻き戻すことは�
 retirement（trusted set からの消失）だけである。同じ generation の endpoint 表記が変わった場合は
 再利用せず新しい link として接続し直す。
 
+### client 側の lane 配線
+
+出荷 client の lane は **owner generation を key に持つ**。lane を開くときだけ trusted endpoint を解決し、
+すでに開いている lane は map の key 一致だけで選ぶ。
+
+| lane | 宛先の決め方 |
+|---|---|
+| control / launch（per-request client、CLI・MCP・TUI の control 操作） | current locator が指す active generation。cold start（daemon 未起動）の bootstrap もこの経路が持つ |
+| attach / input / `input_outcome` / detach | request が持つ `TerminalRef.daemon_generation` の owner lane |
+| `resume` / `resize`（stateless poll lane） | 同上。owner ごとに独立した lane を持つ |
+| scope inventory（render thread と background pump の両方） | trusted な全 generation へ fan-out し、merge した結果を使う |
+
+owner が **active role** に解決されたときの接続は current locator 経路そのもので、published locator の検証・
+bootstrap・exact-owner process fence が全部そのまま効く。**draining role** に解決されたときだけ、その generation
+自身の private socket へ直接接続する。draining generation は cold start も再 publish もされないため、応答が無い
+ことを理由に daemon を起動すると owner とは別の daemon ができてしまうからである。この経路では handshake 後に
+「相手が名乗った generation が要求した owner と一致すること」を確認し、一致しなければ lane を渡さず拒否する。
+
+generation が 1 つしか published されていない build では owner は常に active に解決されるため、接続先・fence・
+観測される挙動は current locator 経路と同一である。
+
+### registry 読み取りの契機
+
+`generations.json` と `current.json` は file であるため、request ごとに読むと IPC hot path に directory
+traversal と file 読み取りが乗る。client は trusted snapshot を cache し、次の 3 つの契機でだけ読み直す。
+
+| 契機 | 理由 |
+|---|---|
+| 最初の解決 | 解決対象の snapshot がまだ無い |
+| 解決に失敗した | snapshot が、その owner を publish した handoff より古い可能性がある |
+| 解決した endpoint へ接続できなかった / 相手が別 generation を名乗った | snapshot が指す endpoint が現実と食い違っている証拠。snapshot からは見えない |
+
+refresh 後も解決できない owner はそのまま typed `stale_target` で拒否する。1 度の refresh で足りなかった場合、
+2 度目の失敗が答えである。directory を読めなかった場合は直前の snapshot を保持したまま拒否し、live owner を
+unaddressable にしない。
+
+### capability と routing の適用範囲
+
+client は generation の数にかかわらず常にこの routing を通す。`owner-generation-routing.v1` を広告しない
+daemon と接続しても routing を切る経路は存在しない。generation が 1 つのとき owner は active に解決され、
+その接続は capability の有無に関係なく成立するからである。この capability は **daemon が rollover を開始して
+よいかどうかの前提条件**としてだけ読まれ、満たさない場合は authority handoff の前に typed refusal で止まる
+（[5. daemon の rollover 前提条件](05-daemon.md#rollover-の-routing-前提条件)）。
+
 ## Unix transport
 
 Unix socket は daemon 専用 adapter が管理する。endpoint は private data directory の generation

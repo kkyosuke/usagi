@@ -872,6 +872,10 @@ replacement terminal を spawn することはない。どの endpoint へ送る
 `TerminalRef.daemon_generation` が決め、connection と cursor は generation ごとに独立して保持する
 （[4. IPC の owner generation routing](04-ipc.md#owner-generation-routing)）。
 
+epoch は lane 集合全体を数える。1 つの lane を失ったときに全 subscription を無効化するのは、無効化しすぎても
+再 attach で済む一方、無効化が足りないと daemon が既に解放した attachment で input を fence してしまうためである。
+generation が 1 つのときは、この 2 つは同じ意味になる。
+
 #### snapshot negotiation と legacy 限定表示
 
 TUI は checkpoint 経路を **capability と negotiated revision の両方**で判定する（wire 契約の正本は
