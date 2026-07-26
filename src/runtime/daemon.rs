@@ -7637,7 +7637,10 @@ mod tests {
             .observe_committed(
                 TerminalId::new(),
                 Some(session),
-                identity.as_url().as_bytes(),
+                // The newline terminates the candidate. Without it the projector
+                // carries the token into the next chunk instead of crediting a
+                // token the output may not have finished writing.
+                format!("{}\n", identity.as_url()).as_bytes(),
             )
             .unwrap();
         let shutdown = Arc::new(AtomicBool::new(false));
