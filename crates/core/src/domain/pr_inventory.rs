@@ -56,20 +56,23 @@ pub fn canonicalize(candidate: &str) -> Option<PrIdentity> {
 }
 
 /// Extracts canonical PRs from one complete byte sequence.
+///
+/// A candidate is one scheme-delimited *token*: it starts at a scheme and ends
+/// at the first whitespace, control byte or quote. A token that fails
+/// [`canonicalize`] is not re-scanned for a scheme embedded inside it, so a PR
+/// URL carried as another URL's query parameter is deliberately not a detection.
 #[must_use]
 pub fn extract(bytes: &[u8]) -> Vec<PrIdentity> {
     let mut identities = Vec::new();
     let mut start = 0;
     while start < bytes.len() {
-        let Some(relative) = bytes[start..]
-            .windows(7)
-            .position(|window| window == b"http://")
-            .or_else(|| {
-                bytes[start..]
-                    .windows(8)
-                    .position(|window| window == b"https://")
-            })
-        else {
+        // Both schemes are searched in one pass for whichever occurs *earliest*.
+        // Scanning the whole buffer for `http://` first and only then for
+        // `https://` skipped every `https://` candidate in front of a later
+        // `http://`, because `"https://"` does not contain `"http://"`.
+        let Some(relative) = (start..bytes.len()).position(|index| {
+            bytes[index..].starts_with(b"http://") || bytes[index..].starts_with(b"https://")
+        }) else {
             break;
         };
         let begin = start + relative;
@@ -288,6 +291,56 @@ mod tests {
             b"(https://github.com/o/r/pull/42/files?x=1#y), https://github.com/o/r/pull/42!",
         );
         assert_eq!(found.len(), 1);
+    }
+    fn extracted(bytes: &[u8]) -> Vec<String> {
+        extract(bytes)
+            .iter()
+            .map(|identity| identity.as_url().to_owned())
+            .collect()
+    }
+    #[test]
+    fn extraction_finds_either_scheme_whichever_comes_first() {
+        // A later plain-http URL used to hide every https candidate in front of
+        // it, because the scan looked for `http://` across the whole buffer
+        // before it looked for `https://` at all.
+        assert_eq!(
+            extracted(b"https://github.com/o/r/pull/1 and http://example.com/x"),
+            ["https://github.com/o/r/pull/1"]
+        );
+        assert_eq!(
+            extracted(b"http://example.com/x and https://github.com/o/r/pull/1"),
+            ["https://github.com/o/r/pull/1"]
+        );
+        assert_eq!(
+            extracted(b"http://github.com/o/r/pull/2 then https://github.com/o/r/pull/1"),
+            [
+                "https://github.com/o/r/pull/2",
+                "https://github.com/o/r/pull/1"
+            ]
+        );
+    }
+    #[test]
+    fn extraction_keeps_order_and_dedupes_across_interleaved_non_github_urls() {
+        assert_eq!(
+            extracted(
+                b"http://localhost:3000/ https://github.com/o/r/pull/7\n\
+                  http://ci.example.com/job/1 https://example.com/o/r/pull/8\n\
+                  https://github.com/o/r/pull/9 http://x/ https://github.com/o/r/pull/7\n"
+            ),
+            vec![
+                "https://github.com/o/r/pull/7",
+                "https://github.com/o/r/pull/9"
+            ]
+        );
+    }
+    #[test]
+    fn extraction_treats_a_glued_scheme_as_one_rejected_token() {
+        // One token, not two candidates: the inner URL is a component of an
+        // outer non-GitHub URL, so it is not a PR the agent produced.
+        assert!(extract(b"http://https://github.com/o/r/pull/1").is_empty());
+        assert!(extract(b"http://x.com/r?u=https://github.com/o/r/pull/1").is_empty());
+        // A trailing truncated scheme is not a candidate either.
+        assert!(extract(b"tail https:/").is_empty());
     }
     #[test]
     fn reducer_is_noop_for_duplicates_and_preserves_dismissal() {
