@@ -5871,7 +5871,7 @@ mod tests {
     use crate::usecase::application::{EntryScreen, Key, Terminal};
     use crate::usecase::overview::SessionCommand;
     use crate::usecase::terminal_input::{LiveTerminalAction, PointerEvent, PointerKind};
-    use chrono::{DateTime, Duration, Utc};
+    use chrono::{DateTime, Duration, Timelike, Utc};
     use std::collections::{BTreeSet, VecDeque};
     use std::io::{self, Write};
     use std::path::{Path, PathBuf};
@@ -8567,13 +8567,91 @@ mod tests {
         assert!(lane_drains.load(Ordering::SeqCst) >= ticks);
     }
 
+    /// One admitted restore job and what the frame gate did on the tick that
+    /// admitted it.
+    #[derive(Debug)]
+    struct RestoreAdmission {
+        /// Each job runs on its own thread, so the thread id is what separates
+        /// two admissions from the several inventory calls inside one of them.
+        job: std::thread::ThreadId,
+        /// Frames the terminal had drawn when this job started.
+        drawn: usize,
+        /// The admitting tick drew nothing: the frame count had not moved since
+        /// that tick began.
+        skipped: bool,
+    }
+
+    /// What the #554 skipped-tick acceptance observes. The frame gate runs on the
+    /// loop thread and the admission is observed from the worker thread the job
+    /// runs on, so both counts are shared: an admission is on a skipped tick
+    /// when the frame count has not moved since that tick started.
+    #[derive(Default)]
+    struct RestoreAdmissionLog {
+        /// Frames the terminal was asked to draw.
+        draws: AtomicUsize,
+        /// `draws` as of the start of the tick now running. The terminal
+        /// republishes it when a tick ends, which is when it reads the next key.
+        draws_at_tick_start: AtomicUsize,
+        /// Inventory calls the admitted jobs have made. A job that has stopped
+        /// calling is a job that has finished.
+        calls: AtomicUsize,
+        admissions: Mutex<Vec<RestoreAdmission>>,
+    }
+
+    impl RestoreAdmissionLog {
+        fn drew(&self) {
+            self.draws.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        /// Close the current tick. Called from the terminal's `read_key`, the
+        /// last thing a loop iteration does.
+        fn tick_ended(&self) {
+            self.draws_at_tick_start
+                .store(self.draws.load(Ordering::SeqCst), Ordering::SeqCst);
+        }
+
+        /// Record one inventory call. A job's first call is its admission, and
+        /// every call is what the driver watches to know the job is still
+        /// running.
+        fn admitted(&self, job: std::thread::ThreadId) {
+            let tick_start = self.draws_at_tick_start.load(Ordering::SeqCst);
+            let drawn = self.draws.load(Ordering::SeqCst);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let mut admissions = self.admitted_jobs();
+            if admissions.last().map(|admission| admission.job) != Some(job) {
+                admissions.push(RestoreAdmission {
+                    job,
+                    drawn,
+                    skipped: drawn == tick_start,
+                });
+            }
+        }
+
+        /// A retry — an admission after the first — ran on a tick that drew
+        /// nothing. This is the contract #554 has to keep, and the observation
+        /// the loop is driven until it makes.
+        fn retry_admitted_on_a_skipped_tick(&self) -> bool {
+            self.admitted_jobs()
+                .iter()
+                .skip(1)
+                .any(|admission| admission.skipped)
+        }
+
+        fn admitted_jobs(&self) -> std::sync::MutexGuard<'_, Vec<RestoreAdmission>> {
+            self.admissions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+    }
+
     /// A restore client that always fails and records, once per admitted job,
-    /// how many frames the terminal had drawn when that job started. Each job
-    /// runs on its own thread, so the thread id is what separates two
-    /// admissions from the several inventory calls inside one of them.
+    /// what the frame gate did on the tick that admitted it.
     struct AdmissionCountingRestorePort {
-        draws: Arc<AtomicUsize>,
-        admitted_at: Arc<Mutex<Vec<(std::thread::ThreadId, usize)>>>,
+        log: Arc<RestoreAdmissionLog>,
     }
 
     impl AgentCommandPort for AdmissionCountingRestorePort {
@@ -8588,33 +8666,53 @@ mod tests {
         }
 
         fn list_terminals(&mut self) -> Result<Vec<TerminalInventoryEntry>, TerminalError> {
-            let job = std::thread::current().id();
-            let mut admitted_at = self
-                .admitted_at
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if admitted_at.last().map(|(id, _)| *id) != Some(job) {
-                admitted_at.push((job, self.draws.load(Ordering::SeqCst)));
-            }
+            self.log.admitted(std::thread::current().id());
             Err(TerminalError::Unavailable)
         }
     }
 
-    /// A terminal that paces its keys so wall time advances between frames, and
-    /// counts the frames it was actually asked to draw.
-    struct PacedTerminal {
-        keys: VecDeque<Key>,
+    /// Ticks the retry acceptance drives before giving up. The retry it waits for
+    /// comes due after one backoff step (250ms), so this is a wide bound whose
+    /// only job is to end a run that observes nothing in its assertions instead
+    /// of driving forever.
+    const MAX_DRIVEN_RETRY_TICKS: usize = 200;
+
+    /// Ticks without a new inventory call the driver waits for before quitting.
+    /// The observed job is admitted on its first call and sleeps between its
+    /// three attempts, so quiet ticks are how the driver knows it has finished.
+    /// Returning from the loop mid-job would leave that worker running into the
+    /// rest of the suite, where it keeps writing `spawn_restore_job`'s coverage
+    /// counters while the harness reads them — enough to make a line another
+    /// test covers report as uncovered. The next retry is a 500ms backoff step
+    /// away, so this quiet window stays inside the gap and admits nothing new.
+    const RETRY_QUIET_TICKS: usize = 2;
+
+    /// A terminal that paces the loop so wall time advances between frames and
+    /// keeps it running with an inert key until the admission log holds the
+    /// observation the test needs, then quits. Driving to the observation is what
+    /// makes the assertion deterministic: which tick skips its frame depends on
+    /// when the material last changed, so no fixed key script can promise that a
+    /// retry lands on a skipped tick (#567).
+    struct RetryDrivingTerminal {
+        log: Arc<RestoreAdmissionLog>,
         pace: std::time::Duration,
-        draws: Arc<AtomicUsize>,
+        /// Ticks driven so far, bounded by [`MAX_DRIVEN_RETRY_TICKS`].
+        ticks: usize,
+        /// Inventory calls seen at the previous tick, and how many ticks have
+        /// passed without a new one.
+        calls: usize,
+        quiet_ticks: usize,
+        /// The quit sequence, queued once the loop is done driving.
+        quit: VecDeque<Key>,
     }
 
-    impl Terminal for PacedTerminal {
+    impl Terminal for RetryDrivingTerminal {
         fn size(&mut self) -> io::Result<(usize, usize)> {
             Ok((20, 80))
         }
 
         fn draw(&mut self, _frame: &[String]) -> io::Result<()> {
-            self.draws.fetch_add(1, Ordering::SeqCst);
+            self.log.drew();
             Ok(())
         }
 
@@ -8623,39 +8721,70 @@ mod tests {
         }
 
         fn read_key(&mut self) -> io::Result<Key> {
+            // The last call of a loop iteration, so the frame count from here is
+            // the one the next tick starts from.
+            self.log.tick_ended();
+            if let Some(key) = self.quit.pop_front() {
+                return Ok(key);
+            }
+            let calls = self.log.calls();
+            self.quiet_ticks = if calls == self.calls {
+                self.quiet_ticks + 1
+            } else {
+                self.calls = calls;
+                0
+            };
+            let settled = self.quiet_ticks >= RETRY_QUIET_TICKS
+                && self.log.retry_admitted_on_a_skipped_tick();
+            if settled || self.ticks >= MAX_DRIVEN_RETRY_TICKS {
+                self.quit.push_back(Key::Char('y'));
+                return Ok(Key::CtrlQ);
+            }
+            self.ticks += 1;
+            // Wall time has to advance for the retry backoff to come due.
             std::thread::sleep(self.pace);
-            self.keys
-                .pop_front()
-                .ok_or_else(|| io::Error::other("no more keys"))
+            // `Escape` is inert on the base Switch route, so driving with it
+            // leaves the frame's material unchanged.
+            Ok(Key::Escape)
         }
+    }
+
+    /// Park until the wall clock has just crossed into a new second.
+    ///
+    /// The frame material carries the wall clock truncated to seconds, so a
+    /// second boundary redraws whatever the workspace is doing. A run that
+    /// starts here and finishes inside the same second sees no clock-driven
+    /// redraw, which is what makes the skipped tick it observes reproducible
+    /// rather than a matter of which phase of the second the run began in
+    /// (#567).
+    fn wait_for_a_fresh_wall_clock_second() {
+        let nanos = u64::from(Utc::now().nanosecond().min(999_999_999));
+        std::thread::sleep(std::time::Duration::from_nanos(1_000_000_000 - nanos));
     }
 
     /// #554 acceptance. The skip covers the drawing and nothing else: the
     /// restore retry's admission sits after the gate and must still fire on a
-    /// tick that drew nothing. Two admissions recorded at the same frame count
-    /// mean no frame was drawn between them, so the second one ran on a skipped
-    /// tick.
+    /// tick that drew nothing. The loop is driven until a retry is admitted on
+    /// such a tick, so the assertion never rests on a run where every tick
+    /// happened to be material (#567).
     #[test]
     fn a_skipped_tick_still_admits_the_restore_retry() {
-        let draws = Arc::new(AtomicUsize::new(0));
-        let admitted_at = Arc::new(Mutex::new(Vec::new()));
-
-        // `Escape` is inert on the base Switch route, so after the first
-        // failure notice the frame's material stops changing entirely.
-        let mut keys = vec![Key::Escape; 24];
-        keys.extend([Key::CtrlQ, Key::Char('y')]);
-        let mut term = PacedTerminal {
-            keys: keys.into(),
+        wait_for_a_fresh_wall_clock_second();
+        let log = Arc::new(RestoreAdmissionLog::default());
+        let mut term = RetryDrivingTerminal {
+            log: Arc::clone(&log),
             pace: std::time::Duration::from_millis(60),
-            draws: Arc::clone(&draws),
+            ticks: 0,
+            calls: 0,
+            quiet_ticks: 0,
+            quit: VecDeque::new(),
         };
         let mut factory = FixedBackendFactory {
             sessions: Some(Box::new(UnavailableSessionCommandPort)),
             agent: Some(Box::new(UnavailableAgentCommandPort)),
             launch: None,
             restore: Some(Box::new(AdmissionCountingRestorePort {
-                draws: Arc::clone(&draws),
-                admitted_at: Arc::clone(&admitted_at),
+                log: Arc::clone(&log),
             })),
             metrics: Some(Box::new(NoMetrics)),
             browser: Some(Box::new(UnavailableBrowserOpener)),
@@ -8670,19 +8799,21 @@ mod tests {
             Exit::Quit
         );
 
-        let admitted_at = admitted_at
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let drawn_at: Vec<usize> = admitted_at.iter().map(|(_, drawn)| *drawn).collect();
+        let admissions = log.admitted_jobs();
+        let driven = term.ticks;
+        let drawn_at: Vec<usize> = admissions.iter().map(|admission| admission.drawn).collect();
+        let admitted = drawn_at.len();
         assert!(
-            drawn_at.len() >= 2,
-            "the restore retry was admitted {} time(s)",
-            drawn_at.len()
+            admitted >= 2,
+            "the restore retry was admitted {admitted} time(s) in {driven} tick(s)"
         );
+        // A retry admitted on a skipped tick is the whole contract, so a run that
+        // never skipped one fails here instead of reading as a pass.
+        let retry_on_a_skipped_tick = admissions.iter().skip(1).any(|admission| admission.skipped);
         assert!(
-            drawn_at.windows(2).any(|pair| pair[0] == pair[1]),
-            "every restore admission followed a redraw: {drawn_at:?}"
+            retry_on_a_skipped_tick,
+            "every restore retry followed a redraw in {driven} tick(s), \
+             admitted at frame {drawn_at:?}"
         );
     }
 
