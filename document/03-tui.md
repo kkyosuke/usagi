@@ -9,6 +9,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 ## 目次
 
 - [画面と入力](#画面と入力)
+- [workspace の離脱と終了](#workspace-の離脱と終了)
 - [settings scope と workspace entry](#settings-scope-と-workspace-entry)
 - [workspace の選択と daemon](#workspace-の選択と-daemon)
 - [Home と target](#home-と-target)
@@ -93,6 +94,45 @@ Home を開く入口は direct workspace、Welcome の Recent、Open の選択�
 `DaemonBackend::dispatch` だけが解釈し、session / Agent / terminal、notes / environment、workspace command、
 decision、PR snapshot / preview、browser、desktop notification へ振り分ける。別の screen-graph executor や
 production fallback stub は持たない。
+
+**Home からは Welcome へ戻れる**。入口は片道ではなく、workspace を離れて別の workspace を開くために
+プロセスを終了する必要はない。離脱と終了の区別、および離脱時の teardown は
+[workspace の離脱と終了](#workspace-の離脱と終了)を正本とする。
+
+## workspace の離脱と終了
+
+**離脱（Welcome へ戻る）と終了（プロセスを終える）は別の答えである**。どちらも Home の
+[exit prompt](#feedback-と終了)（`Ctrl-Q`、live pane 上の `Ctrl-C`）から選ぶが、選択肢・キー・
+効果が分かれているため、片方のキーを打ち間違えてもう片方に落ちることはない。
+
+| 答え | キー | 効果 |
+|---|---|---|
+| `welcome` | `w` | この workspace を離れて Welcome へ戻る。プロセスは続く |
+| `quit` | `q` / `y` | この TUI client を終了する |
+| `stay` | `n` / `Esc` | この workspace に留まる |
+
+離脱と終了はどちらも **この workspace のために確立した資源をすべて落とす**。terminal lane・poll lane・
+pane launch client・restore client の接続、Home の 3 つの[背景観測 lane](#home-frame-loop-と背景観測-lane)、
+metrics lane はいずれも workspace の frame loop が所有しており、loop を抜けることが teardown そのものである。
+したがって**次の workspace を開く時点で、前の workspace の port・pump・worker は 1 つも残っていない**。
+唯一の例外は restore observation の client で、これは「hung な restore を終了が待たない」ために
+切り離した worker が持つ（[背景 observation lane](#背景-observation-lane)）。
+
+daemon-owned の terminal と operation は離脱でも停止しない。**離脱の意味は detach と同じ**であり、接続を
+閉じることで daemon が subscription を解放する（[connection epoch と subscription 無効化](#connection-epoch-と-subscription-無効化)）。
+専用の detach request は送らない。
+
+**プロセス内で同時に接続する daemon は 1 つだけである**。daemon が serve する workspace は 1 つに確定して
+いるため（[workspace の選択と daemon](#workspace-の選択と-daemon)）、離脱で旧 workspace の接続を完全に閉じてから
+次の workspace の daemon へ接続し直す。複数 daemon への接続を同時に持つことはない。戻った Welcome から
+別 workspace を選んだときの fence 拒否も、起動直後と同じく**その画面に留まって notice に出す**。無言で
+前の workspace へ戻ることはしない。
+
+戻り先の Welcome は**開いた時点の Recent 順序を保つ**。workspace を開いた時点で `record_opened` 済みなので
+離れた workspace は先頭にあり、entry 画面が daemon も store も読み直さない原則（[workspace の選択と
+daemon](#workspace-の選択と-daemon)）をそのまま守る。ただし `usagi <path>` / `usagi open <path>` のように
+workspace を直接開いた入口には背後に Welcome が無いため、離脱時に合成ルートが Recent を読み直して
+entry 画面へ入る。
 
 ## settings scope と workspace entry
 
@@ -179,10 +219,19 @@ cwd に native terminal を開くため、controller は両者を別 effect と�
 decision / PR / browser / notification は daemon または platform adapter の結果を controller へ還流する。
 従来 silent no-op だった操作も成功扱いせず、画面に安全な結果を返す。永続データの migration は発生しない。
 
-対話的な `usagi` / `usagi hop` の Welcome 起動時は、入力を読まずに 110ms 間隔で 13 フレームの
-スプラッシュを再生する。ピンクの usagi を先に表示し、`USAGI` を暗い緑から Success の太字へ
-フェードインしてから Welcome を描く。スプラッシュ中の打鍵は Welcome の最初の入力として残る。
+対話的な `usagi` / `usagi hop` の Welcome 起動時は、110ms 間隔で 14 フレームのスプラッシュを再生する。
+ピンクの usagi を先に表示し、`USAGI` を暗い緑から Success の太字へフェードインしてから Welcome を描く。
 非対話環境と `usagi config` はスプラッシュを再生しない。
+
+スプラッシュは**スキップできる**。この 2 つを両方満たす。
+
+- **打鍵で中断する**。フレーム間の待機は「その時間を上限に入力を 1 つ待つ」ため、キーが届いた時点で
+  残りのフレームを捨てて Welcome を描く。**中断に使ったキーはスキップとして消費する**（「何かキーを
+  押すと飛ばせる」の標準的な契約）。以前は入力を読まずスプラッシュ中の打鍵を Welcome の最初の入力へ
+  渡していたが、これは端末由来の紛れ込んだバイトも同じように次の画面へ流し込むため、消費する側に
+  倒した。起こし待ちの tick と端末リサイズは打鍵ではないので、アニメーションの速度を保つ。
+- **1 プロセスで 1 回だけ再生する**。[workspace を離れて戻った Welcome](#workspace-の離脱と終了) は起動では
+  ないため、2 回目以降は 1 フレームも描かない。中断しても Welcome の初期状態は変わらない。
 
 実端末は raw mode、alternate screen、cursor、mouse、自動折返しを合成ルートで管理する。TUI は端末非依存の
 event stream を reducer に渡し、frame diff だけを返す。TUI の実行中は自動折返しを無効化し、右下セルへの描画が
@@ -257,11 +306,12 @@ ANSI span の reset 後にも dim を再適用するため、current marker や 
 
 Home controller の management input では、Switch の `Ctrl-A` は新規 session 作成フォームを開く。session 行を
 選択中の `x` は `session remove`、`Shift`+`x`（`X`）は `session remove -f` を実行する。root と `+ new session`
-行では削除しない。`Ctrl-Q` は workspace 終了確認を開く。Switch の `Ctrl-C` は何もしない。Closeup の live pane でも、leader が
+行では削除しない。`Ctrl-Q` は exit prompt を開く（離脱と終了の区別は
+[workspace の離脱と終了](#workspace-の離脱と終了)）。Switch の `Ctrl-C` は何もしない。Closeup の live pane でも、leader が
 待機していない `Ctrl-C` / `Ctrl-Q` / `Ctrl-D` は global shortcut として management transition に渡す。Closeup の `Ctrl-O o` は
 Switch へ戻り、Switch 中の `Ctrl-O` は単体では mode を変えない。Closeup action modal が前面にある間の `Esc` /
 `Ctrl-C` は、`Ctrl-O o` と同じく modal を閉じて Switch へ戻る（live pane の有無に依らない）。overlay を開いて
-いない Closeup の live pane 上の `Ctrl-C` が終了確認を開く契約はそのままである。前面 overlay は共通入力境界で
+いない Closeup の live pane 上の `Ctrl-C` が exit prompt を開く契約はそのままである。前面 overlay は共通入力境界で
 `Ctrl-C` / `Ctrl-Q` を route より先に所有し、通常は overlay に留まる。例外は `Ctrl-C` で Switch へ戻る Closeup action
 modal と、`Ctrl-C` を acknowledge として閉じる session 作成エラーだけであり、いずれも TUI の終了には伝播しない。
 
@@ -511,6 +561,8 @@ Home 背景との合成範囲を越えない。
 | `selection_marker(selected)` | 選択行の danger 太字 `›`（`widgets/select.rs` と同一経路） |
 | `scroll_above(n)` / `scroll_below(n)` | dim の scroll indicator `↑ N more` / `↓ N more` |
 | `render_body` / `render_body_over` | body 予約（`fixed_body`）＋中央配置／背景合成の双子。over は小端末で `height − 4` に clamp |
+| `choice_buttons(selected, choices)` | 固定幅の選択ボタン列。label は共通幅へ pad するため focus で geometry が動かない |
+| `render_choice_over(.., selected, ChoiceView)` | 3 択以上の prompt を背景へ合成する。footer は複数行を受ける |
 
 インデント・footer 文言・選択マーカー・scroll 文言は 1 経路に統一する。移行では表示を byte 単位で回帰させない
 ことを基本とし、次の 3 か所だけを意図的に統一した（対応する test を更新済み）。
@@ -531,13 +583,16 @@ footer 行は body-composition kit の `footer` helper を通す。
 
 | 経路 | variant | footer hints |
 |---|---|---|
-| Home の Quit（detach 確認） | Yes/No ボタン（既定） | `Enter/y: yes   Esc/n: no   ←→/Tab: choose` |
-| open の Unregister workspace | Yes/No ボタン（既定） | 同上 |
+| open の Unregister workspace | Yes/No ボタン（既定） | `Enter/y: yes   Esc/n: no   ←→/Tab: choose` |
 | open の registry cleanup | compact（ボタンなし） | `y: remove   n/Esc: cancel` |
 
 ボタン付き variant の Yes/No 選択状態は `ConfirmationModal` が持ち、compact variant は選択状態を
 持たない（state 引数を読まない）。open の cleanup は list 本文に手組みしていた `y/n` prompt を廃し、
 unregister と同じ overlay 経路で合成する。
+
+Home の [exit prompt](#workspace-の離脱と終了) は 2 択ではないため `render_choice_over` を使うが、
+ボタンの幅と focus 表示は `confirmation_buttons` と同じ `choice_buttons` を通るので、2 択と 3 択の
+見た目は 1 つの規則から出る。
 
 ### 形別コンポーネント
 
@@ -1140,8 +1195,13 @@ phase、operation / terminal error、disconnect、reconnect、resync は safe me
 TUI-local feedback として表示する。transport の内部 detail や secret は表示しない。orphan state では
 terminal input を送らない。
 
-`q` は確認後に TUI だけを閉じ、daemon-owned terminal は継続する。`Ctrl-Q` も同様に detach 確認 modal を
-開き、確認するとこの TUI client だけが detach する（daemon-owned の terminal や operation は停止しない）。
-確認 modal は[共通 confirmation component](#共通-confirmation-component)（`render_confirmation_over`）の
-Yes/No variant で `[ yes ] [ no ]` を表示し、`Enter`（選択中のボタンを確定）、左右・Tab（Yes/No 選択の切替）、
-`y`（detach）、`n` / Esc（留まる）で操作できる。
+`Ctrl-Q`（と live pane 上の `Ctrl-C`）は **exit prompt** を開く。この modal だけが workspace を出る唯一の
+経路であり、`welcome`（Welcome へ戻る）／`quit`（TUI を閉じる）／`stay`（留まる）の 3 択を提示する。
+どちらの答えでも daemon-owned の terminal や operation は停止しない。3 択の意味・キー・teardown は
+[workspace の離脱と終了](#workspace-の離脱と終了)を正本とする。
+
+modal は[共通 body-composition kit](#共通-body-composition-kit)の choice variant（`render_choice_over`）で
+`[ welcome ] [ quit ] [ stay ]` を表示する。ボタンの幅と focus 表示は Yes/No の
+[共通 confirmation component](#共通-confirmation-component)と同じ規則を共有するため、2 択と 3 択の見た目が
+分岐しない。`Enter` は選択中のボタンを確定し、左右・Tab は focus を巡回する。modal を開いた時点の focus は
+`quit` なので、`Ctrl-Q` + `Enter` は従来どおり TUI を閉じる。

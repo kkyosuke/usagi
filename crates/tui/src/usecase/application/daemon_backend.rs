@@ -276,8 +276,13 @@ fn unavailable(completions: &Completions, message: &str) {
 pub enum Flow {
     /// Continue the frame loop.
     Continue,
-    /// Leave the workspace loop; the adapter owns connection cleanup.
+    /// Leave the workspace loop and end the TUI; the adapter owns connection
+    /// cleanup.
     Exit,
+    /// Leave the workspace loop for the Welcome switcher, keeping the process
+    /// alive. Cleanup is the same as [`Self::Exit`]: this variant only tells the
+    /// shell where to go next (#556).
+    Leave,
 }
 
 /// Production [`Effect`] executor that binds the reducer to the daemon ports.
@@ -336,7 +341,8 @@ impl DaemonBackend {
 
     /// Run one reducer-issued effect against its owning port.
     ///
-    /// Returns [`Flow::Exit`] for [`Effect::Detach`] so the loop leaves; every
+    /// Returns [`Flow::Exit`] for [`Effect::Detach`] and [`Flow::Leave`] for
+    /// [`Effect::LeaveWorkspace`] so the loop leaves; every
     /// other effect returns [`Flow::Continue`].  Entry-surface effects
     /// (`AttachWorkspace` / `CloneProject` / `RegisterWorkspace`) are not used
     /// by the Home screen and are accepted as no-ops until the screen graph
@@ -447,6 +453,7 @@ impl DaemonBackend {
                 self.overlay.open_pull_request(url, self.completions());
             }
             Effect::Detach => return Flow::Exit,
+            Effect::LeaveWorkspace => return Flow::Leave,
             // Entry surfaces are outside Home. If one reaches this backend it is
             // completed explicitly instead of being mistaken for success.
             Effect::AttachWorkspace { .. }

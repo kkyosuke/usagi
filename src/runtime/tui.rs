@@ -2805,6 +2805,32 @@ impl Terminal for CrosstermTerminal {
         Ok(())
     }
 
+    /// Wait out one animation frame on the input pump instead of sleeping, so a
+    /// key pressed during the startup splash is observed instead of queued behind
+    /// a `thread::sleep` (#556). Wake-up ticks are the pump's own cadence and are
+    /// swallowed here; only real input and a resize reach the caller.
+    fn wait_for_key(&mut self, duration: Duration) -> std::io::Result<Option<Key>> {
+        let deadline = Instant::now() + duration;
+        loop {
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            match self.input.next(self.input_started.elapsed())? {
+                RuntimeEvent::Input(input) => {
+                    let now = self.input_started.elapsed();
+                    if let Some(key) = classify_terminal_input(&mut self.live_input, now, &input) {
+                        return Ok(Some(key));
+                    }
+                }
+                RuntimeEvent::Resize { .. } => {
+                    self.renderer.reset_surface();
+                    return Ok(Some(Key::Resize));
+                }
+                RuntimeEvent::Backend(()) | RuntimeEvent::Tick => {}
+            }
+        }
+    }
+
     fn read_key(&mut self) -> std::io::Result<Key> {
         loop {
             match self.input.next(self.input_started.elapsed())? {
@@ -3268,11 +3294,15 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
         let mut loader = FsWorkspaceLoader { storage };
         let mut settings = PersistentSettingsPort::open()?;
         let mut backend_factory = ProductionBackendFactory;
+        let mut splash = presentation::StartupSplash::new();
         run_with_metrics_hook(|| {
             run_in_terminal(|terminal| {
                 if start == Start::Welcome {
-                    presentation::play_startup_splash(terminal)?;
+                    splash.play(terminal)?;
                 }
+                // The graph resolves "leave this workspace" into its own Welcome
+                // screen, so it only returns when the process is ending. The
+                // splash therefore plays once per launch, not once per Welcome.
                 presentation::run_screen_graph_with_backend(
                     terminal,
                     workspaces,
@@ -3399,13 +3429,38 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
         let mut backend_factory = ProductionBackendFactory;
         run_with_metrics_hook(|| {
             run_in_terminal(|terminal| {
-                presentation::run_workspace_controller_with_backend_and_config(
+                // A direct workspace entry has no Welcome behind it, so leaving
+                // continues into the entry screens in this same process rather
+                // than ending it: `usagi <path>` switches workspaces too (#556).
+                // The workspace's ports are already dropped by the time the
+                // controller returns, so the switcher starts with no connection
+                // to the workspace that was left.
+                match presentation::run_workspace_controller_with_backend_and_config(
                     terminal,
                     snapshot,
                     &mut backend_factory,
                     &mut settings,
                     available_agent_models(),
-                )
+                )? {
+                    Exit::Quit => Ok(Exit::Quit),
+                    Exit::Welcome => {
+                        // Read Recent now, not at launch: the workspace that was
+                        // just left is the most recent one and belongs at the top.
+                        let (workspaces, recent) =
+                            load_screen_graph_data(&loader.storage, Start::Welcome)?;
+                        presentation::run_screen_graph_with_backend(
+                            terminal,
+                            workspaces,
+                            recent,
+                            Utc::now(),
+                            Start::Welcome,
+                            &mut loader,
+                            &mut settings,
+                            &mut backend_factory,
+                            available_agent_models(),
+                        )
+                    }
+                }
             })
         })?;
     } else {

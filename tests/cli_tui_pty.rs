@@ -154,28 +154,17 @@ fn resize_pty(terminal: &File, columns: u16, rows: u16) -> io::Result<()> {
     Ok(())
 }
 
-fn read_pty(mut master: File) -> Vec<u8> {
-    let mut output = Vec::new();
-    let mut chunk = [0_u8; 4096];
-    loop {
-        match master.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(read) => output.extend_from_slice(&chunk[..read]),
-            // Linux PTYs report EIO, while Darwin normally reports EOF, after the final slave
-            // descriptor closes. Both mean the captured stream is complete.
-            Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
-            Err(error) => panic!("PTY outputの読み取りに失敗: {error}"),
-        }
-    }
-    output
-}
-
+/// Drain the PTY master into a shared buffer the test can observe while the TUI
+/// is still running. Every test reads through this one path, so a test can wait
+/// for the frame that owns its next keystroke instead of sleeping.
 fn read_pty_shared(mut master: File, output: &Arc<Mutex<Vec<u8>>>) {
     let mut chunk = [0_u8; 4096];
     loop {
         match master.read(&mut chunk) {
             Ok(0) => break,
             Ok(read) => output.lock().unwrap().extend_from_slice(&chunk[..read]),
+            // Linux PTYs report EIO, while Darwin normally reports EOF, after the final slave
+            // descriptor closes. Both mean the captured stream is complete.
             Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
             Err(error) => panic!("PTY outputの読み取りに失敗: {error}"),
         }
@@ -828,7 +817,7 @@ fn quit_from_switch(
 ) -> ExitStatus {
     wait_for_screen_since(output, baseline, "[switch]");
     send(master, b"\x11");
-    wait_for_screen_since(output, baseline, "Detach from this workspace?");
+    wait_for_screen_since(output, baseline, "Leave this workspace?");
     send(master, b"\r");
     wait_with_timeout(child, Duration::from_secs(10)).expect("TUI quits normally")
 }
@@ -1074,30 +1063,27 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     let (mut master, slave) = open_pty().unwrap();
     let attributes_before = terminal_attributes(&slave).unwrap();
     let reader_master = master.try_clone().unwrap();
-    let reader = thread::spawn(move || read_pty(reader_master));
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let reader_capture = Arc::clone(&captured);
+    let reader = thread::spawn(move || read_pty_shared(reader_master, &reader_capture));
 
+    let baseline = capture_len(&captured);
     let mut child = spawn_hop(&home, &workspace, &slave).expect("PTY上でusagi hopを起動できる");
 
-    // `1` は Welcome の予約 input で最初の Recent を開く。`x` は Workspace 上の
-    // non-reserved input で、画面遷移や quit を起こさず次フレームだけを要求する。入力は
-    // PTY の line discipline が raw mode へ切り替わる時間を確保してから送る。
-    thread::sleep(Duration::from_millis(150));
-    send(&mut master, b"1");
-    thread::sleep(Duration::from_millis(150));
+    // Each key waits for the frame that owns it instead of a fixed sleep: a key
+    // typed during the startup splash is consumed as its skip (#556), so `1` has
+    // to reach Welcome itself.
+    open_registered_workspace(&mut master, &captured, baseline);
     // Resize while Home is visible. The runtime must invalidate the diff base and repaint the
     // new surface instead of leaving cells from the former 100-column frame behind.
     resize_pty(&master, 80, 20).unwrap();
-    thread::sleep(Duration::from_millis(100));
     // The workspace loop observes resize on the next frame boundary. `x` is a no-op key
     // which requests that boundary without changing the visible Home state.
     send(&mut master, b"x");
-    thread::sleep(Duration::from_millis(100));
-    // Ctrl-Q opens the TUI-close confirmation; Enter accepts it and detaches.
-    // (`q` alone is inert in the controller Home loop.) Send the two keys with a
-    // settle gap so the confirmation frame renders before Enter under a slow or
-    // instrumented binary.
+    // Ctrl-Q opens the exit prompt; Enter commits its focused `quit` button.
+    // (`q` alone is inert in the controller Home loop.)
     send(&mut master, b"\x11");
-    thread::sleep(Duration::from_millis(200));
+    wait_for_screen_since(&captured, baseline, "Leave this workspace?");
     send(&mut master, b"\r");
 
     let status = match wait_with_timeout(&mut child, Duration::from_secs(5)) {
@@ -1105,11 +1091,9 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
         Err(error) => {
             drop(slave);
             drop(master);
-            let captured = reader.join().unwrap();
-            panic!(
-                "{error}: {}",
-                String::from_utf8_lossy(&captured).replace('\u{1b}', "<ESC>")
-            );
+            let _ = reader.join();
+            let raw = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
+            panic!("{error}: {}", raw.replace('\u{1b}', "<ESC>"));
         }
     };
     let attributes_after = terminal_attributes(&slave).unwrap();
@@ -1125,7 +1109,10 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
 
     let mut reattached =
         spawn_hop(&home, &workspace, &slave).expect("同じPTYへ再接続してhopを起動できる");
-    thread::sleep(Duration::from_millis(150));
+    // Wait for the switcher itself rather than sleeping past the splash: a key
+    // typed during the splash is consumed as its skip (#556), so `q` has to
+    // reach Welcome to close this second entry.
+    wait_for_screen_since(&captured, baseline, "Recent");
     send(&mut master, b"q");
     let reattached_status = wait_with_timeout(&mut reattached, Duration::from_secs(5)).unwrap();
     let attributes_reattached = terminal_attributes(&slave).unwrap();
@@ -1133,8 +1120,8 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     // slave をすべて閉じると reader が EOF/EIO を受け取れる。
     drop(slave);
     drop(master);
-    let captured = reader.join().unwrap();
-    let output = String::from_utf8_lossy(&captured);
+    let _ = reader.join();
+    let output = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
 
     assert!(status.success(), "PTY output: {output}");
     assert!(reattached_status.success(), "PTY output: {output}");
@@ -1165,6 +1152,79 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     assert_eq!(attributes_reattached.c_cflag, attributes_before.c_cflag);
     assert_eq!(attributes_reattached.c_lflag, attributes_before.c_lflag);
     assert_eq!(attributes_reattached.c_cc, attributes_before.c_cc);
+    stop_daemon(&home);
+}
+
+/// #556: leaving a workspace returns to Welcome inside the same process, and
+/// re-entering it from there completes instead of hanging. The workspace's ports
+/// are dropped on the way out, so the second entry establishes a fresh daemon
+/// connection, pumps, and lanes — a leaked subscription or an un-joined pump
+/// would stall this second `[switch]` frame.
+#[test]
+fn real_pty_leaving_a_workspace_returns_to_welcome_and_re_entry_does_not_hang() {
+    let _serial = serial();
+    let home = short_home();
+    let roots = tempfile::tempdir().unwrap();
+    let workspace = roots.path().join("leave-workspace");
+    std::fs::create_dir(&workspace).unwrap();
+
+    let registered = home
+        .command_at(
+            Channel::Local,
+            &workspace,
+            &["open".as_ref(), workspace.as_os_str()],
+        )
+        .output()
+        .expect("workspace registers before the TUI opens it");
+    assert!(registered.status.success());
+
+    let (mut master, slave) = open_pty().unwrap();
+    let reader_master = master.try_clone().unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let reader_capture = Arc::clone(&captured);
+    let reader = thread::spawn(move || read_pty_shared(reader_master, &reader_capture));
+
+    let baseline = capture_len(&captured);
+    let mut child = spawn_hop(&home, &workspace, &slave).expect("usagi hop starts on the PTY");
+
+    // Welcome → workspace.
+    open_registered_workspace(&mut master, &captured, baseline);
+
+    // Ctrl-Q opens the exit prompt; `w` leaves for Welcome without ending the
+    // process. The workspace surface goes away and the switcher comes back.
+    send(&mut master, b"\x11");
+    wait_for_screen_since(&captured, baseline, "Leave this workspace?");
+    send(&mut master, b"w");
+    wait_for_screen_absent_since(&captured, baseline, "[switch]");
+    wait_for_screen_since(&captured, baseline, "Recent");
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "leaving a workspace must not end the process"
+    );
+
+    // Re-entry from the returned Welcome reaches Home again, then `q` at the
+    // prompt ends the process.
+    send(&mut master, b"1");
+    wait_for_screen_since(&captured, baseline, "[switch]");
+    send(&mut master, b"\x11");
+    wait_for_screen_since(&captured, baseline, "Leave this workspace?");
+    send(&mut master, b"q");
+
+    let status = match wait_with_timeout(&mut child, Duration::from_secs(10)) {
+        Ok(status) => status,
+        Err(error) => {
+            drop(slave);
+            drop(master);
+            let _ = reader.join();
+            let screen = screen_since(&captured, baseline).unwrap_or_default();
+            panic!("{error}: screen={screen:?}");
+        }
+    };
+    assert!(status.success());
+
+    drop(slave);
+    drop(master);
+    let _ = reader.join();
     stop_daemon(&home);
 }
 
@@ -1399,7 +1459,7 @@ fn real_pty_hung_daemon_bounds_redraw_and_quit_with_an_attached_pane() {
     // drawing, and the exit proves the release did not wait forever.
     let frozen_at = Instant::now();
     send(&mut master, b"\x11");
-    wait_for_screen_since(&captured, baseline, "Detach from this workspace?");
+    wait_for_screen_since(&captured, baseline, "Leave this workspace?");
     send(&mut master, b"\r");
     let status =
         wait_with_timeout(&mut tui, QUIT_BOUND).expect("the TUI quits within a wall-clock bound");
