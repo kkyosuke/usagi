@@ -16471,6 +16471,7 @@ mod tests {
             _session: Option<SessionId>,
             _geometry: Geometry,
             _arguments: &str,
+            _operation: OperationId,
         ) -> Result<TerminalRef, String> {
             Err("terminal launch is unavailable".to_owned())
         }
