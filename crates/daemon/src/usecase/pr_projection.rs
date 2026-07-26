@@ -375,6 +375,6 @@ mod tests {
         let after = pr_projection_counters();
         assert!(after.dropped_bytes >= before.dropped_bytes + 4);
         assert!(after.coalesced_bytes >= before.coalesced_bytes + 2);
-        assert!(after.gaps >= before.gaps + 1);
+        assert!(after.gaps > before.gaps);
     }
 }

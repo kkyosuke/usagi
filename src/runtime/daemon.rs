@@ -8614,6 +8614,90 @@ mod tests {
         }
     }
 
+    /// Waits for `condition`, failing the test rather than hanging if the
+    /// projection worker never applies the queued work.
+    fn await_projection(condition: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !condition() {
+            assert!(
+                Instant::now() < deadline,
+                "the projection worker did not apply queued work"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn the_projection_worker_owns_every_scan_and_durable_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let projector = Arc::new(Mutex::new(OutputPrProjector::new(PrInventoryStore::new(
+            directory.path(),
+        ))));
+        let projection = Arc::new(PrProjectionQueue::new());
+        start_pr_projection_worker(Arc::clone(&projector), Arc::clone(&projection)).unwrap();
+        let session = SessionId::new();
+        let terminal = TerminalId::new();
+
+        // A terminated candidate is credited by the worker, not by the submitter.
+        projection.submit_output(
+            terminal,
+            Some(session),
+            b"opened https://github.com/o/r/pull/11\n".to_vec(),
+        );
+        await_projection(|| {
+            projector
+                .lock()
+                .is_ok_and(|mut projector| !projector.snapshot(session).unwrap().entries.is_empty())
+        });
+
+        // A gap must discard the carry instead of joining across dropped bytes.
+        projection.submit_output(
+            terminal,
+            Some(session),
+            b" https://github.com/o/r/pu".to_vec(),
+        );
+        projection.submit_gap(terminal);
+        projection.submit_output(terminal, Some(session), b"ll/12\n".to_vec());
+        // A candidate the output never terminated is credited when the terminal
+        // closes, and not before.
+        projection.submit_output(
+            terminal,
+            Some(session),
+            b" https://github.com/o/r/pull/13".to_vec(),
+        );
+        projection.submit_closed(terminal, Some(session));
+        await_projection(|| {
+            projector
+                .lock()
+                .is_ok_and(|mut projector| projector.snapshot(session).unwrap().entries.len() == 2)
+        });
+        let urls: Vec<String> = projector
+            .lock()
+            .unwrap()
+            .snapshot(session)
+            .unwrap()
+            .entries
+            .iter()
+            .map(|entry| entry.identity.as_url().to_owned())
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                "https://github.com/o/r/pull/11",
+                "https://github.com/o/r/pull/13"
+            ],
+            "pull/12 was split across a gap and must not be synthesized"
+        );
+
+        // Closing retires the worker: `recv` returns `None` once drained. The
+        // accept worker's guard is what closes it in production, including on an
+        // unwind, so the guard's drop is the path under test.
+        drop(ClosePrProjectionOnExit {
+            projection: Arc::clone(&projection),
+        });
+        assert_eq!(projection.recv(), None);
+    }
+
     #[test]
     #[allow(clippy::too_many_lines)] // PTY-to-IPC exit observation is one integration scenario.
     fn generic_terminal_exit_reaches_its_resume_response() {
