@@ -10,13 +10,18 @@
 use std::io;
 
 use usagi_core::domain::AppInfo;
-use usagi_core::domain::daemon::{DaemonState, classify};
+use usagi_core::domain::daemon::{DaemonState, StaleReason, classify};
 use usagi_core::infrastructure::daemon::LivenessProbe;
 
 use crate::usecase::serve::DaemonRecordPort;
 
 /// Build the `status` report line: load the record, probe whether its process is
-/// alive, and classify the two into running / stale / not-running.
+/// alive, and classify the two into running / stale / unverified / not-running.
+///
+/// Both stale reasons are reported as reclaimable, but they are named apart: an
+/// owner that simply vanished and an owner whose PID has been handed to an
+/// unrelated process are different events, and only the second explains why an
+/// unrelated live process holds the recorded PID.
 ///
 /// # Errors
 ///
@@ -24,8 +29,8 @@ use crate::usecase::serve::DaemonRecordPort;
 ///
 /// # Panics
 ///
-/// Never in practice: the `Alive` arm unwraps the record, and `classify` reports
-/// `Alive` only when a record is present.
+/// Never in practice: the arms that name a pid read it from the loaded record,
+/// and `classify` reports those states only when a record is present.
 pub fn report(
     store: &dyn DaemonRecordPort,
     probe: &dyn LivenessProbe,
@@ -37,14 +42,18 @@ pub fn report(
         |record| probe.observe(record),
     );
     let describe = info.describe();
+    let recorded_pid = record.as_ref().map(|record| record.pid);
+    let pid = || recorded_pid.expect("classify names a pid only for a present record");
     Ok(match classify(record.as_ref(), observation) {
-        DaemonState::Alive => {
-            let pid = record
-                .expect("classify reports Alive only for a present record")
-                .pid;
-            format!("{describe}: daemon running (pid {pid})")
-        }
-        DaemonState::Stale => format!("{describe}: daemon not running (stale record, reclaimable)"),
+        DaemonState::Alive => format!("{describe}: daemon running (pid {})", pid()),
+        DaemonState::Stale(StaleReason::OwnerGone) => format!(
+            "{describe}: daemon not running (stale record, pid {} is gone; reclaimable)",
+            pid()
+        ),
+        DaemonState::Stale(StaleReason::PidReused) => format!(
+            "{describe}: daemon not running (stale record, pid {} was reused by another process; reclaimable)",
+            pid()
+        ),
         DaemonState::Unverified => {
             format!("{describe}: daemon state unverified (record retained)")
         }
@@ -55,9 +64,9 @@ pub fn report(
 #[cfg(test)]
 mod tests {
     use super::report;
-    use crate::test_support::{FixedProbe, InMemoryRecordFile};
+    use crate::test_support::{FixedProbe, InMemoryRecordFile, ObservedAs};
     use usagi_core::domain::AppInfo;
-    use usagi_core::domain::daemon::DaemonRecord;
+    use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
     use usagi_core::infrastructure::daemon::DaemonRecordStore;
 
     fn info() -> AppInfo {
@@ -92,19 +101,28 @@ mod tests {
         store.save(&DaemonRecord::new(4321)).unwrap();
         assert_eq!(
             report(&store, &FixedProbe(false), &info()).unwrap(),
-            "usagi v0.1.0: daemon not running (stale record, reclaimable)"
+            "usagi v0.1.0: daemon not running (stale record, pid 4321 is gone; reclaimable)"
         );
     }
 
-    struct UnknownProbe;
-
-    impl usagi_core::infrastructure::daemon::LivenessProbe for UnknownProbe {
-        fn observe(
-            &self,
-            _record: &DaemonRecord,
-        ) -> usagi_core::domain::daemon::DaemonProcessObservation {
-            usagi_core::domain::daemon::DaemonProcessObservation::Unknown
-        }
+    #[test]
+    fn names_a_reused_pid_apart_from_a_vanished_owner_and_keeps_both_reclaimable() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        store
+            .save(&DaemonRecord::identified(4321, "old-incarnation"))
+            .unwrap();
+        // Both lines say "reclaimable", because both observations prove the
+        // recorded owner is gone. Only this one explains why an unrelated live
+        // process answers for pid 4321.
+        assert_eq!(
+            report(
+                &store,
+                &ObservedAs(DaemonProcessObservation::IdentityMismatch),
+                &info()
+            )
+            .unwrap(),
+            "usagi v0.1.0: daemon not running (stale record, pid 4321 was reused by another process; reclaimable)"
+        );
     }
 
     #[test]
@@ -113,7 +131,12 @@ mod tests {
         let record = DaemonRecord::new(4321);
         store.save(&record).unwrap();
         assert_eq!(
-            report(&store, &UnknownProbe, &info()).unwrap(),
+            report(
+                &store,
+                &ObservedAs(DaemonProcessObservation::Unknown),
+                &info()
+            )
+            .unwrap(),
             "usagi v0.1.0: daemon state unverified (record retained)"
         );
         assert_eq!(store.load().unwrap(), Some(record));

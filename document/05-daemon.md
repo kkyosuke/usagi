@@ -134,8 +134,8 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 | コマンド | 動作 |
 |---|---|
 | `usagi daemon start` | detached `serve` を起動し、`daemon.json` に稼働中の pid が登録されるまで待つ。すでに稼働中なら新しい process を起動しない |
-| `usagi daemon status` | lifecycle record と exact process-start identity の観測から running / stale / unverified / absent を表示する |
-| `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。stale record は process に signal を送らず、singleton lock 下で stale endpoint を回収してから消去する。unverified record は signal・回収とも拒否する |
+| `usagi daemon status` | lifecycle record と exact process-start identity の観測から running / stale / unverified / absent を表示する。stale は owner 消滅と PID 再利用を区別した文言で報告し、どちらも reclaimable であることを示す |
+| `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。stale record（owner 消滅・PID 再利用のいずれも）は process に signal を送らず、singleton lock 下で stale endpoint を回収してから消去する。unverified record は signal・回収とも拒否する |
 | `usagi daemon restart` | 稼働中 daemon を停止してから新しい daemon を起動する。active / draining handoff は行わない |
 | `usagi daemon replace` | exact artifact の意図的な replacement trigger を要求する。同じ artifact pair / channel は同じ operation ID へ収束し、この command 自体は old daemon を停止しない |
 | `usagi daemon` / `usagi daemon serve` | 前景で daemon を serve する。`serve` は内部用の subcommand であり、[workspace / data directory の 2 段 fence](#単一-daemon-の-2-段-fence)を取得してから公開し、[custody を失うと自主終了する](#custody-喪失による-self-shutdown) |
@@ -240,9 +240,25 @@ shutdown signal
   -> daemon.lock を process exit で解放
 ```
 
-`daemon.json` は endpoint retirement の completion fence である。`status` / `start` / `stop` は record の PID に現在
-存在する process の start identity が保存値と一致する場合だけ owner を alive と扱う。PID が存在しない場合だけ stale
-として reclaim でき、PID reuse、identity 欠落、OS observation failure は `unverified` として record を保持する。
+`daemon.json` は endpoint retirement の completion fence である。`status` / `start` / `stop` / `restart` と
+ordinary client bootstrap の stale recovery は、record の有無と exact process 観測から成る次の 1 つの判定表を共有する。
+同じ観測に対して lifecycle command と bootstrap が別の結論に達することはない。
+
+| record | exact process 観測 | state | lifecycle command の扱い |
+|---|---|---|---|
+| 無し | — | `absent` | `status` は not running を表示し、`start` は起動し、`stop` は停止対象なしを報告する |
+| 有り | PID に存在する process の start identity が保存値と一致 | `running` | `status` は pid を表示し、`start` は起動せず、`stop` は signal して owner cleanup を待つ |
+| 有り | PID に process が存在しない | `stale`（owner 消滅） | signal を送らず reclaim し、`start` / `restart` は replacement を 1 つ起動する |
+| 有り | PID は存在するが別 incarnation が占有（PID 再利用） | `stale`（PID 再利用） | owner 消滅と同じ扱い。所有者が別 incarnation へ置き換わったことは、所有者が消滅したことの肯定的証拠である |
+| 有り | identity 欠落（legacy record）・observation failure・platform 未対応 | `unverified` | signal・record 消去・endpoint 回収・replacement 起動をいずれも行わず record を保持する |
+
+`stale` の 2 つの原因は reclaim 可能性が同じでも別の事象なので、`status` は利用者が区別できる文言で報告する。
+`unverified` だけが所有権不明であり、これを reclaim しないことが fail-closed の境界である。
+
+record の `pid` は 1 つの process を名指せる値でなければならない。`0`（`kill` が caller の process group を指す）、
+`1`（init）、`pid_t` の範囲外（負の PID の wire 表現）は deserialize と registration の両境界で拒否するため、
+そのような値は上の判定にも signal 経路にも到達しない。
+
 `stop` は signal 直前にも identity を再検証し、Linux では identity 確認済みの pidfd に SIGTERM を送る。macOS では
 `proc_pidinfo` で process start time を直前に再検証してから SIGTERM を送る。legacy record、mismatch、unknown identity
 へ raw PID signal を送らない。
@@ -261,8 +277,9 @@ point は次回 `stop` で再試行できる。locator が既に無い場合も 
 replacement の record、locator、socket を保持する。
 
 ordinary TUI / CLI bootstrap で検証済み active locator への接続が `ConnectionRefused` になった場合は、手動の
-`stop` / `start` を要求せず、次の順序で同じ stale cleanup を一度だけ試みる。この順序では connection error 自体を
-stale 判定に使わない。
+`stop` / `start` を要求せず、次の順序で同じ stale cleanup を一度だけ試みる。reclaim するかどうかは上の判定表で
+決めるため、`stop` が拒否する record を bootstrap が回収することはない（逆も同じ）。この順序では connection error
+自体を stale 判定に使わない。
 
 ```text
 bootstrap.lock を保持
@@ -352,6 +369,7 @@ apply は legacy record 全件の name、期待 path、linked worktree、canonic
 `daemon.json` は `pid`、OS の `process_start_identity`、`started_at` を持つ。この lifecycle record は durable
 incarnation fence であり、stale cleanup と conditional clear は record 全体を比較する。identity field を持たない legacy
 record は読み取り可能だが owner unknown であり、自動 signal・stale reclaim・replacement start を行わない。
+`pid` の受け入れ範囲と observation からの state 判定は [daemon process lifecycle](#daemon-process-lifecycle) が正本である。
 `current.json` の型は generation、daemon directory からの
 相対 endpoint、`active` または `draining` の state を持つが、shipping bind は常に `active` を即時 publish し、
 standby / draining registry としては使わない。current locator と socket endpoint は永続データではなく、

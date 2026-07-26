@@ -414,6 +414,103 @@ fn daemon_stop_clears_a_stale_production_record() {
     );
 }
 
+/// A crashed daemon leaves its record, locator, and socket behind. Once the OS
+/// hands its pid to an unrelated process, the recorded identity stops matching —
+/// which is positive proof the owner is gone, not an unknown owner. The explicit
+/// lifecycle commands must reclaim that record themselves instead of wedging
+/// until some unrelated daemon-backed request happens to run.
+#[test]
+fn daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let daemon_dir = home.production_data_dir().join("daemon");
+    let mut crashed = home.spawn_serve();
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            daemon_dir.join("daemon.json").is_file() && daemon_dir.join("current.json").is_file()
+        }),
+        "daemon did not publish its production endpoint"
+    );
+    let socket = daemon_dir.join(
+        &read_locator(&daemon_dir)
+            .expect("a started daemon publishes a locator")
+            .endpoint,
+    );
+    let crashed_record = daemon_record(home.path()).expect("the daemon registered a record");
+    crashed.kill_and_reap();
+    assert!(socket.exists(), "SIGKILL leaves the endpoint behind");
+
+    // Model the PID reuse: an unrelated live process now occupies the recorded
+    // pid, so only the recorded identity distinguishes it from the dead owner.
+    let mut occupant = Command::new("sleep").arg("30").spawn().unwrap();
+    let reused = usagi_core::domain::daemon::DaemonRecord {
+        pid: occupant.id(),
+        process_start_identity: crashed_record.process_start_identity.clone(),
+        started_at: crashed_record.started_at,
+    };
+    std::fs::write(
+        daemon_dir.join("daemon.json"),
+        serde_json::to_vec(&reused).unwrap(),
+    )
+    .unwrap();
+
+    // `status` names the reuse rather than only calling the record stale.
+    let status = run_in_production(&[OsStr::new("daemon"), OsStr::new("status")], &home);
+    assert!(status.status.success(), "{}", stderr(&status));
+    assert!(
+        stdout(&status).contains(&format!(
+            "daemon not running (stale record, pid {} was reused by another process; reclaimable)",
+            reused.pid
+        )),
+        "status: {}",
+        stdout(&status)
+    );
+
+    // `stop` reclaims the record and the crashed endpoint, and sends no signal to
+    // the process that now holds the pid.
+    let stop = run_in_production(&[OsStr::new("daemon"), OsStr::new("stop")], &home);
+    assert!(stop.status.success(), "{}", stderr(&stop));
+    assert!(stdout(&stop).contains("cleared stale daemon record"));
+    assert!(!daemon_dir.join("daemon.json").exists());
+    assert!(!daemon_dir.join("current.json").exists());
+    assert!(!socket.exists());
+    assert!(
+        occupant.try_wait().unwrap().is_none(),
+        "the reclaim signalled the unrelated process holding the reused pid"
+    );
+
+    // `start` then launches one replacement, which registers its own identity.
+    let start = run_in_production(&[OsStr::new("daemon"), OsStr::new("start")], &home);
+    assert!(start.status.success(), "{}", stderr(&start));
+    let started = daemon_record(home.path()).expect("start registers a record");
+    assert_ne!(started.pid, reused.pid);
+    assert_eq!(
+        started.process_start_identity.as_deref(),
+        Some(daemon_fixture::process_start_identity(started.pid).as_str())
+    );
+    assert!(occupant.try_wait().unwrap().is_none());
+
+    // The recovered daemon answers ordinary bootstrap, so no client adds a second
+    // one on top of it.
+    let request = run_in_production(
+        &[
+            OsStr::new("session"),
+            OsStr::new("remove"),
+            OsStr::new("missing"),
+        ],
+        &home,
+    );
+    assert_eq!(request.status.code(), Some(1));
+    assert_eq!(daemon_record(home.path()), Some(started));
+
+    occupant.kill().unwrap();
+    occupant.wait().unwrap();
+    let stop = run_in_production(&[OsStr::new("daemon"), OsStr::new("stop")], &home);
+    assert!(stop.status.success(), "{}", stderr(&stop));
+}
+
 #[test]
 fn daemon_restart_initializes_a_private_endpoint_from_an_empty_data_dir() {
     let _guard = DAEMON_LIFECYCLE_LOCK

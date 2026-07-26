@@ -1633,7 +1633,7 @@ mod tests {
         // require the fence and stays usable against any daemon.
         let unbound = IpcClient::connect(
             bootstrap_script(&Bootstrap::ServerHello(owner_hello(
-                &DaemonRecord::identified(1, "process-start"),
+                &DaemonRecord::identified(4321, "process-start"),
                 &DaemonGeneration("generation".into()),
             ))),
             "client".into(),
@@ -1662,7 +1662,7 @@ mod tests {
         // answer with the sessions of the workspace it happens to serve.
         let selected = IpcClient::connect(
             bootstrap_script(&Bootstrap::ServerHello(owner_hello(
-                &DaemonRecord::identified(1, "process-start"),
+                &DaemonRecord::identified(4321, "process-start"),
                 &DaemonGeneration("generation".into()),
             ))),
             "client".into(),

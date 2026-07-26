@@ -1,4 +1,7 @@
-use super::{DaemonProcessObservation, DaemonRecord, DaemonState, classify};
+use super::{
+    DaemonProcessObservation, DaemonRecord, DaemonState, InvalidRecordPid, MAX_RECORD_PID,
+    MIN_RECORD_PID, StaleReason, classify, is_record_pid,
+};
 
 #[test]
 fn new_records_pid_and_stamps_start_time() {
@@ -44,46 +47,86 @@ fn legacy_record_without_identity_deserializes_as_unknown() {
 }
 
 #[test]
-fn classify_reports_absent_when_no_record() {
-    for observation in [
-        DaemonProcessObservation::Exact,
-        DaemonProcessObservation::Gone,
-        DaemonProcessObservation::IdentityMismatch,
-        DaemonProcessObservation::Unknown,
-    ] {
-        assert_eq!(classify(None, observation), DaemonState::Absent);
+fn a_record_pid_that_cannot_name_a_process_is_rejected_on_the_way_in() {
+    // 0 would address the reader's own process group and 1 the init process;
+    // above `pid_t::MAX` the value is the wire form of a negative pid, which
+    // addresses a process group too. A `-1` literal fails as `u32` before the
+    // range check even sees it.
+    for pid in [0, 1, MAX_RECORD_PID + 1, u32::MAX] {
+        assert!(!is_record_pid(pid), "{pid} must not be a record pid");
+        let json = format!(r#"{{"pid":{pid},"started_at":"2026-07-23T00:00:00Z"}}"#);
+        let error = serde_json::from_str::<DaemonRecord>(&json).unwrap_err();
+        assert!(
+            error.to_string().contains("cannot name a process"),
+            "{pid}: {error}"
+        );
+    }
+    assert!(
+        serde_json::from_str::<DaemonRecord>(r#"{"pid":-1,"started_at":"2026-07-23T00:00:00Z"}"#)
+            .is_err()
+    );
+
+    for pid in [MIN_RECORD_PID, 4321, MAX_RECORD_PID] {
+        assert!(is_record_pid(pid), "{pid} must be a record pid");
+        let json = format!(r#"{{"pid":{pid},"started_at":"2026-07-23T00:00:00Z"}}"#);
+        assert_eq!(
+            serde_json::from_str::<DaemonRecord>(&json).unwrap().pid,
+            pid
+        );
     }
 }
 
 #[test]
-fn classify_reports_alive_only_for_exact_owner() {
-    let record = DaemonRecord::new(4321);
+fn invalid_record_pid_names_the_value_and_the_accepted_range() {
+    let rejected = InvalidRecordPid(1);
     assert_eq!(
-        classify(Some(&record), DaemonProcessObservation::Exact),
-        DaemonState::Alive
+        rejected.to_string(),
+        format!(
+            "daemon record pid 1 cannot name a process (expected {MIN_RECORD_PID}..={MAX_RECORD_PID})"
+        )
     );
+    // Cover the derived Clone / Copy / PartialEq / Debug.
+    assert_eq!({ rejected }, InvalidRecordPid(1));
+    assert_ne!(rejected, InvalidRecordPid(0));
+    assert!(format!("{rejected:?}").contains("InvalidRecordPid"));
 }
 
 #[test]
-fn classify_reports_stale_when_record_but_process_gone() {
-    let record = DaemonRecord::new(4321);
-    assert_eq!(
-        classify(Some(&record), DaemonProcessObservation::Gone),
-        DaemonState::Stale
-    );
-}
-
-#[test]
-fn classify_reports_unverified_for_mismatch_or_unknown() {
-    let record = DaemonRecord::new(4321);
-    for observation in [
-        DaemonProcessObservation::IdentityMismatch,
-        DaemonProcessObservation::Unknown,
+fn a_malformed_record_is_rejected_without_a_pid_verdict() {
+    for json in [
+        "not json",
+        "{}",
+        r#"{"pid":4321}"#,
+        r#"{"pid":"4321","started_at":"2026-07-23T00:00:00Z"}"#,
+        r#"{"pid":4321,"started_at":"yesterday"}"#,
     ] {
-        assert_eq!(
-            classify(Some(&record), observation),
-            DaemonState::Unverified
+        assert!(
+            serde_json::from_str::<DaemonRecord>(json).is_err(),
+            "{json}"
         );
+    }
+}
+
+#[test]
+fn classify_decides_every_observation_against_a_present_and_an_absent_record() {
+    let record = DaemonRecord::new(4321);
+    // Without a record there is nothing to own, whatever the OS reports; with
+    // one, `Gone` and `IdentityMismatch` are both proof that the recorded owner
+    // incarnation is gone, and only `Unknown` leaves ownership undecided.
+    for (observation, expected) in [
+        (DaemonProcessObservation::Exact, DaemonState::Alive),
+        (
+            DaemonProcessObservation::Gone,
+            DaemonState::Stale(StaleReason::OwnerGone),
+        ),
+        (
+            DaemonProcessObservation::IdentityMismatch,
+            DaemonState::Stale(StaleReason::PidReused),
+        ),
+        (DaemonProcessObservation::Unknown, DaemonState::Unverified),
+    ] {
+        assert_eq!(classify(None, observation), DaemonState::Absent);
+        assert_eq!(classify(Some(&record), observation), expected);
     }
 }
 
@@ -92,8 +135,12 @@ fn daemon_state_derives_are_exercised() {
     // Cover the derived Clone / Copy / PartialEq / Debug on DaemonState.
     let state = DaemonState::Alive;
     assert_eq!({ state }, state);
-    assert_ne!(state, DaemonState::Stale);
+    assert_ne!(state, DaemonState::Stale(StaleReason::OwnerGone));
     assert!(format!("{state:?}").contains("Alive"));
+    let reason = StaleReason::PidReused;
+    assert_eq!({ reason }, reason);
+    assert_ne!(reason, StaleReason::OwnerGone);
+    assert!(format!("{reason:?}").contains("PidReused"));
     let observation = DaemonProcessObservation::IdentityMismatch;
     assert_eq!({ observation }, observation);
     assert!(format!("{observation:?}").contains("Mismatch"));

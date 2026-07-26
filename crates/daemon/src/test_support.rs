@@ -113,6 +113,17 @@ impl ProcessIdentitySource for FixedProbe {
     }
 }
 
+/// A [`LivenessProbe`] reporting one fixed observation, so lifecycle tests can
+/// drive the PID-reuse and ownership-unknown arms the same way [`FixedProbe`]
+/// drives exact / gone.
+pub struct ObservedAs(pub DaemonProcessObservation);
+
+impl LivenessProbe for ObservedAs {
+    fn observe(&self, _record: &DaemonRecord) -> DaemonProcessObservation {
+        self.0
+    }
+}
+
 /// A [`Terminator`] that records the pids it is asked to terminate and can be
 /// configured to fail, so tests can assert who was signalled and cover the
 /// error path.
@@ -228,6 +239,7 @@ impl StaleDaemonCleanup for NoopReady {
 pub struct TestLauncher<'a, F> {
     store: &'a DaemonRecordStore<F>,
     register_pid: Option<u32>,
+    launches: Cell<usize>,
 }
 
 impl<'a, F> TestLauncher<'a, F> {
@@ -236,6 +248,7 @@ impl<'a, F> TestLauncher<'a, F> {
         Self {
             store,
             register_pid: Some(pid),
+            launches: Cell::new(0),
         }
     }
 
@@ -244,12 +257,19 @@ impl<'a, F> TestLauncher<'a, F> {
         Self {
             store,
             register_pid: None,
+            launches: Cell::new(0),
         }
+    }
+
+    /// How many detached daemons this launcher was asked to spawn.
+    pub fn launches(&self) -> usize {
+        self.launches.get()
     }
 }
 
 impl<F: RecordFile> DaemonLauncher for TestLauncher<'_, F> {
     fn launch(&self) -> io::Result<()> {
+        self.launches.set(self.launches.get() + 1);
         if let Some(pid) = self.register_pid {
             self.store.save(&DaemonRecord::new(pid))?;
         }

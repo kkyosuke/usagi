@@ -49,11 +49,12 @@ pub fn restart<F: RecordFile, P: LivenessProbe, T: Terminator, L: DaemonLauncher
 mod tests {
     use super::restart;
     use crate::test_support::{
-        FixedProbe, InMemoryRecordFile, NoopReady, NoopSleeper, RecordingTerminator, TestLauncher,
+        FixedProbe, InMemoryRecordFile, NoopReady, NoopSleeper, ObservedAs, RecordingTerminator,
+        TestLauncher,
     };
     use usagi_core::domain::AppInfo;
-    use usagi_core::domain::daemon::DaemonRecord;
-    use usagi_core::infrastructure::daemon::{DaemonRecordStore, Sleeper};
+    use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
+    use usagi_core::infrastructure::daemon::{DaemonRecordStore, LivenessProbe, Sleeper};
 
     struct OwnerCleanupSleeper<'a> {
         store: &'a DaemonRecordStore<InMemoryRecordFile>,
@@ -122,6 +123,74 @@ mod tests {
         );
         // Nothing was running, so no termination was attempted.
         assert!(terminator.terminated().is_empty());
+    }
+
+    /// Reports the seeded pid as reused by an unrelated process and every other
+    /// pid as its exact owner: the stop phase must reclaim without signalling,
+    /// and the start phase must then confirm the replacement.
+    struct ReusedPidProbe(u32);
+
+    impl LivenessProbe for ReusedPidProbe {
+        fn observe(&self, record: &DaemonRecord) -> DaemonProcessObservation {
+            if record.pid == self.0 {
+                DaemonProcessObservation::IdentityMismatch
+            } else {
+                DaemonProcessObservation::Exact
+            }
+        }
+    }
+
+    #[test]
+    fn reclaims_a_reused_pid_record_then_starts_one_replacement() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let stale = DaemonRecord::identified(1111, "old-incarnation");
+        store.save(&stale).unwrap();
+        let terminator = RecordingTerminator::default();
+        let launcher = TestLauncher::registering(&store, 5555);
+
+        assert_eq!(
+            restart(
+                &store,
+                &ReusedPidProbe(stale.pid),
+                &terminator,
+                &launcher,
+                &NoopSleeper,
+                &NoopReady,
+                &info()
+            )
+            .unwrap(),
+            "usagi v0.1.0: daemon restarted (pid 5555)"
+        );
+        // The process occupying the reused pid was never signalled, and exactly
+        // one replacement was launched.
+        assert!(terminator.terminated().is_empty());
+        assert_eq!(launcher.launches(), 1);
+        assert_eq!(store.load().unwrap().map(|record| record.pid), Some(5555));
+    }
+
+    #[test]
+    fn refuses_an_unverified_owner_before_launching_anything() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let existing = DaemonRecord::new(1111);
+        store.save(&existing).unwrap();
+        let terminator = RecordingTerminator::default();
+        let launcher = TestLauncher::registering(&store, 5555);
+
+        let error = restart(
+            &store,
+            &ObservedAs(DaemonProcessObservation::Unknown),
+            &terminator,
+            &launcher,
+            &NoopSleeper,
+            &NoopReady,
+            &info(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("identity is unverified"));
+        assert!(terminator.terminated().is_empty());
+        assert_eq!(launcher.launches(), 0);
+        assert_eq!(store.load().unwrap(), Some(existing));
     }
 
     #[test]

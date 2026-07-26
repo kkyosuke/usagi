@@ -66,7 +66,10 @@ pub fn start(
                 "daemon owner identity is unverified; refusing to start a replacement",
             ));
         }
-        DaemonState::Stale | DaemonState::Absent => {}
+        // Both stale reasons prove the recorded owner is gone, so a replacement
+        // is safe: the launched `serve` still has to win the singleton lock and
+        // reclaim the leftover endpoint before it registers.
+        DaemonState::Stale(_) | DaemonState::Absent => {}
     }
 
     let pid = launch_and_confirm(store, probe, launcher, sleeper)?;
@@ -107,15 +110,32 @@ pub(crate) fn launch_and_confirm(
 #[cfg(test)]
 mod tests {
     use super::start;
-    use crate::test_support::{FixedProbe, InMemoryRecordFile, NoopSleeper, TestLauncher};
+    use crate::test_support::{
+        FixedProbe, InMemoryRecordFile, NoopSleeper, ObservedAs, TestLauncher,
+    };
     use usagi_core::domain::AppInfo;
-    use usagi_core::domain::daemon::DaemonRecord;
-    use usagi_core::infrastructure::daemon::DaemonRecordStore;
+    use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
+    use usagi_core::infrastructure::daemon::{DaemonRecordStore, LivenessProbe};
 
     fn info() -> AppInfo {
         AppInfo {
             name: "usagi",
             version: "0.1.0",
+        }
+    }
+
+    /// Reports the seeded pid as reused by an unrelated process and every other
+    /// pid as its exact owner, so `start` first sees a reclaimable record and
+    /// then confirms the replacement it launched.
+    struct ReusedPidProbe(u32);
+
+    impl LivenessProbe for ReusedPidProbe {
+        fn observe(&self, record: &DaemonRecord) -> DaemonProcessObservation {
+            if record.pid == self.0 {
+                DaemonProcessObservation::IdentityMismatch
+            } else {
+                DaemonProcessObservation::Exact
+            }
         }
     }
 
@@ -153,26 +173,52 @@ mod tests {
         assert!(start(&store, &FixedProbe(true), &launcher, &NoopSleeper, &info()).is_err());
     }
 
-    struct UnknownProbe;
-
-    impl usagi_core::infrastructure::daemon::LivenessProbe for UnknownProbe {
-        fn observe(
-            &self,
-            _record: &DaemonRecord,
-        ) -> usagi_core::domain::daemon::DaemonProcessObservation {
-            usagi_core::domain::daemon::DaemonProcessObservation::Unknown
-        }
-    }
-
     #[test]
     fn refuses_to_replace_an_unverified_record() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         let existing = DaemonRecord::new(1111);
         store.save(&existing).unwrap();
         let launcher = TestLauncher::registering(&store, 5555);
-        let error = start(&store, &UnknownProbe, &launcher, &NoopSleeper, &info()).unwrap_err();
+        let error = start(
+            &store,
+            &ObservedAs(DaemonProcessObservation::Unknown),
+            &launcher,
+            &NoopSleeper,
+            &info(),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("identity is unverified"));
+        assert_eq!(launcher.launches(), 0);
         assert_eq!(store.load().unwrap(), Some(existing));
+    }
+
+    #[test]
+    fn starts_one_replacement_for_a_record_whose_pid_was_reused() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let stale = DaemonRecord::identified(1111, "old-incarnation");
+        store.save(&stale).unwrap();
+        let launcher = TestLauncher::registering(&store, 5555);
+
+        assert_eq!(
+            start(
+                &store,
+                &ReusedPidProbe(stale.pid),
+                &launcher,
+                &NoopSleeper,
+                &info()
+            )
+            .unwrap(),
+            "usagi v0.1.0: daemon started (pid 5555)"
+        );
+        // Exactly one detached daemon, and the confirmed record is a different
+        // incarnation than the reclaimed one.
+        assert_eq!(launcher.launches(), 1);
+        let registered = store.load().unwrap().unwrap();
+        assert_eq!(registered.pid, 5555);
+        assert_ne!(
+            registered.process_start_identity,
+            stale.process_start_identity
+        );
     }
 
     #[test]
