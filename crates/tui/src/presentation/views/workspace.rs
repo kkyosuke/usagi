@@ -433,6 +433,30 @@ impl HomeProjection {
         self
     }
 
+    /// Collapse the animation clock onto the frame it actually draws.
+    ///
+    /// `mascot_tick` advances on every 16ms tick, so comparing two projections
+    /// for render equality would always disagree even on a completely idle
+    /// Home. Only four surfaces read the clock: the sidebar rabbit, the removal
+    /// shimmer, a pending tab's wave, and the create skeleton. The last three
+    /// exist only while their subject does, so when none of them is on screen
+    /// the clock can be folded onto the rabbit's representative tick and the
+    /// shell can skip the redraw (#554). The rabbit's own cadence is unchanged:
+    /// [`widgets::mascot::canonical_tick`] keeps every visibly distinct phase.
+    ///
+    /// Call this last — after every `with_*` step — because the pending tab and
+    /// the create skeleton only become visible through those steps.
+    #[must_use]
+    pub fn collapse_animation_clock(mut self) -> Self {
+        let drives_a_per_tick_animation = self.create_pending.is_some()
+            || self.sessions.iter().any(|session| session.removing)
+            || self.pane_tabs.iter().any(|tab| tab.pending);
+        if !drives_a_per_tick_animation {
+            self.mascot_tick = widgets::mascot::canonical_tick(self.mascot_tick);
+        }
+        self
+    }
+
     /// 左 sidebar の rows。main と `+ new session` は session 数にかかわらず常設する。
     #[must_use]
     pub fn rows(&self) -> Vec<Selection> {
@@ -997,13 +1021,28 @@ pub fn terminal_point_at(
 /// 投影する。Switch では cursor が優先し、Closeup では cursor を抑止して current marker を残す。
 #[must_use]
 pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -> Vec<String> {
+    render_home_at(raw_height, raw_width, home, Utc::now())
+}
+
+/// [`render_home`] against an explicit wall clock.
+///
+/// The sidebar's per-session relative timestamps are the only part of the Home
+/// frame that depends on the current time. The interactive shell passes the
+/// clock in so that time is part of the frame's material and a redraw can be
+/// skipped exactly when nothing — the clock included — has changed (#554).
+#[must_use]
+pub fn render_home_at(
+    raw_height: usize,
+    raw_width: usize,
+    home: &HomeProjection,
+    now: DateTime<Utc>,
+) -> Vec<String> {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let split = panes::split(width, LEFT_WIDTH);
     let body_height = height.saturating_sub(CHROME_ROWS);
     let mut frame = Vec::with_capacity(height);
     frame.push(home_header_line(width, home));
     frame.push(home_notice_banner(width, home));
-    let now = Utc::now();
     let right = dim_inactive_right_pane(
         home.mode == HomeMode::Switch,
         home_right_pane(body_height, split.right, home),

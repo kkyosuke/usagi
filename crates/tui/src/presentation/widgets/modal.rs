@@ -277,7 +277,7 @@ pub fn render_body_over(
 }
 
 /// Shared state for a two-choice confirmation modal.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConfirmationModal {
     confirm_selected: bool,
 }
