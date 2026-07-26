@@ -29,6 +29,7 @@ pub mod replacement;
 pub mod resources;
 pub mod restart;
 pub mod runtime;
+pub mod runtime_shard;
 pub mod serve;
 pub mod session_runtime;
 pub mod session_teardown;

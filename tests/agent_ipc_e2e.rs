@@ -505,8 +505,8 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
     let rows = restored_screen(&snapshot);
     assert!(screen_contains(&rows, "ready"), "{rows:?}");
     assert!(screen_contains(&rows, "input:go"), "{rows:?}");
-    let durable = fs::read_to_string(data_dir.join("daemon/agents.json")).unwrap();
-    assert!(durable.contains("provider_structured"));
+    let durable = daemon_fixture::shard_text(&data_dir);
+    assert!(durable.contains("provider_structured"), "{durable}");
 
     let (resume_operation, resumed_terminal) = resume(&mut reattached, "agent-e2e");
     assert_ne!(terminal, resumed_terminal);
@@ -1100,19 +1100,13 @@ fn live_terminal_pid(data_dir: &Path) -> u64 {
 }
 
 fn live_terminal(data_dir: &Path) -> (TerminalRef, u64) {
-    let path = data_dir.join("daemon/terminals.json");
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut last = String::new();
     loop {
-        last = fs::read_to_string(&path).unwrap_or(last);
-        let found = serde_json::from_str::<serde_json::Value>(&last)
-            .ok()
-            .and_then(|snapshot| snapshot["records"].as_array().cloned())
-            .and_then(|records| {
-                let record = records
-                    .iter()
-                    .find(|record| record["state"] == "running")?
-                    .clone();
+        let records = daemon_fixture::shard_records(data_dir, "terminal");
+        let found = records
+            .iter()
+            .find(|record| record["state"] == "running")
+            .and_then(|record| {
                 let terminal = serde_json::from_value(record["terminal"].clone()).ok()?;
                 Some((terminal, record["process"]["pid"].as_u64()?))
             });
@@ -1121,7 +1115,8 @@ fn live_terminal(data_dir: &Path) -> (TerminalRef, u64) {
         }
         assert!(
             Instant::now() < deadline,
-            "no live generic terminal was persisted: {last}"
+            "no live generic terminal was persisted: {}",
+            daemon_fixture::shard_text(data_dir)
         );
         thread::sleep(Duration::from_millis(20));
     }

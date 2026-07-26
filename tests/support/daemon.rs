@@ -474,3 +474,50 @@ fn assert_outside_checkout(path: &Path, what: &str) {
 fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
+
+/// retained owner shard の durable document すべて。
+///
+/// production の durable runtime state は generation ごとの shard に入り、その
+/// owner-local payload が旧 `agents.json` / `terminals.json` の record 集合を持つ
+/// （[5. daemon](../../document/05-daemon.md#daemon-data-directory)）。テストは
+/// snapshot file ではなくこの経路で durable state を読む。
+pub fn shard_documents(data_dir: &Path) -> Vec<serde_json::Value> {
+    let shards = data_dir.join("daemon").join("shards");
+    let Ok(entries) = std::fs::read_dir(&shards) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|kind| kind == "json"))
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .filter_map(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .collect()
+}
+
+/// 一つの resource kind（`"agent"` / `"terminal"`）の durable record を、retained
+/// shard すべてから集めたもの。
+pub fn shard_records(data_dir: &Path, kind: &str) -> Vec<serde_json::Value> {
+    shard_documents(data_dir)
+        .iter()
+        .flat_map(|document| {
+            document["payloads"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|payload| payload["kind"] == kind)
+                .filter_map(|payload| payload["document"]["records"].as_array().cloned())
+                .flatten()
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// retained shard 全体の JSON テキスト。durable record に何が載ったかの検査用。
+pub fn shard_text(data_dir: &Path) -> String {
+    shard_documents(data_dir)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}

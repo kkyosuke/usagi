@@ -36,7 +36,7 @@ pub mod retention;
 pub mod shard;
 
 #[cfg(test)]
-mod fixture;
+pub(crate) mod fixture;
 
 use std::fmt;
 use std::io;
@@ -231,13 +231,17 @@ impl<D: CasDocument> CasSnapshot<D> {
 /// swap protocol, so nothing about which store a caller binds can change the
 /// code that runs.
 pub struct CasStore<D> {
-    file: Box<dyn CasFile>,
+    file: Box<dyn CasFile + Send>,
     document: PhantomData<D>,
 }
 
 impl<D: CasDocument> CasStore<D> {
     /// Bind a store to its byte seam.
-    pub fn new(file: impl CasFile + 'static) -> Self {
+    ///
+    /// The seam is `Send` because a bound store lives inside the runtime the
+    /// daemon's observer threads share; it is never used from two threads at once,
+    /// which the cross-process lock inside the adapter would serialize anyway.
+    pub fn new(file: impl CasFile + Send + 'static) -> Self {
         Self {
             file: Box::new(file),
             document: PhantomData,

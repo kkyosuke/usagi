@@ -543,3 +543,36 @@ fn a_concurrent_exit_and_spawn_both_survive_the_shared_document() {
     );
     assert!(TerminalId::new().as_str().len() > 8);
 }
+
+#[test]
+fn a_dead_owners_gone_child_gives_its_capacity_back_exactly_once() {
+    let (mut document, operation, owner) = reserved(ResourceKind::Terminal, 2);
+    let resource = document.claims[0].resource.clone();
+    document.mark_spawned(&operation, 1).unwrap();
+    assert_eq!(document.pool_used(ResourceKind::Terminal), 1);
+
+    // Another generation may not release a claim it does not own, and a resource
+    // nothing holds capacity for is refused rather than invented.
+    assert_eq!(
+        document.release_gone(DaemonGeneration::new(), &resource),
+        Err(ResourceError::WrongOwner)
+    );
+    assert_eq!(
+        document.release_gone(owner, &terminal(owner)),
+        Err(ResourceError::UnknownResource)
+    );
+    assert_eq!(document.pool_used(ResourceKind::Terminal), 1);
+
+    document.release_gone(owner, &resource).unwrap();
+    let revision = document.claim(&resource).unwrap().revision;
+    assert_eq!(
+        document.claim(&resource).unwrap().state,
+        ClaimState::Released
+    );
+    assert_eq!(document.pool_used(ResourceKind::Terminal), 0);
+
+    // Repeating it releases nothing a second time.
+    document.release_gone(owner, &resource).unwrap();
+    assert_eq!(document.claim(&resource).unwrap().revision, revision);
+    document.validate().unwrap();
+}

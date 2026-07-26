@@ -482,3 +482,52 @@ fn a_shard_document_belonging_to_another_generation_is_never_written() {
     );
     assert_eq!(shard.owner(), owner);
 }
+
+#[test]
+fn one_payload_per_kind_travels_with_the_records_it_describes() {
+    let owner = DaemonGeneration::new();
+    let (mut document, _, _) = reserved(owner);
+    assert_eq!(document.payload(ResourceKind::Terminal), None);
+
+    document.set_payload(ResourceKind::Terminal, serde_json::json!({"records": 1}));
+    document.set_payload(ResourceKind::Agent, serde_json::json!({"records": 2}));
+    document.set_payload(ResourceKind::Terminal, serde_json::json!({"records": 3}));
+
+    assert_eq!(
+        document.payload(ResourceKind::Terminal),
+        Some(&serde_json::json!({"records": 3})),
+        "a kind's payload is replaced, never appended to"
+    );
+    assert_eq!(
+        document.payload(ResourceKind::Agent),
+        Some(&serde_json::json!({"records": 2})),
+        "the other kind's payload is untouched"
+    );
+    document.validate().unwrap();
+
+    // The payload survives the swap it is committed inside.
+    let bytes = SharedBytes::default();
+    let shard = bind_shard(&bytes, owner);
+    shard
+        .update(|stored| {
+            stored.set_payload(ResourceKind::Agent, serde_json::json!({"records": 2}));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        shard
+            .load()
+            .unwrap()
+            .document()
+            .payload(ResourceKind::Agent),
+        Some(&serde_json::json!({"records": 2}))
+    );
+
+    // Two payloads of one kind would make "this owner's records" ambiguous.
+    let mut ambiguous = document.clone();
+    ambiguous.payloads.push(super::ShardPayload {
+        kind: ResourceKind::Agent,
+        document: serde_json::json!({}),
+    });
+    assert_eq!(ambiguous.validate(), Err(ResourceError::Corrupt));
+}

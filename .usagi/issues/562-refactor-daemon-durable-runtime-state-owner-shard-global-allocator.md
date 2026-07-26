@@ -1,14 +1,14 @@
 ---
 number: 562
 title: refactor(daemon): durable runtime state を owner shard と global allocator へ移行する
-status: todo
+status: in-progress
 priority: high
 labels: [review, v2, daemon, runtime, durability, recovery]
 dependson: []
 related: [518, 526, 555, 559]
 parent: 559
 created_at: 2026-07-26T13:58:56.757197+00:00
-updated_at: 2026-07-26T13:58:56.757197+00:00
+updated_at: 2026-07-26T21:29:36.230484+00:00
 ---
 
 ## 問題・根拠（コード調査で確定）

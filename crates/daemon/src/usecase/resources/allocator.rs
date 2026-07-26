@@ -506,6 +506,35 @@ impl AllocatorDocument {
         self.consume_event(owner, resource, event_revision, true)
     }
 
+    /// Release the capacity of a resource whose child is *proved gone* while its
+    /// owner is *proved dead*.
+    ///
+    /// Every other release is an event the owner published. A dead owner never
+    /// publishes again, so without this its capacity would be held for the
+    /// lifetime of the data directory. The two proofs are the caller's to
+    /// establish — which is why `owner` is a parameter and is not read out of the
+    /// claim — and both are required: a live owner still owns its own exits, and
+    /// a child that is not proved gone may still be running.
+    ///
+    /// It is idempotent: a claim already released stays released exactly once.
+    ///
+    /// # Errors
+    /// Returns [`ResourceError::UnknownResource`] when nothing holds capacity for
+    /// this resource, or [`ResourceError::WrongOwner`] when the claim belongs to
+    /// another generation.
+    pub fn release_gone(
+        &mut self,
+        owner: DaemonGeneration,
+        resource: &TerminalRef,
+    ) -> Result<(), ResourceError> {
+        let claim = self.claim(resource).ok_or(ResourceError::UnknownResource)?;
+        if claim.owner != owner {
+            return Err(ResourceError::WrongOwner);
+        }
+        self.release(resource);
+        Ok(())
+    }
+
     /// Apply one owner-published event for a resource: idempotent, ordered, and
     /// owner fenced. Only the active consumer calls this.
     fn consume_event(
@@ -613,7 +642,7 @@ pub struct ResourceAllocator {
 
 impl ResourceAllocator {
     /// Bind an allocator to its durable document and per-pool policy.
-    pub fn new(file: impl CasFile + 'static, policy: CapacityPolicy) -> Self {
+    pub fn new(file: impl CasFile + Send + 'static, policy: CapacityPolicy) -> Self {
         Self {
             store: CasStore::new(file),
             policy,

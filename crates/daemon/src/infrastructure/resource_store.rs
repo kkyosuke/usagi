@@ -22,11 +22,14 @@ use crate::infrastructure::unix_transport::{
     ensure_private_dir, lock_private_node, read_private_bytes_if_present, write_private_file,
 };
 use crate::usecase::resources::CasFile;
+use crate::usecase::resources::shard::OwnerShard;
+use crate::usecase::runtime_shard::{RETIRED_LEGACY_SUFFIX, ShardSource};
 
 const ALLOCATOR_FILE: &str = "allocations.json";
 const ALLOCATOR_LOCK: &str = "allocations.lock";
 const ALLOCATOR_TEMP_PREFIX: &str = ".allocations.json.tmp.";
 const SHARD_DIR: &str = "shards";
+const SHARD_EXTENSION: &str = "json";
 
 /// The global allocator document in a daemon data directory.
 pub struct AllocatorFile {
@@ -123,6 +126,87 @@ impl CasFile for OwnerShardFile {
     }
 }
 
+/// The retained shards of one daemon data directory.
+///
+/// Enumerating them is what makes "every generation's state" readable without a
+/// registry: the documents *are* the inventory. A file this build cannot name a
+/// generation for is skipped rather than guessed at, so a stray file in the
+/// directory can never be adopted as somebody's runtime state.
+pub struct ShardDirectory {
+    data_dir: PathBuf,
+}
+
+impl ShardDirectory {
+    /// Bind the shard directory of `data_dir`.
+    #[must_use]
+    pub fn new(data_dir: &Path) -> Self {
+        Self {
+            data_dir: data_dir.to_path_buf(),
+        }
+    }
+}
+
+impl ShardSource for ShardDirectory {
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=runtime_resources
+    fn generations(&self) -> io::Result<Vec<DaemonGeneration>> {
+        let shards = self.data_dir.join("daemon").join(SHARD_DIR);
+        match std::fs::symlink_metadata(&shards) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        }
+        ensure_private_dir(&shards)?;
+        let mut generations: Vec<DaemonGeneration> = std::fs::read_dir(&shards)?
+            .collect::<io::Result<Vec<_>>>()?
+            .iter()
+            .filter_map(|entry| shard_generation(&entry.path()))
+            .collect();
+        generations.sort_by_key(|generation| generation.as_str().clone());
+        Ok(generations)
+    }
+
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=runtime_resources
+    fn open(&self, generation: DaemonGeneration) -> io::Result<OwnerShard> {
+        Ok(OwnerShard::new(
+            OwnerShardFile::new(&self.data_dir, generation)?,
+            generation,
+        ))
+    }
+}
+
+/// The generation a shard path names, if it names one at all.
+fn shard_generation(path: &Path) -> Option<DaemonGeneration> {
+    if path.extension()?.to_str()? != SHARD_EXTENSION {
+        return None;
+    }
+    DaemonGeneration::parse(path.file_stem()?.to_str()?).ok()
+}
+
+/// Move a legacy whole-snapshot store aside once its records live in shards.
+///
+/// The bytes are kept, not deleted: they are the only copy of what the previous
+/// build believed, and an operator inspecting a migration needs them. Renaming is
+/// also what makes the migration one-way — an older build reading `agents.json`
+/// finds nothing rather than state that has since moved on.
+///
+/// # Errors
+/// Returns the rename error. An absent legacy document is already retired and is
+/// not an error.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=runtime_resources
+pub fn retire_legacy(path: &Path) -> io::Result<bool> {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(false);
+    };
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    let retired = path.with_file_name(format!("{name}{RETIRED_LEGACY_SUFFIX}"));
+    std::fs::rename(path, retired)?;
+    Ok(true)
+}
+
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=runtime_resources
 fn read_document(path: &Path) -> io::Result<Option<String>> {
     let Some(bytes) = read_private_bytes_if_present(path)? else {
@@ -131,4 +215,26 @@ fn read_document(path: &Path) -> io::Result<Option<String>> {
     String::from_utf8(bytes)
         .map(Some)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_shard_document_names_a_generation() {
+        let generation = DaemonGeneration::new();
+        let named = PathBuf::from(format!("/tmp/shards/{}.json", generation.as_str()));
+        assert_eq!(shard_generation(&named), Some(generation));
+        // Neither a lock, a writer's temporary file, an extensionless entry, nor a
+        // name this build cannot parse is somebody's runtime state.
+        for stray in [
+            format!("/tmp/shards/{}.lock", generation.as_str()),
+            format!("/tmp/shards/.{}.json.tmp.7", generation.as_str()),
+            format!("/tmp/shards/{}", generation.as_str()),
+            "/tmp/shards/not-a-generation.json".to_owned(),
+        ] {
+            assert_eq!(shard_generation(&PathBuf::from(stray)), None);
+        }
+    }
 }

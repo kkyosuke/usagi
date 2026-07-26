@@ -4,9 +4,9 @@
 //! what a cross-process compare-and-swap has to survive: both read the same bytes,
 //! and only the first commit wins.
 
-use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::io;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use usagi_core::domain::id::{
@@ -153,25 +153,26 @@ impl ChildProcessProbe for FakeProbe {
     }
 }
 
-/// A deterministic logical clock.
+/// A deterministic logical clock. It is shareable across threads because a bound
+/// owner state is, and a two-writer test drives both writers from one clock.
 #[derive(Debug, Default)]
-pub struct FakeClock(Cell<u64>);
+pub struct FakeClock(AtomicU64);
 
 impl FakeClock {
     /// A clock reading `now`.
     pub fn at(now: u64) -> Self {
-        Self(Cell::new(now))
+        Self(AtomicU64::new(now))
     }
 
     /// Move the clock forward.
     pub fn advance(&self, ticks: u64) {
-        self.0.set(self.0.get() + ticks);
+        self.0.fetch_add(ticks, Ordering::SeqCst);
     }
 }
 
 impl LogicalClock for FakeClock {
     fn now(&self) -> u64 {
-        self.0.get()
+        self.0.load(Ordering::SeqCst)
     }
 }
 

@@ -19,6 +19,8 @@
 //! semantics cannot lose an update. Whole-snapshot writers need exactly one
 //! writer, which is the active generation.
 
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use crate::usecase::generation::GenerationRole;
 
 /// How a shared document is written.
@@ -103,6 +105,70 @@ pub fn shared_write_verdict(writer: SharedWriter, role: GenerationRole) -> Write
             WriteMode::WholeSnapshot => WriteVerdict::Refused,
         },
         GenerationRole::Standby | GenerationRole::Retired => WriteVerdict::Refused,
+    }
+}
+
+/// The role this process holds right now, readable by the workers that write
+/// shared documents.
+///
+/// The verdict is only worth having if the code that writes actually asks for it,
+/// and the PR inventory is written by a background worker on the PTY output path —
+/// far away from the lifecycle code that knows the role. Re-reading the durable
+/// registry per write would put a locked file read into that hot path (#555), so
+/// the role is published once, where it changes, and read cheaply where it is
+/// enforced.
+#[derive(Debug)]
+pub struct SharedRole(AtomicU8);
+
+impl SharedRole {
+    /// The role of a process that has just become the active generation.
+    #[must_use]
+    pub fn active() -> Self {
+        Self(AtomicU8::new(role_code(GenerationRole::Active)))
+    }
+
+    /// Publish the role this process now holds.
+    pub fn set(&self, role: GenerationRole) {
+        self.0.store(role_code(role), Ordering::SeqCst);
+    }
+
+    /// The role this process holds.
+    #[must_use]
+    pub fn get(&self) -> GenerationRole {
+        ROLES[usize::from(self.0.load(Ordering::SeqCst) & ROLE_MASK)]
+    }
+
+    /// What this process may do to `writer` right now.
+    #[must_use]
+    pub fn verdict(&self, writer: SharedWriter) -> WriteVerdict {
+        shared_write_verdict(writer, self.get())
+    }
+
+    /// Whether this process is the single writer of `writer` right now.
+    #[must_use]
+    pub fn may_write(&self, writer: SharedWriter) -> bool {
+        self.verdict(writer) == WriteVerdict::Allowed
+    }
+}
+
+/// The stored codes, in the order [`role_code`] assigns them. Decoding is a
+/// lookup rather than a match with a fallback arm, so there is no "impossible"
+/// branch to reason about at all.
+const ROLES: [GenerationRole; 4] = [
+    GenerationRole::Active,
+    GenerationRole::Draining,
+    GenerationRole::Standby,
+    GenerationRole::Retired,
+];
+
+const ROLE_MASK: u8 = 0b11;
+
+const fn role_code(role: GenerationRole) -> u8 {
+    match role {
+        GenerationRole::Active => 0,
+        GenerationRole::Draining => 1,
+        GenerationRole::Standby => 2,
+        GenerationRole::Retired => 3,
     }
 }
 

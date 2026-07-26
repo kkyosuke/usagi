@@ -108,6 +108,20 @@ pub struct InFlightCommand {
     pub command: OperationId,
 }
 
+/// One owner-local durable payload, opaque to the cross-generation contract.
+///
+/// The contract fields above answer "who owns what, and may it act": that is what
+/// another generation reads. A payload is the rest of one resource kind's durable
+/// record — the descriptive state only its own owner ever reads back
+/// ([`crate::usecase::runtime_shard`] binds the production stores to it). It lives
+/// in the same document so an owner commits its records and their meaning in one
+/// compare-and-swap, instead of in two objects a crash could split.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShardPayload {
+    pub kind: ResourceKind,
+    pub document: serde_json::Value,
+}
+
 /// The whole shard document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShardDocument {
@@ -119,6 +133,9 @@ pub struct ShardDocument {
     pub in_flight: Vec<InFlightCommand>,
     /// Monotonic event revision issued by this owner alone.
     pub event_sequence: u64,
+    /// The owner-local payload of each resource kind, at most one per kind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub payloads: Vec<ShardPayload>,
 }
 
 impl ShardDocument {
@@ -133,6 +150,30 @@ impl ShardDocument {
             outbox: Vec::new(),
             in_flight: Vec::new(),
             event_sequence: 0,
+            payloads: Vec::new(),
+        }
+    }
+
+    /// The owner-local payload of one resource kind, if this shard carries one.
+    #[must_use]
+    pub fn payload(&self, kind: ResourceKind) -> Option<&serde_json::Value> {
+        self.payloads
+            .iter()
+            .find(|payload| payload.kind == kind)
+            .map(|payload| &payload.document)
+    }
+
+    /// Replace one resource kind's owner-local payload, leaving the other kind's
+    /// payload untouched. Writing the identical payload changes nothing, so a
+    /// converged save commits no revision at all.
+    pub fn set_payload(&mut self, kind: ResourceKind, document: serde_json::Value) {
+        match self
+            .payloads
+            .iter_mut()
+            .find(|payload| payload.kind == kind)
+        {
+            Some(existing) => existing.document = document,
+            None => self.payloads.push(ShardPayload { kind, document }),
         }
     }
 }
@@ -182,6 +223,14 @@ impl CasDocument for ShardDocument {
         }
         for command in &self.in_flight {
             if self.resource(&command.resource).is_none() {
+                return Err(ResourceError::Corrupt);
+            }
+        }
+        // Two payloads of one kind would make "the owner's record of this kind"
+        // ambiguous, and a reader must never pick one of two answers.
+        let mut kinds = std::collections::BTreeSet::new();
+        for payload in &self.payloads {
+            if !kinds.insert(payload.kind.pool()) {
                 return Err(ResourceError::Corrupt);
             }
         }
@@ -616,7 +665,7 @@ pub struct OwnerShard {
 
 impl OwnerShard {
     /// Bind the shard of `owner`.
-    pub fn new(file: impl CasFile + 'static, owner: DaemonGeneration) -> Self {
+    pub fn new(file: impl CasFile + Send + 'static, owner: DaemonGeneration) -> Self {
         Self {
             store: CasStore::new(file),
             owner,

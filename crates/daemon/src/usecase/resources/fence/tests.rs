@@ -70,3 +70,33 @@ fn the_inventory_names_every_writer_that_needs_the_fence() {
     assert!(!SharedWriter::SupervisorState.is_deferrable());
     assert_eq!(SharedWriter::CompletionInbox.mode(), WriteMode::AppendOnly);
 }
+
+#[test]
+fn the_published_role_decides_what_a_worker_may_write() {
+    let role = super::SharedRole::active();
+    assert_eq!(role.get(), GenerationRole::Active);
+    assert!(role.may_write(SharedWriter::PrInventory));
+
+    // A handoff publishes the new role, and the worker stops writing the document
+    // the active generation now owns.
+    role.set(GenerationRole::Draining);
+    assert_eq!(role.get(), GenerationRole::Draining);
+    assert_eq!(
+        role.verdict(SharedWriter::PrInventory),
+        WriteVerdict::DeferToOutbox
+    );
+    assert!(!role.may_write(SharedWriter::PrInventory));
+    assert!(
+        role.may_write(SharedWriter::CompletionInbox),
+        "an append-only writer needs no fence"
+    );
+
+    for expected in [
+        GenerationRole::Standby,
+        GenerationRole::Retired,
+        GenerationRole::Active,
+    ] {
+        role.set(expected);
+        assert_eq!(role.get(), expected);
+    }
+}
