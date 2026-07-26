@@ -143,11 +143,11 @@ pub fn record_child(
     probe: &dyn ChildProcessProbe,
     pid: u32,
 ) -> Result<ChildIdentity, IdentityRefusal> {
-    let start_identity = read(probe.start_identity(pid))?;
+    let start_identity = probe.start_identity(pid).map_err(|error| refusal(&error))?;
     if start_identity.is_empty() {
         return Err(IdentityRefusal::Malformed);
     }
-    let process_group = read(probe.process_group(pid))?;
+    let process_group = probe.process_group(pid).map_err(|error| refusal(&error))?;
     Ok(ChildIdentity {
         pid,
         process_group,
@@ -180,12 +180,14 @@ pub fn observe_child(probe: &dyn ChildProcessProbe, recorded: &ChildIdentity) ->
     }
 }
 
-fn read<T>(result: io::Result<T>) -> Result<T, IdentityRefusal> {
-    result.map_err(|error| match error.kind() {
+/// What a platform failure means for a child's identity. It is deliberately not
+/// generic over the value being read: one mapping, one compiled copy.
+fn refusal(error: &io::Error) -> IdentityRefusal {
+    match error.kind() {
         io::ErrorKind::NotFound => IdentityRefusal::Gone,
         io::ErrorKind::InvalidData => IdentityRefusal::Malformed,
         _ => IdentityRefusal::Unobservable,
-    })
+    }
 }
 
 #[cfg(test)]

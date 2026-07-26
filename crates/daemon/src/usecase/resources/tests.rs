@@ -6,7 +6,7 @@ use super::allocator::{ALLOCATOR_SCHEMA, AllocatorDocument, ExpiryClass, Operati
 use super::fixture::{FileFault, MemoryFile, SharedBytes};
 use super::{CasDocument, CasStore, ResourceError, ResourceFailure};
 
-fn store(bytes: &SharedBytes) -> CasStore<MemoryFile, AllocatorDocument> {
+fn store(bytes: &SharedBytes) -> CasStore<AllocatorDocument> {
     CasStore::new(MemoryFile::new(bytes))
 }
 
@@ -23,10 +23,8 @@ fn absent_document_loads_as_the_caller_supplied_empty_one() {
 #[test]
 fn unreadable_corrupt_and_unknown_schema_bytes_all_fail_closed() {
     let bytes = SharedBytes::default();
-    let failing = CasStore::<MemoryFile, AllocatorDocument>::new(MemoryFile::faulty(
-        &bytes,
-        FileFault::ReadFails,
-    ));
+    let failing =
+        CasStore::<AllocatorDocument>::new(MemoryFile::faulty(&bytes, FileFault::ReadFails));
     let failure = failing.load(AllocatorDocument::default).unwrap_err();
     assert!(failure.refusal().is_none());
     assert!(format!("{failure}").contains("store failed"));
@@ -101,10 +99,8 @@ fn commit_requires_exactly_one_revision_step_and_a_valid_document() {
 #[test]
 fn a_write_failure_and_a_lost_race_are_reported_differently() {
     let bytes = SharedBytes::default();
-    let failing = CasStore::<MemoryFile, AllocatorDocument>::new(MemoryFile::faulty(
-        &bytes,
-        FileFault::WriteFails,
-    ));
+    let failing =
+        CasStore::<AllocatorDocument>::new(MemoryFile::faulty(&bytes, FileFault::WriteFails));
     let snapshot = failing.load(AllocatorDocument::default).unwrap();
     let mut next = snapshot.to_document();
     next.bump();
@@ -116,10 +112,8 @@ fn a_write_failure_and_a_lost_race_are_reported_differently() {
             .is_none()
     );
 
-    let racing = CasStore::<MemoryFile, AllocatorDocument>::new(MemoryFile::faulty(
-        &bytes,
-        FileFault::AlwaysStale,
-    ));
+    let racing =
+        CasStore::<AllocatorDocument>::new(MemoryFile::faulty(&bytes, FileFault::AlwaysStale));
     let snapshot = racing.load(AllocatorDocument::default).unwrap();
     let mut next = snapshot.to_document();
     next.bump();

@@ -9,8 +9,8 @@ use crate::usecase::resources::allocator::{
     ResourceKind,
 };
 use crate::usecase::resources::fixture::{
-    FakeClock, FakeProbe, FakeSpawner, MemoryFile, ProbeAnswer, SharedBytes, SpawnPlan, allocator,
-    intent, policy, probe_for, shard as bind_shard, terminal, verified, wide_limits,
+    FakeClock, FakeProbe, FakeSpawner, FileFault, MemoryFile, ProbeAnswer, SharedBytes, SpawnPlan,
+    allocator, intent, policy, probe_for, shard as bind_shard, terminal, verified, wide_limits,
 };
 use crate::usecase::resources::identity::{ChildIdentity, ChildObservation};
 use crate::usecase::resources::shard::{OwnerShard, ResourceState, ShardDocument};
@@ -36,11 +36,11 @@ impl World {
         }
     }
 
-    fn allocator(&self) -> ResourceAllocator<MemoryFile> {
+    fn allocator(&self) -> ResourceAllocator {
         allocator(&self.allocator_bytes, policy(2, 2))
     }
 
-    fn shard(&self) -> OwnerShard<MemoryFile> {
+    fn shard(&self) -> OwnerShard {
         bind_shard(&self.shard_bytes, self.owner)
     }
 
@@ -618,6 +618,238 @@ fn the_planner_answers_every_durable_shape_from_evidence_alone() {
         plan_launch(&empty_allocator, &without_claim, &plan, &mut exact).unwrap(),
         LaunchStep::Leaked(LeakReason::ReservationWithoutClaim)
     );
+}
+
+/// The state a launch is in when `execute_launch` is called.
+fn stage(world: &World, running: bool, unknown: bool) {
+    let policy = policy(2, 2);
+    world
+        .allocator()
+        .update(|document| {
+            document.reserve(
+                &world.operation,
+                "digest",
+                ResourceKind::Terminal,
+                world.owner,
+                &world.resource,
+                policy,
+            )
+        })
+        .unwrap();
+    world
+        .shard()
+        .update(|document| {
+            document.reserve(
+                &world.operation,
+                "digest",
+                ResourceKind::Terminal,
+                &world.resource,
+            )?;
+            if running {
+                document.record_spawn(&world.resource, &verified(96, "os:96"))?;
+            }
+            if unknown {
+                document.mark_ownership_unknown(&world.resource)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+}
+
+fn broken_allocator(world: &World) -> ResourceAllocator {
+    ResourceAllocator::new(
+        MemoryFile::faulty(&world.allocator_bytes, FileFault::WriteFails),
+        policy(2, 2),
+    )
+}
+
+#[test]
+fn a_store_failure_at_any_boundary_is_unavailable_and_never_a_second_child() {
+    let clock = FakeClock::at(11);
+    let probe = probe_for(96, "os:96");
+
+    // L1: the claim cannot be written, so nothing is reserved and nothing spawns.
+    let fresh = World::new();
+    let mut spawn = spawner(96, "os:96");
+    let failure = execute_launch(
+        &broken_allocator(&fresh),
+        &fresh.shard(),
+        &fresh.intent(),
+        &mut spawn,
+        &probe,
+        &clock,
+        &wide_limits(),
+    )
+    .unwrap_err();
+    assert!(failure.refusal().is_none());
+    assert_eq!(spawn.spawns, 0);
+    assert!(fresh.allocator_bytes.get().is_none());
+
+    // L5 after a proved child: the final cannot be written, so the caller learns
+    // the store is unavailable and the record stays as it was.
+    let proved = World::new();
+    stage(&proved, true, false);
+    let mut spawn = spawner(96, "os:96");
+    let failure = execute_launch(
+        &broken_allocator(&proved),
+        &proved.shard(),
+        &proved.intent(),
+        &mut spawn,
+        &probe,
+        &clock,
+        &wide_limits(),
+    )
+    .unwrap_err();
+    assert!(failure.refusal().is_none());
+    assert_eq!(spawn.spawns, 0);
+    assert_eq!(
+        proved
+            .ledger()
+            .operation(&proved.operation)
+            .unwrap()
+            .outcome,
+        OperationOutcome::Reserved
+    );
+
+    // The same for an ambiguous final.
+    let unprovable = World::new();
+    stage(&unprovable, true, true);
+    let failure = execute_launch(
+        &broken_allocator(&unprovable),
+        &unprovable.shard(),
+        &unprovable.intent(),
+        &mut spawn,
+        &probe,
+        &clock,
+        &wide_limits(),
+    )
+    .unwrap_err();
+    assert!(failure.refusal().is_none());
+    assert_eq!(spawn.spawns, 0);
+
+    // L2: the claim is durable but the owner reservation cannot be written, so no
+    // spawn happens and the operation stays resumable.
+    let reserving = World::new();
+    let unwritable_shard = crate::usecase::resources::shard::OwnerShard::new(
+        MemoryFile::faulty(&reserving.shard_bytes, FileFault::WriteFails),
+        reserving.owner,
+    );
+    let failure = execute_launch(
+        &reserving.allocator(),
+        &unwritable_shard,
+        &reserving.intent(),
+        &mut spawn,
+        &probe,
+        &clock,
+        &wide_limits(),
+    )
+    .unwrap_err();
+    assert!(failure.refusal().is_none());
+    assert_eq!(spawn.spawns, 0);
+    assert_eq!(
+        reserving
+            .ledger()
+            .operation(&reserving.operation)
+            .unwrap()
+            .outcome,
+        OperationOutcome::Reserved,
+        "the claim leads the reservation, so the launch is resumed, not restarted"
+    );
+
+    // A definite spawn failure whose final cannot be written: the capacity stays
+    // claimed rather than being released against an unwritten record.
+    let failing = World::new();
+    stage(&failing, false, false);
+    let mut definite = FakeSpawner::new(SpawnPlan::Definite);
+    let failure = execute_launch(
+        &broken_allocator(&failing),
+        &failing.shard(),
+        &failing.intent(),
+        &mut definite,
+        &probe,
+        &clock,
+        &wide_limits(),
+    )
+    .unwrap_err();
+    assert!(failure.refusal().is_none());
+    assert_eq!(definite.spawns, 1);
+    assert_eq!(
+        failing.ledger().claim(&failing.resource).unwrap().state,
+        ClaimState::Reserved
+    );
+}
+
+#[test]
+fn a_child_that_cannot_be_recorded_becomes_an_ambiguous_final_not_a_retry() {
+    let world = World::new();
+    let clock = FakeClock::at(12);
+    let probe = probe_for(97, "os:97");
+    let policy = policy(2, 2);
+    world
+        .allocator()
+        .update(|document| {
+            document.reserve(
+                &world.operation,
+                "digest",
+                ResourceKind::Terminal,
+                world.owner,
+                &world.resource,
+                policy,
+            )
+        })
+        .unwrap();
+    world
+        .shard()
+        .update(|document| {
+            document.reserve(
+                &world.operation,
+                "digest",
+                ResourceKind::Terminal,
+                &world.resource,
+            )
+        })
+        .unwrap();
+
+    // The spawn succeeds and the shard write fails: a real child exists that this
+    // owner cannot record.
+    let unwritable = crate::usecase::resources::shard::OwnerShard::new(
+        MemoryFile::faulty(&world.shard_bytes, FileFault::WriteFails),
+        world.owner,
+    );
+    let mut spawn = spawner(97, "os:97");
+    let accepted = execute_launch(
+        &world.allocator(),
+        &unwritable,
+        &world.intent(),
+        &mut spawn,
+        &probe,
+        &clock,
+        &wide_limits(),
+    )
+    .unwrap();
+    assert_eq!(spawn.spawns, 1);
+    assert_eq!(
+        accepted.outcome,
+        OperationOutcome::Ambiguous,
+        "an unrecorded child is ambiguous, never a failure a retry could re-spawn"
+    );
+    assert_eq!(
+        world.ledger().claim(&world.resource).unwrap().state,
+        ClaimState::Reserved,
+        "the possibly-running child keeps its capacity"
+    );
+    let replay = execute_launch(
+        &world.allocator(),
+        &unwritable,
+        &world.intent(),
+        &mut spawn,
+        &probe,
+        &clock,
+        &wide_limits(),
+    )
+    .unwrap();
+    assert_eq!(replay.revision, accepted.revision);
+    assert_eq!(spawn.spawns, 1, "the replay never starts a second child");
 }
 
 #[test]

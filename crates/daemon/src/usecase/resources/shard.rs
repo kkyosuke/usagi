@@ -563,8 +563,8 @@ impl WriterLease {
 /// # Errors
 /// Returns [`ResourceError::ForeignOwner`] when the stored document names a
 /// different generation, or any load failure.
-pub fn hydrate<F: CasFile>(
-    shard: &OwnerShard<F>,
+pub fn hydrate(
+    shard: &OwnerShard,
     allocator: &AllocatorDocument,
 ) -> Result<SealedHydrate, ResourceFailure> {
     let snapshot = shard.load()?;
@@ -588,8 +588,8 @@ pub fn hydrate<F: CasFile>(
 /// # Errors
 /// Returns [`ResourceError::SealedElsewhere`] when a revision moved, or any load
 /// failure.
-pub fn open_writer<F: CasFile>(
-    shard: &OwnerShard<F>,
+pub fn open_writer(
+    shard: &OwnerShard,
     allocator: &AllocatorDocument,
     sealed: &SealedHydrate,
 ) -> Result<WriterLease, ResourceFailure> {
@@ -609,14 +609,14 @@ pub fn open_writer<F: CasFile>(
 }
 
 /// One generation's shard over a [`CasFile`].
-pub struct OwnerShard<F> {
-    store: CasStore<F, ShardDocument>,
+pub struct OwnerShard {
+    store: CasStore<ShardDocument>,
     owner: DaemonGeneration,
 }
 
-impl<F: CasFile> OwnerShard<F> {
+impl OwnerShard {
     /// Bind the shard of `owner`.
-    pub fn new(file: F, owner: DaemonGeneration) -> Self {
+    pub fn new(file: impl CasFile + 'static, owner: DaemonGeneration) -> Self {
         Self {
             store: CasStore::new(file),
             owner,
@@ -651,12 +651,20 @@ impl<F: CasFile> OwnerShard<F> {
         self.store.update(
             move || ShardDocument::empty(owner),
             move |document| {
-                if document.owner != owner {
-                    return Err(ResourceError::ForeignOwner);
-                }
+                owned_by(document, owner)?;
                 change(document)
             },
         )
+    }
+}
+
+/// Refuse a document that belongs to another generation. It is deliberately not
+/// part of the generic `update` body: one branch, one compiled copy.
+fn owned_by(document: &ShardDocument, owner: DaemonGeneration) -> Result<(), ResourceError> {
+    if document.owner == owner {
+        Ok(())
+    } else {
+        Err(ResourceError::ForeignOwner)
     }
 }
 

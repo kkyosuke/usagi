@@ -225,16 +225,21 @@ impl<D: CasDocument> CasSnapshot<D> {
 }
 
 /// A compare-and-swapped document over a [`CasFile`].
-pub struct CasStore<F, D> {
-    file: F,
+///
+/// The seam is a trait object rather than a type parameter: the production
+/// adapters and the in-memory fakes then share exactly one compiled copy of the
+/// swap protocol, so nothing about which store a caller binds can change the
+/// code that runs.
+pub struct CasStore<D> {
+    file: Box<dyn CasFile>,
     document: PhantomData<D>,
 }
 
-impl<F: CasFile, D: CasDocument> CasStore<F, D> {
+impl<D: CasDocument> CasStore<D> {
     /// Bind a store to its byte seam.
-    pub fn new(file: F) -> Self {
+    pub fn new(file: impl CasFile + 'static) -> Self {
         Self {
-            file,
+            file: Box::new(file),
             document: PhantomData,
         }
     }

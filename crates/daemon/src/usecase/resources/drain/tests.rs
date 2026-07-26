@@ -60,11 +60,11 @@ impl Drained {
         world
     }
 
-    fn allocator(&self) -> ResourceAllocator<MemoryFile> {
+    fn allocator(&self) -> ResourceAllocator {
         allocator(&self.allocator_bytes, policy(2, 2))
     }
 
-    fn shard(&self) -> OwnerShard<MemoryFile> {
+    fn shard(&self) -> OwnerShard {
         bind_shard(&self.shard_bytes, self.owner)
     }
 

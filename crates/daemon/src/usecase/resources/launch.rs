@@ -40,7 +40,7 @@ use crate::usecase::resources::identity::{
 };
 use crate::usecase::resources::retention::{LogicalClock, RetentionLimits, admission_guard};
 use crate::usecase::resources::shard::{OwnerShard, ResourceState, ShardDocument};
-use crate::usecase::resources::{CasFile, ResourceError, ResourceFailure};
+use crate::usecase::resources::{ResourceError, ResourceFailure};
 
 /// One canonical launch intent, keyed by the producer's durable operation id.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,9 +201,9 @@ pub fn plan_launch(
 /// [`ResourceError::OperationConflict`], [`ResourceError::CapacityExhausted`],
 /// [`ResourceError::RetentionBackpressure`], [`ResourceError::OwnershipUnknown`]
 /// for a one-sided state, or a store failure.
-pub fn execute_launch<FA: CasFile, FS: CasFile>(
-    allocator: &ResourceAllocator<FA>,
-    shard: &OwnerShard<FS>,
+pub fn execute_launch(
+    allocator: &ResourceAllocator,
+    shard: &OwnerShard,
     intent: &LaunchIntent,
     spawner: &mut dyn ResourceSpawner,
     probe: &dyn ChildProcessProbe,
@@ -249,9 +249,9 @@ pub fn execute_launch<FA: CasFile, FS: CasFile>(
 /// Returns the *claimed* resource identity. A resumed launch keeps the identity
 /// its claim already names, so a retry with a freshly minted proposal cannot
 /// produce a second resource for one operation.
-fn reserve<FA: CasFile, FS: CasFile>(
-    allocator: &ResourceAllocator<FA>,
-    shard: &OwnerShard<FS>,
+fn reserve(
+    allocator: &ResourceAllocator,
+    shard: &OwnerShard,
     intent: &LaunchIntent,
 ) -> Result<TerminalRef, ResourceFailure> {
     let policy = allocator.policy();
@@ -277,9 +277,9 @@ fn reserve<FA: CasFile, FS: CasFile>(
 
 /// L3 then L4/L5. The spawn is the only irreversible step, and it runs exactly
 /// once because both durable sides already record this operation.
-fn spawn_once<FA: CasFile, FS: CasFile>(
-    allocator: &ResourceAllocator<FA>,
-    shard: &OwnerShard<FS>,
+fn spawn_once(
+    allocator: &ResourceAllocator,
+    shard: &OwnerShard,
     intent: &LaunchIntent,
     resource: &TerminalRef,
     spawner: &mut dyn ResourceSpawner,
@@ -287,7 +287,16 @@ fn spawn_once<FA: CasFile, FS: CasFile>(
 ) -> Result<LaunchAccepted, ResourceFailure> {
     match spawner.spawn(resource) {
         Ok(identity) => {
-            shard.update(|document| document.record_spawn(resource, &identity))?;
+            if shard
+                .update(|document| document.record_spawn(resource, &identity))
+                .is_err()
+            {
+                // The child exists but its record does not — the persist-after-spawn
+                // case. It is answered as a durable ambiguous final, never as a
+                // failure that a retry could turn into a second child, and the
+                // capacity stays claimed because a process may be running.
+                return commit_ambiguous(allocator, intent, resource, clock);
+            }
             commit_spawned(allocator, intent, resource, clock, true)
         }
         Err(SpawnRefusal::Definite) => {
@@ -314,8 +323,8 @@ fn spawn_once<FA: CasFile, FS: CasFile>(
 }
 
 /// L5: the producer's answer becomes durable.
-fn commit_spawned<F: CasFile>(
-    allocator: &ResourceAllocator<F>,
+fn commit_spawned(
+    allocator: &ResourceAllocator,
     intent: &LaunchIntent,
     resource: &TerminalRef,
     clock: &dyn LogicalClock,
@@ -335,8 +344,8 @@ fn commit_spawned<F: CasFile>(
     })
 }
 
-fn commit_ambiguous<F: CasFile>(
-    allocator: &ResourceAllocator<F>,
+fn commit_ambiguous(
+    allocator: &ResourceAllocator,
     intent: &LaunchIntent,
     resource: &TerminalRef,
     clock: &dyn LogicalClock,

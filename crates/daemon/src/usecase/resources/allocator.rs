@@ -606,14 +606,14 @@ pub fn precedes_or_equals(candidate: &OperationId, watermark: &OperationId) -> b
 }
 
 /// The global allocator over a [`CasFile`].
-pub struct ResourceAllocator<F> {
-    store: CasStore<F, AllocatorDocument>,
+pub struct ResourceAllocator {
+    store: CasStore<AllocatorDocument>,
     policy: CapacityPolicy,
 }
 
-impl<F: CasFile> ResourceAllocator<F> {
+impl ResourceAllocator {
     /// Bind an allocator to its durable document and per-pool policy.
-    pub fn new(file: F, policy: CapacityPolicy) -> Self {
+    pub fn new(file: impl CasFile + 'static, policy: CapacityPolicy) -> Self {
         Self {
             store: CasStore::new(file),
             policy,
@@ -628,7 +628,7 @@ impl<F: CasFile> ResourceAllocator<F> {
 
     /// The compare-and-swapped store, for callers staging their own transition.
     #[must_use]
-    pub fn store(&self) -> &CasStore<F, AllocatorDocument> {
+    pub fn store(&self) -> &CasStore<AllocatorDocument> {
         &self.store
     }
 

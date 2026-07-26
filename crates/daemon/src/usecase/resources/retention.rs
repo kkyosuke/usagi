@@ -33,11 +33,11 @@
 use usagi_core::domain::id::OperationId;
 
 use crate::usecase::resources::ResourceError;
+use crate::usecase::resources::ResourceFailure;
 use crate::usecase::resources::allocator::{
     AllocatorDocument, ClaimState, ExpiryClass, OperationOutcome, OperationTombstone,
     ResourceAllocator, precedes_or_equals,
 };
-use crate::usecase::resources::{CasFile, ResourceFailure};
 
 /// Monotonic logical time. Production binds it to a coarse counter or clock; the
 /// retention tests inject a fake so every phase boundary is deterministic.
@@ -257,8 +257,8 @@ pub fn apply_phase(
 /// # Errors
 /// Returns a store failure. A phase that stopped being safe is dropped rather
 /// than forced, so a retry racing collection keeps its full outcome.
-pub fn collect_garbage<F: CasFile>(
-    allocator: &ResourceAllocator<F>,
+pub fn collect_garbage(
+    allocator: &ResourceAllocator,
     limits: &RetentionLimits,
     clock: &dyn LogicalClock,
 ) -> Result<GcReport, ResourceFailure> {

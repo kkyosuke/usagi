@@ -27,7 +27,7 @@ use usagi_core::domain::id::DaemonGeneration;
 
 use crate::usecase::resources::allocator::{ConsumeOutcome, ResourceAllocator};
 use crate::usecase::resources::shard::{OutboxEvent, OwnerShard, ShardDocument};
-use crate::usecase::resources::{CasFile, ResourceError, ResourceFailure};
+use crate::usecase::resources::{ResourceError, ResourceFailure};
 
 /// What consuming one shard's outbox did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PartialOrd, Ord)]
@@ -44,13 +44,14 @@ pub struct ConsumeReport {
 ///
 /// It holds the allocator (which it may write) and nothing that could write the
 /// old shard.
-pub struct ActiveConsumer<'a, F> {
-    allocator: &'a ResourceAllocator<F>,
+pub struct ActiveConsumer<'a> {
+    allocator: &'a ResourceAllocator,
 }
 
-impl<'a, F: CasFile> ActiveConsumer<'a, F> {
+impl<'a> ActiveConsumer<'a> {
     /// Bind a consumer to the allocator it is allowed to write.
-    pub fn new(allocator: &'a ResourceAllocator<F>) -> Self {
+    #[must_use]
+    pub fn new(allocator: &'a ResourceAllocator) -> Self {
         Self { allocator }
     }
 
@@ -103,8 +104,8 @@ impl<'a, F: CasFile> ActiveConsumer<'a, F> {
 /// # Errors
 /// Returns [`ResourceError::UnknownResource`], [`ResourceError::WrongState`], or
 /// a store failure.
-pub fn publish_exit<F: CasFile>(
-    shard: &OwnerShard<F>,
+pub fn publish_exit(
+    shard: &OwnerShard,
     resource: &usagi_core::domain::id::TerminalRef,
     status: i32,
 ) -> Result<(), ResourceFailure> {
@@ -116,9 +117,9 @@ pub fn publish_exit<F: CasFile>(
 ///
 /// # Errors
 /// Returns a store failure.
-pub fn reclaim_outbox<FS: CasFile, FA: CasFile>(
-    shard: &OwnerShard<FS>,
-    allocator: &ResourceAllocator<FA>,
+pub fn reclaim_outbox(
+    shard: &OwnerShard,
+    allocator: &ResourceAllocator,
 ) -> Result<usize, ResourceFailure> {
     let consumed = allocator.load()?.to_document();
     let (reclaimed, _) = shard.update(|document| Ok(document.reclaim(&consumed)))?;

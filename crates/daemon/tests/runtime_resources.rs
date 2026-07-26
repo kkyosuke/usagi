@@ -89,14 +89,14 @@ impl ResourceSpawner for RealPtySpawner {
     }
 }
 
-fn allocator(data_dir: &Path) -> ResourceAllocator<AllocatorFile> {
+fn allocator(data_dir: &Path) -> ResourceAllocator {
     ResourceAllocator::new(
         AllocatorFile::new(data_dir).unwrap(),
         CapacityPolicy::new(2, 4),
     )
 }
 
-fn shard(data_dir: &Path, generation: DaemonGeneration) -> OwnerShard<OwnerShardFile> {
+fn shard(data_dir: &Path, generation: DaemonGeneration) -> OwnerShard {
     OwnerShard::new(
         OwnerShardFile::new(data_dir, generation).unwrap(),
         generation,

@@ -270,11 +270,11 @@ pub fn policy(agent: usize, terminal: usize) -> CapacityPolicy {
 }
 
 /// An allocator over `bytes`.
-pub fn allocator(bytes: &SharedBytes, policy: CapacityPolicy) -> ResourceAllocator<MemoryFile> {
+pub fn allocator(bytes: &SharedBytes, policy: CapacityPolicy) -> ResourceAllocator {
     ResourceAllocator::new(MemoryFile::new(bytes), policy)
 }
 
 /// A shard over `bytes` owned by `owner`.
-pub fn shard(bytes: &SharedBytes, owner: DaemonGeneration) -> OwnerShard<MemoryFile> {
+pub fn shard(bytes: &SharedBytes, owner: DaemonGeneration) -> OwnerShard {
     OwnerShard::new(MemoryFile::new(bytes), owner)
 }
