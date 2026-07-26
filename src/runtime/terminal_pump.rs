@@ -457,9 +457,13 @@ impl TerminalPollPump {
             while !thread_stop.load(Ordering::Acquire) {
                 let worked = run_round(&thread_shared.state, &mut fetch);
                 let interval = lock(&thread_shared.state).next_interval(worked);
-                if thread_stop.load(Ordering::Acquire) {
-                    break;
-                }
+                // Only the loop condition ends this thread. `Drop` sets `stop`,
+                // marks the state woken, and notifies, so the wait below always
+                // returns at once after a stop — a second check here would add
+                // no promptness, and it could only ever be taken when the stop
+                // landed while the worker sat inside the round, which is a race
+                // that leaves the line uncovered often enough to fail the
+                // coverage gate on unrelated changes.
                 wait_for_next_round(&thread_shared, interval);
             }
         });
@@ -935,5 +939,35 @@ mod tests {
         pump.wake();
         rx.recv_timeout(Duration::from_secs(1))
             .expect("a wake runs the next round without waiting out the idle cadence");
+    }
+
+    /// Dropping the pump must not wait out the cadence.
+    ///
+    /// The worker observes a stop only through its loop condition, so this pins
+    /// the property that makes the single check sufficient: `Drop` marks the state
+    /// woken and notifies, which ends the pending wait at once. Without that, an
+    /// unregistered lane would hold the drop for its 250 ms interval.
+    #[test]
+    fn dropping_the_pump_stops_the_worker_without_waiting_out_the_cadence() {
+        let terminal = terminal();
+        let (tx, rx) = mpsc::channel();
+        let pump = TerminalPollPump::spawn(move |_| {
+            let _ = tx.send(());
+            Ok(Vec::new())
+        });
+        pump.register(&terminal, 0, 1);
+        // Back the cadence off so the worker is parked on a long wait when the
+        // drop lands, which is the case a second stop check could only ever win
+        // by racing.
+        for _ in 0..6 {
+            let _ = rx.recv_timeout(Duration::from_secs(5));
+        }
+
+        let started = std::time::Instant::now();
+        drop(pump);
+        assert!(
+            started.elapsed() < UNREGISTERED_INTERVAL,
+            "dropping the pump waited out the cadence instead of being woken"
+        );
     }
 }

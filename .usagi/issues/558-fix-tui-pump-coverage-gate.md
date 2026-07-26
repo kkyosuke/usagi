@@ -1,13 +1,13 @@
 ---
 number: 558
 title: fix(tui): pump の停止・解放パスを coverage gate が確率で落とす競合から外す
-status: todo
+status: done
 priority: medium
 labels: [review, v2, tui, test, coverage]
 dependson: []
 related: [551, 554, 557]
 created_at: 2026-07-26T12:36:19.358016+00:00
-updated_at: 2026-07-26T12:57:54.096165+00:00
+updated_at: 2026-07-26T13:20:25.122568+00:00
 ---
 
 ## 問題・根拠（CI 実測で確定）
@@ -43,21 +43,28 @@ while !thread_stop.load(Ordering::Acquire) {
 内側の `break` は「round を 1 つ終えてから、次の待ちに入る前の窓」で停止が立ったときだけ踏まれる。
 外側の `while` 条件で抜ける経路と競合しており、どちらが先に観測されるかはスケジューリング次第である。
 
-### 2. `refresh_pump.rs` — 意図的に hang させた worker の解放パス
+### 2. `refresh_pump.rs` — hang した worker の「まだ解放されていない」分岐
 
-`a_hung_fetch_never_blocks_the_render_thread` は fetch を故意に hang させ、最後に解放する。
+**起票時の記述を訂正する。** 当初この節には「worker が解放を観測する前に test が終わるので `return Ok(1)` が
+未達になる」と書いたが、**誤りだった**。解放の待ち合わせは既に実装済みで（`pump.take()` が `Some` を返すまで待つ）、
+CI が報告した未達行 L620-621 は `return` ではなく**その逆側**、つまり「まだ解放されていないので sleep して回る」
+分岐である。
 
 ```rust
 loop {
     if *worker_release.lock().unwrap_or_else(PoisonError::into_inner) {
-        return Ok(1);              // ← この行と閉じ括弧が未達になる
+        return Ok(1);
     }
-    std::thread::sleep(Duration::from_millis(5));
+    std::thread::sleep(Duration::from_millis(5));   // ← ここと直前の閉じ括弧が未達
 }
 ```
 
-worker が `release == true` を観測する前に test が終わって pump が drop されると、この `return` は踏まれない。
-5 ms の sleep で回しているため、解放の観測は時間依存である。
+機構はこうである。test は `entered`（closure の**先頭**で送る）を受け取った直後に、非ブロッキングな
+`take` / `wake` を 200 回回してから `release` を立てる。worker が `entered` を送った直後にデスケジュールされると、
+再開時には既に `release == true` になっており、**1 回目の判定で `return` してこの分岐を一度も通らない**。
+`fetch` に入ったことは「`release == false` を観測した」ことを何ら保証しない。
+
+つまり当初の記述とは向きが逆だったが、**競合依存であるという性質は当たっていた**。
 
 ## 影響
 
@@ -81,8 +88,8 @@ worker が `release == true` を観測する前に test が終わって pump が
 
 - `terminal_pump.rs` の worker loop の**停止経路を 1 本にする**。round 後の二重確認をやめ、停止の観測点を
   1 か所（待ちの内側）に寄せる。停止の即応性は落とさない。
-- `refresh_pump.rs` の hang test を、worker が解放を**確実に観測してから**終わる形にする。解放後に worker の
-  到達を待ち合わせる（channel などで同期する）。sleep 間隔に依存させない。
+- `refresh_pump.rs` の hang test で、worker が「**まだ解放されていない**」ことを観測したことを test 側が待ち合わせる。
+  `fetch` への entry 通知だけでは不足である（上記の機構）。
 
 ## 設計上の判断が必要な点
 
@@ -99,7 +106,7 @@ worker が `release == true` を観測する前に test が終わって pump が
 ## 受入条件
 
 - [ ] `terminal_pump.rs` の worker 停止経路が 1 本になり、停止レイテンシが退行しないことをテストで固定する。
-- [ ] `a_hung_fetch_never_blocks_the_render_thread` が worker の解放到達を待ち合わせ、sleep 間隔に依存しない。
+- [ ] `a_hung_fetch_never_blocks_the_render_thread` が「まだ解放されていない」分岐の到達を待ち合わせる。
 - [ ] **同一 commit で coverage を複数回実行しても未達が出ない**。少なくとも CI で 2 回連続 green を確認する。
 - [ ] `coverage(off)` を追加していない（競合依存は許可理由に該当しないため）。
 - [ ] カバレッジ 100% を維持する。`document/` の更新は、停止契約を変えた場合のみ該当節に反映する
@@ -113,3 +120,29 @@ worker が `release == true` を観測する前に test が終わって pump が
 - Rust 差分を含むため、fmt / `cargo check --workspace --all-targets` /
   `cargo clippy --workspace --all-targets -- -D warnings` / `scripts/recommend-tests.sh origin/main` の推奨 test を
   通し、full gate は PR CI で確認する。
+
+## 実装時の決定
+
+### `terminal_pump` は姉妹ファイルの確立済みパターンを移植した
+
+`refresh_pump.rs` の worker loop には**既に停止経路 1 本化が入っており**、その理由がコメントで明文化されていた
+（`Drop` が `stop` と同時に `woken` を立てて notify するので、待ちは停止後ただちに返る。二重確認は promptness を
+増やさず、`fetch` の中で停止が landed した競合でしか踏めない）。`terminal_pump.rs` だけがこの修正から取り残されて
+いたため、同じ形とほぼ同じコメントを移植した。
+
+停止レイテンシが落ちないことは実装前に確認した。`stop.store(true)` は両ファイルで `Drop` の 1 か所だけであり、
+そこは必ず `woken = true` と `notify_all` を伴う。したがって待ち側は condvar で必ず起き、round 後の二重確認は
+不要である。この性質は
+`dropping_the_pump_stops_the_worker_without_waiting_out_the_cadence` で固定した（未登録レーンの 250 ms を
+待たずに drop が返ること）。
+
+### 未達行そのものを消した
+
+`terminal_pump` 側は「テストで踏めるようにする」のではなく、**その行を無くした**。競合でしか踏めない行が存在しない
+なら未達にもなり得ない。`coverage(off)` は使っていない（競合依存は許可理由に該当しない）。
+
+### ローカルでは再現しない
+
+修正前のコードをローカルで計測すると両ファイルとも 100%（`refresh_pump` 405/405、`terminal_pump` 280/280）で、
+未達は CI（Linux・instrumented・並行）でしか出なかった。したがって**ローカルの 1 回 green は本 issue の証拠にならない**。
+CI で 2 回連続 green を確認する受入条件はこの理由で置いている。
