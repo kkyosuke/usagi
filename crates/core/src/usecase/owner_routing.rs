@@ -29,6 +29,10 @@
 //! * **Generations are independent.** Connections and output cursors live in
 //!   [`GenerationLinks`], keyed by generation, so publishing a new `current`
 //!   does not discard a draining subscription.
+//! * **Resolving costs no IO.** The trusted set comes from files, so
+//!   [`RouteCache`] holds it and re-reads only on a reason — the first
+//!   resolution, one that fails, or a caller reporting a lost connection. A
+//!   request sent on a connection that is already open resolves nothing.
 //!
 //! The client advertises
 //! [`OWNER_GENERATION_ROUTING_CAPABILITY`](crate::infrastructure::ipc::OWNER_GENERATION_ROUTING_CAPABILITY)
@@ -686,7 +690,7 @@ pub trait GenerationTransport {
 /// |---|---|
 /// | the first resolution | there is nothing to resolve against yet |
 /// | a resolution that fails | the snapshot may predate the handoff that published this owner |
-/// | [`RouteCache::invalidate`] | the caller observed a generation change on the wire |
+/// | [`RouteCache::invalidate`] | the caller lost a connection it held, which is the only generation change a client can observe for itself |
 ///
 /// A second failure after the refresh is the answer: nothing degrades into the
 /// active endpoint.
@@ -737,8 +741,9 @@ impl RouteCache {
     /// Require the next resolution to re-read the directory.
     ///
     /// This is the caller's way of reporting evidence the cache cannot see for
-    /// itself — a reply that named a different current generation, or a
-    /// connection that had to be re-established.
+    /// itself: a lane it held stopped answering, or a peer named a generation
+    /// other than the one that was asked for. Both mean the records may have
+    /// moved on, and neither is visible from the snapshot.
     pub fn invalidate(&mut self) {
         self.loaded = false;
     }
