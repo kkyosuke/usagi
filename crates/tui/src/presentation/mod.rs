@@ -17525,6 +17525,7 @@ mod tests {
     impl AgentCommandPort for CountedPort {
         fn launch(
             &mut self,
+            _operation: OperationId,
             _workspace: WorkspaceId,
             _session: Option<SessionId>,
             _profile: Option<AgentProfileId>,
@@ -17536,6 +17537,7 @@ mod tests {
     impl PaneLaunchCommandPort for CountedPort {
         fn launch(
             &self,
+            _operation: OperationId,
             _workspace: WorkspaceId,
             _session: Option<SessionId>,
             _profile: Option<AgentProfileId>,
