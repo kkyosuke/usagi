@@ -6,20 +6,29 @@
 //! that read older bytes loses, which is what keeps two daemon processes from
 //! producing a lost update on the same document.
 //!
-//! It is deliberately a different object from `current.json`. Clients discover
-//! an endpoint by reading one small locator; only the daemons read the
-//! registry. Keeping the two consistent across a crash is the handoff
-//! protocol's job ([`crate::usecase::authority::handoff`]), not this adapter's.
+//! It is deliberately a different object from `current.json`. The locator names
+//! the one endpoint a client connects to for control work; the registry names
+//! every retained generation, which a client needs only to reach a terminal an
+//! older generation still owns ([`TrustedGenerationDirectory`], #508). Writing
+//! it stays a daemon-only privilege, and keeping the two consistent across a
+//! crash is the handoff protocol's job
+//! ([`crate::usecase::authority::handoff`]), not this adapter's.
 
 use std::io;
 use std::path::{Path, PathBuf};
+
+use usagi_core::infrastructure::ipc::GenerationRole as WireRole;
+use usagi_core::usecase::owner_routing::{
+    DirectoryError, GenerationDirectory, TrustedEndpoint, TrustedEndpoints,
+};
 
 use crate::infrastructure::unix_transport::{
     ensure_private_dir, lock_private_node, read_private_bytes_if_present, write_private_file,
 };
 use crate::usecase::authority::handoff::{LocatorObservation, PublishedLocator};
-use crate::usecase::authority::registry::RegistryFile;
+use crate::usecase::authority::registry::{REGISTRY_SCHEMA, RegistryDocument, RegistryFile};
 use crate::usecase::authority::rollover::CurrentLocator;
+use crate::usecase::generation::GenerationRole;
 
 const REGISTRY_FILE: &str = "generations.json";
 const REGISTRY_LOCK: &str = "generations.lock";
@@ -78,6 +87,105 @@ fn read_bytes(daemon: &Path) -> io::Result<Option<String>> {
     String::from_utf8(bytes)
         .map(Some)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+/// The client's read-only view of the same durable records.
+///
+/// A client resolves the endpoint of a generation it holds a `TerminalRef` for,
+/// so it needs more than the one-entry locator — but it must not become a second
+/// writer of the registry either. This adapter therefore reads and never
+/// creates: no daemon directory, no lock node, no document.
+///
+/// Two readings are possible, and both are trusted because the daemon wrote
+/// them:
+///
+/// * `generations.json` present — every retained generation, with the role and
+///   endpoint the registry holds. Standby and retired generations are dropped:
+///   a standby is private until it is activated, and a retired generation is
+///   exactly the verified absence that lets a client collect its tabs.
+/// * `generations.json` absent — a daemon that has never rolled over. The
+///   published `current.json` is then the whole authority, which is precisely
+///   today's single-generation behaviour.
+pub struct TrustedGenerationDirectory {
+    data_dir: PathBuf,
+}
+
+impl TrustedGenerationDirectory {
+    /// Bind the directory of `data_dir` without creating anything in it.
+    #[must_use]
+    pub fn new(data_dir: &Path) -> Self {
+        Self {
+            data_dir: data_dir.to_path_buf(),
+        }
+    }
+
+    /// The registry document, or `None` when this daemon never rolled over.
+    fn registry(&self) -> Result<Option<RegistryDocument>, DirectoryError> {
+        let daemon = self.data_dir.join("daemon");
+        let Some(contents) =
+            read_bytes(&daemon).map_err(|error| DirectoryError::Unreadable(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let document: RegistryDocument = serde_json::from_str(&contents)
+            .map_err(|_| DirectoryError::Corrupt("registry document does not parse"))?;
+        if document.schema != REGISTRY_SCHEMA {
+            return Err(DirectoryError::Corrupt("registry schema is not supported"));
+        }
+        Ok(Some(document))
+    }
+
+    /// The published locator, or `None` when no daemon is published.
+    fn locator(&self) -> Result<Option<PublishedLocator>, DirectoryError> {
+        match CurrentLocatorFile::new(&self.data_dir).read() {
+            Ok(LocatorObservation::Published(locator)) => Ok(Some(locator)),
+            Ok(LocatorObservation::Absent) => Ok(None),
+            // An untrustworthy locator and a failed inspection are the same
+            // answer: no endpoint may be taken from here.
+            Ok(LocatorObservation::Unreadable) | Err(_) => Err(DirectoryError::Unreadable(
+                "current locator cannot be trusted".into(),
+            )),
+        }
+    }
+}
+
+/// Which registry roles a client may address.
+fn addressable(role: GenerationRole) -> Option<WireRole> {
+    match role {
+        GenerationRole::Active => Some(WireRole::Active),
+        GenerationRole::Draining => Some(WireRole::Draining),
+        GenerationRole::Standby | GenerationRole::Retired => None,
+    }
+}
+
+impl GenerationDirectory for TrustedGenerationDirectory {
+    fn snapshot(&self) -> Result<TrustedEndpoints, DirectoryError> {
+        let Some(document) = self.registry()? else {
+            let Some(locator) = self.locator()? else {
+                return Ok(TrustedEndpoints::default());
+            };
+            return TrustedEndpoints::build(
+                Some(locator.generation),
+                vec![TrustedEndpoint {
+                    generation: locator.generation,
+                    role: WireRole::Active,
+                    endpoint: locator.endpoint,
+                }],
+            );
+        };
+        let entries = document
+            .generations
+            .iter()
+            .filter_map(|entry| {
+                addressable(entry.role).map(|role| TrustedEndpoint {
+                    generation: entry.generation,
+                    role,
+                    endpoint: entry.endpoint.clone(),
+                })
+            })
+            .collect();
+        TrustedEndpoints::build(document.current, entries)
+    }
 }
 
 /// The published `current.json` in a daemon data directory, as the handoff

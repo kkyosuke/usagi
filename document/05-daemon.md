@@ -1151,6 +1151,26 @@ barrier を戻して旧 authority を維持する。W2 が成功した後の bar
 `retired` への遷移は、保持した client worker の stream を shutdown して parked な frame read を解除し、**全 JoinHandle を
 join してから** endpoint と process を回収する。count だけを待って JoinHandle を捨てることはしない。
 
+### rollover の routing 前提条件
+
+handoff は「終わったあとも全参加者が draining generation に到達できる」場合だけ開始してよい。到達できない
+client が 1 つでも残ったまま rollover すると、その client が持つ old terminal は到達不能になるか、
+new active の別 terminal へ誤配送される。したがって rollover の入口は最初の durable write より前に次を
+検証し、1 つでも満たさなければ typed refusal で止める。refusal は **effect zero** であり、registry、
+current locator、admission barrier、全 PTY は元のままである。
+
+| 参加者 | 条件 | 満たさない場合 |
+|---|---|---|
+| admit 済みの全 client connection | `ClientHello` に `owner-generation-routing.v1` を広告している | `client_routing_unsupported` |
+| 後継 generation | `ServerHello` に同じ capability を広告している | `successor_routing_unsupported` |
+| durable registry | この build が書く schema である | `registry_schema_unsupported` |
+| durable registry | rollover を計画した revision のままである | `registry_revision_mismatch` |
+
+client 側の routing 契約は [4. IPC の owner generation routing](04-ipc.md#owner-generation-routing) が正本である。
+capability は connection 単位で記録するため、旧 build の client が切断すれば refusal は解け、同じ client が
+新しい build で再接続すれば自分の答えを更新する。この gate は実装済みだが、それを駆動する shipping の
+`daemon restart` はまだ存在しない（[daemon process lifecycle](#daemon-process-lifecycle)）。
+
 ### legacy migration
 
 registry を持たない `daemon.json` + `current.json` の状態は、record が exact な OS process

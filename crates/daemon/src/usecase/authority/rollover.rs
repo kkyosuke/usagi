@@ -9,7 +9,7 @@ use std::fmt;
 use std::io;
 
 use usagi_core::domain::id::DaemonGeneration;
-use usagi_core::infrastructure::ipc::OperationId;
+use usagi_core::infrastructure::ipc::{OperationId, ServerHello};
 
 use crate::usecase::authority::admission::{AdmissionGate, AdmissionRefusal, LeaseClass};
 use crate::usecase::authority::handoff::{
@@ -19,6 +19,7 @@ use crate::usecase::authority::handoff::{
 use crate::usecase::authority::registry::{
     GenerationRegistry, RegistryError, RegistryFailure, RegistryFile,
 };
+use crate::usecase::authority::routing::{RolloverRefusal, RoutingLedger, admit_rollover};
 use crate::usecase::authority::workers::{ClientWorkers, RetireReport};
 use crate::usecase::generation::{GenerationRole, ProcessIdentity, ProcessObservation};
 
@@ -73,6 +74,9 @@ pub enum HandoffFailure {
     Registry(RegistryFailure),
     Admission(AdmissionRefusal),
     Locator(io::Error),
+    /// A participant could not address the generation this rollover would leave
+    /// draining. Refused before the first durable write (#508).
+    Routing(RolloverRefusal),
 }
 
 impl From<RegistryFailure> for HandoffFailure {
@@ -99,17 +103,68 @@ impl From<io::Error> for HandoffFailure {
     }
 }
 
+impl From<RolloverRefusal> for HandoffFailure {
+    fn from(refusal: RolloverRefusal) -> Self {
+        Self::Routing(refusal)
+    }
+}
+
 impl fmt::Display for HandoffFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Registry(failure) => write!(f, "{failure}"),
             Self::Admission(refusal) => write!(f, "{refusal}"),
             Self::Locator(error) => write!(f, "current locator failed: {error}"),
+            Self::Routing(refusal) => write!(f, "{refusal}"),
         }
     }
 }
 
 impl std::error::Error for HandoffFailure {}
+
+/// What a rollover was planned against, checked once before anything is written.
+///
+/// It exists so the shipping restart (#507) cannot start a handoff that would
+/// leave a draining generation nobody can reach: the participants are named
+/// here, and [`execute_gated_rollover`] refuses before the first durable write.
+pub struct RolloverPlan<'a> {
+    /// Every admitted client connection's routing capability.
+    pub ledger: &'a RoutingLedger,
+    /// The successor's own `ServerHello`, as proved by [`super::standby`].
+    pub successor: &'a ServerHello,
+    /// The registry revision this rollover was planned against.
+    pub planned_revision: u64,
+}
+
+/// Hand authority over only when every participant can address the generation
+/// this leaves draining.
+///
+/// This is the entry point a shipping rollover uses. The plain
+/// [`execute_rollover`] performs the handoff itself and is what the fixtures
+/// drive directly; it deliberately does not know about clients.
+///
+/// # Errors
+/// Returns [`HandoffFailure::Routing`] with nothing written when a participant
+/// cannot route by owner generation or the registry moved, or any failure
+/// [`execute_rollover`] returns.
+pub fn execute_gated_rollover<F: RegistryFile>(
+    registry: &GenerationRegistry<F>,
+    locator: &dyn CurrentLocator,
+    gate: Option<&AdmissionGate>,
+    plan: &RolloverPlan<'_>,
+    operation: &OperationId,
+    from: Option<DaemonGeneration>,
+    to: DaemonGeneration,
+) -> Result<RolloverOutcome, HandoffFailure> {
+    let snapshot = registry.load()?;
+    admit_rollover(
+        plan.ledger,
+        snapshot.document(),
+        plan.planned_revision,
+        plan.successor,
+    )?;
+    execute_rollover(registry, locator, gate, operation, from, to)
+}
 
 /// Hand authority from `from` to the verified standby `to`.
 ///

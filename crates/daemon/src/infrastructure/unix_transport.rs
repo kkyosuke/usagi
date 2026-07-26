@@ -785,6 +785,33 @@ pub fn connect_current(data_dir: &Path) -> io::Result<UnixStream> {
     UnixStream::connect(endpoint).map_err(classify_published_endpoint_error)
 }
 
+/// Connects to one trusted generation endpoint, active or draining.
+///
+/// [`connect_current`] is deliberately restricted to the published locator; this
+/// is how a client reaches the generation that owns a terminal it already holds
+/// a complete `TerminalRef` for. The address is not the caller's to choose: the
+/// only input is a [`TrustedEndpoint`], which a
+/// [`GenerationDirectory`](usagi_core::usecase::owner_routing::GenerationDirectory)
+/// produced from records the daemon wrote, and it is re-derived and re-verified
+/// as that generation's own private socket before a byte is sent (#508).
+///
+/// # Errors
+///
+/// Returns an error when the endpoint is not that generation's own safe socket,
+/// or when it cannot be connected.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=owner_routing
+pub fn connect_generation(
+    data_dir: &Path,
+    endpoint: &usagi_core::usecase::owner_routing::TrustedEndpoint,
+) -> io::Result<UnixStream> {
+    let daemon = data_dir.join("daemon");
+    verify_private(&daemon, DIR_MODE, true)?;
+    let path =
+        generation_endpoint_path(&daemon, &endpoint.generation.as_str(), &endpoint.endpoint)?;
+    verify_private(&path, SOCKET_MODE, false).map_err(classify_published_endpoint_error)?;
+    UnixStream::connect(path).map_err(classify_published_endpoint_error)
+}
+
 fn classify_published_endpoint_error(error: io::Error) -> io::Error {
     if error.kind() == io::ErrorKind::NotFound {
         io::Error::new(
@@ -1527,18 +1554,28 @@ fn checked_endpoint(daemon: &Path, locator: &EndpointLocator) -> io::Result<Path
 }
 
 fn endpoint_path(daemon: &Path, locator: &EndpointLocator) -> io::Result<PathBuf> {
-    let endpoint = daemon.join(&locator.endpoint);
-    let expected = daemon
-        .join("generations")
-        .join(&locator.generation.0)
-        .join("sock");
-    if endpoint != expected {
+    generation_endpoint_path(daemon, &locator.generation.0, &locator.endpoint)
+}
+
+/// The one path a generation's endpoint is allowed to be.
+///
+/// Naming a generation therefore names exactly one socket: a record whose
+/// endpoint spells anything else is refused instead of connected to, which is
+/// what keeps a caller from choosing an address of its own.
+fn generation_endpoint_path(
+    daemon: &Path,
+    generation: &str,
+    endpoint: &str,
+) -> io::Result<PathBuf> {
+    let path = daemon.join(endpoint);
+    let expected = daemon.join("generations").join(generation).join("sock");
+    if path != expected {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "locator endpoint is outside generation directory",
         ));
     }
-    Ok(endpoint)
+    Ok(path)
 }
 
 #[cfg(test)]

@@ -640,6 +640,83 @@ fn a_rollover_onto_an_unknown_successor_is_refused_before_any_write() {
 }
 
 #[test]
+fn a_gated_rollover_hands_authority_over_when_every_participant_can_route_by_owner() {
+    let world = world();
+    let ledger = RoutingLedger::new();
+    let successor = crate::usecase::authority::fixture::hello(world.next, &build("next"));
+    let plan = RolloverPlan {
+        ledger: &ledger,
+        successor: &successor,
+        planned_revision: world.document().document().revision,
+    };
+    let outcome = execute_gated_rollover(
+        &world.store,
+        &world.locator,
+        Some(&world.gate),
+        &plan,
+        &operation("a"),
+        Some(world.old),
+        world.next,
+    )
+    .unwrap();
+    assert_eq!(outcome, RolloverOutcome::Advanced);
+    assert_eq!(world.document().document().current, Some(world.next));
+}
+
+#[test]
+fn a_participant_that_cannot_route_by_owner_stops_the_rollover_before_any_write() {
+    let world = world();
+    let before = world.file.contents();
+    let writes = world.file.writes();
+    let ledger = RoutingLedger::new();
+    ledger.admit(
+        usagi_core::domain::id::ConnectionId::new(),
+        &legacy_client_hello(),
+    );
+    let successor = crate::usecase::authority::fixture::hello(world.next, &build("next"));
+    let plan = RolloverPlan {
+        ledger: &ledger,
+        successor: &successor,
+        planned_revision: world.document().document().revision,
+    };
+    let failure = execute_gated_rollover(
+        &world.store,
+        &world.locator,
+        Some(&world.gate),
+        &plan,
+        &operation("a"),
+        Some(world.old),
+        world.next,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        failure,
+        HandoffFailure::Routing(RolloverRefusal::ClientRoutingUnsupported { connections: 1 })
+    ));
+    // Nothing observable moved: the old generation still admits control work,
+    // the locator still names it, and the registry was not rewritten.
+    assert_eq!(world.gate.role(), GenerationRole::Active);
+    assert!(world.locator.publishes().is_empty());
+    assert_eq!(world.file.contents(), before);
+    assert_eq!(world.file.writes(), writes);
+}
+
+/// A client from a build that predates owner-generation routing.
+fn legacy_client_hello() -> usagi_core::infrastructure::ipc::ClientHello {
+    usagi_core::infrastructure::ipc::ClientHello {
+        client_id: usagi_core::infrastructure::ipc::ClientId("legacy".into()),
+        connection_nonce: "nonce".into(),
+        expected_daemon_generation: None,
+        supported_protocols: Vec::new(),
+        capabilities: Vec::new(),
+        required_capabilities: Vec::new(),
+        build: build("old"),
+        workspace: None,
+    }
+}
+
+#[test]
 fn failures_are_reported_by_their_source_rather_than_flattened() {
     let admission: HandoffFailure =
         crate::usecase::authority::admission::AdmissionRefusal::Retired.into();
@@ -648,5 +725,10 @@ fn failures_are_reported_by_their_source_rather_than_flattened() {
     assert_eq!(registry.to_string(), RegistryError::Corrupt.to_string());
     let locator: HandoffFailure = io::Error::other("unlink").into();
     assert!(locator.to_string().contains("unlink"));
+    let routing: HandoffFailure = RolloverRefusal::SuccessorRoutingUnsupported.into();
+    assert_eq!(
+        routing.to_string(),
+        RolloverRefusal::SuccessorRoutingUnsupported.to_string()
+    );
     assert_eq!(format!("{:?}", HandoffStep::BeforeIntent), "BeforeIntent");
 }

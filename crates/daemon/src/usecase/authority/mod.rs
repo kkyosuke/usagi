@@ -12,6 +12,7 @@
 //! | [`standby`] | is this candidate the exact build it was admitted for — proved without any side effect? |
 //! | [`handoff`] | how do the registry and the current locator — two independent durable objects — reach one outcome across a crash? |
 //! | [`admission`] | may *this* request, right now, produce an effect on *this* generation? |
+//! | [`routing`] | may this rollover leave a draining generation behind — can every participant still address it? |
 //! | [`workers`] | which client threads must be unblocked and joined before a generation is collected? |
 //! | [`rollover`] | driving the above against the durable objects, with a named boundary at every write |
 //! | [`migration`] | can the legacy single-generation state be adopted, or must it fail closed? |
@@ -35,5 +36,6 @@ pub mod handoff;
 pub mod migration;
 pub mod registry;
 pub mod rollover;
+pub mod routing;
 pub mod standby;
 pub mod workers;

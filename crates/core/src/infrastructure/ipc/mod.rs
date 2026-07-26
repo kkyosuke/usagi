@@ -45,6 +45,17 @@ pub const TERMINAL_INPUT_OPERATION_CAPABILITY: &str = "terminal.input-operation.
 /// workspace-bound client requires it, so a daemon that would admit any
 /// workspace cannot silently serve one workspace's sessions to another.
 pub const WORKSPACE_FENCE_CAPABILITY: &str = "workspace.fence.v1";
+/// The capability a **client** advertises when it addresses every terminal
+/// request by the owner generation of its complete `TerminalRef` instead of by
+/// whichever endpoint is currently active.
+///
+/// It is the truth source for whether a planned rollover may leave a draining
+/// generation behind: a client without it would send an old generation's attach,
+/// input, or resize to the new active daemon, which either fails or lands on a
+/// different terminal. The routing contract itself is
+/// [`crate::usecase::owner_routing`], and the handoff admission that requires it
+/// of every participant is the daemon's rollover gate (#508).
+pub const OWNER_GENERATION_ROUTING_CAPABILITY: &str = "owner-generation-routing.v1";
 /// The [`ProtocolError::error_id`] carried by every workspace-fence refusal.
 /// Clients match on it to present "this is not this workspace's daemon" instead
 /// of an unavailable endpoint, and to keep the refusal out of cold start,
@@ -781,6 +792,18 @@ pub fn terminal_input_replay_mode(capabilities: &[String]) -> TerminalInputRepla
     } else {
         TerminalInputReplayMode::LegacyFailClosed
     }
+}
+
+/// Whether a peer advertises [`OWNER_GENERATION_ROUTING_CAPABILITY`].
+///
+/// The capability is the truth source on both sides: a client that does not
+/// advertise it must not be left with a draining generation to reach, and a
+/// daemon that does not advertise it cannot be trusted to serve one.
+#[must_use]
+pub fn supports_owner_generation_routing(capabilities: &[String]) -> bool {
+    capabilities
+        .iter()
+        .any(|capability| capability == OWNER_GENERATION_ROUTING_CAPABILITY)
 }
 
 /// The semantic digest of one terminal input operation.

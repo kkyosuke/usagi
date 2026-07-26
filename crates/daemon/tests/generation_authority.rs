@@ -532,8 +532,13 @@ fn a_standby_takes_authority_without_the_old_connection_keeping_its_privileges()
         ResponseOutcome::Error(_)
     ));
 
-    // The new authority serves control work on its own endpoint.
-    assert_eq!(standby_client.request("spawn"), ResponseOutcome::Ok);
+    // The new authority serves control work on its own endpoint. Its gate is
+    // opened by its *own* poll loop observing the committed registry, which is
+    // a separate process from the one that committed it — so this waits for
+    // that observation rather than assuming it already happened. The refusal
+    // before the commit is asserted above, so waiting here cannot hide a
+    // generation that admits control work too early.
+    await_until(|| standby_client.request("spawn") == ResponseOutcome::Ok);
 
     // Collection unblocks the parked worker of the still-open connection and
     // joins it before the registry records the retirement.

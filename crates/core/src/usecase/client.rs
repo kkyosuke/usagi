@@ -23,11 +23,11 @@ use crate::domain::terminal_launch::{
 };
 use crate::infrastructure::ipc::{
     Bootstrap, BuildIdentity, ClientHello, ClientId, ClientWorkspace, DaemonGeneration, Envelope,
-    EnvelopeKind, ErrorCode, GenerationRole, ProtocolError, ProtocolRange, ProtocolVersion,
-    ResponseOutcome, RetryMode, ServerHello, SideEffect, TERMINAL_CHECKPOINT_REVISION,
-    TERMINAL_WIRE_GENERATION, TerminalInputReplayMode, TerminalSnapshotMode,
-    WORKSPACE_FENCE_CAPABILITY, is_workspace_mismatch, read_json_frame, terminal_input_replay_mode,
-    terminal_snapshot_mode, write_json_frame,
+    EnvelopeKind, ErrorCode, GenerationRole, OWNER_GENERATION_ROUTING_CAPABILITY, ProtocolError,
+    ProtocolRange, ProtocolVersion, ResponseOutcome, RetryMode, ServerHello, SideEffect,
+    TERMINAL_CHECKPOINT_REVISION, TERMINAL_WIRE_GENERATION, TerminalInputReplayMode,
+    TerminalSnapshotMode, WORKSPACE_FENCE_CAPABILITY, is_workspace_mismatch, read_json_frame,
+    terminal_input_replay_mode, terminal_snapshot_mode, write_json_frame,
 };
 
 /// A daemon request understood by every presentation surface.
@@ -824,7 +824,11 @@ impl<S: Read + Write> IpcClient<S> {
                 // as legacy (it never parses the raw tail).
                 max_revision: TERMINAL_CHECKPOINT_REVISION,
             }],
-            capabilities: vec![],
+            // Advertised, not required: this is what *this* client can do, and
+            // it is the daemon that needs it — a rollover may only leave a
+            // draining generation behind while every connected client can
+            // still address it (#508).
+            capabilities: vec![OWNER_GENERATION_ROUTING_CAPABILITY.into()],
             required_capabilities,
             build,
             workspace: Some(workspace),
@@ -1816,6 +1820,15 @@ mod tests {
         // silently serve this client another workspace's state.
         let required = sent["required_capabilities"].as_array().unwrap();
         assert!(required.contains(&serde_json::json!(WORKSPACE_FENCE_CAPABILITY)));
+        // Owner-generation routing is advertised rather than required: it is the
+        // daemon that consults it before leaving a draining generation behind.
+        assert!(
+            sent["capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(OWNER_GENERATION_ROUTING_CAPABILITY))
+        );
+        assert!(!required.contains(&serde_json::json!(OWNER_GENERATION_ROUTING_CAPABILITY)));
 
         // An unbound connection names no workspace resource, so it does not
         // require the fence and stays usable against any daemon.

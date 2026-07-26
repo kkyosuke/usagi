@@ -396,6 +396,10 @@ pub fn server_protocol(
             usagi_core::infrastructure::ipc::TERMINAL_SCREEN_CHECKPOINT_CAPABILITY.into(),
             usagi_core::infrastructure::ipc::TERMINAL_INPUT_OPERATION_CAPABILITY.into(),
             usagi_core::infrastructure::ipc::WORKSPACE_FENCE_CAPABILITY.into(),
+            // A client that addresses terminals by their owner generation must
+            // see that this daemon serves them that way; the rollover gate reads
+            // the same advertisement from a successor's hello (#508).
+            usagi_core::infrastructure::ipc::OWNER_GENERATION_ROUTING_CAPABILITY.into(),
         ],
         build,
         limits: usagi_core::infrastructure::ipc::ProtocolLimits::default(),
