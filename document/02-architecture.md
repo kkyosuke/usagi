@@ -72,9 +72,12 @@ v2 ではこの 4 分割をクレートとして表現し、「TUI が daemon �
 │   │       ├── presentation/    # daemon サーバ入口（daemon verb と IPC request の dispatch・応答整形）
 │   │       │   └── ipc.rs       # handshake 後の IPC protocol handler
 │   │       ├── usecase/         # daemon 専用ロジック（lifecycle verb、terminal/runtime・orchestration）
-│   │       │   └── authority/   # cross-process generation authority（registry・handoff・admission）
+│   │       │   ├── authority/   # cross-process generation authority（registry・handoff・admission）
+│   │       │   └── resources/   # owner generation ごとの runtime shard と global resource allocator
 │   │       └── infrastructure/  # daemon 専用の外部接続（Unix socket transport）
+│   │           ├── child_identity.rs # spawn した child の OS process-start / process-group identity 観測
 │   │           ├── generation_registry.rs # generation registry document と current locator の実 IO adapter
+│   │           ├── resource_store.rs # owner shard と global allocator document の実 IO adapter
 │   │           └── unix_transport.rs # generation locator と peer credential を検証する Unix transport
 │   └── tui/              # usagi-tui: TUI 面
 │       └── src/
@@ -660,10 +663,12 @@ shell command は durable record、IPC event、通常 log に保存しない。g
 attach / detach / replay / verified exit / reclaim は既存 `TerminalRegistry` と #251 の reservation contract を
 使う。disconnect は attachment だけを外して PTY を生存させる。同じ durable record の identity unknown、orphan、
 ambiguous spawn は replacement spawn と slot release を block し、verified exit または `Gone` の reclaim だけが
-slot を解放する。一方、現行 generic Terminal Launch は producer `OperationId` を wire に持たず、daemon が request
-ごとに terminal / operation identity を新規発行する。spawn 後の response が失われて client が launch を再送すると
-別 record として二重 spawn し得るため、response-loss idempotency と cross-generation capacity は
-[#518](../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md) で追跡する。
+slot を解放する。generic Terminal Launch は producer `OperationId` を wire に持ち、daemon は durable record を
+その id と canonical intent digest で索引する。したがって spawn 後の response が失われて client が launch を再送
+しても、同じ `TerminalRef` が replay され、異なる intent は `idempotency_conflict` になる（正本は
+[4. IPC](04-ipc.md#generic-terminal-request)）。複数 generation にまたがる capacity と runtime state の authority は
+`usecase::resources`（owner shard と global allocator）が持ち、契約は
+[5. daemon](05-daemon.md#owner-generation-runtime-shard-と-global-resource-allocator) を正本とする。
 
 ### Agent orchestration の fence
 

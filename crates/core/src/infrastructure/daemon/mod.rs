@@ -278,13 +278,25 @@ impl<F: RecordFile> DaemonRecordStore<F> {
 
     /// Persist `record`, overwriting any existing record.
     ///
+    /// Registration is the other boundary a PID crosses into durable state (the
+    /// first is deserialization), so a record whose PID cannot name a process is
+    /// refused here rather than written for a later reader to act on.
+    ///
     /// # Errors
-    /// Returns the [`RecordFile`] write error.
+    /// Returns [`io::ErrorKind::InvalidInput`] when `record` names a PID outside
+    /// [`is_record_pid`](crate::domain::daemon::is_record_pid), or the
+    /// [`RecordFile`] write error.
     ///
     /// # Panics
     /// Panics only if serializing a `DaemonRecord` to JSON fails, which cannot
     /// happen for its scalar fields.
     pub fn save(&self, record: &DaemonRecord) -> io::Result<()> {
+        if !crate::domain::daemon::is_record_pid(record.pid) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                crate::domain::daemon::InvalidRecordPid(record.pid),
+            ));
+        }
         // Serializing a DaemonRecord's scalar fields cannot fail.
         let json = serde_json::to_string(record).expect("DaemonRecord serializes to JSON");
         self.file.write(&json)

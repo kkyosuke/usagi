@@ -8,7 +8,11 @@
 //! - **running**: asks the process to terminate, then waits until the owner has
 //!   retired its endpoint and cleared that exact record;
 //! - **stale**: acquires a scoped singleton fence, retires the stale endpoint,
-//!   then conditionally clears that exact leftover record;
+//!   then conditionally clears that exact leftover record. Both stale reasons
+//!   take this path — a vanished owner and a reused PID are equally proven gone,
+//!   and neither is signalled;
+//! - **unverified**: refuses with zero effect, because ownership is undecided
+//!   rather than disproved;
 //! - **not running**: reports there is nothing to stop.
 //!
 //! The store's file seam, probe, terminator, and stale cleanup transaction are injected, so this
@@ -112,7 +116,7 @@ pub fn stop<F: RecordFile, P: LivenessProbe, T: Terminator, K: Sleeper>(
             wait_for_owner_cleanup(store, probe, sleeper, record)?;
             Ok(format!("{describe}: daemon stopped (pid {pid})"))
         }
-        DaemonState::Stale => {
+        DaemonState::Stale(_) => {
             let record = record
                 .as_ref()
                 .expect("classify reports Stale only for a present record");
@@ -177,12 +181,12 @@ fn wait_for_owner_cleanup(
 mod tests {
     use super::{StaleCleanup, StaleDaemonCleanup, stop as stop_with_cleanup};
     use crate::test_support::{
-        FixedProbe, InMemoryRecordFile, NoopReady, NoopSleeper, RecordingTerminator,
+        FixedProbe, InMemoryRecordFile, NoopReady, NoopSleeper, ObservedAs, RecordingTerminator,
     };
     use crate::usecase::serve::DaemonRecordPort;
     use std::cell::Cell;
     use usagi_core::domain::AppInfo;
-    use usagi_core::domain::daemon::DaemonRecord;
+    use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
     use usagi_core::infrastructure::daemon::{
         DaemonRecordStore, LivenessProbe, RecordFile, Sleeper, Terminator,
     };
@@ -240,15 +244,13 @@ mod tests {
     struct ReplacingProbe<'a> {
         store: &'a DaemonRecordStore<InMemoryRecordFile>,
         replacement: DaemonRecord,
+        observation: DaemonProcessObservation,
     }
 
     impl LivenessProbe for ReplacingProbe<'_> {
-        fn observe(
-            &self,
-            _record: &DaemonRecord,
-        ) -> usagi_core::domain::daemon::DaemonProcessObservation {
+        fn observe(&self, _record: &DaemonRecord) -> DaemonProcessObservation {
             self.store.save(&self.replacement).unwrap();
-            usagi_core::domain::daemon::DaemonProcessObservation::Gone
+            self.observation
         }
     }
 
@@ -332,17 +334,6 @@ mod tests {
                 assert!(self.store.clear_if(self.expected).unwrap());
                 usagi_core::domain::daemon::DaemonProcessObservation::Gone
             }
-        }
-    }
-
-    struct UnknownProbe;
-
-    impl LivenessProbe for UnknownProbe {
-        fn observe(
-            &self,
-            _record: &DaemonRecord,
-        ) -> usagi_core::domain::daemon::DaemonProcessObservation {
-            usagi_core::domain::daemon::DaemonProcessObservation::Unknown
         }
     }
 
@@ -513,10 +504,93 @@ mod tests {
         let record = DaemonRecord::new(4321);
         store.save(&record).unwrap();
         let terminator = RecordingTerminator::default();
-        let error = stop(&store, &UnknownProbe, &terminator, &NoopSleeper, &info()).unwrap_err();
+        let error = stop(
+            &store,
+            &ObservedAs(DaemonProcessObservation::Unknown),
+            &terminator,
+            &NoopSleeper,
+            &info(),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("identity is unverified"));
         assert!(terminator.terminated().is_empty());
         assert_eq!(store.load().unwrap(), Some(record));
+    }
+
+    #[test]
+    fn a_reused_pid_is_reclaimed_without_signalling_its_new_occupant() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let record = DaemonRecord::identified(4321, "old-incarnation");
+        store.save(&record).unwrap();
+        let terminator = RecordingTerminator::default();
+
+        // Some unrelated process now holds pid 4321. The record is reclaimable
+        // because the owner is proven gone, so the reclaim runs to completion
+        // while the signal count stays zero.
+        assert_eq!(
+            stop(
+                &store,
+                &ObservedAs(DaemonProcessObservation::IdentityMismatch),
+                &terminator,
+                &NoopSleeper,
+                &info(),
+            )
+            .unwrap(),
+            "usagi v0.1.0: cleared stale daemon record"
+        );
+        assert!(terminator.terminated().is_empty());
+        assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[test]
+    fn a_reused_pid_whose_cleanup_fails_keeps_its_record_for_a_retry() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let record = DaemonRecord::identified(4321, "old-incarnation");
+        store.save(&record).unwrap();
+        let cleanup = FailOnceCleanup {
+            calls: Cell::new(0),
+            saw_expected: Cell::new(false),
+            cleared: Cell::new(false),
+        };
+
+        let error = stop_with_cleanup(
+            &store,
+            &ObservedAs(DaemonProcessObservation::IdentityMismatch),
+            &RecordingTerminator::default(),
+            &NoopSleeper,
+            &cleanup,
+            &info(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "endpoint cleanup failed");
+        assert_eq!(store.load().unwrap(), Some(record));
+    }
+
+    #[test]
+    fn a_reused_pid_racing_a_replacement_save_preserves_the_replacement() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let old = DaemonRecord::identified(4321, "old-incarnation");
+        let replacement = replacement_of(&old);
+        store.save(&old).unwrap();
+
+        // The reclaim decision is made before the lock; a replacement saved in
+        // that window must survive it, exactly as for a vanished owner.
+        let error = stop_with_cleanup(
+            &store,
+            &ReplacingProbe {
+                store: &store,
+                replacement: replacement.clone(),
+                observation: DaemonProcessObservation::IdentityMismatch,
+            },
+            &RecordingTerminator::default(),
+            &NoopSleeper,
+            &NoopReady,
+            &info(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(store.load().unwrap(), Some(replacement));
     }
 
     #[test]
@@ -555,6 +629,7 @@ mod tests {
             &ReplacingProbe {
                 store: &store,
                 replacement: replacement.clone(),
+                observation: DaemonProcessObservation::Gone,
             },
             &RecordingTerminator::default(),
             &NoopSleeper,

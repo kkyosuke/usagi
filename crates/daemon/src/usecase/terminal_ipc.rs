@@ -236,6 +236,26 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
                         "requested terminal scope did not match the resolved scope",
                     ));
                 }
+                // The producer's own launch identity, when the client carries one
+                // (#518). Keying the durable record on it is what makes a lost
+                // response, a reconnect, or a restart replay this terminal instead
+                // of spawning a second one for the same intent.
+                let digest = intent.canonical_digest();
+                if let Some(producer) = intent.launch_operation
+                    && let Some(recorded) = self.coordinator.launch_by_operation(&producer)
+                {
+                    if recorded.launch_digest.as_deref() != Some(digest.as_str()) {
+                        return Err(ProtocolError::new(
+                            ErrorCode::IdempotencyConflict,
+                            "launch operation id was accepted for a different intent",
+                        ));
+                    }
+                    return Ok(json!({
+                        "terminal": recorded.terminal,
+                        "launch_operation": producer,
+                        "replayed": true,
+                    }));
+                }
                 let terminal = TerminalRef {
                     daemon_generation: self.generation,
                     terminal_id: TerminalId::new(),
@@ -246,12 +266,13 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
                 let fence = CompletionFence {
                     workspace_id: terminal.workspace_id,
                     session_id: terminal.session_id,
-                    operation_id: OperationId::new(),
+                    operation_id: intent.launch_operation.unwrap_or_else(OperationId::new),
                     owner_daemon_generation: terminal.daemon_generation,
                     execution_attempt: 1,
                     lifecycle_attempt: 1,
                     expected_revision: 0,
                 };
+                let launch_operation = fence.operation_id;
                 let geometry = geometry(intent.geometry)?;
                 let mut resolver = ScopedProfileResolver {
                     profile: &mut self.resolver,
@@ -268,7 +289,13 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
                         &mut self.pty,
                     )
                     .map_err(map_error)?;
-                Ok(json!({"terminal": terminal}))
+                // The accepted response echoes the producer's own id, so a client
+                // that lost the first answer can resolve it without guessing.
+                Ok(json!({
+                    "terminal": terminal,
+                    "launch_operation": launch_operation,
+                    "replayed": false,
+                }))
             }
             (TerminalAction::Inventory, TerminalRequest::Inventory { scope }) => {
                 Ok(json!({"terminals": self.coordinator.inventory(&scope)}))
@@ -668,6 +695,7 @@ mod tests {
                             scope,
                         },
                         geometry: TerminalGeometry { cols: 80, rows: 24 },
+                        launch_operation: None,
                     },
                 },
             )["terminal"]
@@ -675,6 +703,213 @@ mod tests {
         )
         .unwrap();
         (runtime, terminal)
+    }
+
+    /// A runtime whose scope resolver admits exactly `scope`.
+    fn runtime_for(
+        scope: TerminalLaunchScope,
+    ) -> GenericTerminalRuntime<Resolver, Store, Pty, Scope> {
+        GenericTerminalRuntime::new(
+            DaemonGeneration::new(),
+            Resolver,
+            Store::default(),
+            Pty::default(),
+            Scope {
+                scope: scope.clone(),
+                working_directory: PathBuf::from("/available-worktree"),
+            },
+        )
+    }
+
+    fn launch_request(
+        scope: &TerminalLaunchScope,
+        operation: Option<OperationId>,
+        cols: u16,
+    ) -> TerminalRequest {
+        TerminalRequest::Launch {
+            intent: usagi_core::usecase::client::TerminalLaunchIntent {
+                request: TerminalLaunchRequest {
+                    profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                    scope: scope.clone(),
+                },
+                geometry: TerminalGeometry { cols, rows: 24 },
+                launch_operation: operation,
+            },
+        }
+    }
+
+    fn scope_of(session: Option<SessionId>) -> TerminalLaunchScope {
+        TerminalLaunchScope {
+            workspace_id: WorkspaceId::new(),
+            session_id: session,
+            worktree_id: WorktreeId::new(),
+        }
+    }
+
+    #[test]
+    fn a_repeated_producer_launch_replays_one_terminal_and_a_changed_intent_conflicts() {
+        let scope = scope_of(Some(SessionId::new()));
+        let mut runtime = runtime_for(scope.clone());
+        let producer = OperationId::new();
+        let connection = ConnectionId::new();
+        let client = ClientId::new();
+
+        let first = call(
+            &mut runtime,
+            connection,
+            client,
+            TerminalAction::Launch,
+            launch_request(&scope, Some(producer), 80),
+        );
+        assert_eq!(first["launch_operation"], json!(producer));
+        assert_eq!(first["replayed"], json!(false));
+
+        // The response was lost and the client reconnected: the identical intent
+        // answers with the same terminal instead of spawning a second one.
+        let replay = call(
+            &mut runtime,
+            ConnectionId::new(),
+            client,
+            TerminalAction::Launch,
+            launch_request(&scope, Some(producer), 80),
+        );
+        assert_eq!(replay["terminal"], first["terminal"]);
+        assert_eq!(replay["launch_operation"], json!(producer));
+        assert_eq!(replay["replayed"], json!(true));
+
+        let inventory = call(
+            &mut runtime,
+            connection,
+            client,
+            TerminalAction::Inventory,
+            TerminalRequest::Inventory {
+                scope: scope.clone(),
+            },
+        );
+        assert_eq!(
+            inventory["terminals"].as_array().unwrap().len(),
+            1,
+            "one producer operation owns exactly one terminal"
+        );
+
+        // The same id with another geometry is a different request.
+        let conflict = runtime
+            .request(
+                connection,
+                client,
+                RequestId::new(),
+                TerminalAction::Launch,
+                serde_json::to_value(launch_request(&scope, Some(producer), 120)).unwrap(),
+                SnapshotWire::RawTail,
+            )
+            .unwrap_err();
+        assert_eq!(conflict.code, ErrorCode::IdempotencyConflict);
+        let after = call(
+            &mut runtime,
+            connection,
+            client,
+            TerminalAction::Inventory,
+            TerminalRequest::Inventory { scope },
+        );
+        assert_eq!(
+            after["terminals"], inventory["terminals"],
+            "a conflict changes neither the terminal nor the inventory"
+        );
+    }
+
+    #[test]
+    fn a_launch_without_a_producer_id_keeps_its_server_issued_identity() {
+        let scope = scope_of(None);
+        let mut runtime = runtime_for(scope.clone());
+        let body = call(
+            &mut runtime,
+            ConnectionId::new(),
+            ClientId::new(),
+            TerminalAction::Launch,
+            launch_request(&scope, None, 80),
+        );
+        let issued: OperationId = serde_json::from_value(body["launch_operation"].clone()).unwrap();
+        assert_eq!(body["replayed"], json!(false));
+        // A peer that predates the producer id still gets one durable identity
+        // back, and it is the daemon's own.
+        assert_ne!(issued.as_str(), String::new());
+    }
+
+    #[test]
+    fn a_hydrated_record_without_a_canonical_digest_never_proves_a_replay() {
+        let scope = scope_of(Some(SessionId::new()));
+        let generation = DaemonGeneration::new();
+        let producer = OperationId::new();
+        let terminal = TerminalRef {
+            daemon_generation: generation,
+            terminal_id: TerminalId::new(),
+            workspace_id: scope.workspace_id,
+            session_id: scope.session_id,
+            worktree_id: scope.worktree_id,
+        };
+        let record = super::super::generic_terminal::DurableTerminalRecord {
+            terminal: terminal.clone(),
+            operation: CompletionFence {
+                workspace_id: terminal.workspace_id,
+                session_id: terminal.session_id,
+                operation_id: producer,
+                owner_daemon_generation: generation,
+                execution_attempt: 1,
+                lifecycle_attempt: 1,
+                expected_revision: 0,
+            },
+            launch: DurableTerminalLaunchSnapshot::new(
+                TerminalLaunchRequest {
+                    profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                    scope: scope.clone(),
+                },
+                1,
+                "/bin/sh",
+                vec![],
+                PathBuf::from("/"),
+                [],
+            )
+            .unwrap(),
+            // A restart moves an unterminated record to `identity_unknown`; that
+            // is the shape a hydrating owner actually holds.
+            state: super::super::terminal::TerminalRuntimeState::ReconcileRequired(
+                super::super::terminal::TerminalReconcileState::IdentityUnknown,
+            ),
+            process: None,
+            launch_digest: None,
+        };
+        let mut runtime = GenericTerminalRuntime::from_snapshot(
+            generation,
+            Resolver,
+            Store::default(),
+            Pty::default(),
+            Scope {
+                scope: scope.clone(),
+                working_directory: PathBuf::from("/available-worktree"),
+            },
+            super::super::generic_terminal::TerminalStoreSnapshot {
+                schema_version:
+                    super::super::generic_terminal::TerminalStoreSnapshot::SCHEMA_VERSION,
+                records: vec![record],
+            },
+        )
+        .unwrap();
+
+        let refusal = runtime
+            .request(
+                ConnectionId::new(),
+                ClientId::new(),
+                RequestId::new(),
+                TerminalAction::Launch,
+                serde_json::to_value(launch_request(&scope, Some(producer), 80)).unwrap(),
+                SnapshotWire::RawTail,
+            )
+            .unwrap_err();
+        assert_eq!(
+            refusal.code,
+            ErrorCode::IdempotencyConflict,
+            "a legacy record cannot prove the intents match, so it refuses instead of guessing"
+        );
     }
 
     #[test]
@@ -878,6 +1113,7 @@ mod tests {
                 },
             },
             geometry: TerminalGeometry { cols: 43, rows: 17 },
+            launch_operation: None,
         };
         let launched = call(
             &mut runtime,
@@ -1056,6 +1292,7 @@ mod tests {
                             },
                         },
                         geometry: TerminalGeometry { cols: 80, rows: 24 },
+                        launch_operation: None,
                     },
                 })
                 .unwrap(),
@@ -1094,6 +1331,7 @@ mod tests {
                                 scope: invalid_scope,
                             },
                             geometry: TerminalGeometry { cols: 80, rows: 24 },
+                            launch_operation: None,
                         },
                     })
                     .unwrap(),
@@ -1424,6 +1662,7 @@ mod tests {
                             scope,
                         },
                         geometry: TerminalGeometry { cols: 80, rows: 24 },
+                        launch_operation: None,
                     },
                 },
             )["terminal"]
@@ -1645,6 +1884,7 @@ mod tests {
                             scope: scope.clone(),
                         },
                         geometry: TerminalGeometry { cols: 80, rows: 24 },
+                        launch_operation: None,
                     },
                 },
             )["terminal"]

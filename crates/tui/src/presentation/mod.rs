@@ -177,6 +177,7 @@ pub trait AgentCommandPort: Send {
         _session: Option<SessionId>,
         _geometry: Geometry,
         _arguments: &str,
+        _operation: OperationId,
     ) -> Result<TerminalRef, String> {
         Err("terminal launch is unavailable".to_owned())
     }
@@ -361,12 +362,15 @@ pub trait PaneLaunchCommandPort: Send + Sync {
     /// # Errors
     ///
     /// Returns a presentation-safe launch failure.
+    /// `operation` is the controller's durable launch identity; it reaches the
+    /// daemon unchanged so a repeated delivery replays instead of spawning.
     fn launch_terminal(
         &self,
         workspace: WorkspaceId,
         session: Option<SessionId>,
         geometry: Geometry,
         arguments: &str,
+        operation: OperationId,
     ) -> Result<TerminalRef, String>;
 }
 
@@ -428,9 +432,10 @@ impl PaneLaunchCommandPort for SerializedPaneLaunchPort {
         session: Option<SessionId>,
         geometry: Geometry,
         arguments: &str,
+        operation: OperationId,
     ) -> Result<TerminalRef, String> {
         self.client()
-            .launch_terminal(workspace, session, geometry, arguments)
+            .launch_terminal(workspace, session, geometry, arguments, operation)
     }
 }
 
@@ -471,6 +476,7 @@ impl PaneLaunchCommandPort for UnavailablePaneLaunchPort {
         _session: Option<SessionId>,
         _geometry: Geometry,
         _arguments: &str,
+        _operation: OperationId,
     ) -> Result<TerminalRef, String> {
         Err("terminal launch is unavailable".to_owned())
     }
@@ -2960,7 +2966,7 @@ fn run_pane_launch(
             arguments,
         } => PaneLaunchOutcome::Terminal {
             operation,
-            result: port.launch_terminal(workspace, session, geometry, &arguments),
+            result: port.launch_terminal(workspace, session, geometry, &arguments, operation),
         },
     }
 }
@@ -6570,6 +6576,7 @@ mod tests {
             _session: Option<SessionId>,
             _geometry: Geometry,
             _arguments: &str,
+            _operation: OperationId,
         ) -> Result<TerminalRef, String> {
             self.gate("launch_terminal");
             Ok(self.terminal.clone())
@@ -6622,6 +6629,7 @@ mod tests {
             _session: Option<SessionId>,
             _geometry: Geometry,
             _arguments: &str,
+            _operation: OperationId,
         ) -> Result<TerminalRef, String> {
             Err("terminal launch is not scripted".to_owned())
         }
@@ -7204,7 +7212,13 @@ mod tests {
         );
         assert!(
             UnavailablePaneLaunchPort
-                .launch_terminal(workspace_id, None, terminal_geometry(20, 80), "new")
+                .launch_terminal(
+                    workspace_id,
+                    None,
+                    terminal_geometry(20, 80),
+                    "new",
+                    OperationId::new(),
+                )
                 .is_err()
         );
 
@@ -13950,6 +13964,7 @@ mod tests {
                 Some(SessionId::new()),
                 Geometry { cols: 80, rows: 24 },
                 "open",
+                OperationId::new(),
             )
             .unwrap_err(),
             "terminal launch is unavailable"
@@ -15511,6 +15526,7 @@ mod tests {
                 Some(SessionId::new()),
                 Geometry { cols: 80, rows: 24 },
                 "open",
+                OperationId::new(),
             ),
             Err("terminal launch is unavailable".to_owned())
         );
