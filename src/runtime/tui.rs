@@ -42,8 +42,8 @@ use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
     AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonMetrics, DaemonReply,
-    DaemonRequest, IpcClient, MetricsAction, PrAction, PrRequest, SessionAction, TerminalAction,
-    TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
+    DaemonRequest, MetricsAction, PrAction, PrRequest, SessionAction, TerminalAction,
+    TerminalGeometry, TerminalLaneBudget, TerminalLaunchIntent, TerminalRequest,
 };
 use usagi_core::usecase::env::EnvScope;
 use usagi_core::usecase::note::Target as StoreTarget;
@@ -92,6 +92,7 @@ use usagi_tui::usecase::terminal_input::{
 
 use crate::runtime::agent_tab_intent::FileAgentTabIntentStore;
 use crate::runtime::clipboard::PlatformClipboard;
+use crate::runtime::daemon::LaneClient;
 use crate::runtime::inventory_pump::TerminalInventoryPump;
 use crate::runtime::terminal_pump::TerminalPollPump;
 use crate::tui_input::{CrosstermSource, EventPump, NoBackend};
@@ -918,13 +919,17 @@ fn unix_stream_closed(stream: &std::os::unix::net::UnixStream) -> bool {
 }
 
 struct DaemonAgentCommandPort {
-    terminal: Option<IpcClient<std::os::unix::net::UnixStream>>,
+    /// The shared attach/input lane. It is deadline-armed like every other lane
+    /// ([`crate::runtime::daemon::LaneClient`]) and re-armed per request with
+    /// [`TerminalLaneBudget`], so a daemon that stops answering costs the render
+    /// thread one action budget instead of freezing the UI.
+    terminal: Option<LaneClient>,
     /// Dedicated connection for the stateless `Resize` action, carrying a
     /// per-request read deadline. Kept separate from `terminal` so a timed-out
     /// read only drops this lane and never disturbs the attach/input
     /// connection's subscription or exactly-once ledger. (`Resume` polling runs
     /// on the background `pump` instead of any render-thread connection.)
-    poll: Option<IpcClient<std::os::unix::net::UnixStream>>,
+    poll: Option<LaneClient>,
     /// Foreground poll pump. `Resume` fetches run on its own thread and
     /// connection at a bounded interactive cadence, so the render thread only
     /// drains ready output and never blocks on the daemon. Attach registers a
@@ -988,12 +993,6 @@ impl AgentTabIntentPort for UserAgentTabIntentPort {
 }
 
 impl DaemonAgentCommandPort {
-    /// Read deadline for one `Resume`/`Resize` request on the poll lane. Normal
-    /// polls answer in well under a millisecond; this only fires when the daemon
-    /// is momentarily unavailable (e.g. holding the agent lock during a
-    /// dispatch), so the render thread drops a stale frame instead of freezing.
-    const POLL_LANE_DEADLINE: Duration = Duration::from_millis(50);
-
     fn new(pump: TerminalPollPump) -> Self {
         Self {
             terminal: None,
@@ -1021,18 +1020,22 @@ impl DaemonAgentCommandPort {
     }
 
     /// Returns the persistent terminal connection, opening it on first use.
+    ///
+    /// Opening it may have to bootstrap (and cold-start) a daemon, so the
+    /// connection is established under the surface policy budget; each request
+    /// then re-arms the lane with its own, far smaller
+    /// [`TerminalLaneBudget`].
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
-    fn terminal_client(
-        &mut self,
-    ) -> Result<&mut IpcClient<std::os::unix::net::UnixStream>, TerminalError> {
+    fn terminal_client(&mut self) -> Result<&mut LaneClient, TerminalError> {
         if self.terminal.is_none() {
-            let client = crate::runtime::daemon::client(ClientPolicy::tui())
-                .map_err(|_| TerminalError::Unavailable)?;
+            let client =
+                crate::runtime::daemon::client(ClientPolicy::tui(), TerminalLaneBudget::CONNECT_MS)
+                    .map_err(|_| TerminalError::Unavailable)?;
             if let Some(cancelled) = self.terminal_watch_cancelled.take() {
                 cancelled.store(true, Ordering::Release);
             }
             if let Some(publisher) = &self.restore_connection
-                && let Ok(stream) = client.transport().try_clone()
+                && let Ok(stream) = crate::runtime::daemon::lane_socket(&client).try_clone()
             {
                 self.terminal_watch_cancelled = Some(publisher.watch(stream));
             }
@@ -1042,6 +1045,21 @@ impl DaemonAgentCommandPort {
             .terminal
             .as_mut()
             .expect("terminal client was just set"))
+    }
+
+    /// Returns the terminal lane with a fresh end-to-end budget armed for one
+    /// `action`. Arming happens per request rather than per connection because
+    /// the lane is persistent: it owns every pane's attachment and the
+    /// exactly-once input ledger, so it is never silently replaced the way a
+    /// reconnecting per-request client would be.
+    #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=an_unanswered_input_returns_within_the_lane_budget_and_advances_the_epoch
+    fn armed_terminal_client(
+        &mut self,
+        action: TerminalAction,
+    ) -> Result<&mut LaneClient, TerminalError> {
+        let client = self.terminal_client()?;
+        crate::runtime::daemon::rearm_lane(client, TerminalLaneBudget::for_action(action));
+        Ok(client)
     }
 
     /// Whether the connected daemon keeps the durable input operation ledger.
@@ -1059,10 +1077,12 @@ impl DaemonAgentCommandPort {
     /// success body.
     ///
     /// Only a **transport** failure drops the connection: the stream's position
-    /// is then unknown, so it cannot be reused. A fully received protocol error
-    /// means the daemon answered on a healthy socket — that request is finished,
-    /// and one pane's `resync_required` / `stale_target` must not revoke the
-    /// attachments every other pane holds on the same connection.
+    /// is then unknown, so it cannot be reused. That now includes an exceeded
+    /// [`TerminalLaneBudget`], which is exactly the same condition — a socket
+    /// that may hold a partial frame. A fully received protocol error means the
+    /// daemon answered on a healthy socket — that request is finished, and one
+    /// pane's `resync_required` / `stale_target` must not revoke the attachments
+    /// every other pane holds on the same connection.
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
     fn terminal_request(
         &mut self,
@@ -1071,7 +1091,7 @@ impl DaemonAgentCommandPort {
     ) -> Result<serde_json::Value, TerminalError> {
         let payload = serde_json::to_value(request).expect("terminal request is serializable");
         let reply = {
-            let client = self.terminal_client()?;
+            let client = self.armed_terminal_client(action)?;
             client.request(DaemonRequest::Terminal { action, payload })
         };
         match reply {
@@ -1157,21 +1177,19 @@ impl DaemonAgentCommandPort {
     /// and offset), so this lane never attaches, never carries an input
     /// subscription, and reports no `connection_epoch`.
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
-    fn poll_client(
-        &mut self,
-    ) -> Result<&mut IpcClient<std::os::unix::net::UnixStream>, TerminalError> {
+    fn poll_client(&mut self, action: TerminalAction) -> Result<&mut LaneClient, TerminalError> {
         if self.poll.is_none() {
-            let client = crate::runtime::daemon::client(ClientPolicy::tui())
-                .map_err(|_| TerminalError::Unavailable)?;
-            // Bound each read so a momentarily busy daemon cannot stall the
-            // render thread. A timed-out read leaves an unread frame on the
-            // socket, so `poll_request` drops the lane on any error.
-            let _ = client
-                .transport()
-                .set_read_timeout(Some(Self::POLL_LANE_DEADLINE));
-            self.poll = Some(client);
+            self.poll = Some(
+                crate::runtime::daemon::client(ClientPolicy::tui(), TerminalLaneBudget::CONNECT_MS)
+                    .map_err(|_| TerminalError::Unavailable)?,
+            );
         }
-        Ok(self.poll.as_mut().expect("poll client was just set"))
+        let client = self.poll.as_mut().expect("poll client was just set");
+        // Bound the whole request so a momentarily busy daemon cannot stall the
+        // render thread. A timed-out exchange leaves an unread frame on the
+        // socket, so `poll_request` drops the lane on any error.
+        crate::runtime::daemon::rearm_lane(client, TerminalLaneBudget::for_action(action));
+        Ok(client)
     }
 
     /// Sends one `Resume`/`Resize` request over the deadline-bounded poll lane.
@@ -1185,7 +1203,7 @@ impl DaemonAgentCommandPort {
     ) -> Result<serde_json::Value, TerminalError> {
         let payload = serde_json::to_value(request).expect("terminal request is serializable");
         let reply = {
-            let client = self.poll_client()?;
+            let client = self.poll_client(action)?;
             client.request(DaemonRequest::Terminal { action, payload })
         };
         match reply {
@@ -1746,7 +1764,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         let reply = {
             // Failure to establish a connection happens before this request is
             // written, so it remains a definite unavailable outcome.
-            let client = self.terminal_client()?;
+            let client = self.armed_terminal_client(TerminalAction::Input)?;
             client.request(DaemonRequest::Terminal {
                 action: TerminalAction::Input,
                 payload,
@@ -1765,11 +1783,17 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             // "not sent", "partly sent" or "applied but ACK lost". Never label
             // either path undelivered and never replay it blindly.
             Ok(DaemonReply::Accepted { .. }) => Err(TerminalError::InputEffectUnknown),
+            // A lane deadline overrun arrives here as a transport failure. It is
+            // deliberately *not* retried: the daemon may already have written
+            // the bytes to the PTY, so the keystroke's effect is unknown and the
+            // session resolves it with the read-only `InputOutcome` query
+            // instead of sending it again (#519).
             Err(
                 error @ (ClientError::Unavailable(_)
                 | ClientError::Lifecycle(_)
                 | ClientError::RolloverRequired(_)
-                | ClientError::BuildIdentityUnavailable),
+                | ClientError::BuildIdentityUnavailable
+                | ClientError::BootstrapContended),
             ) => {
                 if error.is_transport_failure() {
                     self.reset_terminal();
@@ -1867,7 +1891,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
 /// connection so every `Resume` fetch runs off the render thread.
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
 fn spawn_poll_pump() -> TerminalPollPump {
-    let mut client: Option<IpcClient<std::os::unix::net::UnixStream>> = None;
+    let mut client: Option<LaneClient> = None;
     TerminalPollPump::spawn(move |fence| {
         fetch_terminal_output(&mut client, &fence.terminal, fence.after_offset)
     })
@@ -1879,7 +1903,7 @@ fn spawn_poll_pump() -> TerminalPollPump {
 /// them (#527).
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=inventory_pump_unit_contract
 fn spawn_inventory_pump() -> TerminalInventoryPump {
-    let mut client: Option<IpcClient<std::os::unix::net::UnixStream>> = None;
+    let mut client: Option<LaneClient> = None;
     TerminalInventoryPump::spawn(move |job| fetch_scope_inventory(&mut client, &job.scope))
 }
 
@@ -1888,16 +1912,19 @@ fn spawn_inventory_pump() -> TerminalInventoryPump {
 /// Called only by the inventory pump thread, never the render thread.
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=inventory_pump_unit_contract
 fn fetch_scope_inventory(
-    client: &mut Option<IpcClient<std::os::unix::net::UnixStream>>,
+    client: &mut Option<LaneClient>,
     scope: &TerminalLaunchScope,
 ) -> Result<Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry>, ()> {
     if client.is_none() {
-        let opened = crate::runtime::daemon::client(ClientPolicy::tui()).map_err(|_| ())?;
-        let _ = opened
-            .transport()
-            .set_read_timeout(Some(DaemonAgentCommandPort::POLL_LANE_DEADLINE));
-        *client = Some(opened);
+        *client = Some(
+            crate::runtime::daemon::client(ClientPolicy::tui(), TerminalLaneBudget::CONNECT_MS)
+                .map_err(|_| ())?,
+        );
     }
+    crate::runtime::daemon::rearm_lane(
+        client.as_mut().expect("inventory connection was just set"),
+        TerminalLaneBudget::for_action(TerminalAction::Inventory),
+    );
     let payload = serde_json::to_value(TerminalRequest::Inventory {
         scope: scope.clone(),
     })
@@ -1925,18 +1952,20 @@ fn fetch_scope_inventory(
 /// by the background pump thread, never the render thread.
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
 fn fetch_terminal_output(
-    client: &mut Option<IpcClient<std::os::unix::net::UnixStream>>,
+    client: &mut Option<LaneClient>,
     terminal: &usagi_core::domain::id::TerminalRef,
     after_offset: u64,
 ) -> Result<Vec<TerminalChunk>, TerminalError> {
     if client.is_none() {
-        let opened = crate::runtime::daemon::client(ClientPolicy::tui())
-            .map_err(|_| TerminalError::Unavailable)?;
-        let _ = opened
-            .transport()
-            .set_read_timeout(Some(DaemonAgentCommandPort::POLL_LANE_DEADLINE));
-        *client = Some(opened);
+        *client = Some(
+            crate::runtime::daemon::client(ClientPolicy::tui(), TerminalLaneBudget::CONNECT_MS)
+                .map_err(|_| TerminalError::Unavailable)?,
+        );
     }
+    crate::runtime::daemon::rearm_lane(
+        client.as_mut().expect("poll connection was just set"),
+        TerminalLaneBudget::for_action(TerminalAction::Resume),
+    );
     let payload = serde_json::to_value(TerminalRequest::Resume {
         terminal: terminal.clone(),
         after_offset,
@@ -2387,6 +2416,9 @@ fn daemon_error_reason(error: ClientError) -> String {
         ClientError::BuildIdentityUnavailable => {
             "exact daemon build identity is unavailable; the current daemon remains running"
                 .to_owned()
+        }
+        ClientError::BootstrapContended => {
+            "another usagi process is establishing the daemon connection; retrying".to_owned()
         }
     }
 }
@@ -3180,7 +3212,14 @@ mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
-    use std::time::Duration;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use usagi_core::usecase::client::{ClientPolicy, TerminalLaneBudget};
+
+    /// The lane clock counts whole milliseconds, so a deadline armed for `n` ms
+    /// can elapse a fraction under `n`. Lane-budget assertions allow that much.
+    const CLOCK_GRANULARITY_MS: u64 = 2;
 
     use super::{
         DaemonAgentCommandPort, DaemonDecisionCommandPort, DaemonRestoreConnectionPort, EnvScope,
@@ -3319,7 +3358,7 @@ mod tests {
         )>,
         adjust: impl FnOnce(&mut usagi_core::infrastructure::ipc::ServerProtocol),
     ) -> (
-        usagi_core::usecase::client::IpcClient<std::os::unix::net::UnixStream>,
+        super::LaneClient,
         std::thread::JoinHandle<Vec<serde_json::Value>>,
     ) {
         use std::os::unix::net::UnixStream;
@@ -3384,8 +3423,14 @@ mod tests {
             }
             requests
         });
+        // The production lane transport, so every scripted exchange is bounded
+        // by the same deadline stream the TUI actually runs over.
         let client = IpcClient::connect(
-            client_stream,
+            crate::runtime::daemon::deadline_transport(
+                crate::runtime::daemon::SystemClock::new(),
+                client_stream,
+                ClientPolicy::tui().timeout_ms,
+            ),
             "input-ack-client".to_owned(),
             "input-ack-nonce".to_owned(),
             ClientPolicy::tui(),
@@ -3951,6 +3996,356 @@ mod tests {
         );
     }
 
+    /// A daemon that stops answering while keeping the socket open — the shape a
+    /// hung daemon has, as distinct from the EOF a restarted one leaves.
+    ///
+    /// It answers `replies` in order, then reads one more request and answers
+    /// nothing, holding the connection until the returned server is joined. The
+    /// client can therefore only be freed by its own armed lane deadline, which is
+    /// exactly what these fixtures need to prove.
+    #[cfg(unix)]
+    struct HungTerminalServer {
+        release: mpsc::Sender<()>,
+        handle: std::thread::JoinHandle<Vec<serde_json::Value>>,
+    }
+
+    #[cfg(unix)]
+    impl HungTerminalServer {
+        /// Releases the held connection and yields the request bodies it read.
+        fn join(self) -> Vec<serde_json::Value> {
+            let _ = self.release.send(());
+            self.handle.join().unwrap()
+        }
+    }
+
+    #[cfg(unix)]
+    fn hung_terminal_connection(
+        replies: Vec<(
+            usagi_core::infrastructure::ipc::ResponseOutcome,
+            serde_json::Value,
+        )>,
+    ) -> (super::LaneClient, HungTerminalServer) {
+        use std::os::unix::net::UnixStream;
+
+        use usagi_core::infrastructure::ipc::{
+            BuildIdentity, DaemonGeneration, Envelope, EnvelopeKind, read_json_frame,
+            write_json_frame,
+        };
+        use usagi_core::usecase::client::{ClientPolicy, IpcClient};
+        use usagi_daemon::presentation::ipc::{handshake, server_protocol};
+
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let build = BuildIdentity {
+            version: "test".to_owned(),
+            commit: "test".to_owned(),
+            target: "test".to_owned(),
+            artifact: "test-artifact".to_owned(),
+        };
+        let protocol = server_protocol(
+            DaemonGeneration("hung-lane-test".to_owned()),
+            "hung-lane-connection".to_owned(),
+            build.clone(),
+            usagi_core::domain::daemon::DaemonRecord::identified(2, "test-process"),
+            TEST_WORKSPACE_ROOT.to_owned(),
+        );
+        let (release, released) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let mut reader = server_stream.try_clone().unwrap();
+            let mut writer = server_stream;
+            let hello = handshake(&mut reader, &mut writer, &protocol)
+                .unwrap()
+                .unwrap();
+            let limit = hello.limits.max_frame_bytes as usize;
+            let mut requests = Vec::new();
+            let mut replies = replies.into_iter();
+            while let Ok(Some(request)) = read_json_frame::<Envelope>(&mut reader, limit) {
+                let EnvelopeKind::Request {
+                    request_id,
+                    body: request_body,
+                    ..
+                } = request.kind
+                else {
+                    panic!("terminal client sent a non-request envelope");
+                };
+                requests.push(request_body);
+                let Some((outcome, body)) = replies.next() else {
+                    // Read but never answered: the daemon may already have applied
+                    // this request's effect, so the client must treat it as unknown
+                    // rather than undelivered.
+                    break;
+                };
+                write_json_frame(
+                    &mut writer,
+                    &Envelope {
+                        protocol: hello.protocol,
+                        daemon_generation: hello.daemon_generation.clone(),
+                        kind: EnvelopeKind::Response {
+                            request_id,
+                            outcome,
+                            body,
+                        },
+                    },
+                    limit,
+                )
+                .unwrap();
+            }
+            // Hold the socket open so nothing but the client's own deadline can
+            // end its wait.
+            let _ = released.recv();
+            requests
+        });
+        let client = IpcClient::connect(
+            crate::runtime::daemon::deadline_transport(
+                crate::runtime::daemon::SystemClock::new(),
+                client_stream,
+                ClientPolicy::tui().timeout_ms,
+            ),
+            "hung-lane-client".to_owned(),
+            "hung-lane-nonce".to_owned(),
+            ClientPolicy::tui(),
+            build,
+            test_client_workspace(),
+        )
+        .unwrap();
+        (client, HungTerminalServer { release, handle })
+    }
+
+    #[cfg(unix)]
+    fn lane_port(client: super::LaneClient) -> DaemonAgentCommandPort {
+        DaemonAgentCommandPort {
+            terminal: Some(client),
+            poll: None,
+            pump: TerminalPollPump::spawn(|_| Ok(Vec::new())),
+            inventory: None,
+            terminal_epoch: 1,
+            attachments: Vec::new(),
+            restore_connection: None,
+            terminal_watch_cancelled: None,
+        }
+    }
+
+    /// A hung daemon costs one keystroke its lane budget, not the UI.
+    ///
+    /// The attach/input lane used to be a plain socket with no deadline at all,
+    /// so a daemon that read an `Input` and stopped answering froze the render
+    /// thread forever (#553). It is now re-armed per request with
+    /// [`TerminalLaneBudget`], and the overrun is handled as the ambiguity it is:
+    /// the daemon may already have written the bytes to the PTY, so the keystroke
+    /// is **never** replayed. It is resolved by the read-only `InputOutcome`
+    /// query against the durable operation ledger (#519), which is the only lane
+    /// action the retry table lets a fresh connection carry.
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_daemon_bounds_one_keystroke_and_resolves_it_by_ledger_query() {
+        use usagi_core::infrastructure::ipc::ResponseOutcome;
+        use usagi_tui::presentation::AgentCommandPort;
+        use usagi_tui::usecase::application::terminal_session::TerminalInputResolution;
+
+        let (client, hung) = hung_terminal_connection(Vec::new());
+        let mut port = lane_port(client);
+        let terminal = input_terminal_ref();
+        let operation = OperationId::new();
+
+        let started = Instant::now();
+        assert_eq!(
+            port.input_terminal(&terminal, subscription(7), 0, operation, b"ab"),
+            Err(TerminalError::InputEffectUnknown)
+        );
+        let elapsed = started.elapsed();
+
+        // The budget plus scheduler slack, and nowhere near the surface policy's
+        // two seconds that the lane would otherwise have inherited.
+        assert!(
+            elapsed >= Duration::from_millis(TerminalLaneBudget::INPUT_MS - CLOCK_GRANULARITY_MS),
+            "the deadline was actually reached: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(TerminalLaneBudget::INPUT_MS * 4),
+            "one keystroke stayed within its lane budget: {elapsed:?}"
+        );
+        assert!(elapsed < Duration::from_millis(ClientPolicy::tui().timeout_ms));
+
+        // The socket's position is unknown after the overrun, so the lane is
+        // dropped and the epoch advances: every pane re-attaches (#523).
+        assert!(port.terminal.is_none());
+        assert_eq!(port.terminal_connection_epoch(), Some(2));
+
+        // Exactly one write reached the daemon, and it was never repeated.
+        assert_eq!(terminal_actions(hung.join()), vec!["input#0@7"]);
+
+        // Resolution runs on the replacement connection, as a read-only query
+        // naming the same operation. The recorded final is projected exactly as
+        // the lost acknowledgement would have been.
+        let (replacement, ledger) = scripted_terminal_connection(
+            vec![(
+                ResponseOutcome::Ok,
+                json!({ "outcome": "final", "ack": "Written" }),
+            )],
+            |_| {},
+        );
+        port.terminal = Some(replacement);
+        assert_eq!(
+            port.terminal_input_outcome(&terminal, operation, 2),
+            Ok(TerminalInputResolution::Final(
+                TerminalInputOutcome::Written
+            ))
+        );
+        drop(port);
+        assert_eq!(
+            terminal_actions(ledger.join().unwrap()),
+            vec!["inputoutcome"]
+        );
+    }
+
+    /// A keystroke whose request never reached the daemon is still reported as
+    /// unknown, and still never resent.
+    ///
+    /// Once the write was attempted the client cannot distinguish "not sent" from
+    /// "applied but the acknowledgement was lost", so it fails closed. What it
+    /// must not do is decide the byte is undelivered and send it again: the
+    /// resolution is the read-only ledger query. Here the daemon closed before
+    /// reading anything, so the true effect count is zero — and the number of
+    /// requests it received stays zero, proving no replay was attempted.
+    #[cfg(unix)]
+    #[test]
+    fn a_request_that_never_reached_the_daemon_reports_unknown_without_resending() {
+        use usagi_tui::presentation::AgentCommandPort;
+
+        // Answers nothing and closes without reading: dispatch never happened.
+        let (client, server) = scripted_terminal_connection(Vec::new(), |_| {});
+        // The deadline transport still exposes the socket underneath, which is
+        // what the restore watcher clones to peek for EOF; arming the lane must
+        // not take that away.
+        assert!(
+            crate::runtime::daemon::lane_socket(&client)
+                .try_clone()
+                .is_ok()
+        );
+        let mut port = lane_port(client);
+
+        assert_eq!(
+            port.input_terminal(
+                &input_terminal_ref(),
+                subscription(7),
+                0,
+                OperationId::new(),
+                b"ab"
+            ),
+            Err(TerminalError::InputEffectUnknown)
+        );
+        assert!(port.terminal.is_none());
+        assert_eq!(port.terminal_connection_epoch(), Some(2));
+        drop(port);
+        assert!(terminal_actions(server.join().unwrap()).is_empty());
+    }
+
+    /// A lane deadline on one pane does not leave the others stranded: it drops
+    /// the shared lane, and every pane comes back through the epoch path (#523).
+    ///
+    /// This is the cross-pane half of the deadline contract. The peer pane's
+    /// subscription belongs to the epoch that just ended, so its next keystroke
+    /// is refused *locally* — nothing is written, so the effect is definitively
+    /// zero — and re-attaching on the fresh epoch restores both panes.
+    #[cfg(unix)]
+    #[test]
+    fn a_lane_deadline_on_one_pane_reattaches_every_pane_through_the_epoch() {
+        use usagi_core::infrastructure::ipc::ResponseOutcome;
+        use usagi_tui::presentation::AgentCommandPort;
+
+        let geometry = Geometry { cols: 20, rows: 3 };
+        let attach_body = |subscription: u64| {
+            json!({
+                "subscription": subscription,
+                "snapshot": {
+                    "revision": 1,
+                    "output_offset": 0,
+                    "base_offset": 0,
+                    "screen": screen_checkpoint_value(b"", 3, 20),
+                    "exited": null
+                }
+            })
+        };
+        let agent = input_terminal_ref();
+        let peer = peer_terminal_ref();
+
+        // Both panes attach, then the daemon hangs on the agent pane's attach.
+        let (client, hung) = hung_terminal_connection(vec![
+            (ResponseOutcome::Ok, attach_body(11)),
+            (ResponseOutcome::Ok, attach_body(12)),
+        ]);
+        let mut port = lane_port(client);
+        let agent_first = port.attach_terminal(&agent, geometry).unwrap();
+        let peer_first = port.attach_terminal(&peer, geometry).unwrap();
+        assert_eq!(agent_first.subscription, subscription(11));
+        assert_eq!(peer_first.subscription, subscription(12));
+
+        let started = Instant::now();
+        assert_eq!(
+            port.attach_terminal(&agent, geometry),
+            Err(TerminalError::Unavailable)
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed
+                >= Duration::from_millis(TerminalLaneBudget::SNAPSHOT_MS - CLOCK_GRANULARITY_MS),
+            "the snapshot budget was actually reached: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(TerminalLaneBudget::SNAPSHOT_MS * 4),
+            "a tab switch stayed within its lane budget: {elapsed:?}"
+        );
+        assert!(port.terminal.is_none());
+        assert_eq!(port.terminal_connection_epoch(), Some(2));
+        assert_eq!(
+            terminal_actions(hung.join()),
+            vec!["attach", "attach", "attach"]
+        );
+
+        // The peer pane never asked for anything, yet its subscription is from the
+        // epoch that ended. Its next keystroke is refused before a connection is
+        // even opened, so the byte is definitely unwritten rather than rejected as
+        // unattached.
+        assert_eq!(
+            port.input_terminal(&peer, peer_first.subscription, 0, OperationId::new(), b"x"),
+            Err(TerminalError::Unavailable)
+        );
+
+        // Re-attaching on the fresh epoch restores both panes on the replacement
+        // connection, and each one's input sequence starts from that connection's
+        // own ledger.
+        let (replacement, second) = scripted_terminal_connection(
+            vec![
+                (ResponseOutcome::Ok, attach_body(21)),
+                (ResponseOutcome::Ok, attach_body(22)),
+                (ResponseOutcome::Ok, json!({ "ack": "Written" })),
+                (ResponseOutcome::Ok, json!({ "ack": "Written" })),
+            ],
+            |_| {},
+        );
+        port.terminal = Some(replacement);
+        let agent_second = port.attach_terminal(&agent, geometry).unwrap();
+        let peer_second = port.attach_terminal(&peer, geometry).unwrap();
+        assert_eq!(
+            agent_second.subscription,
+            TerminalSubscription { id: 21, epoch: 2 }
+        );
+        assert_eq!(
+            peer_second.subscription,
+            TerminalSubscription { id: 22, epoch: 2 }
+        );
+        for (terminal, attached) in [(&agent, agent_second), (&peer, peer_second)] {
+            assert_eq!(
+                port.input_terminal(terminal, attached.subscription, 0, OperationId::new(), b"k"),
+                Ok(TerminalInputOutcome::Written)
+            );
+        }
+        drop(port);
+        assert_eq!(
+            terminal_actions(second.join().unwrap()),
+            vec!["attach", "attach", "input#0@21", "input#0@22"]
+        );
+    }
+
     /// A resize failure drops only its own lane: the shared attach / input
     /// connection, its epoch, and every pane's subscription survive it.
     #[cfg(unix)]
@@ -4251,7 +4646,11 @@ mod tests {
             // Close after consuming the request but before writing its ACK.
         });
         let client = IpcClient::connect(
-            client_stream,
+            crate::runtime::daemon::deadline_transport(
+                crate::runtime::daemon::SystemClock::new(),
+                client_stream,
+                ClientPolicy::tui().timeout_ms,
+            ),
             "input-ack-loss-client".to_owned(),
             "input-ack-loss-nonce".to_owned(),
             ClientPolicy::tui(),
@@ -4769,6 +5168,12 @@ mod tests {
         assert_eq!(
             daemon_error_reason(ClientError::Lifecycle("restart".into())),
             "restart"
+        );
+        // Contention is a "someone else is connecting" notice, not an outage:
+        // the surface says it is retrying rather than that the daemon is gone.
+        assert_eq!(
+            daemon_error_reason(ClientError::BootstrapContended),
+            "another usagi process is establishing the daemon connection; retrying"
         );
 
         let file = temporary.path().join("file");

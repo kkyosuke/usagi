@@ -318,6 +318,10 @@ fn write_client_error(
         ClientError::Lifecycle(message) => {
             writeln!(err, "{context} [unavailable]: {message}")
         }
+        ClientError::BootstrapContended => writeln!(
+            err,
+            "{context} [busy]: another usagi process is establishing the daemon connection; try again"
+        ),
     }
 }
 
@@ -421,5 +425,25 @@ mod tests {
             String::from_utf8(unknown).unwrap(),
             "replacement [unavailable]: exact daemon build identity is unavailable; the current daemon remains running\n"
         );
+    }
+
+    /// Bootstrap contention renders as busy-and-retryable, not as an absent
+    /// daemon: the daemon may be running and healthy while another process is
+    /// simply mid-connect.
+    #[test]
+    fn bootstrap_contention_renders_as_busy_rather_than_unavailable() {
+        let mut contended = Vec::new();
+        write_client_error(
+            &mut contended,
+            "session list",
+            &ClientError::BootstrapContended,
+        )
+        .unwrap();
+        let rendered = String::from_utf8(contended).unwrap();
+        assert_eq!(
+            rendered,
+            "session list [busy]: another usagi process is establishing the daemon connection; try again\n"
+        );
+        assert!(!rendered.contains("unavailable"));
     }
 }
