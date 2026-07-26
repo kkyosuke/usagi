@@ -1,13 +1,13 @@
 ---
 number: 552
 title: fix(core): extract が後続の http:// により先行する https:// PR URL を取りこぼす
-status: todo
+status: done
 priority: high
 labels: [review, v2, core, daemon, pullrequest, correctness]
 dependson: []
 related: [518]
 created_at: 2026-07-25T22:56:54.411474+00:00
-updated_at: 2026-07-25T22:56:54.411474+00:00
+updated_at: 2026-07-26T00:33:25.720048+00:00
 ---
 
 ## 問題・根拠（コード調査で確定）
