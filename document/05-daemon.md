@@ -16,6 +16,7 @@ managed session と terminal を所有する daemon の現在の契約である�
 - [PR refresh scheduler](#pr-refresh-scheduler)
 - [failure logging](#failure-logging)
 - [durable operation](#durable-operation)
+- [background worker の待ち方](#background-worker-の待ち方)
 - [session teardown worker](#session-teardown-worker)
 - [terminal ownership](#terminal-ownership)
 - [terminal launch environment](#terminal-launch-environment)
@@ -535,6 +536,32 @@ resume する**（[session teardown worker](#session-teardown-worker)）。
 interrupted reconciliation は session を `failed`、対応 operation を terminal `failed` に同じ durable state で記録する。元の `OperationId` の再送は保存済み safe failure を返し、effect を再試行しない。operator が filesystem / Git の状態を確認・修復した後は、明示 recovery または新しい `OperationId` による許可された lifecycle 操作を使う。
 
 旧 reducer が書いた `session.lifecycle = failed` と `operation.status = succeeded` の矛盾した snapshot は daemon open 時に保守的に補正する。failure stage、session name、operation の canonical semantic key が一致する operation だけを `failed` に戻して関連付け、成功 outcome や success hook は生成しない。この移行は effect の再実行可能性を推測しないため、自動 retry は行わず明示 recovery を待つ。
+
+## background worker の待ち方
+
+daemon が常駐して**何もしていない間のコスト**の正本はこの節である。
+
+worker は tick を「10 ms ごとに shutdown flag を見に行く」形では待たない。shutdown 要求は flag が権威で、
+edge は condvar が運ぶ。worker は「tick が経過する」か「shutdown が要求される」かのどちらか早い方まで park する
+ため、**idle の daemon の timer wakeup は各 worker の意図した tick の回数だけ**になり、shutdown への即応は
+tick の長さに依存しない。
+
+| worker | tick | tick が決めるもの |
+|---|---|---|
+| PR refresh | 250 ms | 検出直後の PR に title / state が付くまでの遅れ（[PR refresh scheduler](#pr-refresh-scheduler)） |
+| daemon custody | 1 s | 権威を失った daemon が自分を回収するまでの遅れ（[custody 喪失による self-shutdown](#custody-喪失による-self-shutdown)） |
+| session teardown | 1 s | finalization に失敗した teardown を再試行する間隔。受理は即座に worker を起こす（[session teardown worker](#session-teardown-worker)） |
+| decision maintenance | 250 ms | 期限切れの decision が `Pending` として読める残り時間 |
+| retention GC | 30 s | idle 時に age budget と最小可視 TTL を反映するまでの遅れ（[final retention と aggregate GC](#final-retention-と-aggregate-gc)） |
+
+IPC accept は tick を持たない。listener の readiness descriptor と、shutdown 要求を写した descriptor を
+`poll(2)` で同時に待つため、接続が来るまで wakeup は発生しない。lifecycle owner も同じく park し、
+**signal 由来の shutdown と accept worker の異常終了由来の shutdown の両方**で起きる。signal handler は
+flag を直接書くだけ（async-signal-safe だが condvar を notify できない）なので、delivery を要求へ変換する
+専用の待ち手が signal を blocking で受ける。
+
+decision maintenance の tick は、期限到来が無ければ **store lock も durable write も行わない**。判定は
+atomically replaced な document の lock-free read で行い、実際に期限切れがあるときだけ lock を取って書く。
 
 ## session teardown worker
 

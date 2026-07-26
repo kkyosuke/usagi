@@ -582,6 +582,16 @@ impl SecureUnixListener {
         self.cleanup.clone()
     }
 
+    /// The listening descriptor, so a caller can wait on it with `poll(2)`
+    /// instead of retrying a non-blocking accept on a timer.
+    ///
+    /// The descriptor is only for readiness waiting; accepting still goes through
+    /// [`accept`](Self::accept), which keeps the peer-credential check.
+    #[must_use]
+    pub fn readiness_fd(&self) -> std::os::fd::RawFd {
+        self.listener.as_raw_fd()
+    }
+
     /// Accept exactly one already-authenticated peer. `WouldBlock` is passed to
     /// the event loop; credential failures close before a protocol byte is read.
     ///

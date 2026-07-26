@@ -28,6 +28,7 @@ pub mod runtime;
 pub mod serve;
 pub mod session_runtime;
 pub mod session_teardown;
+pub mod shutdown;
 pub mod start;
 pub mod status;
 pub mod stop;

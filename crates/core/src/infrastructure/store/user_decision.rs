@@ -74,12 +74,23 @@ impl UserDecisionStore {
     /// no delivery event: an answer must never be invented for a timed-out
     /// caller.
     pub fn expire_due(&self, now: DateTime<Utc>) -> Result<Vec<UserDecisionId>> {
+        // Nothing due is the overwhelmingly common case for a maintenance tick.
+        // Deciding that from a lock-free read keeps an idle daemon from taking
+        // the store lock and fsyncing a document it would not change. The read is
+        // consistent because every write replaces the file atomically, and the
+        // authoritative decision is still made under the lock below.
+        if !self
+            .load()?
+            .decisions
+            .iter()
+            .any(|decision| Self::is_due(decision, now))
+        {
+            return Ok(Vec::new());
+        }
         self.mutate(|state| {
             let mut expired = Vec::new();
             for decision in &mut state.decisions {
-                if decision.status == UserDecisionStatus::Pending
-                    && decision.expires_at.is_some_and(|deadline| deadline <= now)
-                {
+                if Self::is_due(decision, now) {
                     decision.status = UserDecisionStatus::Expired;
                     decision.resolved_at = Some(now);
                     expired.push(decision.decision_id);
@@ -205,6 +216,10 @@ impl UserDecisionStore {
             item.resolved_at = Some(now);
             Ok(item.clone())
         })
+    }
+    fn is_due(decision: &UserDecision, now: DateTime<Utc>) -> bool {
+        decision.status == UserDecisionStatus::Pending
+            && decision.expires_at.is_some_and(|deadline| deadline <= now)
     }
     fn load(&self) -> Result<State> {
         Ok(json_file::read(&self.path())?.unwrap_or_default())
@@ -336,6 +351,28 @@ mod tests {
 
         assert_eq!(store.consume_events().unwrap(), Ok(1));
         assert_eq!(store.consume_events().unwrap(), Ok(0));
+    }
+
+    #[test]
+    fn an_expiry_sweep_with_nothing_due_performs_no_write() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        // With no decisions at all the sweep must not even create the document,
+        // so an idle daemon's maintenance tick costs one read and no fsync.
+        assert!(store.expire_due(Utc::now()).unwrap().is_empty());
+        assert!(!store.path().exists());
+
+        // A decision that is not yet due must not be rewritten either. An atomic
+        // replacement always lands on a new inode, so the inode is what proves no
+        // write happened rather than merely no visible change.
+        let mut decision = item();
+        decision.expires_at = Some(Utc::now() + chrono::Duration::seconds(60));
+        store.create(decision).unwrap().unwrap();
+        let before = std::fs::metadata(store.path()).unwrap().ino();
+        assert!(store.expire_due(Utc::now()).unwrap().is_empty());
+        assert_eq!(std::fs::metadata(store.path()).unwrap().ino(), before);
     }
 
     #[test]
