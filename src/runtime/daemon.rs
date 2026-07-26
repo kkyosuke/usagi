@@ -70,6 +70,9 @@ use usagi_daemon::usecase::orchestration::AdapterRegistry;
 use usagi_daemon::usecase::pr_inventory::{
     GhProcessPort, OutputPrProjector, RefreshClock, RefreshWorker,
 };
+use usagi_daemon::usecase::pr_projection::{
+    PrProjection, PrProjectionQueue, pr_projection_counters,
+};
 use usagi_daemon::usecase::runtime::{
     OutputJournal, ProvisionContext, PtySpawner, RuntimeStore, RuntimeStoreSnapshot,
     SandboxLauncher, SpawnProvision, TerminateReapError,
@@ -1370,6 +1373,10 @@ fn spawn_ipc_server(
     let pr_inventory = Arc::new(Mutex::new(OutputPrProjector::new(PrInventoryStore::new(
         data_dir.join("daemon"),
     ))));
+    // Deferred PR detection. The observers submit committed bytes here after
+    // releasing the runtime lock, so no scan and no durable write happens inside
+    // it (#555).
+    let projection = Arc::new(PrProjectionQueue::new());
     let pipeline_metrics = Arc::new(TerminalPipelineMetrics::default());
     // One daemon-wide aggregate retention budget for exited terminal and Agent
     // finals (#526). Both owners reserve from it before spawning and commit
@@ -1400,11 +1407,7 @@ fn spawn_ipc_server(
         Arc::clone(&user_environment),
         retention.clone(),
     )?;
-    start_terminal_observer(
-        Arc::clone(&terminal),
-        observations,
-        Arc::clone(&pr_inventory),
-    )?;
+    start_terminal_observer(Arc::clone(&terminal), observations, Arc::clone(&projection))?;
     let (agent_pty, agent_observations) =
         AgentPty::new(terminal_environment(), Arc::clone(&pipeline_metrics));
     let mcp_command = std::env::current_exe()?;
@@ -1428,9 +1431,10 @@ fn spawn_ipc_server(
     start_agent_observer(
         Arc::clone(&agent),
         agent_observations,
-        Arc::clone(&pr_inventory),
+        Arc::clone(&projection),
         Arc::clone(&supervisor),
     )?;
+    start_pr_projection_worker(Arc::clone(&pr_inventory), Arc::clone(&projection))?;
     let decisions = Arc::new(UserDecisionStore::new(data_dir.join("daemon")));
     consume_user_decision_events(&decisions)
         .map_err(|error| std::io::Error::other(error.message))?;
@@ -1457,6 +1461,7 @@ fn spawn_ipc_server(
         agent,
         retention,
         pr_inventory,
+        projection,
         decisions,
         Arc::new(Mutex::new(MetricsBroker::default())),
         Arc::new(Mutex::new(ProcessResourceSampler { previous: None })),
@@ -1864,30 +1869,42 @@ fn open_agent_runtime(
 fn start_agent_observer(
     agent: SharedAgentRuntime,
     observations: Receiver<AgentPtyObservation>,
-    pr_inventory: SharedPrInventory,
+    projection: Arc<PrProjectionQueue>,
     supervisor: SharedSupervisorRuntime,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("usagi-agent-observer".to_string())
         .spawn(move || {
             while let Ok(observation) = observations.recv() {
-                let Ok(mut agent) = agent.lock() else {
-                    break;
-                };
                 match observation {
                     AgentPtyObservation::Output(reference, bytes) => {
-                        if agent.output(&reference, bytes.clone()).is_ok()
-                            && let Ok(mut projector) = pr_inventory.lock()
-                        {
-                            let _ = projector.observe_committed(
+                        // The runtime lock covers journaling this chunk and
+                        // nothing else. PR detection is submitted afterwards, so
+                        // the lock is never held for a scan or for durable IO.
+                        let committed = {
+                            let Ok(mut agent) = agent.lock() else {
+                                break;
+                            };
+                            agent.output(&reference, bytes.clone()).is_ok()
+                        };
+                        if committed {
+                            projection.submit_output(
                                 reference.terminal_id,
                                 reference.session_id,
-                                &bytes,
+                                bytes,
                             );
                         }
                     }
                     AgentPtyObservation::Exited(reference, status) => {
-                        let _ = agent.exit(&reference, status);
+                        {
+                            let Ok(mut agent) = agent.lock() else {
+                                break;
+                            };
+                            let _ = agent.exit(&reference, status);
+                        }
+                        // A candidate the output never terminated is only
+                        // creditable once nothing more can arrive for it.
+                        projection.submit_closed(reference.terminal_id, reference.session_id);
                         if let Ok(runtime) = supervisor.lock()
                             && let Err(error) =
                                 runtime.tick_all(chrono::Utc::now(), &mut DeferredDecisionWaker)
@@ -1896,6 +1913,40 @@ fn start_agent_observer(
                                 "supervisor completion reconciliation deferred: {error}"
                             ));
                         }
+                    }
+                }
+            }
+        })
+        .map(|_| ())
+}
+
+/// Starts the only production PR projection worker.
+///
+/// It owns every scan and every durable inventory write that PTY output causes.
+/// The queue's `recv` parks on a condvar and returns `None` once the queue is
+/// closed and drained, so this thread has no timer and no polling.
+fn start_pr_projection_worker(
+    pr_inventory: SharedPrInventory,
+    projection: Arc<PrProjectionQueue>,
+) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("usagi-pr-projection".to_string())
+        .spawn(move || {
+            while let Some(item) = projection.recv() {
+                let Ok(mut projector) = pr_inventory.lock() else {
+                    break;
+                };
+                match item {
+                    PrProjection::Output {
+                        terminal,
+                        session,
+                        bytes,
+                    } => {
+                        let _ = projector.observe_committed(terminal, session, &bytes);
+                    }
+                    PrProjection::Gap { terminal } => projector.mark_gap(terminal),
+                    PrProjection::Closed { terminal, session } => {
+                        let _ = projector.release_terminal(terminal, session);
                     }
                 }
             }
@@ -1959,7 +2010,7 @@ fn new_terminal_runtime(
 fn start_terminal_observer<S, Q>(
     terminal: Arc<Mutex<GenericTerminalRuntime<TrustedLoginShell, S, DaemonPty, Q>>>,
     observations: Receiver<PtyObservation>,
-    pr_inventory: SharedPrInventory,
+    projection: Arc<PrProjectionQueue>,
 ) -> std::io::Result<()>
 where
     S: TerminalStore + Send + 'static,
@@ -1969,23 +2020,32 @@ where
         .name("usagi-terminal-observer".to_string())
         .spawn(move || {
             while let Ok(observation) = observations.recv() {
-                let Ok(mut terminal) = terminal.lock() else {
-                    break;
-                };
                 match observation {
                     PtyObservation::Output(reference, bytes) => {
-                        if terminal.output(&reference, bytes.clone()).is_ok()
-                            && let Ok(mut projector) = pr_inventory.lock()
-                        {
-                            let _ = projector.observe_committed(
+                        // As in the Agent observer: the lock covers journaling
+                        // only, and PR detection happens after it is released.
+                        let committed = {
+                            let Ok(mut terminal) = terminal.lock() else {
+                                break;
+                            };
+                            terminal.output(&reference, bytes.clone()).is_ok()
+                        };
+                        if committed {
+                            projection.submit_output(
                                 reference.terminal_id,
                                 reference.session_id,
-                                &bytes,
+                                bytes,
                             );
                         }
                     }
                     PtyObservation::Exited(reference, status) => {
-                        let _ = terminal.exit(&reference, status);
+                        {
+                            let Ok(mut terminal) = terminal.lock() else {
+                                break;
+                            };
+                            let _ = terminal.exit(&reference, status);
+                        }
+                        projection.submit_closed(reference.terminal_id, reference.session_id);
                     }
                 }
             }
@@ -2003,6 +2063,7 @@ fn start_ipc_accept_loop(
     agent: SharedAgentRuntime,
     retention: usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention,
     pr_inventory: SharedPrInventory,
+    projection: Arc<PrProjectionQueue>,
     decisions: Arc<UserDecisionStore>,
     metrics: SharedMetricsBroker,
     process_metrics: SharedProcessResourceSampler,
@@ -2016,6 +2077,10 @@ fn start_ipc_accept_loop(
             let _exit = ShutdownOnIpcWorkerExit {
                 shutdown: Arc::clone(&shutdown),
             };
+            // Closing the projection queue is what retires its worker: `recv`
+            // returns `None` once the queue is closed and drained, so the thread
+            // needs no shutdown flag of its own and never polls one.
+            let _projection = ClosePrProjectionOnExit { projection };
             // One workspace-global visibility authority for exited terminal
             // tombstones (#525), shared by every client connection so multiple
             // TUIs converge on the same Observed / Dismissed state.
@@ -2096,6 +2161,18 @@ fn start_ipc_accept_loop(
             }
             listener
         })
+}
+
+/// Retires the PR projection worker whenever the accept worker exits, including
+/// on an unwind, so no thread is left parked on a queue nothing will feed.
+struct ClosePrProjectionOnExit {
+    projection: Arc<PrProjectionQueue>,
+}
+
+impl Drop for ClosePrProjectionOnExit {
+    fn drop(&mut self) {
+        self.projection.close();
+    }
 }
 
 /// Wakes the lifecycle owner whenever the accept worker unwinds or exits.
@@ -3253,6 +3330,7 @@ fn dispatch_metrics(
                     })?
                     .snapshot();
                 let retention = output_pipeline_counters();
+                let projection_counters = pr_projection_counters();
                 let sampled_at_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |duration| {
@@ -3267,6 +3345,9 @@ fn dispatch_metrics(
                     terminal_backpressured_bytes: pipeline_metrics
                         .backpressured_bytes
                         .load(Ordering::Relaxed),
+                    pr_projection_dropped_bytes: projection_counters.dropped_bytes,
+                    pr_projection_coalesced_bytes: projection_counters.coalesced_bytes,
+                    pr_projection_gaps: projection_counters.gaps,
                 }))
             }
         }
@@ -8561,12 +8642,14 @@ mod tests {
                 working_directory: directory.path().to_path_buf(),
             },
         )));
-        start_terminal_observer(
-            Arc::clone(&runtime),
-            observations,
+        let projection = Arc::new(PrProjectionQueue::new());
+        start_terminal_observer(Arc::clone(&runtime), observations, Arc::clone(&projection))
+            .unwrap();
+        start_pr_projection_worker(
             Arc::new(Mutex::new(OutputPrProjector::new(PrInventoryStore::new(
                 directory.path(),
             )))),
+            Arc::clone(&projection),
         )
         .unwrap();
         let connection = ConnectionId::new();

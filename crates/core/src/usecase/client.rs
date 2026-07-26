@@ -283,6 +283,16 @@ pub struct DaemonMetrics {
     /// PTY output bytes whose reader had to wait for bounded queue capacity.
     #[serde(default)]
     pub terminal_backpressured_bytes: u64,
+    /// Committed PTY output never scanned for PRs because the deferred
+    /// projection queue was full.
+    #[serde(default)]
+    pub pr_projection_dropped_bytes: u64,
+    /// Committed PTY output merged into an already queued projection chunk.
+    #[serde(default)]
+    pub pr_projection_coalesced_bytes: u64,
+    /// Discontinuities recorded so a PR scan never joins across dropped bytes.
+    #[serde(default)]
+    pub pr_projection_gaps: u64,
 }
 
 /// Product-neutral Agent launch intent sent by a TUI client.

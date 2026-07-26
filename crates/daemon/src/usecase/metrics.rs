@@ -24,6 +24,9 @@ pub struct MetricsSample {
     pub terminal_dropped_bytes: u64,
     pub terminal_coalesced_bytes: u64,
     pub terminal_backpressured_bytes: u64,
+    pub pr_projection_dropped_bytes: u64,
+    pub pr_projection_coalesced_bytes: u64,
+    pub pr_projection_gaps: u64,
 }
 
 /// The receiving side of one bounded metrics subscription.
@@ -95,6 +98,9 @@ impl MetricsBroker {
             terminal_dropped_bytes: self.latest.terminal_dropped_bytes,
             terminal_coalesced_bytes: self.latest.terminal_coalesced_bytes,
             terminal_backpressured_bytes: self.latest.terminal_backpressured_bytes,
+            pr_projection_dropped_bytes: self.latest.pr_projection_dropped_bytes,
+            pr_projection_coalesced_bytes: self.latest.pr_projection_coalesced_bytes,
+            pr_projection_gaps: self.latest.pr_projection_gaps,
         }
     }
 
@@ -128,6 +134,9 @@ mod tests {
             terminal_dropped_bytes: 3,
             terminal_coalesced_bytes: 5,
             terminal_backpressured_bytes: 7,
+            pr_projection_dropped_bytes: 0,
+            pr_projection_coalesced_bytes: 0,
+            pr_projection_gaps: 0,
         }
     }
 
