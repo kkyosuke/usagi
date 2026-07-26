@@ -1,13 +1,13 @@
 ---
 number: 557
 title: perf(daemon): background worker の idle wakeup と無条件 fsync を削る
-status: in-progress
+status: done
 priority: medium
 labels: [review, v2, daemon, runtime, performance]
 dependson: []
 related: [518, 555]
 created_at: 2026-07-25T23:00:31.152370+00:00
-updated_at: 2026-07-26T06:26:28.346217+00:00
+updated_at: 2026-07-26T12:35:26.864205+00:00
 ---
 
 ## 問題・根拠（コード調査で確定）
