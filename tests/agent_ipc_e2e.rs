@@ -6,6 +6,7 @@
 
 #![cfg(unix)]
 
+use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -990,4 +991,169 @@ fn root_ipc_cold_restart_projects_interrupted_history_and_resumes_one_exact_tab(
             .all(|tab| tab.continuation != selected.continuation),
         "{after:?}"
     );
+}
+
+/// A planned `daemon stop` / `daemon restart` must not destroy a live PTY, and
+/// an explicit `--force` must still be able to.
+///
+/// This drives the shipping binary end to end: a real daemon process owning a
+/// real generic-terminal child, and the same `usagi daemon …` verbs an operator
+/// runs. The refusal has to be observable there, not only in the usecase.
+#[test]
+fn root_planned_stop_and_restart_refuse_while_a_terminal_is_live() {
+    let _serial = DAEMON_START_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let repo = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let count = home.path().join("shell-spawn-count");
+    let shell = bin.join("fixture-shell");
+    write_shell(&shell, &count);
+    let _daemon = start_daemon(repo.path(), home.path(), &bin, Some(&shell));
+    let data_dir = channel_data_dir(home.path());
+    let mut client = client(&data_dir);
+    let (workspace, session, worktree) = available_scope(&mut client);
+
+    let DaemonReply::Ok(launched) = client
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Launch,
+            payload: serde_json::to_value(TerminalRequest::Launch {
+                intent: TerminalLaunchIntent {
+                    request: TerminalLaunchRequest {
+                        profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                        scope: TerminalLaunchScope {
+                            workspace_id: workspace,
+                            session_id: Some(session),
+                            worktree_id: worktree,
+                        },
+                    },
+                    geometry: TerminalGeometry { cols: 80, rows: 24 },
+                    launch_operation: None,
+                },
+            })
+            .unwrap(),
+        })
+        .expect("the fixture login shell launches")
+    else {
+        panic!("generic terminal launch is synchronous");
+    };
+    let terminal: TerminalRef = serde_json::from_value(launched["terminal"].clone()).unwrap();
+    let owner_pid = daemon_pid(&data_dir);
+    let child_pid = live_terminal_pid(&data_dir);
+
+    let lifecycle = |args: &[&str]| {
+        let mut command = usagi_command(
+            home.path(),
+            Channel::Local,
+            repo.path(),
+            &args.iter().map(OsStr::new).collect::<Vec<_>>(),
+        );
+        command.output().expect("the shipping binary runs")
+    };
+
+    // Both planned verbs refuse, name what they saved, and name the missing
+    // prerequisite that would otherwise have preserved it.
+    for args in [&["daemon", "stop"][..], &["daemon", "restart"][..]] {
+        let refused = lifecycle(args);
+        let message = String::from_utf8_lossy(&refused.stderr).into_owned()
+            + &String::from_utf8_lossy(&refused.stdout);
+        assert!(!refused.status.success(), "{args:?} was not refused");
+        assert!(
+            message.contains("1 generic terminal(s)"),
+            "{args:?}: {message}"
+        );
+        assert!(message.contains("--force"), "{args:?}: {message}");
+    }
+    assert!(
+        message_free_of_effect(&data_dir, owner_pid, child_pid),
+        "a refused transition changed the daemon or its child"
+    );
+    // The terminal is not merely alive: it is still the same owned runtime, so a
+    // client can keep using the exact ref it already holds.
+    assert_eq!(live_terminal_ref(&data_dir), terminal);
+
+    // Giving the runtime up explicitly is what actually stops the daemon: the
+    // owner clears its exact lifecycle record only after retiring its endpoint.
+    let forced = lifecycle(&["daemon", "stop", "--force"]);
+    assert!(
+        forced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&forced.stderr)
+    );
+    assert!(
+        !data_dir.join("daemon/daemon.json").exists(),
+        "the forced stop left the lifecycle record behind"
+    );
+    wait_for_dead(child_pid);
+}
+
+/// The exact ref of the single live generic terminal.
+fn live_terminal_ref(data_dir: &Path) -> TerminalRef {
+    live_terminal(data_dir).0
+}
+
+/// The OS pid of the single live generic terminal's child.
+fn live_terminal_pid(data_dir: &Path) -> u64 {
+    live_terminal(data_dir).1
+}
+
+fn live_terminal(data_dir: &Path) -> (TerminalRef, u64) {
+    let path = data_dir.join("daemon/terminals.json");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last = String::new();
+    loop {
+        last = fs::read_to_string(&path).unwrap_or(last);
+        let found = serde_json::from_str::<serde_json::Value>(&last)
+            .ok()
+            .and_then(|snapshot| snapshot["records"].as_array().cloned())
+            .and_then(|records| {
+                let record = records
+                    .iter()
+                    .find(|record| record["state"] == "running")?
+                    .clone();
+                let terminal = serde_json::from_value(record["terminal"].clone()).ok()?;
+                Some((terminal, record["process"]["pid"].as_u64()?))
+            });
+        if let Some(found) = found {
+            return found;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no live generic terminal was persisted: {last}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn daemon_pid(data_dir: &Path) -> u64 {
+    let record = fs::read_to_string(data_dir.join("daemon/daemon.json")).unwrap();
+    serde_json::from_str::<serde_json::Value>(&record).unwrap()["pid"]
+        .as_u64()
+        .unwrap()
+}
+
+/// Whether the refused transition left the owner and its child exactly as they
+/// were.
+fn message_free_of_effect(data_dir: &Path, owner: u64, child: u64) -> bool {
+    alive(owner) && alive(child) && daemon_pid(data_dir) == owner
+}
+
+fn alive(pid: u64) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 only probes existence and permission.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Wait for a process this test never parented, so no zombie can be mistaken
+/// for a survivor.
+fn wait_for_dead(pid: u64) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive(pid) {
+        assert!(Instant::now() < deadline, "process {pid} did not exit");
+        thread::sleep(Duration::from_millis(20));
+    }
 }

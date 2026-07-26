@@ -10,6 +10,7 @@ managed session と terminal を所有する daemon の現在の契約である�
 - [authority と lifecycle](#authority-と-lifecycle)
 - [session tree と ignore rules](#session-tree-と-ignore-rules)
 - [daemon process lifecycle](#daemon-process-lifecycle)
+- [planned replacement](#planned-replacement)
 - [launchd supervision](#launchd-supervision)
 - [daemon data directory](#daemon-data-directory)
 - [PR 検出の投影](#pr-検出の投影)
@@ -96,19 +97,11 @@ effect-free であり、production / local は cross-process standby / admission
 unknown identity、`build.artifact.v1` capability の無い old daemon、read / verification failure も old daemon を維持した
 typed refusal になる。
 
-したがって TUI の終了や同 build client の再接続だけでは daemon-owned Agent PTY は失われない。一方、明示的な cold
-`daemon restart` は旧 owner process を終了するため、その process が持つ PTY master と
-live Agent / generic Terminal を継続できない。fresh daemon は unfinished runtime を `identity_unknown` へ reconcile し、旧
-`TerminalRef` を live として復元しない。この production gap は
-[#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md) で追跡する。前提となる build
-artifact identity / safe trigger は
-[#528](../.usagi/issues/528-fix-daemon-build-artifact-identity-safe-rollover-trigger.md)、cross-process authority は
-[#516](../.usagi/issues/516-refactor-daemon-cross-process-generation-registry-standby-handoff-authority.md)、owner runtime
-の永続化と handoff は
-[owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
-に実装済みであり、shipping enable 前の owner-generation routing は
-[#508](../.usagi/issues/508-fix-tui-ipc-draining-generation-inventory-terminalref-owner-routing.md) に分割する。#507 は #508
-完了後だけ rollover を有効化する。検証済み active locator への接続が `ConnectionRefused` になった場合だけ、共有
+したがって TUI の終了や同 build client の再接続だけでは daemon-owned Agent PTY は失われない。一方、cold transition は
+旧 owner process を終了するため、その process が持つ PTY master と live Agent / generic Terminal を継続できない。
+fresh daemon は unfinished runtime を `identity_unknown` へ reconcile し、旧 `TerminalRef` を live として復元しない。
+このため `daemon stop` / `daemon restart` / `daemon replace` は live runtime を持つ daemon を既定で拒否する
+（[planned replacement](#planned-replacement)）。検証済み active locator への接続が `ConnectionRefused` になった場合だけ、共有
 bootstrap は後述の exact stale-owner recovery を試みる。draining、malformed / unsafe locator、所有権または lifecycle
 record の安全性が不明な場合は replacement を起動せず、安全な typed lifecycle error を表示する。client が
 daemon-owned terminal や managed session をローカルに代替実行することはない。
@@ -124,7 +117,10 @@ detected build mismatch / daemon replace
 development build mismatch
   client -> stable rollover operation -> cold restart -> exact build reconnect
 
-manual cold restart
+manual restart / replace, daemon owns live runtime
+  client -> census -> refused, effect 0 -> old process + PTY remain alive
+
+manual cold transition (--force, or nothing live)
   client -> stop old -> quiesce / retire endpoint -> old process exit
                                                     -> PTY master is not transferred
          -> start fresh -> reconcile unfinished = identity_unknown
@@ -139,9 +135,9 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 |---|---|
 | `usagi daemon start` | detached `serve` を起動し、`daemon.json` に稼働中の pid が登録されるまで待つ。すでに稼働中なら新しい process を起動しない |
 | `usagi daemon status` | lifecycle record と exact process-start identity の観測から running / stale / unverified / absent を表示する。stale は owner 消滅と PID 再利用を区別した文言で報告し、どちらも reclaimable であることを示す |
-| `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。stale record（owner 消滅・PID 再利用のいずれも）は process に signal を送らず、singleton lock 下で stale endpoint を回収してから消去する。unverified record は signal・回収とも拒否する |
-| `usagi daemon restart` | 稼働中 daemon を停止してから新しい daemon を起動する。active / draining handoff は行わない |
-| `usagi daemon replace` | exact artifact の意図的な replacement trigger を要求する。同じ artifact pair / channel は同じ operation ID へ収束し、この command 自体は old daemon を停止しない |
+| `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。live runtime を持つ daemon は `--force` なしでは拒否する（[planned replacement](#planned-replacement)）。stale record（owner 消滅・PID 再利用のいずれも）は process に signal を送らず、singleton lock 下で stale endpoint を回収してから消去する。unverified record は signal・回収とも拒否する |
+| `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime を持つ daemon は `--force` なしでは拒否する。実行される transition は cold であり、active / draining handoff は行わない |
+| `usagi daemon replace` | exact artifact の意図的な replacement trigger を要求し、その operation で `restart` と同じ transition を実行する。同じ artifact pair / channel は同じ operation ID へ収束する |
 | `usagi daemon` / `usagi daemon serve` | 前景で daemon を serve する。`serve` は内部用の subcommand であり、[workspace / data directory の 2 段 fence](#単一-daemon-の-2-段-fence)を取得してから公開し、[custody を失うと自主終了する](#custody-喪失による-self-shutdown) |
 | `usagi daemon install-service` | macOS の LaunchAgent を明示的に install し、前景 `serve` を login と異常終了後に supervise する |
 | `usagi daemon uninstall-service` | install 済み LaunchAgent を unload して remove する |
@@ -316,11 +312,55 @@ hard crash では unique temporary が残り得るが、後続 save は別名を
 producer の停止、既接続 stream の shutdown/join を行う admission fence は
 [cross-process generation authority](#cross-process-generation-authority) に実装されているが、shipping `serve`
 はまだそれを駆動しないため、この順序自体は変わっていない。両者の接続は
-[#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md) で行う。
+[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) で行う。
 正常終了後の discovery は stale socket への `ConnectionRefused` ではなく `NotFound` になる。client bootstrap は
 locator 自体の `NotFound` では replacement を一度起動する。検証済み locator の endpoint 検証または connect 後の
 `NotFound` は `ConnectionRefused` 相当に分類し、上記の fenced recovery が完了した場合だけ起動する。その他の接続失敗、
 draining、不正 endpoint では replacement を起動せず fail closed にする。
+
+## planned replacement
+
+`usagi daemon restart` と `usagi daemon replace` は同じ一つの経路（`usecase::replacement`）を通る。
+manual restart は「稼働中と同じ artifact の forced replacement」であり、その durable operation ID は
+`daemon replace` が同じ場合に導く trigger と同一である。したがって繰り返し・並行の restart は
+新しい identity を作らず、同じ operation へ収束する。`stop` → fresh `start` へ直接降りる bypass は無い。
+
+replacement は 2 つの観測から決まる。どちらも仮定ではなく実測である。
+
+| 観測 | 内容 |
+|---|---|
+| live runtime | exact owner が生存している daemon について、`agents.json` / `terminals.json` の `reserved` / `running` レコード数。reconcile 待ちのレコードは owner が既に居ないので数えない。daemon が稼働していなければ census 自体を取らない |
+| seamless refusal | durable な [generation registry](#durable-registry) から導く、live successor へ authority を渡せない理由 |
+
+seamless rollover は old process を draining generation として生かしたまま authority を渡し、その PTY を
+replacement 後も維持する。2 process を安全に運用する authority は
+[cross-process generation authority](#cross-process-generation-authority) と
+[owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
+に実装済みだが、現在の build には authority を渡す先の standby process を起動する lifecycle が無い。
+`serve` は process lifetime にわたり単一インスタンス lock を保持し、durable runtime state は
+process-local な whole-snapshot store だからである。seamless refusal は registry を読み、
+欠けている前提を名前で示す。
+
+| refusal | 意味 |
+|---|---|
+| `no generation registry` | registry が存在しない。authority を渡す先の generation が一つも登録されていない |
+| `registry schema unsupported` | registry がこの build の書く schema ではない |
+| `registry unreadable` | registry を読めない / parse できない。fail closed |
+| `no verified standby` | readiness 後に artifact identity を検証済みの standby が居ない |
+| `standby not admitted` | 検証済み standby は居るが、この build には serve 中の standby を admit する lifecycle が無い |
+
+残るのは cold transition であり、cold transition は old daemon が持つ PTY をすべて破棄する。
+そこで transition は次の 3 通りに分かれる。
+
+| live runtime | 要求 | 結果 |
+|---|---|---|
+| 0 | planned | cold transition |
+| 1 以上 | planned | 拒否。signal を送らず、`current` も PTY も registry も変更しない |
+| 1 以上 | `--force`（明示 cold transition） | cold transition |
+
+拒否は typed であり、何を守ったか（Agent runtime 数と generic terminal 数）と、
+seamless に保てなかった理由を示す。`daemon stop` は rollover とは別契約であり、渡す先の successor が
+そもそも存在しないため seamless refusal を報告しない。live runtime を明示的に手放したかどうかだけを問う。
 
 ## launchd supervision
 
@@ -416,7 +456,7 @@ authority は、この 2 つの snapshot とは別の durable object（`shards/<
 [owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
 が正本である。shipping `serve` はまだ `terminals.json` / `agents.json` の single-writer store を使い、shard /
 allocator を駆動しない。統合は
-[#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md) が担う。
+[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) が担う。
 
 daemon restart 時は `agents.json` と `terminals.json` を spawn admission より前に読む。Agent runtime は
 coordinator、semantic operation ledger、safe outcome を hydrate する。両 snapshot の未終端 runtime は
@@ -1067,8 +1107,8 @@ TUI は最新 snapshot を workspace の左ペイン下部にある v1 互換の
 
 2 つの daemon process が一時的に共存する planned restart の前提となる authority である。本節がその契約の正本で、
 process 内 1 世代の fence（[generation と orphan safety](#generation-と-orphan-safety)）とは別物である。shipping
-`serve` はまだこの authority を駆動しない（[daemon process lifecycle](#daemon-process-lifecycle)）。統合は
-[#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md) が担う。
+`serve` はまだこの authority を駆動しない（[planned replacement](#planned-replacement)）。統合は
+[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) が担う。
 
 ### durable registry
 
@@ -1185,7 +1225,7 @@ shard** に分け、capacity と producer operation の authority を **1 つの
 契約の正本で、[cross-process generation authority](#cross-process-generation-authority) が「どの generation が
 行動してよいか」を決めるのに対し、本節は「各 generation が何を所有できるか」を決める。shipping `serve` はまだ
 single-writer store（[daemon data directory](#daemon-data-directory)）を使い、この authority を駆動しない。統合は
-[#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md) が担う。
+[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) が担う。
 
 ```text
 shards/<G1>.json   writer は G1 だけ ── outbox ──▶ allocations.json ──▶ G2 が consume
@@ -1275,7 +1315,7 @@ revision を再検証し、どちらかが動いていれば `sealed_elsewhere` 
 
 old generation が回収可能になるのは、自 shard の live resource 0、in-flight terminal command 0、未 ACK outbox 0、
 global capacity claim 0 を **すべて** 検証できた場合だけである。1 つの 0 を他の 0 の代わりにしない。role と
-endpoint の最終回収は [cross-process generation authority](#cross-process-generation-authority) と #507 が行う。
+endpoint の最終回収は [cross-process generation authority](#cross-process-generation-authority) と #559 が行う。
 
 ### operation ledger の retention / expiry / GC
 
@@ -1353,8 +1393,9 @@ draining owner として維持する機構ではない。安全な landing order
 [owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
 を前提に、draining owner routing の
 [#508](../.usagi/issues/508-fix-tui-ipc-draining-generation-inventory-terminalref-owner-routing.md)、shipping lifecycle / final E2E の
-[#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md) の順である。#508 capability と
-compatible registry revision が無い限り #507 の rollover path は disabled とし、old active/current を維持する。
+[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) の順である。standby serve・owner shard・client routing の production 配線が揃うまで
+seamless rollover は disabled であり、shipping の replacement は old active/current と live PTY を維持した
+typed refusal か明示的な cold transition になる（[planned replacement](#planned-replacement)）。
 
 spawn reservation は process spawn より先に保存する。crash 後に process identity を証明できない terminal は
 `identity_unknown` として扱い、replacement spawn、input、kill を自動で行わない。PID の生存だけでは ownership

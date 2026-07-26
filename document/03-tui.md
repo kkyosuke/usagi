@@ -1265,7 +1265,7 @@ daemon request を作らない。inventory refresh・reconnect・workspace open�
 planned な `daemon restart` は旧 generation の PTY を保持したまま control authority だけを移す別 failure mode である。
 その間の tab は interrupted ではなく、owner generation の endpoint へ配送される live tab のままである
 （[4. IPC の owner generation routing](04-ipc.md#owner-generation-routing)）。rollover 自体の起動は
-[#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md) の責務であり、
+[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) の責務であり、
 本 projection は crash / cold restart を旧 PTY の継続と偽らないことだけを保証する。
 
 ## feedback と終了

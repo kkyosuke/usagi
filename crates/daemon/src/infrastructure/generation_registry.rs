@@ -89,6 +89,33 @@ fn read_bytes(daemon: &Path) -> io::Result<Option<String>> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+/// Read the durable registry document without creating anything in `data_dir`.
+///
+/// A reader must never become a second writer, so this neither ensures the
+/// private daemon directory nor takes the registry lock node. `Ok(None)` means
+/// no daemon in this data directory has ever registered a generation, which is
+/// the state a build that cannot roll over stays in.
+///
+/// # Errors
+///
+/// Returns [`DirectoryError::Unreadable`] when the bytes cannot be read and
+/// [`DirectoryError::Corrupt`] when they are not a registry document. The
+/// schema itself is *not* judged here: naming an unsupported schema is a useful
+/// answer for a caller that reports why a rollover cannot start
+/// ([`crate::usecase::replacement::seamless_refusal`]).
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=generation_registry_store
+pub fn read_registry_document(data_dir: &Path) -> Result<Option<RegistryDocument>, DirectoryError> {
+    let daemon = data_dir.join("daemon");
+    let Some(contents) =
+        read_bytes(&daemon).map_err(|error| DirectoryError::Unreadable(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    serde_json::from_str(&contents)
+        .map(Some)
+        .map_err(|_| DirectoryError::Corrupt("registry document does not parse"))
+}
+
 /// The client's read-only view of the same durable records.
 ///
 /// A client resolves the endpoint of a generation it holds a `TerminalRef` for,
@@ -121,18 +148,14 @@ impl TrustedGenerationDirectory {
 
     /// The registry document, or `None` when this daemon never rolled over.
     fn registry(&self) -> Result<Option<RegistryDocument>, DirectoryError> {
-        let daemon = self.data_dir.join("daemon");
-        let Some(contents) =
-            read_bytes(&daemon).map_err(|error| DirectoryError::Unreadable(error.to_string()))?
-        else {
-            return Ok(None);
-        };
-        let document: RegistryDocument = serde_json::from_str(&contents)
-            .map_err(|_| DirectoryError::Corrupt("registry document does not parse"))?;
-        if document.schema != REGISTRY_SCHEMA {
+        let document = read_registry_document(&self.data_dir)?;
+        if document
+            .as_ref()
+            .is_some_and(|document| document.schema != REGISTRY_SCHEMA)
+        {
             return Err(DirectoryError::Corrupt("registry schema is not supported"));
         }
-        Ok(Some(document))
+        Ok(document)
     }
 
     /// The published locator, or `None` when no daemon is published.

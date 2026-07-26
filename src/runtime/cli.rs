@@ -41,18 +41,11 @@ pub(crate) fn dispatch(
             tui::launch(out, info, &entry).map(|()| ExitCode::SUCCESS)
         }
         RunOutcome::LaunchDaemon(command) => {
-            daemon::run(out, command, info).map(|()| ExitCode::SUCCESS)
+            daemon::run(out, command, info, None).map(|()| ExitCode::SUCCESS)
         }
-        RunOutcome::RequestDaemonReplacement => {
-            match daemon::request_replacement(ClientPolicy::cli()) {
-                Ok(trigger) => {
-                    writeln!(
-                        out,
-                        "daemon replacement requested (operation {})",
-                        trigger.operation_id.0
-                    )?;
-                    Ok(ExitCode::SUCCESS)
-                }
+        RunOutcome::RequestDaemonReplacement { force } => {
+            match daemon::replace_running_daemon(out, ClientPolicy::cli(), force, info)? {
+                Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(error) => {
                     write_client_error(err, "daemon replacement refused", &error)?;
                     Ok(ExitCode::FAILURE)

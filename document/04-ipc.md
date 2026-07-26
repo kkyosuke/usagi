@@ -91,6 +91,10 @@ replacement の exact artifact を再接続時の handshake で確認する。�
 `usagi daemon replace` だけが `ForceReplace` trigger を作る。identity が empty / malformed / unsupported の場合は
 version / target 一致へ昇格せず、typed `BuildIdentityUnavailable` として old daemon を維持する。
 
+trigger の生成自体は effect-free だが、`usagi daemon replace` はその trigger を自ら消費し、
+`usagi daemon restart` と同じ経路で replacement を実行する。live runtime を持つ daemon はそこで拒否されるため、
+この verb が PTY を暗黙に破棄することはない（[5. daemon の planned replacement](05-daemon.md#planned-replacement)）。
+
 private standby、generation limit / draining admission、authority handoff は
 [#516](../.usagi/issues/516-refactor-daemon-cross-process-generation-registry-standby-handoff-authority.md) の consumer である。
 その consumer が接続されるまで production / local は trigger を typed outcome として返すだけで、blind cold replacement や
@@ -153,7 +157,7 @@ daemon はどの workspace の client も admit してしまうため、capabili
 |---|---|
 | client readiness（`usagi open <path>` の起動前確認） | daemon の存在確認だけで workspace state を読まない |
 | daemon metrics subscription（[daemon metrics subscription](#daemon-metrics-subscription)） | daemon process の表示専用 sample であり、workspace の state を読まない。加えてこの接続は daemon を起動しない（entry 画面が workspace を選ぶ前に、起動 directory へ束縛された daemon を作らないため） |
-| `usagi daemon replace` | 広告された build identity を読む lifecycle 観測であり、workspace に紐づかない |
+| `usagi daemon replace` | 広告された build identity を読む lifecycle 操作であり、workspace に紐づかない |
 
 この fence は**同一 UID の協調する peer 同士の一貫性 fence**であり、authorization boundary ではない
 （accept 時に UID を検証済みで、到達できた peer は任意の root を綴れる）。したがって `unbound` は
@@ -963,8 +967,9 @@ owner-generation runtime shard は
 [#518](../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md) が
 提供し、client 側の owner routing は本節の契約として実装済みである。これらは registry / locator の
 fixture 上で完結しており、shipping の `daemon restart` から rollover を起動する経路はまだ存在しない。
-最終 enable / restart / product E2E は
-[#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md) が担当する。
+shipping の replacement は 1 本の durable operation に集約済みで、seamless に保てない live runtime を
+既定で拒否する（[5. daemon の planned replacement](05-daemon.md#planned-replacement)）。最終 enable /
+handoff / product E2E は [#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) が担当する。
 
 ## client の失敗処理
 

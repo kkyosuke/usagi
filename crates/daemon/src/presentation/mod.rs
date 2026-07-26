@@ -20,7 +20,7 @@ pub mod ipc;
 ///
 /// argv の文字列解釈と usage error の整形は合成ルートが担い、この層には実行可能な
 /// verb だけを閉じた型として渡す。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DaemonCommand {
     /// 前景で daemon を常駐させる。
     Serve,
@@ -28,10 +28,16 @@ pub enum DaemonCommand {
     Start,
     /// daemon の稼働状態を表示する。
     Status,
-    /// 稼働中の daemon を停止する。
-    Stop,
-    /// daemon を停止してから背景起動する。
-    Restart,
+    /// 稼働中の daemon を停止する。live runtime を持つ daemon は
+    /// [`usecase::replacement::TransitionMode::Cold`] を明示したときだけ止まる。
+    Stop(usecase::replacement::TransitionMode),
+    /// daemon を入れ替える。manual restart と build/update replacement は同じ
+    /// [`usecase::replacement`] の path を通る。
+    Replace {
+        /// この入れ替えを識別する durable operation。未知 artifact では `None`。
+        operation: Option<usagi_core::infrastructure::ipc::OperationId>,
+        mode: usecase::replacement::TransitionMode,
+    },
 }
 
 /// daemon 面が実 IO を行うために注入される依存一式。合成ルートが本物（ファイル・
@@ -60,6 +66,11 @@ pub struct DaemonEnv<'a, F, P, T, R, S, L, K, M, W> {
     pub workspace: &'a W,
     /// `serve` が register する自プロセスの pid。
     pub pid: u32,
+    /// `stop` / `replace` が壊しうる live runtime の実測。
+    pub census: &'a dyn usecase::replacement::ResourceCensus,
+    /// この build が live successor へ authority を渡せない理由。durable な
+    /// generation registry の観測から導く。
+    pub seamless: usecase::replacement::SeamlessRefusal,
 }
 
 /// daemon 面の entry point。合成ルートが `usagi daemon` の argv を検証して構築した
@@ -68,8 +79,10 @@ pub struct DaemonEnv<'a, F, P, T, R, S, L, K, M, W> {
 ///
 /// 実 IO を伴う verb は、注入された [`DaemonEnv`] を使う usecase へ振り分ける:
 /// `serve` は前景の常駐 [`usecase::serve::serve`]、`start` は背景起動の
-/// [`usecase::start::start`]、`status` は [`usecase::status::report`]、`stop` は
-/// [`usecase::stop::stop`]、`restart` は [`usecase::restart::restart`]。
+/// [`usecase::start::start`]、`status` は [`usecase::status::report`]。
+/// `stop` と `replace` は [`usecase::replacement`] を通り、live runtime を壊す遷移を
+/// そこで一度だけ判定してから [`usecase::stop::stop`] /
+/// [`usecase::restart::restart`] へ降りる。
 ///
 /// # Errors
 ///
@@ -112,25 +125,31 @@ pub fn run<
             let line = usecase::status::report(env.store, env.probe, info)?;
             writeln!(out, "{line}")
         }
-        DaemonCommand::Stop => {
-            let line = usecase::stop::stop(
+        DaemonCommand::Stop(mode) => {
+            let line = usecase::replacement::stop_daemon(
                 env.store,
                 env.probe,
                 env.terminator,
                 env.sleeper,
                 env.ready,
+                env.census,
+                mode,
                 info,
             )?;
             writeln!(out, "{line}")
         }
-        DaemonCommand::Restart => {
-            let line = usecase::restart::restart(
+        DaemonCommand::Replace { operation, mode } => {
+            let line = usecase::replacement::replace_daemon(
                 env.store,
                 env.probe,
                 env.terminator,
                 env.launcher,
                 env.sleeper,
                 env.ready,
+                env.census,
+                &env.seamless,
+                mode,
+                operation.as_ref(),
                 info,
             )?;
             writeln!(out, "{line}")
@@ -145,6 +164,9 @@ mod tests {
         FakeLock, FakeWorkspaceFence, FixedProbe, ImmediateShutdown, InMemoryRecordFile, NoopReady,
         NoopSleeper, RecordingTerminator, TestLauncher,
     };
+    use crate::usecase::replacement::{
+        LiveResources, ResourceCensus, SeamlessRefusal, TransitionMode,
+    };
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::daemon::DaemonRecord;
     use usagi_core::infrastructure::daemon::DaemonRecordStore;
@@ -153,6 +175,30 @@ mod tests {
         AppInfo {
             name: "usagi",
             version: "0.1.0",
+        }
+    }
+
+    /// A daemon owning `agents` Agent runtimes and nothing else.
+    struct Owning(usize);
+    impl ResourceCensus for Owning {
+        fn live(&self) -> std::io::Result<LiveResources> {
+            Ok(LiveResources {
+                agents: self.0,
+                terminals: 0,
+            })
+        }
+    }
+
+    /// An ordinary stop: nothing live, nothing given up.
+    const fn stop() -> DaemonCommand {
+        DaemonCommand::Stop(TransitionMode::Planned)
+    }
+
+    /// An ordinary replacement, unkeyed.
+    const fn replace() -> DaemonCommand {
+        DaemonCommand::Replace {
+            operation: None,
+            mode: TransitionMode::Planned,
         }
     }
 
@@ -178,6 +224,8 @@ mod tests {
             lock: &FakeLock::Acquired,
             workspace: &FakeWorkspaceFence::Acquired,
             pid: 4321,
+            census: &Owning(0),
+            seamless: SeamlessRefusal::NoGenerationRegistry,
         };
         let mut buf = Vec::new();
         run(&mut buf, command, &info(), &env).unwrap();
@@ -196,17 +244,14 @@ mod tests {
     }
 
     #[test]
-    fn run_routes_start_and_restart_to_the_launcher() {
-        // Both start and restart launch a daemon; the launcher registers pid 5555.
+    fn run_routes_start_and_replace_to_the_launcher() {
+        // Both start and replace launch a daemon; the launcher registers pid 5555.
         for (command, expected) in [
             (
                 DaemonCommand::Start,
                 "usagi v0.1.0: daemon started (pid 5555)\n",
             ),
-            (
-                DaemonCommand::Restart,
-                "usagi v0.1.0: daemon restarted (pid 5555)\n",
-            ),
+            (replace(), "usagi v0.1.0: daemon restarted (pid 5555)\n"),
         ] {
             let store = DaemonRecordStore::new(InMemoryRecordFile::default());
             let (probe, terminator, shutdown, sleeper) = (
@@ -228,6 +273,8 @@ mod tests {
                 lock: &FakeLock::Acquired,
                 workspace: &FakeWorkspaceFence::Acquired,
                 pid: 4321,
+                census: &Owning(0),
+                seamless: SeamlessRefusal::NoGenerationRegistry,
             };
             let mut buf = Vec::new();
             run(&mut buf, command, &info(), &env).unwrap();
@@ -240,9 +287,45 @@ mod tests {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         // No record yet: stop reports there is nothing to stop.
         assert_eq!(
-            run_line(DaemonCommand::Stop, &store),
+            run_line(stop(), &store),
             "usagi v0.1.0: daemon not running\n"
         );
+    }
+
+    /// A daemon that still owns a runtime is neither stopped nor replaced by
+    /// the ordinary verbs — the guard lives on the one path both take.
+    #[test]
+    fn run_refuses_both_transitions_while_a_runtime_is_live() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        store.save(&DaemonRecord::new(4321)).unwrap();
+        let (probe, terminator, shutdown, sleeper) = (
+            FixedProbe(true),
+            RecordingTerminator::default(),
+            ImmediateShutdown,
+            NoopSleeper,
+        );
+        let launcher = TestLauncher::registering(&store, 5555);
+        let ready = NoopReady;
+        let env = DaemonEnv {
+            store: &store,
+            probe: &probe,
+            terminator: &terminator,
+            ready: &ready,
+            shutdown: &shutdown,
+            launcher: &launcher,
+            sleeper: &sleeper,
+            lock: &FakeLock::Acquired,
+            workspace: &FakeWorkspaceFence::Acquired,
+            pid: 4321,
+            census: &Owning(1),
+            seamless: SeamlessRefusal::NoGenerationRegistry,
+        };
+        for command in [stop(), replace()] {
+            let error = run(&mut Vec::new(), command, &info(), &env).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        }
+        assert!(terminator.terminated().is_empty());
+        assert_eq!(launcher.launches(), 0);
     }
 
     #[test]
@@ -274,9 +357,9 @@ mod tests {
         // tests. The record-reading verbs must propagate the load error.
         for command in [
             DaemonCommand::Status,
-            DaemonCommand::Stop,
+            stop(),
             DaemonCommand::Start,
-            DaemonCommand::Restart,
+            replace(),
         ] {
             let store = DaemonRecordStore::new(InMemoryRecordFile::with("not json"));
             let launcher = TestLauncher::idle(&store);
@@ -292,6 +375,8 @@ mod tests {
                 lock: &FakeLock::Acquired,
                 workspace: &FakeWorkspaceFence::Acquired,
                 pid: 4321,
+                census: &Owning(0),
+                seamless: SeamlessRefusal::NoGenerationRegistry,
             };
             let mut buf = Vec::new();
             assert!(run(&mut buf, command, &info(), &env).is_err());

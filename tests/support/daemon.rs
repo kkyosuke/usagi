@@ -351,7 +351,10 @@ fn reap_channel(home: &Path, channel: Channel) {
 fn stop_command(home: &Path, channel: Channel) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_usagi"));
     command
-        .args(["daemon", "stop"])
+        // Teardown gives up whatever the fixture daemon still owns: a planned
+        // stop refuses while a runtime is live (#507), which would leak the
+        // process into the next test.
+        .args(["daemon", "stop", "--force"])
         .env("USAGI_HOME", home)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

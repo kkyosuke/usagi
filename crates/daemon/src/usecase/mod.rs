@@ -9,6 +9,9 @@
 //! [`restart`]）が担い、[`crate::presentation::run`] が検証済みの
 //! [`crate::presentation::DaemonCommand`] を振り分ける。argv の解釈と不正な command の
 //! 拒否は合成ルートが担う。
+//!
+//! `stop` と `restart` は [`replacement`] を通る。live runtime を壊す遷移かどうかの
+//! 判定を 1 か所に集約し、`stop` → fresh `start` の bypass を残さないためである。
 
 pub mod agent_ipc;
 pub mod authority;
@@ -22,6 +25,7 @@ pub mod metrics;
 pub mod orchestration;
 pub mod pr_inventory;
 pub mod pr_projection;
+pub mod replacement;
 pub mod resources;
 pub mod restart;
 pub mod runtime;
