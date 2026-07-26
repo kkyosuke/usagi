@@ -50,9 +50,9 @@ v2 は workspace の骨組み（[2. アーキテクチャ](02-architecture.md)�
 | `usagi update` | GitHub Releases の最新バイナリを download して `~/.usagi/bin/` へ導入する。`usagi update -v` は release 一覧を5行固定で表示し、`↑` / `↓` で選択して Enter で選んだ版を導入する。反映には再起動が必要 |
 | `usagi version` / `usagi --version` | 配布 version を表示する |
 | `usagi daemon start` | daemon をバックグラウンドで起動し、登録された pid を表示する。すでに稼働中ならその pid を表示する |
-| `usagi daemon stop` | 稼働中の daemon を終了する。stale な lifecycle record は回収する |
+| `usagi daemon stop` | 稼働中の daemon を終了する。live な Agent / generic terminal を持つ daemon は拒否し、`--force` で明示的に手放したときだけ停止する。stale な lifecycle record は回収する |
 | `usagi daemon status` | daemon が稼働中か、stale record が回収可能かを表示する |
-| `usagi daemon restart` | 稼働中 daemon を停止してから新しい daemon を起動する |
+| `usagi daemon restart` | 稼働中 daemon を入れ替える。`stop` と同じく live runtime があれば `--force` なしでは拒否する（[planned replacement](05-daemon.md#planned-replacement)） |
 | `usagi daemon` | daemon を前景で serve する（通常は `start` が起動する内部経路） |
 | `usagi mcp` | 入口面（MCP）の ready 行（`usagi v<version> mcp ready`）を表示する |
 | `usagi <不正な引数>` | [process argv contract](02-architecture.md#process-argv-contract) に従い、clap の利用方法エラーとして拒否する |

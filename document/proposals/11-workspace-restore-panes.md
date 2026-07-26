@@ -130,7 +130,7 @@ open workspace
 | authoritative に削除された session | `session_id` が成功した lifecycle snapshot に無い | target / slots と所有 dismissal を同一 commit で除去する |
 | allowed session 内の inventory 欠落 | session は lifecycle snapshot に残る | dormant slot / dismissal を保持する |
 | scope mismatch | 別 workspace / 別 worktree / 別 session | skip・attach しない |
-| saved / current generation 不一致 | #506 の current endpoint では owner を証明できない | attach しない。planned lifecycle は [#507](../../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md)、owner routing は [#508](../../.usagi/issues/508-fix-tui-ipc-draining-generation-inventory-terminalref-owner-routing.md) |
+| saved / current generation 不一致 | #506 の current endpoint では owner を証明できない | attach しない。planned lifecycle は [#507](../../.usagi/issues/507-fix-daemon-planned-replacement-operation-live-runtime-cold.md)、owner routing は [#508](../../.usagi/issues/508-fix-tui-ipc-draining-generation-inventory-terminalref-owner-routing.md) |
 | exact-equal terminal row の重複 | `TerminalRef` / kind / live がすべて同じ | normalize して 1 row にする |
 | conflicting terminal row / duplicate live continuation / Agent↔terminal 非全単射 | 同じ fenced ref の kind / live が競合する、または live 対応が一意でない | observation 全体を拒否して retry |
 | dismissed continuation の replacement / interrupted record | durable lineage が一致 | 明示 reopen まで tab を抑止し、runtime は停止しない |
