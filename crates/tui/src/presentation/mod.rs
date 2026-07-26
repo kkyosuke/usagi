@@ -7690,13 +7690,20 @@ mod tests {
         let session_calls = Arc::new(Mutex::new(Vec::new()));
 
         // Forty wake-ups interleaved with forty resizes — the shape of dragging
-        // a window edge while nothing else happens — then quit.
+        // a window edge while nothing else happens — then a modal open/close and
+        // quit, all while both lanes stay silent.
         let mut keys = Vec::new();
         for _ in 0..40 {
             keys.push(Key::Other);
             keys.push(Key::Resize);
         }
-        keys.extend([Key::CtrlQ, Key::Char('y')]);
+        keys.extend([
+            Key::Char(':'),
+            Key::Char('i'),
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
         let mut term = FakeTerminal::with_keys(&keys);
         let mut factory = FixedBackendFactory {
             sessions: Some(Box::new(SnapshotSessionPort(Arc::clone(&session_calls)))),
@@ -7739,6 +7746,12 @@ mod tests {
         assert!(frames >= 80, "the loop drew only {frames} frames");
         assert!(decision_polls.load(Ordering::SeqCst) >= frames);
         assert!(lane_drains.load(Ordering::SeqCst) >= frames);
+        // Draw, modal, and quit all completed with both lanes never answering.
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("Overview"))
+        );
     }
 
     /// #551 acceptance: several `RefreshSessions` inside one cadence period are
@@ -7803,6 +7816,29 @@ mod tests {
         // A second drain with nothing published leaves the frame untouched.
         super::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
         assert!(backend.drain_events().is_empty());
+
+        // A legacy port that answers with rows but no stable identities leaves
+        // the adopted ids alone, and the completion still reports the set Home
+        // currently holds rather than an empty one.
+        let (completions, events) =
+            crate::usecase::application::daemon_backend::Completions::channel();
+        pending_refresh = Some(completions);
+        lane.queued
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(Ok(SessionCommandResult {
+                message: "legacy snapshot".to_owned(),
+                sessions: Some(ui.workspace.sessions().to_vec()),
+                session_ids: None,
+                agent_resumes: None,
+                session_lifecycles: None,
+                revision: Some(8),
+            }));
+        super::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            AppEvent::Backend(BackendEvent::Sessions(ids)) if ids == vec![published]
+        ));
     }
 
     /// A lane that fails reports it once through the parked completion and

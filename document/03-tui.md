@@ -319,12 +319,14 @@ session / metrics）と、live terminal の
 Home の 3 lane はそれぞれ**専用の常駐 worker thread と専用の永続接続**を持ち、cadence は 250ms〜1s の範囲に clamp する。
 worker は workspace を開いたときに 1 本ずつ起動して閉じるまで生存するため、frame が thread を作ることはない。
 
-| lane | 観測対象 | primitive | cadence | cold-start |
-|---|---|---|---|---|
-| decision | 保留中の user decision | `UserDecision::List` | 500ms。失敗中は 500ms から 8s 上限の指数 backoff | しない |
-| session | 他 client（MCP server / CLI）が変えた session lifecycle | `Session::List` | 1s。失敗中は 1s から 8s 上限の指数 backoff | する（高々 3 回） |
-| metrics | mascot の daemon metrics | `Metrics::Snapshot` | 1s。失敗中は 1s から 8s 上限の指数 backoff | しない |
+| lane | 観測対象 | primitive | cadence | 起動する契機 | cold-start |
+|---|---|---|---|---|---|
+| decision | 保留中の user decision | `UserDecision::List` | 500ms。失敗中は 500ms から 8s 上限の指数 backoff | 最初の `RefreshDecisions` | しない |
+| session | 他 client（MCP server / CLI）が変えた session lifecycle | `Session::List` | 1s。失敗中は 1s から 8s 上限の指数 backoff | frame loop 開始時の wake | する（高々 3 回） |
+| metrics | mascot の daemon metrics | `Metrics::Snapshot` | 1s。失敗中は 1s から 8s 上限の指数 backoff | 最初の描画 | しない |
 
+- **lane は駆動されるまで dormant である**。worker thread は composition と同時に起動するが、上表の契機で起こされるまで
+  request も接続も発行しない。したがって composition を組み立てただけで daemon IO は起きない。
 - **request rate は frame rate に比例しない**。idle な Home が生む daemon request は上表の cadence だけで決まり、
   接続確立は lane あたり workspace の生存中に原則 1 回（transport 断のあとの再接続のみ追加）である。
 - **同種の未処理要求は最新 1 件に畳む**（coalesce）。lane の in-flight request は高々 1 件で、cadence 1 周期に何度
@@ -341,8 +343,10 @@ worker は workspace を開いたときに 1 本ずつ起動して閉じるま�
   観測の機会ではない。frame loop はこの 2 つを別のキーとして受け取り、どちらでも lane を起こさないため、ウィンドウの
   ドラッグリサイズは 1 event につき 1 回の再描画だけを費やす。実サイズは frame 先頭の `term.size()` から読む。
 - **lane が応答しなくても frame は進む**。lane が hung / 不在でも frame loop は drain が空振りするだけなので、描画・
-  入力・modal・quit は待たされない。decision lane の失敗は notice として、session lane の失敗は refresh を要求した
-  完了経路の notice として 1 回だけ出る。metrics lane の失敗は直前の sample を保持して mascot をちらつかせない。
+  入力・modal・quit は待たされない。
+- **失敗の表示は失敗の連続に対して 1 回である**。cadence ごとに notice を積まない。decision lane は失敗状態へ入った
+  ときに 1 回だけ notice を出し、次に成功したらその抑止を解く。session lane の失敗は refresh を要求した完了経路の
+  notice として 1 回だけ出る。metrics lane の失敗は直前の sample を保持して mascot をちらつかせない。
 
 ## Session sidebar rows
 

@@ -26,6 +26,9 @@
 //! * **Immediate wake.** [`RefreshPump::wake`] cuts the current wait short, so a
 //!   user action that changes the observed state is reflected without waiting
 //!   out the idle cadence.
+//! * **Dormant until driven.** A lane issues no request and opens no connection
+//!   until [`RefreshPump::activate`] or [`RefreshPump::wake`] starts it, so
+//!   building a composition costs no daemon IO.
 //!
 //! The pure scheduling state ([`RefreshState`]) is unit-tested directly with an
 //! injected elapsed clock; the thread wrapper ([`RefreshPump`]) is exercised
@@ -46,9 +49,10 @@ pub const MIN_INTERVAL: Duration = Duration::from_millis(250);
 /// invisible for longer than a user reads as "live".
 pub const MAX_INTERVAL: Duration = Duration::from_millis(1_000);
 
-/// How long the thread waits when the lane is stopped mid-wait. Only bounds the
-/// shutdown of a pump whose wait was not signalled.
-const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// How long the thread waits when the lane is not observing yet, or when it is
+/// already due while a round is finishing. Activating and stopping both signal
+/// the condvar, so this only bounds a wake-up nothing signalled.
+const DORMANT_INTERVAL: Duration = Duration::from_millis(250);
 
 /// One lane's request rhythm.
 ///
@@ -119,8 +123,9 @@ pub struct RefreshMetrics {
 #[derive(Debug)]
 pub struct RefreshState<T> {
     cadence: RefreshCadence,
-    /// Elapsed time the next fetch becomes allowed at.
-    due: Duration,
+    /// Elapsed time the next fetch becomes allowed at, or `None` while the lane
+    /// is dormant.
+    due: Option<Duration>,
     /// Consecutive failures driving the backoff.
     failures: u32,
     /// The newest result the render thread has not drained yet.
@@ -131,13 +136,19 @@ pub struct RefreshState<T> {
 }
 
 impl<T> RefreshState<T> {
-    /// A lane that is due immediately, so the first frame does not wait out a
-    /// full cadence period for its first observation.
+    /// A **dormant** lane: it issues no request and opens no connection until
+    /// something drives it.
+    ///
+    /// Observation starts at [`Self::activate`] rather than at construction so
+    /// that building a composition is free of daemon IO. A composition that is
+    /// built but never driven by a frame loop — the shape every unit test of
+    /// the production factory has — must not connect to, let alone start, a
+    /// daemon from a resident thread (#551).
     #[must_use]
     pub fn new(cadence: RefreshCadence) -> Self {
         Self {
             cadence,
-            due: Duration::ZERO,
+            due: None,
             failures: 0,
             latest: None,
             woken: false,
@@ -145,9 +156,20 @@ impl<T> RefreshState<T> {
         }
     }
 
-    /// Whether a fetch may start at `now`, counting it when it may.
+    /// Begin observing, if not already. Idempotent, and cheap enough for a
+    /// caller that reaches it once per frame: an already-active lane keeps its
+    /// current schedule instead of becoming due again.
+    pub fn activate(&mut self) {
+        if self.due.is_none() {
+            self.due = Some(Duration::ZERO);
+            self.woken = true;
+        }
+    }
+
+    /// Whether a fetch may start at `now`, counting it when it may. A dormant
+    /// lane is never due.
     pub fn begin(&mut self, now: Duration) -> bool {
-        if now < self.due {
+        if self.due.is_none_or(|due| now < due) {
             return false;
         }
         self.metrics.fetches += 1;
@@ -168,21 +190,24 @@ impl<T> RefreshState<T> {
             self.metrics.coalesced += 1;
         }
         self.latest = Some(result);
-        self.due = now.saturating_add(self.cadence.delay(self.failures));
+        self.due = Some(now.saturating_add(self.cadence.delay(self.failures)));
     }
 
-    /// Make the lane due immediately. Wakes inside one cadence period collapse:
-    /// the lane is already due, so the extra wake only shortens the wait.
+    /// Activate the lane and make it due immediately. Wakes inside one cadence
+    /// period collapse: the lane is already due, so the extra wake only shortens
+    /// the wait.
     pub fn wake(&mut self) {
         self.metrics.wakes += 1;
-        self.due = Duration::ZERO;
+        self.due = Some(Duration::ZERO);
         self.woken = true;
     }
 
-    /// How long the worker should wait before re-checking, at `now`.
+    /// How long the worker should wait before re-checking, at `now`. A dormant
+    /// lane parks until something signals it.
     #[must_use]
     pub fn wait_for(&self, now: Duration) -> Duration {
-        self.due.saturating_sub(now)
+        self.due
+            .map_or(DORMANT_INTERVAL, |due| due.saturating_sub(now))
     }
 
     /// Non-blocking drain of the newest observation.
@@ -218,15 +243,16 @@ fn lock<T>(state: &Mutex<RefreshState<T>>) -> std::sync::MutexGuard<'_, RefreshS
 /// comes first. Waiting on the condvar rather than sleeping blindly is what lets
 /// the idle cadence be a full second without delaying a user-triggered refresh.
 fn wait_for_next_round<T>(shared: &Shared<T>, interval: Duration) {
-    let wait = if interval.is_zero() {
-        STOP_POLL_INTERVAL
-    } else {
-        interval
-    };
+    // A zero wait means the lane is already due — a round that took longer than
+    // its own cadence. Re-check immediately instead of parking; the next
+    // `begin` succeeds, so this cannot spin.
+    if interval.is_zero() {
+        return;
+    }
     let guard = lock(&shared.state);
     let (mut guard, _timeout) = shared
         .signal
-        .wait_timeout_while(guard, wait, |state| !state.woken)
+        .wait_timeout_while(guard, interval, |state| !state.woken)
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // The wake is spent by ending this wait, so the round that follows uses the
     // ordinary cadence instead of running twice back to back.
@@ -284,8 +310,15 @@ impl<T: Send + 'static> RefreshPump<T> {
         }
     }
 
-    /// Ask for an immediate out-of-cadence observation (see
-    /// [`RefreshState::wake`]).
+    /// Begin observing at the steady cadence (see [`RefreshState::activate`]).
+    /// Safe to call every frame.
+    pub fn activate(&self) {
+        lock(&self.shared.state).activate();
+        self.shared.signal.notify_all();
+    }
+
+    /// Ask for an immediate out-of-cadence observation, activating the lane if
+    /// it was dormant (see [`RefreshState::wake`]).
     pub fn wake(&self) {
         lock(&self.shared.state).wake();
         self.shared.signal.notify_all();
@@ -319,8 +352,10 @@ impl<T> Drop for RefreshPump<T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_INTERVAL, MIN_INTERVAL, RefreshCadence, RefreshPump, RefreshState, STOP_POLL_INTERVAL,
+        DORMANT_INTERVAL, MAX_INTERVAL, MIN_INTERVAL, RefreshCadence, RefreshPump, RefreshState,
+        Shared, wait_for_next_round,
     };
+    use std::sync::Condvar;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
@@ -350,8 +385,9 @@ mod tests {
     }
 
     #[test]
-    fn a_lane_is_due_immediately_and_then_only_once_per_cadence() {
+    fn an_activated_lane_is_due_immediately_and_then_only_once_per_cadence() {
         let mut state = RefreshState::<u32>::new(cadence());
+        state.activate();
         assert!(state.begin(Duration::ZERO));
         state.complete(Duration::ZERO, Ok(1));
         // Every frame of the next half second re-checks and finds nothing due.
@@ -413,6 +449,7 @@ mod tests {
     #[test]
     fn repeated_wakes_inside_one_period_collapse_into_one_fetch() {
         let mut state = RefreshState::<u32>::new(cadence());
+        state.activate();
         state.complete(Duration::ZERO, Ok(1));
         for _ in 0..10 {
             state.wake();
@@ -429,6 +466,7 @@ mod tests {
     #[test]
     fn an_idle_lane_request_count_follows_the_cadence_not_the_frame_rate() {
         let mut state = RefreshState::<u32>::new(cadence());
+        state.activate();
         let mut connects = 0u32;
         // Ten seconds of 16ms frames: 625 frames, 20 cadence periods.
         for frame in 0..625u64 {
@@ -452,6 +490,7 @@ mod tests {
         let pump = RefreshPump::spawn(cadence(), move || {
             Ok(worker.fetch_add(1, Ordering::SeqCst) + 1)
         });
+        pump.activate();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if let Some(result) = pump.take() {
@@ -471,6 +510,7 @@ mod tests {
         let pump = RefreshPump::spawn(cadence(), move || {
             Ok(worker.fetch_add(1, Ordering::SeqCst) + 1)
         });
+        pump.activate();
         let deadline = Instant::now() + Duration::from_secs(5);
         while pump.take().is_none() {
             assert!(Instant::now() < deadline, "the lane published no result");
@@ -487,21 +527,102 @@ mod tests {
         assert!(pump.metrics().wakes >= 1);
     }
 
+    /// The worker is resident: the lane runs every round on the one thread it
+    /// spawned, however many rounds (and however many render frames) go by. The
+    /// per-tick `std::thread::spawn` this pump replaced grew a thread per
+    /// completed round (#551).
+    #[test]
+    fn every_round_runs_on_the_one_resident_worker_thread() {
+        let threads = Arc::new(Mutex::new(Vec::new()));
+        let worker = Arc::clone(&threads);
+        let pump = RefreshPump::spawn(
+            RefreshCadence::new(
+                MIN_INTERVAL,
+                Duration::from_millis(10),
+                Duration::from_millis(20),
+            ),
+            move || {
+                worker
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(std::thread::current().id());
+                Ok(1u32)
+            },
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            // Every drain is also a wake, the way a frame loop that keeps asking
+            // for fresh state would drive the lane.
+            pump.wake();
+            let rounds = threads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len();
+            if rounds >= 5 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the lane ran only {rounds} rounds"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let observed = threads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let threads_used = observed
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let rounds = observed.len();
+        assert_eq!(
+            threads_used, 1,
+            "{rounds} rounds ran on {threads_used} threads"
+        );
+    }
+
+    /// A lane that is already due when its round ends re-checks immediately
+    /// instead of parking for the dormant interval.
+    #[test]
+    fn a_zero_wait_returns_without_parking() {
+        let shared = Shared {
+            state: Mutex::new(RefreshState::<u32>::new(cadence())),
+            signal: Condvar::new(),
+        };
+        let started = Instant::now();
+        wait_for_next_round(&shared, Duration::ZERO);
+        assert!(started.elapsed() < DORMANT_INTERVAL);
+    }
+
     /// A hung lane must not stall the caller: `take` and `wake` stay
     /// non-blocking while the worker sits inside `fetch`.
+    ///
+    /// The worker announces that it has entered `fetch` before the render-thread
+    /// loop starts, so the lane is provably hung for the whole measured window
+    /// rather than merely likely to be.
     #[test]
     fn a_hung_fetch_never_blocks_the_render_thread() {
         let release = Arc::new(Mutex::new(false));
         let worker_release = Arc::clone(&release);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let pump = RefreshPump::<u32>::spawn(cadence(), move || {
-            while !*worker_release
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-            {
+            let _ = entered_tx.send(());
+            loop {
+                if *worker_release
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                {
+                    return Ok(1);
+                }
                 std::thread::sleep(Duration::from_millis(5));
             }
-            Ok(1)
         });
+        pump.activate();
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the lane entered its fetch");
+
         let started = Instant::now();
         for _ in 0..200 {
             assert!(pump.take().is_none());
@@ -531,6 +652,7 @@ mod tests {
                 Err("daemon unavailable".to_owned())
             },
         );
+        pump.activate();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if pump.metrics().failures >= 2 {
@@ -542,13 +664,54 @@ mod tests {
         assert_eq!(pump.take(), Some(Err("daemon unavailable".to_owned())));
     }
 
-    /// A zero wait (the lane is already due while the worker is finishing a
-    /// round) must still park on the condvar rather than spin.
+    /// A lane whose round outlived its own cadence is due the moment it
+    /// finishes, and says so with a zero wait rather than parking.
     #[test]
-    fn a_zero_wait_parks_for_the_stop_poll_interval() {
-        assert_eq!(STOP_POLL_INTERVAL, Duration::from_millis(50));
+    fn an_overdue_lane_reports_a_zero_wait() {
         let mut state = RefreshState::<u32>::new(cadence());
-        state.wake();
-        assert_eq!(state.wait_for(Duration::from_millis(100)), Duration::ZERO);
+        state.activate();
+        state.complete(Duration::ZERO, Ok(1u32));
+        assert_eq!(state.wait_for(Duration::from_millis(900)), Duration::ZERO);
+        assert!(state.begin(Duration::from_millis(900)));
+    }
+
+    /// A lane that nobody drives must cost nothing: no request, and therefore
+    /// no connection and no cold start. This is what keeps constructing the
+    /// production composition free of daemon IO (#551).
+    #[test]
+    fn a_dormant_lane_issues_no_request_until_it_is_driven() {
+        let mut state = RefreshState::<u32>::new(cadence());
+        for frame in 0..625u64 {
+            assert!(!state.begin(Duration::from_millis(frame * 16)));
+        }
+        assert_eq!(state.metrics().fetches, 0);
+        assert_eq!(state.wait_for(Duration::from_secs(10)), DORMANT_INTERVAL);
+
+        state.activate();
+        assert!(state.begin(Duration::from_secs(10)));
+        state.complete(Duration::from_secs(10), Ok(1));
+        // Activating again is idempotent: it never re-arms an active lane.
+        state.activate();
+        assert!(!state.begin(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn a_dormant_pump_stays_silent_and_starts_on_activation() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let worker = Arc::clone(&calls);
+        let pump = RefreshPump::spawn(cadence(), move || {
+            Ok(worker.fetch_add(1, Ordering::SeqCst) + 1)
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(pump.take().is_none());
+
+        pump.activate();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while pump.take().is_none() {
+            assert!(Instant::now() < deadline, "activation produced no fetch");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(pump.metrics().fetches, 1);
     }
 }

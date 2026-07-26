@@ -470,6 +470,11 @@ struct ProductionDecisionPort {
     /// composition opened it.
     workspace: WorkspaceId,
     pump: RefreshPump<Vec<usagi_core::domain::user_decision::UserDecision>>,
+    /// Whether the current failure streak has already been reported. A lane that
+    /// observes twice a second must notice a missing daemon **once**, not twice
+    /// a second, so the notice is tied to entering the failure state rather than
+    /// to each failed round.
+    reported_failure: bool,
 }
 
 impl ProductionDecisionPort {
@@ -483,6 +488,7 @@ impl ProductionDecisionPort {
     ) {
         let event = match result {
             Ok(decisions) => {
+                self.reported_failure = false;
                 for decision in &decisions {
                     if self.notified.insert(decision.decision_id) {
                         self.notifier
@@ -494,7 +500,11 @@ impl ProductionDecisionPort {
                     decisions,
                 }
             }
-            Err(error) => BackendEvent::Notice(Notice::new(error)),
+            Err(_) if self.reported_failure => return,
+            Err(error) => {
+                self.reported_failure = true;
+                BackendEvent::Notice(Notice::new(error))
+            }
         };
         completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
     }
@@ -510,8 +520,10 @@ impl BackendDecisionPort for ProductionDecisionPort {
 
     fn refresh(&mut self, _workspace: WorkspaceId, completions: Completions) {
         // An explicit refresh is an out-of-cadence wake, never a request on this
-        // thread. Whatever the lane has already observed is handed over now; the
-        // wake's own result arrives through `poll` on a later frame.
+        // thread — and it is also what starts the lane, so a composition nobody
+        // drives never reaches the daemon. Whatever the lane has already observed
+        // is handed over now; the wake's own result arrives through `poll` on a
+        // later frame.
         self.pump.wake();
         if let Some(result) = self.pump.take() {
             self.publish(result, &completions);
@@ -671,6 +683,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             notified: std::collections::BTreeSet::new(),
             workspace: snapshot.workspace_id,
             pump: spawn_decision_pump(),
+            reported_failure: false,
         }))
         .with_overlay(Box::new(ProductionOverlayPort {
             workspace_name: snapshot.workspace.name.clone(),
@@ -773,6 +786,9 @@ impl MetricsPort for DaemonMetricsPort {
     // Real daemon I/O belongs to the composition root; UI behaviour is tested
     // through its injected MetricsPort boundary.
     fn latest(&mut self) -> Option<DaemonMetrics> {
+        // The first frame that wants a sample starts the lane; a composition
+        // nobody draws never reaches the daemon.
+        self.metrics.activate();
         // A failed observation keeps the previous sample rather than blanking
         // the mascot: the lane's backoff already reports the outage rate, and a
         // momentary daemon hiccup should not flicker the frame.
