@@ -825,7 +825,9 @@ impl AgentRuntime {
                 "agent resume operation id must be canonical",
             )
         })?;
-        let prefix = resume_scope_prefix(workspace, session);
+        // The scope prefix comes from the same key authority as the exact-resume
+        // key, so recognizing a stored key never re-derives the format here.
+        let prefix = usagi_core::usecase::client::agent_resume_scope_prefix(workspace, session);
         if let Some(existing) = self.operations.get(operation_id) {
             if existing
                 .semantic_key
@@ -2236,13 +2238,6 @@ fn terminal_of(request: &TerminalRequest) -> Option<&TerminalRef> {
 /// derive the same digest for the final it receives.
 fn semantic_key(intent: &AgentLaunchIntent) -> String {
     usagi_core::usecase::client::agent_launch_semantic_key(intent)
-}
-
-fn resume_scope_prefix(workspace: WorkspaceId, session: Option<SessionId>) -> String {
-    format!(
-        "resume:{workspace}:{}:",
-        session.map_or_else(|| "workspace-root".to_owned(), |session| session.as_str())
-    )
 }
 
 /// The canonical exact-resume intent, shared with clients through

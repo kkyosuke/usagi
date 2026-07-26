@@ -333,6 +333,19 @@ pub fn agent_launch_semantic_key(intent: &AgentLaunchIntent) -> String {
     )
 }
 
+/// The prefix every exact-resume key of one scope shares.
+///
+/// A caller that only knows the scope — a legacy resume that lets the daemon
+/// resolve the exact target — uses this to recognize a stored key as its own
+/// scope's without re-deriving the key format itself.
+#[must_use]
+pub fn agent_resume_scope_prefix(workspace: WorkspaceId, session: Option<SessionId>) -> String {
+    format!(
+        "resume:{workspace}:{}:",
+        session.map_or_else(|| "workspace-root".to_owned(), |session| session.as_str())
+    )
+}
+
 /// The canonical semantic intent of one exact Agent resume.
 ///
 /// The whole opaque target participates: a resume that names another
@@ -341,11 +354,8 @@ pub fn agent_launch_semantic_key(intent: &AgentLaunchIntent) -> String {
 #[must_use]
 pub fn agent_resume_semantic_key(target: &AgentResumeTarget) -> String {
     format!(
-        "resume:{}:{}:{}:{}:{}:{}:{}",
-        target.workspace_id,
-        target
-            .session_id
-            .map_or_else(|| "workspace-root".to_owned(), |session| session.as_str()),
+        "{}{}:{}:{}:{}:{}",
+        agent_resume_scope_prefix(target.workspace_id, target.session_id),
         target.worktree_id,
         target.continuation,
         target.source,
