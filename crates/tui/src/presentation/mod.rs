@@ -629,6 +629,7 @@ fn key_to_terminal_bytes(key: Key) -> Option<Vec<u8>> {
         | Key::TerminalCopy { .. }
         | Key::Click { .. }
         | Key::Pointer(_)
+        | Key::Resize
         | Key::Other => {
             return None;
         }
@@ -812,6 +813,10 @@ impl BackendAgentPort for ControllerHost {
 pub struct ControllerBackendComposition {
     pub backend: DaemonBackend,
     pub session_commands: Box<dyn SessionCommandPort>,
+    /// Resident session-inventory lane. It never shares the command port's
+    /// connection, so a slow user-initiated create/remove and the background
+    /// observation cannot block each other.
+    pub session_refresh: Box<dyn SessionRefreshPort>,
     /// Resident terminal stream client. It stays with the live panes for the
     /// whole workspace and is never moved into a worker.
     pub agent_commands: Box<dyn AgentCommandPort>,
@@ -1277,6 +1282,39 @@ impl BrowserOpener for UnavailableBrowserOpener {
     }
 }
 
+/// Resident session-inventory lane for the Home frame.
+///
+/// Adopting lifecycle changes another client made (an MCP server creating a
+/// session) used to ride on the frame tick: every terminal wake-up dispatched
+/// `Effect::RefreshSessions`, which spawned one OS thread that opened a fresh
+/// daemon connection. At the composition root's 16ms tick that is a new thread
+/// and a new bootstrap per completed round (#551).
+///
+/// This port replaces that with a worker the composition root keeps resident for
+/// the whole workspace: it observes at a bounded cadence on its own persistent
+/// connection, coalesces to the newest snapshot, and hands it over through the
+/// non-blocking [`take`]. The frame loop only drains.
+///
+/// [`take`]: Self::take
+pub trait SessionRefreshPort: Send {
+    /// Ask the resident worker for an immediate out-of-cadence observation, for
+    /// a user action that changed lifecycle state and should not wait out the
+    /// idle cadence. Never blocks on the daemon.
+    fn wake(&mut self) {}
+
+    /// Non-blocking drain of the newest snapshot the worker completed, or `None`
+    /// when nothing new arrived since the previous frame.
+    fn take(&mut self) -> Option<Result<SessionCommandResult, String>> {
+        None
+    }
+}
+
+/// The lane an embedder that injects no daemon-backed worker gets: it observes
+/// nothing, so Home keeps the snapshot it opened with.
+struct UnavailableSessionRefreshPort;
+
+impl SessionRefreshPort for UnavailableSessionRefreshPort {}
+
 /// Workspace 起動ごとに Overview の [`SessionCommandPort`] を新しく作る境界。
 ///
 /// screen graph（Welcome→Open / Recent）は 1 ループで複数の workspace を順に開くため、
@@ -1533,10 +1571,6 @@ struct SessionCommandCompletion {
 enum SessionBackendCompletion {
     Create {
         token: PendingToken,
-        before: Vec<SessionId>,
-        completions: Completions,
-    },
-    Refresh {
         before: Vec<SessionId>,
         completions: Completions,
     },
@@ -2287,6 +2321,7 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
         | Key::Passthrough(_)
         | Key::Paste(_)
         | Key::TerminalCopy { .. }
+        | Key::Resize
         | Key::Other => WelcomeStep::Stay,
     }
 }
@@ -2380,6 +2415,7 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
         | Key::Pointer(_)
         | Key::Passthrough(_)
         | Key::TerminalCopy { .. }
+        | Key::Resize
         | Key::Other => NewStep::Stay,
     }
 }
@@ -2542,6 +2578,7 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
         | Key::Pointer(_)
         | Key::Passthrough(_)
         | Key::TerminalCopy { .. }
+        | Key::Resize
         | Key::Other => OpenStep::Stay,
     }
 }
@@ -2583,19 +2620,6 @@ fn begin_session_command(
         });
     });
     true
-}
-
-/// A terminal wake-up is a bounded opportunity to adopt lifecycle changes made
-/// by another client, such as an MCP server. Never enqueue a refresh while the
-/// a lifecycle command is already in flight: its revision-based completion
-/// reconciliation handles the newer observation safely.
-fn tick_session_refresh(
-    key: &Key,
-    session_command_available: bool,
-    workspace: WorkspaceId,
-) -> Option<Effect> {
-    (matches!(key, Key::Other) && session_command_available)
-        .then_some(Effect::RefreshSessions { workspace })
 }
 
 /// The daemon-owned name for the session identified by `session`, if the current
@@ -2673,23 +2697,71 @@ fn drain_session_completions(ui: &mut WorkspaceUi) {
             {
                 ui.removing_session = None;
             }
-            SessionBackendCompletion::Refresh { .. } | SessionBackendCompletion::Remove { .. } => {}
+            SessionBackendCompletion::Remove { .. } => {}
         }
         if let Ok(result) = completion.result {
-            let is_current = result
-                .revision
-                .is_none_or(|revision| revision >= ui.last_session_revision);
-            if let Some(revision) = result.revision.filter(|_| is_current) {
-                ui.last_session_revision = revision;
+            adopt_session_snapshot(ui, result);
+        }
+    }
+}
+
+/// Reconcile one daemon lifecycle snapshot into the session cache, ignoring a
+/// snapshot older than one already adopted.
+///
+/// The revision gate is what makes the resident lane's coalescing safe: an
+/// observation that started before a user's create/remove but landed after it
+/// carries the older revision and is discarded, so the newest daemon state wins
+/// regardless of which lane observed it (#551).
+fn adopt_session_snapshot(ui: &mut WorkspaceUi, result: SessionCommandResult) {
+    let is_current = result
+        .revision
+        .is_none_or(|revision| revision >= ui.last_session_revision);
+    if let Some(revision) = result.revision.filter(|_| is_current) {
+        ui.last_session_revision = revision;
+    }
+    if is_current {
+        apply_session_projection(
+            ui,
+            result.sessions,
+            result.session_ids,
+            result.agent_resumes,
+            result.session_lifecycles,
+        );
+    }
+}
+
+/// Drain the resident session-inventory lane and complete the refresh requests
+/// parked on it.
+///
+/// This is the whole of what the frame loop does for the session lane: no
+/// connection, no request, no worker spawn. Everything parked in
+/// `pending_session_refresh` completes against the one snapshot the lane
+/// published, which is how several `RefreshSessions` effects inside one cadence
+/// period cost exactly one daemon request (#551).
+fn drain_session_refresh(
+    ui: &mut WorkspaceUi,
+    session_refresh: &mut dyn SessionRefreshPort,
+    pending_session_refresh: &mut Option<Completions>,
+) {
+    let Some(result) = session_refresh.take() else {
+        return;
+    };
+    match result {
+        Ok(result) => {
+            let ids = result
+                .session_ids
+                .clone()
+                .unwrap_or_else(|| ui.workspace.session_ids().to_vec());
+            adopt_session_snapshot(ui, result);
+            if let Some(completions) = pending_session_refresh.take() {
+                completions.emit(AppEvent::Backend(BackendEvent::Sessions(ids)));
             }
-            if is_current {
-                apply_session_projection(
-                    ui,
-                    result.sessions,
-                    result.session_ids,
-                    result.agent_resumes,
-                    result.session_lifecycles,
-                );
+        }
+        Err(message) => {
+            if let Some(completions) = pending_session_refresh.take() {
+                completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                    safe_session_error(&message),
+                ))));
             }
         }
     }
@@ -2728,11 +2800,7 @@ fn emit_session_command_result(
         }
         (
             Ok(result),
-            SessionBackendCompletion::Refresh {
-                before,
-                completions,
-            }
-            | SessionBackendCompletion::Remove {
+            SessionBackendCompletion::Remove {
                 before,
                 completions,
                 ..
@@ -2755,11 +2823,7 @@ fn emit_session_command_result(
                 notice: Some(Notice::new(safe_session_error(message))),
             }));
         }
-        (
-            Err(message),
-            SessionBackendCompletion::Refresh { completions, .. }
-            | SessionBackendCompletion::Remove { completions, .. },
-        ) => {
+        (Err(message), SessionBackendCompletion::Remove { completions, .. }) => {
             completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
                 safe_session_error(message),
             ))));
@@ -2885,8 +2949,9 @@ fn run_pane_launch(
 /// The composition-root adapter has already resolved the `Ctrl-O` live prefix, so
 /// [`Key::Live`] arrives as a settled [`LiveTerminalAction`] that this function
 /// maps to the equivalent [`AppKey`]. Ordinary keys map one-to-one; the reducer,
-/// which owns overlay context, decides what each means. `Key::Other` (resize and
-/// backend wakeups the composition root cannot express as input) advances the
+/// which owns overlay context, decides what each means. `Key::Other` and
+/// `Key::Resize` (backend wakeups and terminal resizes the composition root
+/// cannot express as input) advance the
 /// mascot via [`AppEvent::Tick`] — real resize dimensions come from `term.size()`
 /// and backend results from `DaemonBackend::drain_events()`, not from a `Key`.
 ///
@@ -2899,7 +2964,7 @@ fn run_pane_launch(
 pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
     let app_key = match key {
         Key::Live(action) => return live_action_to_app_key(action).map(AppEvent::Key),
-        Key::Other => return Some(AppEvent::Tick),
+        Key::Resize | Key::Other => return Some(AppEvent::Tick),
         Key::Up => AppKey::Up,
         Key::Down => AppKey::Down,
         // Left/Right move the focus inside a horizontal choice (the Yes/No quit
@@ -3994,6 +4059,8 @@ fn drain_controller_host_actions(
     ui: &mut WorkspaceUi,
     runtime: &mut WorkspaceRuntime,
     pending_targets: &mut std::collections::HashMap<OperationId, Target>,
+    session_refresh: &mut dyn SessionRefreshPort,
+    pending_session_refresh: &mut Option<Completions>,
 ) {
     while let Ok(action) = actions.try_recv() {
         match action {
@@ -4013,14 +4080,12 @@ fn drain_controller_host_actions(
                 }
             }
             ControllerHostAction::Refresh(_, completions) => {
-                let _ = begin_session_command(
-                    ui,
-                    SessionCommand::List,
-                    SessionBackendCompletion::Refresh {
-                        before: ui.workspace.session_ids().to_vec(),
-                        completions,
-                    },
-                );
+                // A refresh is an observation, not a command: it goes to the
+                // resident lane instead of spawning a worker with its own
+                // daemon connection (#551). Several requests inside one cadence
+                // period coalesce onto the snapshot that lane publishes next.
+                session_refresh.wake();
+                *pending_session_refresh = Some(completions);
             }
             ControllerHostAction::Remove(request, completions) => {
                 if let Some(name) = session_name_for(ui, request.session) {
@@ -4386,6 +4451,15 @@ fn drive_workspace_controller(
     let mut browser = composition.browser;
     let mut restore_commands = Some(composition.restore_commands);
     let mut restore_connection = composition.restore_connection;
+    // Resident session-inventory lane. The frame loop only wakes and drains it;
+    // the observation itself never runs here (#551).
+    let mut session_refresh = composition.session_refresh;
+    // The `Effect::RefreshSessions` completion parked until the resident lane
+    // publishes its next snapshot. Requests inside one cadence period coalesce
+    // onto that one snapshot instead of each issuing a request, and every
+    // completion sink of a workspace is a clone of the same channel, so keeping
+    // the newest is keeping all of them.
+    let mut pending_session_refresh: Option<Completions> = None;
     let (restore_sender, restore_completions) = mpsc::channel();
     let mut workspace =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, session_ids.clone());
@@ -4421,11 +4495,15 @@ fn drive_workspace_controller(
     // Live-terminal scroll offset, drag selection, and copy feedback the reducer
     // does not own (design §4.2).
     let mut controls = LiveTerminalControls::default();
-    // Seed the daemon-authoritative snapshot before the first frame so a
-    // pending decision is visible without requiring a manual key binding.
+    // Seed the daemon-authoritative snapshots before the first frame so a
+    // pending decision and another client's sessions are visible without
+    // requiring a manual key binding. Both are wakes of a resident lane, not
+    // synchronous requests: the frame loop issues no daemon RPC of its own
+    // (#551).
     let _ = backend.dispatch(Effect::RefreshDecisions {
         workspace: workspace_id,
     });
+    session_refresh.wake();
     // Start restore after the first frame. The controller owns retry admission
     // and a capped backoff across worker jobs; a frame tick never resets it.
     let restore_clock = std::time::Instant::now();
@@ -4437,11 +4515,23 @@ fn drive_workspace_controller(
         while let Some(epoch) = restore_connection.take_reconnected_epoch() {
             restore_retry.reconnected(epoch, restore_clock.elapsed());
         }
-        drain_controller_host_actions(&host_rx, &mut ui, &mut runtime, &mut pending_targets);
+        drain_controller_host_actions(
+            &host_rx,
+            &mut ui,
+            &mut runtime,
+            &mut pending_targets,
+            session_refresh.as_mut(),
+            &mut pending_session_refresh,
+        );
         if ui.take_agent_observation_request() {
             restore_retry.request_observation(restore_clock.elapsed());
         }
         drain_session_completions(&mut ui);
+        drain_session_refresh(
+            &mut ui,
+            session_refresh.as_mut(),
+            &mut pending_session_refresh,
+        );
         sync_runtime_sessions(&mut runtime, &ui);
         let current_sessions = ui
             .workspace
@@ -4530,19 +4620,14 @@ fn drive_workspace_controller(
         }
         drain_pane_launches(&mut ui, geometry);
         let key = term.read_key()?;
-        // A tick is a bounded UI/session refresh point. Restore retry admission
-        // is clocked above and an explicit Reconnected event starts a new epoch;
-        // this wakeup never issues inventory RPCs by itself.
-        if matches!(key, Key::Other) {
-            let _ = backend.dispatch(Effect::RefreshDecisions {
-                workspace: workspace_id,
-            });
-        }
-        if let Some(effect) =
-            tick_session_refresh(&key, ui.active_session_command.is_none(), workspace_id)
-        {
-            let _ = backend.dispatch(effect);
-        }
+        // Neither a tick nor a resize refreshes an inventory here any more. Both
+        // used to dispatch `RefreshDecisions` + `RefreshSessions`, which ran the
+        // daemon round trip on this thread at the 16ms frame cadence; the
+        // decision and session lanes are now resident background workers with
+        // their own bounded cadence, drained at the head of this loop (#551).
+        // A tick and a resize therefore cost exactly one redraw each, and the
+        // only wake left is the explicit one a lifecycle action asks for through
+        // `ControllerHostAction`.
         if forward_live_terminal_input(&mut ui, &runtime, &mut controls, term, &key) {
             continue;
         }
@@ -4705,6 +4790,12 @@ struct FixedBackendFactory {
     restore: Option<Box<dyn AgentCommandPort>>,
     metrics: Option<Box<dyn MetricsPort>>,
     browser: Option<Box<dyn BrowserOpener>>,
+    /// Resident session-inventory lane injected as a fake by the frame-loop
+    /// tests; unset means the workspace observes nothing (#551).
+    session_refresh: Option<Box<dyn SessionRefreshPort>>,
+    /// Decision lane injected as a fake by the frame-loop tests; unset keeps the
+    /// unavailable port.
+    decisions: Option<Box<dyn BackendDecisionPort>>,
 }
 
 impl ControllerBackendFactory for FixedBackendFactory {
@@ -4720,12 +4811,20 @@ impl ControllerBackendFactory for FixedBackendFactory {
                 Box::new(UnavailableBackendPort),
                 Box::new(UnavailableBackendPort),
             )
-            .with_decisions(Box::new(UnavailableBackendPort))
+            .with_decisions(
+                self.decisions
+                    .take()
+                    .unwrap_or_else(|| Box::new(UnavailableBackendPort)),
+            )
             .with_overlay(Box::new(UnavailableBackendPort)),
             session_commands: self
                 .sessions
                 .take()
                 .expect("fixed session port is created once"),
+            session_refresh: self
+                .session_refresh
+                .take()
+                .unwrap_or_else(|| Box::new(UnavailableSessionRefreshPort)),
             agent_commands: self.agent.take().expect("fixed agent port is created once"),
             pane_launch_commands: self
                 .launch
@@ -4781,6 +4880,8 @@ pub fn run_workspace_controller(
         restore: None,
         metrics: Some(metrics),
         browser: Some(browser),
+        session_refresh: None,
+        decisions: None,
     };
     run_workspace_controller_with_backend(term, snapshot, &mut factory)
 }
@@ -5011,6 +5112,7 @@ impl ControllerBackendFactory for CompatibilityBackendFactory<'_, '_, '_> {
         ControllerBackendComposition {
             backend,
             session_commands: self.sessions.create(),
+            session_refresh: Box::new(UnavailableSessionRefreshPort),
             agent_commands,
             pane_launch_commands,
             restore_commands: self.agents.as_deref_mut().map_or_else(
@@ -5336,25 +5438,24 @@ mod tests {
         FixedBackendFactory, Geometry, MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort,
         MetricsPortFactory, NewStep, NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep,
         PaneLaunch, PaneLaunchCommandPort, SerializedPaneLaunchPort, SessionCommandPort,
-        SessionCommandPortFactory, SessionCommandResult, Start, TerminalAttach, TerminalChunk,
-        TerminalError, TerminalInputOutcome, TerminalInputResolution, TerminalSubscription,
-        UnavailableAgentCommandPort, UnavailableBackendPort, UnavailableBrowserOpener,
-        UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
+        SessionCommandPortFactory, SessionCommandResult, SessionRefreshPort, Start, TerminalAttach,
+        TerminalChunk, TerminalError, TerminalInputOutcome, TerminalInputResolution,
+        TerminalSubscription, UnavailableAgentCommandPort, UnavailableBackendPort,
+        UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
         UnavailableExternalTerminalPort, UnavailablePaneLaunchPort, UnavailablePrSnapshotPort,
         UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory, WelcomeStep,
         WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
         app_event_from_key, close_exited_panes, controller_terminal_view, copy_terminal_selection,
-        drain_controller_host_actions, drain_session_completions, forward_live_terminal_input,
-        handle_terminal_pointer, intercept_live_terminal_control, key_to_terminal_bytes,
-        new_project_notice, play_startup_splash, poll_and_project_terminals,
-        render_controller_frame, render_home_snapshot, restore_open_panes, run as run_from_start,
-        run_with_settings,
+        drain_session_completions, forward_live_terminal_input, handle_terminal_pointer,
+        intercept_live_terminal_control, key_to_terminal_bytes, new_project_notice,
+        play_startup_splash, poll_and_project_terminals, render_controller_frame,
+        render_home_snapshot, restore_open_panes, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
         run_workspace_controller_with_backend_and_settings, safe_session_error,
         session_worktree_names, sidebar_pointer_event, step_config, step_new, step_open,
-        terminal_geometry, tick_session_refresh, welcome_action, write_banner,
+        terminal_geometry, welcome_action, write_banner,
     };
     use crate::presentation::live_terminal::LiveTerminalControls;
     use crate::presentation::views::config::AvailableAgentModels;
@@ -5370,7 +5471,9 @@ mod tests {
         AppEvent, AppKey, BackendEvent, Effect, EnvironmentEntry, NewRequest, Overlay,
         PendingToken, SessionCreateIntent, TabDirection, Target,
     };
-    use crate::usecase::application::daemon_backend::{DaemonBackend, ReopenAgentRequest};
+    use crate::usecase::application::daemon_backend::{
+        Completions, DaemonBackend, DecisionPort as BackendDecisionPort, ReopenAgentRequest,
+    };
     use crate::usecase::application::pane::{LivePane, PaneKind, PaneTab};
     use crate::usecase::application::pr::PrSnapshotPort;
     use crate::usecase::application::run as dispatch;
@@ -5414,6 +5517,79 @@ mod tests {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc)
+    }
+
+    /// Host-action routing without the resident session lane. These tests
+    /// exercise which action a dispatched effect produces; the lane's own
+    /// behaviour is covered by [`FakeSessionRefreshPort`] and the frame-loop
+    /// tests below.
+    fn drain_host_actions(
+        actions: &Receiver<ControllerHostAction>,
+        ui: &mut WorkspaceUi,
+        runtime: &mut WorkspaceRuntime,
+        pending_targets: &mut std::collections::HashMap<OperationId, Target>,
+    ) {
+        super::drain_controller_host_actions(
+            actions,
+            ui,
+            runtime,
+            pending_targets,
+            &mut super::UnavailableSessionRefreshPort,
+            &mut None,
+        );
+    }
+
+    /// A scripted resident session-inventory lane. It records every wake and
+    /// hands over queued snapshots the way the daemon-backed lane hands over
+    /// what its worker already fetched — so a test can assert the frame loop
+    /// only ever drains, and count what the lane was asked to do (#551).
+    #[derive(Default)]
+    struct FakeSessionRefreshPort {
+        wakes: Arc<AtomicUsize>,
+        takes: Arc<AtomicUsize>,
+        queued: Arc<Mutex<VecDeque<Result<SessionCommandResult, String>>>>,
+    }
+
+    impl SessionRefreshPort for FakeSessionRefreshPort {
+        fn wake(&mut self) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn take(&mut self) -> Option<Result<SessionCommandResult, String>> {
+            self.takes.fetch_add(1, Ordering::SeqCst);
+            self.queued
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+        }
+    }
+
+    /// A decision lane that counts what the frame loop asked of it. The daemon
+    /// round trip belongs to the resident worker, so `refresh` here does exactly
+    /// what the production port does: record a wake and return (#551).
+    #[derive(Default)]
+    struct CountingDecisionPort {
+        wakes: Arc<AtomicUsize>,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl BackendDecisionPort for CountingDecisionPort {
+        fn poll(&mut self, _completions: &Completions) {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn refresh(&mut self, _workspace: WorkspaceId, _completions: Completions) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn resolve(
+            &mut self,
+            _workspace: WorkspaceId,
+            _decision_id: UserDecisionId,
+            _answer: UserDecisionAnswer,
+            _completions: Completions,
+        ) {
+        }
     }
 
     #[test]
@@ -5521,16 +5697,15 @@ mod tests {
         assert_eq!(terminal_copy_event, None);
     }
 
+    /// A resize is a redraw, never an inventory refresh. It reaches the reducer
+    /// as the same mascot tick as a wake-up, while the real dimensions come from
+    /// `term.size()` at the head of the frame; the daemon lanes are not involved
+    /// at all (#551).
     #[test]
-    fn terminal_wakeup_refreshes_sessions_while_other_commands_are_running() {
-        let workspace = WorkspaceId::new();
-
-        assert_eq!(
-            tick_session_refresh(&Key::Other, true, workspace),
-            Some(Effect::RefreshSessions { workspace })
-        );
-        assert_eq!(tick_session_refresh(&Key::Enter, true, workspace), None);
-        assert_eq!(tick_session_refresh(&Key::Other, false, workspace), None);
+    fn a_resize_maps_to_a_redraw_tick_and_stays_distinct_from_a_wakeup() {
+        assert_eq!(app_event_from_key(Key::Resize), Some(AppEvent::Tick));
+        assert_eq!(app_event_from_key(Key::Other), Some(AppEvent::Tick));
+        assert_ne!(Key::Resize, Key::Other);
     }
 
     #[test]
@@ -5785,7 +5960,7 @@ mod tests {
         ] {
             backend.dispatch(effect);
         }
-        drain_controller_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
+        drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
         let completed = (0..1)
             .map(|_| {
                 ui.session_completions
@@ -5798,7 +5973,11 @@ mod tests {
         }
         super::drain_session_completions(&mut ui);
         let events = backend.drain_events();
-        assert_eq!(events.len(), 3);
+        // Create is admitted and reports its token; Remove is refused as busy
+        // and notices. `RefreshSessions` no longer competes for that single
+        // command slot at all — it parks on the resident lane, which observes
+        // nothing here, so it contributes no event (#551).
+        assert_eq!(events.len(), 2);
         assert!(events.iter().any(|event| matches!(
             event,
             AppEvent::OperationResult(result) if result.token == token && !result.succeeded
@@ -5808,7 +5987,7 @@ mod tests {
                 .iter()
                 .filter(|event| matches!(event, AppEvent::Backend(BackendEvent::Notice(_))))
                 .count(),
-            2
+            1
         );
         assert_eq!(ui.pane_launches.len(), 2);
         assert!(!pending.is_empty());
@@ -5831,7 +6010,7 @@ mod tests {
             Box::new(UnavailableBackendPort),
         );
         backend.dispatch(Effect::RefreshSessions { workspace });
-        drain_controller_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
+        drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
         std::thread::sleep(std::time::Duration::from_millis(10));
         super::drain_session_completions(&mut ui);
         backend.dispatch(Effect::RemoveSession {
@@ -5839,7 +6018,7 @@ mod tests {
             session,
             force: true,
         });
-        drain_controller_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
+        drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
         std::thread::sleep(std::time::Duration::from_millis(10));
         super::drain_session_completions(&mut ui);
         backend.dispatch(Effect::OpenTerminal {
@@ -5847,8 +6026,17 @@ mod tests {
             operation_id: OperationId::new(),
             arguments: "new".into(),
         });
-        drain_controller_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
-        assert_eq!(calls.lock().unwrap().len(), 2);
+        drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
+        // Only the user-initiated `Remove` reaches the command port. The
+        // refresh went to the resident lane, so it neither spawned a worker nor
+        // opened a connection of its own (#551).
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -6865,7 +7053,7 @@ mod tests {
         sender
             .send(ControllerHostAction::SelectTab(TabDirection::Previous))
             .unwrap();
-        super::drain_controller_host_actions(&receiver, &mut ui, &mut runtime, &mut pending);
+        drain_host_actions(&receiver, &mut ui, &mut runtime, &mut pending);
         assert_eq!(runtime.focused_terminal(), Some(agent_terminal));
         assert!(matches!(
             mutations.lock().unwrap().last(),
@@ -6995,7 +7183,7 @@ mod tests {
             )))
             .unwrap();
 
-        drain_controller_host_actions(
+        drain_host_actions(
             &receiver,
             &mut ui,
             &mut runtime,
@@ -7419,6 +7607,8 @@ mod tests {
             })),
             metrics: Some(Box::new(NoMetrics)),
             browser: Some(Box::new(UnavailableBrowserOpener)),
+            session_refresh: None,
+            decisions: None,
         };
 
         let started = std::time::Instant::now();
@@ -7463,6 +7653,8 @@ mod tests {
             restore: None,
             metrics: Some(Box::new(NoMetrics)),
             browser: Some(Box::new(UnavailableBrowserOpener)),
+            session_refresh: None,
+            decisions: None,
         };
         let settings = usagi_core::domain::settings::Settings {
             modal_selection_mode: usagi_core::domain::settings::ModalSelectionMode::Prompt,
@@ -7485,6 +7677,213 @@ mod tests {
         }));
     }
 
+    /// #551 acceptance. The frame loop must be "non-blocking drain → projection
+    /// → draw → input" and nothing else: neither a wake-up tick nor a resize may
+    /// reach a daemon lane, and no frame may spawn a session worker. Both used
+    /// to happen on every `Key::Other`, at 62.5Hz.
+    #[test]
+    fn ticks_and_resizes_never_reach_a_daemon_lane_or_spawn_a_session_worker() {
+        let decision_wakes = Arc::new(AtomicUsize::new(0));
+        let decision_polls = Arc::new(AtomicUsize::new(0));
+        let lane_wakes = Arc::new(AtomicUsize::new(0));
+        let lane_drains = Arc::new(AtomicUsize::new(0));
+        let session_calls = Arc::new(Mutex::new(Vec::new()));
+
+        // Forty wake-ups interleaved with forty resizes — the shape of dragging
+        // a window edge while nothing else happens — then a modal open/close and
+        // quit, all while both lanes stay silent.
+        let mut keys = Vec::new();
+        for _ in 0..40 {
+            keys.push(Key::Other);
+            keys.push(Key::Resize);
+        }
+        keys.extend([
+            Key::Char(':'),
+            Key::Char('i'),
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut factory = FixedBackendFactory {
+            sessions: Some(Box::new(SnapshotSessionPort(Arc::clone(&session_calls)))),
+            agent: Some(Box::new(UnavailableAgentCommandPort)),
+            launch: None,
+            restore: None,
+            metrics: Some(Box::new(NoMetrics)),
+            browser: Some(Box::new(UnavailableBrowserOpener)),
+            session_refresh: Some(Box::new(FakeSessionRefreshPort {
+                wakes: Arc::clone(&lane_wakes),
+                takes: Arc::clone(&lane_drains),
+                queued: Arc::default(),
+            })),
+            decisions: Some(Box::new(CountingDecisionPort {
+                wakes: Arc::clone(&decision_wakes),
+                polls: Arc::clone(&decision_polls),
+            })),
+        };
+
+        assert_eq!(
+            run_workspace_controller_with_backend(&mut term, snapshot("idle"), &mut factory)
+                .unwrap(),
+            Exit::Quit
+        );
+
+        // One seed wake per lane for the whole run — not one per frame.
+        assert_eq!(decision_wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(lane_wakes.load(Ordering::SeqCst), 1);
+        // The command port, and therefore `std::thread::spawn`, is untouched:
+        // the tick no longer runs `SessionCommand::List`.
+        assert!(
+            session_calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
+        // What the loop does do every frame is drain, and it kept drawing while
+        // both lanes stayed silent.
+        let frames = term.frames.len();
+        assert!(frames >= 80, "the loop drew only {frames} frames");
+        assert!(decision_polls.load(Ordering::SeqCst) >= frames);
+        assert!(lane_drains.load(Ordering::SeqCst) >= frames);
+        // Draw, modal, and quit all completed with both lanes never answering.
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("Overview"))
+        );
+    }
+
+    /// #551 acceptance: several `RefreshSessions` inside one cadence period are
+    /// answered by the one snapshot the lane publishes, and a lane that never
+    /// answers parks at most one completion instead of accumulating them.
+    #[test]
+    fn refresh_requests_coalesce_onto_one_published_snapshot() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let mut pending_targets = std::collections::HashMap::new();
+        let mut pending_refresh = None;
+        let (host, actions) = ControllerHost::channel();
+        let mut backend = DaemonBackend::new(
+            Box::new(host.clone()),
+            Box::new(host),
+            Box::new(UnavailableBackendPort),
+            Box::new(UnavailableBackendPort),
+        );
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let published = SessionId::new();
+        let mut lane = FakeSessionRefreshPort {
+            wakes: Arc::clone(&wakes),
+            takes: Arc::default(),
+            queued: Arc::new(Mutex::new(VecDeque::from([Ok(SessionCommandResult {
+                message: "daemon snapshot refreshed".to_owned(),
+                sessions: Some(ui.workspace.sessions().to_vec()),
+                session_ids: Some(vec![published]),
+                agent_resumes: None,
+                session_lifecycles: None,
+                revision: Some(7),
+            })]))),
+        };
+
+        for _ in 0..3 {
+            backend.dispatch(Effect::RefreshSessions { workspace });
+        }
+        super::drain_controller_host_actions(
+            &actions,
+            &mut ui,
+            &mut runtime,
+            &mut pending_targets,
+            &mut lane,
+            &mut pending_refresh,
+        );
+        assert_eq!(wakes.load(Ordering::SeqCst), 3);
+        assert!(pending_refresh.is_some());
+
+        super::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
+        assert!(pending_refresh.is_none());
+        assert_eq!(ui.workspace.session_ids(), &[published]);
+        assert_eq!(ui.last_session_revision, 7);
+        let events = backend.drain_events();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            AppEvent::Backend(BackendEvent::Sessions(ids)) if ids == &[published]
+        ));
+
+        // A second drain with nothing published leaves the frame untouched.
+        super::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
+        assert!(backend.drain_events().is_empty());
+
+        // A legacy port that answers with rows but no stable identities leaves
+        // the adopted ids alone, and the completion still reports the set Home
+        // currently holds rather than an empty one.
+        let (completions, events) =
+            crate::usecase::application::daemon_backend::Completions::channel();
+        pending_refresh = Some(completions);
+        lane.queued
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(Ok(SessionCommandResult {
+                message: "legacy snapshot".to_owned(),
+                sessions: Some(ui.workspace.sessions().to_vec()),
+                session_ids: None,
+                agent_resumes: None,
+                session_lifecycles: None,
+                revision: Some(8),
+            }));
+        super::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            AppEvent::Backend(BackendEvent::Sessions(ids)) if ids == vec![published]
+        ));
+    }
+
+    /// A lane that fails reports it once through the parked completion and
+    /// leaves the adopted snapshot alone, and a snapshot older than one already
+    /// adopted is discarded whichever lane observed it.
+    #[test]
+    fn a_failed_or_stale_lane_observation_never_rewrites_the_adopted_snapshot() {
+        let session = SessionId::new();
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        ui.last_session_revision = 9;
+        let (completions, events) =
+            crate::usecase::application::daemon_backend::Completions::channel();
+        let mut pending_refresh = Some(completions);
+        let stale = SessionId::new();
+        let mut lane = FakeSessionRefreshPort {
+            wakes: Arc::default(),
+            takes: Arc::default(),
+            queued: Arc::new(Mutex::new(VecDeque::from([
+                Err("daemon unavailable\ninternal detail".to_owned()),
+                Ok(SessionCommandResult {
+                    message: "stale".to_owned(),
+                    sessions: Some(Vec::new()),
+                    session_ids: Some(vec![stale]),
+                    agent_resumes: None,
+                    session_lifecycles: None,
+                    revision: Some(3),
+                }),
+            ]))),
+        };
+
+        super::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
+        assert!(pending_refresh.is_none());
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            AppEvent::Backend(BackendEvent::Notice(notice))
+                if notice.message == "daemon unavailable"
+        ));
+        assert_eq!(ui.workspace.session_ids(), &[session]);
+
+        super::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
+        assert_eq!(ui.workspace.session_ids(), &[session]);
+        assert_eq!(ui.last_session_revision, 9);
+    }
+
     #[test]
     fn direct_controller_entry_binds_workspace_config_settings() {
         let mut keys = vec![Key::Char(':')];
@@ -7505,6 +7904,8 @@ mod tests {
             restore: None,
             metrics: Some(Box::new(NoMetrics)),
             browser: Some(Box::new(UnavailableBrowserOpener)),
+            session_refresh: None,
+            decisions: None,
         };
         let mut settings = WorkspaceBindingSettingsPort::default();
 
@@ -7732,7 +8133,8 @@ mod tests {
         assert!(super::begin_session_command(
             &mut ui,
             SessionCommand::List,
-            super::SessionBackendCompletion::Refresh {
+            super::SessionBackendCompletion::Remove {
+                session: SessionId::new(),
                 before: Vec::new(),
                 completions: first_completions,
             },
@@ -7740,7 +8142,8 @@ mod tests {
         assert!(!super::begin_session_command(
             &mut ui,
             SessionCommand::List,
-            super::SessionBackendCompletion::Refresh {
+            super::SessionBackendCompletion::Remove {
+                session: SessionId::new(),
                 before: Vec::new(),
                 completions: second_completions,
             },
@@ -7777,7 +8180,8 @@ mod tests {
                     session_lifecycles: None,
                     revision: Some(2),
                 }),
-                completion: super::SessionBackendCompletion::Refresh {
+                completion: super::SessionBackendCompletion::Remove {
+                    session: SessionId::new(),
                     before: vec![original],
                     completions: newer_completions,
                 },
@@ -7797,7 +8201,8 @@ mod tests {
                     session_lifecycles: None,
                     revision: Some(1),
                 }),
-                completion: super::SessionBackendCompletion::Refresh {
+                completion: super::SessionBackendCompletion::Remove {
+                    session: SessionId::new(),
                     before: vec![newer],
                     completions: older_completions,
                 },
@@ -7864,7 +8269,8 @@ mod tests {
         let existing = SessionId::new();
         let (completions, receiver) =
             crate::usecase::application::daemon_backend::Completions::channel();
-        let completion = super::SessionBackendCompletion::Refresh {
+        let completion = super::SessionBackendCompletion::Remove {
+            session: SessionId::new(),
             before: vec![existing],
             completions,
         };
@@ -7880,7 +8286,8 @@ mod tests {
 
         let (completions, receiver) =
             crate::usecase::application::daemon_backend::Completions::channel();
-        let completion = super::SessionBackendCompletion::Refresh {
+        let completion = super::SessionBackendCompletion::Remove {
+            session: SessionId::new(),
             before: vec![existing],
             completions,
         };
@@ -7998,7 +8405,7 @@ mod tests {
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let (mut host, actions) = ControllerHost::channel();
         let first_completion = enqueue_session_request(&mut host, first, workspace, session);
-        drain_controller_host_actions(
+        drain_host_actions(
             &actions,
             &mut ui,
             &mut runtime,
@@ -8009,7 +8416,7 @@ mod tests {
             .unwrap();
 
         let second_completion = enqueue_session_request(&mut host, second, workspace, session);
-        drain_controller_host_actions(
+        drain_host_actions(
             &actions,
             &mut ui,
             &mut runtime,
@@ -8126,7 +8533,7 @@ mod tests {
             workspace,
             session,
         );
-        drain_controller_host_actions(
+        drain_host_actions(
             &actions,
             &mut ui,
             &mut runtime,
@@ -8155,7 +8562,7 @@ mod tests {
             workspace,
             session,
         );
-        drain_controller_host_actions(
+        drain_host_actions(
             &actions,
             &mut ui,
             &mut runtime,
@@ -8221,7 +8628,8 @@ mod tests {
             .send(super::SessionCommandCompletion {
                 command_id: 1,
                 result: result.clone(),
-                completion: super::SessionBackendCompletion::Refresh {
+                completion: super::SessionBackendCompletion::Remove {
+                    session: SessionId::new(),
                     before: Vec::new(),
                     completions,
                 },
@@ -8235,7 +8643,8 @@ mod tests {
             .send(super::SessionCommandCompletion {
                 command_id: 2,
                 result,
-                completion: super::SessionBackendCompletion::Refresh {
+                completion: super::SessionBackendCompletion::Remove {
+                    session: SessionId::new(),
                     before: Vec::new(),
                     completions,
                 },
@@ -8276,7 +8685,7 @@ mod tests {
             workspace,
             session,
         );
-        drain_controller_host_actions(
+        drain_host_actions(
             &actions,
             &mut ui,
             &mut runtime,
@@ -8335,7 +8744,8 @@ mod tests {
             session_lifecycles: None,
             revision: None,
         });
-        let completion = super::SessionBackendCompletion::Refresh {
+        let completion = super::SessionBackendCompletion::Remove {
+            session: SessionId::new(),
             before: vec![session],
             completions,
         };
@@ -11668,7 +12078,7 @@ mod tests {
                 continuation,
             }))
             .unwrap();
-        super::drain_controller_host_actions(
+        drain_host_actions(
             &receiver,
             &mut ui,
             &mut runtime,
@@ -11768,7 +12178,7 @@ mod tests {
                 continuation,
             }))
             .unwrap();
-        super::drain_controller_host_actions(
+        drain_host_actions(
             &receiver,
             &mut ui,
             &mut runtime,
@@ -12100,7 +12510,7 @@ mod tests {
         sender
             .send(ControllerHostAction::SelectTab(TabDirection::Next))
             .unwrap();
-        super::drain_controller_host_actions(
+        drain_host_actions(
             &receiver,
             &mut ui,
             &mut runtime,
@@ -12176,7 +12586,7 @@ mod tests {
         sender
             .send(ControllerHostAction::SelectTab(TabDirection::Next))
             .unwrap();
-        super::drain_controller_host_actions(
+        drain_host_actions(
             &receiver,
             &mut generic_ui,
             &mut generic_runtime,

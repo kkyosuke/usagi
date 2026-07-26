@@ -1,13 +1,13 @@
 ---
 number: 551
 title: fix(tui): Home frame loop から同期 daemon RPC を排除する
-status: todo
+status: done
 priority: high
 labels: [review, v2, tui, ipc, performance, scheduler, responsiveness]
 dependson: []
 related: [506, 508, 521, 523, 527, 553, 554, 556]
 created_at: 2026-07-25T22:56:07.577277+00:00
-updated_at: 2026-07-25T23:00:02.821858+00:00
+updated_at: 2026-07-26T01:50:12.583515+00:00
 ---
 
 ## 問題・根拠（コード調査で確定）
