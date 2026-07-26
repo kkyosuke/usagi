@@ -1179,6 +1179,8 @@ L5  allocator CAS   operation final（spawned）               producer への�
 claim は常に reservation より先に durable になるため、**claim の無い reservation** は state 喪失か偽造しかあり得ず、
 `ownership_unknown` で fail closed にする（推測 spawn・推測 release をしない）。definite failure は capacity を
 1 度だけ解放し、ambiguous outcome は child が存在し得るので capacity を保持したまま durable final になる。
+spawn には成功したが L4 の record が書けなかった場合（persist-after-spawn）も definite failure ではなく ambiguous
+final とする。記録されていない child に対して replacement spawn を行わず、再送は同じ final を replay する。
 
 ### producer launch operation
 
