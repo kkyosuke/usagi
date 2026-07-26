@@ -85,6 +85,7 @@ use usagi_daemon::usecase::session_runtime::{
 use usagi_daemon::usecase::session_teardown::{
     TeardownEffect, TeardownJournal, TeardownSignal, drain_pending_teardowns,
 };
+use usagi_daemon::usecase::shutdown::ShutdownRequest;
 use usagi_daemon::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
 use usagi_daemon::usecase::supervisor_runtime::{
     DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime,
@@ -1184,6 +1185,12 @@ type SharedTerminalRuntime = Arc<
 >;
 type SharedPrInventory = Arc<Mutex<OutputPrProjector<PrInventoryStore>>>;
 
+/// How often the PR refresh worker claims due work.
+///
+/// This bounds how quickly a freshly detected PR gets its title and state, and
+/// each tick claims at most [`PR_REFRESH_PER_TICK`] identities against a 60 s
+/// freshness window. Now that the wait is edge-driven rather than a 10 ms poll,
+/// the tick costs one wakeup, so there is no reason to lengthen it.
 const PR_REFRESH_TICK: Duration = Duration::from_millis(250);
 const PR_REFRESH_FRESHNESS_MS: u64 = 60_000;
 const PR_REFRESH_PER_TICK: usize = 2;
@@ -1196,6 +1203,15 @@ const CUSTODY_TICK: Duration = Duration::from_secs(1);
 /// the pending set again anyway. An admission wakes it immediately, so this only
 /// bounds the retry of a teardown whose durable finalization failed.
 const SESSION_TEARDOWN_TICK: Duration = Duration::from_secs(1);
+
+/// How often the decision maintenance worker makes due expiries durable and
+/// drains the resolved-decision outbox.
+///
+/// This bounds how long an already expired decision can still be read as
+/// `Pending`. A tick that finds nothing due performs two small reads and no
+/// write: expiry no longer takes the store lock or fsyncs unless something
+/// actually changed.
+const DECISION_MAINTENANCE_TICK: Duration = Duration::from_millis(250);
 
 struct ProductionRefreshClock {
     started: Instant,
@@ -1359,7 +1375,7 @@ fn spawn_ipc_server(
     build: &BuildIdentity,
     daemon_process: DaemonRecord,
     custody: FsCustodyProbe,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
     let owner = daemon_process.clone();
     let repo_root = workspace_root.to_path_buf();
@@ -1438,7 +1454,7 @@ fn spawn_ipc_server(
     let decisions = Arc::new(UserDecisionStore::new(data_dir.join("daemon")));
     consume_user_decision_events(&decisions)
         .map_err(|error| std::io::Error::other(error.message))?;
-    start_decision_maintenance(Arc::clone(&decisions))?;
+    start_decision_maintenance(Arc::clone(&decisions), Arc::clone(&shutdown))?;
     start_pr_refresh_worker(Arc::clone(&pr_inventory), Arc::clone(&shutdown))?;
     let teardown = start_session_teardown_worker(Arc::clone(&runtime), Arc::clone(&shutdown))?;
     start_retention_gc_worker(
@@ -1491,7 +1507,7 @@ fn bind_ipc_listener(
 /// progress while `gh` is slow.
 fn start_pr_refresh_worker(
     pr_inventory: SharedPrInventory,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<()> {
     spawn_pr_refresh_worker(
         pr_inventory,
@@ -1507,7 +1523,7 @@ fn start_pr_refresh_worker(
 
 fn spawn_pr_refresh_worker<R, C>(
     pr_inventory: SharedPrInventory,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<ShutdownRequest>,
     runner: R,
     clock: C,
     tick: Duration,
@@ -1526,18 +1542,18 @@ where
             {
                 ErrorLog::record("PR refresh schedule rebuild failed");
             }
-            while !shutdown.load(Ordering::Acquire) {
+            while !shutdown.is_requested() {
                 let due = pr_inventory
                     .lock()
                     .ok()
                     .and_then(|mut projector| worker.claim_due(&mut projector).ok())
                     .unwrap_or_default();
                 for identity in due {
-                    if shutdown.load(Ordering::Acquire) {
+                    if shutdown.is_requested() {
                         break;
                     }
                     let result = worker.fetch(&identity);
-                    if shutdown.load(Ordering::Acquire) {
+                    if shutdown.is_requested() {
                         break;
                     }
                     if let Ok(mut projector) = pr_inventory.lock()
@@ -1546,9 +1562,8 @@ where
                         ErrorLog::record("PR refresh snapshot publish failed");
                     }
                 }
-                let deadline = Instant::now() + tick;
-                while !shutdown.load(Ordering::Acquire) && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(10));
+                if shutdown.wait_for_tick(tick) {
+                    break;
                 }
             }
         })
@@ -1564,7 +1579,7 @@ where
 /// that a previous daemon was interrupted in.
 fn start_session_teardown_worker(
     sessions: SharedSessionRuntime,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<Arc<TeardownSignal>> {
     let signal = Arc::new(TeardownSignal::new());
     spawn_session_teardown_worker(
@@ -1581,7 +1596,7 @@ fn spawn_session_teardown_worker<J, E>(
     journal: J,
     effect: E,
     signal: Arc<TeardownSignal>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<ShutdownRequest>,
     tick: Duration,
 ) -> std::io::Result<std::thread::JoinHandle<()>>
 where
@@ -1592,8 +1607,8 @@ where
         .name("usagi-session-teardown".to_string())
         .spawn(move || {
             let cancel = Arc::clone(&shutdown);
-            let cancelled = move || cancel.load(Ordering::Acquire);
-            while !shutdown.load(Ordering::Acquire) {
+            let cancelled = move || cancel.is_requested();
+            while !shutdown.is_requested() {
                 for report in drain_pending_teardowns(&journal, &effect, &cancelled) {
                     if let Some(error) = report.effect_error {
                         ErrorLog::record(&format!(
@@ -1608,7 +1623,7 @@ where
                         ));
                     }
                 }
-                if shutdown.load(Ordering::Acquire) {
+                if shutdown.is_requested() {
                     break;
                 }
                 // An admitted removal wakes this immediately; the tick only
@@ -1628,7 +1643,7 @@ fn start_custody_worker(
     probe: FsCustodyProbe,
     owner: DaemonRecord,
     data_dir: PathBuf,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<()> {
     spawn_custody_worker(probe, owner, data_dir, shutdown, CUSTODY_TICK).map(|_| ())
 }
@@ -1637,7 +1652,7 @@ fn spawn_custody_worker<P>(
     probe: P,
     owner: DaemonRecord,
     data_dir: PathBuf,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<ShutdownRequest>,
     tick: Duration,
 ) -> std::io::Result<std::thread::JoinHandle<()>>
 where
@@ -1646,7 +1661,7 @@ where
     std::thread::Builder::new()
         .name("usagi-daemon-custody".to_string())
         .spawn(move || {
-            while !shutdown.load(Ordering::Acquire) {
+            while !shutdown.is_requested() {
                 match usagi_daemon::usecase::custody::evaluate(&probe, &owner) {
                     Ok(Custody::Lost(loss)) => {
                         // The error log lives inside the data directory. Record
@@ -1661,23 +1676,27 @@ where
                         }
                         // Request the same graceful shutdown a SIGTERM does, so
                         // endpoint retirement and record clearing stay on one path.
-                        shutdown.store(true, Ordering::Release);
+                        shutdown.request();
                         return;
                     }
                     // An undecidable observation is not a loss: keep serving and
                     // re-evaluate on the next tick.
                     Ok(Custody::Held) | Err(_) => {}
                 }
-                let deadline = Instant::now() + tick;
-                while !shutdown.load(Ordering::Acquire) && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(10));
+                if shutdown.wait_for_tick(tick) {
+                    break;
                 }
             }
         })
 }
 
-/// How often the daemon ages exited terminal / Agent finals out of the
-/// aggregate retention budget when nothing else drives collection.
+/// How often the daemon ages exited terminal / Agent finals out of the aggregate
+/// retention budget when nothing else drives collection.
+///
+/// Launch and exit already collect on the spot, so this only covers an idle
+/// daemon, where the only things still moving are the age budget and the minimum
+/// visibility TTL. Both are measured in minutes, so a 30 s tick is far finer than
+/// the state it observes.
 const RETENTION_GC_TICK: Duration = Duration::from_secs(30);
 
 /// Starts the only production retention collector. Launch and exit already
@@ -1686,7 +1705,7 @@ const RETENTION_GC_TICK: Duration = Duration::from_secs(30);
 fn start_retention_gc_worker(
     terminal: SharedTerminalRuntime,
     agent: SharedAgentRuntime,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<()> {
     spawn_retention_gc_worker(
         move || {
@@ -1707,7 +1726,7 @@ fn start_retention_gc_worker(
 /// without a daemon, a PTY, or a store.
 fn spawn_retention_gc_worker<C>(
     mut collect: C,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<ShutdownRequest>,
     tick: Duration,
 ) -> std::io::Result<std::thread::JoinHandle<()>>
 where
@@ -1716,11 +1735,10 @@ where
     std::thread::Builder::new()
         .name("usagi-retention-gc".to_string())
         .spawn(move || {
-            while !shutdown.load(Ordering::Acquire) {
+            while !shutdown.is_requested() {
                 collect();
-                let deadline = Instant::now() + tick;
-                while !shutdown.load(Ordering::Acquire) && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(10));
+                if shutdown.wait_for_tick(tick) {
+                    break;
                 }
             }
         })
@@ -1778,17 +1796,31 @@ fn node_identity(metadata: &std::fs::Metadata) -> NodeIdentity {
 /// Keeps decision deadlines progressing even when no subsequent MCP/TUI
 /// request arrives. Every action is idempotent, so a daemon restart simply
 /// resumes from the JSON store.
-fn start_decision_maintenance(decisions: Arc<UserDecisionStore>) -> std::io::Result<()> {
+fn start_decision_maintenance(
+    decisions: Arc<UserDecisionStore>,
+    shutdown: Arc<ShutdownRequest>,
+) -> std::io::Result<()> {
+    spawn_decision_maintenance(decisions, shutdown, DECISION_MAINTENANCE_TICK).map(|_| ())
+}
+
+/// The loop, with the tick injected so a test can drive it without waiting out
+/// the production cadence.
+fn spawn_decision_maintenance(
+    decisions: Arc<UserDecisionStore>,
+    shutdown: Arc<ShutdownRequest>,
+    tick: Duration,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("usagi-decision-maintenance".to_string())
         .spawn(move || {
-            loop {
+            while !shutdown.is_requested() {
                 let _ = decisions.expire_due(chrono::Utc::now());
                 let _ = consume_user_decision_events(&decisions);
-                std::thread::sleep(Duration::from_millis(250));
+                if shutdown.wait_for_tick(tick) {
+                    break;
+                }
             }
         })
-        .map(|_| ())
 }
 
 fn open_agent_runtime(
@@ -2069,7 +2101,7 @@ fn start_ipc_accept_loop(
     process_metrics: SharedProcessResourceSampler,
     pipeline_metrics: Arc<TerminalPipelineMetrics>,
     supervisor: SharedSupervisorRuntime,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
     std::thread::Builder::new()
         .name("usagi-ipc".to_string())
@@ -2086,10 +2118,23 @@ fn start_ipc_accept_loop(
             // TUIs converge on the same Observed / Dismissed state.
             let visibility =
                 usagi_daemon::usecase::terminal_visibility_ipc::SharedTerminalVisibility::new();
-            while !shutdown.load(Ordering::Acquire) {
+            // Waiting on the listening descriptor replaces a non-blocking accept
+            // that retried every 10 ms. The wake pipe is what lets one wait cover
+            // both a new connection and a shutdown request.
+            let wake = match ShutdownPipe::mirroring(&shutdown) {
+                Ok(wake) => wake,
+                Err(error) => {
+                    ErrorLog::record(&format!("daemon accept wait unavailable: {error}"));
+                    return listener;
+                }
+            };
+            while !shutdown.is_requested() {
+                if !wake.wait_for_listener(listener.readiness_fd()) {
+                    break;
+                }
                 match listener.accept() {
                     Ok(stream) => {
-                        if shutdown.load(Ordering::Acquire) {
+                        if shutdown.is_requested() {
                             break;
                         }
                         let server = server.clone();
@@ -2153,14 +2198,91 @@ fn start_ipc_accept_loop(
                                 let _ = result;
                             });
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                    // A readiness wait can still race another accept or see a
+                    // connection that went away, so `WouldBlock` simply means
+                    // "wait again" rather than "retry on a timer".
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(_) => {}
                 }
             }
             listener
         })
+}
+
+/// A pipe whose readable end lets `poll(2)` wait for a shutdown request
+/// alongside the listening socket.
+///
+/// A condvar cannot be mixed into a descriptor wait, so the request is mirrored
+/// onto a descriptor. The mirroring thread parks on the condvar, which means an
+/// idle daemon still performs no timed wakeups.
+struct ShutdownPipe {
+    read: std::os::fd::RawFd,
+    write: std::os::fd::RawFd,
+}
+
+impl ShutdownPipe {
+    /// Creates the pipe and starts mirroring `shutdown` onto it.
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
+    fn mirroring(shutdown: &Arc<ShutdownRequest>) -> std::io::Result<Self> {
+        let mut ends = [0_i32; 2];
+        // SAFETY: `ends` is a two-element array, exactly what pipe(2) writes.
+        if unsafe { libc::pipe(ends.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let pipe = Self {
+            read: ends[0],
+            write: ends[1],
+        };
+        let write = pipe.write;
+        let requested = Arc::clone(shutdown);
+        std::thread::Builder::new()
+            .name("usagi-shutdown-wake".to_string())
+            .spawn(move || {
+                requested.wait_until_requested();
+                // One byte is enough: the reader only needs readiness, and the
+                // descriptor is never reused for anything else.
+                // SAFETY: writing one byte from a local buffer to an owned pipe.
+                unsafe { libc::write(write, [1_u8].as_ptr().cast(), 1) };
+            })?;
+        Ok(pipe)
+    }
+
+    /// Waits until the listener has a connection or shutdown was requested.
+    /// Returns whether the listener is the one that became ready.
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
+    fn wait_for_listener(&self, listener: std::os::fd::RawFd) -> bool {
+        let mut fds = [
+            libc::pollfd {
+                fd: listener,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: self.read,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        // A negative timeout blocks indefinitely: there is nothing to poll for on
+        // a timer, so an idle daemon performs no wakeups here at all.
+        // SAFETY: both descriptors are owned and live for this call.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+        // An interrupted or failed wait is reported as "listener ready" so the
+        // caller re-checks the request flag and retries the accept, rather than
+        // treating an EINTR as a shutdown.
+        ready < 0 || fds[0].revents != 0
+    }
+}
+
+impl Drop for ShutdownPipe {
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
+    fn drop(&mut self) {
+        // SAFETY: both ends are owned by this value.
+        unsafe {
+            libc::close(self.read);
+            libc::close(self.write);
+        }
+    }
 }
 
 /// Retires the PR projection worker whenever the accept worker exits, including
@@ -2179,12 +2301,12 @@ impl Drop for ClosePrProjectionOnExit {
 /// Normal signal-driven shutdown has already set the same flag, so the guard
 /// is idempotent on the expected return path.
 struct ShutdownOnIpcWorkerExit {
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<ShutdownRequest>,
 }
 
 impl Drop for ShutdownOnIpcWorkerExit {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
+        self.shutdown.request();
     }
 }
 
@@ -4860,7 +4982,7 @@ struct IpcReady<'a> {
     /// this process is still the singleton for `data_dir`.
     instance_lock: &'a FileInstanceLock,
     build: BuildIdentity,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<ShutdownRequest>,
     published: AtomicBool,
     publication_attempted: AtomicBool,
     worker: RefCell<Option<std::thread::JoinHandle<SecureUnixListener>>>,
@@ -4966,7 +5088,7 @@ impl DaemonReady for IpcReady<'_> {
     }
 
     fn quiesce(&self) -> std::io::Result<()> {
-        self.shutdown.store(true, Ordering::Release);
+        self.shutdown.request();
         let Some(worker) = self.worker.borrow_mut().take() else {
             return Ok(());
         };
@@ -5041,14 +5163,18 @@ impl Drop for IpcReady<'_> {
     }
 }
 
+/// Marks that signal delivery has been prepared. The blocking iterator now lives
+/// in the signal thread, so the owner keeps only this proof.
+struct SignalDelivery;
+
 struct SignalShutdown {
-    shutdown: Arc<AtomicBool>,
-    signals: RefCell<Option<signal_hook::iterator::Signals>>,
+    shutdown: Arc<ShutdownRequest>,
+    signals: RefCell<Option<SignalDelivery>>,
     flag_ids: RefCell<Vec<signal_hook::SigId>>,
 }
 
 impl SignalShutdown {
-    fn new(shutdown: Arc<AtomicBool>) -> Self {
+    fn new(shutdown: Arc<ShutdownRequest>) -> Self {
         Self {
             shutdown,
             signals: RefCell::new(None),
@@ -5072,7 +5198,7 @@ impl ShutdownSignal for SignalShutdown {
         if signals.is_none() {
             let mut flag_ids = Vec::with_capacity(2);
             for signal in [libc::SIGINT, libc::SIGTERM] {
-                match signal_hook::flag::register(signal, Arc::clone(&self.shutdown)) {
+                match signal_hook::flag::register(signal, self.shutdown.flag()) {
                     Ok(id) => flag_ids.push(id),
                     Err(error) => {
                         for id in flag_ids {
@@ -5082,18 +5208,38 @@ impl ShutdownSignal for SignalShutdown {
                     }
                 }
             }
-            let prepared = match signal_hook::iterator::Signals::new([libc::SIGINT, libc::SIGTERM])
-            {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    for id in flag_ids {
-                        signal_hook::low_level::unregister(id);
+            let mut prepared =
+                match signal_hook::iterator::Signals::new([libc::SIGINT, libc::SIGTERM]) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        for id in flag_ids {
+                            signal_hook::low_level::unregister(id);
+                        }
+                        return Err(error);
                     }
-                    return Err(error);
+                };
+            // `signal_hook::flag::register` above writes the flag straight from
+            // the handler, which is async-signal-safe but cannot wake a condvar.
+            // This thread does the waking: it blocks on signal-hook's own pipe
+            // (no timer) and converts the first delivery into one request. It is
+            // started here, before any worker is spawned, so the documented
+            // ordering of shutdown delivery is unchanged.
+            let requested = Arc::clone(&self.shutdown);
+            let handle = std::thread::Builder::new()
+                .name("usagi-daemon-signal".to_string())
+                .spawn(move || {
+                    if prepared.forever().next().is_some() {
+                        requested.request();
+                    }
+                });
+            if let Err(error) = handle {
+                for id in flag_ids {
+                    signal_hook::low_level::unregister(id);
                 }
-            };
+                return Err(error);
+            }
             *self.flag_ids.borrow_mut() = flag_ids;
-            *signals = Some(prepared);
+            *signals = Some(SignalDelivery);
         }
         Ok(())
     }
@@ -5107,24 +5253,18 @@ impl ShutdownSignal for SignalShutdown {
 
     #[cfg(unix)]
     fn wait(&self) -> std::io::Result<()> {
-        let mut signals = self.signals.borrow_mut();
-        let signals = signals
-            .as_mut()
-            .ok_or_else(|| std::io::Error::other("daemon shutdown delivery was not prepared"))?;
-        // Poll the shared flag as well as pending signals. The flag is set by
-        // both signal-hook and the accept-worker exit guard, so a worker panic
-        // cannot leave the owner blocked forever while holding daemon.lock and
-        // a stale lifecycle record.
-        loop {
-            if self.shutdown.load(Ordering::Acquire) {
-                return Ok(());
-            }
-            if signals.pending().next().is_some() {
-                self.shutdown.store(true, Ordering::Release);
-                return Ok(());
-            }
-            std::thread::sleep(Duration::from_millis(10));
+        if self.signals.borrow().is_none() {
+            return Err(std::io::Error::other(
+                "daemon shutdown delivery was not prepared",
+            ));
         }
+        // Both delivery paths converge on one request, so this parks instead of
+        // polling: `prepare` runs a thread that turns a delivered signal into a
+        // request, and the accept-worker exit guard requests directly. A worker
+        // panic therefore still releases an owner that would otherwise hold
+        // daemon.lock and a stale lifecycle record.
+        self.shutdown.wait_until_requested();
+        Ok(())
     }
     #[cfg(not(unix))]
     fn wait(&self) -> std::io::Result<()> {
@@ -5418,7 +5558,7 @@ fn run_inner(
         // process lifetime. Atomic replacement of the executable path cannot
         // mutate this startup snapshot.
         build: current_build(),
-        shutdown: Arc::new(AtomicBool::new(false)),
+        shutdown: Arc::new(ShutdownRequest::new()),
         published: AtomicBool::new(false),
         publication_attempted: AtomicBool::new(false),
         worker: RefCell::new(None),
@@ -6178,7 +6318,7 @@ mod tests {
                 target: "test".to_owned(),
                 artifact: "test-artifact".to_owned(),
             },
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(ShutdownRequest::new()),
             published: AtomicBool::new(false),
             publication_attempted: AtomicBool::new(false),
             worker: RefCell::new(None),
@@ -7991,12 +8131,12 @@ mod tests {
             return;
         }
 
-        let admission_closed = Arc::new(AtomicBool::new(false));
+        let admission_closed = Arc::new(ShutdownRequest::new());
         let shutdown = SignalShutdown::new(Arc::clone(&admission_closed));
         shutdown.prepare().unwrap();
         signal_hook::low_level::raise(libc::SIGTERM).unwrap();
 
-        assert!(admission_closed.load(Ordering::Acquire));
+        assert!(admission_closed.is_requested());
     }
 
     #[test]
@@ -8016,7 +8156,7 @@ mod tests {
             return;
         }
 
-        let admission_closed = Arc::new(AtomicBool::new(false));
+        let admission_closed = Arc::new(ShutdownRequest::new());
         let shutdown = SignalShutdown::new(Arc::clone(&admission_closed));
         shutdown.prepare().unwrap();
         let worker_flag = Arc::clone(&admission_closed);
@@ -8029,13 +8169,13 @@ mod tests {
 
         shutdown.wait().unwrap();
 
-        assert!(admission_closed.load(Ordering::Acquire));
+        assert!(admission_closed.is_requested());
         assert!(worker.join().is_err());
     }
 
     struct FixedRefreshClock {
         calls: Arc<AtomicUsize>,
-        shutdown_after: Option<(usize, Arc<AtomicBool>)>,
+        shutdown_after: Option<(usize, Arc<ShutdownRequest>)>,
     }
     impl RefreshClock for FixedRefreshClock {
         fn now_ms(&self) -> u64 {
@@ -8043,7 +8183,7 @@ mod tests {
             if let Some((after, shutdown)) = &self.shutdown_after
                 && call >= *after
             {
-                shutdown.store(true, Ordering::Release);
+                shutdown.request();
             }
             0
         }
@@ -8086,7 +8226,7 @@ mod tests {
                 format!("{}\n", identity.as_url()).as_bytes(),
             )
             .unwrap();
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(ShutdownRequest::new());
         let calls = Arc::new(AtomicUsize::new(0));
         let unlocked = Arc::new(AtomicBool::new(false));
         let handle = spawn_pr_refresh_worker(
@@ -8110,7 +8250,8 @@ mod tests {
         let snapshot = inventory.lock().unwrap().snapshot(session).unwrap();
         assert_eq!(snapshot.entries[0].title.as_deref(), Some("production"));
 
-        let cancelled = Arc::new(AtomicBool::new(true));
+        let cancelled = Arc::new(ShutdownRequest::new());
+        cancelled.request();
         let cancelled_calls = Arc::new(AtomicUsize::new(0));
         let handle = spawn_pr_refresh_worker(
             Arc::clone(&inventory),
@@ -8156,7 +8297,7 @@ mod tests {
 
     struct FakeTeardownEffect {
         torn_down: Arc<Mutex<Vec<String>>>,
-        shutdown: Arc<AtomicBool>,
+        shutdown: Arc<ShutdownRequest>,
     }
     impl TeardownEffect for FakeTeardownEffect {
         fn tear_down(
@@ -8166,7 +8307,7 @@ mod tests {
             self.torn_down.lock().unwrap().push(teardown.name.clone());
             // End the worker as soon as it has taken the admitted work, so the
             // test observes exactly one drain.
-            self.shutdown.store(true, Ordering::Release);
+            self.shutdown.request();
             Err("worktree is busy".into())
         }
     }
@@ -8182,7 +8323,7 @@ mod tests {
                 force: false,
             },
         ]));
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(ShutdownRequest::new());
         let torn_down = Arc::new(Mutex::new(Vec::new()));
         let signal = Arc::new(TeardownSignal::new());
 
@@ -8206,7 +8347,8 @@ mod tests {
         assert!(pending.lock().unwrap().is_empty());
 
         // A worker started under shutdown takes no work at all.
-        let already_stopped = Arc::new(AtomicBool::new(true));
+        let already_stopped = Arc::new(ShutdownRequest::new());
+        already_stopped.request();
         let untouched = Arc::new(Mutex::new(Vec::new()));
         spawn_session_teardown_worker(
             FakeTeardownJournal {
@@ -8259,7 +8401,7 @@ mod tests {
         probe: FsCustodyProbe,
         owner: DaemonRecord,
         data_dir: &Path,
-        shutdown: &Arc<AtomicBool>,
+        shutdown: &Arc<ShutdownRequest>,
     ) -> std::thread::JoinHandle<()> {
         spawn_custody_worker(
             probe,
@@ -8271,15 +8413,15 @@ mod tests {
         .unwrap()
     }
 
-    fn wait_for_flag(flag: &AtomicBool, timeout: Duration) -> bool {
+    fn wait_for_request(shutdown: &ShutdownRequest, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            if flag.load(Ordering::Acquire) {
+            if shutdown.is_requested() {
                 return true;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        flag.load(Ordering::Acquire)
+        shutdown.is_requested()
     }
 
     #[test]
@@ -8322,14 +8464,14 @@ mod tests {
     fn production_custody_worker_requests_shutdown_when_the_lock_path_disappears() {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let (lock, owner, probe) = custody_fixture(home.path());
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(ShutdownRequest::new());
         let handle = custody_worker(probe, owner, home.path(), &shutdown);
 
         // A live daemon keeps serving across ticks.
-        assert!(!wait_for_flag(&shutdown, Duration::from_millis(50)));
+        assert!(!wait_for_request(&shutdown, Duration::from_millis(50)));
 
         std::fs::remove_file(home.path().join("daemon/daemon.lock")).unwrap();
-        assert!(wait_for_flag(&shutdown, Duration::from_secs(5)));
+        assert!(wait_for_request(&shutdown, Duration::from_secs(5)));
         handle.join().unwrap();
         drop(lock);
     }
@@ -8338,7 +8480,7 @@ mod tests {
     fn production_custody_worker_requests_shutdown_when_another_owner_takes_the_record() {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let (lock, owner, probe) = custody_fixture(home.path());
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(ShutdownRequest::new());
         let handle = custody_worker(probe, owner, home.path(), &shutdown);
 
         DaemonRecordStore::new(FsRecordFile {
@@ -8346,7 +8488,7 @@ mod tests {
         })
         .save(&DaemonRecord::identified(4321, "custody:replacement"))
         .unwrap();
-        assert!(wait_for_flag(&shutdown, Duration::from_secs(5)));
+        assert!(wait_for_request(&shutdown, Duration::from_secs(5)));
         handle.join().unwrap();
         drop(lock);
     }
@@ -8355,7 +8497,8 @@ mod tests {
     fn production_custody_worker_stops_at_an_already_requested_shutdown() {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let (lock, owner, probe) = custody_fixture(home.path());
-        let shutdown = Arc::new(AtomicBool::new(true));
+        let shutdown = Arc::new(ShutdownRequest::new());
+        shutdown.request();
         custody_worker(probe, owner, home.path(), &shutdown)
             .join()
             .unwrap();
@@ -8387,15 +8530,64 @@ mod tests {
     }
 
     #[test]
+    fn decision_maintenance_never_writes_when_nothing_is_due_and_honors_shutdown() {
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let daemon = home.path().join("daemon");
+        std::fs::create_dir_all(&daemon).unwrap();
+        let decisions = Arc::new(UserDecisionStore::new(daemon.clone()));
+        let store_path = decisions.path();
+        let shutdown = Arc::new(ShutdownRequest::new());
+        let stopper = Arc::clone(&shutdown);
+
+        let handle =
+            spawn_decision_maintenance(decisions, shutdown, Duration::from_millis(1)).unwrap();
+        // Let several ticks run, then stop: the worker must observe the request
+        // rather than needing its tick to be short.
+        std::thread::sleep(Duration::from_millis(30));
+        stopper.request();
+        handle.join().unwrap();
+
+        // An idle tick decides "nothing is due" from a lock-free read, so it must
+        // not have created the durable document at all — no fsync, no store lock.
+        assert!(
+            !store_path.exists(),
+            "an idle maintenance tick must not write the decision store"
+        );
+        assert!(
+            !daemon
+                .join(usagi_core::infrastructure::persistence::store_lock::LOCK_FILE_NAME)
+                .exists(),
+            "an idle maintenance tick must not take the store lock"
+        );
+    }
+
+    #[test]
+    fn decision_maintenance_stops_at_an_already_requested_shutdown() {
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let daemon = home.path().join("daemon");
+        std::fs::create_dir_all(&daemon).unwrap();
+        let shutdown = Arc::new(ShutdownRequest::new());
+        shutdown.request();
+        spawn_decision_maintenance(
+            Arc::new(UserDecisionStore::new(daemon)),
+            shutdown,
+            Duration::from_secs(30),
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+    }
+
+    #[test]
     fn the_retention_collector_ticks_until_shutdown_and_stops_when_already_down() {
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(ShutdownRequest::new());
         let calls = Arc::new(AtomicUsize::new(0));
         let ticking = Arc::clone(&calls);
         let stopper = Arc::clone(&shutdown);
         let handle = spawn_retention_gc_worker(
             move || {
                 if ticking.fetch_add(1, Ordering::AcqRel) >= 1 {
-                    stopper.store(true, Ordering::Release);
+                    stopper.request();
                 }
             },
             Arc::clone(&shutdown),
@@ -8406,7 +8598,8 @@ mod tests {
         assert_eq!(calls.load(Ordering::Acquire), 2);
 
         // A daemon already shutting down never collects.
-        let cancelled = Arc::new(AtomicBool::new(true));
+        let cancelled = Arc::new(ShutdownRequest::new());
+        cancelled.request();
         let skipped = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&skipped);
         let handle = spawn_retention_gc_worker(
