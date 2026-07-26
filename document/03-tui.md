@@ -710,6 +710,25 @@ background のいずれも同じ規則に従う。
 hung request 自体の deadline は本節の責務ではなく、[#521](../.usagi/issues/521-fix-ipc-clientpolicy-request-deadline-reconnect-budget.md)
 の IPC request deadline が所有する。
 
+#### 同一 process の pending operation identity
+
+pending pane と daemon の答えを結ぶ identity は、**controller が pending tab のために発行した 1 つの `OperationId`**
+だけである。この節はその同一 process 内の規則の正本で、wire 側の identity と digest の契約は
+[4. daemon IPC#agent operation identity と final の相関](04-ipc.md#agent-operation-identity-と-final-の相関)（Agent）と
+[4. daemon IPC#generic terminal request](04-ipc.md#generic-terminal-request)（generic Terminal）が正本である。
+
+| 段 | 規則 |
+|---|---|
+| controller → worker | pending tab を作った `OperationId` をそのまま launch request に載せる。Agent / generic terminal、workspace root / session で同じ |
+| worker → daemon client | client adapter は別の `OperationId` を発行せず、その identity をそのまま daemon へ送る。Agent の答えは request と同じ identity・同じ intent digest・request scope に属する `TerminalRef` を検証してから返し、generic Terminal は同じ identity を [#518 の launch operation 契約](04-ipc.md#generic-terminal-request)へ渡す |
+| daemon の答え → pending | その identity の pending tab がこの process に残っている間だけ完了させる。close 済み・置換済みの tab は復活させない |
+| 検証に落ちた答え | pane を成功させず safe failure に収束させる（別 operation の side effect を pending へ promote しない） |
+
+response が失われた・timeout した場合は、その pane を安全な失敗として閉じるだけで、**別の `OperationId` で blind retry
+しない**。TUI を開き直したときの in-flight launch の replay や `OperationId` の再利用も行わず、復元は
+[workspace open 時の pane 復元](#workspace-open-時の-pane-復元) の inventory 観測と
+[#506 dismissal precedence](#506-dismissal-precedence) の display intent だけが決める。
+
 ### live terminal の出力表示と入力
 
 選択中の foreground live terminal tab は、daemon が所有する PTY の出力を右ペインへ描画し、キー入力をその PTY へ

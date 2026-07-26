@@ -105,11 +105,20 @@ pub struct AgentPaneAdmission {
 /// another role's instance, so a slow or hung request in one cannot stop the
 /// others.
 pub trait AgentCommandPort: Send {
+    /// Launch one daemon-owned Agent under the caller's durable operation.
+    ///
+    /// `operation` is the identity the controller already issued for the pending
+    /// pane. It reaches the daemon unchanged and the implementation correlates the
+    /// admission and the final answer back to it (#522); an implementation must
+    /// never mint an operation of its own, because the side effect of a second
+    /// identity could then be promoted as this pending pane's completion.
+    ///
     /// # Errors
     ///
     /// Returns a presentation-safe daemon launch failure.
     fn launch(
         &mut self,
+        operation: OperationId,
         workspace: WorkspaceId,
         session: Option<SessionId>,
         profile: Option<AgentProfileId>,
@@ -331,8 +340,12 @@ pub trait PaneLaunchCommandPort: Send + Sync {
     /// # Errors
     ///
     /// Returns a presentation-safe daemon launch failure.
+    /// `operation` is the pending pane's durable launch identity; it reaches the
+    /// daemon unchanged so the admission and the final can be correlated back to
+    /// exactly this pane instead of to an adapter-minted operation (#522).
     fn launch(
         &self,
+        operation: OperationId,
         workspace: WorkspaceId,
         session: Option<SessionId>,
         profile: Option<AgentProfileId>,
@@ -402,11 +415,12 @@ impl SerializedPaneLaunchPort {
 impl PaneLaunchCommandPort for SerializedPaneLaunchPort {
     fn launch(
         &self,
+        operation: OperationId,
         workspace: WorkspaceId,
         session: Option<SessionId>,
         profile: Option<AgentProfileId>,
     ) -> Result<AgentPaneAdmission, String> {
-        self.client().launch(workspace, session, profile)
+        self.client().launch(operation, workspace, session, profile)
     }
 
     fn resume(
@@ -446,6 +460,7 @@ struct UnavailablePaneLaunchPort;
 impl PaneLaunchCommandPort for UnavailablePaneLaunchPort {
     fn launch(
         &self,
+        _operation: OperationId,
         _workspace: WorkspaceId,
         _session: Option<SessionId>,
         _profile: Option<AgentProfileId>,
@@ -1180,6 +1195,7 @@ struct UnavailableAgentCommandPort;
 impl AgentCommandPort for UnavailableAgentCommandPort {
     fn launch(
         &mut self,
+        _operation: OperationId,
         _workspace: WorkspaceId,
         _session: Option<SessionId>,
         _profile: Option<AgentProfileId>,
@@ -2928,7 +2944,9 @@ fn run_pane_launch(
                     |session| port.resume(workspace, session, operation),
                 )
             } else {
-                port.launch(workspace, session, profile)
+                // The pending pane's own operation is what the daemon admits and
+                // finalizes, so no second identity can complete this pane (#522).
+                port.launch(operation, workspace, session, profile)
             };
             PaneLaunchOutcome::Agent { operation, result }
         }
@@ -6626,6 +6644,7 @@ mod tests {
     impl AgentCommandPort for RecordingStreamPort {
         fn launch(
             &mut self,
+            _operation: OperationId,
             _workspace: WorkspaceId,
             _session: Option<SessionId>,
             _profile: Option<AgentProfileId>,
@@ -6710,6 +6729,7 @@ mod tests {
     impl PaneLaunchCommandPort for GatedLaunchPort {
         fn launch(
             &self,
+            _operation: OperationId,
             _workspace: WorkspaceId,
             _session: Option<SessionId>,
             _profile: Option<AgentProfileId>,
@@ -6764,6 +6784,7 @@ mod tests {
     impl PaneLaunchCommandPort for PanickingLaunchPort {
         fn launch(
             &self,
+            _operation: OperationId,
             _workspace: WorkspaceId,
             _session: Option<SessionId>,
             _profile: Option<AgentProfileId>,
@@ -6980,6 +7001,251 @@ mod tests {
         // launch anything.
         assert_eq!(stream.lock().unwrap().launches, 0);
         assert!(ui.pane_completions.try_recv().is_err());
+    }
+
+    /// One request the identity-recording launch client answered.
+    #[derive(Debug, Clone)]
+    struct RecordedLaunch {
+        kind: &'static str,
+        operation: OperationId,
+        terminal: TerminalRef,
+    }
+
+    /// A launch client that records the operation each request carried and mints a
+    /// terminal for exactly that operation. A completion applied to the wrong
+    /// pending pane is therefore visible as a foreign terminal on that pane.
+    struct IdentityRecordingLaunchPort(Arc<Mutex<Vec<RecordedLaunch>>>);
+
+    impl IdentityRecordingLaunchPort {
+        fn record(
+            &self,
+            kind: &'static str,
+            operation: OperationId,
+            workspace: WorkspaceId,
+            session: Option<SessionId>,
+        ) -> TerminalRef {
+            let terminal = scoped_terminal_ref(workspace, session);
+            self.0.lock().unwrap().push(RecordedLaunch {
+                kind,
+                operation,
+                terminal: terminal.clone(),
+            });
+            terminal
+        }
+    }
+
+    impl PaneLaunchCommandPort for IdentityRecordingLaunchPort {
+        fn launch(
+            &self,
+            operation: OperationId,
+            workspace: WorkspaceId,
+            session: Option<SessionId>,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<AgentPaneAdmission, String> {
+            Ok(AgentPaneAdmission {
+                terminal: self.record("agent", operation, workspace, session),
+                continuation: None,
+            })
+        }
+
+        fn resume(
+            &self,
+            _workspace: WorkspaceId,
+            _session: SessionId,
+            _operation: OperationId,
+        ) -> Result<AgentPaneAdmission, String> {
+            Err("resume is not part of this fixture".to_owned())
+        }
+
+        fn resume_exact(
+            &self,
+            _target: AgentResumeTarget,
+            _operation: OperationId,
+        ) -> Result<ExactAgentResume, String> {
+            Err("resume is not part of this fixture".to_owned())
+        }
+
+        fn launch_terminal(
+            &self,
+            workspace: WorkspaceId,
+            session: Option<SessionId>,
+            _geometry: Geometry,
+            _arguments: &str,
+            operation: OperationId,
+        ) -> Result<TerminalRef, String> {
+            Ok(self.record("terminal", operation, workspace, session))
+        }
+    }
+
+    /// The live terminals `target`'s pane currently shows.
+    fn live_tab_terminals(runtime: &WorkspaceRuntime, target: Target) -> Vec<TerminalRef> {
+        runtime
+            .panes()
+            .pane(target)
+            .map(|pane| {
+                pane.tabs()
+                    .iter()
+                    .filter_map(|tab| match tab {
+                        PaneTab::Live(live) => Some(live.terminal.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// #522: the operation the controller issued for a pending pane is the one the
+    /// launch client is asked with — Agent and generic terminal, workspace root and
+    /// session alike. No adapter mints a second identity whose side effect could be
+    /// promoted into this pane.
+    #[test]
+    fn every_pane_launch_request_carries_its_own_pending_operation() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut ui = ui_with_split_ports(
+            workspace,
+            session,
+            Arc::new(Mutex::new(StreamCalls::default())),
+            Box::new(IdentityRecordingLaunchPort(Arc::clone(&requests))),
+        );
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let mut pending = std::collections::HashMap::new();
+
+        let root_agent = OperationId::new();
+        let session_agent = OperationId::new();
+        let session_terminal = OperationId::new();
+        let planned = [
+            (
+                Target::Root(workspace),
+                root_agent,
+                "agent",
+                super::PaneLaunch::Agent {
+                    operation: root_agent,
+                    workspace,
+                    session: None,
+                    profile: None,
+                    resume: false,
+                },
+            ),
+            (
+                Target::Session(session),
+                session_agent,
+                "agent",
+                agent_launch(workspace, session, session_agent),
+            ),
+            (
+                Target::Session(session),
+                session_terminal,
+                "terminal",
+                super::PaneLaunch::Terminal {
+                    operation: session_terminal,
+                    workspace,
+                    session: Some(session),
+                    arguments: "new".into(),
+                },
+            ),
+        ];
+        let expected = planned
+            .iter()
+            .map(|(target, operation, kind, _)| (*target, *operation, *kind))
+            .collect::<Vec<_>>();
+        for (target, operation, _, launch) in planned {
+            runtime.request_pane(target, operation, PaneKind::Agent);
+            pending.insert(operation, target);
+            super::enqueue_pane_launch(&mut ui, launch);
+        }
+
+        // One worker at a time, each drained before the next is admitted.
+        for (target, operation, kind) in expected {
+            super::drain_pane_launches(&mut ui, terminal_geometry(20, 80));
+            drain_next_completion(&mut ui, &mut runtime, &mut pending);
+            let recorded = requests
+                .lock()
+                .unwrap()
+                .last()
+                .cloned()
+                .expect("each admitted launch reaches the client once");
+            assert_eq!(recorded.kind, kind);
+            assert_eq!(
+                recorded.operation, operation,
+                "the pending pane's own operation is what the daemon is asked with"
+            );
+            assert!(
+                live_tab_terminals(&runtime, target).contains(&recorded.terminal),
+                "the pane promoted the terminal its own operation was answered with"
+            );
+        }
+        assert_eq!(requests.lock().unwrap().len(), 3);
+        assert!(pending.is_empty());
+    }
+
+    /// #522: while a pending operation lives in this process, its completion — even
+    /// applied out of order — promotes only its own pane, and a completion that
+    /// arrives after the pending tab is gone revives nothing.
+    #[test]
+    fn out_of_order_and_late_completions_never_cross_or_revive_a_pane() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let root = Target::Root(workspace);
+        let scoped = Target::Session(session);
+        let mut ui = ui_with_split_ports(
+            workspace,
+            session,
+            Arc::new(Mutex::new(StreamCalls::default())),
+            Box::new(IdentityRecordingLaunchPort(Arc::new(
+                Mutex::new(Vec::new()),
+            ))),
+        );
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let mut pending = std::collections::HashMap::new();
+
+        let first = OperationId::new();
+        let second = OperationId::new();
+        let closed = OperationId::new();
+        let first_terminal = scoped_terminal_ref(workspace, None);
+        let second_terminal = scoped_terminal_ref(workspace, Some(session));
+        let closed_terminal = scoped_terminal_ref(workspace, Some(session));
+        for (target, operation) in [(root, first), (scoped, second), (scoped, closed)] {
+            runtime.request_pane(target, operation, PaneKind::Agent);
+            pending.insert(operation, target);
+        }
+        // The third pane is dropped before its daemon answer arrives.
+        runtime.fail_pane(scoped, closed, "cancelled".to_owned());
+
+        // The answers arrive in the reverse of the order they were requested.
+        for (operation, terminal) in [
+            (closed, closed_terminal.clone()),
+            (second, second_terminal.clone()),
+            (first, first_terminal.clone()),
+        ] {
+            ui.pane_completion_sender
+                .send(super::PaneLaunchCompletion {
+                    launch_id: super::PANE_LAUNCH_UNADMITTED,
+                    outcome: super::PaneLaunchOutcome::Agent {
+                        operation,
+                        result: Ok(AgentPaneAdmission {
+                            terminal,
+                            continuation: None,
+                        }),
+                    },
+                })
+                .expect("the workspace still owns its completion receiver");
+        }
+        super::drain_pane_completions_into_runtime(
+            &mut ui,
+            &mut runtime,
+            &mut pending,
+            terminal_geometry(20, 80),
+        );
+
+        assert_eq!(live_tab_terminals(&runtime, root), vec![first_terminal]);
+        assert_eq!(live_tab_terminals(&runtime, scoped), vec![second_terminal]);
+        assert!(
+            !live_tab_terminals(&runtime, scoped).contains(&closed_terminal),
+            "a completion for a closed pending tab never revives it"
+        );
+        assert!(pending.is_empty());
     }
 
     #[test]
@@ -7359,7 +7625,7 @@ mod tests {
         );
         assert!(
             UnavailableAgentCommandPort
-                .launch(workspace_id, None, None)
+                .launch(OperationId::new(), workspace_id, None, None)
                 .is_err()
         );
         // An embedder without a launch client refuses every pane launch inline
@@ -7367,7 +7633,7 @@ mod tests {
         let history = interrupted_history(workspace_id, Some(session_id), true);
         assert!(
             UnavailablePaneLaunchPort
-                .launch(workspace_id, None, None)
+                .launch(OperationId::new(), workspace_id, None, None)
                 .is_err()
         );
         assert!(
@@ -7487,6 +7753,7 @@ mod tests {
     impl AgentCommandPort for SuccessfulAgentPort {
         fn launch(
             &mut self,
+            _operation: OperationId,
             _workspace: WorkspaceId,
             _session: Option<SessionId>,
             _profile: Option<AgentProfileId>,
@@ -7821,6 +8088,7 @@ mod tests {
     impl AgentCommandPort for BlockingRestorePort {
         fn launch(
             &mut self,
+            _operation: OperationId,
             _workspace: WorkspaceId,
             _session: Option<SessionId>,
             _profile: Option<AgentProfileId>,
@@ -9612,6 +9880,7 @@ mod tests {
     impl AgentCommandPort for ScriptedAgentPort {
         fn launch(
             &mut self,
+            _operation: OperationId,
             _workspace: WorkspaceId,
             _session: Option<SessionId>,
             _profile: Option<AgentProfileId>,
@@ -9750,6 +10019,7 @@ mod tests {
     impl AgentCommandPort for BackgroundLanePort {
         fn launch(
             &mut self,
+            _operation: OperationId,
             _workspace: WorkspaceId,
             _session: Option<SessionId>,
             _profile: Option<AgentProfileId>,
@@ -10023,6 +10293,7 @@ mod tests {
     impl AgentCommandPort for SharedConnectionPort {
         fn launch(
             &mut self,
+            _operation: OperationId,
             _workspace: WorkspaceId,
             _session: Option<SessionId>,
             _profile: Option<AgentProfileId>,
@@ -10730,6 +11001,7 @@ mod tests {
     impl AgentCommandPort for RestoreInventoryPort {
         fn launch(
             &mut self,
+            _operation: OperationId,
             _workspace: WorkspaceId,
             _session: Option<SessionId>,
             _profile: Option<AgentProfileId>,
@@ -10796,6 +11068,7 @@ mod tests {
     impl AgentCommandPort for SequencedRestorePort {
         fn launch(
             &mut self,
+            _: OperationId,
             _: WorkspaceId,
             _: Option<SessionId>,
             _: Option<AgentProfileId>,
@@ -10819,6 +11092,7 @@ mod tests {
     impl AgentCommandPort for RetryRestorePort {
         fn launch(
             &mut self,
+            _: OperationId,
             _: WorkspaceId,
             _: Option<SessionId>,
             _: Option<AgentProfileId>,
@@ -14617,6 +14891,7 @@ mod tests {
     impl AgentCommandPort for IdleAgentPort {
         fn launch(
             &mut self,
+            _operation: OperationId,
             _workspace: WorkspaceId,
             _session: Option<SessionId>,
             _profile: Option<AgentProfileId>,
@@ -14642,7 +14917,12 @@ mod tests {
     fn idle_agent_port_is_safe_when_an_unexpected_launch_is_requested() {
         let mut port = IdleAgentPort;
         let error = port
-            .launch(WorkspaceId::new(), Some(SessionId::new()), None)
+            .launch(
+                OperationId::new(),
+                WorkspaceId::new(),
+                Some(SessionId::new()),
+                None,
+            )
             .unwrap_err();
 
         assert_eq!(error, "not launched in this test");
@@ -16160,6 +16440,7 @@ mod tests {
     impl AgentCommandPort for DefaultTerminalPort {
         fn launch(
             &mut self,
+            _operation: OperationId,
             _workspace: WorkspaceId,
             _session: Option<SessionId>,
             _profile: Option<AgentProfileId>,
@@ -16179,8 +16460,13 @@ mod tests {
         };
         let mut port = DefaultTerminalPort;
         assert!(
-            port.launch(WorkspaceId::new(), Some(SessionId::new()), None)
-                .is_err()
+            port.launch(
+                OperationId::new(),
+                WorkspaceId::new(),
+                Some(SessionId::new()),
+                None
+            )
+            .is_err()
         );
         assert_eq!(
             port.resize_terminal(&terminal, Geometry { cols: 80, rows: 24 }),
@@ -16533,6 +16819,7 @@ mod tests {
     impl AgentCommandPort for ScriptedExactResumePort {
         fn launch(
             &mut self,
+            _operation: OperationId,
             _workspace: WorkspaceId,
             _session: Option<SessionId>,
             _profile: Option<AgentProfileId>,

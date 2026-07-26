@@ -1508,10 +1508,89 @@ fn decode_agent_admission(
     })
 }
 
+/// The one safe message every failed Agent launch correlation reports. It says
+/// nothing about which check failed, so a mismatched identity, a foreign digest,
+/// and an unfenced terminal all read the same on screen.
+const AGENT_LAUNCH_UNCORRELATED: &str = "agent launch could not be correlated safely";
+
+/// Build the request for one pane's Agent launch. The pending pane's own
+/// operation is the wire identity; the adapter never mints another (#522).
+fn agent_launch_request(
+    operation: usagi_core::domain::id::OperationId,
+    intent: AgentLaunchIntent,
+) -> DaemonRequest {
+    DaemonRequest::Agent {
+        operation_id: operation.to_string(),
+        intent,
+    }
+}
+
+/// Correlate one Agent launch reply back to the pending operation that issued it.
+///
+/// The reply is usable only when *every* fence agrees with the request: the
+/// admission or final states the same `operation_id`, the digest of the intent it
+/// was admitted for matches the one computed here, `completed` matches the reply
+/// class (an `Accepted` is running, an `Ok` is the durable final — direct or
+/// replayed after a reconnect), the terminal is fenced to the requested scope, and
+/// an ordinary launch carries no resume relation. Anything else — a missing or
+/// foreign identity, another intent's digest, a `completed: false` offered as a
+/// final, a terminal from another scope — is a correlation failure that leaves the
+/// pending pane to fail safely instead of promoting a side effect that may belong
+/// to another operation (#522).
+fn correlate_agent_launch(
+    reply: DaemonReply,
+    operation: usagi_core::domain::id::OperationId,
+    intent: &AgentLaunchIntent,
+) -> Result<AgentPaneAdmission, String> {
+    let expected = operation.to_string();
+    let expected_digest = usagi_core::infrastructure::ipc::agent_operation_digest(
+        &usagi_core::usecase::client::agent_launch_semantic_key(intent),
+    );
+    let (body, final_reply) = match reply {
+        // `Accepted` proves admission of this operation twice over: the envelope
+        // identity the transport matched, and the body identity checked below.
+        DaemonReply::Accepted {
+            operation_id, body, ..
+        } if operation_id == expected => (body, false),
+        DaemonReply::Accepted { .. } => return Err(AGENT_LAUNCH_UNCORRELATED.to_owned()),
+        // `ResponseOutcome::Ok` carries no envelope operation identity, so a final
+        // is correlatable only through its body.
+        DaemonReply::Ok(body) => (body, true),
+    };
+    if body.get("operation_id").and_then(serde_json::Value::as_str) != Some(expected.as_str()) {
+        return Err(AGENT_LAUNCH_UNCORRELATED.to_owned());
+    }
+    if body
+        .get("semantic_digest")
+        .and_then(serde_json::Value::as_str)
+        != Some(expected_digest.as_str())
+    {
+        return Err(AGENT_LAUNCH_UNCORRELATED.to_owned());
+    }
+    if body.get("completed").and_then(serde_json::Value::as_bool) != Some(final_reply) {
+        return Err(AGENT_LAUNCH_UNCORRELATED.to_owned());
+    }
+    // A relation means the daemon answered a resume replacement, not this launch.
+    if body
+        .get("resume_relation")
+        .is_some_and(|relation| !relation.is_null())
+    {
+        return Err(AGENT_LAUNCH_UNCORRELATED.to_owned());
+    }
+    let admission = decode_agent_admission(&body, "agent launch")?;
+    if admission.terminal.workspace_id != intent.workspace
+        || admission.terminal.session_id != intent.session
+    {
+        return Err(AGENT_LAUNCH_UNCORRELATED.to_owned());
+    }
+    Ok(admission)
+}
+
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=daemon_terminal_decode_and_reconnect_contract
 impl AgentCommandPort for DaemonAgentCommandPort {
     fn launch(
         &mut self,
+        operation: usagi_core::domain::id::OperationId,
         workspace: WorkspaceId,
         session: Option<usagi_core::domain::id::SessionId>,
         profile: Option<usagi_core::domain::agent::AgentProfileId>,
@@ -1519,22 +1598,15 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         let mut client =
             crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
                 .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
-        let operation_id = usagi_core::domain::id::OperationId::new().to_string();
-        match client
-            .request(DaemonRequest::Agent {
-                operation_id,
-                intent: AgentLaunchIntent {
-                    workspace,
-                    session,
-                    profile,
-                },
-            })
-            .map_err(|_| "daemon request failed; reconnect to continue".to_owned())?
-        {
-            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => {
-                decode_agent_admission(&body, "agent launch")
-            }
-        }
+        let intent = AgentLaunchIntent {
+            workspace,
+            session,
+            profile,
+        };
+        let reply = client
+            .request(agent_launch_request(operation, intent.clone()))
+            .map_err(|_| "daemon request failed; reconnect to continue".to_owned())?;
+        correlate_agent_launch(reply, operation, &intent)
     }
 
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=structured_codex_identity_enables_one_explicit_new_runtime_resume
@@ -3495,19 +3567,20 @@ mod tests {
     const CLOCK_GRANULARITY_MS: u64 = 2;
 
     use super::{
-        DaemonAgentCommandPort, DaemonDecisionCommandPort, DaemonRestoreConnectionPort, EnvScope,
-        EnvironmentStorePort, FsWorkspaceLoader, Geometry, LANE_COLD_START_BUDGET, LaneConnection,
-        LifecycleRequestError, LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory,
-        RepoEnvironmentStore, SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen,
-        TerminalChunk, TerminalError, TerminalInputOutcome, TerminalSnapshotMode,
-        TerminalSubscription, agent_inventory_request, classify_terminal_input,
-        created_session_hook, daemon_error_reason, decision_cadence, decode_agent_admission,
-        decode_attach_screen, decode_exact_agent_resume, decode_terminal_input_ack,
-        decode_terminal_inventory, decode_terminal_poll, exact_agent_resume_request,
-        lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
-        metrics_cadence, passthrough_key, probe_path, provider_resume_projection, session_cadence,
-        session_snapshot_result, terminal_copy_key, terminal_inventory_matches_scope,
-        validate_workspace_directory, workspace_open_error,
+        AGENT_LAUNCH_UNCORRELATED, AgentLaunchIntent, DaemonAgentCommandPort,
+        DaemonDecisionCommandPort, DaemonReply, DaemonRequest, DaemonRestoreConnectionPort,
+        EnvScope, EnvironmentStorePort, FsWorkspaceLoader, Geometry, LANE_COLD_START_BUDGET,
+        LaneConnection, LifecycleRequestError, LifecycleSnapshot, PersistentSettingsPort,
+        ProductionBackendFactory, RepoEnvironmentStore, SettingsEnvironmentStore, Start,
+        StoreTarget, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
+        TerminalSnapshotMode, TerminalSubscription, agent_inventory_request, agent_launch_request,
+        classify_terminal_input, correlate_agent_launch, created_session_hook, daemon_error_reason,
+        decision_cadence, decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
+        decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
+        exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
+        load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, probe_path,
+        provider_resume_projection, session_cadence, session_snapshot_result, terminal_copy_key,
+        terminal_inventory_matches_scope, validate_workspace_directory, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
@@ -5171,6 +5244,192 @@ mod tests {
             )
             .unwrap_err(),
             "agent launch returned an invalid continuation"
+        );
+    }
+
+    /// The pending pane's own operation is what reaches the daemon: the adapter
+    /// mints no second identity for the same launch (#522).
+    #[test]
+    fn agent_launch_request_carries_the_callers_operation_unchanged() {
+        let operation = OperationId::new();
+        let intent = AgentLaunchIntent {
+            workspace: WorkspaceId::new(),
+            session: Some(usagi_core::domain::id::SessionId::new()),
+            profile: None,
+        };
+        let DaemonRequest::Agent {
+            operation_id,
+            intent: sent,
+        } = agent_launch_request(operation, intent.clone())
+        else {
+            panic!("a pane launch is an Agent request");
+        };
+        assert_eq!(operation_id, operation.to_string());
+        assert_eq!(sent, intent);
+    }
+
+    fn launch_correlation_fixture() -> (OperationId, AgentLaunchIntent, TerminalRef, String, String)
+    {
+        let operation = OperationId::new();
+        let workspace = WorkspaceId::new();
+        let session = usagi_core::domain::id::SessionId::new();
+        let intent = AgentLaunchIntent {
+            workspace,
+            session: Some(session),
+            profile: None,
+        };
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: Some(session),
+            worktree_id: WorktreeId::new(),
+        };
+        let digest = usagi_core::infrastructure::ipc::agent_operation_digest(
+            &usagi_core::usecase::client::agent_launch_semantic_key(&intent),
+        );
+        (operation, intent, terminal, operation.to_string(), digest)
+    }
+
+    /// #522: an admission and a durable final are correlated to the pending
+    /// operation only when the reply states the same identity and the digest of
+    /// the very intent that was requested.
+    #[test]
+    fn agent_launch_correlates_only_the_matching_admission_and_identity_bearing_final() {
+        let (operation, intent, terminal, id, digest) = launch_correlation_fixture();
+
+        let accepted = correlate_agent_launch(
+            DaemonReply::Accepted {
+                operation_id: id.clone(),
+                revision: 1,
+                body: json!({
+                    "operation_id": id,
+                    "semantic_digest": digest,
+                    "terminal": terminal,
+                    "continuation": null,
+                    "resume_relation": null,
+                    "completed": false,
+                }),
+            },
+            operation,
+            &intent,
+        );
+        assert_eq!(accepted.unwrap().terminal, terminal);
+
+        // The direct final and the replay a reconnecting client reads are the same
+        // body, so one expectation fixes both routes.
+        let final_body = json!({
+            "operation_id": id,
+            "semantic_digest": digest,
+            "terminal": terminal,
+            "continuation": null,
+            "resume_relation": null,
+            "completed": true,
+        });
+        assert_eq!(
+            correlate_agent_launch(DaemonReply::Ok(final_body.clone()), operation, &intent)
+                .unwrap()
+                .terminal,
+            terminal
+        );
+        assert_eq!(
+            correlate_agent_launch(DaemonReply::Ok(final_body), operation, &intent)
+                .unwrap()
+                .terminal,
+            terminal,
+            "a cached replay is verified exactly like the direct final"
+        );
+    }
+
+    /// #522: every correlation failure keeps the pending pane unfinished with one
+    /// safe message, so no foreign side effect is promoted into it.
+    #[test]
+    fn agent_launch_refuses_mismatched_identity_digest_target_and_non_final_replies() {
+        let (operation, intent, terminal, id, digest) = launch_correlation_fixture();
+        let other = OperationId::new().to_string();
+        let foreign_terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: intent.session,
+            worktree_id: WorktreeId::new(),
+        };
+        let foreign_digest = usagi_core::infrastructure::ipc::agent_operation_digest(
+            &usagi_core::usecase::client::agent_launch_semantic_key(&AgentLaunchIntent {
+                workspace: intent.workspace,
+                session: None,
+                profile: None,
+            }),
+        );
+        let relation = usagi_core::domain::agent::AgentResumeRelation {
+            source: usagi_core::domain::id::AgentResumeSourceId::new(),
+            replacement_runtime: usagi_core::domain::id::AgentRuntimeId::new(),
+            replacement_terminal: terminal.clone(),
+        };
+        let refused = [
+            // The envelope admitted another operation.
+            DaemonReply::Accepted {
+                operation_id: other.clone(),
+                revision: 1,
+                body: json!({"operation_id": id, "semantic_digest": digest, "terminal": terminal, "completed": false}),
+            },
+            // The admission body names another operation than its envelope.
+            DaemonReply::Accepted {
+                operation_id: id.clone(),
+                revision: 1,
+                body: json!({"operation_id": other, "semantic_digest": digest, "terminal": terminal, "completed": false}),
+            },
+            // An admission is not a final.
+            DaemonReply::Accepted {
+                operation_id: id.clone(),
+                revision: 1,
+                body: json!({"operation_id": id, "semantic_digest": digest, "terminal": terminal, "completed": true}),
+            },
+            // A final without any identity cannot be correlated at all.
+            DaemonReply::Ok(
+                json!({"semantic_digest": digest, "terminal": terminal, "completed": true}),
+            ),
+            // A final for another operation.
+            DaemonReply::Ok(
+                json!({"operation_id": other, "semantic_digest": digest, "terminal": terminal, "completed": true}),
+            ),
+            // The same operation, another intent.
+            DaemonReply::Ok(
+                json!({"operation_id": id, "semantic_digest": foreign_digest, "terminal": terminal, "completed": true}),
+            ),
+            // A legacy record replays without a digest.
+            DaemonReply::Ok(json!({"operation_id": id, "terminal": terminal, "completed": true})),
+            // A running operation offered as the final.
+            DaemonReply::Ok(
+                json!({"operation_id": id, "semantic_digest": digest, "terminal": terminal, "completed": false}),
+            ),
+            // A resume replacement is not this launch's answer.
+            DaemonReply::Ok(
+                json!({"operation_id": id, "semantic_digest": digest, "terminal": terminal, "resume_relation": relation, "completed": true}),
+            ),
+            // The terminal belongs to another scope than the request.
+            DaemonReply::Ok(
+                json!({"operation_id": id, "semantic_digest": digest, "terminal": foreign_terminal, "completed": true}),
+            ),
+        ];
+        for reply in refused {
+            assert_eq!(
+                correlate_agent_launch(reply.clone(), operation, &intent),
+                Err(AGENT_LAUNCH_UNCORRELATED.to_owned()),
+                "{reply:?}"
+            );
+        }
+
+        // A correlated answer still has to carry a decodable fenced terminal.
+        assert_eq!(
+            correlate_agent_launch(
+                DaemonReply::Ok(
+                    json!({"operation_id": id, "semantic_digest": digest, "completed": true}),
+                ),
+                operation,
+                &intent,
+            ),
+            Err("agent launch returned no terminal".to_owned())
         );
     }
 

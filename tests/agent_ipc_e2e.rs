@@ -225,6 +225,40 @@ fn available_scope(client: &mut impl DaemonClient) -> (WorkspaceId, SessionId, W
     )
 }
 
+fn launch_intent(
+    workspace: WorkspaceId,
+    session: SessionId,
+    profile: Option<&str>,
+) -> AgentLaunchIntent {
+    AgentLaunchIntent {
+        workspace,
+        session: Some(session),
+        profile: profile.map(|value| AgentProfileId::new(value).unwrap()),
+    }
+}
+
+/// The digest a client computes for its own request, so an answer that means
+/// another intent cannot be correlated to it (#522).
+fn expected_digest(intent: &AgentLaunchIntent) -> String {
+    usagi_core::infrastructure::ipc::agent_operation_digest(
+        &usagi_core::usecase::client::agent_launch_semantic_key(intent),
+    )
+}
+
+/// Assert that one Agent answer states the operation it belongs to and the digest
+/// of the intent it was admitted for.
+fn assert_agent_identity(body: &serde_json::Value, operation: &str, intent: &AgentLaunchIntent) {
+    assert_eq!(
+        body["operation_id"], *operation,
+        "every Agent answer names its own operation"
+    );
+    assert_eq!(
+        body["semantic_digest"],
+        serde_json::Value::String(expected_digest(intent)),
+        "every Agent answer carries the digest of the intent it was admitted for"
+    );
+}
+
 fn launch(
     client: &mut impl DaemonClient,
     workspace: WorkspaceId,
@@ -232,14 +266,11 @@ fn launch(
     profile: Option<&str>,
 ) -> (String, TerminalRef) {
     let operation = OperationId::new().to_string();
+    let intent = launch_intent(workspace, session, profile);
     let reply = client
         .request(DaemonRequest::Agent {
             operation_id: operation.clone(),
-            intent: AgentLaunchIntent {
-                workspace,
-                session: Some(session),
-                profile: profile.map(|value| AgentProfileId::new(value).unwrap()),
-            },
+            intent: intent.clone(),
         })
         .expect("fixture Codex is admitted");
     let DaemonReply::Accepted {
@@ -253,6 +284,11 @@ fn launch(
     assert_eq!(
         accepted, operation,
         "admission preserves the client operation ID"
+    );
+    assert_agent_identity(&body, &operation, &intent);
+    assert_eq!(
+        body["completed"], false,
+        "an admission is not offered as the durable final"
     );
     (
         operation,
@@ -304,6 +340,11 @@ fn screen_contains(rows: &[String], text: &str) -> bool {
     rows.iter().any(|row| row.contains(text))
 }
 
+/// Poll the durable final of one Agent launch, then read it once more.
+///
+/// `ResponseOutcome::Ok` carries no envelope operation identity, so the final and
+/// the cached replay a reconnecting client reads must both state the operation and
+/// the semantic digest in their body — and state them identically (#522).
 fn wait_for_agent_completion(
     client: &mut impl DaemonClient,
     operation: &str,
@@ -311,23 +352,32 @@ fn wait_for_agent_completion(
     session: SessionId,
     profile: Option<&str>,
 ) -> serde_json::Value {
+    let intent = launch_intent(workspace, session, profile);
+    let request = || DaemonRequest::Agent {
+        operation_id: operation.to_owned(),
+        intent: intent.clone(),
+    };
     let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match client.request(DaemonRequest::Agent {
-            operation_id: operation.to_owned(),
-            intent: AgentLaunchIntent {
-                workspace,
-                session: Some(session),
-                profile: profile.map(|value| AgentProfileId::new(value).unwrap()),
-            },
-        }) {
-            Ok(DaemonReply::Ok(body)) if body["completed"] == true => return body,
-            Ok(DaemonReply::Accepted { .. }) => {}
+    let body = loop {
+        match client.request(request()) {
+            Ok(DaemonReply::Ok(body)) if body["completed"] == true => break body,
+            Ok(DaemonReply::Accepted { body, .. }) => {
+                assert_agent_identity(&body, operation, &intent);
+            }
             other => panic!("unexpected final replay: {other:?}"),
         }
         assert!(Instant::now() < deadline, "fixture Agent did not exit");
         thread::sleep(Duration::from_millis(20));
-    }
+    };
+    assert_agent_identity(&body, operation, &intent);
+    let Ok(DaemonReply::Ok(replayed)) = client.request(request()) else {
+        panic!("a completed operation replays its durable final");
+    };
+    assert_eq!(
+        replayed, body,
+        "the cached replay is the same identity-bearing final"
+    );
+    body
 }
 
 fn resume(client: &mut impl DaemonClient, session_name: &str) -> (String, TerminalRef) {
@@ -758,21 +808,30 @@ fn root_ipc_cold_restart_projects_interrupted_history_and_resumes_one_exact_tab(
     let daemon = start_daemon(repo.path(), home.path(), &bin, None);
     let mut first = client(&data_dir);
     let (workspace, session, _) = available_scope(&mut first);
-    let (_, session_terminal) = launch(&mut first, workspace, session, None);
+    let (session_operation, session_terminal) = launch(&mut first, workspace, session, None);
     let root_operation = OperationId::new().to_string();
+    let root_intent = AgentLaunchIntent {
+        workspace,
+        session: None,
+        profile: None,
+    };
     let root_reply = first
         .request(DaemonRequest::Agent {
             operation_id: root_operation.clone(),
-            intent: AgentLaunchIntent {
-                workspace,
-                session: None,
-                profile: None,
-            },
+            intent: root_intent.clone(),
         })
         .expect("workspace-root fixture Codex is admitted");
     let DaemonReply::Accepted { body, .. } = root_reply else {
         panic!("root launch must be admitted as an operation");
     };
+    // Two concurrent scopes: each admission names its own operation and its own
+    // intent, so neither client can correlate the other's answer (#522).
+    assert_ne!(root_operation, session_operation);
+    assert_agent_identity(&body, &root_operation, &root_intent);
+    assert_ne!(
+        body["semantic_digest"],
+        serde_json::Value::String(expected_digest(&launch_intent(workspace, session, None)))
+    );
     let root_terminal: TerminalRef = serde_json::from_value(body["terminal"].clone()).unwrap();
     assert_eq!(root_terminal.session_id, None);
     // Both fixture children are running before the cold failure.

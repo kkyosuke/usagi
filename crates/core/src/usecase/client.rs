@@ -309,6 +309,51 @@ pub struct AgentLaunchIntent {
     pub profile: Option<AgentProfileId>,
 }
 
+/// The canonical semantic intent of one Agent launch.
+///
+/// This string, not the producer-issued `OperationId`, is what makes a launch
+/// *mean* the same thing: the daemon conflicts a reused operation identity whose
+/// key differs, and both sides derive the wire
+/// [`agent_operation_digest`](crate::infrastructure::ipc::agent_operation_digest)
+/// from it, so a client can refuse a final that belongs to another intent. It
+/// lives here — beside the request it summarizes — as the single authority both
+/// the daemon owner and every client compute from.
+#[must_use]
+pub fn agent_launch_semantic_key(intent: &AgentLaunchIntent) -> String {
+    format!(
+        "{}:{}:{}",
+        intent.workspace.as_str(),
+        intent
+            .session
+            .map_or_else(|| "workspace-root".to_owned(), |session| session.as_str()),
+        intent
+            .profile
+            .as_ref()
+            .map_or_else(|| "<default>".to_owned(), ToString::to_string),
+    )
+}
+
+/// The canonical semantic intent of one exact Agent resume.
+///
+/// The whole opaque target participates: a resume that names another
+/// continuation, source, runtime, or adapter revision is a different intent even
+/// under the same scope.
+#[must_use]
+pub fn agent_resume_semantic_key(target: &AgentResumeTarget) -> String {
+    format!(
+        "resume:{}:{}:{}:{}:{}:{}:{}",
+        target.workspace_id,
+        target
+            .session_id
+            .map_or_else(|| "workspace-root".to_owned(), |session| session.as_str()),
+        target.worktree_id,
+        target.continuation,
+        target.source,
+        target.runtime_id,
+        target.adapter_revision,
+    )
+}
+
 /// The exclusive worker selector for an immediate dispatch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -3352,5 +3397,94 @@ mod deadline_and_retry_tests {
             ..keyed
         };
         assert_ne!(resized.canonical_digest(), anonymous.canonical_digest());
+    }
+
+    /// #522: the canonical semantic key is what a daemon and its clients must
+    /// agree on to correlate an Agent final, so every part of the intent that
+    /// changes the meaning of a launch changes the key.
+    #[test]
+    fn the_agent_launch_semantic_key_covers_the_whole_intent() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let intent = AgentLaunchIntent {
+            workspace,
+            session: Some(session),
+            profile: None,
+        };
+        let key = agent_launch_semantic_key(&intent);
+        assert_eq!(key, agent_launch_semantic_key(&intent.clone()));
+        assert!(key.contains(&workspace.as_str()));
+        assert!(key.contains(&session.as_str()));
+        assert!(key.ends_with("<default>"));
+
+        // A workspace-root launch, another scope, and another profile are each a
+        // different intent under the same producer identity.
+        for other in [
+            AgentLaunchIntent {
+                session: None,
+                ..intent.clone()
+            },
+            AgentLaunchIntent {
+                session: Some(SessionId::new()),
+                ..intent.clone()
+            },
+            AgentLaunchIntent {
+                workspace: WorkspaceId::new(),
+                ..intent.clone()
+            },
+            AgentLaunchIntent {
+                profile: Some(AgentProfileId::new("codex").unwrap()),
+                ..intent.clone()
+            },
+        ] {
+            assert_ne!(key, agent_launch_semantic_key(&other), "{other:?}");
+        }
+    }
+
+    /// #522: a resume names one exact interrupted source, so its key stays distinct
+    /// from an ordinary launch in the same scope and from any other target.
+    #[test]
+    fn the_agent_resume_semantic_key_covers_the_exact_target() {
+        use crate::domain::agent::AgentResumeTarget;
+        use crate::domain::id::{
+            AgentContinuationRef, AgentResumeSourceId, AgentRuntimeId, WorktreeId,
+        };
+
+        let target = AgentResumeTarget {
+            continuation: AgentContinuationRef::new(),
+            source: AgentResumeSourceId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+            runtime_id: AgentRuntimeId::new(),
+            adapter_revision: 3,
+        };
+        let key = agent_resume_semantic_key(&target);
+        assert!(key.starts_with("resume:"));
+        assert_eq!(key, agent_resume_semantic_key(&target.clone()));
+        assert_ne!(
+            key,
+            agent_launch_semantic_key(&AgentLaunchIntent {
+                workspace: target.workspace_id,
+                session: target.session_id,
+                profile: None,
+            })
+        );
+        for other in [
+            AgentResumeTarget {
+                runtime_id: AgentRuntimeId::new(),
+                ..target.clone()
+            },
+            AgentResumeTarget {
+                adapter_revision: 4,
+                ..target.clone()
+            },
+            AgentResumeTarget {
+                session_id: None,
+                ..target.clone()
+            },
+        ] {
+            assert_ne!(key, agent_resume_semantic_key(&other), "{other:?}");
+        }
     }
 }

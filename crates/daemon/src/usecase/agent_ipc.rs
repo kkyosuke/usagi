@@ -40,7 +40,7 @@ use usagi_core::{
             TerminalRef, WorkspaceId, WorktreeId,
         },
     },
-    infrastructure::ipc::{ErrorCode, ProtocolError},
+    infrastructure::ipc::{ErrorCode, ProtocolError, agent_operation_digest},
     infrastructure::runtime_model::{
         ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig,
     },
@@ -120,6 +120,14 @@ pub struct AgentAdmission {
     /// running operation from its single final success without guessing a
     /// replacement terminal.
     pub completed: bool,
+    /// Digest of the canonical semantic intent this operation was admitted for
+    /// (#522).  A client correlates a final — direct or replayed — to its own
+    /// pending operation only when this digest matches the one it computed for
+    /// its request, so a reused identity can never promote another intent's
+    /// terminal.  It is absent only for a legacy durable record admitted before
+    /// the semantic key was persisted; such a record replays without a digest and
+    /// the client refuses the final rather than guessing.
+    pub semantic_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1243,6 +1251,7 @@ impl AgentRuntime {
                 .and_then(|record| record.continuation),
             resume_relation: None,
             completed: false,
+            semantic_digest: Some(agent_operation_digest(semantic_key)),
         })
     }
 
@@ -1457,6 +1466,7 @@ impl AgentRuntime {
                 replacement_terminal: authorization.runtime.terminal.clone(),
             }),
             completed: false,
+            semantic_digest: Some(agent_operation_digest(semantic_key)),
         })
     }
 
@@ -1481,6 +1491,7 @@ impl AgentRuntime {
             )
         })?;
         let launch_semantic = semantic_key(intent);
+        let semantic_digest = agent_operation_digest(&launch_semantic);
         if let Some(existing) = self
             .dispatch
             .admission(operation)
@@ -1633,6 +1644,7 @@ impl AgentRuntime {
                 .and_then(|record| record.continuation),
             resume_relation: None,
             completed: false,
+            semantic_digest: Some(semantic_digest),
         })
     }
 
@@ -2219,18 +2231,11 @@ fn terminal_of(request: &TerminalRequest) -> Option<&TerminalRef> {
     }
 }
 
+/// The canonical launch intent. The formatting authority is
+/// [`usagi_core::usecase::client::agent_launch_semantic_key`] so a client can
+/// derive the same digest for the final it receives.
 fn semantic_key(intent: &AgentLaunchIntent) -> String {
-    format!(
-        "{}:{}:{}",
-        intent.workspace.as_str(),
-        intent
-            .session
-            .map_or_else(|| "workspace-root".to_owned(), |session| session.as_str()),
-        intent
-            .profile
-            .as_ref()
-            .map_or_else(|| "<default>".to_owned(), ToString::to_string),
-    )
+    usagi_core::usecase::client::agent_launch_semantic_key(intent)
 }
 
 fn resume_scope_prefix(workspace: WorkspaceId, session: Option<SessionId>) -> String {
@@ -2240,16 +2245,10 @@ fn resume_scope_prefix(workspace: WorkspaceId, session: Option<SessionId>) -> St
     )
 }
 
+/// The canonical exact-resume intent, shared with clients through
+/// [`usagi_core::usecase::client::agent_resume_semantic_key`].
 fn resume_semantic_key(target: &AgentResumeTarget) -> String {
-    format!(
-        "{}{}:{}:{}:{}:{}",
-        resume_scope_prefix(target.workspace_id, target.session_id),
-        target.worktree_id,
-        target.continuation,
-        target.source,
-        target.runtime_id,
-        target.adapter_revision,
-    )
+    usagi_core::usecase::client::agent_resume_semantic_key(target)
 }
 
 fn resume_target(record: &super::runtime::DurableRuntimeRecord) -> Option<AgentResumeTarget> {
@@ -2325,6 +2324,10 @@ fn durable_operation_outcome(
     record: &super::runtime::DurableRuntimeRecord,
 ) -> Result<AgentAdmission, ProtocolError> {
     use super::runtime::DurableOperationOutcome;
+    // A hydrated replay carries the same digest as the direct answer, derived from
+    // the semantic key the record was admitted with. A legacy record without that
+    // key replays without a digest, and the client refuses the final (#522).
+    let semantic_digest = record.semantic_key.as_deref().map(agent_operation_digest);
     match record.outcome {
         DurableOperationOutcome::Accepted | DurableOperationOutcome::ResumeSucceeded => {
             Ok(AgentAdmission {
@@ -2334,6 +2337,7 @@ fn durable_operation_outcome(
                 continuation: record.continuation,
                 resume_relation: durable_resume_relation(record),
                 completed: false,
+                semantic_digest,
             })
         }
         DurableOperationOutcome::Completed => Ok(AgentAdmission {
@@ -2343,6 +2347,7 @@ fn durable_operation_outcome(
             continuation: record.continuation,
             resume_relation: durable_resume_relation(record),
             completed: true,
+            semantic_digest,
         }),
         DurableOperationOutcome::SpawnUnavailable => Err(ProtocolError::new(
             ErrorCode::Unavailable,
@@ -2931,6 +2936,62 @@ mod tests {
     }
 
     // ---- tests ---------------------------------------------------------------
+
+    /// #522: every admission and every final — direct, replayed, or hydrated after
+    /// a restart — states the operation it belongs to and the digest of the intent
+    /// it was admitted for, so a client can refuse an answer that means something
+    /// else instead of promoting its terminal.
+    #[test]
+    fn agent_admissions_and_finals_carry_their_operation_and_semantic_digest() {
+        let mut runtime = runtime();
+        let fake_scope = FakeScope(Ok(scope()));
+        let operation = OperationId::new().to_string();
+        let launch_intent = intent(None);
+        let expected_digest = agent_operation_digest(
+            &usagi_core::usecase::client::agent_launch_semantic_key(&launch_intent),
+        );
+
+        let admitted = runtime
+            .launch(&operation, &launch_intent, &fake_scope)
+            .unwrap();
+        assert_eq!(admitted.operation_id, operation);
+        assert_eq!(admitted.semantic_digest.as_deref(), Some(&*expected_digest));
+        assert!(!admitted.completed);
+
+        // A resend of the same operation replays the identical identity/digest.
+        let replay = runtime
+            .launch(&operation, &launch_intent, &fake_scope)
+            .unwrap();
+        assert_eq!(replay, admitted);
+
+        // The single durable final keeps them and only adds `completed`.
+        runtime.exit(&admitted.terminal, 0).unwrap();
+        let completed = runtime
+            .launch(&operation, &launch_intent, &fake_scope)
+            .unwrap();
+        assert!(completed.completed);
+        assert_eq!(completed.operation_id, operation);
+        assert_eq!(completed.semantic_digest, admitted.semantic_digest);
+        assert_eq!(completed.terminal, admitted.terminal);
+        assert_eq!(
+            runtime.operation_outcome(&operation),
+            Some(Ok(completed.clone())),
+            "a reconnecting client reads exactly the same final"
+        );
+
+        // Another intent is another digest, so one identity cannot answer for both.
+        let other = OperationId::new().to_string();
+        let other_admission = runtime.launch(&other, &intent(None), &fake_scope).unwrap();
+        assert_ne!(other_admission.semantic_digest, admitted.semantic_digest);
+        assert_eq!(
+            runtime
+                .launch(&operation, &intent(None), &fake_scope)
+                .unwrap_err()
+                .code,
+            ErrorCode::IdempotencyConflict,
+            "the same identity with another intent stays a conflict"
+        );
+    }
 
     #[test]
     fn reported_phase_refines_a_live_projection_but_never_outranks_observation() {
