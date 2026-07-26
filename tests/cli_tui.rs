@@ -1763,3 +1763,92 @@ fn open_validates_non_utf8_workspace_paths() {
             .exists()
     );
 }
+
+/// With one generation published — every build that cannot yet roll over — owner
+/// generation routing resolves to exactly the endpoint the client has always
+/// used, and an owner the records do not name is refused rather than served by
+/// the active daemon.
+///
+/// This is the regression fence for wiring the shipping client onto
+/// `owner_routing`: the routing layer may only start to matter once a second
+/// generation exists, so here it must be observationally identical to
+/// `connect_current` ([4. IPC](../document/04-ipc.md#owner-generation-routing)).
+#[test]
+fn one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_owner() {
+    use usagi_core::infrastructure::ipc::GenerationRole;
+    use usagi_core::usecase::client::{ClientPolicy, IpcClient};
+    use usagi_core::usecase::owner_routing::{RouteCache, RouteTarget};
+    use usagi_daemon::infrastructure::generation_registry::TrustedGenerationDirectory;
+    use usagi_daemon::infrastructure::unix_transport::connect_generation;
+
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let _daemon = home.spawn_serve();
+    let daemon_dir = home.path().join("daemon");
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            daemon_dir.join("daemon.json").is_file() && daemon_dir.join("current.json").is_file()
+        }),
+        "daemon did not publish its production endpoint"
+    );
+
+    let locator = read_locator(&daemon_dir).expect("the published locator is readable");
+    let mut cache = RouteCache::new(TrustedGenerationDirectory::new(home.path()));
+
+    // A daemon that never rolled over publishes no `generations.json`, so the
+    // current locator is the whole authority: one active generation, and control
+    // work, owner-addressed work and the scope fan-out all land on it.
+    let every = cache
+        .every_generation()
+        .expect("the published generation is addressable");
+    assert_eq!(every.len(), 1, "one daemon publishes one generation");
+    assert_eq!(every[0].role, GenerationRole::Active);
+    assert_eq!(every[0].generation.as_str(), locator.generation.0);
+    assert_eq!(every[0].endpoint, locator.endpoint);
+    let owner = every[0].generation;
+    assert_eq!(
+        cache.resolve(&RouteTarget::ActiveControl).unwrap(),
+        usagi_core::usecase::owner_routing::RouteResolution::Single(every[0].clone())
+    );
+    assert_eq!(&cache.owner(owner).unwrap(), &every[0]);
+
+    // The resolved endpoint is the same socket `connect_current` reaches, and it
+    // answers the same handshake with the same generation.
+    let connect = |stream| {
+        IpcClient::connect(
+            stream,
+            "owner-routing-e2e".to_owned(),
+            usagi_core::domain::id::OperationId::new().to_string(),
+            ClientPolicy::cli(),
+            shipping_build_identity(),
+            daemon_fixture::client_workspace(&home.production_data_dir()),
+        )
+        .expect("the published endpoint completes the handshake")
+    };
+    let routed = connect(
+        connect_generation(home.path(), &every[0]).expect("the resolved endpoint is connectable"),
+    );
+    let current = connect(connect_current(home.path()).expect("current is connectable"));
+    assert_eq!(routed.daemon_generation(), current.daemon_generation());
+    assert_eq!(routed.daemon_generation().0, locator.generation.0);
+    assert_eq!(routed.server_build(), current.server_build());
+
+    // An owner the daemon-written records do not name is a typed stale target.
+    // Answering it with the active endpoint would hand back a daemon that owns a
+    // different set of PTYs entirely.
+    let forged = usagi_core::domain::id::DaemonGeneration::new();
+    let refusal = cache.owner(forged).expect_err("a forged owner is refused");
+    assert_eq!(
+        refusal,
+        usagi_core::usecase::owner_routing::RoutingError::UnknownGeneration(forged)
+    );
+    assert_eq!(
+        refusal.to_client_error().code(),
+        ErrorCode::StaleTarget,
+        "an unaddressable owner is stale, not merely unavailable"
+    );
+    // The refusal did not disturb the generation that is addressable.
+    assert_eq!(&cache.owner(owner).unwrap(), &every[0]);
+}

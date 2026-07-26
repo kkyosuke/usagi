@@ -1010,17 +1010,32 @@ fn unix_stream_closed(stream: &std::os::unix::net::UnixStream) -> bool {
 }
 
 struct DaemonAgentCommandPort {
-    /// The shared attach/input lane. It is deadline-armed like every other lane
+    /// The attach/input lanes, one per owner generation.
+    ///
+    /// Each lane is deadline-armed like every other lane
     /// ([`crate::runtime::daemon::LaneClient`]) and re-armed per request with
     /// [`TerminalLaneBudget`], so a daemon that stops answering costs the render
     /// thread one action budget instead of freezing the UI.
-    terminal: Option<LaneClient>,
-    /// Dedicated connection for the stateless `Resize` action, carrying a
-    /// per-request read deadline. Kept separate from `terminal` so a timed-out
+    ///
+    /// The key is the owner named by `TerminalRef.daemon_generation`, so a
+    /// terminal is only ever addressed on the connection of the generation that
+    /// actually holds its PTY ([4. IPC の owner generation
+    /// routing](../../document/04-ipc.md#owner-generation-routing)). Until a
+    /// rollover can publish a second generation this map holds exactly one
+    /// entry, the active one, which is the single shared lane it has always
+    /// been.
+    terminals: BTreeMap<usagi_core::domain::id::DaemonGeneration, LaneClient>,
+    /// Dedicated connections for the stateless actions — `Resize` and the scope
+    /// `Inventory` fan-out — carrying a per-request read deadline, one per
+    /// generation they address. Kept separate from `terminals` so a timed-out
     /// read only drops this lane and never disturbs the attach/input
     /// connection's subscription or exactly-once ledger. (`Resume` polling runs
     /// on the background `pump` instead of any render-thread connection.)
-    poll: Option<LaneClient>,
+    ///
+    /// Nothing on these lanes is connection state, which is what lets a
+    /// generation that stops answering a scope query be dropped here without
+    /// touching any pane's attachment.
+    polls: BTreeMap<usagi_core::domain::id::DaemonGeneration, LaneClient>,
     /// Foreground poll pump. `Resume` fetches run on its own thread and
     /// connection at a bounded interactive cadence, so the render thread only
     /// drains ready output and never blocks on the daemon. Attach registers a
@@ -1032,15 +1047,20 @@ struct DaemonAgentCommandPort {
     /// connection; the launch and restore ports watch nothing, so they leave it
     /// unset rather than spawning an idle thread.
     inventory: Option<TerminalInventoryPump>,
-    /// Client-local incarnation of the shared `terminal` connection.
+    /// Client-local incarnation of the `terminals` lane set.
     ///
     /// Every subscription this port issues carries the epoch it was taken on.
-    /// Dropping the connection advances the epoch, which is what invalidates all
+    /// Dropping the lanes advances the epoch, which is what invalidates all
     /// of the panes' subscriptions at once: the daemon released those
     /// attachments with the connection, so each session must attach again before
     /// its next `Input`. The epoch advances at the drop rather than at the next
     /// open so a subscription is never mistaken for current while the connection
     /// that owned it is already gone.
+    ///
+    /// It counts the whole set rather than one generation. Over-invalidating
+    /// costs a re-attach; under-invalidating would let a subscription taken on a
+    /// closed connection fence an input the daemon has already forgotten. With
+    /// one published generation the two are the same thing.
     terminal_epoch: u64,
     /// The subscription each attached terminal is currently fenced by, so a
     /// superseded subscription's release cannot revoke the attachment — or the
@@ -1086,8 +1106,8 @@ impl AgentTabIntentPort for UserAgentTabIntentPort {
 impl DaemonAgentCommandPort {
     fn new(pump: TerminalPollPump) -> Self {
         Self {
-            terminal: None,
-            poll: None,
+            terminals: BTreeMap::new(),
+            polls: BTreeMap::new(),
             pump,
             inventory: None,
             terminal_epoch: 1,
@@ -1110,31 +1130,52 @@ impl DaemonAgentCommandPort {
         self
     }
 
-    /// Returns the persistent terminal connection, opening it on first use.
+    /// Returns the persistent terminal connection of one owner generation,
+    /// opening it on first use.
     ///
-    /// Opening it may have to bootstrap (and cold-start) a daemon, so the
-    /// connection is established under the surface policy budget; each request
-    /// then re-arms the lane with its own, far smaller
-    /// [`TerminalLaneBudget`].
+    /// An already open lane is returned without resolving anything: the map key
+    /// *is* the owner, so a per-request generation-registry read never happens.
+    /// Only opening a lane resolves the owner's endpoint, and that resolution is
+    /// fail closed — an owner the daemon-written records do not name is a typed
+    /// `stale_target` here rather than a connection to the active generation
+    /// ([4. IPC](../../document/04-ipc.md#owner-generation-routing)).
+    ///
+    /// Opening the active generation's lane may have to bootstrap (and
+    /// cold-start) a daemon, so the connection is established under the surface
+    /// policy budget; each request then re-arms the lane with its own, far
+    /// smaller [`TerminalLaneBudget`].
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
-    fn terminal_client(&mut self) -> Result<&mut LaneClient, TerminalError> {
-        if self.terminal.is_none() {
-            let client =
-                crate::runtime::daemon::client(ClientPolicy::tui(), TerminalLaneBudget::CONNECT_MS)
-                    .map_err(|_| TerminalError::Unavailable)?;
-            if let Some(cancelled) = self.terminal_watch_cancelled.take() {
-                cancelled.store(true, Ordering::Release);
+    fn terminal_client(
+        &mut self,
+        owner: usagi_core::domain::id::DaemonGeneration,
+    ) -> Result<&mut LaneClient, TerminalError> {
+        if !self.terminals.contains_key(&owner) {
+            let lane = crate::runtime::daemon::owner_client(
+                ClientPolicy::tui(),
+                owner,
+                TerminalLaneBudget::CONNECT_MS,
+            )
+            .map_err(|error| map_terminal_error(&error))?;
+            // The restore watcher observes the *active* generation's lane: it
+            // exists to notice that the daemon serving this workspace went away.
+            // A draining generation is expected to go away, so its EOF is not
+            // the loss of a restore connection.
+            if lane.is_active() {
+                if let Some(cancelled) = self.terminal_watch_cancelled.take() {
+                    cancelled.store(true, Ordering::Release);
+                }
+                if let Some(publisher) = &self.restore_connection
+                    && let Ok(stream) =
+                        crate::runtime::daemon::lane_socket(&lane.client).try_clone()
+                {
+                    self.terminal_watch_cancelled = Some(publisher.watch(stream));
+                }
             }
-            if let Some(publisher) = &self.restore_connection
-                && let Ok(stream) = crate::runtime::daemon::lane_socket(&client).try_clone()
-            {
-                self.terminal_watch_cancelled = Some(publisher.watch(stream));
-            }
-            self.terminal = Some(client);
+            self.terminals.insert(owner, lane.client);
         }
         Ok(self
-            .terminal
-            .as_mut()
+            .terminals
+            .get_mut(&owner)
             .expect("terminal client was just set"))
     }
 
@@ -1146,26 +1187,42 @@ impl DaemonAgentCommandPort {
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=an_unanswered_input_returns_within_the_lane_budget_and_advances_the_epoch
     fn armed_terminal_client(
         &mut self,
+        owner: usagi_core::domain::id::DaemonGeneration,
         action: TerminalAction,
     ) -> Result<&mut LaneClient, TerminalError> {
-        let client = self.terminal_client()?;
+        let client = self.terminal_client(owner)?;
         crate::runtime::daemon::rearm_lane(client, TerminalLaneBudget::for_action(action));
         Ok(client)
     }
 
-    /// Whether the connected daemon keeps the durable input operation ledger.
+    /// Whether the daemon generation that owns `terminal` keeps the durable
+    /// input operation ledger.
     ///
     /// The capability is the truth source, so a daemon that does not advertise it
     /// is treated as legacy even if it would accept the field: this client then
     /// neither issues an operation identity nor claims a lost acknowledgement is
-    /// resolvable (#519).
-    fn terminal_input_is_durable(&mut self) -> Result<bool, TerminalError> {
-        Ok(self.terminal_client()?.terminal_input_replay_mode()
+    /// resolvable (#519). It is asked of the owner's own connection because two
+    /// generations are two builds: the one holding this PTY is the only one whose
+    /// ledger could answer for it.
+    fn terminal_input_is_durable(
+        &mut self,
+        terminal: &usagi_core::domain::id::TerminalRef,
+    ) -> Result<bool, TerminalError> {
+        Ok(self
+            .terminal_client(terminal.daemon_generation)?
+            .terminal_input_replay_mode()
             == TerminalInputReplayMode::DurableOperation)
     }
 
-    /// Sends one terminal request over the persistent connection and returns its
-    /// success body.
+    /// Sends one owner-addressed terminal request over that owner's persistent
+    /// connection and returns its success body.
+    ///
+    /// The destination comes from the typed payload, not from the action: it is
+    /// the `TerminalRef` the request carries that names the generation holding
+    /// the PTY ([`route_terminal_request`]). Work with no such reference does not
+    /// belong on this lane — control work is the active generation's through the
+    /// per-request client, and a scope query has more than one answer
+    /// ([`Self::merged_inventory`]).
     ///
     /// Only a **transport** failure drops the connection: the stream's position
     /// is then unknown, so it cannot be reused. That now includes an exceeded
@@ -1174,15 +1231,18 @@ impl DaemonAgentCommandPort {
     /// daemon answered on a healthy socket — that request is finished, and one
     /// pane's `resync_required` / `stale_target` must not revoke the attachments
     /// every other pane holds on the same connection.
+    ///
+    /// [`route_terminal_request`]: usagi_core::usecase::owner_routing::route_terminal_request
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
     fn terminal_request(
         &mut self,
         action: TerminalAction,
         request: TerminalRequest,
     ) -> Result<serde_json::Value, TerminalError> {
+        let owner = owner_of_terminal_request(&request)?;
         let payload = serde_json::to_value(request).expect("terminal request is serializable");
         let reply = {
-            let client = self.armed_terminal_client(action)?;
+            let client = self.armed_terminal_client(owner, action)?;
             client.request(DaemonRequest::Terminal { action, payload })
         };
         match reply {
@@ -1196,15 +1256,24 @@ impl DaemonAgentCommandPort {
         }
     }
 
-    /// Drops the shared connection and advances the epoch, invalidating every
-    /// subscription taken on it. The daemon releases those attachments when the
+    /// Drops every owner lane and advances the epoch, invalidating every
+    /// subscription taken on them. The daemon releases those attachments when the
     /// connection closes, so each session attaches freshly instead of fencing
     /// its next input with an attachment that no longer exists.
+    ///
+    /// Losing a lane is also the only evidence this client has that the set of
+    /// generations may have changed, so the routing snapshot is marked stale
+    /// here. That keeps the registry read off the per-request path without
+    /// letting a cached snapshot outlive a handoff.
     fn reset_terminal(&mut self) {
         if let Some(cancelled) = self.terminal_watch_cancelled.take() {
             cancelled.store(true, Ordering::Release);
         }
-        self.terminal = None;
+        let had_lane = !self.terminals.is_empty();
+        self.terminals.clear();
+        if had_lane {
+            crate::runtime::daemon::invalidate_routes();
+        }
         self.terminal_epoch = self
             .terminal_epoch
             .checked_add(1)
@@ -1263,19 +1332,29 @@ impl DaemonAgentCommandPort {
         current
     }
 
-    /// Returns the deadline-bounded poll connection, opening it on first use.
-    /// `Resume`/`Resize` are stateless on the daemon (keyed only by terminal id
-    /// and offset), so this lane never attaches, never carries an input
-    /// subscription, and reports no `connection_epoch`.
+    /// Returns one generation's deadline-bounded poll connection, opening it on
+    /// first use. `Resume`/`Resize`/`Inventory` are stateless on the daemon
+    /// (keyed only by terminal id and offset, or by scope), so this lane never
+    /// attaches, never carries an input subscription, and reports no
+    /// `connection_epoch`.
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
-    fn poll_client(&mut self, action: TerminalAction) -> Result<&mut LaneClient, TerminalError> {
-        if self.poll.is_none() {
-            self.poll = Some(
-                crate::runtime::daemon::client(ClientPolicy::tui(), TerminalLaneBudget::CONNECT_MS)
-                    .map_err(|_| TerminalError::Unavailable)?,
-            );
-        }
-        let client = self.poll.as_mut().expect("poll client was just set");
+    fn poll_client(
+        &mut self,
+        owner: usagi_core::domain::id::DaemonGeneration,
+        action: TerminalAction,
+    ) -> Result<&mut LaneClient, TerminalError> {
+        let client = match self.polls.entry(owner) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let lane = crate::runtime::daemon::owner_client(
+                    ClientPolicy::tui(),
+                    owner,
+                    TerminalLaneBudget::CONNECT_MS,
+                )
+                .map_err(|error| map_terminal_error(&error))?;
+                entry.insert(lane.client)
+            }
+        };
         // Bound the whole request so a momentarily busy daemon cannot stall the
         // render thread. A timed-out exchange leaves an unread frame on the
         // socket, so `poll_request` drops the lane on any error.
@@ -1283,8 +1362,9 @@ impl DaemonAgentCommandPort {
         Ok(client)
     }
 
-    /// Sends one `Resume`/`Resize` request over the deadline-bounded poll lane.
-    /// Any transport failure (including a read timeout) drops this lane only; the
+    /// Sends one `Resume`/`Resize` request to the generation that owns the
+    /// terminal it names, over that generation's deadline-bounded poll lane.
+    /// Any transport failure (including a read timeout) drops that lane only; the
     /// attach/input connection and its exactly-once ledger are untouched.
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
     fn poll_request(
@@ -1292,18 +1372,89 @@ impl DaemonAgentCommandPort {
         action: TerminalAction,
         request: TerminalRequest,
     ) -> Result<serde_json::Value, TerminalError> {
+        let owner = owner_of_terminal_request(&request)?;
+        self.poll_request_to(owner, action, request)
+    }
+
+    /// Sends one stateless request to a named generation's poll lane.
+    ///
+    /// The owner is explicit here because a scope query does not carry one: it is
+    /// asked of each generation in turn, and each answer speaks only for that
+    /// generation ([`Self::merged_inventory`]).
+    #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
+    fn poll_request_to(
+        &mut self,
+        owner: usagi_core::domain::id::DaemonGeneration,
+        action: TerminalAction,
+        request: TerminalRequest,
+    ) -> Result<serde_json::Value, TerminalError> {
         let payload = serde_json::to_value(request).expect("terminal request is serializable");
         let reply = {
-            let client = self.poll_client(action)?;
+            let client = self.poll_client(owner, action)?;
             client.request(DaemonRequest::Terminal { action, payload })
         };
         match reply {
             Ok(DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. }) => Ok(body),
             Err(error) => {
-                self.poll = None;
+                self.polls.remove(&owner);
                 Err(map_terminal_error(&error))
             }
         }
+    }
+
+    /// Asks every trusted generation for one scope and merges the answers.
+    ///
+    /// A scope query is the one request with more than one right answer while a
+    /// generation is draining: each generation speaks only for the terminals it
+    /// owns, so taking the active one's answer alone would read the draining
+    /// generation's terminals as absent — and absence is what collects a tab.
+    /// The merge fences every entry against the generation that produced it and
+    /// against the requested scope ([`merge_inventory`]).
+    ///
+    /// A generation that does not answer is *uncertainty*, so its terminals are
+    /// simply not listed and stay tracked. Only a round in which nothing at all
+    /// answered is a failure: that is an unobserved scope, not an empty one.
+    ///
+    /// [`merge_inventory`]: usagi_core::usecase::owner_routing::merge_inventory
+    #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
+    fn merged_inventory(
+        &mut self,
+        scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+    ) -> Result<Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry>, TerminalError>
+    {
+        use usagi_core::usecase::owner_routing::{
+            GenerationInventory, InventoryOutcome, merge_inventory,
+        };
+
+        let endpoints = crate::runtime::daemon::trusted_generations()
+            .map_err(|error| map_terminal_error(&error))?;
+        // Leaving the trusted set is the verified retirement that lets this
+        // client collect a generation's lane. An owner that is merely
+        // unreachable stays in the set and keeps its lane slot.
+        self.polls
+            .retain(|generation, _| endpoints.iter().any(|e| e.generation == *generation));
+        let mut parts = Vec::with_capacity(endpoints.len());
+        for endpoint in &endpoints {
+            let request = TerminalRequest::Inventory {
+                scope: scope.clone(),
+            };
+            let outcome = match self
+                .poll_request_to(endpoint.generation, TerminalAction::Inventory, request)
+                .and_then(|body| decode_terminal_inventory(&body))
+            {
+                Ok(entries) => InventoryOutcome::Listed(entries),
+                Err(_) => InventoryOutcome::Unreachable,
+            };
+            parts.push(GenerationInventory {
+                generation: endpoint.generation,
+                outcome,
+            });
+        }
+        let merged = merge_inventory(&parts, scope);
+        if !merged.answered_any() {
+            return Err(TerminalError::Unavailable);
+        }
+        Ok(merged.entries().to_vec())
     }
 }
 
@@ -1315,6 +1466,25 @@ impl Drop for DaemonAgentCommandPort {
     fn drop(&mut self) {
         self.reset_terminal();
         self.record_lane_degradation();
+    }
+}
+
+/// The generation a terminal request must be delivered to.
+///
+/// The destination is read from the typed payload rather than from the action it
+/// is sent under, because the `TerminalRef` is what names the daemon that holds
+/// the PTY. A request that carries no such reference has no single owner —
+/// control work belongs to the active generation and a scope query belongs to
+/// all of them — so it is refused here instead of being sent to whichever lane
+/// happened to be open.
+fn owner_of_terminal_request(
+    request: &TerminalRequest,
+) -> Result<usagi_core::domain::id::DaemonGeneration, TerminalError> {
+    use usagi_core::usecase::owner_routing::{RouteTarget, route_terminal_request};
+
+    match route_terminal_request(request) {
+        RouteTarget::Owner(generation) => Ok(generation),
+        RouteTarget::ActiveControl | RouteTarget::EveryGeneration => Err(TerminalError::Stale),
     }
 }
 
@@ -1791,13 +1961,11 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         }
         let mut entries = Vec::new();
         for scope in launch_scopes {
-            let body = self.terminal_request(
-                TerminalAction::Inventory,
-                TerminalRequest::Inventory {
-                    scope: scope.clone(),
-                },
-            )?;
-            let scope_entries = decode_terminal_inventory(&body)?;
+            // The merge already drops every entry outside the requested scope and
+            // every entry a generation claimed on another's behalf, so a mismatch
+            // cannot reach this list. The assertion is kept as a backstop against
+            // a decoder that stops applying the fence.
+            let scope_entries = self.merged_inventory(&scope)?;
             if !terminal_inventory_matches_scope(&scope_entries, &scope) {
                 return Err(TerminalError::Unavailable);
             }
@@ -1814,7 +1982,9 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         // The negotiated connection decides the snapshot contract before the
         // request is sent, so a daemon without the checkpoint capability can
         // never have its raw tail decoded into a screen.
-        let mode = self.terminal_client()?.terminal_snapshot_mode();
+        let mode = self
+            .terminal_client(terminal.daemon_generation)?
+            .terminal_snapshot_mode();
         let body = self.terminal_request(
             TerminalAction::Attach,
             TerminalRequest::Attach {
@@ -1919,7 +2089,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         // The operation identity is sent only to a daemon that advertises the
         // durable ledger. Sending it to a peer that ignores it would let this
         // client believe a lost acknowledgement is resolvable when it is not.
-        let durable = self.terminal_input_is_durable()?;
+        let durable = self.terminal_input_is_durable(terminal)?;
         let payload = serde_json::to_value(TerminalRequest::Input {
             terminal: terminal.clone(),
             subscription: subscription.id,
@@ -1931,7 +2101,8 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         let reply = {
             // Failure to establish a connection happens before this request is
             // written, so it remains a definite unavailable outcome.
-            let client = self.armed_terminal_client(TerminalAction::Input)?;
+            let client =
+                self.armed_terminal_client(terminal.daemon_generation, TerminalAction::Input)?;
             client.request(DaemonRequest::Terminal {
                 action: TerminalAction::Input,
                 payload,
@@ -1985,7 +2156,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
     ) -> Result<TerminalInputResolution, TerminalError> {
         // A daemon without the ledger cannot answer, and a guess is exactly what
         // must not happen here: the caller keeps its uncertainty latched.
-        if !self.terminal_input_is_durable()? {
+        if !self.terminal_input_is_durable(terminal)? {
             return Ok(TerminalInputResolution::Unknown);
         }
         let body = self.terminal_request(
@@ -2232,9 +2403,9 @@ fn spawn_metrics_pump() -> RefreshPump<Option<DaemonMetrics>> {
 /// connection so every `Resume` fetch runs off the render thread.
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
 fn spawn_poll_pump() -> TerminalPollPump {
-    let mut client: Option<LaneClient> = None;
+    let mut lanes: BTreeMap<usagi_core::domain::id::DaemonGeneration, LaneClient> = BTreeMap::new();
     TerminalPollPump::spawn(move |fence| {
-        fetch_terminal_output(&mut client, &fence.terminal, fence.after_offset)
+        fetch_terminal_output(&mut lanes, &fence.terminal, fence.after_offset)
     })
 }
 
@@ -2244,67 +2415,124 @@ fn spawn_poll_pump() -> TerminalPollPump {
 /// them (#527).
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=inventory_pump_unit_contract
 fn spawn_inventory_pump() -> TerminalInventoryPump {
-    let mut client: Option<LaneClient> = None;
-    TerminalInventoryPump::spawn(move |job| fetch_scope_inventory(&mut client, &job.scope))
+    let mut lanes: BTreeMap<usagi_core::domain::id::DaemonGeneration, LaneClient> = BTreeMap::new();
+    TerminalInventoryPump::spawn(move |job| fetch_scope_inventory(&mut lanes, &job.scope))
 }
 
-/// Performs one scope `Inventory` request on the inventory lane's own
-/// connection, reconnecting on any transport error (including a read timeout).
-/// Called only by the inventory pump thread, never the render thread.
+/// Performs one scope `Inventory` round against every trusted generation on the
+/// pump's own connections, reconnecting on any transport error (including a read
+/// timeout). Called only by the inventory pump thread, never the render thread.
+///
+/// The merge is what keeps a draining owner's silence from reading as an exit:
+/// an unreachable generation contributes no entries, and the pump keeps every
+/// terminal a round did not list. Returning `Err` means *nothing* answered,
+/// which backs the scope off instead of collecting its tabs.
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=inventory_pump_unit_contract
 fn fetch_scope_inventory(
-    client: &mut Option<LaneClient>,
+    lanes: &mut BTreeMap<usagi_core::domain::id::DaemonGeneration, LaneClient>,
     scope: &TerminalLaunchScope,
 ) -> Result<Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry>, ()> {
-    if client.is_none() {
-        *client = Some(
-            crate::runtime::daemon::client(ClientPolicy::tui(), TerminalLaneBudget::CONNECT_MS)
-                .map_err(|_| ())?,
-        );
+    use usagi_core::usecase::owner_routing::{
+        GenerationInventory, InventoryOutcome, merge_inventory,
+    };
+
+    let endpoints = crate::runtime::daemon::trusted_generations().map_err(|_| ())?;
+    // Absence from the trusted set is a verified retirement, and the only thing
+    // that collects a generation's lane here.
+    lanes.retain(|generation, _| {
+        endpoints
+            .iter()
+            .any(|endpoint| endpoint.generation == *generation)
+    });
+    let mut parts = Vec::with_capacity(endpoints.len());
+    for endpoint in &endpoints {
+        let outcome = match fetch_generation_inventory(lanes, endpoint.generation, scope) {
+            Ok(entries) => InventoryOutcome::Listed(entries),
+            Err(()) => InventoryOutcome::Unreachable,
+        };
+        parts.push(GenerationInventory {
+            generation: endpoint.generation,
+            outcome,
+        });
     }
+    let merged = merge_inventory(&parts, scope);
+    if !merged.answered_any() {
+        return Err(());
+    }
+    Ok(merged.entries().to_vec())
+}
+
+/// One generation's answer for one scope, on that generation's own lane.
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=inventory_pump_unit_contract
+fn fetch_generation_inventory(
+    lanes: &mut BTreeMap<usagi_core::domain::id::DaemonGeneration, LaneClient>,
+    owner: usagi_core::domain::id::DaemonGeneration,
+    scope: &TerminalLaunchScope,
+) -> Result<Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry>, ()> {
+    let client = match lanes.entry(owner) {
+        std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            let lane = crate::runtime::daemon::owner_client(
+                ClientPolicy::tui(),
+                owner,
+                TerminalLaneBudget::CONNECT_MS,
+            )
+            .map_err(|_| ())?;
+            entry.insert(lane.client)
+        }
+    };
     crate::runtime::daemon::rearm_lane(
-        client.as_mut().expect("inventory connection was just set"),
+        client,
         TerminalLaneBudget::for_action(TerminalAction::Inventory),
     );
     let payload = serde_json::to_value(TerminalRequest::Inventory {
         scope: scope.clone(),
     })
     .expect("terminal request is serializable");
-    let reply = client
-        .as_mut()
-        .expect("inventory connection was just set")
-        .request(DaemonRequest::Terminal {
-            action: TerminalAction::Inventory,
-            payload,
-        });
+    let reply = client.request(DaemonRequest::Terminal {
+        action: TerminalAction::Inventory,
+        payload,
+    });
     match reply {
         Ok(DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. }) => {
             decode_terminal_inventory(&body).map_err(|_| ())
         }
         Err(_) => {
-            *client = None;
+            lanes.remove(&owner);
             Err(())
         }
     }
 }
 
-/// Performs one `Resume` fetch on the pump's own deadline-bounded connection,
-/// reconnecting on any transport error (including a read timeout). Called only
-/// by the background pump thread, never the render thread.
+/// Performs one `Resume` fetch on the owner generation's own deadline-bounded
+/// connection, reconnecting on any transport error (including a read timeout).
+/// Called only by the background pump thread, never the render thread.
+///
+/// Output belongs to the daemon that holds the PTY, so the fetch follows the
+/// terminal's own `daemon_generation` rather than whichever generation happens
+/// to be current: resuming from the active one would replay a *different*
+/// terminal's bytes into this pane.
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
 fn fetch_terminal_output(
-    client: &mut Option<LaneClient>,
+    lanes: &mut BTreeMap<usagi_core::domain::id::DaemonGeneration, LaneClient>,
     terminal: &usagi_core::domain::id::TerminalRef,
     after_offset: u64,
 ) -> Result<Vec<TerminalChunk>, TerminalError> {
-    if client.is_none() {
-        *client = Some(
-            crate::runtime::daemon::client(ClientPolicy::tui(), TerminalLaneBudget::CONNECT_MS)
-                .map_err(|_| TerminalError::Unavailable)?,
-        );
-    }
+    let owner = terminal.daemon_generation;
+    let client = match lanes.entry(owner) {
+        std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            let lane = crate::runtime::daemon::owner_client(
+                ClientPolicy::tui(),
+                owner,
+                TerminalLaneBudget::CONNECT_MS,
+            )
+            .map_err(|error| map_terminal_error(&error))?;
+            entry.insert(lane.client)
+        }
+    };
     crate::runtime::daemon::rearm_lane(
-        client.as_mut().expect("poll connection was just set"),
+        client,
         TerminalLaneBudget::for_action(TerminalAction::Resume),
     );
     let payload = serde_json::to_value(TerminalRequest::Resume {
@@ -2312,19 +2540,16 @@ fn fetch_terminal_output(
         after_offset,
     })
     .expect("terminal request is serializable");
-    let reply = client
-        .as_mut()
-        .expect("poll connection was just set")
-        .request(DaemonRequest::Terminal {
-            action: TerminalAction::Resume,
-            payload,
-        });
+    let reply = client.request(DaemonRequest::Terminal {
+        action: TerminalAction::Resume,
+        payload,
+    });
     match reply {
         Ok(DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. }) => {
             decode_terminal_poll(&body)
         }
         Err(error) => {
-            *client = None;
+            lanes.remove(&owner);
             Err(map_terminal_error(&error))
         }
     }
@@ -3610,6 +3835,7 @@ pub(crate) fn launch(
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::sync::mpsc;
@@ -3764,8 +3990,8 @@ mod tests {
         let (client, server) = scripted_terminal_connection(replies, adjust);
         (
             DaemonAgentCommandPort {
-                terminal: Some(client),
-                poll: None,
+                terminals: scripted_owner_lane(client),
+                polls: BTreeMap::new(),
                 pump: TerminalPollPump::spawn(|_| Ok(Vec::new())),
                 inventory: None,
                 terminal_epoch: 1,
@@ -3878,7 +4104,70 @@ mod tests {
         TerminalSubscription { id, epoch: 1 }
     }
 
+    /// Installs a scripted connection as the lane of the generation every
+    /// terminal in these tests belongs to.
+    ///
+    /// Lanes are keyed by owner generation in production, so a fixture that
+    /// injects a connection has to say which owner it stands for. Every terminal
+    /// reference here descends from [`input_terminal_ref`], so they all share one
+    /// generation and therefore one lane — exactly the single-generation shape a
+    /// build that cannot roll over produces.
     #[cfg(unix)]
+    fn scripted_owner_lane(
+        client: super::LaneClient,
+    ) -> BTreeMap<usagi_core::domain::id::DaemonGeneration, super::LaneClient> {
+        BTreeMap::from([(input_terminal_ref().daemon_generation, client)])
+    }
+
+    /// Every request that carries a complete `TerminalRef` is delivered to the
+    /// generation that reference names, and a request that carries none is
+    /// refused rather than sent to whichever lane happens to be open.
+    ///
+    /// The lane path reads the destination out of the typed payload, so a
+    /// scope query (many answers) and control work (the active generation's)
+    /// must not resolve to an owner here — they have their own routes
+    /// ([4. IPC](../../document/04-ipc.md#owner-generation-routing)).
+    #[test]
+    fn owner_addressed_requests_route_to_their_reference_and_the_rest_are_refused() {
+        use usagi_core::domain::terminal_launch::TerminalLaunchScope;
+        use usagi_core::usecase::client::TerminalRequest;
+
+        let terminal = input_terminal_ref();
+        let scope = TerminalLaunchScope {
+            workspace_id: terminal.workspace_id,
+            session_id: terminal.session_id,
+            worktree_id: terminal.worktree_id,
+        };
+        for request in [
+            TerminalRequest::Attach {
+                terminal: terminal.clone(),
+            },
+            TerminalRequest::Resume {
+                terminal: terminal.clone(),
+                after_offset: 0,
+            },
+            TerminalRequest::Detach {
+                terminal: terminal.clone(),
+                subscription: 1,
+            },
+        ] {
+            assert_eq!(
+                super::owner_of_terminal_request(&request).unwrap(),
+                terminal.daemon_generation
+            );
+        }
+        assert_eq!(
+            super::owner_of_terminal_request(&TerminalRequest::Inventory {
+                scope: scope.clone(),
+            }),
+            Err(TerminalError::Stale)
+        );
+        assert_eq!(
+            super::owner_of_terminal_request(&TerminalRequest::CompletedInventory { scope }),
+            Err(TerminalError::Stale)
+        );
+    }
+
     fn input_terminal_ref() -> TerminalRef {
         serde_json::from_value(json!({
             "daemon_generation": "00000000-0000-4000-8000-000000000001",
@@ -3976,7 +4265,7 @@ mod tests {
         // The answer was fully received, so the stream stays consistent: the
         // shared connection — and every peer pane's subscription on it — survives
         // this pane's unknown input effect.
-        assert!(port.terminal.is_some());
+        assert!(!port.terminals.is_empty());
         assert_eq!(port.terminal_connection_epoch(), Some(1));
         drop(port);
         server.join().unwrap();
@@ -4036,7 +4325,7 @@ mod tests {
             Err(TerminalError::InputEffectUnknown)
         );
         // Every answer was fully received, so the shared connection is intact.
-        assert!(port.terminal.is_some());
+        assert!(!port.terminals.is_empty());
         assert_eq!(port.terminal_connection_epoch(), Some(1));
         drop(port);
 
@@ -4169,7 +4458,7 @@ mod tests {
             // A protocol error is a finished request on a healthy socket, whatever
             // its side effect: the shared connection is kept so peer panes keep
             // their attachments.
-            assert!(port.terminal.is_some(), "side effect {side_effect:?}");
+            assert!(!port.terminals.is_empty(), "side effect {side_effect:?}");
             assert_eq!(port.terminal_connection_epoch(), Some(1));
             drop(port);
             server.join().unwrap();
@@ -4267,8 +4556,8 @@ mod tests {
             |_| {},
         );
         let mut port = DaemonAgentCommandPort {
-            terminal: Some(client),
-            poll: None,
+            terminals: scripted_owner_lane(client),
+            polls: BTreeMap::new(),
             // The pump answers every registered terminal, so a lost registration
             // is observable as output that stops arriving.
             pump: TerminalPollPump::spawn(|fence| {
@@ -4316,7 +4605,7 @@ mod tests {
             port.attach_terminal(&agent, geometry),
             Err(TerminalError::ResyncRequired)
         );
-        assert!(port.terminal.is_some());
+        assert!(!port.terminals.is_empty());
         assert_eq!(port.terminal_connection_epoch(), Some(1));
 
         // That pane resyncs on the same connection and releases its superseded
@@ -4355,7 +4644,7 @@ mod tests {
             port.attach_terminal(&generic, geometry),
             Err(TerminalError::Unavailable)
         );
-        assert!(port.terminal.is_none());
+        assert!(port.terminals.is_empty());
         assert_eq!(port.terminal_connection_epoch(), Some(2));
 
         // A replaced subscription is refused before any connection is opened, so
@@ -4374,7 +4663,7 @@ mod tests {
         // to send it on.
         port.detach_terminal(&generic, generic_first.subscription);
         port.detach_terminal(&agent, agent_resync.subscription);
-        assert!(port.terminal.is_none());
+        assert!(port.terminals.is_empty());
         assert_eq!(port.terminal_connection_epoch(), Some(2));
 
         // The reconnect the next attach performs, with the replacement connection
@@ -4386,7 +4675,7 @@ mod tests {
             ],
             |_| {},
         );
-        port.terminal = Some(replacement);
+        port.terminals = scripted_owner_lane(replacement);
         let generic_second = port.attach_terminal(&generic, geometry).unwrap();
         assert_eq!(
             generic_second.subscription,
@@ -4544,8 +4833,8 @@ mod tests {
     #[cfg(unix)]
     fn lane_port(client: super::LaneClient) -> DaemonAgentCommandPort {
         DaemonAgentCommandPort {
-            terminal: Some(client),
-            poll: None,
+            terminals: scripted_owner_lane(client),
+            polls: BTreeMap::new(),
             pump: TerminalPollPump::spawn(|_| Ok(Vec::new())),
             inventory: None,
             terminal_epoch: 1,
@@ -4598,7 +4887,7 @@ mod tests {
 
         // The socket's position is unknown after the overrun, so the lane is
         // dropped and the epoch advances: every pane re-attaches (#523).
-        assert!(port.terminal.is_none());
+        assert!(port.terminals.is_empty());
         assert_eq!(port.terminal_connection_epoch(), Some(2));
 
         // Exactly one write reached the daemon, and it was never repeated.
@@ -4614,7 +4903,7 @@ mod tests {
             )],
             |_| {},
         );
-        port.terminal = Some(replacement);
+        port.terminals = scripted_owner_lane(replacement);
         assert_eq!(
             port.terminal_input_outcome(&terminal, operation, 2),
             Ok(TerminalInputResolution::Final(
@@ -4664,7 +4953,7 @@ mod tests {
             ),
             Err(TerminalError::InputEffectUnknown)
         );
-        assert!(port.terminal.is_none());
+        assert!(port.terminals.is_empty());
         assert_eq!(port.terminal_connection_epoch(), Some(2));
         drop(port);
         assert!(terminal_actions(server.join().unwrap()).is_empty());
@@ -4725,7 +5014,7 @@ mod tests {
             elapsed < Duration::from_millis(TerminalLaneBudget::SNAPSHOT_MS * 4),
             "a tab switch stayed within its lane budget: {elapsed:?}"
         );
-        assert!(port.terminal.is_none());
+        assert!(port.terminals.is_empty());
         assert_eq!(port.terminal_connection_epoch(), Some(2));
         assert_eq!(
             terminal_actions(hung.join()),
@@ -4753,7 +5042,7 @@ mod tests {
             ],
             |_| {},
         );
-        port.terminal = Some(replacement);
+        port.terminals = scripted_owner_lane(replacement);
         let agent_second = port.attach_terminal(&agent, geometry).unwrap();
         let peer_second = port.attach_terminal(&peer, geometry).unwrap();
         assert_eq!(
@@ -4791,7 +5080,7 @@ mod tests {
         // The resize lane answers nothing and closes, which is the read timeout /
         // EOF the deadline-bounded lane is there to contain.
         let (resize_lane, resize_server) = scripted_terminal_connection(Vec::new(), |_| {});
-        port.poll = Some(resize_lane);
+        port.polls = scripted_owner_lane(resize_lane);
         let terminal = input_terminal_ref();
 
         assert_eq!(
@@ -4799,8 +5088,8 @@ mod tests {
             Err(TerminalError::Unavailable)
         );
 
-        assert!(port.poll.is_none());
-        assert!(port.terminal.is_some());
+        assert!(port.polls.is_empty());
+        assert!(!port.terminals.is_empty());
         assert_eq!(port.terminal_connection_epoch(), Some(1));
         // The subscription taken before the resize is still current, so the pane
         // keeps writing without reattaching.
@@ -4847,7 +5136,7 @@ mod tests {
             port.attach_terminal(&terminal, Geometry { cols: 20, rows: 3 }),
             Err(TerminalError::Unavailable)
         );
-        assert!(port.terminal.is_some());
+        assert!(!port.terminals.is_empty());
         let attach = port
             .attach_terminal(&terminal, Geometry { cols: 20, rows: 3 })
             .unwrap();
@@ -5090,8 +5379,8 @@ mod tests {
         )
         .unwrap();
         let mut port = DaemonAgentCommandPort {
-            terminal: Some(client),
-            poll: None,
+            terminals: scripted_owner_lane(client),
+            polls: BTreeMap::new(),
             pump: TerminalPollPump::spawn(|_| Ok(Vec::new())),
             inventory: None,
             terminal_epoch: 1,
@@ -5110,7 +5399,7 @@ mod tests {
             ),
             Err(TerminalError::InputEffectUnknown)
         );
-        assert!(port.terminal.is_none());
+        assert!(port.terminals.is_empty());
         server.join().unwrap();
     }
 

@@ -948,3 +948,148 @@ fn a_retired_generation_is_collected_by_the_next_refresh() {
     assert_eq!(harness.router.links().len(), 0);
     assert!(harness.router.endpoints().owner(generation(1)).is_none());
 }
+
+// -------------------------------------------------------------- route cache
+
+/// The three registry states a client actually has to distinguish, resolved
+/// through the cache the shipping client holds.
+///
+/// The single-generation row is the one every current build produces: control
+/// work and owner-addressed work land on the same active endpoint, which is what
+/// makes this routing a no-op until a rollover can publish a second generation.
+#[test]
+fn route_cache_resolves_control_owner_and_fan_out_for_every_registry_state() {
+    // active only.
+    let one = TrustedEndpoints::build(Some(generation(2)), vec![active(2)]).unwrap();
+    let mut cache = RouteCache::new(FakeDirectory::of(vec![Ok(one)]));
+    assert_eq!(
+        cache.resolve(&RouteTarget::ActiveControl).unwrap(),
+        RouteResolution::Single(active(2))
+    );
+    assert_eq!(cache.owner(generation(2)).unwrap(), active(2));
+    assert_eq!(cache.every_generation().unwrap(), vec![active(2)]);
+
+    // active + draining: control stays on the active endpoint while the owner of
+    // an old terminal resolves to the draining one, and a scope query asks both.
+    let mut cache = RouteCache::new(FakeDirectory::of(vec![Ok(two_generations())]));
+    assert_eq!(
+        cache.resolve(&RouteTarget::ActiveControl).unwrap(),
+        RouteResolution::Single(active(2))
+    );
+    assert_eq!(cache.owner(generation(1)).unwrap(), draining(1));
+    assert_eq!(
+        cache.every_generation().unwrap(),
+        vec![active(2), draining(1)]
+    );
+
+    // unknown owner: fail closed, never the active endpoint.
+    assert_eq!(
+        cache.owner(generation(7)).unwrap_err(),
+        RoutingError::UnknownGeneration(generation(7))
+    );
+}
+
+/// A retired owner is refused exactly like one that never existed: it is absent
+/// from the trusted set, and absence is the verified retirement.
+#[test]
+fn route_cache_refuses_a_retired_owner_instead_of_the_active_endpoint() {
+    let retired = TrustedEndpoints::build(Some(generation(2)), vec![active(2)]).unwrap();
+    let mut cache = RouteCache::new(FakeDirectory::of(vec![Ok(two_generations()), Ok(retired)]));
+    assert_eq!(cache.owner(generation(1)).unwrap(), draining(1));
+    cache.invalidate();
+    let error = cache.owner(generation(1)).unwrap_err();
+    assert_eq!(error, RoutingError::UnknownGeneration(generation(1)));
+    // The refusal is a stale target, not an unavailable transport: the reference
+    // names something that no longer exists.
+    assert_eq!(
+        error.to_client_error().code(),
+        crate::infrastructure::ipc::ErrorCode::StaleTarget
+    );
+    assert_eq!(cache.owner(generation(2)).unwrap(), active(2));
+}
+
+/// The registry is a file. Resolving from the cached snapshot must not read it,
+/// or every IPC request would carry a directory traversal (#555).
+#[test]
+fn route_cache_reads_the_directory_once_until_it_has_a_reason_to_read_again() {
+    let directory = FakeDirectory::of(vec![Ok(two_generations())]);
+    let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut cache = RouteCache::new(CountingDirectory {
+        inner: directory,
+        reads: std::sync::Arc::clone(&reads),
+    });
+    assert!(!cache.is_loaded());
+    for _ in 0..8 {
+        cache.owner(generation(1)).unwrap();
+        cache.owner(generation(2)).unwrap();
+        cache.every_generation().unwrap();
+        cache.resolve(&RouteTarget::ActiveControl).unwrap();
+    }
+    assert_eq!(
+        reads.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "resolution must not re-read the records"
+    );
+    assert!(cache.is_loaded());
+
+    // An owner the snapshot cannot resolve is the one reason to look again: the
+    // snapshot may predate the handoff that published it. One extra read, then
+    // the refusal stands.
+    assert!(cache.owner(generation(7)).is_err());
+    assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 2);
+
+    // Explicit invalidation is the caller reporting evidence the cache cannot
+    // see for itself — a lane that stopped answering.
+    cache.invalidate();
+    cache.owner(generation(1)).unwrap();
+    assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 3);
+}
+
+/// An unreadable directory keeps the previous snapshot and refuses, rather than
+/// unaddressing a live owner or falling back to the endpoint used last.
+#[test]
+fn route_cache_keeps_the_last_snapshot_when_the_directory_becomes_unreadable() {
+    let mut cache = RouteCache::new(FakeDirectory::of(vec![
+        Ok(two_generations()),
+        Err(DirectoryError::Unreadable("gone".into())),
+    ]));
+    assert_eq!(cache.owner(generation(1)).unwrap(), draining(1));
+    // The unresolvable owner triggers the refresh, which now fails.
+    assert_eq!(
+        cache.owner(generation(7)).unwrap_err(),
+        RoutingError::Directory(DirectoryError::Unreadable("gone".into()))
+    );
+    assert_eq!(cache.endpoints(), &two_generations());
+}
+
+/// Nothing published at all is `NoActiveGeneration`, and it stays effect zero:
+/// an unavailable daemon is not a licence to route anywhere.
+#[test]
+fn route_cache_refuses_every_target_when_nothing_is_published() {
+    let mut cache = RouteCache::new(FakeDirectory::of(vec![Ok(TrustedEndpoints::default())]));
+    assert_eq!(
+        cache.resolve(&RouteTarget::ActiveControl).unwrap_err(),
+        RoutingError::NoActiveGeneration
+    );
+    assert_eq!(
+        cache.every_generation().unwrap_err(),
+        RoutingError::NoActiveGeneration
+    );
+    assert_eq!(
+        cache.owner(generation(2)).unwrap_err(),
+        RoutingError::UnknownGeneration(generation(2))
+    );
+}
+
+struct CountingDirectory {
+    inner: FakeDirectory,
+    reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl GenerationDirectory for CountingDirectory {
+    fn snapshot(&self) -> Result<TrustedEndpoints, DirectoryError> {
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.snapshot()
+    }
+}

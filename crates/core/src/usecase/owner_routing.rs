@@ -674,32 +674,140 @@ pub trait GenerationTransport {
     ) -> Result<Box<dyn DaemonSession>, ClientError>;
 }
 
-/// The production route: a client that addresses every request by its owner.
+/// The trusted snapshot a client resolves against, read from the directory only
+/// when there is a reason to read it.
 ///
-/// It holds the last trusted snapshot and one link per generation, and refreshes
-/// the snapshot only when it has a reason to — the first request, an owner it
-/// cannot resolve, or a transport failure. A request whose owner is still not
-/// addressable after a refresh is refused; nothing is retried against a
-/// different endpoint.
-pub struct OwnerRouter {
-    directory: Box<dyn GenerationDirectory>,
-    transport: Box<dyn GenerationTransport>,
+/// The registry and the current locator are files. Reading them once per request
+/// would put a directory traversal and two `open`/`read` pairs on the IPC hot
+/// path, which is the cost that had to be taken back out of the daemon's own PTY
+/// path (#555). So the snapshot is cached and re-read only on a reason:
+///
+/// | trigger | why |
+/// |---|---|
+/// | the first resolution | there is nothing to resolve against yet |
+/// | a resolution that fails | the snapshot may predate the handoff that published this owner |
+/// | [`RouteCache::invalidate`] | the caller observed a generation change on the wire |
+///
+/// A second failure after the refresh is the answer: nothing degrades into the
+/// active endpoint.
+pub struct RouteCache {
+    directory: Box<dyn GenerationDirectory + Send>,
     endpoints: TrustedEndpoints,
     loaded: bool,
+}
+
+impl RouteCache {
+    /// Build a cache over a trusted directory. Nothing is read until the first
+    /// resolution, so constructing one costs no IO.
+    ///
+    /// The directory is `Send` because one client process resolves owners from
+    /// its render thread and from its background observation lanes, behind one
+    /// shared cache rather than one directory reader per thread.
+    pub fn new(directory: impl GenerationDirectory + Send + 'static) -> Self {
+        Self {
+            directory: Box::new(directory),
+            endpoints: TrustedEndpoints::default(),
+            loaded: false,
+        }
+    }
+
+    /// The trusted set this cache last read.
+    #[must_use]
+    pub fn endpoints(&self) -> &TrustedEndpoints {
+        &self.endpoints
+    }
+
+    /// Whether the directory has been read at least once.
+    #[must_use]
+    pub fn is_loaded(&self) -> bool {
+        self.loaded
+    }
+
+    /// Re-read the trusted directory.
+    ///
+    /// # Errors
+    /// Returns [`DirectoryError`] and leaves the previous snapshot in place, so
+    /// an unreadable directory does not silently unaddress a live owner.
+    pub fn refresh(&mut self) -> Result<(), DirectoryError> {
+        self.endpoints = self.directory.snapshot()?;
+        self.loaded = true;
+        Ok(())
+    }
+
+    /// Require the next resolution to re-read the directory.
+    ///
+    /// This is the caller's way of reporting evidence the cache cannot see for
+    /// itself — a reply that named a different current generation, or a
+    /// connection that had to be re-established.
+    pub fn invalidate(&mut self) {
+        self.loaded = false;
+    }
+
+    /// Resolve `target`, refreshing once when the current snapshot cannot.
+    ///
+    /// # Errors
+    /// Returns the [`RoutingError`] the *first* attempt produced, so a refresh
+    /// that changes nothing does not relabel an unaddressable owner. A directory
+    /// that cannot be read at all is [`RoutingError::Directory`].
+    pub fn resolve(&mut self, target: &RouteTarget) -> Result<RouteResolution, RoutingError> {
+        if !self.loaded {
+            self.refresh()?;
+        }
+        match resolve_route(target, &self.endpoints) {
+            Ok(resolution) => Ok(resolution),
+            Err(first) => {
+                // The snapshot may predate a handoff that published this owner.
+                // One refresh is enough: a second failure is the answer.
+                self.refresh()?;
+                resolve_route(target, &self.endpoints).map_err(|_| first)
+            }
+        }
+    }
+
+    /// Resolve the single endpoint that owns `generation`.
+    ///
+    /// # Errors
+    /// Returns [`RoutingError::UnknownGeneration`] when the generation is not
+    /// addressable — never the active endpoint.
+    pub fn owner(&mut self, generation: DaemonGeneration) -> Result<TrustedEndpoint, RoutingError> {
+        self.resolve(&RouteTarget::Owner(generation))?
+            .into_endpoints()
+            .pop()
+            .ok_or(RoutingError::UnknownGeneration(generation))
+    }
+
+    /// Every generation a scope inventory must be asked, active first.
+    ///
+    /// # Errors
+    /// Returns [`RoutingError::NoActiveGeneration`] when there is no generation
+    /// to ask at all.
+    pub fn every_generation(&mut self) -> Result<Vec<TrustedEndpoint>, RoutingError> {
+        Ok(self
+            .resolve(&RouteTarget::EveryGeneration)?
+            .into_endpoints())
+    }
+}
+
+/// The production route: a client that addresses every request by its owner.
+///
+/// It holds the last trusted snapshot ([`RouteCache`]) and one link per
+/// generation. A request whose owner is still not addressable after a refresh is
+/// refused; nothing is retried against a different endpoint.
+pub struct OwnerRouter {
+    cache: RouteCache,
+    transport: Box<dyn GenerationTransport>,
     links: GenerationLinks,
 }
 
 impl OwnerRouter {
     /// Build a router over a trusted directory and a transport.
     pub fn new(
-        directory: impl GenerationDirectory + 'static,
+        directory: impl GenerationDirectory + Send + 'static,
         transport: impl GenerationTransport + 'static,
     ) -> Self {
         Self {
-            directory: Box::new(directory),
+            cache: RouteCache::new(directory),
             transport: Box::new(transport),
-            endpoints: TrustedEndpoints::default(),
-            loaded: false,
             links: GenerationLinks::new(),
         }
     }
@@ -707,7 +815,7 @@ impl OwnerRouter {
     /// The trusted set this router last read.
     #[must_use]
     pub fn endpoints(&self) -> &TrustedEndpoints {
-        &self.endpoints
+        self.cache.endpoints()
     }
 
     /// The per-generation links, for cursor bookkeeping.
@@ -727,27 +835,21 @@ impl OwnerRouter {
     /// Returns [`DirectoryError`] and leaves the previous snapshot in place, so
     /// an unreadable directory does not silently unaddress a live owner.
     pub fn refresh(&mut self) -> Result<(), DirectoryError> {
-        let endpoints = self.directory.snapshot()?;
-        self.links.retain_trusted(&endpoints);
-        self.endpoints = endpoints;
-        self.loaded = true;
+        self.cache.refresh()?;
+        self.links.retain_trusted(self.cache.endpoints());
         Ok(())
     }
 
     /// Resolve `target`, refreshing once when the current snapshot cannot.
+    ///
+    /// Links are pruned against whatever snapshot the cache ends up holding.
+    /// Pruning is idempotent, so doing it after every resolution costs nothing
+    /// when the snapshot did not change and cannot miss a refresh that happened
+    /// inside the cache.
     fn resolve(&mut self, target: &RouteTarget) -> Result<RouteResolution, RoutingError> {
-        if !self.loaded {
-            self.refresh()?;
-        }
-        match resolve_route(target, &self.endpoints) {
-            Ok(resolution) => Ok(resolution),
-            Err(first) => {
-                // The snapshot may predate a handoff that published this owner.
-                // One refresh is enough: a second failure is the answer.
-                self.refresh()?;
-                resolve_route(target, &self.endpoints).map_err(|_| first)
-            }
-        }
+        let resolution = self.cache.resolve(target);
+        self.links.retain_trusted(self.cache.endpoints());
+        resolution
     }
 
     /// Send one request to the endpoint that owns it.

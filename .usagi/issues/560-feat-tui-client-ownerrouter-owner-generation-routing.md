@@ -1,14 +1,14 @@
 ---
 number: 560
 title: feat(tui): client を OwnerRouter に載せて owner generation 宛の routing を配線する
-status: todo
+status: done
 priority: high
 labels: [review, v2, tui, ipc, daemon, lifecycle]
 dependson: []
 related: [508, 516, 559]
 parent: 559
 created_at: 2026-07-26T13:57:35.232736+00:00
-updated_at: 2026-07-26T13:57:35.232736+00:00
+updated_at: 2026-07-26T15:09:53.436860+00:00
 ---
 
 ## 問題・根拠（コード調査で確定）
@@ -50,27 +50,41 @@ active endpoint を返すので、`connect_current` と同じ接続先に解決�
 2. draining endpoint の一時不通を `reconnecting` として保持し、**verified retirement まで tab を回収しない**。
 3. generation が 1 つのときは現在と同じ接続先・同じ挙動になることをテストで固定する。
 
-## 設計上の判断が必要な点
+## 設計上の判断（確定した内容）
 
-- **`OwnerRouter` の生存期間と再解決の契機**。registry revision が変わったときに再解決する必要があるが、
-  接続ごとに registry を読むと IPC の hot path にファイル読み込みが入る（[#555](555-perf-daemon-pr-identity-pty-hot-path.md)
-  で daemon 側の同種問題を潰したばかりである）。revision を観測して cache する形にするか、
-  接続確立時だけ解決するかを決める。
-- **exact owner が未知・retired のときの扱い**。`TerminalRef.daemon_generation` に対応する endpoint が registry に
-  無い場合、active へ fallback すると別 generation の PTY を掴む危険がある。**fail closed（typed error）にするのが
-  既定**で、その error を TUI がどう提示するかを決める。
-- **capability 未対応の相手**。wire では `owner-generation-routing.v1` を双方向 advertise 済みなので、
-  未対応 client / server と混在したときに routing を使わない経路へ落ちる条件を明示する。
+- **`OwnerRouter` の生存期間と再解決の契機** — snapshot を cache する `RouteCache` を
+  `usecase::owner_routing` に切り出し、合成ルートが process ごとに 1 つ保持する。読み直す契機は
+  「最初の解決」「解決失敗」「保持していた lane を失った（`invalidate`）」の 3 つだけで、
+  すでに開いている lane の選択は map の key 一致だけなので registry 読み取りは per-request hot path に
+  入らない。`OwnerRouter` も同じ `RouteCache` の上に載せ替えて判定の SSoT を保った。
+- **exact owner が未知・retired のときの扱い** — fail closed。`RoutingError::UnknownGeneration` →
+  typed `stale_target` で、active へ fallback しない。TUI では `map_terminal_error` が既存の
+  `TerminalError::Stale` に落とすため、pane は「その terminal はもう無い」として扱われる。
+  加えて handshake 後に「相手が名乗った generation が要求した owner と一致すること」を両 role で確認し、
+  不一致なら lane を渡さず snapshot を stale 扱いにする（cache が古いまま別 daemon の lane を掴まない）。
+- **capability 未対応の相手** — client は generation 数にかかわらず常に routing を通し、routing を切る経路は
+  作らない。generation が 1 つのとき owner は active に解決され、その接続は capability の有無に関係なく
+  成立するためである。`owner-generation-routing.v1` は **daemon が rollover を開始してよいかの前提条件**
+  としてだけ読まれる（#516 / #559 の責務）。
 
 ## 受入条件
 
-- [ ] generation が 1 つのとき、接続先と観測される挙動が現在と同一である（回帰テストで固定）。
-- [ ] draining generation が存在するとき、terminal operation が exact owner endpoint へ、control / launch が
+- [x] generation が 1 つのとき、接続先と観測される挙動が現在と同一である（回帰テストで固定）。
+      `tests/cli_tui.rs` の `one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_owner`
+      が実 daemon 1 プロセスに対して、解決された endpoint が `current.json` と一致し、`connect_generation` と
+      `connect_current` が同じ generation・同じ build を名乗ることを固定する。
+- [x] draining generation が存在するとき、terminal operation が exact owner endpoint へ、control / launch が
       active へ解決される（fake registry で固定）。
-- [ ] exact owner が未知・retired のとき active へ fallback せず typed error になる。
-- [ ] draining endpoint の一時不通で tab を回収しない（`reconnecting` を保持する）。
-- [ ] registry 読み取りが IPC の per-request hot path に入っていない。
-- [ ] カバレッジ 100% を維持する。[document/04-ipc.md](../../document/04-ipc.md) の routing 記述を実装に合わせて
+      `route_cache_resolves_control_owner_and_fan_out_for_every_registry_state`。
+- [x] exact owner が未知・retired のとき active へ fallback せず typed error になる。
+      `route_cache_refuses_a_retired_owner_instead_of_the_active_endpoint` と integration test。
+- [x] draining endpoint の一時不通で tab を回収しない（`reconnecting` を保持する）。
+      inventory は `merge_inventory` で merge し、答えなかった generation の terminal は列挙されないだけなので
+      pump の「列挙されなかった terminal は tracked のまま」契約がそのまま効く。全 generation が沈黙した
+      round だけを failure（backoff）にする。
+- [x] registry 読み取りが IPC の per-request hot path に入っていない。
+      `route_cache_reads_the_directory_once_until_it_has_a_reason_to_read_again`。
+- [x] カバレッジ 100% を維持する。[document/04-ipc.md](../../document/04-ipc.md) の routing 記述を実装に合わせて
       更新する（**未実装の rollover 契約は書かない**。それは #559）。
 
 ## 必須回帰テスト・計測

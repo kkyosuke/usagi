@@ -888,6 +888,19 @@ impl<S: Read + Write> IpcClient<S> {
         &self.server_build
     }
 
+    /// The generation this connection is bound to, as the daemon named it in the
+    /// handshake.
+    ///
+    /// This is what lets a client key a connection by its owner without reading
+    /// the generation registry: the peer that answered has already said which
+    /// generation it is, so a lane held for a terminal can be matched against
+    /// that terminal's `TerminalRef.daemon_generation` with no IO at all
+    /// ([`owner_routing`](crate::usecase::owner_routing)).
+    #[must_use]
+    pub fn daemon_generation(&self) -> &DaemonGeneration {
+        &self.daemon_generation
+    }
+
     /// How this connection must treat terminal attach / resync snapshots.
     ///
     /// Derived from the negotiated protocol version **and** the daemon's
@@ -2242,6 +2255,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(client.server_build().version, "test");
+        // The connection knows which generation answered it. That is what lets a
+        // client hold one lane per owner and match a terminal against it without
+        // reading the generation registry per request
+        // ([`owner_routing`](crate::usecase::owner_routing)).
+        assert_eq!(client.daemon_generation().0, "daemon");
         assert_eq!(
             client
                 .request(DaemonRequest::Session {
