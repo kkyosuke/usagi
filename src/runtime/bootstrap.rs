@@ -20,7 +20,13 @@ use usagi_core::usecase::client::ClientError;
 // `daemon start` confirms the PID record before the subsequently published IPC
 // endpoint becomes connectable. Leave room for that bounded publication on a
 // cold or contended host instead of surfacing a transient unavailable state.
-const READINESS_ATTEMPTS: usize = 40;
+const READINESS_ATTEMPTS: u32 = 40;
+
+/// The longest one cold start spends waiting for the freshly spawned daemon to
+/// publish its endpoint. Callers that serialize bootstrap across processes size
+/// their bounded wait against this, so a concurrent honest cold start is waited
+/// out rather than mistaken for a wedged holder.
+pub(crate) const READINESS_CEILING: Duration = READINESS_DELAY.saturating_mul(READINESS_ATTEMPTS);
 const READINESS_DELAY: Duration = Duration::from_millis(50);
 
 // The unit suite exercises every action, readiness, recovery, and build-fence

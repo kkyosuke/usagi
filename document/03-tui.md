@@ -591,8 +591,8 @@ shell が attach するのは、現在の active target に属する selected fo
 （利用者の操作が起こす attach / input / resize / detach は従来どおり描画スレッドから同期送信する）。
 どちらの lane が exit を報告した tab も自動で閉じる。最後の live tab が exit したとき、tab が 1 枚も残らなければ
 Closeup の action 空状態へ戻る（interrupted history などの非 live tab が残っている場合は tab surface に留まる）。
-IPC request の実効 deadline は
-[#521](../.usagi/issues/521-fix-ipc-clientpolicy-request-deadline-reconnect-budget.md) が所有する。
+描画スレッドから同期送信する attach / input / resize / detach も含め、request ごとの実効 deadline は
+[4. daemon IPC#terminal lane の per-request budget](04-ipc.md#terminal-lane-の-per-request-budget) が正本である。
 
 ### pane launch の command worker と常駐 stream の分離
 

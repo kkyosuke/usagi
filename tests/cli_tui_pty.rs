@@ -1312,6 +1312,117 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
 ///
 /// background tab には `Attach` も `Resume` も送らないので、観測しても process は増えない
 /// （[3. TUI#背景 observation lane](../document/03-tui.md)）。
+/// 応答を止めた daemon が、出荷 TUI を固めないことの product 上の bound。
+///
+/// attach/input lane は以前 deadline を持たない生 socket で、`Input` を書いたあと daemon が
+/// 答えなければ描画スレッドが無期限に停止した（#553）。lane は request ごとに
+/// `TerminalLaneBudget` で armed になったので、SIGSTOP した daemon（＝accept も応答もしないが
+/// socket は生きている、hung daemon そのものの形）に対しても、live pane へのキー入力・switch
+/// overlay の描画・quit がすべて wall-clock で有界に戻る。修正前はこのテストが timeout する。
+#[test]
+fn real_pty_hung_daemon_bounds_redraw_and_quit_with_an_attached_pane() {
+    /// 全体の wall-clock 上限。frame ごとの lane budget そのものは real socket + real clock の
+    /// unit test（`a_hung_daemon_bounds_one_keystroke_and_resolves_it_by_ledger_query` ほか）が
+    /// 押さえる。ここが固定するのは product 上の事実 —— quit が**有限時間で終わる**こと —— で、
+    /// 修正前はここが無期限だった。frame 予算そのものの縮小は #551 の担当である。
+    const QUIT_BOUND: Duration = Duration::from_secs(45);
+
+    let _serial = serial();
+    let home = short_home();
+    let workspace_root = tempfile::tempdir().unwrap();
+    let workspace = workspace_root.path().join("hung-daemon-workspace");
+    fs::create_dir(&workspace).unwrap();
+    git(&workspace, &["init", "-q"]);
+    git(
+        &workspace,
+        &["config", "user.email", "tui-e2e@example.test"],
+    );
+    git(&workspace, &["config", "user.name", "TUI E2E"]);
+    fs::write(workspace.join("README.md"), "fixture\n").unwrap();
+    git(&workspace, &["add", "README.md"]);
+    git(&workspace, &["commit", "-qm", "fixture"]);
+
+    write_prompt_settings(home.path());
+
+    let fixture = tempfile::tempdir().unwrap();
+    let shell = fixture.path().join("fixture-shell");
+    let spawn_count = fixture.path().join("shell-spawn-count");
+    write_terminal_fixture(&shell, &spawn_count);
+    let registered = home
+        .command_at(
+            Channel::Local,
+            &workspace,
+            &["open".as_ref(), workspace.as_os_str()],
+        )
+        .env("SHELL", &shell)
+        .output()
+        .expect("workspace registers with fixture login shell");
+    assert!(registered.status.success());
+
+    let (mut master, slave) = open_pty().unwrap();
+    let reader_master = master.try_clone().unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let reader_capture = Arc::clone(&captured);
+    let reader = thread::spawn(move || read_pty_shared(reader_master, &reader_capture));
+
+    let baseline = capture_len(&captured);
+    let mut tui = spawn_hop(&home, &workspace, &slave).unwrap();
+    open_registered_workspace(&mut master, &captured, baseline);
+    submit_closeup_command(&mut master, &captured, baseline, "terminal open");
+    wait_for_screen_since(&captured, baseline, "generic-ready-unique:");
+    activate_selected_live_pane(&mut master, &captured, baseline);
+
+    // The pane really is live and attached before the daemon is frozen, so the
+    // quit below has a real subscription to release over the frozen lane rather
+    // than nothing to do.
+    send(&mut master, b"before-freeze\r");
+    wait_for_screen_since(&captured, baseline, "generic-input:before-freeze");
+    // Leave the pane for Switch while the daemon still answers; bare Ctrl-Q
+    // belongs to the PTY while the live terminal owns input.
+    send(&mut master, b"\x0f\x0f");
+    wait_for_screen_since(&captured, baseline, "[switch]");
+
+    // SIGSTOP is the exact hung-daemon shape: the process answers nothing while
+    // its listening socket and every established connection stay open, so only a
+    // client-side deadline can end a wait on it.
+    let daemon = daemon_pid(home.path());
+    // SAFETY: `daemon` is the pid this test's own `DaemonHome` recorded, and the
+    // call only suspends that process.
+    assert_eq!(
+        unsafe { libc::kill(libc::pid_t::try_from(daemon).unwrap(), libc::SIGSTOP) },
+        0,
+        "the fixture daemon could not be suspended"
+    );
+
+    // Quitting releases the attached pane's subscription over a lane that will
+    // never answer. Reaching the confirmation frame proves the render loop kept
+    // drawing, and the exit proves the release did not wait forever.
+    let frozen_at = Instant::now();
+    send(&mut master, b"\x11");
+    wait_for_screen_since(&captured, baseline, "Detach from this workspace?");
+    send(&mut master, b"\r");
+    let status =
+        wait_with_timeout(&mut tui, QUIT_BOUND).expect("the TUI quits within a wall-clock bound");
+    let elapsed = frozen_at.elapsed();
+
+    // SAFETY: same pid, resumed so the fixture teardown can stop it normally.
+    unsafe { libc::kill(libc::pid_t::try_from(daemon).unwrap(), libc::SIGCONT) };
+
+    assert!(
+        status.success(),
+        "the TUI quit cleanly against a hung daemon"
+    );
+    assert!(
+        elapsed < QUIT_BOUND,
+        "redraw and quit stayed bounded against a hung daemon: {elapsed:?}"
+    );
+
+    drop(slave);
+    drop(master);
+    reader.join().unwrap();
+    stop_daemon(&home);
+}
+
 #[test]
 fn real_pty_background_terminal_exit_closes_its_tab_through_scope_inventory() {
     let _serial = serial();

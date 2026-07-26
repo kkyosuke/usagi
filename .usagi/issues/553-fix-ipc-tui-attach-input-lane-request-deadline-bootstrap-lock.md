@@ -1,13 +1,13 @@
 ---
 number: 553
 title: fix(ipc): TUI の attach/input lane に request deadline を入れ bootstrap lock を有界化する
-status: todo
+status: done
 priority: high
 labels: [review, v2, ipc, tui, client, timeout, resilience]
 dependson: []
 related: [508, 517, 519, 521, 523, 551, 554, 556]
 created_at: 2026-07-25T22:57:20.001062+00:00
-updated_at: 2026-07-25T23:00:10.442980+00:00
+updated_at: 2026-07-26T01:26:32.584703+00:00
 ---
 
 ## 問題・根拠（コード調査で確定）

@@ -4288,13 +4288,61 @@ fn verify_private_lock_path(path: &Path, file: &std::fs::File, label: &str) -> s
     Ok(())
 }
 
+/// How long a caller waits for a contended private lock before giving up.
+///
+/// Every cross-process section this module takes is bounded, because these
+/// locks are held on a machine-wide data directory: a blocking `flock` here lets
+/// any other usagi process — an MCP server, a CLI invocation, a rollover — stall
+/// an interactive surface for as long as it likes, and a holder killed while
+/// wedged would stall it forever. Each bound is sized against what its own
+/// section can legitimately take.
+#[derive(Clone, Copy)]
+struct PrivateLockWait {
+    limit: Duration,
+    poll: Duration,
+}
+
+impl PrivateLockWait {
+    const POLL: Duration = Duration::from_millis(20);
+
+    /// A section that only reads or rewrites one small record file. The same
+    /// two seconds the instance lock and the workspace fence already wait.
+    const RECORD: Self = Self {
+        limit: Duration::from_secs(2),
+        poll: Self::POLL,
+    };
+
+    /// The bootstrap section, held across one `connect_or_start`. Its worst case
+    /// is a cold start: spawning the lifecycle child, then
+    /// [`bootstrap::READINESS_CEILING`] of endpoint polling. The budget is that
+    /// ceiling plus a spawn margin, so a concurrent honest cold start is waited
+    /// out while a wedged holder still returns a typed answer.
+    const BOOTSTRAP: Self = Self {
+        limit: bootstrap::READINESS_CEILING.saturating_add(Duration::from_secs(3)),
+        poll: Self::POLL,
+    };
+}
+
 fn lock_private_exclusive(
     path: &Path,
     label: &str,
     mode_policy: PrivateLockModePolicy,
+    wait: PrivateLockWait,
 ) -> std::io::Result<std::fs::File> {
     let file = open_private_lock(path, label, mode_policy)?;
-    FileExt::lock_exclusive(&file)?;
+    let deadline = Instant::now() + wait.limit;
+    loop {
+        match FileExt::try_lock_exclusive(&file) {
+            Ok(()) => break,
+            Err(_) if Instant::now() < deadline => std::thread::sleep(wait.poll),
+            Err(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!("{label} is held by another process"),
+                ));
+            }
+        }
+    }
     #[cfg(test)]
     wait_private_lock_after_flock_barrier(path);
     verify_private_lock_path(path, &file, label)?;
@@ -4340,6 +4388,7 @@ impl FsRecordFile {
             &parent.join("record.lock"),
             "daemon record lock",
             PrivateLockModePolicy::CrashResidue,
+            PrivateLockWait::RECORD,
         )?;
         operation()
     }
@@ -5410,26 +5459,67 @@ fn client_workspace() -> ClientWorkspace {
 /// channel reuses an exact artifact. A different known artifact returns one
 /// deterministic rollover trigger. Development consumes it with a cold
 /// restart; other channels preserve the old daemon for a future safe handoff.
+///
+/// The returned lane is deadline-armed by construction: there is no way to
+/// obtain an unbounded daemon socket from this module. `connect_budget_ms`
+/// bounds bootstrap, connect and handshake; each later request re-arms the lane
+/// with its own budget through [`rearm_lane`].
 pub(crate) fn client(
     policy: ClientPolicy,
-) -> Result<IpcClient<std::os::unix::net::UnixStream>, ClientError> {
-    client_for(policy, &client_workspace())
+    connect_budget_ms: u64,
+) -> Result<LaneClient, ClientError> {
+    client_for(policy, &client_workspace(), connect_budget_ms)
 }
 
 fn client_for(
     policy: ClientPolicy,
     workspace: &ClientWorkspace,
-) -> Result<IpcClient<std::os::unix::net::UnixStream>, ClientError> {
+    connect_budget_ms: u64,
+) -> Result<LaneClient, ClientError> {
+    let clock = SystemClock::new();
     bootstrap_client(|data_dir, build| {
-        connect_client(data_dir, policy, build.clone(), workspace.clone())
+        connect_client(
+            data_dir,
+            policy,
+            build.clone(),
+            workspace.clone(),
+            |stream| deadline_transport(clock, stream, connect_budget_ms),
+        )
     })
 }
 
+/// Wraps an established socket in this process's deadline transport.
+pub(crate) fn deadline_transport(
+    clock: SystemClock,
+    stream: std::os::unix::net::UnixStream,
+    budget_ms: u64,
+) -> LaneStream {
+    DeadlineStream::new(clock, DeadlineUnixStream(stream), budget_ms)
+}
+
+/// Restarts a lane's end-to-end budget for the request that is about to be
+/// sent. A lane keeps one connection across requests (its attachments and input
+/// ledger live there), so the budget is per request rather than per connection.
+pub(crate) fn rearm_lane(client: &mut LaneClient, budget_ms: u64) {
+    usagi_core::usecase::client::DaemonSession::rearm(client, budget_ms);
+}
+
+/// Borrows a lane's underlying socket, for composition-owned passive
+/// observation (the restore watcher clones it to peek for EOF).
+pub(crate) fn lane_socket(client: &LaneClient) -> &std::os::unix::net::UnixStream {
+    &client.transport().get_ref().0
+}
+
 /// Establishes a bootstrapped, build-fenced daemon connection. `connect` builds
-/// one authenticated session over any stream type (a plain `UnixStream` for the
-/// persistent terminal path, or a deadline-armed stream for [`policy_client`]),
-/// so both surfaces share the identical cold-start, stale-recovery, and
-/// development rollover handling.
+/// one authenticated session over any stream type — the exact-owner-verified
+/// [`LaneClient`] the terminal lanes use, or the per-request one
+/// [`policy_client`] builds — so every surface shares the identical cold-start,
+/// stale-recovery, and development rollover handling. Both are deadline-armed:
+/// no caller can ask this for an unbounded socket.
+///
+/// Entering the bootstrap section is itself bounded
+/// ([`acquire_bootstrap_lock`]), so a peer that is holding it cannot stall this
+/// caller indefinitely.
 // LLVM counts the deadline-stream instantiation as uncovered for branches the
 // UnixStream instantiation already exercises through the integration suite.
 #[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=cli_tui_pty
@@ -5482,13 +5572,13 @@ fn bootstrap_client<S: Read + Write>(
 /// meaningful; the origin is captured once so a wall-clock jump cannot rewind a
 /// deadline.
 #[derive(Clone, Copy)]
-struct SystemClock {
+pub(crate) struct SystemClock {
     origin: Instant,
 }
 
 impl SystemClock {
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=mcp_e2e
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             origin: Instant::now(),
         }
@@ -5504,7 +5594,7 @@ impl MonotonicClock for SystemClock {
 
 /// A deadline-armed Unix domain socket. Arming maps to OS receive/send timeouts
 /// so a stalled daemon cannot block a surface past its policy budget.
-struct DeadlineUnixStream(std::os::unix::net::UnixStream);
+pub(crate) struct DeadlineUnixStream(std::os::unix::net::UnixStream);
 
 impl Read for DeadlineUnixStream {
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=mcp_e2e
@@ -5535,7 +5625,13 @@ impl DeadlineConnection for DeadlineUnixStream {
     }
 }
 
-type DeadlineIpcClient = IpcClient<DeadlineStream<SystemClock, DeadlineUnixStream>>;
+/// The only daemon byte stream this composition root builds: an OS socket that
+/// always carries an armed end-to-end deadline.
+pub(crate) type LaneStream = DeadlineStream<SystemClock, DeadlineUnixStream>;
+/// A daemon client over [`LaneStream`]. Every surface — per-request, terminal
+/// lane, poll pump, inventory pump — is this one type, so an unbounded socket
+/// cannot be introduced without changing the type.
+pub(crate) type LaneClient = IpcClient<LaneStream>;
 
 /// This process's client incarnation, declared by every connection it opens.
 ///
@@ -5558,9 +5654,9 @@ fn connect_deadline_client(
     workspace: ClientWorkspace,
     clock: SystemClock,
     budget_ms: u64,
-) -> std::io::Result<DeadlineIpcClient> {
+) -> std::io::Result<LaneClient> {
     let stream = usagi_daemon::infrastructure::unix_transport::connect_current(data_dir)?;
-    let deadline = DeadlineStream::new(clock, DeadlineUnixStream(stream), budget_ms);
+    let deadline = deadline_transport(clock, stream, budget_ms);
     IpcClient::connect(
         deadline,
         client_incarnation().to_owned(),
@@ -5653,11 +5749,13 @@ pub(crate) fn request_replacement(
     // Replacing the running artifact is a lifecycle observation, not workspace
     // work: it reads the daemon's advertised build and sends no request, so it
     // stays usable from outside the daemon's workspace.
+    let clock = SystemClock::new();
     let client = connect_client(
         &data_dir,
         policy,
         expected_build.clone(),
         ClientWorkspace::Unbound,
+        |stream| deadline_transport(clock, stream, policy.timeout_ms),
     )
     .map_err(|_| ClientError::Unavailable("daemon endpoint is unavailable".into()))?;
     let actual_build = client.server_build();
@@ -5754,12 +5852,17 @@ fn current_build() -> BuildIdentity {
         env!("USAGI_BUILD_SOURCE_ID"),
     )
 }
-fn connect_client(
+/// Connects one exact-owner-verified daemon session. `arm` wraps the accepted
+/// socket in the transport the caller's lane runs over; it is applied only after
+/// the peer's process-start identity, record and generation have been observed,
+/// so the fence is identical for every lane.
+fn connect_client<S: Read + Write>(
     data_dir: &Path,
     policy: ClientPolicy,
     build: BuildIdentity,
     workspace: ClientWorkspace,
-) -> std::io::Result<IpcClient<std::os::unix::net::UnixStream>> {
+    arm: impl FnOnce(std::os::unix::net::UnixStream) -> S,
+) -> std::io::Result<IpcClient<S>> {
     let daemon = data_dir.join("daemon");
     let locator = read_locator(&daemon)?;
     let stream = usagi_daemon::infrastructure::unix_transport::connect_current(data_dir)?;
@@ -5775,7 +5878,7 @@ fn connect_client(
     let peer = peer_pid(&stream)?;
     let observation = ExactProcessControl.observe(&expected);
     IpcClient::connect_expected_owner(
-        stream,
+        arm(stream),
         client_incarnation().to_owned(),
         format!("{}", std::process::id()),
         policy,
@@ -5815,19 +5918,43 @@ fn run_lifecycle(exe: &Path, command: &str) -> std::io::Result<()> {
         .then_some(())
         .ok_or_else(|| std::io::Error::other(format!("daemon {command} failed")))
 }
+/// Enters the cross-process bootstrap section under a bounded wait.
+///
+/// The section serializes `connect_or_start` so two clients cannot cold-start
+/// two daemons for one data directory. Because the data directory is shared by
+/// every usagi process on the machine, the wait is bounded
+/// ([`PrivateLockWait::BOOTSTRAP`]) and contention is reported as
+/// [`ClientError::BootstrapContended`] rather than folded into "the daemon is
+/// unavailable": the daemon may be perfectly healthy and the caller should
+/// simply try again, which is exactly what the TUI's reattach backoff does.
 fn acquire_bootstrap_lock(data_dir: &Path) -> Result<std::fs::File, ClientError> {
+    acquire_bootstrap_lock_within(data_dir, PrivateLockWait::BOOTSTRAP)
+}
+
+fn acquire_bootstrap_lock_within(
+    data_dir: &Path,
+    wait: PrivateLockWait,
+) -> Result<std::fs::File, ClientError> {
     let result = (|| {
-        let daemon_dir = data_dir.join("daemon");
         ensure_private_dir_all(data_dir)?;
-        ensure_private_dir(&daemon_dir)?;
-        let path = daemon_dir.join("bootstrap.lock");
+        // `open_private_lock` runs `ensure_private_dir` on the lock's parent, so
+        // creating (and directory-locking) `daemon/` here as well would double
+        // the setup locking every bootstrap performs on the shared data dir.
+        let path = data_dir.join("daemon").join("bootstrap.lock");
         lock_private_exclusive(
             &path,
             "bootstrap lock",
             PrivateLockModePolicy::BootstrapLegacy0644,
+            wait,
         )
     })();
-    result.map_err(|error: std::io::Error| ClientError::Unavailable(error.to_string()))
+    result.map_err(|error: std::io::Error| {
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            ClientError::BootstrapContended
+        } else {
+            ClientError::Unavailable(error.to_string())
+        }
+    })
 }
 
 /// Ensures that an active daemon endpoint exists before an interactive TUI is
@@ -5839,7 +5966,12 @@ fn acquire_bootstrap_lock(data_dir: &Path) -> Result<std::fs::File, ClientError>
 /// workspace-bound connections those screens make afterwards carry their own
 /// declaration and are fenced there.
 pub(crate) fn ensure_ready() -> Result<(), ClientError> {
-    client_for(ClientPolicy::tui(), &ClientWorkspace::Unbound).map(|_| ())
+    client_for(
+        ClientPolicy::tui(),
+        &ClientWorkspace::Unbound,
+        ClientPolicy::tui().timeout_ms,
+    )
+    .map(|_| ())
 }
 
 #[cfg(test)]
@@ -6097,6 +6229,7 @@ mod tests {
                 .unwrap();
         });
 
+        let clock = SystemClock::new();
         let error = connect_client(
             data,
             ClientPolicy::cli(),
@@ -6104,6 +6237,7 @@ mod tests {
             ClientWorkspace::Bound {
                 root: paths::wire_workspace_root(data),
             },
+            |stream| deadline_transport(clock, stream, ClientPolicy::cli().timeout_ms),
         )
         .err()
         .expect("forged endpoint must be rejected");
@@ -6332,6 +6466,7 @@ mod tests {
             &record_lock,
             "daemon record lock",
             PrivateLockModePolicy::CrashResidue,
+            PrivateLockWait::RECORD,
         )
         .unwrap();
         assert_private_lock_descriptor(&record_descriptor);
@@ -6377,6 +6512,105 @@ mod tests {
         unsafe {
             libc::umask(previous_umask);
         }
+    }
+
+    /// The bootstrap section is bounded, and its contention is a distinct answer.
+    ///
+    /// The section is entered on a machine-wide data directory by every surface,
+    /// including the TUI's render thread, and it is held across one
+    /// `connect_or_start` — a cold start, in the worst case. A blocking `flock`
+    /// there means any other usagi process (MCP server, CLI, rollover), or a
+    /// holder that was killed while wedged, stalls the UI without limit. So a
+    /// holder that outlasts the wait yields `BootstrapContended`, which tells the
+    /// surface to retry rather than that the daemon is absent.
+    #[test]
+    fn a_contended_bootstrap_section_returns_bounded_typed_contention() {
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data_dir = directory.path().join("data");
+        // Enter and leave once, so the uncontended path is the one that creates
+        // the lock node and the `daemon/` directory chain.
+        drop(acquire_bootstrap_lock(&data_dir).unwrap());
+
+        // A second open file description on the same node: `flock` conflicts
+        // across descriptions, so this is exactly what another process holding
+        // the section looks like.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(data_dir.join("daemon").join("bootstrap.lock"))
+            .unwrap();
+        FileExt::lock_exclusive(&held).unwrap();
+
+        let wait = PrivateLockWait {
+            limit: Duration::from_millis(120),
+            poll: Duration::from_millis(10),
+        };
+        let started = Instant::now();
+        let error = acquire_bootstrap_lock_within(&data_dir, wait)
+            .expect_err("a held bootstrap section must not be entered");
+        let elapsed = started.elapsed();
+
+        assert_eq!(error, ClientError::BootstrapContended);
+        assert_eq!(
+            error.side_effect(),
+            usagi_core::infrastructure::ipc::SideEffect::None
+        );
+        assert!(
+            elapsed >= wait.limit,
+            "the wait was actually spent: {elapsed:?}"
+        );
+        assert!(
+            elapsed < wait.limit * 10,
+            "the wait is bounded, not blocking: {elapsed:?}"
+        );
+
+        // Once the holder leaves, the same section is entered normally.
+        FileExt::unlock(&held).unwrap();
+        drop(held);
+        let entered = acquire_bootstrap_lock_within(&data_dir, wait).unwrap();
+        assert_private_lock_descriptor(&entered);
+    }
+
+    /// The wait must outlast one honest cold start, or a client that legitimately
+    /// waits for a peer's `daemon start` would report contention instead of using
+    /// the daemon that peer is about to publish.
+    #[test]
+    fn the_bootstrap_wait_outlasts_one_cold_start() {
+        assert!(PrivateLockWait::BOOTSTRAP.limit > bootstrap::READINESS_CEILING);
+        assert!(PrivateLockWait::BOOTSTRAP.poll < PrivateLockWait::BOOTSTRAP.limit);
+        assert!(PrivateLockWait::RECORD.limit < PrivateLockWait::BOOTSTRAP.limit);
+    }
+
+    /// Every daemon socket this composition root builds carries an armed
+    /// end-to-end deadline, so no surface can be handed an unbounded stream: the
+    /// only client type is [`LaneClient`], and its transport fails closed once
+    /// the budget is spent.
+    #[test]
+    fn the_lane_transport_bounds_reads_and_writes_by_construction() {
+        let (client_socket, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut lane = deadline_transport(SystemClock::new(), client_socket, 40);
+
+        // The peer is alive and simply never answers, which is the shape a hung
+        // daemon has: without the armed deadline this read would never return.
+        let started = Instant::now();
+        let mut byte = [0_u8; 1];
+        let error = lane.read(&mut byte).unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        ));
+        assert!(elapsed < Duration::from_secs(2), "bounded: {elapsed:?}");
+
+        // The budget is spent, so the next call fails without touching the OS;
+        // re-arming is what gives the next request its own budget.
+        assert_eq!(
+            lane.read(&mut byte).unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        usagi_core::usecase::client::RearmableStream::rearm(&mut lane, 40);
+        assert!(lane.write(b"x").is_ok());
+        drop(peer);
     }
 
     #[test]

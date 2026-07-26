@@ -507,6 +507,14 @@ pub enum ClientError {
     /// A daemon lifecycle transition could not safely establish a verified
     /// endpoint. Callers must not replace it with a local implementation.
     Lifecycle(String),
+    /// Another process held the cross-process bootstrap section for longer than
+    /// this surface's bounded wait, so no connection was ever attempted.
+    ///
+    /// It is deliberately distinct from [`Self::Unavailable`]: a daemon may well
+    /// be running and healthy, and the correct response is to try again shortly
+    /// rather than to report the daemon as absent. No request was written, so
+    /// the side effect is definitively none.
+    BootstrapContended,
 }
 
 impl ClientError {
@@ -514,7 +522,9 @@ impl ClientError {
     pub fn retry_mode(&self) -> RetryMode {
         match self {
             Self::Protocol(error) => error.retry_mode,
-            Self::Unavailable(_) | Self::Lifecycle(_) => RetryMode::Reconnect,
+            Self::Unavailable(_) | Self::Lifecycle(_) | Self::BootstrapContended => {
+                RetryMode::Reconnect
+            }
             Self::RolloverRequired(_) | Self::BuildIdentityUnavailable => RetryMode::Manual,
         }
     }
@@ -524,7 +534,9 @@ impl ClientError {
         match self {
             Self::Protocol(error) => error.side_effect,
             Self::Unavailable(_) | Self::Lifecycle(_) => SideEffect::PartialOrUnknown,
-            Self::RolloverRequired(_) | Self::BuildIdentityUnavailable => SideEffect::None,
+            Self::RolloverRequired(_)
+            | Self::BuildIdentityUnavailable
+            | Self::BootstrapContended => SideEffect::None,
         }
     }
 
@@ -535,7 +547,7 @@ impl ClientError {
             Self::Unavailable(_) | Self::Lifecycle(_) | Self::BuildIdentityUnavailable => {
                 ErrorCode::Unavailable
             }
-            Self::RolloverRequired(_) => ErrorCode::Busy,
+            Self::RolloverRequired(_) | Self::BootstrapContended => ErrorCode::Busy,
         }
     }
 
@@ -545,6 +557,8 @@ impl ClientError {
     /// is finished and must not be replayed on a fresh connection.
     #[must_use]
     pub fn is_transport_failure(&self) -> bool {
+        // Bootstrap contention happens before any socket exists, so it is not a
+        // lost request: nothing was dispatched and nothing needs discarding.
         matches!(self, Self::Unavailable(_) | Self::Lifecycle(_))
     }
 }
@@ -563,6 +577,9 @@ impl fmt::Display for ClientError {
                 f.write_str("BuildIdentityUnavailable: exact daemon artifact is unknown")
             }
             Self::Lifecycle(message) => write!(f, "Lifecycle: {message}"),
+            Self::BootstrapContended => f.write_str(
+                "BootstrapContended: another usagi process is establishing the daemon connection",
+            ),
         }
     }
 }
@@ -963,6 +980,86 @@ impl ClientPolicy {
         Self {
             timeout_ms: 30_000,
             reconnect_attempts: 1,
+        }
+    }
+}
+
+/// Per-request end-to-end deadline budgets for the TUI's terminal lanes.
+///
+/// A terminal lane is a *persistent* connection: it owns the attachments and the
+/// exactly-once input ledger of every pane sharing it, so it cannot be handed to
+/// the reconnecting [`PolicyClient`] — a transparent reconnect would silently
+/// void subscriptions the panes still believe in. Instead the lane keeps one
+/// connection and re-arms its deadline transport before every request, which
+/// gives each request the same attempt-scoped budget guarantee without any
+/// reconnect.
+///
+/// The connection itself is established under the surface [`ClientPolicy`]
+/// budget, because opening it may have to bootstrap (and cold-start) a daemon.
+/// Only the per-request budgets below are charged to the render thread, and they
+/// are deliberately far smaller than `ClientPolicy::tui().timeout_ms`: a hung
+/// daemon must cost one keystroke a fraction of a second, not two seconds.
+///
+/// | budget | actions | why this size |
+/// |---|---|---|
+/// | [`Self::POLL_MS`] | `Resume`, `Resize` | stateless and sub-millisecond in normal operation; a missed one only drops a frame |
+/// | [`Self::INPUT_MS`] | `Input`, `InputOutcome`, `Detach` | a keystroke's PTY write plus its acknowledgement, and the read-only ledger query that resolves a lost one |
+/// | [`Self::SNAPSHOT_MS`] | `Attach`, `Resync`, `Inventory`, `CompletedInventory`, `Observe`, `Dismiss` | serializes a screen checkpoint or scans a scope, so it is legitimately slower than a keystroke |
+/// | [`Self::LAUNCH_MS`] | `Launch` | spawns a process; it runs on the per-request [`PolicyClient`] path, never on a lane |
+///
+/// Exceeding a budget is a transport failure: the socket may hold a partial
+/// frame, so the lane is dropped and the client's connection epoch advances,
+/// which is what makes every pane re-attach instead of trusting a subscription
+/// the daemon no longer has.
+///
+/// That consequence is why these budgets are not as small as a frame. Dropping
+/// the lane costs every pane a re-attach, and the keystrokes typed during that
+/// window are refused with visible feedback rather than delivered late. A budget
+/// tight enough to trip on a *busy* daemon would therefore lose real input on a
+/// loaded machine. Each budget is sized above a healthy round trip under load and
+/// below anything a user would call a freeze; shrinking the render thread's
+/// exposure further is a frame-budget question, tracked by
+/// [#551](../../../.usagi/issues/551-fix-tui-home-frame-loop-daemon-rpc.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalLaneBudget;
+
+impl TerminalLaneBudget {
+    /// Stateless poll of already-produced output, or a geometry change. The one
+    /// action that may be this tight: nothing is lost by missing it, because the
+    /// next frame simply asks again.
+    pub const POLL_MS: u64 = 50;
+    /// One keystroke's round trip, or the read-only resolution of one whose
+    /// acknowledgement was lost.
+    pub const INPUT_MS: u64 = 750;
+    /// An atomic screen snapshot or a scope listing.
+    pub const SNAPSHOT_MS: u64 = 1_000;
+    /// A daemon-owned process spawn.
+    pub const LAUNCH_MS: u64 = 2_000;
+    /// Establishing (or re-establishing) a lane's own connection: one
+    /// connect + handshake against an already-running daemon.
+    ///
+    /// This is one *attempt*, not a cold start — the readiness probe that follows
+    /// a `daemon start` runs its own bounded retry loop, and each of its attempts
+    /// gets a fresh budget — so a render-thread lane facing a daemon that listens
+    /// but never completes a handshake spends this instead of the surface policy
+    /// budget it used to inherit.
+    pub const CONNECT_MS: u64 = 1_000;
+
+    /// The budget one terminal action's request may spend end to end.
+    #[must_use]
+    pub const fn for_action(action: TerminalAction) -> u64 {
+        match action {
+            TerminalAction::Resume | TerminalAction::Resize => Self::POLL_MS,
+            TerminalAction::Input | TerminalAction::InputOutcome | TerminalAction::Detach => {
+                Self::INPUT_MS
+            }
+            TerminalAction::Attach
+            | TerminalAction::Resync
+            | TerminalAction::Inventory
+            | TerminalAction::CompletedInventory
+            | TerminalAction::Observe
+            | TerminalAction::Dismiss => Self::SNAPSHOT_MS,
+            TerminalAction::Launch => Self::LAUNCH_MS,
         }
     }
 }
@@ -1908,6 +2005,92 @@ mod tests {
     fn policies_are_surface_specific() {
         assert!(ClientPolicy::tui().timeout_ms < ClientPolicy::cli().timeout_ms);
         assert!(ClientPolicy::mcp().timeout_ms > ClientPolicy::cli().timeout_ms);
+    }
+
+    /// Bootstrap contention is a distinct, effect-free, retryable answer: no
+    /// socket existed, so nothing was dispatched and nothing needs discarding.
+    /// Collapsing it into `Unavailable` would tell a surface the daemon is gone
+    /// when it is merely busy being connected to by someone else.
+    #[test]
+    fn bootstrap_contention_is_busy_effect_free_and_not_a_transport_failure() {
+        let error = ClientError::BootstrapContended;
+        assert_eq!(error.code(), ErrorCode::Busy);
+        assert_eq!(error.retry_mode(), RetryMode::Reconnect);
+        assert_eq!(error.side_effect(), SideEffect::None);
+        assert!(!error.is_transport_failure());
+        assert_ne!(error, ClientError::Unavailable(String::new()));
+        assert!(error.to_string().starts_with("BootstrapContended:"));
+    }
+
+    /// The render thread's budgets are the point of the lane split: a keystroke
+    /// or a tab switch must cost a fraction of the surface policy budget, and a
+    /// stateless poll must cost less again. The connection budget stays the
+    /// surface policy's, because opening a lane may have to cold-start a daemon.
+    #[test]
+    fn terminal_lane_budgets_are_ordered_and_far_below_the_surface_policy() {
+        use TerminalAction::{
+            Attach, CompletedInventory, Detach, Dismiss, Input, InputOutcome, Inventory, Launch,
+            Observe, Resize, Resume, Resync,
+        };
+
+        const {
+            assert!(TerminalLaneBudget::POLL_MS < TerminalLaneBudget::INPUT_MS);
+            assert!(TerminalLaneBudget::INPUT_MS < TerminalLaneBudget::SNAPSHOT_MS);
+            assert!(TerminalLaneBudget::SNAPSHOT_MS < ClientPolicy::tui().timeout_ms);
+            assert!(TerminalLaneBudget::LAUNCH_MS == ClientPolicy::tui().timeout_ms);
+            // Re-establishing a lane against a daemon that listens but never
+            // completes a handshake must not cost the render thread the surface
+            // policy budget it used to inherit.
+            assert!(TerminalLaneBudget::CONNECT_MS < ClientPolicy::tui().timeout_ms);
+            assert!(TerminalLaneBudget::CONNECT_MS >= TerminalLaneBudget::SNAPSHOT_MS);
+        }
+
+        for action in [Resume, Resize] {
+            assert_eq!(
+                TerminalLaneBudget::for_action(action),
+                TerminalLaneBudget::POLL_MS
+            );
+        }
+        for action in [Input, InputOutcome, Detach] {
+            assert_eq!(
+                TerminalLaneBudget::for_action(action),
+                TerminalLaneBudget::INPUT_MS
+            );
+        }
+        for action in [
+            Attach,
+            Resync,
+            Inventory,
+            CompletedInventory,
+            Observe,
+            Dismiss,
+        ] {
+            assert_eq!(
+                TerminalLaneBudget::for_action(action),
+                TerminalLaneBudget::SNAPSHOT_MS
+            );
+        }
+        assert_eq!(
+            TerminalLaneBudget::for_action(Launch),
+            TerminalLaneBudget::LAUNCH_MS
+        );
+
+        // Resolving a lost input acknowledgement is the only lane action the
+        // retry table lets a fresh connection replay; the write itself is not.
+        assert!(
+            RetryEligibility::classify(&DaemonRequest::Terminal {
+                action: InputOutcome,
+                payload: Value::Null,
+            })
+            .may_retry_on_new_connection()
+        );
+        assert!(
+            !RetryEligibility::classify(&DaemonRequest::Terminal {
+                action: Input,
+                payload: Value::Null,
+            })
+            .may_retry_on_new_connection()
+        );
     }
 
     #[test]

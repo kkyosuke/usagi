@@ -15,6 +15,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -2096,13 +2098,44 @@ fn repair_crashed_private_parent(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Longest a caller waits for another process's directory setup section.
+///
+/// The section only creates or repairs one directory, so an honest holder is
+/// gone in microseconds; the bound exists because this lock is taken on the
+/// machine-wide data directory, on the path an interactive surface uses to open
+/// a connection. A blocking `flock` there would let any other usagi process
+/// stall the render thread indefinitely, and a holder wedged mid-repair would
+/// stall it forever.
+const SETUP_LOCK_WAIT: Duration = Duration::from_secs(2);
+const SETUP_LOCK_POLL: Duration = Duration::from_millis(20);
+
 fn lock_setup_directory(path: &Path, exact_private_mode: bool) -> io::Result<fs::File> {
+    lock_setup_directory_within(path, exact_private_mode, SETUP_LOCK_WAIT)
+}
+
+fn lock_setup_directory_within(
+    path: &Path,
+    exact_private_mode: bool,
+    wait: Duration,
+) -> io::Result<fs::File> {
     let directory = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | PRIVATE_FILE_FLAGS)
         .open(path)?;
     verify_open_directory(path, &directory, exact_private_mode)?;
-    FileExt::lock_exclusive(&directory)?;
+    let deadline = Instant::now() + wait;
+    loop {
+        match FileExt::try_lock_exclusive(&directory) {
+            Ok(()) => break,
+            Err(_) if Instant::now() < deadline => thread::sleep(SETUP_LOCK_POLL),
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "private directory setup is held by another process",
+                ));
+            }
+        }
+    }
     verify_open_directory(path, &directory, exact_private_mode)?;
     Ok(directory)
 }
@@ -3513,6 +3546,48 @@ mod tests {
         let generations = daemon.join("generations");
         ensure_private_dir(&generations).unwrap();
         assert_eq!(fs::metadata(generations).unwrap().mode() & 0o777, DIR_MODE);
+    }
+
+    /// The directory setup section is bounded, not blocking.
+    ///
+    /// This lock is taken on the machine-wide data directory by every path that
+    /// opens a daemon connection, including the TUI's render thread. A blocking
+    /// `flock` there lets any other usagi process — or a holder that was killed
+    /// while wedged — stall an interactive surface without limit, so contention
+    /// resolves to a typed `WouldBlock` inside the wait instead.
+    #[test]
+    fn a_contended_directory_setup_section_fails_bounded_instead_of_blocking() {
+        let temp = TempDir::new_in("/tmp").unwrap();
+        let daemon = temp.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+
+        // A second open file description on the same directory: `flock` conflicts
+        // across descriptions, so this is exactly what another process holding the
+        // setup section looks like.
+        let held = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | PRIVATE_FILE_FLAGS)
+            .open(&daemon)
+            .unwrap();
+        FileExt::lock_exclusive(&held).unwrap();
+
+        let wait = Duration::from_millis(120);
+        let started = Instant::now();
+        let error = lock_setup_directory_within(&daemon, false, wait)
+            .expect_err("a held setup section must not be acquired");
+        let elapsed = started.elapsed();
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(elapsed >= wait, "the wait was actually spent: {elapsed:?}");
+        assert!(
+            elapsed < wait * 10,
+            "the wait is bounded, not blocking: {elapsed:?}"
+        );
+
+        // Once the holder leaves, the very same section is acquired normally.
+        FileExt::unlock(&held).unwrap();
+        drop(held);
+        drop(lock_setup_directory_within(&daemon, false, wait).unwrap());
     }
 
     #[test]

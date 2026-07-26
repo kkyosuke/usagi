@@ -11,6 +11,8 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 - [frame と handshake](#frame-と-handshake)
 - [workspace fence](#workspace-fence)
 - [attempt deadline と reconnect budget](#attempt-deadline-と-reconnect-budget)
+  - [terminal lane の per-request budget](#terminal-lane-の-per-request-budget)
+  - [bootstrap section の bounded wait](#bootstrap-section-の-bounded-wait)
 - [envelope とエラー](#envelope-とエラー)
 - [Unix transport](#unix-transport)
 - [client の失敗処理](#client-の失敗処理)
@@ -56,7 +58,9 @@ payload を確保する。
 
 `ClientPolicy.timeout_ms` / `reconnect_attempts` は surface 別（TUI 2s/3、CLI 10s/1、MCP 30s/1）の policy であり、
 CLI・MCP・TUI の per-request 経路は [attempt deadline と reconnect budget](#attempt-deadline-と-reconnect-budget) で
-これを実効化する。TUI の pane restore は request を off-thread に隔離して frame / input / quit の同期待ちを避ける。
+これを実効化する。TUI の terminal lane はこの policy より小さい
+[per-request budget](#terminal-lane-の-per-request-budget) を持つ。TUI の pane restore は request を off-thread に
+隔離して frame / input / quit の同期待ちを避ける。
 
 最初の frame は必ず `ClientHello` である。hello は client ID、connection nonce、期待する
 daemon generation、client が申告する workspace（[workspace fence](#workspace-fence)）、対応 protocol range、
@@ -194,6 +198,59 @@ healthy な connection は再利用のため保持する。
 
 late response は attempt ごとに connection が異なり、同一 connection 内でも request sequence が進むため、新しい request に
 誤相関しない。
+
+### terminal lane の per-request budget
+
+合成ルートが作る daemon socket は**すべて deadline 付き**である。client は型として 1 つ（deadline transport の上の
+`IpcClient`）しかなく、生の socket を掴む経路は存在しない。したがって「deadline の無い lane」は構成上作れない。
+
+attach 済み terminal の lane（attach / resync / input / input outcome / detach / inventory）は**持続的な connection**で、
+その connection に全 pane の attachment と exactly-once input ledger が乗る。ゆえに再接続を透過的に行う
+[`PolicyClient`](#attempt-deadline-と-reconnect-budget) には載せられない（黙って張り替えると、pane がまだ有効だと思っている
+subscription を無効化してしまう）。代わりに lane は connection を保持したまま、**request ごとに deadline を張り直す**。
+1 attempt = 1 end-to-end deadline という不変条件は同じで、reconnect は行わない。
+
+| budget | 対象 action | 値 | 根拠 |
+|---|---|---|---|
+| poll | `resume` / `resize` | 50ms | daemon 側 stateless。落としても次 frame が再要求するだけで失うものが無い |
+| input | `input` / `input_outcome` / `detach` | 750ms | keystroke の PTY write と ACK、および失った ACK を解決する read-only 照会 |
+| snapshot | `attach` / `resync` / `inventory` / `completed_inventory` / `observe` / `dismiss` | 1000ms | screen checkpoint の直列化や scope 走査を伴い、keystroke より正当に遅い |
+| connect | lane の connect + handshake | 1000ms | **1 attempt** であり cold start ではない（`daemon start` 後の readiness 探索は独自の bounded retry を持ち、その attempt ごとに新しい budget を得る） |
+| launch | `launch` | 2000ms | process を起こす。lane ではなく per-request の `PolicyClient` 経路に載る |
+
+budget 超過は transport failure として扱う。socket に partial frame が残り得るため lane を破棄し、client-local な
+connection epoch を進める。その結果、全 pane が
+[stream connection の共有と subscription の無効化](#stream-connection-の共有と-subscription-の無効化)の epoch 経路で
+再 attach する。
+
+この「破棄する」帰結が、budget を frame 予算まで小さくしない理由である。lane を落とすと全 pane が再 attach し、その
+window に打たれた keystroke は遅れて届くのではなく **feedback 付きで拒否される**。busy なだけの daemon で発火する
+budget は、負荷の高いマシンで実入力を失わせる。各 budget は「負荷下でも健全な round trip」より上、「freeze と呼ばれる
+時間」より下に置く。描画スレッドの露出そのものをさらに縮めるのは frame 予算の問題であり、
+[#551](../.usagi/issues/551-fix-tui-home-frame-loop-daemon-rpc.md) が扱う。
+
+input の budget 超過は **effect unknown** であり、blind retry しない。daemon が既に PTY へ書いた可能性があるため、
+client は同じ producer `OperationId` で read-only な `input_outcome` を照会して `final` / `unknown` に収束させる
+（[terminal input identity と cross-connection replay](#terminal-input-identity-と-cross-connection-replay)）。
+request 送信前に lane を確立できなかった場合は effect が確定的に 0 なので、`unavailable` として扱う。
+
+### bootstrap section の bounded wait
+
+connect / cold start を跨いで 1 データディレクトリに daemon が 1 つだけ立つよう、client は `bootstrap.lock` の
+cross-process section を取る。この section と、private directory の setup section（`ensure_private_dir` が親
+ディレクトリに取る flock）は、**いずれも blocking `flock` ではなく bounded な `try_lock` retry** である。データ
+ディレクトリはマシン全体で共有されるため、blocking にすると MCP server / CLI / rollover のいずれかが section に
+いる間、UI 経路の接続確立が無期限に待ってしまう。保持したまま wedge したプロセスがいれば永久に待つ。
+
+| section | 待ち上限 | 上限の根拠 | 超過時 |
+|---|---|---|---|
+| `bootstrap.lock` | readiness ceiling（40 × 50ms = 2s）＋ spawn margin 3s | section は 1 回の `connect_or_start` を跨いで保持され、最悪ケースは cold start（lifecycle child の spawn ＋ readiness 探索） | typed `bootstrap_contended` |
+| private directory setup | 2s | 1 ディレクトリの作成 / 修復だけなので、健全な保持者は microsecond 単位で去る | `would_block` の IO error |
+
+`bootstrap_contended` は `unavailable` と別の typed error である。daemon は健全に動いていて、単に別 client が接続を
+確立中というだけの状態を「daemon が居ない」と報告しないためで、retry mode は reconnect、side effect は none
+（request は 1 件も書かれていない）、code は `busy` である。TUI はこれを「別プロセスが接続確立中；再試行する」として
+表示し、既存の reattach backoff がそのまま再試行する。
 
 ## envelope とエラー
 
@@ -804,8 +861,10 @@ generic terminal launch・inventory）は共通の resilient client を通り、
 CLI の exit、MCP の response loop を無期限停止させない。retry の可否は同節の request class 判定が正本であり、
 `OperationId` を持つ mutation を再送するときは元の operation identity を保持する。generic Terminal Launch は現行 wire に
 producer `OperationId` がないため、この durable retry 契約の対象外である。attach 済み terminal の stream lane（attach /
-resume / resync / input / resize / detach）は connection-local な subscription であり、per-request budget ではなく
-下記の `unavailable` → backoff reattach で扱う。
+resume / resync / input / resize / detach）は connection-local な subscription を持つため reconnect する client には
+載せず、代わりに connection を保持したまま request ごとに deadline を張り直す
+（[terminal lane の per-request budget](#terminal-lane-の-per-request-budget)）。budget 超過は下記の `unavailable` →
+backoff reattach で扱う。
 
 TUI が daemon の出力・exit を観測する 2 本の lane（attach 済み terminal の `resume` と、detach 済み background tab のための
 scope 単位 `inventory`）は、いずれも描画スレッドの外で、上記の attempt deadline に加えて **client 側の bounded cadence**
