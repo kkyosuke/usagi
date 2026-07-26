@@ -204,3 +204,258 @@ fn every_readiness_refusal_reads_as_a_safety_outcome() {
         RegistryError::StaleRevision.to_string()
     );
 }
+
+/// A registry holding one live active generation, as a running daemon leaves it.
+fn active_registry(generation: DaemonGeneration, owner: &ProcessIdentity) -> RegistryDocument {
+    let mut document = RegistryDocument::default();
+    document
+        .activate_first(2, generation, ENDPOINT, owner.clone(), build("next"))
+        .unwrap();
+    document
+}
+
+/// The lifecycle record the same daemon writes for that process.
+fn owner_record(owner: &ProcessIdentity) -> DaemonRecord {
+    DaemonRecord::identified(owner.pid, owner.start_identity.clone())
+}
+
+#[test]
+fn a_standby_is_admitted_only_next_to_a_registered_live_active_owner() {
+    let active = DaemonGeneration::new();
+    let owner = process(31);
+    let document = active_registry(active, &owner);
+    let record = owner_record(&owner);
+
+    assert_eq!(
+        admissible_active(
+            Some(&document),
+            &ActiveOwner {
+                record: Some(&record),
+                observation: DaemonProcessObservation::Exact,
+            },
+        ),
+        Ok(active)
+    );
+}
+
+#[test]
+fn a_data_directory_without_a_trusted_registry_admits_no_standby() {
+    let owner = process(31);
+    let record = owner_record(&owner);
+    let live = ActiveOwner {
+        record: Some(&record),
+        observation: DaemonProcessObservation::Exact,
+    };
+
+    assert_eq!(
+        admissible_active(None, &live),
+        Err(StandbyStartRefusal::NoGenerationRegistry)
+    );
+
+    let mut foreign = active_registry(DaemonGeneration::new(), &owner);
+    foreign.schema = "usagi-generation-registry-v2".to_owned();
+    assert_eq!(
+        admissible_active(Some(&foreign), &live),
+        Err(StandbyStartRefusal::RegistrySchemaUnsupported)
+    );
+}
+
+/// A standby is not a way to start serving: without a live owner the first
+/// daemon activates instead, and admitting a standby here would produce a
+/// successor with nothing to succeed.
+#[test]
+fn no_live_owner_means_no_standby() {
+    let active = DaemonGeneration::new();
+    let owner = process(31);
+    let document = active_registry(active, &owner);
+    let record = owner_record(&owner);
+
+    assert_eq!(
+        admissible_active(
+            Some(&document),
+            &ActiveOwner {
+                record: None,
+                observation: DaemonProcessObservation::Gone,
+            },
+        ),
+        Err(StandbyStartRefusal::NoLiveOwner)
+    );
+    for uncertain in [
+        DaemonProcessObservation::Gone,
+        DaemonProcessObservation::IdentityMismatch,
+        DaemonProcessObservation::Unknown,
+    ] {
+        assert_eq!(
+            admissible_active(
+                Some(&document),
+                &ActiveOwner {
+                    record: Some(&record),
+                    observation: uncertain,
+                },
+            ),
+            Err(StandbyStartRefusal::NoLiveOwner)
+        );
+    }
+}
+
+/// The mixed-build case: an older `serve` owns the data directory without ever
+/// registering, so the registry cannot name the authority a handoff would take
+/// from. Fail closed rather than admit a standby beside it.
+#[test]
+fn a_live_owner_the_registry_does_not_name_fails_closed() {
+    let owner = process(31);
+    let record = owner_record(&owner);
+    let live = ActiveOwner {
+        record: Some(&record),
+        observation: DaemonProcessObservation::Exact,
+    };
+
+    // A registry this build wrote, but with every generation already retired:
+    // the live owner is not in it.
+    let mut retired = active_registry(DaemonGeneration::new(), &owner);
+    retired.retire_self(retired.current.unwrap()).unwrap();
+    assert_eq!(
+        admissible_active(Some(&retired), &live),
+        Err(StandbyStartRefusal::OwnerUnregistered)
+    );
+
+    // A registry naming an active generation that is *another* process: the
+    // record and the registry disagree about who owns the directory.
+    let other = active_registry(DaemonGeneration::new(), &process(99));
+    assert_eq!(
+        admissible_active(Some(&other), &live),
+        Err(StandbyStartRefusal::OwnerUnregistered)
+    );
+
+    // Same pid, different process incarnation.
+    let reused = active_registry(
+        DaemonGeneration::new(),
+        &ProcessIdentity {
+            pid: owner.pid,
+            start_identity: "start-elsewhere".to_owned(),
+            process_group: owner.process_group,
+        },
+    );
+    assert_eq!(
+        admissible_active(Some(&reused), &live),
+        Err(StandbyStartRefusal::OwnerUnregistered)
+    );
+}
+
+#[test]
+fn a_handoff_in_flight_admits_no_third_process() {
+    let active = DaemonGeneration::new();
+    let owner = process(31);
+    let mut document = active_registry(active, &owner);
+    let successor = DaemonGeneration::new();
+    document
+        .register_standby(2, successor, ENDPOINT, process(32), build("next"))
+        .unwrap();
+    document
+        .verify_standby_build(successor, &build("next"))
+        .unwrap();
+    crate::usecase::authority::handoff::begin_handoff(
+        &mut document,
+        &crate::usecase::authority::fixture::operation("mid"),
+        Some(active),
+        successor,
+    )
+    .unwrap();
+    let record = owner_record(&owner);
+
+    assert_eq!(
+        admissible_active(
+            Some(&document),
+            &ActiveOwner {
+                record: Some(&record),
+                observation: DaemonProcessObservation::Exact,
+            },
+        ),
+        Err(StandbyStartRefusal::HandoffInFlight)
+    );
+}
+
+#[test]
+fn every_start_refusal_reads_as_a_safety_outcome() {
+    let refusals = [
+        StandbyStartRefusal::NoGenerationRegistry,
+        StandbyStartRefusal::RegistrySchemaUnsupported,
+        StandbyStartRefusal::NoLiveOwner,
+        StandbyStartRefusal::OwnerUnregistered,
+        StandbyStartRefusal::HandoffInFlight,
+    ];
+    for refusal in refusals {
+        assert!(!refusal.to_string().is_empty());
+        assert!(refusal.source().is_none());
+        assert_eq!(
+            std::io::Error::from(refusal).to_string(),
+            refusal.to_string()
+        );
+    }
+    let messages: std::collections::BTreeSet<_> =
+        refusals.iter().map(ToString::to_string).collect();
+    assert_eq!(messages.len(), refusals.len());
+}
+
+/// A standby holds no lock and no lifecycle record, so its registry entry is its
+/// custody. Retirement — by recovery that failed an abandoned authority closed,
+/// or by collection — is what tells it to exit.
+#[test]
+fn a_standby_holds_custody_until_its_entry_is_retired_or_replaced() {
+    let active = DaemonGeneration::new();
+    let owner = process(31);
+    let mut document = active_registry(active, &owner);
+    let generation = DaemonGeneration::new();
+    let mine = process(32);
+    document
+        .register_standby(2, generation, ENDPOINT, mine.clone(), build("next"))
+        .unwrap();
+
+    assert_eq!(
+        evaluate_custody(&document, generation, &mine),
+        StandbyCustody::Held
+    );
+
+    // A promotion is not a loss: only a retired generation admits nothing.
+    let mut promoted = document.clone();
+    promoted
+        .transition(active, GenerationRole::Draining)
+        .unwrap();
+    promoted
+        .transition(generation, GenerationRole::Active)
+        .unwrap();
+    promoted.current = Some(generation);
+    assert_eq!(
+        evaluate_custody(&promoted, generation, &mine),
+        StandbyCustody::Held
+    );
+
+    let mut retired = document.clone();
+    retired.retire_self(generation).unwrap();
+    assert_eq!(
+        evaluate_custody(&retired, generation, &mine),
+        StandbyCustody::Lost(StandbyCustodyLoss::EntryRetired)
+    );
+
+    assert_eq!(
+        evaluate_custody(&document, DaemonGeneration::new(), &mine),
+        StandbyCustody::Lost(StandbyCustodyLoss::EntryAbsent)
+    );
+
+    assert_eq!(
+        evaluate_custody(&document, generation, &process(77)),
+        StandbyCustody::Lost(StandbyCustodyLoss::EntryReplaced)
+    );
+}
+
+#[test]
+fn every_custody_loss_carries_a_distinct_reason() {
+    let reasons = [
+        StandbyCustodyLoss::EntryAbsent,
+        StandbyCustodyLoss::EntryRetired,
+        StandbyCustodyLoss::EntryReplaced,
+    ]
+    .map(StandbyCustodyLoss::reason);
+    let unique: std::collections::BTreeSet<_> = reasons.iter().collect();
+    assert_eq!(unique.len(), reasons.len());
+}

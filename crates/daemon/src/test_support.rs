@@ -12,6 +12,7 @@ use usagi_core::infrastructure::daemon::{
 };
 
 use crate::usecase::serve::{DaemonRecordPort, GenerationAuthority};
+use crate::usecase::serve_standby::{StandbyAuthority, StandbyEndpoint};
 use crate::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
 
 /// An in-memory [`RecordFile`] standing in for `daemon.json` on disk.
@@ -208,6 +209,50 @@ impl DaemonReady for NoopReady {
     }
 
     fn retire(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A [`StandbyEndpoint`] that binds and retires nothing, for tests that only
+/// need the standby dispatch wiring.
+pub struct NoopStandbyEndpoint;
+
+impl StandbyEndpoint for NoopStandbyEndpoint {
+    fn bind(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn retire(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A [`StandbyAuthority`] that counts its two verbs, so the presentation test
+/// can prove `serve --standby` reached the standby state machine and not the
+/// active one.
+#[derive(Default)]
+pub struct CountingStandbyAuthority {
+    admits: Cell<usize>,
+}
+
+impl CountingStandbyAuthority {
+    /// How many times this process was admitted as a standby.
+    pub fn admits(&self) -> usize {
+        self.admits.get()
+    }
+}
+
+impl StandbyAuthority for CountingStandbyAuthority {
+    fn preflight(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn admit(&self) -> io::Result<()> {
+        self.admits.set(self.admits.get() + 1);
+        Ok(())
+    }
+
+    fn release(&self) -> io::Result<()> {
         Ok(())
     }
 }

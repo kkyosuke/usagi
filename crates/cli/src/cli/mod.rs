@@ -215,13 +215,20 @@ impl From<SandboxModeArg> for SandboxMode {
 
 /// daemon control plane が受理する閉じた lifecycle verb。
 ///
-/// 引数なしの `usagi daemon` は [`DaemonCommand::Serve`] と同じである。各 variant は
-/// 追加の positional/option を持たないため、clap が余分な argv を runtime 起動前に拒否する。
+/// 引数なしの `usagi daemon` は `serve`（active role）と同じである。各 variant は
+/// 追加の positional を持たないため、clap が余分な argv を runtime 起動前に拒否する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
 pub enum DaemonCommand {
     /// 前景で daemon を serve する（内部用）
     #[command(hide = true)]
-    Serve,
+    Serve {
+        /// active の隣で standby generation として常駐する（内部用）。
+        ///
+        /// standby は locator を publish せず、runtime を所有しない。planned
+        /// replacement が authority を渡す先を作るためだけに存在する。
+        #[arg(long)]
+        standby: bool,
+    },
     /// detached daemon を起動する
     Start,
     /// daemon の状態を表示する
@@ -309,7 +316,7 @@ impl Command {
                 version: version.to_owned(),
             }),
             Command::Daemon { command } => Box::new(DaemonEntry {
-                command: command.unwrap_or(DaemonCommand::Serve),
+                command: command.unwrap_or(DaemonCommand::Serve { standby: false }),
             }),
             Command::Mcp => Box::new(McpEntry),
             Command::Session { command } => Box::new(Session { command }),
@@ -545,8 +552,18 @@ mod tests {
     #[test]
     fn special_entries_return_typed_launch_requests() {
         for (tokens, expected) in [
-            (&["usagi", "daemon"][..], DaemonCommand::Serve),
-            (&["usagi", "daemon", "serve"][..], DaemonCommand::Serve),
+            (
+                &["usagi", "daemon"][..],
+                DaemonCommand::Serve { standby: false },
+            ),
+            (
+                &["usagi", "daemon", "serve"][..],
+                DaemonCommand::Serve { standby: false },
+            ),
+            (
+                &["usagi", "daemon", "serve", "--standby"][..],
+                DaemonCommand::Serve { standby: true },
+            ),
             (&["usagi", "daemon", "start"][..], DaemonCommand::Start),
             (&["usagi", "daemon", "status"][..], DaemonCommand::Status),
             (

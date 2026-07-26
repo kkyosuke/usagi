@@ -30,6 +30,7 @@ pub mod resources;
 pub mod restart;
 pub mod runtime;
 pub mod serve;
+pub mod serve_standby;
 pub mod session_runtime;
 pub mod session_teardown;
 pub mod shutdown;
