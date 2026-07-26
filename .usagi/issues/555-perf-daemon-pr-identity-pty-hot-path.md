@@ -1,13 +1,13 @@
 ---
 number: 555
 title: perf(daemon): PR identity 抽出を PTY 出力 hot path から外す
-status: todo
+status: in-progress
 priority: high
 labels: [review, v2, daemon, core, terminal, pullrequest, performance]
 dependson: [552]
 related: [493, 518, 524, 526, 527, 534]
 created_at: 2026-07-25T22:58:44.664415+00:00
-updated_at: 2026-07-25T22:58:44.664415+00:00
+updated_at: 2026-07-26T01:04:53.304381+00:00
 ---
 
 ## 問題・根拠（コード調査で確定）

@@ -1516,8 +1516,8 @@ where
         .spawn(move || {
             let mut worker =
                 RefreshWorker::new(runner, clock, PR_REFRESH_PER_TICK, PR_REFRESH_FRESHNESS_MS);
-            if let Ok(projector) = pr_inventory.lock()
-                && worker.rebuild(&projector).is_err()
+            if let Ok(mut projector) = pr_inventory.lock()
+                && worker.rebuild(&mut projector).is_err()
             {
                 ErrorLog::record("PR refresh schedule rebuild failed");
             }
@@ -1525,7 +1525,7 @@ where
                 let due = pr_inventory
                     .lock()
                     .ok()
-                    .and_then(|projector| worker.claim_due(&projector).ok())
+                    .and_then(|mut projector| worker.claim_due(&mut projector).ok())
                     .unwrap_or_default();
                 for identity in due {
                     if shutdown.load(Ordering::Acquire) {
@@ -2780,7 +2780,7 @@ fn dispatch_pr_snapshot(
             } => inventory
                 .lock()
                 .ok()
-                .and_then(|projector| projector.snapshot(payload.session_id).ok())
+                .and_then(|mut projector| projector.snapshot(payload.session_id).ok())
                 .and_then(|snapshot| serde_json::to_value(snapshot).ok()),
             _ => None,
         });
