@@ -111,6 +111,15 @@ impl PrProjectionQueue {
         }
     }
 
+    /// Runs `apply` against the queue state.
+    ///
+    /// A poisoned lock reports "not accepted" instead of panicking, and does so
+    /// on the same line as the lock so this failure mode needs no branch of its
+    /// own to leave unexercised.
+    fn with_state(&self, apply: impl FnOnce(&mut State) -> bool) -> bool {
+        self.state.lock().is_ok_and(|mut state| apply(&mut state))
+    }
+
     /// Submits committed output. Returns whether it was queued rather than
     /// dropped, so a caller can assert the bound in a test.
     pub fn submit_output(
@@ -119,49 +128,48 @@ impl PrProjectionQueue {
         session: Option<SessionId>,
         bytes: Vec<u8>,
     ) -> bool {
-        let Ok(mut state) = self.state.lock() else {
-            return false;
-        };
-        if state.closed {
-            return false;
-        }
-        if state.bytes.saturating_add(bytes.len()) > self.byte_cap {
-            DROPPED_BYTES.fetch_add(
-                u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-                Ordering::Relaxed,
-            );
-            Self::push_gap(&mut state, terminal);
-            self.ready.notify_one();
-            return false;
-        }
-        state.bytes += bytes.len();
-        // Merging into the pending chunk keeps the entry count proportional to
-        // bytes. The merged bytes are contiguous, so this changes nothing a scan
-        // can observe.
-        if let Some(PrProjection::Output {
-            terminal: pending,
-            session: pending_session,
-            bytes: pending_bytes,
-        }) = state.items.back_mut()
-            && *pending == terminal
-            && *pending_session == session
-            && pending_bytes.len() < self.merge_cap
-        {
-            COALESCED_BYTES.fetch_add(
-                u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-                Ordering::Relaxed,
-            );
-            pending_bytes.extend_from_slice(&bytes);
-            self.ready.notify_one();
-            return true;
-        }
-        state.items.push_back(PrProjection::Output {
-            terminal,
-            session,
-            bytes,
+        let queued = self.with_state(|state| {
+            if state.closed {
+                return false;
+            }
+            if state.bytes.saturating_add(bytes.len()) > self.byte_cap {
+                DROPPED_BYTES.fetch_add(
+                    u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                    Ordering::Relaxed,
+                );
+                Self::push_gap(state, terminal);
+                return false;
+            }
+            state.bytes += bytes.len();
+            // Merging into the pending chunk keeps the entry count proportional
+            // to bytes. The merged bytes are contiguous, so this changes nothing
+            // a scan can observe.
+            if let Some(PrProjection::Output {
+                terminal: pending,
+                session: pending_session,
+                bytes: pending_bytes,
+            }) = state.items.back_mut()
+                && *pending == terminal
+                && *pending_session == session
+                && pending_bytes.len() < self.merge_cap
+            {
+                COALESCED_BYTES.fetch_add(
+                    u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                    Ordering::Relaxed,
+                );
+                pending_bytes.extend_from_slice(&bytes);
+                return true;
+            }
+            state.items.push_back(PrProjection::Output {
+                terminal,
+                session,
+                bytes,
+            });
+            true
         });
+        // A drop is woken too: the gap it recorded is itself work to apply.
         self.ready.notify_one();
-        true
+        queued
     }
 
     /// Records that bytes for `terminal` were dropped outside this queue.
@@ -342,13 +350,9 @@ mod tests {
         let terminal = TerminalId::new();
         let waiter = Arc::clone(&queue);
         let handle = std::thread::spawn(move || waiter.recv());
-        // The worker is parked on the condvar; the submit is what wakes it.
-        let submitted = loop {
-            if queue.submit_output(terminal, None, b"wake".to_vec()) {
-                break true;
-            }
-        };
-        assert!(submitted);
+        // The worker is parked on the condvar; the submit is what wakes it. The
+        // queue is empty, so this submit cannot be refused.
+        assert!(queue.submit_output(terminal, None, b"wake".to_vec()));
         assert!(matches!(
             handle.join().unwrap(),
             Some(PrProjection::Output { .. })
