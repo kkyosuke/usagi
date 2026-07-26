@@ -1,13 +1,13 @@
 ---
 number: 550
 title: fix(daemon): PID 再利用 record を lifecycle command からも stale として回収する
-status: todo
+status: done
 priority: medium
 labels: [v2, daemon, lifecycle, recovery, process-safety]
 dependson: []
 related: [507, 513, 515, 516]
 created_at: 2026-07-25T13:20:20.168166+00:00
-updated_at: 2026-07-25T13:20:20.168166+00:00
+updated_at: 2026-07-26T06:25:11.316240+00:00
 ---
 
 ## 問題・影響
