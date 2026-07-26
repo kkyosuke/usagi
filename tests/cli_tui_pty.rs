@@ -154,9 +154,6 @@ fn resize_pty(terminal: &File, columns: u16, rows: u16) -> io::Result<()> {
     Ok(())
 }
 
-/// Drain the PTY master into a shared buffer the test can observe while the TUI
-/// is still running. Every test reads through this one path, so a test can wait
-/// for the frame that owns its next keystroke instead of sleeping.
 fn read_pty_shared(mut master: File, output: &Arc<Mutex<Vec<u8>>>) {
     let mut chunk = [0_u8; 4096];
     loop {
@@ -1071,18 +1068,26 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     let baseline = capture_len(&captured);
     let mut child = spawn_hop(&home, &workspace, &slave).expect("PTY上でusagi hopを起動できる");
 
-    // Each key waits for the frame that owns it instead of a fixed sleep: a key
-    // typed during the startup splash is consumed as its skip (#556), so `1` has
-    // to reach Welcome itself.
-    open_registered_workspace(&mut master, &captured, baseline);
+    // #554. Since the frame loop skips a redraw whose material is unchanged,
+    // every step below waits for the *screen* rather than sleeping. Welcome is
+    // the strongest place to pin it: that screen has no animation at all, so a
+    // gate that swallowed an input would leave it frozen forever instead of
+    // being rescued by the next tick. #556 makes the wait load-bearing for a
+    // second reason: a key typed during the startup splash is consumed as its
+    // skip, so `1` has to reach Welcome itself. `1` は Welcome の予約 input で
+    // 最初の Recent を開く。
+    wait_for_screen_since(&captured, baseline, "Recent");
+    send(&mut master, b"1");
+    wait_for_screen_since(&captured, baseline, "[switch]");
     // Resize while Home is visible. The runtime must invalidate the diff base and repaint the
     // new surface instead of leaving cells from the former 100-column frame behind.
     resize_pty(&master, 80, 20).unwrap();
     // The workspace loop observes resize on the next frame boundary. `x` is a no-op key
     // which requests that boundary without changing the visible Home state.
     send(&mut master, b"x");
-    // Ctrl-Q opens the exit prompt; Enter commits its focused `quit` button.
-    // (`q` alone is inert in the controller Home loop.)
+    // Ctrl-Q opens the TUI-close confirmation; Enter accepts it and detaches.
+    // (`q` alone is inert in the controller Home loop.) Waiting for the
+    // confirmation instead of sleeping is what pins the keystroke's reflection.
     send(&mut master, b"\x11");
     wait_for_screen_since(&captured, baseline, "Leave this workspace?");
     send(&mut master, b"\r");
@@ -1092,9 +1097,12 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
         Err(error) => {
             drop(slave);
             drop(master);
-            let _ = reader.join();
-            let raw = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
-            panic!("{error}: {}", raw.replace('\u{1b}', "<ESC>"));
+            reader.join().unwrap();
+            let captured = captured.lock().unwrap().clone();
+            panic!(
+                "{error}: {}",
+                String::from_utf8_lossy(&captured).replace('\u{1b}', "<ESC>")
+            );
         }
     };
     let attributes_after = terminal_attributes(&slave).unwrap();
@@ -1108,12 +1116,10 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     assert_eq!(attributes_after.c_lflag, attributes_before.c_lflag);
     assert_eq!(attributes_after.c_cc, attributes_before.c_cc);
 
+    let reattach_baseline = capture_len(&captured);
     let mut reattached =
         spawn_hop(&home, &workspace, &slave).expect("同じPTYへ再接続してhopを起動できる");
-    // Wait for the switcher itself rather than sleeping past the splash: a key
-    // typed during the splash is consumed as its skip (#556), so `q` has to
-    // reach Welcome to close this second entry.
-    wait_for_screen_since(&captured, baseline, "Recent");
+    wait_for_screen_since(&captured, reattach_baseline, "Recent");
     send(&mut master, b"q");
     let reattached_status = wait_with_timeout(&mut reattached, Duration::from_secs(5)).unwrap();
     let attributes_reattached = terminal_attributes(&slave).unwrap();
@@ -1121,8 +1127,9 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     // slave をすべて閉じると reader が EOF/EIO を受け取れる。
     drop(slave);
     drop(master);
-    let _ = reader.join();
-    let output = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
+    reader.join().unwrap();
+    let captured = captured.lock().unwrap().clone();
+    let output = String::from_utf8_lossy(&captured);
 
     assert!(status.success(), "PTY output: {output}");
     assert!(reattached_status.success(), "PTY output: {output}");

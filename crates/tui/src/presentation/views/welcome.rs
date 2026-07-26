@@ -66,7 +66,7 @@ pub struct MenuItem {
 
 /// welcome メニューの状態。端末 IO を持たず、[`render`] に渡して描画する。recent は
 /// [`Recent`] の配列で持ち、単体 workspace と unite を同じリストに混ぜて表示する。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Welcome {
     items: Vec<MenuItem>,
     recent: Vec<Recent>,

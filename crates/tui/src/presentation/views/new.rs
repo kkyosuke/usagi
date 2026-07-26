@@ -88,7 +88,7 @@ pub enum Field {
 }
 
 /// New 画面の編集状態。端末 IO を持たず、[`render`] に渡して描画する。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct New {
     mode: Mode,
     /// `mode.fields()` 内のフォーカス位置。

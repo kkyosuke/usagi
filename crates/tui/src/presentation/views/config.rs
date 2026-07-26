@@ -61,7 +61,7 @@ pub enum Field {
 /// single source of truth).
 pub type AvailableAgentModels = usagi_core::domain::settings::AvailableModels;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ScopeSettings {
     saved: Settings,
     draft: Settings,
@@ -76,7 +76,7 @@ impl ScopeSettings {
 /// Editable Config screen state. Global Config edits application preferences
 /// and workspace defaults; the Overview modal edits only the current
 /// workspace's Agent, Issue, and Memory choices.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     scope: SettingsScope,
     field: Field,
