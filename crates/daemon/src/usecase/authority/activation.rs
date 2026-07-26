@@ -38,7 +38,7 @@ use usagi_core::domain::id::DaemonGeneration;
 use usagi_core::infrastructure::ipc::BuildIdentity;
 
 use crate::usecase::authority::handoff::{PublishedLocator, RecoveryOutcome};
-use crate::usecase::authority::registry::{GenerationRegistry, RegistryFailure, RegistryFile};
+use crate::usecase::authority::registry::{GenerationRegistry, RegistryFailure};
 use crate::usecase::authority::rollover::{CurrentLocator, HandoffFailure, recover};
 use crate::usecase::generation::{ProcessIdentity, ProcessObservation};
 
@@ -110,8 +110,8 @@ impl From<ClaimFailure> for io::Error {
 /// registry and the locator exactly as they were; a locator failure after it
 /// leaves an entry whose process the next recovery cannot prove alive, which
 /// that recovery retires.
-pub fn claim_authority<F: RegistryFile>(
-    registry: &GenerationRegistry<F>,
+pub fn claim_authority(
+    registry: &GenerationRegistry,
     locator: &dyn CurrentLocator,
     claim: &AuthorityClaim<'_>,
     observe: &mut dyn FnMut(&ProcessIdentity) -> ProcessObservation,
@@ -149,8 +149,8 @@ pub fn claim_authority<F: RegistryFile>(
 /// # Errors
 /// Returns the registry failure. A generation that was never registered, or is
 /// already retired, is not a failure.
-pub fn release_authority<F: RegistryFile>(
-    registry: &GenerationRegistry<F>,
+pub fn release_authority(
+    registry: &GenerationRegistry,
     generation: DaemonGeneration,
 ) -> Result<(), RegistryFailure> {
     registry

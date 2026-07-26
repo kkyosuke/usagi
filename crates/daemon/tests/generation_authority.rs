@@ -76,7 +76,7 @@ fn artifact(tag: &str) -> usagi_core::infrastructure::ipc::BuildIdentity {
     build_identity("2.6.0", "fixture", "test-target", "debug", &source)
 }
 
-fn registry_of(data_dir: &Path) -> GenerationRegistry<GenerationRegistryFile> {
+fn registry_of(data_dir: &Path) -> GenerationRegistry {
     GenerationRegistry::new(
         GenerationRegistryFile::new(data_dir).unwrap(),
         DEFAULT_GENERATION_LIMIT,

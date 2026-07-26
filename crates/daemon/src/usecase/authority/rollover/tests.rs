@@ -28,7 +28,7 @@ const STEPS: [HandoffStep; 10] = [
 ];
 
 struct World {
-    store: GenerationRegistry<Arc<MemoryRegistryFile>>,
+    store: GenerationRegistry,
     file: Arc<MemoryRegistryFile>,
     locator: MemoryLocator,
     gate: AdmissionGate,

@@ -420,6 +420,7 @@ fn every_refusal_reads_as_a_safety_outcome() {
         RegistryError::HandoffInProgress,
         RegistryError::UnknownOperation,
         RegistryError::WrongPhase,
+        RegistryError::AuthorityRetained,
     ] {
         assert!(!error.to_string().is_empty());
         assert!(error.source().is_none());
@@ -447,7 +448,7 @@ mod first_activation {
         document.activate_first(
             limit,
             generation,
-            format!("generations/{}/sock", generation.as_str()),
+            &format!("generations/{}/sock", generation.as_str()),
             process(11),
             build("next"),
         )

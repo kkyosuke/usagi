@@ -14,7 +14,7 @@ use crate::usecase::authority::registry::{
 use crate::usecase::generation::GenerationRole;
 
 struct World {
-    store: GenerationRegistry<Arc<MemoryRegistryFile>>,
+    store: GenerationRegistry,
     file: Arc<MemoryRegistryFile>,
     locator: MemoryLocator,
     generation: DaemonGeneration,

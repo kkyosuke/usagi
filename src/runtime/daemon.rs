@@ -5361,7 +5361,7 @@ struct RegistryAuthority<'a> {
 }
 
 impl RegistryAuthority<'_> {
-    fn registry(&self) -> std::io::Result<GenerationRegistry<GenerationRegistryFile>> {
+    fn registry(&self) -> std::io::Result<GenerationRegistry> {
         Ok(GenerationRegistry::new(
             GenerationRegistryFile::new(self.data_dir)?,
             DEFAULT_GENERATION_LIMIT,

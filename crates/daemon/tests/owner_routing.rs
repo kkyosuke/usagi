@@ -477,7 +477,7 @@ impl World {
         )
     }
 
-    fn registry(&self) -> GenerationRegistry<GenerationRegistryFile> {
+    fn registry(&self) -> GenerationRegistry {
         GenerationRegistry::new(
             GenerationRegistryFile::new(&self.data_dir).unwrap(),
             DEFAULT_GENERATION_LIMIT,

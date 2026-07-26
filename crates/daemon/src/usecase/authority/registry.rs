@@ -268,15 +268,29 @@ impl RegistrySnapshot {
 }
 
 /// The durable registry over a [`RegistryFile`].
-pub struct GenerationRegistry<F> {
-    file: F,
+///
+/// The seam is a trait object rather than a type parameter, exactly as
+/// [`crate::usecase::resources::CasStore`] does: the production adapter and the
+/// in-memory fakes then share one compiled copy of the compare-and-swap
+/// protocol, so which store a caller binds cannot change the code that runs —
+/// and the swap's own error paths are proved once rather than once per
+/// instantiation.
+pub struct GenerationRegistry {
+    file: Box<dyn RegistryFile + Send + Sync>,
     limit: usize,
 }
 
-impl<F: RegistryFile> GenerationRegistry<F> {
+impl GenerationRegistry {
     /// Build a registry retaining at most `limit` non-retired generations.
-    pub fn new(file: F, limit: usize) -> Self {
-        Self { file, limit }
+    ///
+    /// The store must be shareable across threads: a daemon reads and commits
+    /// the registry from its lifecycle path and from workers, and a test drives
+    /// concurrent writers to prove the compare-and-swap.
+    pub fn new(file: impl RegistryFile + Send + Sync + 'static, limit: usize) -> Self {
+        Self {
+            file: Box::new(file),
+            limit,
+        }
     }
 
     /// The configured retention limit.
@@ -338,6 +352,14 @@ impl<F: RegistryFile> GenerationRegistry<F> {
     /// Load, apply `change`, and commit in one compare-and-swap. `change` runs
     /// on a copy: a refusal commits nothing.
     ///
+    /// This body is deliberately branch free. `change` is a closure, so a
+    /// generic `update` is monomorphized once per *call site*, and every branch
+    /// left inside it would be compiled — and measured — separately in each
+    /// copy. The decision it used to make lives in [`commit_changed`] instead,
+    /// where one compiled copy is proved by the whole suite.
+    ///
+    /// [`commit_changed`]: Self::commit_changed
+    ///
     /// # Errors
     /// Returns `change`'s refusal, or any [`load`](Self::load) /
     /// [`commit`](Self::commit) failure.
@@ -348,14 +370,27 @@ impl<F: RegistryFile> GenerationRegistry<F> {
         let snapshot = self.load()?;
         let mut next = snapshot.to_document();
         let value = change(&mut next)?;
+        Ok((value, self.commit_changed(snapshot, next)?))
+    }
+
+    /// Commit `next` when it differs from what `snapshot` was read as.
+    ///
+    /// A converged retry writes nothing at all, so a replayed operation cannot
+    /// be told apart from the original by its durable effect.
+    ///
+    /// # Errors
+    /// Returns the [`commit`](Self::commit) failure. An unchanged document is
+    /// not a failure — it is the retry's answer.
+    fn commit_changed(
+        &self,
+        snapshot: RegistrySnapshot,
+        mut next: RegistryDocument,
+    ) -> Result<RegistrySnapshot, RegistryFailure> {
         if next == snapshot.document {
-            // A converged retry writes nothing at all, so a replayed operation
-            // cannot be told apart from the original by its durable effect.
-            return Ok((value, snapshot));
+            return Ok(snapshot);
         }
         next.revision += 1;
-        let committed = self.commit(&snapshot, next)?;
-        Ok((value, committed))
+        self.commit(&snapshot, next)
     }
 }
 
@@ -505,18 +540,21 @@ impl RegistryDocument {
     /// when another generation or an in-flight handoff is present, or
     /// [`RegistryError::GenerationLimit`] when no generation may be retained at
     /// all.
+    /// `endpoint` is deliberately `&str` rather than `impl Into<String>`: a
+    /// generic parameter would compile this body once per argument type, and
+    /// every branch would then be measured separately in each copy.
     pub fn activate_first(
         &mut self,
         limit: usize,
         generation: DaemonGeneration,
-        endpoint: impl Into<String>,
+        endpoint: &str,
         process: ProcessIdentity,
         build: BuildIdentity,
     ) -> Result<(), RegistryError> {
         let candidate = GenerationEntry {
             generation,
             role: GenerationRole::Active,
-            endpoint: endpoint.into(),
+            endpoint: endpoint.to_owned(),
             process,
             // An unknown artifact stays unknown rather than being promoted:
             // `verified_build` means "a hello proved this exact artifact", which
