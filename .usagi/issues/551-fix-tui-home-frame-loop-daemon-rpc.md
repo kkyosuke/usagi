@@ -5,9 +5,9 @@ status: done
 priority: high
 labels: [review, v2, tui, ipc, performance, scheduler, responsiveness]
 dependson: []
-related: [506, 508, 521, 523, 527, 553, 554, 556]
+related: [506, 508, 521, 523, 527, 553, 554, 555, 556, 557, 558]
 created_at: 2026-07-25T22:56:07.577277+00:00
-updated_at: 2026-07-26T01:50:12.583515+00:00
+updated_at: 2026-07-26T12:57:43.872917+00:00
 ---
 
 ## 問題・根拠（コード調査で確定）
@@ -67,7 +67,14 @@ daemon 側が lock を長く保持
 
 さらに本 issue の「毎秒約 125 回の bootstrap」は #553 の bootstrap flock を毎秒 125 回取得することでもあるため、**他プロセス（MCP server / CLI）の接続確立も同じ頻度で直列化する**。
 
-daemon 側 hot path（lock 保持時間そのもの）は別の triage session が起票する daemon 側 issue が扱う。番号が判明したら相互に `related` へ入れる。
+この鎖の daemon 側は次の 2 件が扱う。
+
+| # | 内容 | status |
+|---|---|---|
+| [#555](555-perf-daemon-pr-identity-pty-hot-path.md) | PR identity 抽出を PTY 出力 hot path から外す（**lock 保持時間そのもの**を短くする側） | done |
+| [#557](557-perf-daemon-background-worker-idle-wakeup-fsync.md) | background worker の idle wakeup と無条件 fsync を削る（idle daemon が毎秒約 504 回 wakeup する） | todo |
+
+#555 が本 issue の増幅鎖の先頭（daemon が lock を長く握る原因）を閉じ、#557 は本 issue と**同じ問題の daemon 側の鏡像**である（どちらも「何もしていないのに毎秒数百回の wakeup が走る」）。
 
 ## やること
 

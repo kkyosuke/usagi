@@ -5,9 +5,9 @@ status: todo
 priority: medium
 labels: [review, v2, tui, test, coverage]
 dependson: []
-related: [554, 557]
+related: [551, 554, 557]
 created_at: 2026-07-26T12:36:19.358016+00:00
-updated_at: 2026-07-26T12:36:19.358016+00:00
+updated_at: 2026-07-26T12:57:54.096165+00:00
 ---
 
 ## 問題・根拠（CI 実測で確定）
