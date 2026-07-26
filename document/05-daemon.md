@@ -481,7 +481,9 @@ worker は timer も shutdown flag の polling も持たない。
 cache を破棄する（memory が durable より先に進んだ状態を残さない）。
 
 同一 process 内で inventory を書くのは projector だけであり、cross-generation の single writer 契約は
-[#518](../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md) が扱う。
+[owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
+の[他の shared writer](#他の-shared-writer) が正本である（draining owner は whole-save せず owner-local event を
+publish し、active writer が適用する）。
 
 ### metrics
 
