@@ -1,13 +1,13 @@
 ---
 number: 554
 title: perf(tui): frame 予算からファイル IO と全画面再構築を外す
-status: todo
+status: done
 priority: medium
 labels: [review, v2, tui, performance, rendering]
 dependson: []
 related: [527, 551, 553, 556]
 created_at: 2026-07-25T22:58:15.805403+00:00
-updated_at: 2026-07-25T23:00:15.232129+00:00
+updated_at: 2026-07-26T07:24:33.618723+00:00
 ---
 
 ## 問題・根拠（コード調査で確定）
