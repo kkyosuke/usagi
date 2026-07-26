@@ -127,6 +127,21 @@ pub fn sidebar_block_with_sidecar(
     Some(MascotBlock { rows })
 }
 
+/// Smallest animation tick that draws the same rabbit as `tick`.
+///
+/// The rabbit cycles over six ticks but only has three distinct appearances:
+/// the blink at phase 4, the ear flop at phase 5, and the resting face for
+/// every other phase. Folding the clock onto that representative lets the shell
+/// compare two frames' material for equality instead of redrawing at the 16ms
+/// tick cadence, without changing when the rabbit visibly moves (#554).
+#[must_use]
+pub const fn canonical_tick(tick: u64) -> u64 {
+    match tick % 6 {
+        phase @ (4 | 5) => phase,
+        _ => 0,
+    }
+}
+
 fn rabbit_rows(tick: u64) -> [String; 3] {
     let phase = tick % 6;
     let ears = if phase == 5 { " (\\(/" } else { " (\\(\\" };
@@ -178,11 +193,41 @@ fn strip_ansi(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{MascotSpeech, sidebar_block, sidebar_block_with_sidecar};
+    use super::{MascotSpeech, canonical_tick, sidebar_block, sidebar_block_with_sidecar};
     use crate::presentation::widgets::display_width;
 
     fn plain(rows: &[String]) -> String {
         rows.join("\n")
+    }
+
+    /// #554. The shell skips a redraw when the collapsed animation clock is
+    /// unchanged, so the collapse must never merge two ticks that draw a
+    /// different rabbit — otherwise the blink would visibly stall.
+    #[test]
+    fn collapsed_animation_ticks_draw_the_same_rabbit_as_the_raw_tick() {
+        for tick in 0..24u64 {
+            let collapsed = canonical_tick(tick);
+            assert!(collapsed <= tick, "collapse never moves the clock forward");
+            assert_eq!(
+                plain(sidebar_block(20, tick, None).expect("mascot fits").rows()),
+                plain(
+                    sidebar_block(20, collapsed, None)
+                        .expect("mascot fits")
+                        .rows()
+                ),
+                "tick {tick} collapsed to {collapsed} but draws a different rabbit"
+            );
+        }
+    }
+
+    /// The three appearances stay distinct: collapsing must not flatten the
+    /// blink and the ear flop into the resting face.
+    #[test]
+    fn the_rabbit_still_blinks_and_flops_an_ear_once_per_cycle() {
+        let frames = (0..6u64)
+            .map(canonical_tick)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(frames, std::collections::BTreeSet::from([0, 4, 5]));
     }
 
     #[test]

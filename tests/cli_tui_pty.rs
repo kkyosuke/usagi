@@ -154,22 +154,6 @@ fn resize_pty(terminal: &File, columns: u16, rows: u16) -> io::Result<()> {
     Ok(())
 }
 
-fn read_pty(mut master: File) -> Vec<u8> {
-    let mut output = Vec::new();
-    let mut chunk = [0_u8; 4096];
-    loop {
-        match master.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(read) => output.extend_from_slice(&chunk[..read]),
-            // Linux PTYs report EIO, while Darwin normally reports EOF, after the final slave
-            // descriptor closes. Both mean the captured stream is complete.
-            Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
-            Err(error) => panic!("PTY outputの読み取りに失敗: {error}"),
-        }
-    }
-    output
-}
-
 fn read_pty_shared(mut master: File, output: &Arc<Mutex<Vec<u8>>>) {
     let mut chunk = [0_u8; 4096];
     loop {
@@ -1075,30 +1059,33 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     let (mut master, slave) = open_pty().unwrap();
     let attributes_before = terminal_attributes(&slave).unwrap();
     let reader_master = master.try_clone().unwrap();
-    let reader = thread::spawn(move || read_pty(reader_master));
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let reader_capture = Arc::clone(&captured);
+    let reader = thread::spawn(move || read_pty_shared(reader_master, &reader_capture));
+    let baseline = capture_len(&captured);
 
     let mut child = spawn_hop(&home, &workspace, &slave).expect("PTY上でusagi hopを起動できる");
 
-    // `1` は Welcome の予約 input で最初の Recent を開く。`x` は Workspace 上の
-    // non-reserved input で、画面遷移や quit を起こさず次フレームだけを要求する。入力は
-    // PTY の line discipline が raw mode へ切り替わる時間を確保してから送る。
-    thread::sleep(Duration::from_millis(150));
+    // #554. Since the frame loop skips a redraw whose material is unchanged,
+    // every step below waits for the *screen* rather than sleeping. Welcome is
+    // the strongest place to pin it: that screen has no animation at all, so a
+    // gate that swallowed an input would leave it frozen forever instead of
+    // being rescued by the next tick. `1` は Welcome の予約 input で最初の
+    // Recent を開く。
+    wait_for_screen_since(&captured, baseline, "Recent");
     send(&mut master, b"1");
-    thread::sleep(Duration::from_millis(150));
+    wait_for_screen_since(&captured, baseline, "[switch]");
     // Resize while Home is visible. The runtime must invalidate the diff base and repaint the
     // new surface instead of leaving cells from the former 100-column frame behind.
     resize_pty(&master, 80, 20).unwrap();
-    thread::sleep(Duration::from_millis(100));
     // The workspace loop observes resize on the next frame boundary. `x` is a no-op key
     // which requests that boundary without changing the visible Home state.
     send(&mut master, b"x");
-    thread::sleep(Duration::from_millis(100));
     // Ctrl-Q opens the TUI-close confirmation; Enter accepts it and detaches.
-    // (`q` alone is inert in the controller Home loop.) Send the two keys with a
-    // settle gap so the confirmation frame renders before Enter under a slow or
-    // instrumented binary.
+    // (`q` alone is inert in the controller Home loop.) Waiting for the
+    // confirmation instead of sleeping is what pins the keystroke's reflection.
     send(&mut master, b"\x11");
-    thread::sleep(Duration::from_millis(200));
+    wait_for_screen_since(&captured, baseline, "Detach from this workspace?");
     send(&mut master, b"\r");
 
     let status = match wait_with_timeout(&mut child, Duration::from_secs(5)) {
@@ -1106,7 +1093,8 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
         Err(error) => {
             drop(slave);
             drop(master);
-            let captured = reader.join().unwrap();
+            reader.join().unwrap();
+            let captured = captured.lock().unwrap().clone();
             panic!(
                 "{error}: {}",
                 String::from_utf8_lossy(&captured).replace('\u{1b}', "<ESC>")
@@ -1124,9 +1112,10 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     assert_eq!(attributes_after.c_lflag, attributes_before.c_lflag);
     assert_eq!(attributes_after.c_cc, attributes_before.c_cc);
 
+    let reattach_baseline = capture_len(&captured);
     let mut reattached =
         spawn_hop(&home, &workspace, &slave).expect("同じPTYへ再接続してhopを起動できる");
-    thread::sleep(Duration::from_millis(150));
+    wait_for_screen_since(&captured, reattach_baseline, "Recent");
     send(&mut master, b"q");
     let reattached_status = wait_with_timeout(&mut reattached, Duration::from_secs(5)).unwrap();
     let attributes_reattached = terminal_attributes(&slave).unwrap();
@@ -1134,7 +1123,8 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     // slave をすべて閉じると reader が EOF/EIO を受け取れる。
     drop(slave);
     drop(master);
-    let captured = reader.join().unwrap();
+    reader.join().unwrap();
+    let captured = captured.lock().unwrap().clone();
     let output = String::from_utf8_lossy(&captured);
 
     assert!(status.success(), "PTY output: {output}");

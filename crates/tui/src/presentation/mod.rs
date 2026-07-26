@@ -21,7 +21,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::{
     AgentInventory, AgentProfileId, AgentResumeRelation, AgentResumeTarget,
@@ -50,7 +50,7 @@ use crate::presentation::views::splash;
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{
     self, GitDiff, HomeProjection, ProjectedSession, TerminalViewProjection,
-    Workspace as WorkspaceView, render_home, terminal_point_at,
+    Workspace as WorkspaceView, render_home, render_home_at, terminal_point_at,
 };
 use crate::presentation::widgets::modal::{self, ConfirmationView};
 use crate::presentation::workspace_runtime::{
@@ -840,6 +840,10 @@ pub struct ControllerBackendComposition {
     pub external_terminal: Box<dyn ExternalTerminalPort>,
     pub metrics: Box<dyn MetricsPort>,
     pub browser: Box<dyn BrowserOpener>,
+    /// Local worktree scan behind the inline create form's collision hint. It
+    /// is a port so the frame loop's filesystem IO is countable in a test and
+    /// stays out of the frame budget (#554).
+    pub session_worktrees: Box<dyn SessionWorktreeScanPort>,
 }
 
 /// Dedicated restore-client connection lifecycle observed by the composition
@@ -3193,7 +3197,16 @@ pub fn render_home_snapshot(
 
 /// Keep the controller's Home rows in step with the daemon session projection
 /// the legacy transport reconciled this frame.
-fn sync_runtime_sessions(runtime: &mut WorkspaceRuntime, ui: &WorkspaceUi) {
+///
+/// `worktree_names` is the inline create form's collision hint, supplied by
+/// [`SessionWorktreeHint`]. It is empty while the form is closed, because the
+/// scan that produces it is filesystem IO which must not ride the frame budget
+/// (#554).
+fn sync_runtime_sessions(
+    runtime: &mut WorkspaceRuntime,
+    ui: &WorkspaceUi,
+    worktree_names: &[String],
+) {
     let ids = ui.workspace.session_ids().to_vec();
     if runtime.state().sessions() != ids.as_slice() {
         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Sessions(ids)));
@@ -3208,7 +3221,7 @@ fn sync_runtime_sessions(runtime: &mut WorkspaceRuntime, ui: &WorkspaceUi) {
         .iter()
         .map(|record| record.name.clone())
         .collect();
-    names.extend(session_worktree_names(ui.workspace.path()));
+    names.extend(worktree_names.iter().cloned());
     let names: Vec<String> = names.into_iter().collect();
     if runtime.state().session_names() != names.as_slice() {
         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionNames(names)));
@@ -3229,27 +3242,95 @@ fn sync_runtime_sessions(runtime: &mut WorkspaceRuntime, ui: &WorkspaceUi) {
     }
 }
 
-/// Names of worktree directories which would collide with a new session.
+/// Preflight scan of the worktree directories which would collide with a new
+/// session.
 ///
-/// This is a read-only, best-effort preflight fact for the inline form. The
-/// daemon remains the sole authority that creates or removes worktrees; an
-/// unreadable directory simply contributes no local hint and is checked again
-/// by the daemon when the user submits the request.
-fn session_worktree_names(workspace: &Path) -> Vec<String> {
-    let sessions = workspace.join(".usagi").join("sessions");
-    std::fs::read_dir(sessions)
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            entry
-                .file_type()
-                .ok()
-                .filter(std::fs::FileType::is_dir)
-                .map(|_| entry)
-        })
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .collect()
+/// This is a read-only, best-effort fact for the inline create form. The daemon
+/// remains the sole authority that creates or removes worktrees; an unreadable
+/// directory simply contributes no local hint and is checked again by the
+/// daemon when the user submits the request.
+///
+/// It is a port because the scan is real filesystem IO. [`SessionWorktreeHint`]
+/// keeps it off the frame budget, and injecting it lets a test count exactly
+/// how often the frame loop reaches the disk (#554).
+pub trait SessionWorktreeScanPort {
+    /// Directory names directly under `<workspace>/.usagi/sessions`.
+    fn scan(&mut self, workspace: &Path) -> Vec<String>;
+}
+
+/// Production scan: one `read_dir` over `<workspace>/.usagi/sessions`.
+pub struct FsSessionWorktreeScanPort;
+
+impl SessionWorktreeScanPort for FsSessionWorktreeScanPort {
+    fn scan(&mut self, workspace: &Path) -> Vec<String> {
+        let sessions = workspace.join(".usagi").join("sessions");
+        std::fs::read_dir(sessions)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                entry
+                    .file_type()
+                    .ok()
+                    .filter(std::fs::FileType::is_dir)
+                    .map(|_| entry)
+            })
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect()
+    }
+}
+
+/// Cadence gate that keeps the create form's collision hint off the frame
+/// budget.
+///
+/// Before #554 the frame loop scanned `<workspace>/.usagi/sessions` on every
+/// tick — about 62 `read_dir` calls plus one `stat` per entry every second,
+/// growing with the session count, for a hint only the inline create form ever
+/// reads. The scan now runs on the frame that opens the form and then at most
+/// once per [`Self::CADENCE`] while it stays open; closing the form drops the
+/// hint and stops the IO entirely.
+///
+/// Staleness is safe: the daemon re-checks the name when the request is
+/// submitted and rejects a collision this hint missed, so the hint only has to
+/// be good enough to catch the common case before the round trip.
+struct SessionWorktreeHint {
+    scan: Box<dyn SessionWorktreeScanPort>,
+    names: Vec<String>,
+    /// Elapsed time of the last scan, cleared whenever the form closes so the
+    /// next opening always sees a freshly scanned hint.
+    scanned_at: Option<std::time::Duration>,
+}
+
+impl SessionWorktreeHint {
+    /// Ceiling on how often a form left open re-reads the directory.
+    const CADENCE: std::time::Duration = std::time::Duration::from_millis(500);
+
+    fn new(scan: Box<dyn SessionWorktreeScanPort>) -> Self {
+        Self {
+            scan,
+            names: Vec::new(),
+            scanned_at: None,
+        }
+    }
+
+    /// The hint to fold into the reducer's advisory name copy this frame.
+    ///
+    /// Returns an empty slice while `form_open` is false, and never scans then.
+    fn names(&mut self, form_open: bool, workspace: &Path, now: std::time::Duration) -> &[String] {
+        if !form_open {
+            self.names.clear();
+            self.scanned_at = None;
+            return &self.names;
+        }
+        let due = self
+            .scanned_at
+            .is_none_or(|last| now.saturating_sub(last) >= Self::CADENCE);
+        if due {
+            self.names = self.scan.scan(workspace);
+            self.scanned_at = Some(now);
+        }
+        &self.names
+    }
 }
 
 /// Project the focused live terminal's already-polled rows for
@@ -4010,8 +4091,100 @@ fn intercept_live_terminal_control(
     true
 }
 
-/// Compose the controller Home frame: `render_home` plus the shell overlays that
-/// `render_home` does not own (create form, quit confirmation).
+/// Everything the Home frame is a function of.
+///
+/// [`render_home_material`] is pure in this value, so the shell can compare it
+/// against the material it last drew and skip both the frame build and
+/// [`Terminal::draw`] when nothing changed (#554). Comparing the renderer's
+/// inputs is what makes the skip safe, and it holds only because the renderer
+/// reads nothing else — [`render_home_at`] takes even the wall clock as an
+/// argument for that reason. A new renderer input belongs here too.
+#[derive(Debug, PartialEq, Eq)]
+struct HomeFrameMaterial {
+    height: usize,
+    width: usize,
+    projection: HomeProjection,
+    /// `Some(selected)` exactly while the quit confirmation covers the frame.
+    quit_confirmation: Option<bool>,
+    /// The create-failure dialog's safe message, present exactly while its
+    /// overlay is open. Keying off the message avoids an unreachable "error
+    /// overlay without a message" branch.
+    create_error: Option<String>,
+    /// Whole-second wall clock behind the sidebar's relative session times.
+    ///
+    /// Truncating to the second is what makes time material without making
+    /// every frame material: the coarsest thing the renderer derives from it
+    /// changes at minute granularity, so a one-second resolution can never be
+    /// late, and an idle Home redraws at most once per second because of it.
+    now: DateTime<Utc>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn home_frame_material(
+    height: usize,
+    width: usize,
+    runtime: &WorkspaceRuntime,
+    workspace_name: &str,
+    root_cwd: &Path,
+    sessions: &[ProjectedSession],
+    metrics: Option<usagi_core::usecase::client::DaemonMetrics>,
+    git_diffs: &BTreeMap<SessionId, GitDiff>,
+    terminal_view: Option<TerminalViewProjection>,
+    create_pending: Option<&str>,
+    now: DateTime<Utc>,
+) -> HomeFrameMaterial {
+    let projection =
+        HomeProjection::from_state(runtime.state(), workspace_name, root_cwd, sessions)
+            .with_pane(runtime.active_pane())
+            .with_metrics(metrics)
+            .with_git_diffs(git_diffs)
+            .with_terminal_view(terminal_view)
+            .with_create_pending(create_pending.map(str::to_owned))
+            .with_overlay_modals(
+                runtime.overview_modal().cloned(),
+                runtime.closeup_modal().cloned(),
+            )
+            // Last, once every surface that reads the animation clock is known.
+            .collapse_animation_clock();
+    HomeFrameMaterial {
+        height,
+        width,
+        projection,
+        quit_confirmation: (runtime.state().overlay() == Some(Overlay::QuitConfirmation))
+            .then(|| runtime.state().quit_confirm_selected()),
+        create_error: runtime
+            .state()
+            .create_session_error()
+            .map(|error| error.message.clone()),
+        now: now.with_nanosecond(0).unwrap_or(now),
+    }
+}
+
+/// Compose the controller Home frame: [`render_home_at`] plus the shell
+/// overlays it does not own (quit confirmation, create-failure dialog).
+fn render_home_material(material: &HomeFrameMaterial) -> Vec<String> {
+    let frame = render_home_at(
+        material.height,
+        material.width,
+        &material.projection,
+        material.now,
+    );
+    // The create form renders inline in the `+ new session` sidebar row (see
+    // `render_home`), so no overlay composite is needed here.
+    if let Some(selected) = material.quit_confirmation {
+        return quit_modal::render_over(material.height, material.width, &frame, selected);
+    }
+    if let Some(message) = &material.create_error {
+        return create_session_error_modal::render_over(
+            material.height,
+            material.width,
+            &frame,
+            message,
+        );
+    }
+    frame
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_controller_frame(
     height: usize,
@@ -4025,35 +4198,19 @@ fn render_controller_frame(
     terminal_view: Option<TerminalViewProjection>,
     create_pending: Option<&str>,
 ) -> Vec<String> {
-    let projection =
-        HomeProjection::from_state(runtime.state(), workspace_name, root_cwd, sessions)
-            .with_pane(runtime.active_pane())
-            .with_metrics(metrics)
-            .with_git_diffs(git_diffs)
-            .with_terminal_view(terminal_view)
-            .with_create_pending(create_pending.map(str::to_owned))
-            .with_overlay_modals(
-                runtime.overview_modal().cloned(),
-                runtime.closeup_modal().cloned(),
-            );
-    let frame = render_home(height, width, &projection);
-    // The create form renders inline in the `+ new session` sidebar row (see
-    // `render_home`), so no overlay composite is needed here.
-    if runtime.state().overlay() == Some(Overlay::QuitConfirmation) {
-        return quit_modal::render_over(
-            height,
-            width,
-            &frame,
-            runtime.state().quit_confirm_selected(),
-        );
-    }
-    // The create-failure dialog carries its safe message exactly while its
-    // overlay is open, so keying off the message avoids an unreachable
-    // "error overlay without a message" branch.
-    if let Some(error) = runtime.state().create_session_error() {
-        return create_session_error_modal::render_over(height, width, &frame, &error.message);
-    }
-    frame
+    render_home_material(&home_frame_material(
+        height,
+        width,
+        runtime,
+        workspace_name,
+        root_cwd,
+        sessions,
+        metrics,
+        git_diffs,
+        terminal_view,
+        create_pending,
+        Utc::now(),
+    ))
 }
 
 /// Apply actions already routed by [`DaemonBackend`] to the stateful terminal
@@ -4514,6 +4671,13 @@ fn drive_workspace_controller(
     // and a capped backoff across worker jobs; a frame tick never resets it.
     let restore_clock = std::time::Instant::now();
     let mut restore_retry = RestoreRetryState::new();
+    // Filesystem hint for the inline create form. It is off the frame budget:
+    // no scan happens while the form is closed (#554).
+    let mut worktree_hint = SessionWorktreeHint::new(composition.session_worktrees);
+    // Material of the frame currently on screen. A tick whose material matches
+    // it draws nothing: the frame build and the terminal diff are both skipped.
+    // Everything else in this loop — drains, admission, input — runs regardless.
+    let mut drawn_material: Option<HomeFrameMaterial> = None;
     loop {
         for event in backend.drain_events() {
             let _ = runtime.apply_event(event);
@@ -4538,7 +4702,12 @@ fn drive_workspace_controller(
             session_refresh.as_mut(),
             &mut pending_session_refresh,
         );
-        sync_runtime_sessions(&mut runtime, &ui);
+        let worktree_names = worktree_hint.names(
+            runtime.state().create_session_form().is_some(),
+            ui.workspace.path(),
+            restore_clock.elapsed(),
+        );
+        sync_runtime_sessions(&mut runtime, &ui, worktree_names);
         let current_sessions = ui
             .workspace
             .session_ids()
@@ -4595,7 +4764,7 @@ fn drive_workspace_controller(
         for update in metrics_backend.drain_events() {
             metrics_projection.apply(update);
         }
-        let frame = render_controller_frame(
+        let material = home_frame_material(
             height,
             width,
             &runtime,
@@ -4608,8 +4777,15 @@ fn drive_workspace_controller(
             ui.creating_session
                 .as_ref()
                 .map(|create| create.name.as_str()),
+            Utc::now(),
         );
-        term.draw(&frame)?;
+        // Skip only the drawing. A skipped tick has already run every drain
+        // above and still runs restore admission, pane launches, and input
+        // below, so nothing that makes progress depends on the redraw.
+        if drawn_material.as_ref() != Some(&material) {
+            term.draw(&render_home_material(&material))?;
+            drawn_material = Some(material);
+        }
         if restore_commands.is_some() && restore_retry.begin_if_due(restore_clock.elapsed()) {
             let port = restore_commands
                 .take()
@@ -4694,6 +4870,9 @@ fn drive_workspace_controller(
                         .map(|create| create.name.as_str()),
                 );
                 run_workspace_config(term, context.settings, context.available_models, &base)?;
+                // The modal drew over the frame the gate remembers, so the next
+                // tick must redraw even if no material changed underneath it.
+                drawn_material = None;
                 let effective =
                     usagi_core::usecase::settings::read_for_workspace_entry(context.settings);
                 runtime.set_modal_selection_mode(effective.modal_selection_mode);
@@ -4802,6 +4981,9 @@ struct FixedBackendFactory {
     /// Decision lane injected as a fake by the frame-loop tests; unset keeps the
     /// unavailable port.
     decisions: Option<Box<dyn BackendDecisionPort>>,
+    /// Worktree scan injected as a counting fake by the frame-loop tests; unset
+    /// keeps the real `read_dir` (#554).
+    session_worktrees: Option<Box<dyn SessionWorktreeScanPort>>,
 }
 
 impl ControllerBackendFactory for FixedBackendFactory {
@@ -4851,6 +5033,10 @@ impl ControllerBackendFactory for FixedBackendFactory {
                 .browser
                 .take()
                 .expect("fixed browser port is created once"),
+            session_worktrees: self
+                .session_worktrees
+                .take()
+                .unwrap_or_else(|| Box::new(FsSessionWorktreeScanPort)),
         }
     }
 }
@@ -4888,6 +5074,7 @@ pub fn run_workspace_controller(
         browser: Some(browser),
         session_refresh: None,
         decisions: None,
+        session_worktrees: None,
     };
     run_workspace_controller_with_backend(term, snapshot, &mut factory)
 }
@@ -5130,6 +5317,7 @@ impl ControllerBackendFactory for CompatibilityBackendFactory<'_, '_, '_> {
             external_terminal: Box::new(UnavailableExternalTerminalPort),
             metrics,
             browser: Box::new(UnavailableBrowserOpener),
+            session_worktrees: Box::new(FsSessionWorktreeScanPort),
         }
     }
 }
@@ -5169,6 +5357,64 @@ fn run_with_settings_inner(
     )
 }
 
+/// Everything an entry screen's frame is a function of.
+///
+/// The entry screens have no clock and no background lane: each `render_*` is
+/// pure in the terminal size and the form on screen, so comparing this value
+/// against the last drawn one is an exact redraw test (#554). The `now` the
+/// renderers receive is fixed for the whole run and therefore not material.
+///
+/// Holding the form by value means cloning it once per tick. That is a handful
+/// of short strings and paths, kept deliberately in exchange for the full
+/// screen build, ANSI parse and cell diff it lets an idle tick skip.
+#[derive(Debug, PartialEq, Eq)]
+struct EntryFrameMaterial {
+    height: usize,
+    width: usize,
+    form: EntryForm,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum EntryForm {
+    Welcome(Welcome),
+    Open(Open),
+    New(New),
+    Config(Config),
+}
+
+impl EntryFrameMaterial {
+    fn new(
+        height: usize,
+        width: usize,
+        screen: Screen,
+        welcome: &Welcome,
+        open: &Open,
+        new_form: &New,
+        config_form: &Config,
+    ) -> Self {
+        let form = match screen {
+            Screen::Welcome => EntryForm::Welcome(welcome.clone()),
+            Screen::Open => EntryForm::Open(open.clone()),
+            Screen::New => EntryForm::New(new_form.clone()),
+            Screen::Config => EntryForm::Config(config_form.clone()),
+        };
+        Self {
+            height,
+            width,
+            form,
+        }
+    }
+
+    fn render(&self, now: DateTime<Utc>) -> Vec<String> {
+        match &self.form {
+            EntryForm::Welcome(welcome) => welcome::render(self.height, self.width, welcome, now),
+            EntryForm::Open(open) => render_open(self.height, self.width, open, now),
+            EntryForm::New(form) => new::render(self.height, self.width, form),
+            EntryForm::Config(form) => config::render(self.height, self.width, form),
+        }
+    }
+}
+
 /// Production screen graph entry. Every Welcome/Open/Recent/New path creates
 /// its workspace runtime through the same backend factory as direct launch.
 ///
@@ -5195,15 +5441,26 @@ pub fn run_screen_graph_with_backend(
         Start::Welcome => Screen::Welcome,
         Start::Config => Screen::Config,
     };
+    // Material of the frame currently on screen. Every entry screen renders a
+    // pure function of its size and its form — there is no clock and no
+    // background lane here — so a tick that leaves both unchanged draws
+    // nothing (#554).
+    let mut drawn_material: Option<EntryFrameMaterial> = None;
     loop {
         let (height, width) = term.size()?;
-        let frame = match screen {
-            Screen::Welcome => welcome::render(height, width, &welcome, now),
-            Screen::Open => render_open(height, width, &open, now),
-            Screen::New => new::render(height, width, &new_form),
-            Screen::Config => config::render(height, width, &config_form),
-        };
-        term.draw(&frame)?;
+        let material = EntryFrameMaterial::new(
+            height,
+            width,
+            screen,
+            &welcome,
+            &open,
+            &new_form,
+            &config_form,
+        );
+        if drawn_material.as_ref() != Some(&material) {
+            term.draw(&material.render(now))?;
+            drawn_material = Some(material);
+        }
         let key = term.read_key()?;
         match screen {
             Screen::Welcome => match step_welcome(&mut welcome, key) {
@@ -5315,6 +5572,10 @@ pub fn run_screen_graph_with_backend(
                 ConfigStep::Quit => return Ok(Exit::Quit),
                 ConfigStep::Back => screen = Screen::Welcome,
                 ConfigStep::Save => {
+                    // The save wave and its `done` hold draw straight to the
+                    // terminal, so whatever the gate remembers is no longer on
+                    // screen and the next tick must redraw unconditionally.
+                    drawn_material = None;
                     play_config_save_wave(term, &mut config_form, None)?;
                     if config_form.commit_save(settings) {
                         // Hold the `done` confirmation briefly, then return home
@@ -5438,30 +5699,33 @@ mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{
         AgentCommandPort, AgentCommandPortFactory, AgentPaneAdmission, AgentTabIntentPort,
-        AgentTabIntentPortCommit, BannerScreenRunner, BrowserOpener, Config, ConfigStep,
+        AgentTabIntentPortCommit, BTreeMap, BannerScreenRunner, BrowserOpener, Config, ConfigStep,
         ControllerHost, ControllerHostAction, DecisionCommandPort, DefaultSettingsPort,
         DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort,
-        FixedBackendFactory, Geometry, MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort,
-        MetricsPortFactory, NewStep, NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep,
-        PaneLaunch, PaneLaunchCommandPort, SerializedPaneLaunchPort, SessionCommandPort,
-        SessionCommandPortFactory, SessionCommandResult, SessionRefreshPort, Start, TerminalAttach,
-        TerminalChunk, TerminalError, TerminalInputOutcome, TerminalInputResolution,
-        TerminalSubscription, UnavailableAgentCommandPort, UnavailableBackendPort,
+        FixedBackendFactory, FsSessionWorktreeScanPort, Geometry, GitDiff,
+        MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory, NewStep,
+        NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep, PaneLaunch,
+        PaneLaunchCommandPort, ProjectedSession, SerializedPaneLaunchPort, SessionCommandPort,
+        SessionCommandPortFactory, SessionCommandResult, SessionRefreshPort, SessionWorktreeHint,
+        SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk, TerminalError,
+        TerminalInputOutcome, TerminalInputResolution, TerminalSubscription,
+        TerminalViewProjection, UnavailableAgentCommandPort, UnavailableBackendPort,
         UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
         UnavailableExternalTerminalPort, UnavailablePaneLaunchPort, UnavailablePrSnapshotPort,
         UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory, WelcomeStep,
         WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
         app_event_from_key, close_exited_panes, controller_terminal_view, copy_terminal_selection,
         drain_session_completions, forward_live_terminal_input, handle_terminal_pointer,
-        intercept_live_terminal_control, key_to_terminal_bytes, new_project_notice,
-        play_startup_splash, poll_and_project_terminals, render_controller_frame,
-        render_home_snapshot, restore_open_panes, run as run_from_start, run_with_settings,
+        home_frame_material, intercept_live_terminal_control, key_to_terminal_bytes,
+        new_project_notice, play_startup_splash, poll_and_project_terminals,
+        render_controller_frame, render_home_snapshot, restore_open_panes, run as run_from_start,
+        run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
         run_workspace_controller_with_backend_and_settings, safe_session_error,
-        session_worktree_names, sidebar_pointer_event, step_config, step_new, step_open,
-        terminal_geometry, welcome_action, write_banner,
+        sidebar_pointer_event, step_config, step_new, step_open, terminal_geometry, welcome_action,
+        write_banner,
     };
     use crate::presentation::live_terminal::LiveTerminalControls;
     use crate::presentation::views::config::AvailableAgentModels;
@@ -5766,7 +6030,10 @@ mod tests {
         std::fs::create_dir_all(sessions.join("stale-session")).unwrap();
         std::fs::write(sessions.join("not-a-worktree"), "marker").unwrap();
 
-        assert_eq!(session_worktree_names(temp.path()), vec!["stale-session"]);
+        assert_eq!(
+            FsSessionWorktreeScanPort.scan(temp.path()),
+            vec!["stale-session"]
+        );
     }
 
     #[test]
@@ -6069,7 +6336,7 @@ mod tests {
 
         // The reducer receives the lifecycle so it can gate attach by capability.
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
-        super::sync_runtime_sessions(&mut runtime, &ui);
+        super::sync_runtime_sessions(&mut runtime, &ui, &[]);
         assert_eq!(
             runtime.state().session_lifecycles().get(&session).copied(),
             Some(SessionLifecycle::Failed)
@@ -6150,7 +6417,7 @@ mod tests {
             &mut std::collections::HashMap::new(),
             Geometry { cols: 20, rows: 5 },
         );
-        super::sync_runtime_sessions(&mut mismatched_runtime, &ui);
+        super::sync_runtime_sessions(&mut mismatched_runtime, &ui, &[]);
         let mut no_controls = LiveTerminalControls::default();
         let _ = super::poll_and_project_terminals(
             &mut ui,
@@ -7623,6 +7890,7 @@ mod tests {
             browser: Some(Box::new(UnavailableBrowserOpener)),
             session_refresh: None,
             decisions: None,
+            session_worktrees: None,
         };
 
         let started = std::time::Instant::now();
@@ -7669,6 +7937,7 @@ mod tests {
             browser: Some(Box::new(UnavailableBrowserOpener)),
             session_refresh: None,
             decisions: None,
+            session_worktrees: None,
         };
         let settings = usagi_core::domain::settings::Settings {
             modal_selection_mode: usagi_core::domain::settings::ModalSelectionMode::Prompt,
@@ -7735,6 +8004,7 @@ mod tests {
                 wakes: Arc::clone(&decision_wakes),
                 polls: Arc::clone(&decision_polls),
             })),
+            session_worktrees: None,
         };
 
         assert_eq!(
@@ -7754,18 +8024,540 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_empty()
         );
-        // What the loop does do every frame is drain, and it kept drawing while
-        // both lanes stayed silent.
-        let frames = term.frames.len();
-        assert!(frames >= 80, "the loop drew only {frames} frames");
-        assert!(decision_polls.load(Ordering::SeqCst) >= frames);
-        assert!(lane_drains.load(Ordering::SeqCst) >= frames);
+        // What the loop does do every frame is drain. Since #554 the redraw is
+        // gated on the frame's material, so a tick that changes nothing draws
+        // nothing — the per-iteration invariant lives in the drain counts, not
+        // in the frame count.
+        assert!(decision_polls.load(Ordering::SeqCst) >= 80);
+        assert!(lane_drains.load(Ordering::SeqCst) >= 80);
         // Draw, modal, and quit all completed with both lanes never answering.
         assert!(
             term.frames
                 .iter()
                 .any(|frame| frame.join("\n").contains("Overview"))
         );
+    }
+
+    /// A worktree scan that counts how often the frame loop reaches the disk.
+    struct CountingWorktreeScanPort {
+        scans: Arc<AtomicUsize>,
+        names: Vec<String>,
+    }
+
+    impl SessionWorktreeScanPort for CountingWorktreeScanPort {
+        fn scan(&mut self, _workspace: &std::path::Path) -> Vec<String> {
+            self.scans.fetch_add(1, Ordering::SeqCst);
+            self.names.clone()
+        }
+    }
+
+    fn counting_scan(scans: &Arc<AtomicUsize>) -> Box<dyn SessionWorktreeScanPort> {
+        Box::new(CountingWorktreeScanPort {
+            scans: Arc::clone(scans),
+            names: vec!["stale-worktree".to_owned()],
+        })
+    }
+
+    /// 16ms is the composition root's tick period, so this is "frame `tick`".
+    fn at_tick(tick: u64) -> std::time::Duration {
+        std::time::Duration::from_millis(16 * tick)
+    }
+
+    /// #554 acceptance. A closed create form has no reader for the hint, so the
+    /// frame budget must not contain a `read_dir` at all — this used to be ~62
+    /// directory scans per second plus one `stat` per entry, forever.
+    #[test]
+    fn a_closed_create_form_never_scans_the_sessions_directory() {
+        let scans = Arc::new(AtomicUsize::new(0));
+        let mut hint = SessionWorktreeHint::new(counting_scan(&scans));
+
+        for tick in 0..600 {
+            assert!(
+                hint.names(false, std::path::Path::new("/tmp/demo"), at_tick(tick))
+                    .is_empty(),
+                "a closed form must contribute no hint"
+            );
+        }
+
+        assert_eq!(scans.load(Ordering::SeqCst), 0);
+    }
+
+    /// #554 acceptance. An open form scans immediately — so the very first frame
+    /// that shows the caret can already reject a known collision — and then no
+    /// more than once per cadence period however long it stays open.
+    #[test]
+    fn an_open_create_form_scans_on_open_and_then_at_the_cadence_ceiling() {
+        let scans = Arc::new(AtomicUsize::new(0));
+        let mut hint = SessionWorktreeHint::new(counting_scan(&scans));
+        let workspace = std::path::Path::new("/tmp/demo");
+
+        // The frame that opens the form.
+        assert_eq!(hint.names(true, workspace, at_tick(0)), ["stale-worktree"]);
+        assert_eq!(scans.load(Ordering::SeqCst), 1);
+
+        // Five seconds of 16ms ticks with the form left open.
+        let ticks = 313;
+        for tick in 1..ticks {
+            assert_eq!(
+                hint.names(true, workspace, at_tick(tick)),
+                ["stale-worktree"]
+            );
+        }
+
+        let elapsed = at_tick(ticks - 1);
+        let ceiling =
+            usize::try_from(1 + elapsed.as_millis() / SessionWorktreeHint::CADENCE.as_millis())
+                .expect("the ceiling of a five second run fits a usize");
+        let scanned = scans.load(Ordering::SeqCst);
+        assert!(
+            scanned <= ceiling,
+            "{scanned} scans over {elapsed:?} exceeds the cadence ceiling of {ceiling}"
+        );
+        assert_eq!(scanned, 10);
+    }
+
+    /// Reopening the form is the moment the hint matters most, so it always
+    /// rescans — even when the previous scan is still inside the cadence window.
+    #[test]
+    fn reopening_the_create_form_rescans_inside_the_cadence_window() {
+        let scans = Arc::new(AtomicUsize::new(0));
+        let mut hint = SessionWorktreeHint::new(counting_scan(&scans));
+        let workspace = std::path::Path::new("/tmp/demo");
+
+        assert_eq!(hint.names(true, workspace, at_tick(0)), ["stale-worktree"]);
+        assert_eq!(hint.names(true, workspace, at_tick(1)), ["stale-worktree"]);
+        assert_eq!(scans.load(Ordering::SeqCst), 1);
+
+        assert!(hint.names(false, workspace, at_tick(2)).is_empty());
+        assert_eq!(hint.names(true, workspace, at_tick(3)), ["stale-worktree"]);
+        assert_eq!(scans.load(Ordering::SeqCst), 2);
+    }
+
+    /// #554 acceptance, through the real frame loop: an idle Home reaches
+    /// neither the filesystem nor the renderer on a tick that changes nothing,
+    /// while every drain still runs on exactly those ticks.
+    #[test]
+    fn idle_ticks_skip_the_worktree_scan_and_the_redraw_but_never_a_drain() {
+        let scans = Arc::new(AtomicUsize::new(0));
+        let lane_drains = Arc::new(AtomicUsize::new(0));
+
+        let ticks = 80;
+        let mut keys = vec![Key::Other; ticks];
+        keys.extend([Key::CtrlQ, Key::Char('y')]);
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut factory = FixedBackendFactory {
+            sessions: Some(Box::new(UnavailableSessionCommandPort)),
+            agent: Some(Box::new(UnavailableAgentCommandPort)),
+            launch: None,
+            restore: None,
+            metrics: Some(Box::new(NoMetrics)),
+            browser: Some(Box::new(UnavailableBrowserOpener)),
+            session_refresh: Some(Box::new(FakeSessionRefreshPort {
+                wakes: Arc::default(),
+                takes: Arc::clone(&lane_drains),
+                queued: Arc::default(),
+            })),
+            decisions: None,
+            session_worktrees: Some(counting_scan(&scans)),
+        };
+
+        assert_eq!(
+            run_workspace_controller_with_backend(&mut term, snapshot("idle"), &mut factory)
+                .unwrap(),
+            Exit::Quit
+        );
+
+        assert_eq!(
+            scans.load(Ordering::SeqCst),
+            0,
+            "an idle frame reached the sessions directory"
+        );
+        let frames = term.frames.len();
+        assert!(
+            frames < ticks,
+            "{frames} draws for {ticks} ticks: the redraw gate did nothing"
+        );
+        // The floor is the rabbit: it has three distinct appearances per six
+        // ticks and #554 keeps that cadence, so roughly half the idle ticks are
+        // genuinely material.
+        assert!(
+            frames <= ticks / 2 + 4,
+            "{frames} draws for {ticks} ticks is above the animation floor"
+        );
+        // Every iteration still drained the resident lane, including the ones
+        // that drew nothing.
+        assert!(lane_drains.load(Ordering::SeqCst) >= ticks);
+    }
+
+    /// A restore client that always fails and records, once per admitted job,
+    /// how many frames the terminal had drawn when that job started. Each job
+    /// runs on its own thread, so the thread id is what separates two
+    /// admissions from the several inventory calls inside one of them.
+    struct AdmissionCountingRestorePort {
+        draws: Arc<AtomicUsize>,
+        admitted_at: Arc<Mutex<Vec<(std::thread::ThreadId, usize)>>>,
+    }
+
+    impl AgentCommandPort for AdmissionCountingRestorePort {
+        fn launch(
+            &mut self,
+            _workspace: WorkspaceId,
+            _session: Option<SessionId>,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<AgentPaneAdmission, String> {
+            Err("launch is unavailable".to_owned())
+        }
+
+        fn list_terminals(&mut self) -> Result<Vec<TerminalInventoryEntry>, TerminalError> {
+            let job = std::thread::current().id();
+            let mut admitted_at = self
+                .admitted_at
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if admitted_at.last().map(|(id, _)| *id) != Some(job) {
+                admitted_at.push((job, self.draws.load(Ordering::SeqCst)));
+            }
+            Err(TerminalError::Unavailable)
+        }
+    }
+
+    /// A terminal that paces its keys so wall time advances between frames, and
+    /// counts the frames it was actually asked to draw.
+    struct PacedTerminal {
+        keys: VecDeque<Key>,
+        pace: std::time::Duration,
+        draws: Arc<AtomicUsize>,
+    }
+
+    impl Terminal for PacedTerminal {
+        fn size(&mut self) -> io::Result<(usize, usize)> {
+            Ok((20, 80))
+        }
+
+        fn draw(&mut self, _frame: &[String]) -> io::Result<()> {
+            self.draws.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn wait(&mut self, _duration: std::time::Duration) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn read_key(&mut self) -> io::Result<Key> {
+            std::thread::sleep(self.pace);
+            self.keys
+                .pop_front()
+                .ok_or_else(|| io::Error::other("no more keys"))
+        }
+    }
+
+    /// #554 acceptance. The skip covers the drawing and nothing else: the
+    /// restore retry's admission sits after the gate and must still fire on a
+    /// tick that drew nothing. Two admissions recorded at the same frame count
+    /// mean no frame was drawn between them, so the second one ran on a skipped
+    /// tick.
+    #[test]
+    fn a_skipped_tick_still_admits_the_restore_retry() {
+        let draws = Arc::new(AtomicUsize::new(0));
+        let admitted_at = Arc::new(Mutex::new(Vec::new()));
+
+        // `Escape` is inert on the base Switch route, so after the first
+        // failure notice the frame's material stops changing entirely.
+        let mut keys = vec![Key::Escape; 24];
+        keys.extend([Key::CtrlQ, Key::Char('y')]);
+        let mut term = PacedTerminal {
+            keys: keys.into(),
+            pace: std::time::Duration::from_millis(60),
+            draws: Arc::clone(&draws),
+        };
+        let mut factory = FixedBackendFactory {
+            sessions: Some(Box::new(UnavailableSessionCommandPort)),
+            agent: Some(Box::new(UnavailableAgentCommandPort)),
+            launch: None,
+            restore: Some(Box::new(AdmissionCountingRestorePort {
+                draws: Arc::clone(&draws),
+                admitted_at: Arc::clone(&admitted_at),
+            })),
+            metrics: Some(Box::new(NoMetrics)),
+            browser: Some(Box::new(UnavailableBrowserOpener)),
+            session_refresh: None,
+            decisions: None,
+            session_worktrees: None,
+        };
+
+        assert_eq!(
+            run_workspace_controller_with_backend(&mut term, snapshot("retry"), &mut factory)
+                .unwrap(),
+            Exit::Quit
+        );
+
+        let admitted_at = admitted_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let drawn_at: Vec<usize> = admitted_at.iter().map(|(_, drawn)| *drawn).collect();
+        assert!(
+            drawn_at.len() >= 2,
+            "the restore retry was admitted {} time(s)",
+            drawn_at.len()
+        );
+        assert!(
+            drawn_at.windows(2).any(|pair| pair[0] == pair[1]),
+            "every restore admission followed a redraw: {drawn_at:?}"
+        );
+    }
+
+    /// #554 acceptance. Skipping is decided by comparing the renderer's inputs,
+    /// so this pins each of those inputs: change one and the frame must differ,
+    /// change none and it must not — including across the ticks the rabbit
+    /// spends resting.
+    #[test]
+    #[allow(clippy::too_many_lines)] // One arm per material the renderer reads; splitting hides the table.
+    fn the_frame_material_changes_for_every_input_the_renderer_reads() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let record = SessionRecord {
+            name: "alpha".to_owned(),
+            display_name: None,
+            origin: SessionOrigin::Human,
+            started_from: None,
+            root: PathBuf::from("/tmp/demo/alpha"),
+            created_at: now(),
+            last_active: None,
+            notes: Scratchpad::default(),
+            prs: Vec::new(),
+        };
+        let sessions = vec![ProjectedSession::from_record(session, &record)];
+        let root = PathBuf::from("/tmp/demo");
+        let no_diffs = BTreeMap::new();
+        let clock = now();
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+
+        let material = |runtime: &WorkspaceRuntime| {
+            home_frame_material(
+                20, 80, runtime, "demo", &root, &sessions, None, &no_diffs, None, None, clock,
+            )
+        };
+        let base = material(&runtime);
+
+        // A resting tick is not material: the rabbit's four idle phases collapse
+        // onto one frame, so the loop draws nothing while it holds its pose.
+        for _ in 0..3 {
+            let _ = runtime.apply_event(AppEvent::Tick);
+            assert_eq!(material(&runtime), base, "a resting tick forced a redraw");
+        }
+        // The blink and the ear flop are: both must reach the terminal.
+        let _ = runtime.apply_event(AppEvent::Tick);
+        let blink = material(&runtime);
+        assert_ne!(blink, base, "the rabbit stopped blinking");
+        let _ = runtime.apply_event(AppEvent::Tick);
+        let flop = material(&runtime);
+        assert_ne!(flop, blink, "the rabbit stopped flopping its ear");
+        let _ = runtime.apply_event(AppEvent::Tick);
+        assert_eq!(
+            material(&runtime),
+            base,
+            "the rabbit never came back to rest"
+        );
+
+        // Terminal size (a resize that actually changes the geometry).
+        let resized = home_frame_material(
+            21, 80, &runtime, "demo", &root, &sessions, None, &no_diffs, None, None, clock,
+        );
+        assert_ne!(resized, base, "a resize did not redraw");
+
+        // The wall clock behind the sidebar's relative session times. It is
+        // material at whole-second resolution: sub-second jitter must not force
+        // a redraw, but a new second must.
+        let sub_second = home_frame_material(
+            20,
+            80,
+            &runtime,
+            "demo",
+            &root,
+            &sessions,
+            None,
+            &no_diffs,
+            None,
+            None,
+            clock + Duration::milliseconds(400),
+        );
+        assert_eq!(sub_second, base, "sub-second jitter forced a redraw");
+        let next_second = home_frame_material(
+            20,
+            80,
+            &runtime,
+            "demo",
+            &root,
+            &sessions,
+            None,
+            &no_diffs,
+            None,
+            None,
+            clock + Duration::seconds(1),
+        );
+        assert_ne!(next_second, base, "the relative session times froze");
+
+        // Daemon metrics for the mascot sidecar.
+        let metrics = home_frame_material(
+            20,
+            80,
+            &runtime,
+            "demo",
+            &root,
+            &sessions,
+            StaticMetrics.latest(),
+            &no_diffs,
+            None,
+            None,
+            clock,
+        );
+        assert_ne!(metrics, base, "a metrics update did not redraw");
+
+        // Git diffs joined onto the sidebar rows.
+        let diffs = BTreeMap::from([(
+            session,
+            GitDiff {
+                base: "main".to_owned(),
+                ahead: 1,
+                behind: 0,
+                added: 1,
+                removed: 2,
+            },
+        )]);
+        let git = home_frame_material(
+            20, 80, &runtime, "demo", &root, &sessions, None, &diffs, None, None, clock,
+        );
+        assert_ne!(git, base, "a git diff update did not redraw");
+
+        // Live terminal output.
+        let view = TerminalViewProjection {
+            rows: vec!["output".to_owned()],
+            row_offset: 0,
+            total_rows: 1,
+            scroll: 0,
+            feedback: None,
+        };
+        let terminal_output = home_frame_material(
+            20,
+            80,
+            &runtime,
+            "demo",
+            &root,
+            &sessions,
+            None,
+            &no_diffs,
+            Some(view),
+            None,
+            clock,
+        );
+        assert_ne!(terminal_output, base, "terminal output did not redraw");
+
+        // The pending create skeleton.
+        let pending = home_frame_material(
+            20,
+            80,
+            &runtime,
+            "demo",
+            &root,
+            &sessions,
+            None,
+            &no_diffs,
+            None,
+            Some("beta"),
+            clock,
+        );
+        assert_ne!(pending, base, "a pending create did not redraw");
+
+        // Reducer state, and the two overlays composited outside `render_home`.
+        let mut moved = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = moved.handle_key(Key::Down);
+        assert_ne!(material(&moved), base, "a selection move did not redraw");
+
+        let mut quitting = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = quitting.handle_key(Key::CtrlQ);
+        let confirming = material(&quitting);
+        assert_ne!(confirming, base, "the quit confirmation did not redraw");
+        let _ = quitting.handle_key(Key::Left);
+        assert_ne!(
+            material(&quitting),
+            confirming,
+            "moving the quit confirmation's focus did not redraw"
+        );
+    }
+
+    /// #554 acceptance for the entry screens. They have no clock and no
+    /// background lane, so an idle Welcome must draw exactly once however long
+    /// the terminal keeps ticking.
+    #[test]
+    fn idle_entry_screen_ticks_draw_nothing_after_the_first_frame() {
+        let mut keys = vec![Key::Other; 60];
+        keys.push(Key::Char('q'));
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut loader = FakeLoader::default();
+        let mut settings = DefaultSettingsPort;
+        let mut sessions = UnavailableSessionCommandPortFactory;
+
+        assert_eq!(
+            run_with_settings(
+                &mut term,
+                Vec::new(),
+                Vec::new(),
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut settings,
+                &mut sessions,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        assert_eq!(
+            term.frames.len(),
+            1,
+            "an idle Welcome rebuilt its frame on a tick"
+        );
+    }
+
+    /// The entry gate still redraws the moment the form or the screen changes,
+    /// so input latency is unaffected: every tick that carries a change draws,
+    /// and only the empty ones in between are skipped.
+    #[test]
+    fn entry_screen_input_redraws_immediately() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Other,
+            Key::Down,
+            Key::Other,
+            Key::Enter,
+            Key::Other,
+            Key::Escape,
+            Key::Other,
+            Key::Char('q'),
+        ]);
+        let mut loader = FakeLoader::default();
+        let mut settings = DefaultSettingsPort;
+        let mut sessions = UnavailableSessionCommandPortFactory;
+
+        assert_eq!(
+            run_with_settings(
+                &mut term,
+                Vec::new(),
+                Vec::new(),
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut settings,
+                &mut sessions,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        // Welcome, the selection move, the screen it opens, and Welcome again:
+        // one frame per input that changed something, none for the four
+        // interleaved ticks.
+        assert_eq!(term.frames.len(), 4);
     }
 
     /// #551 acceptance: several `RefreshSessions` inside one cadence period are
@@ -7920,6 +8712,7 @@ mod tests {
             browser: Some(Box::new(UnavailableBrowserOpener)),
             session_refresh: None,
             decisions: None,
+            session_worktrees: None,
         };
         let mut settings = WorkspaceBindingSettingsPort::default();
 
@@ -14004,7 +14797,9 @@ mod tests {
             &mut FakeLoader::default(),
         )
         .unwrap();
-        assert_eq!(term.frames.len(), keys.len() - 1);
+        // None of these keys changes Welcome, so the gate draws the menu once
+        // and every ignored key costs nothing (#554).
+        assert_eq!(term.frames.len(), 1);
         assert!(
             term.frames
                 .iter()
@@ -14062,7 +14857,8 @@ mod tests {
             &mut FakeLoader::default(),
         )
         .unwrap();
-        assert_eq!(direct.frames.len(), 2);
+        // `x` changes nothing on Config, so only the entry frame is drawn.
+        assert_eq!(direct.frames.len(), 1);
         assert!(
             direct
                 .frames
@@ -15166,10 +15962,11 @@ mod tests {
         )
         .unwrap();
         assert!(term.frames[1].join("\n").contains("No workspaces yet"));
-        assert_eq!(term.frames.len(), keys.len());
+        // Welcome and the empty Open list. Enter, Down and Up have nothing to
+        // move in an empty list, so they draw nothing (#554).
+        assert_eq!(term.frames.len(), 2);
 
-        let keys = [Key::Char('o'), Key::Tab, Key::Enter, Key::Quit];
-        let mut term = FakeTerminal::with_keys(&keys);
+        let mut term = FakeTerminal::with_keys(&[Key::Char('o'), Key::Tab, Key::Enter, Key::Quit]);
         run(
             &mut term,
             vec![ws("alpha")],
@@ -15178,7 +15975,9 @@ mod tests {
             &mut FakeLoader::default(),
         )
         .unwrap();
-        assert_eq!(term.frames.len(), keys.len());
+        // Welcome, the Open list, and the Home frame the chosen workspace
+        // opens. Tab completes onto the only entry and changes nothing.
+        assert_eq!(term.frames.len(), 3);
     }
 
     #[test]
@@ -15306,7 +16105,9 @@ mod tests {
         )
         .unwrap();
         assert!(loader.opened.is_empty());
-        assert_eq!(term.frames.len(), 3);
+        // Both Unite selections stay on Welcome without changing it, so the
+        // menu is drawn once.
+        assert_eq!(term.frames.len(), 1);
     }
 
     #[test]
@@ -15320,7 +16121,8 @@ mod tests {
             &mut FakeLoader::default(),
         )
         .unwrap();
-        assert_eq!(term.frames.len(), 2);
+        // The out-of-range number leaves Welcome untouched, so it never redraws.
+        assert_eq!(term.frames.len(), 1);
     }
 
     #[test]

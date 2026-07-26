@@ -32,7 +32,7 @@ const BLOCK_WIDTH: usize = 56;
 const NAME_WIDTH: usize = 42;
 
 /// Open 画面の状態。登録済み workspace の一覧と選択位置を持つ。端末 IO は持たない。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Open {
     workspaces: Vec<WorkspaceOverview>,
     selected_index: usize,

@@ -13,6 +13,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [workspace の選択と daemon](#workspace-の選択と-daemon)
 - [Home と target](#home-と-target)
 - [Home frame loop と背景観測 lane](#home-frame-loop-と背景観測-lane)
+- [frame 予算](#frame-予算)
 - [Session sidebar rows](#session-sidebar-rows)
 - [Overview と modal](#overview-と-modal)
 - [PR modal と browser effect](#pr-modal-と-browser-effect)
@@ -348,6 +349,58 @@ worker は workspace を開いたときに 1 本ずつ起動して閉じるま�
   ときに 1 回だけ notice を出し、次に成功したらその抑止を解く。session lane の失敗は refresh を要求した完了経路の
   notice として 1 回だけ出る。metrics lane の失敗は直前の sample を保持して mascot をちらつかせない。
 
+## frame 予算
+
+frame loop は 16ms（約 62Hz）で回る。[背景観測 lane](#home-frame-loop-と背景観測-lane) が daemon への同期 request を
+frame から追い出したのに続き、**ローカルのファイル IO と全画面の再構築も frame 予算から外す**。この節が、1 tick が
+何を払い何を払わないかの正本である。
+
+| 作業 | idle な tick で払うか | 決めるもの |
+|---|---|---|
+| lane の drain（decision / session / metrics / terminal / pane completion） | 払う | 毎 tick 無条件 |
+| restore retry の admission、pane launch の投入、入力処理 | 払う | 毎 tick 無条件 |
+| `.usagi/sessions` のディレクトリ走査 | 払わない | inline create フォームが開いているか |
+| frame の構築と端末への diff | 変化した tick だけ払う | frame material が前 frame と異なるか |
+
+**描画だけを skip する。** drain と admission は毎 tick 走るため、skip された tick でも lane の観測は取り込まれ、
+restore の再試行は期限どおり始まり、キー入力は同じ tick で処理される。skip は入力から反映までの latency を増やさない。
+
+### create フォームの衝突ヒント
+
+inline の `+ new session` フォームは、名前が既存の worktree と衝突することを daemon への往復より前に伝える。
+その材料は `<workspace>/.usagi/sessions` の 1 回の `read_dir` である。
+
+- 走査は**フォームが開いている間だけ**行う。閉じている間はディレクトリに触れず、ヒントは空である。
+- フォームを開いた frame で 1 回走査し、開いたままなら**最大 500ms に 1 回**まで再走査する。
+- 閉じるとヒントを捨てるため、開き直しは cadence 窓の内側でも必ず走査し直す。
+- ヒントは best-effort である。開いている間に他 client が作った worktree を取りこぼしても、**作成を拒否する権威は
+  daemon 側**にあり、送信時に改めて検査される。
+
+### frame material と再描画の判定
+
+再描画するかどうかは、**renderer の入力（frame material）を前 frame のものと比較して**決める。「何かが変わった」を
+イベントごとに手で立てる dirty flag 方式は取らない。material が等しければ frame も等しいという等式が成り立つのは、
+**renderer が material 以外の値を読まない**からである。この規約のために、`render_home` は実時計を自分で読むのを
+やめて呼び出し側から受け取る。renderer に新しい入力を足すときは material にも足す。
+
+| 面 | material |
+|---|---|
+| Home | 端末サイズ、`HomeProjection`（reducer state・session 行・metrics・git 差分・live terminal 出力・pane tab・overlay modal・create pending）、quit 確認、create 失敗 dialog、秒単位に丸めた現在時刻 |
+| Welcome / Open / New / Config | 端末サイズと、その画面のフォーム |
+
+**時刻も material である**。sidebar の session 行が出す相対時刻（`now` / `3m ago`）は実時計に依存するので、時計を
+material に含めないと idle な Home で表示が止まる。丸め単位は 1 秒で、相対時刻の最小粒度（分）より細かいため遅れは
+生じず、時計だけを理由とする再描画は最大でも毎秒 1 回である。entry 画面が受け取る時刻は起動時に固定した値なので
+material ではない。
+
+entry 画面は時間駆動の要素を持たないため、idle な tick は**一切描画しない**。Home には
+[mascot](#sidebar-mascot) の瞬きがある。うさぎは 6 tick 周期だが見た目は 3 種類（休み・瞬き・耳）しかないため、
+material は同じ見た目の tick を 1 つに畳む。瞬きの間隔は畳む前と変わらず、idle な Home の再描画は約半分になる。
+除去や pending tab のように毎 tick 動くアニメーションが画面にある間は畳まず、従来どおり毎 tick 描画する。
+
+modal（workspace config、config の save wave）は frame loop の外から端末へ直接描くため、戻った直後の tick は
+material にかかわらず必ず描き直す。
+
 ## Session sidebar rows
 
 Home sidebar は `main → divider → session* → + new session` の順序と target identity を保つ。main と作成 action は
@@ -567,7 +620,7 @@ body-composition kit の 1 段上に、modal を「形（shape）」ごとの薄
 Home の左 sidebar は footer の直上に usagi を表示する。frame は reducer が所有する tick でだけ
 進み、瞬きと耳の動きは純粋 render で決まる。mascot block の直下には常に 1 行の空行を予約し、footer、
 session viewport、pending row と重ならない。狭いペインでは menu の viewport を優先して mascot block 全体を
-省略する。
+省略する。この tick が idle な Home の再描画をどれだけ発生させるかは [frame 予算](#frame-予算) が決める。
 
 presentation が表示安全な message を供給した場合だけ、mascot の上に黄色太字の角丸 speech bubble を出す。
 bubble は `╰─┬─╯` の tail を mascot の頭へ向け、Unicode 表示幅で折り返し、各行を sidebar 幅に clip する。

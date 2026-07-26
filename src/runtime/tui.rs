@@ -727,6 +727,9 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             external_terminal: Box::new(PlatformExternalTerminalPort),
             metrics: Box::new(DaemonMetricsPort::new()),
             browser: Box::new(PlatformBrowserOpener),
+            // Off the frame budget: the inline create form is the only reader,
+            // so the scan runs only while that form owns input (#554).
+            session_worktrees: Box::new(presentation::FsSessionWorktreeScanPort),
         }
     }
 }
