@@ -510,6 +510,14 @@ daemon generation / operation fence を保持したまま inventory に `live: f
 はそのまま残り、Agent の success / non-zero-exit outcome は同じ意味で replay する。この reconcile は
 **process memory 上でのみ**行い、他 generation の shard を書き換えない。
 
+shard document または payload の JSON 破損、未知 schema、重複 operation、scope / generation / operation fence の
+不整合は daemon startup を fail closed にする。この状態では runtime を公開せず、spawn も document の上書きも
+行わない。reconcile 件数と store failure は日次 error log に記録され、session lifecycle vocabulary は変更しない。
+旧 Agent schema は欠けた semantic key や outcome から成功を捏造せず、該当 operation を `identity_unknown` の
+非 spawnable safe failure として現 schema に移行する。credential は hydrate せず、restart 後も ephemeral に
+失効する。旧 PTY 自体は resume せず、利用者には inventory の `live: false` と typed safe error で非 live を
+明示する。
+
 ### 死んだ generation の収束
 
 自分以外の retained shard は、`serve` が単一インスタンス lock を保持している間は必ず**死んだ owner**のものである。
@@ -524,14 +532,6 @@ directory の寿命まで押さえられたままになる。`serve` は admissi
 | running で child が生存 | OS 観測 | `ownership_unknown`（PTY master は失われている）。capacity は保持する |
 | running で何も証明できない | なし | `ownership_unknown`。capacity は保持し、次回に再判定する |
 | reserved | なし（記録の無い child が存在し得る） | operation を `ambiguous` で seal し、capacity は保持する |
-
-旧 snapshot は次の launch による保存でも削除しない。snapshot の JSON 破損、未知 schema、重複 operation、
-scope / generation / operation fence の不整合、または reconcile write failure は daemon startup を fail closed
-にする。この状態では runtime を公開せず、spawn も snapshot の上書きも行わない。reconcile 件数と store failure
-は日次 error log に記録され、session lifecycle vocabulary は変更しない。旧 Agent schema は欠けた semantic key
-や outcome から成功を捏造せず、該当 operation を `identity_unknown` の非 spawnable safe failure として現 schema
-に移行する。credential は hydrate せず、restart 後も ephemeral に失効する。旧 PTY 自体は resume せず、利用者には
-inventory の `live: false` と typed safe error で非 live を明示する。
 
 ## PR 検出の投影
 
