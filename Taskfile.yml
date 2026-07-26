@@ -35,3 +35,18 @@ tasks:
     desc: Restart the release daemon using .usagi runtime state
     cmds:
       - USAGI_RUNTIME_MODE=production cargo run --release -- daemon restart
+
+  'daemon:restart:force':
+    desc: Cold-restart the .usagi/local daemon, destroying the Agent runtimes and terminals it owns
+    cmds:
+      - USAGI_RUNTIME_MODE=local cargo run -- daemon restart --force
+
+  'daemon:restart:dev:force':
+    desc: Cold-restart the .usagi/dev daemon, destroying the Agent runtimes and terminals it owns
+    cmds:
+      - USAGI_RUNTIME_MODE=development cargo run -- daemon restart --force
+
+  'daemon:restart:prd:force':
+    desc: Cold-restart the release .usagi daemon, destroying the Agent runtimes and terminals it owns
+    cmds:
+      - USAGI_RUNTIME_MODE=production cargo run --release -- daemon restart --force

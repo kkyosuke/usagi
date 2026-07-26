@@ -431,6 +431,16 @@ runtime mode は `USAGI_RUNTIME_MODE=production`（本番モード）、`USAGI_R
 
 開発環境に [Task](https://taskfile.dev/) を導入している場合、リポジトリルートの `Taskfile.yml` から mode を選んで起動できる。`task run` は local mode、`task dev` は development mode、`task prd` は release build の production mode を使う。daemon の再起動は `task daemon:restart`、`task daemon:restart:dev`、`task daemon:restart:prd` を使う。各 task は `USAGI_RUNTIME_MODE` を明示するため、呼び出し元の環境変数には影響されない。
 
+`daemon restart` は live runtime を持つ daemon を拒否する（[planned replacement](#planned-replacement)）。その daemon が持つ Agent runtime と generic terminal を明示的に手放して cold transition する場合は、mode ごとの force task を使う。
+
+| task | mode | 実行する command |
+|---|---|---|
+| `task daemon:restart:force` | local | `daemon restart --force` |
+| `task daemon:restart:dev:force` | development | `daemon restart --force` |
+| `task daemon:restart:prd:force` | production（release build） | `daemon restart --force` |
+
+force task は `--force` を command 行に固定しているため、`--force` を付けるかどうかが task 名として残る。planned な再起動と cold transition が同じ入口を共有せず、意図しない cold transition を取り違えて起動できない。
+
 managed session state は repository 内の `.usagi/` ではなく、この shared daemon directory に保存する。最初の
 起動時だけ従来の `<repository>/.usagi/lifecycle-state.json` があれば `sessions.json` へ atomically 移行して削除する。lifecycle
 state が無い場合は、検証済みの project runtime state（debug は `<repository>/.usagi/dev/state.json`）の session も available record として同じ atomic write で採用する。
