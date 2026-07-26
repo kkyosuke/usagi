@@ -545,6 +545,35 @@ fn a_replacement_without_a_safe_operation_key_still_reports_the_transition() {
     );
 }
 
+/// A cold transition that cannot confirm its successor fails as itself: the
+/// operation key is a label on a completed transition, never on a failed one.
+#[test]
+fn a_failed_cold_transition_propagates_its_own_error() {
+    let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+    let terminator = RecordingTerminator::default();
+    // An idle launcher registers nothing, so the start phase times out.
+    let launcher = TestLauncher::idle(&store);
+    let operation = OperationId("build-rollover-v1-abc".into());
+
+    let error = replace_daemon(
+        &store,
+        &FixedProbe(true),
+        &terminator,
+        &launcher,
+        &NoopSleeper,
+        &NoopReady,
+        &FixedCensus::of(0, 0),
+        &SeamlessRefusal::NoGenerationRegistry,
+        TransitionMode::Planned,
+        Some(&operation),
+        &info(),
+    )
+    .unwrap_err();
+
+    assert!(!error.to_string().contains("operation"));
+    assert_eq!(store.load().unwrap(), None);
+}
+
 #[test]
 fn replacing_a_busy_daemon_is_refused_and_names_the_missing_prerequisite() {
     let store = DaemonRecordStore::new(InMemoryRecordFile::default());
