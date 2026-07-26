@@ -609,6 +609,7 @@ mod tests {
         let release = Arc::new(Mutex::new(false));
         let worker_release = Arc::clone(&release);
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (hung_tx, hung_rx) = std::sync::mpsc::channel();
         let pump = RefreshPump::<u32>::spawn(cadence(), move || {
             let _ = entered_tx.send(());
             loop {
@@ -618,6 +619,14 @@ mod tests {
                 {
                     return Ok(1);
                 }
+                // Announce the still-hung state, not just the entry. Entering
+                // `fetch` says nothing about having observed `release == false`:
+                // the worker can be descheduled right after the entry signal,
+                // and the render-thread loop below is non-blocking enough to set
+                // `release` before the worker ever looks. It then returns on its
+                // first look and this branch is never taken, which shows up as
+                // missing coverage rather than as a failure.
+                let _ = hung_tx.send(());
                 std::thread::sleep(Duration::from_millis(5));
             }
         });
@@ -625,6 +634,9 @@ mod tests {
         entered_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("the lane entered its fetch");
+        hung_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the lane observed that it was not released yet");
 
         let started = Instant::now();
         for _ in 0..200 {
