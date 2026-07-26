@@ -429,17 +429,23 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 runtime mode は `USAGI_RUNTIME_MODE=production`（本番モード）、`USAGI_RUNTIME_MODE=development`（開発モード）、または `USAGI_RUNTIME_MODE=local`（ローカルモード）で明示する。production は `$USAGI_HOME` または `~/.usagi` 自体を使い、development はその `dev/` 子 directory、local はその `local/` 子 directory を使う。環境変数を未指定または不正な値にした場合は、debug / release build とも local を既定にする。本番モードは `USAGI_RUNTIME_MODE=production` による明示指定が必要である。プロジェクト内の runtime state も同じ定義を使い、production は `<project_root>/.usagi/`、development は `<project_root>/.usagi/dev/`、local は `<project_root>/.usagi/local/` に保存する。旧 `device/` / `develop/` / `development/` との互換処理は行わない。
 したがって development 中・local mode 中に本番用の record / locator / lock / daemon-owned state へ触れず、必要なら `USAGI_RUNTIME_MODE=development cargo run` で local mode のまま開発用状態を選べる。`USAGI_HOME` を明示しても同じ分離を適用する。daemon が起動する Agent の MCP server には選択した mode も転送するため、Agent の完了報告も同じ daemon に届く。
 
-開発環境に [Task](https://taskfile.dev/) を導入している場合、リポジトリルートの `Taskfile.yml` から mode を選んで起動できる。`task run` は local mode、`task dev` は development mode、`task prd` は release build の production mode を使う。daemon の再起動は `task daemon:restart`、`task daemon:restart:dev`、`task daemon:restart:prd` を使う。各 task は `USAGI_RUNTIME_MODE` を明示するため、呼び出し元の環境変数には影響されない。
+開発環境に [Task](https://taskfile.dev/) を導入している場合、リポジトリルートの `Taskfile.yml` から mode を選んで起動できる。`task run` は local mode、`task dev` は development mode、`task prd` は release build の production mode を使う。各 task は `USAGI_RUNTIME_MODE` を明示するため、呼び出し元の環境変数には影響されない。
 
-`daemon restart` は live runtime を持つ daemon を拒否する（[planned replacement](#planned-replacement)）。その daemon が持つ Agent runtime と generic terminal を明示的に手放して cold transition する場合は、mode ごとの force task を使う。
+`usagi daemon` の lifecycle command には mode ごとの task を使う。task が決めるのは runtime mode と build profile だけで、`--` の後ろはそのまま `usagi daemon` へ渡す。したがって subcommand と flag の組み合わせは task 側で列挙しない。
 
-| task | mode | 実行する command |
+| task | mode | build |
 |---|---|---|
-| `task daemon:restart:force` | local | `daemon restart --force` |
-| `task daemon:restart:dev:force` | development | `daemon restart --force` |
-| `task daemon:restart:prd:force` | production（release build） | `daemon restart --force` |
+| `task daemon -- <args>` | local | debug |
+| `task daemon:dev -- <args>` | development | debug |
+| `task daemon:prd -- <args>` | production | release |
 
-force task は `--force` を command 行に固定しているため、`--force` を付けるかどうかが task 名として残る。planned な再起動と cold transition が同じ入口を共有せず、意図しない cold transition を取り違えて起動できない。
+```bash
+task daemon:dev -- status
+task daemon:dev -- restart
+task daemon:dev -- restart --force   # live runtime を明示的に手放す cold transition
+```
+
+`restart` / `stop` は live runtime を持つ daemon を `--force` なしでは拒否する（[planned replacement](#planned-replacement)）。その拒否を上書きするのは `--force` そのものであり、task 名ではない。`--` を省くと Task が `restart` を task 名として解釈するため、引数は必ず `--` の後ろに置く。
 
 managed session state は repository 内の `.usagi/` ではなく、この shared daemon directory に保存する。最初の
 起動時だけ従来の `<repository>/.usagi/lifecycle-state.json` があれば `sessions.json` へ atomically 移行して削除する。lifecycle
