@@ -51,8 +51,7 @@ use usagi_daemon::infrastructure::generation_registry::{
 use usagi_daemon::infrastructure::pty::PtyTerminal;
 use usagi_daemon::infrastructure::unix_transport::{
     EndpointCleanup, EndpointLocator, SecureUnixListener, connect_generation, ensure_private_dir,
-    ensure_private_dir_all, peer_pid, read_locator, retire_stale_current,
-    retire_stale_current_preserving,
+    ensure_private_dir_all, peer_pid, read_locator, retire_stale_current_preserving,
 };
 use usagi_daemon::presentation::{
     DaemonCommand as PresentationDaemonCommand, DaemonEnv, ServeRole,
@@ -5996,8 +5995,12 @@ fn start_standby_custody_worker(
                 // An unreadable registry is uncertainty, not a loss: it never
                 // terminates a standby that may still hold its entry.
                 if let Ok(Some(document)) = read_registry_document(&data_dir)
-                    && let StandbyCustody::Lost(loss) =
-                        evaluate_custody(&document, generation, &process)
+                    && let StandbyCustody::Lost(loss) = evaluate_custody(
+                        &document,
+                        generation,
+                        &process,
+                        &mut observe_generation_process,
+                    )
                 {
                     ErrorLog::record(&format!(
                         "daemon standby custody lost ({}); shutting down",
@@ -7235,7 +7238,15 @@ fn recover_stale_client_endpoint_with(
 
     // Socket-first retirement and current.lock provide the endpoint commit
     // fence. The record remains present on every cleanup error.
-    retire_stale_current(data_dir)?;
+    //
+    // The instance lock this path holds excludes another *active* daemon, not a
+    // standby — which holds no lock and whose live socket is therefore
+    // indistinguishable on the filesystem from a crashed generation's leftover.
+    // Sweeping it would leave the registry naming a verified successor nobody
+    // accepts on, so the same durable answer the daemon-side sweep uses applies
+    // here.
+    let live = live_generation_endpoints(data_dir);
+    retire_stale_current_preserving(data_dir, &|generation| live.contains(generation))?;
     if store.clear_if(&expected)? {
         Ok(bootstrap::StaleRecovery::Recovered)
     } else {
@@ -9070,6 +9081,106 @@ mod tests {
 
         // SAFETY: the listener has not moved and still owns normal cleanup.
         unsafe { ManuallyDrop::drop(&mut listener) };
+    }
+
+    /// The instance lock this recovery holds excludes another *active* daemon,
+    /// not a standby — which holds no lock, so its live socket looks exactly like
+    /// a crashed generation's leftover on the filesystem. Sweeping it would leave
+    /// the registry naming a verified successor that nobody accepts on, which is
+    /// the same hazard the daemon-side sweep already guards against.
+    #[test]
+    fn client_bootstrap_recovery_preserves_a_live_standby_endpoint() {
+        use std::mem::ManuallyDrop;
+        use std::os::unix::fs::PermissionsExt;
+        use usagi_daemon::usecase::authority::registry::{
+            GenerationEntry, REGISTRY_SCHEMA, RegistryDocument,
+        };
+        use usagi_daemon::usecase::generation::GenerationRole;
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let daemon = data.join("daemon");
+
+        // The dead active's published endpoint, and a live standby's private one.
+        let mut dead = ManuallyDrop::new(SecureUnixListener::bind(data, ipc_generation()).unwrap());
+        let dead_socket = daemon.join(&dead.locator().endpoint);
+        let standby = SecureUnixListener::bind_private(data, ipc_generation()).unwrap();
+        let standby_socket = daemon.join(&standby.locator().endpoint);
+        assert!(dead_socket.exists() && standby_socket.exists());
+
+        let active_generation =
+            usagi_core::domain::id::DaemonGeneration::parse(&dead.locator().generation.0).unwrap();
+        let standby_generation =
+            usagi_core::domain::id::DaemonGeneration::parse(&standby.locator().generation.0)
+                .unwrap();
+        // The standby's recorded process is this one, which the OS proves alive;
+        // the active's is a PID that has been reused, which it cannot.
+        let live = own_process_identity(std::process::id()).unwrap();
+        let mut gone = live.clone();
+        gone.start_identity = "gone".to_owned();
+        let entry = |generation, role, endpoint: &str, process: ProcessIdentity| GenerationEntry {
+            generation,
+            role,
+            endpoint: endpoint.to_owned(),
+            process,
+            expected_build: current_build(),
+            verified_build: Some(current_build()),
+            revision: 1,
+        };
+        let document = RegistryDocument {
+            schema: REGISTRY_SCHEMA.to_owned(),
+            revision: 1,
+            current: Some(active_generation),
+            generations: vec![
+                entry(
+                    active_generation,
+                    GenerationRole::Active,
+                    &dead.locator().endpoint,
+                    gone,
+                ),
+                entry(
+                    standby_generation,
+                    GenerationRole::Standby,
+                    &standby.locator().endpoint,
+                    live,
+                ),
+            ],
+            handoff: None,
+            completed_operation: None,
+        };
+        // Written the way the daemon writes it: the private read this recovery
+        // performs rejects a world-readable document.
+        let registry = daemon.join("generations.json");
+        std::fs::write(&registry, serde_json::to_string(&document).unwrap()).unwrap();
+        std::fs::set_permissions(&registry, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // A record whose identity no longer matches its PID is proved stale, which
+        // is what admits this recovery at all.
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: daemon.join("daemon.json"),
+        });
+        store
+            .save(&DaemonRecord::identified(std::process::id(), "gone"))
+            .unwrap();
+
+        assert_eq!(
+            recover_stale_client_endpoint(data).unwrap(),
+            bootstrap::StaleRecovery::Recovered
+        );
+
+        // The crashed generation's residue is reclaimed, and the live standby's
+        // socket — which its own process is still accepting on — is not.
+        assert!(!dead_socket.exists());
+        assert!(
+            standby_socket.exists(),
+            "client recovery swept a live standby endpoint"
+        );
+        assert_eq!(store.load().unwrap(), None);
+
+        drop(standby);
+        // SAFETY: recovery removed only filesystem artifacts; dropping closes the
+        // still-owned listener fd and its cleanup is idempotent.
+        unsafe { ManuallyDrop::drop(&mut dead) };
     }
 
     #[test]

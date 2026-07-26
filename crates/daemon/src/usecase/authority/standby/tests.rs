@@ -397,6 +397,17 @@ fn every_start_refusal_reads_as_a_safety_outcome() {
     assert_eq!(messages.len(), refusals.len());
 }
 
+/// Every observation this suite makes: alive exactly when the pid is listed.
+fn alive(pids: Vec<u32>) -> impl FnMut(&ProcessIdentity) -> ProcessObservation {
+    move |observed| {
+        if pids.contains(&observed.pid) {
+            ProcessObservation::VerifiedAlive(observed.clone())
+        } else {
+            ProcessObservation::Gone
+        }
+    }
+}
+
 /// A standby holds no lock and no lifecycle record, so its registry entry is its
 /// custody. Retirement — by recovery that failed an abandoned authority closed,
 /// or by collection — is what tells it to exit.
@@ -412,11 +423,13 @@ fn a_standby_holds_custody_until_its_entry_is_retired_or_replaced() {
         .unwrap();
 
     assert_eq!(
-        evaluate_custody(&document, generation, &mine),
+        evaluate_custody(&document, generation, &mine, &mut alive(vec![31])),
         StandbyCustody::Held
     );
 
-    // A promotion is not a loss: only a retired generation admits nothing.
+    // A promotion is not a loss: only a retired generation admits nothing. It
+    // also ends the incumbent check — this generation *is* the authority now,
+    // which is why nothing in this registry needs to be observably alive.
     let mut promoted = document.clone();
     promoted
         .transition(active, GenerationRole::Draining)
@@ -426,25 +439,97 @@ fn a_standby_holds_custody_until_its_entry_is_retired_or_replaced() {
         .unwrap();
     promoted.current = Some(generation);
     assert_eq!(
-        evaluate_custody(&promoted, generation, &mine),
+        evaluate_custody(&promoted, generation, &mine, &mut alive(Vec::new())),
         StandbyCustody::Held
     );
 
     let mut retired = document.clone();
     retired.retire_self(generation).unwrap();
     assert_eq!(
-        evaluate_custody(&retired, generation, &mine),
+        evaluate_custody(&retired, generation, &mine, &mut alive(vec![31])),
         StandbyCustody::Lost(StandbyCustodyLoss::EntryRetired)
     );
 
     assert_eq!(
-        evaluate_custody(&document, DaemonGeneration::new(), &mine),
+        evaluate_custody(
+            &document,
+            DaemonGeneration::new(),
+            &mine,
+            &mut alive(vec![31])
+        ),
         StandbyCustody::Lost(StandbyCustodyLoss::EntryAbsent)
     );
 
     assert_eq!(
-        evaluate_custody(&document, generation, &process(77)),
+        evaluate_custody(&document, generation, &process(77), &mut alive(vec![31])),
         StandbyCustody::Lost(StandbyCustodyLoss::EntryReplaced)
+    );
+}
+
+/// A standby that outlives its incumbent is not idle — it is a *retained*
+/// generation, and activation refuses a registry that retains one. Without this
+/// invariant, `daemon start` after a clean `daemon stop` fails with
+/// `authority_retained` forever, because a clean stop retires the active's entry
+/// and leaves the standby's untouched.
+#[test]
+fn a_standby_loses_custody_when_its_incumbent_goes_away() {
+    let active = DaemonGeneration::new();
+    let owner = process(31);
+    let mut document = active_registry(active, &owner);
+    let generation = DaemonGeneration::new();
+    let mine = process(32);
+    document
+        .register_standby(2, generation, ENDPOINT, mine.clone(), build("next"))
+        .unwrap();
+
+    // A clean `daemon stop`: the active gave its own entry up and nothing else
+    // changed. This is the case that used to be missed.
+    let mut stopped = document.clone();
+    stopped.retire_self(active).unwrap();
+    assert_eq!(
+        evaluate_custody(&stopped, generation, &mine, &mut alive(vec![31])),
+        StandbyCustody::Lost(StandbyCustodyLoss::IncumbentGone)
+    );
+
+    // Or the active died without giving anything up, which the OS reports.
+    assert_eq!(
+        evaluate_custody(&document, generation, &mine, &mut alive(Vec::new())),
+        StandbyCustody::Lost(StandbyCustodyLoss::IncumbentGone)
+    );
+
+    // A PID that is live but is not the recorded incarnation proves nothing.
+    assert_eq!(
+        evaluate_custody(&document, generation, &mine, &mut |_| {
+            ProcessObservation::Unknown
+        }),
+        StandbyCustody::Lost(StandbyCustodyLoss::IncumbentGone)
+    );
+}
+
+/// A handoff is the incumbent being replaced on purpose, so a momentarily
+/// absent active inside one is the protocol working — not the authority
+/// disappearing. Its outcome decides instead.
+#[test]
+fn an_in_flight_handoff_suspends_the_incumbent_check() {
+    let active = DaemonGeneration::new();
+    let owner = process(31);
+    let mut document = active_registry(active, &owner);
+    let generation = DaemonGeneration::new();
+    let mine = process(32);
+    document
+        .register_standby(2, generation, ENDPOINT, mine.clone(), build("next"))
+        .unwrap();
+    document.handoff = Some(crate::usecase::authority::registry::HandoffRecord {
+        operation: usagi_core::infrastructure::ipc::OperationId("rollover".into()),
+        from: Some(active),
+        to: generation,
+        endpoint: ENDPOINT.to_owned(),
+        phase: crate::usecase::authority::registry::HandoffPhase::Preparing,
+    });
+
+    assert_eq!(
+        evaluate_custody(&document, generation, &mine, &mut alive(Vec::new())),
+        StandbyCustody::Held
     );
 }
 
@@ -454,6 +539,7 @@ fn every_custody_loss_carries_a_distinct_reason() {
         StandbyCustodyLoss::EntryAbsent,
         StandbyCustodyLoss::EntryRetired,
         StandbyCustodyLoss::EntryReplaced,
+        StandbyCustodyLoss::IncumbentGone,
     ]
     .map(StandbyCustodyLoss::reason);
     let unique: std::collections::BTreeSet<_> = reasons.iter().collect();

@@ -261,7 +261,9 @@ stale endpoint recovery は `generations/` 配下の socket を residue とし�
 active しか排除しないため、lock を取れたことは「他に process が無い」ことの証明にならず、生存中の
 [standby](#standby-process-の-lifecycle) の socket は filesystem 上では crash 残骸と見分けが付かない。判断の根拠は
 durable な registry entry と process identity であり、証明できない socket は従来どおり掃除する（crash した standby も
-これで回収される）。
+これで回収される）。この保護は `serve` の pre-registration recovery と、client bootstrap の
+[stale cleanup](#daemon-process-lifecycle) の**両方**に適用される。どちらも同じ lock しか持たないため、
+片方だけに掛けると生存中の standby の socket がもう片方で掃かれてしまう。
 
 endpoint bind 後の startup failure では、listener fd と独立した exact generation cleanup token を保持する。
 accept-loop panic や join / retire failure で worker または listener を失っても token を再試行し、socket と locator の
@@ -1256,7 +1258,7 @@ standby は **何も所有しない**。この 1 点から lifecycle の差が�
 | endpoint | bind して `current.json` を publish する | `bind_private` のみ。publish しない |
 | durable runtime state | 起動時に reconcile する | read-only で hydrate する（[standby hydrate と activation](#standby-hydrate-と-activation)） |
 | worker | PTY / supervisor / PR / teardown / retention を起動する | 起動しない |
-| custody | lock と record（[custody 喪失による self-shutdown](#custody-喪失による-self-shutdown)） | 自分の registry entry |
+| custody | lock と record（[custody 喪失による self-shutdown](#custody-喪失による-self-shutdown)） | 自分の registry entry と live な incumbent |
 
 段は 6 つで、最初の refusal は**何も作る前**に置く。
 
@@ -1289,19 +1291,28 @@ stand down の順序は active の**逆**である。active は `current.json`�
 entry を先に返却しないと、「retain された standby が既に消えた socket を名指す」状態が残り、それは rollover が
 信じてしまう state である。entry の返却に失敗した場合は endpoint を retire せず、失敗を報告して終了する。
 
-standby の custody は自分の registry entry である。lock も record も持たないため active の 2 invariant は存在しない。
-約 1 秒周期で entry を読み直し、次のいずれかを観測した時点で graceful shutdown を要求する（registry が読めない場合は
-「不明」として継続する）。
+standby の custody は **自分の registry entry と、後継すべき incumbent** の 2 つである。lock も record も持たない
+ため active の 2 invariant は存在しない。約 1 秒周期で registry を読み直し、次のいずれかを観測した時点で graceful
+shutdown を要求する（registry が読めない場合は「不明」として継続する）。
 
 | custody loss | 意味 |
 |---|---|
 | entry が無い | この generation は registry から消えた |
 | entry が retired | handoff の fail closed、active 消滅後の recovery、または collection が退役させた |
 | entry が別 process を名指す | この process はもうその generation ではない |
+| live な active が居ない | 後継すべき authority が消えた（in-flight handoff 中は判定を保留する） |
 
-standby から active / draining への昇格は loss ではない（退役だけが loss である）。この監視があるため、
-active が crash して次の start が [recovery](#handoff-protocol) で全 generation を retired にした場合、
-その standby は孤児として残らず自分で終了する。
+standby から active / draining への昇格は loss ではない（退役だけが loss であり、昇格した generation は
+incumbent 判定の対象からも外れる）。生存判定は他の authority 判定と同じく registry が記録した exact
+process-start identity で行い、PID の再利用は incumbent の生存を証明しない。
+
+**incumbent 側の invariant は省略できない。** standby は retained generation であり、activation は retained
+generation が 1 つでもある registry を `authority_retained` で拒否する（[first
+activation](#first-activation)）。したがって incumbent より長生きした standby は、以後この data directory の
+`daemon start` を恒久的に失敗させる。crash 経路だけなら entry の invariant で足りる（次の start の
+[recovery](#handoff-protocol) が全 generation を retired にし、standby はそれを観測して終了する）が、**通常の
+`daemon stop` は active 自身の entry しか retire しない**ため、standby の entry は無傷のまま残る。この経路を
+閉じるのが incumbent custody である。
 
 standby の endpoint が答えるのは handshake と typed refusal だけである。`ServerHello` は role を `standby` と名乗り
 （owner binding は `active` を要求するので、client がこれを data directory の authority と誤認することはない）、

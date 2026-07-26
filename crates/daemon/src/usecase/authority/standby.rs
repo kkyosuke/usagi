@@ -21,11 +21,13 @@
 //!   generation the registry itself names. That is what fails a mixed build
 //!   closed: an old `serve` that never registers is a live owner the registry
 //!   cannot account for, so no standby joins it.
-//! * [`evaluate_custody`] answers "is this process still that standby". A
-//!   standby holds no lock and no lifecycle record, so its registry entry *is*
-//!   its custody: recovery that fails an abandoned authority closed retires
-//!   every generation, and the standby it retired has to notice and exit rather
-//!   than linger as an orphan.
+//! * [`evaluate_custody`] answers "is this process still that standby, and is
+//!   there still something to succeed". A standby holds no lock and no lifecycle
+//!   record, so its registry entry *is* its custody: recovery that fails an
+//!   abandoned authority closed retires every generation, and the standby it
+//!   retired has to notice and exit rather than linger as an orphan. A clean
+//!   `daemon stop` retires only the *active's* entry, so the incumbent is
+//!   watched too — a retained standby refuses every later activation.
 
 use std::fmt;
 use std::io;
@@ -40,7 +42,7 @@ use crate::usecase::authority::registry::{
     GenerationRegistry, REGISTRY_SCHEMA, RegistryDocument, RegistryError, RegistryFailure,
     RegistrySnapshot,
 };
-use crate::usecase::generation::{GenerationRole, ProcessIdentity};
+use crate::usecase::generation::{GenerationRole, ProcessIdentity, ProcessObservation};
 
 /// The capability a peer advertises when its `ServerHello` carries a canonical
 /// build artifact identity. Without it the peer is an older build that cannot
@@ -246,6 +248,9 @@ pub enum StandbyCustodyLoss {
     EntryRetired,
     /// The entry names another process, so this one is not that generation.
     EntryReplaced,
+    /// The active generation this standby was admitted to succeed is gone, and
+    /// nothing took its place.
+    IncumbentGone,
 }
 
 impl StandbyCustodyLoss {
@@ -256,6 +261,7 @@ impl StandbyCustodyLoss {
             Self::EntryAbsent => "registry entry is gone",
             Self::EntryRetired => "registry entry is retired",
             Self::EntryReplaced => "registry entry names another process",
+            Self::IncumbentGone => "no live active generation remains",
         }
     }
 }
@@ -270,17 +276,32 @@ pub enum StandbyCustody {
 }
 
 /// Decide whether the standby `generation`, running as `process`, still holds
-/// its registry entry.
+/// its registry entry *and* still has an authority to succeed.
 ///
 /// A role that moved *forward* — a standby that a handoff made active or
 /// draining — is still custody: only retirement ends it, because only a retired
 /// generation admits nothing at all
 /// ([`super::admission::classify`]).
+///
+/// The incumbent is the second invariant, and it is the one that cannot be
+/// dropped without breaking the *active* lifecycle. A standby is a retained
+/// generation, and [`RegistryDocument::activate_first`] refuses a registry that
+/// retains one. So a standby that outlives its incumbent does not merely idle —
+/// it refuses every future `daemon start` in this data directory with
+/// `authority_retained`, forever. Watching only this process's own entry misses
+/// exactly that case, because a clean `daemon stop` retires the *active's* entry
+/// and leaves the standby's untouched.
+///
+/// `observe` supplies exact OS evidence, so a reused PID never counts as a live
+/// incumbent. An in-flight handoff suspends the check: the incumbent is being
+/// replaced on purpose there, and a momentarily absent active is the protocol
+/// working rather than the authority disappearing.
 #[must_use]
 pub fn evaluate_custody(
     document: &RegistryDocument,
     generation: DaemonGeneration,
     process: &ProcessIdentity,
+    observe: &mut dyn FnMut(&ProcessIdentity) -> ProcessObservation,
 ) -> StandbyCustody {
     let Some(entry) = document.entry(generation) else {
         return StandbyCustody::Lost(StandbyCustodyLoss::EntryAbsent);
@@ -291,7 +312,20 @@ pub fn evaluate_custody(
     if &entry.process != process {
         return StandbyCustody::Lost(StandbyCustodyLoss::EntryReplaced);
     }
-    StandbyCustody::Held
+    // Promoted: this generation is the authority now, so there is no incumbent
+    // for it to have lost.
+    if entry.role != GenerationRole::Standby || document.handoff.is_some() {
+        return StandbyCustody::Held;
+    }
+    match document.active() {
+        Some(active)
+            if observe(&active.process)
+                == ProcessObservation::VerifiedAlive(active.process.clone()) =>
+        {
+            StandbyCustody::Held
+        }
+        Some(_) | None => StandbyCustody::Lost(StandbyCustodyLoss::IncumbentGone),
+    }
 }
 
 /// Compare a standby's answer against what it was admitted for.
