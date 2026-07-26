@@ -187,7 +187,8 @@ retry を許すかは request class だけで決める。これが唯一の elig
 | `RequestId` だけの mutation | 不可 | `RequestId` は connection-local correlation に過ぎず、cross-connection idempotency evidence ではない |
 | terminal input | 不可 | ACK loss は再送ではなく read-only な outcome 照会で収束させる（[cross-connection replay](#terminal-input-identity-と-cross-connection-replay)） |
 | terminal input outcome 照会 | budget 内で可 | daemon の operation ledger を読むだけなので、response loss は安全に再照会できる |
-| generic Terminal Launch | 不可（[#518](../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md) まで） | producer `OperationId` + digest + durable launch outcome を持たない |
+| producer `OperationId` 付きの generic Terminal Launch | budget 内で可 | 同じ id + 同じ canonical digest が同じ `TerminalRef` を replay し、異なる digest は `idempotency_conflict` になる |
+| producer `OperationId` の無い generic Terminal Launch | 不可 | daemon が request ごとに terminal / operation identity を発行するため、再送は別 record になる |
 
 request 送信前（connect / handshake の失敗）は effect が生じないため、どの class でも budget 内で安全に retry する。
 request を送信した後の response loss / deadline では、上表で eligible な class（read-only と durable operation）だけが新しい
@@ -264,10 +265,10 @@ cross-process section を取る。この section と、private directory の set
 
 現行 production handler で `RequestId` は一回の RPC correlation にだけ使い、`ResponseCache` は接続されていない。
 再接続すると client の request sequence も変わるため、`RequestId` を durable idempotency key として扱わない。
-session / Agent / dispatch 等の durable mutation は request correlation と独立した `OperationId` を持ち、target
-scope と semantic digest が同じ場合だけ既存 operation として再利用する。generic Terminal Launch はこの契約の
-例外で、producer `OperationId` と durable replay をまだ持たない。この gap は
-[#518](../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md) で追跡する。
+session / Agent / dispatch / generic Terminal Launch 等の durable mutation は request correlation と独立した
+`OperationId` を持ち、target scope と semantic digest が同じ場合だけ既存 operation として再利用する。producer が
+`OperationId` を送らない場合だけ、daemon が自分の operation identity を発行し、その request は cross-connection の
+idempotency evidence を持たない。
 
 `ProtocolError` は machine-readable な code、safe message、retry mode、side-effect classification、
 error ID を返す。resource/ownership を証明できない場合は `ownership_unknown`、resume が成立しない
@@ -475,11 +476,16 @@ working directory、environment、secret は wire field ではなく、daemon �
 
 launch の response は完全な `TerminalRef` を返す。attach は snapshot と connection-owned
 subscription を同時に返す。input、resize、detach はその `TerminalRef` と subscription を必ず含める。
-現行 launch response は immediate `Ok` であり、producer `OperationId` / Accepted revision / semantic replay を
-持たない。daemon は request ごとに新しい terminal / operation identity を生成するため、spawn 後の response / ACK
-loss をまたぐ launch 再送は同じ operation へ収束せず、二重 spawn し得る。client はこれを安全な mutation retry と
-みなさない。durable reservation と replay は
-[#518](../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md) で追跡する。
+
+launch intent は producer 発行の `launch_operation`（`OperationId`）を additive field として持つ。UI の
+`OpenTerminal` effect が決めた durable identity をそのまま wire へ載せるため、response が失われて client が
+再接続・再送しても、daemon は同じ producer operation の durable record を replay する。response は
+`terminal`、`launch_operation`、その答えが replay かどうかを示す `replayed` を返す。canonical intent digest は
+trusted profile ID・fenced scope・geometry から作り、同じ `launch_operation` に異なる digest が来た場合は
+`idempotency_conflict` として既存 terminal も capacity も変更しない。digest を持たない旧 record は intent の一致を
+証明できないため replay せず、同じく conflict になる。`launch_operation` を持たない旧 peer の launch は従来どおり
+daemon 発行の identity になり、その再送は安全な mutation retry ではない。owner shard / capacity claim 側の契約は
+[5. daemon](05-daemon.md#owner-generation-runtime-shard-と-global-resource-allocator) を正本とする。
 terminal command の effect は、daemon generation、terminal、workspace、optional session、worktree、
 runtime ownership/state の全 fence を read-only で検証した後だけ実行する。resize はこの preflight から
 PTY effect、geometry commit まで terminal actor の排他区間を保持するため、途中の exit/replacement は

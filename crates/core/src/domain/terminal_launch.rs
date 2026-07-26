@@ -56,6 +56,26 @@ pub struct TerminalLaunchScope {
     pub session_id: Option<SessionId>,
     pub worktree_id: WorktreeId,
 }
+/// The canonical intent digest that decides whether two launches carrying the
+/// same producer `OperationId` are the same request.
+///
+/// It covers exactly what makes a launch distinct — the trusted profile
+/// selector, the fully fenced scope, and the requested geometry — so a repeated
+/// delivery replays the recorded terminal while a different scope, profile, or
+/// geometry under the same id is an idempotency conflict (#518).
+#[must_use]
+pub fn canonical_launch_digest(request: &TerminalLaunchRequest, cols: u16, rows: u16) -> String {
+    let scope = &request.scope;
+    format!(
+        "v1|{}|{}|{}|{}|{cols}x{rows}",
+        request.profile_id.as_str(),
+        scope.workspace_id.as_str(),
+        scope
+            .session_id
+            .map_or_else(|| "root".to_owned(), |session| session.as_str()),
+        scope.worktree_id.as_str(),
+    )
+}
 
 /// Client-visible intent. It deliberately contains no command, argv, cwd, or env.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +225,32 @@ mod tests {
             },
         }
     }
+    #[test]
+    fn the_canonical_digest_separates_scope_profile_and_geometry() {
+        let base = request();
+        let digest = canonical_launch_digest(&base, 80, 24);
+        assert_eq!(digest, canonical_launch_digest(&base.clone(), 80, 24));
+        // Geometry, profile, and every scope component are part of the identity.
+        assert_ne!(digest, canonical_launch_digest(&base, 120, 24));
+        assert_ne!(digest, canonical_launch_digest(&base, 80, 48));
+        let other_profile = TerminalLaunchRequest {
+            profile_id: TerminalProfileId::new("other-shell").unwrap(),
+            scope: base.scope.clone(),
+        };
+        assert_ne!(digest, canonical_launch_digest(&other_profile, 80, 24));
+        let root = TerminalLaunchRequest {
+            profile_id: base.profile_id.clone(),
+            scope: TerminalLaunchScope {
+                session_id: None,
+                ..base.scope.clone()
+            },
+        };
+        let root_digest = canonical_launch_digest(&root, 80, 24);
+        assert_ne!(digest, root_digest);
+        assert!(root_digest.contains("root"));
+        assert_ne!(digest, canonical_launch_digest(&request(), 80, 24));
+    }
+
     #[test]
     fn request_is_selection_only_and_snapshot_redacts_values() {
         let snapshot = DurableTerminalLaunchSnapshot::new(

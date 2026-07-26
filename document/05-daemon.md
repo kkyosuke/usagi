@@ -24,6 +24,7 @@ managed session と terminal を所有する daemon の現在の契約である�
 - [supervisor scheduler](#supervisor-scheduler)
 - [supervisor policy and verification](#supervisor-policy-and-verification)
 - [cross-process generation authority](#cross-process-generation-authority)
+- [owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
 - [generation と orphan safety](#generation-と-orphan-safety)
 - [metrics observer](#metrics-observer)
 
@@ -103,8 +104,8 @@ artifact identity / safe trigger は
 [#528](../.usagi/issues/528-fix-daemon-build-artifact-identity-safe-rollover-trigger.md)、cross-process authority は
 [#516](../.usagi/issues/516-refactor-daemon-cross-process-generation-registry-standby-handoff-authority.md)、owner runtime
 の永続化と handoff は
-[#518](../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md)、shipping enable 前の
-owner-generation routing は
+[owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
+に実装済みであり、shipping enable 前の owner-generation routing は
 [#508](../.usagi/issues/508-fix-tui-ipc-draining-generation-inventory-terminalref-owner-routing.md) に分割する。#507 は #508
 完了後だけ rollover を有効化する。検証済み active locator への接続が `ConnectionRefused` になった場合だけ、共有
 bootstrap は後述の exact stale-owner recovery を試みる。draining、malformed / unsafe locator、所有権または lifecycle
@@ -348,6 +349,10 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `current.json` | private atomic JSON locator | active daemon generation の Unix socket endpoint を公開する。安全な publication の正本は [4. IPC の Unix transport](04-ipc.md#unix-transport) |
 | `generations.json` | durable atomic JSON | cross-process generation registry。schema、document revision、各 generation の role / endpoint / process identity / expected・verified artifact、進行中 handoff を持つ（[cross-process generation authority](#cross-process-generation-authority)） |
 | `generations.lock` | lock file | `generations.json` の read・compare-and-swap を cross-process で直列化する |
+| `allocations.json` | durable atomic JSON | global resource allocator。resource claim（owner generation・kind・capacity pool・producer operation・semantic digest・state・revision）、producer launch operation の full outcome、compact tombstone、consume ledger、expiry watermark を持つ（[owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)） |
+| `allocations.lock` | lock file | `allocations.json` の read・compare-and-swap を cross-process で直列化する |
+| `shards/<generation>.json` | durable atomic JSON | owner generation ごとの runtime shard。自 generation の resource reservation / child identity / runtime state、in-flight terminal command、active consumer 向け outbox を持つ。writer はその generation の process だけである |
+| `shards/<generation>.lock` | lock file | 対応する shard の read・compare-and-swap を直列化する |
 | `generations/<generation>/sock` | Unix domain socket | generation ごとの IPC endpoint。socket と locator は所有者・permission・symlink を検証して利用する |
 | `sessions.json` | JSON | managed session の lifecycle、operation journal、stable identity と trusted repository root。daemon restart をまたいで共有する |
 | `terminals.json` | durable atomic JSON | generic terminal の launch reservation、trusted profile provenance、process identity、runtime state。PTY master と output journal は process memory にのみ保持する |
@@ -404,10 +409,13 @@ snapshot を置換せず、失敗した temporary file を削除する。
 
 この full-snapshot write は、`daemon.lock` により daemon process が一つだけである現在の single-writer 契約を
 前提にする。一意 temporary と atomic rename は partial JSON を防ぐが、複数 process が同じ古い snapshot を
-load して別々に置換した場合の lost update は防がない。現行 store には cross-process の read-modify-write lock、
-revision CAS、reload/merge はないため、active / draining を同時起動する前に owner generation ごとの write authority
-を分離する必要がある。この未実装の前提は
-[#518](../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md) で追跡する。
+load して別々に置換した場合の lost update は防がない。2 process が同時に走る planned restart のための write
+authority は、この 2 つの snapshot とは別の durable object（`shards/<generation>.json` と `allocations.json`）に
+分離してあり、契約は
+[owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
+が正本である。shipping `serve` はまだ `terminals.json` / `agents.json` の single-writer store を使い、shard /
+allocator を駆動しない。統合は
+[#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md) が担う。
 
 daemon restart 時は `agents.json` と `terminals.json` を spawn admission より前に読む。Agent runtime は
 coordinator、semantic operation ledger、safe outcome を hydrate する。両 snapshot の未終端 runtime は
@@ -418,10 +426,11 @@ attach、input、resize、kill、replacement spawn を行わない。runtime は
 daemon generation / operation fence を保持したまま inventory に `live: false` として投影する。`exited` runtime
 はそのまま残り、Agent の success / non-zero-exit outcome は同じ意味で replay する。
 
-production の Agent / generic child に保存する `ProcessIdentity.start_identity` は現在固定文字列であり、PID reuse と
-別 process incarnation を区別する OS identity ではない。したがって planned rollover の owner 証明、cross-generation
-kill、capacity release には使わない。実 process-start / process-group identity への置換は
-[#518](../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md) で追跡する。
+`terminals.json` / `agents.json` に保存する `ProcessIdentity.start_identity` は現在固定文字列であり、PID reuse と
+別 process incarnation を区別する OS identity ではない。したがってこの 2 つの store の record は planned rollover の
+owner 証明、cross-generation kill、capacity release には使わない。OS が検証できる child identity は runtime shard の
+契約であり、shard 側の record だけがそれを保持する
+（[child identity](#child-identity)）。
 
 旧 snapshot は次の launch による保存でも削除しない。snapshot の JSON 破損、未知 schema、重複 operation、
 scope / generation / operation fence の不整合、または reconcile write failure は daemon startup を fail closed
@@ -887,11 +896,11 @@ TUI 側の pending pane と fenced attach policy は [3. TUI](03-tui.md) を正�
 per-terminal の bound（64 KiB の replay window、exit 時の PTY / FD 解放）は 1 本の terminal しか縛らない。本節は
 その上に載る **aggregate** の契約——daemon 全体・workspace ごとに何本の final を、何 byte、どれだけの期間 retain
 できるか、pressure 下でどの順に evict するか——の正本である。exited generic terminal と completed / interrupted
-Agent runtime の final tombstone（durable record・bounded replay・journal）だけを対象とし、[#518] の launch
-operation outcome / relation と [#519] の input sequence / ACK ledger は各 owner の契約に従う（本節では削除も
-再定義もしない）。
+Agent runtime の final tombstone（durable record・bounded replay・journal）だけを対象とし、launch operation
+outcome / relation の retention は
+[operation ledger の retention / expiry / GC](#operation-ledger-の-retention--expiry--gc)、input sequence / ACK
+ledger は [#519] の契約に従う（本節では削除も再定義もしない）。
 
-[#518]: ../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md
 [#519]: ../.usagi/issues/519-feat-ipc-terminal-input-ack-loss-cross-connection-replay.md
 
 ### budget
@@ -1120,6 +1129,150 @@ registry を持たない `daemon.json` + `current.json` の状態は、record �
 process identity を持たない legacy record、PID 再利用、観測不能、locator の欠落・破損はいずれも fail-closed で、
 所有者を推測しない。移行した entry は expected artifact が unknown なので、handoff の**移譲元にはなれるが移譲先にはならない**。
 
+## owner-generation runtime shard と global resource allocator
+
+planned restart で draining owner と新 active owner が同時に走る間、runtime state を **owner generation ごとの
+shard** に分け、capacity と producer operation の authority を **1 つの global allocator** に集約する。本節がその
+契約の正本で、[cross-process generation authority](#cross-process-generation-authority) が「どの generation が
+行動してよいか」を決めるのに対し、本節は「各 generation が何を所有できるか」を決める。shipping `serve` はまだ
+single-writer store（[daemon data directory](#daemon-data-directory)）を使い、この authority を駆動しない。統合は
+[#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md) が担う。
+
+```text
+shards/<G1>.json   writer は G1 だけ ── outbox ──▶ allocations.json ──▶ G2 が consume
+shards/<G2>.json   writer は G2 だけ
+```
+
+shard は writer が 1 つなので merge が不要である。generation をまたぐのは state ではなく **event** であり、
+draining owner は自分の outbox に append し、active consumer は global allocator へ apply し、owner は consumed
+revision を読んで自分の outbox を回収する。active consumer は旧 shard へ **一切書かない**。
+
+### capacity pool
+
+allocator は resource kind ごとに独立した pool を持ち、Agent と generic Terminal の上限を暗黙に合算しない。
+claim は `reserved` → `live` → `released` の 3 状態で、`released` は capacity を保持しない。全 retained generation
+（active と draining の両方）の claim が同じ pool を消費するため、rollover 中も設定上限を超えない。pool 満杯の
+reservation failure は spawn effect zero である。
+
+### launch の書き込み順序
+
+launch は allocator・shard・OS process の 3 つを触るため、1 回の write では動かせない。順序を 1 つに固定し、
+各境界の意味を durable state として持つ。
+
+```text
+L1  allocator CAS   claim reserved + operation reserved     authority が effect に先行する
+L2  shard CAS       owner reservation reserved              ここで初めて spawn してよい
+L3  spawn           child を起動し identity を観測する       唯一の非可逆な段
+L4  shard CAS       resource running + 検証済み identity     child が durable に所有される
+L5  allocator CAS   operation final（spawned）               producer への答えが durable になる
+```
+
+| crash 境界 | durable state | recovery |
+|---|---|---|
+| L1 より前 | 何もない | 再送は fresh admission |
+| L1〜L2 | claim だけ | reservation を完成させ、1 度だけ spawn する |
+| L2〜L3 | claim + reservation | 1 度だけ spawn する（まだ何も起動していない） |
+| L3〜L4 | claim + reservation・child は生存 | 未記録の child として `ambiguous` を返し、replacement spawn をしない |
+| L4〜L5 | running record | record から final を commit する |
+| L5 より後 | final | final を verbatim に replay する |
+
+claim は常に reservation より先に durable になるため、**claim の無い reservation** は state 喪失か偽造しかあり得ず、
+`ownership_unknown` で fail closed にする（推測 spawn・推測 release をしない）。definite failure は capacity を
+1 度だけ解放し、ambiguous outcome は child が存在し得るので capacity を保持したまま durable final になる。
+
+### producer launch operation
+
+generic Terminal Launch は producer `OperationId` を wire に持ち（[4. IPC の terminal command](04-ipc.md#generic-terminal-request)）、
+daemon は durable record をその id と canonical intent digest（trusted profile・fenced scope・geometry）で索引する。
+同じ id + 同じ digest は既存の `TerminalRef` を replay し、同じ id + 異なる digest は `idempotency_conflict` として
+既存 terminal も capacity も変更しない。digest を持たない旧 record は intent の一致を証明できないため replay せず、
+同じく conflict として拒否する。
+
+### exit event の handoff
+
+```text
+E1  old shard CAS    resource exited + outbox event(rev)   owner が 1 度だけ publish する
+E2  allocator CAS    consumed(rev) + claim released        active が 1 度だけ apply する
+E3  old shard CAS    consumed 以下の outbox を破棄          owner が自分の outbox を回収する
+```
+
+| crash 境界 | durable state | recovery |
+|---|---|---|
+| E1 より前 | 何もない | exit を再観測して publish する |
+| E1〜E2 | event published | consumer が apply する（再配送は idempotent） |
+| E2〜E3 | event applied | owner が次の pass で回収する |
+| E3 より後 | pending なし | resource を忘れる |
+
+duplicate、reorder、late delivery、consumer restart は同じ outcome に収束し、capacity 解放は 1 度だけである。
+別 owner の resource を名指した event、claim の無い resource の event は refuse され、他の resource を変更しない。
+
+### child identity
+
+shard の record が持つ child identity は OS が答えた process-start token と process group であり、固定文字列・
+wall clock・PID 由来の値は identity にしない。観測結果は `exact` / `gone` / `reused`（PID 再利用）/ `unknown` を
+区別する。`gone` と `reused` は「この child はもう走っていない」ことの証明なので final commit に使えるが、
+どちらも signal 先にはしない。`unknown` は何も証明しないため fail closed である。verifiable でない identity では
+`running` record を作れない。
+
+### standby hydrate と activation
+
+standby は自分の shard を **read-only** で hydrate し、読んだ shard revision と allocator revision を seal する。
+readiness 中は reconcile / save、worker / tick、spawn を行わない。handoff commit 後に writer を開くとき、両
+revision を再検証し、どちらかが動いていれば `sealed_elsewhere` で admission を開始しない。
+
+### generation collection
+
+old generation が回収可能になるのは、自 shard の live resource 0、in-flight terminal command 0、未 ACK outbox 0、
+global capacity claim 0 を **すべて** 検証できた場合だけである。1 つの 0 を他の 0 の代わりにしない。role と
+endpoint の最終回収は [cross-process generation authority](#cross-process-generation-authority) と #507 が行う。
+
+### operation ledger の retention / expiry / GC
+
+producer operation の記憶は無限には持てないため、collectable な final だけを 3 段で回収する。各段は独立した
+compare-and-swap である。
+
+```text
+G1  allocator CAS   full outcome ──▶ compact tombstone      exact な答えを atomic に置換する
+G2  allocator CAS   expiry watermark を進める                その id 以下は永久に expired
+G3  allocator CAS   watermark 以下の tombstone を破棄        最後の byte を解放する
+```
+
+| 段 | その後の再送が得るもの |
+|---|---|
+| G1 より前（minimum window 内） | full exact final の verbatim replay |
+| G1 の後 | typed `operation_expired`（effect zero） |
+| G2 の後 | watermark だけから typed `operation_expired` |
+| G3 の後 | 記録が無くても watermark から typed `operation_expired` |
+
+watermark は server が自分で seal した id からだけ進み、client の timestamp では進まない。live な operation を
+追い越さないため、走行中の launch が expired 判定されることはない。GC 対象は「collectable な final（ambiguous は
+永久に対象外）」かつ「capacity release が 1 度 commit 済み」かつ「consumer dependency 0」の record だけである。
+count / byte / age の hard cap に達しても安全な候補が無い場合は、既存 record を evict せず、新規 launch を typed
+backpressure で effect zero に拒否する。
+
+### legacy record の adoption
+
+`terminals.json` / `agents.json` の record を shard へ移せるのは、完全な owner generation を名指し、producer
+operation を持ち、child identity が OS 検証可能な場合だけである。それ以外は `ownership_unknown` として shard に
+残し、live として数えず、spawn・kill・capacity release を行わない。別 generation を名指す record と重複 record は
+shard に入れない。旧 active が real child identity と sharded store の capability を advertise しない場合、planned
+rollover は seamless 継続を偽らず、refuse または明示的な cold transition を要求する。
+
+### 他の shared writer
+
+shard を分けても、draining process が触り得る他の whole-snapshot document に lost update が移るなら意味が無い。
+対象は次のとおりで、append-only writer は cross-process lock で足りるため fence を要さない。
+
+| shared writer | write mode | draining owner |
+|---|---|---|
+| `pr-inventory.json` | whole snapshot | owner-local event を publish し、active writer が apply する |
+| supervisor state | whole snapshot | 拒否（active generation の tick が再計算する） |
+| `sessions.json` | whole snapshot | 拒否（lifecycle admission は既に閉じている） |
+| `dispatch.json` | append only（cross-process lock） | 許可 |
+| `inbox/*.jsonl` | append only（cross-process lock） | 許可 |
+
+standby と retired はいずれの document も書かない。
+
 ## generation と orphan safety
 
 generation coordinator は一つの daemon process 内で Agent admission、terminal control/exit、completion outcome を
@@ -1127,8 +1280,10 @@ current generation に fence する。shipping `serve` は process lifetime の 
 [単一 daemon の 2 段 fence](#単一-daemon-の-2-段-fence)）を保持するため、同じ data directory でも同じ workspace でも
 2 process は共存せず、production lifecycle は coordinator の `rollover` を呼ばない。standby endpoint、cross-process
 generation registry、draining process への admission は [cross-process generation
-authority](#cross-process-generation-authority) が持つが、shipping `serve` はまだそれを駆動しない。generic terminal
-runtime も、この process 内 coordinator の authority には含まれない。
+authority](#cross-process-generation-authority) が持ち、owner ごとの runtime state と capacity は
+[owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
+が持つが、shipping `serve` はまだどちらも駆動しない。generic terminal runtime も、この process 内 coordinator の
+authority には含まれない。
 
 daemon owner process の exact identity と fenced SIGTERM は lifecycle record に実装されている。そのため PID reuse や
 legacy record を daemon owner と推測しない。
@@ -1143,9 +1298,9 @@ mismatch は active generation を変えず、candidate を standby のまま保
 そのため current generation の exact fence は stale request の誤適用を防ぐが、planned restart 中に旧 PTY を
 draining owner として維持する機構ではない。安全な landing order は、artifact identity / trigger の
 [#528](../.usagi/issues/528-fix-daemon-build-artifact-identity-safe-rollover-trigger.md)、daemon identity / locator の
-#515、[cross-process generation authority](#cross-process-generation-authority) を前提に、owner shard /
-exit-capacity handoff の
-[#518](../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md)、draining owner routing の
+#515、[cross-process generation authority](#cross-process-generation-authority) と
+[owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
+を前提に、draining owner routing の
 [#508](../.usagi/issues/508-fix-tui-ipc-draining-generation-inventory-terminalref-owner-routing.md)、shipping lifecycle / final E2E の
 [#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md) の順である。#508 capability と
 compatible registry revision が無い限り #507 の rollover path は disabled とし、old active/current を維持する。

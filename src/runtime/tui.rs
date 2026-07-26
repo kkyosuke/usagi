@@ -1600,6 +1600,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         session: Option<usagi_core::domain::id::SessionId>,
         geometry: usagi_tui::usecase::application::pane_runtime::Geometry,
         arguments: &str,
+        operation: usagi_core::domain::id::OperationId,
     ) -> Result<usagi_core::domain::id::TerminalRef, String> {
         if !matches!(arguments, "open" | "new") {
             return Err("terminal accepts only `open` or `new`".to_owned());
@@ -1657,6 +1658,9 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                 cols: geometry.cols,
                 rows: geometry.rows,
             },
+            // The controller's durable operation reaches the daemon unchanged, so
+            // a lost response or a reconnect replays the same terminal.
+            launch_operation: Some(operation),
         };
         let mut client = crate::runtime::daemon::policy_client(ClientPolicy::tui())
             .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;

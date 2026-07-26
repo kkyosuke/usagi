@@ -23,6 +23,7 @@ use usagi_core::domain::{
     terminal_launch::{
         DurableTerminalLaunchSnapshot, ResolvedTerminalLaunch, TerminalInventoryEntry,
         TerminalKind, TerminalLaunchRequest, TerminalLaunchValidationError,
+        canonical_launch_digest,
     },
     terminal_retention::{AdmissionRejection, EvictionReason, FinalLookup, RetainedFinal},
 };
@@ -43,6 +44,13 @@ pub struct DurableTerminalRecord {
     pub launch: DurableTerminalLaunchSnapshot,
     pub state: TerminalRuntimeState,
     pub process: Option<ProcessIdentity>,
+    /// Canonical intent digest of the launch this record was created for. It is
+    /// what proves a repeated producer `OperationId` carries the *same* request,
+    /// so a replay answers with this terminal and a different intent is refused
+    /// (#518). Absent on records written before the producer id reached the wire;
+    /// such a record can never prove a replay and therefore refuses one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_digest: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalStoreSnapshot {
@@ -286,6 +294,16 @@ impl GenericTerminalCoordinator {
         outcome
     }
 
+    /// The record created for one producer launch operation, if this owner still
+    /// holds it. It is how a repeated `Launch` is answered without spawning: the
+    /// caller compares the recorded canonical digest before replaying (#518).
+    #[must_use]
+    pub fn launch_by_operation(&self, operation: &OperationId) -> Option<&DurableTerminalRecord> {
+        self.records
+            .values()
+            .find(|record| record.operation.operation_id == *operation)
+    }
+
     fn launch_admitted(
         &mut self,
         request: &TerminalLaunchRequest,
@@ -313,6 +331,11 @@ impl GenericTerminalCoordinator {
                 launch: resolved.snapshot.clone(),
                 state: TerminalRuntimeState::Reserved,
                 process: None,
+                launch_digest: Some(canonical_launch_digest(
+                    request,
+                    geometry.cols,
+                    geometry.rows,
+                )),
             },
         );
         self.persist(store)?;
