@@ -863,6 +863,26 @@ fn terminal_input_replay_is_capability_gated_and_fails_closed() {
 }
 
 #[test]
+fn owner_generation_routing_is_read_from_the_advertisement_alone() {
+    assert!(supports_owner_generation_routing(&[
+        TERMINAL_SCREEN_CHECKPOINT_CAPABILITY.to_owned(),
+        OWNER_GENERATION_ROUTING_CAPABILITY.to_owned(),
+    ]));
+    // A peer that does not advertise it may not be left with a draining
+    // generation to reach, whatever else it supports.
+    for capabilities in [
+        vec![],
+        vec![TERMINAL_INPUT_OPERATION_CAPABILITY.to_owned()],
+        vec!["owner-generation-routing.v2".to_owned()],
+    ] {
+        assert!(
+            !supports_owner_generation_routing(&capabilities),
+            "{capabilities:?}"
+        );
+    }
+}
+
+#[test]
 fn the_terminal_input_digest_separates_target_from_bytes() {
     let digest = terminal_input_digest("terminal-a", b"ls\r");
     assert_eq!(digest.len(), 64);

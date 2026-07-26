@@ -794,7 +794,9 @@ detach は次の 2 つを local no-op として扱う。どちらも現在の co
 | 同じ terminal の新しい attach に置き換えられた superseded subscription | 新しい attachment とその出力登録（poll pump）は置き換え後の subscription が所有する |
 
 epoch は attach ごとに新しい resource を作らず、client-local な transport の incarnation を数えるだけである。
-replacement terminal の spawn も generation 単位の routing も行わない。
+replacement terminal を spawn することはない。どの endpoint へ送るかは epoch ではなく request が持つ
+`TerminalRef.daemon_generation` が決め、connection と cursor は generation ごとに独立して保持する
+（[4. IPC の owner generation routing](04-ipc.md#owner-generation-routing)）。
 
 #### snapshot negotiation と legacy 限定表示
 
@@ -968,8 +970,10 @@ runtime bridge を確認する手順である。profile の install 状態、認
 
 daemon は terminal / Agent runtime の権威 owner であり、TUI を閉じても runtime は daemon 内で継続する。
 そのため workspace を開き直した（同じ client の再 open、または 2 つ目の client の open）とき、その
-workspace の root scope と各 available session scope に属する **live**（現 daemon generation が所有し attach
-可能）な Agent / Terminal を pane tab に復元する。
+workspace の root scope と各 available session scope に属する **live**（いずれかの trusted generation が所有し
+attach 可能）な Agent / Terminal を pane tab に復元する。planned restart 中は active と draining の両 generation が
+inventory に答え、完全な `TerminalRef` で merge / dedup した結果を投影する
+（[4. IPC の owner generation routing](04-ipc.md#owner-generation-routing)）。
 
 この inventory 復元は provider conversation resume を開始しない。`identity_unknown` / interrupted Agent は
 sidebar の第 2 行に `interrupted · resume available` または ID を含まない safe reason を表示するが、
@@ -1024,7 +1028,9 @@ TUI 起動、workspace open、daemon reconnect から `ResumeAgent` を自動送
 | authoritative に削除された session | 成功した lifecycle snapshot の available session 集合から消えた | target / selection / slots と、その slots 所有 dismissal だけを同一 commit で除去する |
 | allowed session 内の inventory 欠落 | session 自体は lifecycle snapshot に残る | dormant slot / dismissal を保持し、別 target を復元する |
 | scope mismatch（別 workspace / worktree / session） | daemon が scope 完全一致で filter | 列挙されない |
-| saved generation と current daemon が異なる | #506 の単一 endpoint inventory では owner を証明できない | attach しない。planned lifecycle は [#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md)、owner routing は [#508](../.usagi/issues/508-fix-tui-ipc-draining-generation-inventory-terminalref-owner-routing.md) の責務 |
+| saved generation が current active と異なるが、その owner generation が saved exact ref を live として列挙した | merged inventory が owner 自身の答えを持つ | 保存 slot へ live tab を 1 枚投影し、attach / input は owner endpoint へ配送する（[4. IPC の owner generation routing](04-ipc.md#owner-generation-routing)） |
+| saved generation の owner が answer しなかった | partial inventory は absence ではない | last-known tab を `reconnecting` として保持し、interrupted へ変換しない |
+| saved generation が trusted registry から消えた | verified retirement | tab を回収する。attach も input も別 generation へ再配送しない |
 | exact-equal terminal row の重複 | `TerminalRef` / kind / live がすべて同じ | normalize して 1 row にする |
 | conflicting terminal row / duplicate live continuation / Agent↔terminal 非全単射 | 同じ fenced ref の kind / live が競合する、または live Agent 対応が一意でない | observation 全体を拒否して retry する |
 | daemon 不通 / partial / cross-RPC 不整合 inventory | coherent な全量 observation ではない | 全 pane restore を適用せず retry し、intent / dismissal を GC せず local PTY も作らない |
@@ -1182,9 +1188,10 @@ cold restart 直後のように **interrupted tab しか無い target** でも�
 resume 不可の tab、選択されていない tab、および interrupted tab を持たない selection に対する `Ctrl-O r` は
 daemon request を作らない。inventory refresh・reconnect・workspace open・planned restart も同様である。
 
-planned な `daemon restart` は旧 generation の PTY を保持したまま control authority だけを移す別 failure mode であり、
-その rollover と owner routing は [#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md) /
-[#508](../.usagi/issues/508-fix-tui-ipc-draining-generation-inventory-terminalref-owner-routing.md) の責務である。
+planned な `daemon restart` は旧 generation の PTY を保持したまま control authority だけを移す別 failure mode である。
+その間の tab は interrupted ではなく、owner generation の endpoint へ配送される live tab のままである
+（[4. IPC の owner generation routing](04-ipc.md#owner-generation-routing)）。rollover 自体の起動は
+[#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md) の責務であり、
 本 projection は crash / cold restart を旧 PTY の継続と偽らないことだけを保証する。
 
 ## feedback と終了

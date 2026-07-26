@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use usagi_core::domain::id::DaemonGeneration;
 use usagi_core::infrastructure::ipc::{
     BuildIdentity, ConnectionId, DaemonGeneration as WireGeneration, GenerationRole as WireRole,
-    OperationId, ProtocolLimits, ProtocolVersion, ServerHello, build_identity,
+    OWNER_GENERATION_ROUTING_CAPABILITY, OperationId, ProtocolLimits, ProtocolVersion, ServerHello,
+    build_identity,
 };
 
 use super::handoff::{LocatorObservation, PublishedLocator};
@@ -65,6 +66,7 @@ pub fn hello(generation: DaemonGeneration, artifact: &BuildIdentity) -> ServerHe
         capabilities: vec![
             BUILD_ARTIFACT_CAPABILITY.to_owned(),
             GENERATION_HANDOFF_CAPABILITY.to_owned(),
+            OWNER_GENERATION_ROUTING_CAPABILITY.to_owned(),
         ],
         build: artifact.clone(),
         limits: ProtocolLimits::default(),

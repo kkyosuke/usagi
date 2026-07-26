@@ -19,6 +19,9 @@
 //! - [`vt_screen`] — raw PTY バイト列を `rows × cols` の文字グリッドへ解釈する純粋な
 //!   VT parser（`VtScreen`）。TUI と daemon が共有する単一 parser authority で、
 //!   描画（selection / link / cursor marker）は presentation 側に残す。
+//! - [`owner_routing`] — planned restart 中に active / draining の 2 generation が
+//!   並存する間、request を owner generation の endpoint へ配送する client 側の
+//!   routing（trusted endpoint 解決・inventory merge・generation 別 connection）。
 
 pub mod agent;
 pub mod claude_sandbox;
@@ -27,6 +30,7 @@ pub mod env;
 pub mod issue;
 pub mod memory;
 pub mod note;
+pub mod owner_routing;
 pub mod pr_inventory;
 pub mod session;
 pub mod settings;

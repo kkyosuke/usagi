@@ -14,6 +14,7 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
   - [terminal lane の per-request budget](#terminal-lane-の-per-request-budget)
   - [bootstrap section の bounded wait](#bootstrap-section-の-bounded-wait)
 - [envelope とエラー](#envelope-とエラー)
+- [owner generation routing](#owner-generation-routing)
 - [Unix transport](#unix-transport)
 - [client の失敗処理](#client-の失敗処理)
   - [stream connection の共有と subscription の無効化](#stream-connection-の共有と-subscription-の無効化)
@@ -763,6 +764,69 @@ continuation で別 incarnation へ fallback しない。TUI の projection 契�
 [3. TUI](03-tui.md) を正本とする。aggregate retention / GC は
 [#526](../.usagi/issues/526-fix-daemon-terminal-agent-tombstone-retention-aggregate-bound-gc.md) の責務である。
 
+## owner generation routing
+
+planned restart 中は old generation が draining のまま自分の PTY を持ち続け、new generation が
+active として新規 launch を受ける。この間 client は「current endpoint 一つ」では old generation の
+terminal に到達できず、推測で new active へ送れば別 terminal に effect を与える。client 側の
+routing 契約は `usagi-core` の `usecase::owner_routing` が正本であり、次の表がその全体である。
+
+| request | 配送先 |
+|---|---|
+| workspace / session / issue / Agent launch / generic terminal launch 等の control operation | active generation |
+| scope inventory（`inventory` / `completed_inventory`） | trusted な全 generation。完全な `TerminalRef` で merge / dedup する |
+| attach / resume / resync / input / `input_outcome` / resize / detach / `observe` / `dismiss` | request が持つ完全な `TerminalRef.daemon_generation` の owner endpoint |
+| unknown / retired / forged generation | typed `stale_target`。current endpoint や同名 terminal へ fallback しない |
+
+client は `ClientHello.capabilities` に `owner-generation-routing.v1` を広告し、daemon も
+`ServerHello.capabilities` で同じ capability を広告する。daemon はこの広告を rollover 開始の
+前提条件として読み、条件を満たさない場合は authority handoff の前に typed refusal で止める
+（[5. daemon の rollover 前提条件](05-daemon.md#rollover-の-routing-前提条件)）。
+
+### trusted endpoint の解決
+
+generation endpoint は daemon が書いた record からだけ解決する。client が socket path を指定できる
+API は存在せず、caller が渡せるのは `DaemonGeneration` だけである。解決は次の 2 通りで、いずれも
+daemon が書いたものだから trusted である。
+
+- `generations.json` がある場合はそこにある retained generation の role と endpoint を使う。
+  `standby` は活性化まで private、`retired` は client が tab を回収してよい verified absence として
+  除外する。
+- `generations.json` が無い（rollover していない daemon）場合は `current.json` が全体の authority で
+  あり、単一 active generation として振る舞う。
+
+解決した endpoint は接続前に「その generation 自身の private directory 内の socket」であることを
+再検証する。record が別 generation の socket を指していれば接続せず拒否する。重複 generation、
+複数 active、active を指さない `current` は inconsistent として fail closed にする。
+
+### merge と partial answer
+
+scope inventory は generation ごとに問い合わせ、次の 2 つの fence を通った entry だけを採用する。
+answering generation 以外の `daemon_generation` を持つ entry（別 daemon の terminal を名乗る）と、
+要求 scope 外の entry は捨てる。残りを完全な `TerminalRef` で dedup し、同じ順序へ正規化するため、
+同じ observation を何度 merge しても各 terminal は一度だけ tab へ投影される。
+
+answer が無かった generation は `unreachable` として記録し、absence には変換しない。tracked terminal
+の presence は次のように決まる。
+
+| 観測 | presence |
+|---|---|
+| owner が live として列挙した | `live` |
+| owner が answer したが列挙しなかった / `live: false` | `gone`（tab と endpoint record を回収してよい） |
+| owner が answer しなかった（timeout / transport failure / 未問い合わせ） | `reconnecting`（last-known tab を保持する） |
+| generation が trusted set から消えた（verified retirement） | `gone` |
+
+partial inventory を cold-restart の interrupted projection へ変換しない。
+
+### generation ごとの connection と cursor
+
+connection、negotiated capability、output cursor は generation ごとに独立して保持する。active locator
+が変わっても draining generation の link は破棄されない。transport failure はその generation の socket
+だけを落とし cursor は残すため、再接続は replay ではなく cursor からの resume になる。cursor は
+monotonic であり、遅れて届いた frame が tab を巻き戻すことはない。link を回収するのは verified
+retirement（trusted set からの消失）だけである。同じ generation の endpoint 表記が変わった場合は
+再利用せず新しい link として接続し直す。
+
 ## Unix transport
 
 Unix socket は daemon 専用 adapter が管理する。endpoint は private data directory の generation
@@ -847,12 +911,18 @@ startup owner に観測させることはない。stale recovery が generation 
 owner-only directory かつ symlink でないことを先に検証し、daemon directory 外の socket を回収対象にしない。
 
 accept 時は OS peer credential の UID が daemon UID と一致しなければ、protocol byte を読む前に接続を
-閉じる。client は active locator だけを解決でき、draining locator や generation directory 外を指す
-endpoint には接続しない。cross-process standby handoff と draining owner routing は未実装であり、前者は
-[#516](../.usagi/issues/516-refactor-daemon-cross-process-generation-registry-standby-handoff-authority.md)、後者は
-[#508](../.usagi/issues/508-fix-tui-ipc-draining-generation-inventory-terminalref-owner-routing.md) で追跡する。到達不能な
-draining resource を作る intermediate main を許さないため、shipping rollover は #508 の owner-generation routing
-capability と compatible registry revision を確認できるまで disabled とする。最終 enable / restart / product E2E は
+閉じる。control 用の endpoint 解決は active locator だけであり、generation directory 外を指す endpoint に
+接続することはない。owner generation を名指しした terminal request だけが draining generation の endpoint を
+解決でき、その解決も daemon が書いた record と当該 generation の private socket 検証を経る
+（[owner generation routing](#owner-generation-routing)）。
+
+cross-process standby handoff は
+[#516](../.usagi/issues/516-refactor-daemon-cross-process-generation-registry-standby-handoff-authority.md) が、
+owner-generation runtime shard は
+[#518](../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md) が
+提供し、client 側の owner routing は本節の契約として実装済みである。これらは registry / locator の
+fixture 上で完結しており、shipping の `daemon restart` から rollover を起動する経路はまだ存在しない。
+最終 enable / restart / product E2E は
 [#507](../.usagi/issues/507-fix-daemon-planned-restart-active-draining-generation-rollover.md) が担当する。
 
 ## client の失敗処理
