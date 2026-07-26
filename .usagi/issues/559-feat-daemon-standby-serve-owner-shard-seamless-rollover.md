@@ -4,11 +4,11 @@ title: feat(daemon): standby serve と owner shard を配線して seamless roll
 status: todo
 priority: high
 labels: [review, v2, daemon, lifecycle, recovery]
-dependson: []
+dependson: [560, 561, 562]
 related: [209, 221, 275, 350, 492, 507, 508, 515, 516, 518, 528, 550]
 parent: 505
 created_at: 2026-07-26T13:20:50.130410+00:00
-updated_at: 2026-07-26T13:20:50.130410+00:00
+updated_at: 2026-07-26T13:59:06.246041+00:00
 ---
 
 ## 問題・影響
