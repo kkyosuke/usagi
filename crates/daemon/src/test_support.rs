@@ -11,7 +11,7 @@ use usagi_core::infrastructure::daemon::{
     WorkspaceFenceOutcome,
 };
 
-use crate::usecase::serve::DaemonRecordPort;
+use crate::usecase::serve::{DaemonRecordPort, GenerationAuthority};
 use crate::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
 
 /// An in-memory [`RecordFile`] standing in for `daemon.json` on disk.
@@ -209,6 +209,69 @@ impl DaemonReady for NoopReady {
 
     fn retire(&self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+/// A [`GenerationAuthority`] that records every claim and release, and can be
+/// made to fail either one.
+///
+/// The counts are what the ordering assertions read: `serve` must claim after the
+/// endpoint answers and release after it is retired, so a test proves the order
+/// by what was recorded rather than by inspecting a registry.
+#[derive(Default)]
+pub struct FakeAuthority {
+    claims: Cell<usize>,
+    releases: Cell<usize>,
+    fail_claim: bool,
+    fail_release: bool,
+}
+
+impl FakeAuthority {
+    /// An authority whose claim fails, as an unreadable registry would.
+    pub fn failing_claim() -> Self {
+        Self {
+            fail_claim: true,
+            ..Self::default()
+        }
+    }
+
+    /// An authority whose release fails, as a registry that cannot be written
+    /// during shutdown would.
+    pub fn failing_release() -> Self {
+        Self {
+            fail_release: true,
+            ..Self::default()
+        }
+    }
+
+    /// How many times authority was claimed.
+    pub fn claims(&self) -> usize {
+        self.claims.get()
+    }
+
+    /// How many times authority was released.
+    pub fn releases(&self) -> usize {
+        self.releases.get()
+    }
+}
+
+impl GenerationAuthority for FakeAuthority {
+    fn claim(&self) -> io::Result<()> {
+        self.claims.set(self.claims.get() + 1);
+        if self.fail_claim {
+            Err(io::Error::other("claim failed"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn release(&self) -> io::Result<()> {
+        self.releases.set(self.releases.get() + 1);
+        if self.fail_release {
+            Err(io::Error::other("release failed"))
+        } else {
+            Ok(())
+        }
     }
 }
 

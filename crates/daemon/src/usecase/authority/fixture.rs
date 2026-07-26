@@ -148,12 +148,7 @@ impl RegistryFile for Arc<MemoryRegistryFile> {
 
 /// A registry over a fresh in-memory document, with the file kept for
 /// inspection.
-pub fn registry(
-    limit: usize,
-) -> (
-    GenerationRegistry<Arc<MemoryRegistryFile>>,
-    Arc<MemoryRegistryFile>,
-) {
+pub fn registry(limit: usize) -> (GenerationRegistry, Arc<MemoryRegistryFile>) {
     let file = MemoryRegistryFile::shared();
     (GenerationRegistry::new(Arc::clone(&file), limit), file)
 }

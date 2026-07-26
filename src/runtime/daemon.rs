@@ -44,16 +44,28 @@ use usagi_core::usecase::client::{
     MonotonicClock, PolicyClient,
 };
 use usagi_core::usecase::client::{DaemonRequest, DispatchToolAction, SupervisorToolAction};
+use usagi_daemon::infrastructure::child_identity::UnixChildProbe;
+use usagi_daemon::infrastructure::generation_registry::{
+    CurrentLocatorFile, GenerationRegistryFile,
+};
 use usagi_daemon::infrastructure::pty::PtyTerminal;
 use usagi_daemon::infrastructure::unix_transport::{
-    EndpointCleanup, SecureUnixListener, ensure_private_dir, ensure_private_dir_all, peer_pid,
-    read_locator, retire_stale_current,
+    EndpointCleanup, EndpointLocator, SecureUnixListener, ensure_private_dir,
+    ensure_private_dir_all, peer_pid, read_locator, retire_stale_current,
 };
 use usagi_daemon::presentation::{DaemonCommand as PresentationDaemonCommand, DaemonEnv};
 use usagi_daemon::usecase::agent_ipc::{
     AgentRuntime, AgentTerminalActor, ResolvedAgentScope, ScopeResolveError, SessionScopeResolver,
     SharedTerminalOwner, TerminalOutcome,
 };
+use usagi_daemon::usecase::authority::activation::{
+    AuthorityClaim, claim_authority, release_authority,
+};
+use usagi_daemon::usecase::authority::handoff::{
+    LocatorObservation, PublishedLocator, RecoveryOutcome,
+};
+use usagi_daemon::usecase::authority::registry::{DEFAULT_GENERATION_LIMIT, GenerationRegistry};
+use usagi_daemon::usecase::authority::rollover::CurrentLocator;
 use usagi_daemon::usecase::claude::{
     ClaudeAdapter, ClaudeProvision, ClaudeProvisionFailure, ClaudeProvisioner, scoped_settings_json,
 };
@@ -61,7 +73,7 @@ use usagi_daemon::usecase::codex::{
     CodexAdapter, CodexProvision, CodexProvisionFailure, CodexProvisioner,
 };
 use usagi_daemon::usecase::custody::{Custody, CustodyProbe, NodeIdentity};
-use usagi_daemon::usecase::generation::ProcessIdentity;
+use usagi_daemon::usecase::generation::{ProcessIdentity, ProcessObservation};
 use usagi_daemon::usecase::generic_terminal::{
     GenericPtySpawner, TerminalProfileResolver, TerminalStore, TerminalStoreSnapshot,
 };
@@ -77,11 +89,12 @@ use usagi_daemon::usecase::replacement::{
     LiveResources, ResourceCensus, SeamlessRefusal, TransitionMode, census_of, manual_operation_id,
     seamless_refusal,
 };
+use usagi_daemon::usecase::resources::identity::ChildProcessProbe;
 use usagi_daemon::usecase::runtime::{
     OutputJournal, ProvisionContext, PtySpawner, RuntimeStore, RuntimeStoreSnapshot,
     SandboxLauncher, SpawnProvision, TerminateReapError,
 };
-use usagi_daemon::usecase::serve::DaemonRecordPort;
+use usagi_daemon::usecase::serve::{DaemonRecordPort, GenerationAuthority};
 use usagi_daemon::usecase::session_runtime::{
     SessionRuntime, SessionRuntimeError, SharedSessionTeardown, SystemGit, WorktreeTeardown,
     perform_create, perform_remove,
@@ -1560,7 +1573,10 @@ fn bind_ipc_listener(
             .as_str()
             .clone(),
     );
-    let listener = SecureUnixListener::bind(data_dir, generation.clone())?;
+    // Bound, not published: the endpoint has to be *accepting* before the
+    // registry may name it, and it must not be *discoverable* until it does.
+    // `serve` publishes `current` afterwards, through the generation authority.
+    let listener = SecureUnixListener::bind_private(data_dir, generation.clone())?;
     Ok((listener, generation))
 }
 
@@ -5117,6 +5133,35 @@ impl IpcReady<'_> {
         Ok(())
     }
 
+    /// The generation and endpoint this process bound, once it has bound one.
+    ///
+    /// It is read from the retained cleanup token rather than recomputed, so the
+    /// durable registry entry, the published locator, and the socket that is
+    /// actually accepting can only ever be the same generation.
+    fn bound_endpoint(&self) -> Option<EndpointLocator> {
+        self.cleanup
+            .borrow()
+            .as_ref()
+            .map(|cleanup| cleanup.locator().clone())
+    }
+
+    /// Publish this generation's endpoint as `current`.
+    ///
+    /// The owner publishes through its own cleanup token, which re-verifies the
+    /// socket's identity inside the locator lock — a locator naming a socket that
+    /// was replaced between bind and publication is refused rather than written.
+    fn publish_current(&self) -> std::io::Result<()> {
+        self.cleanup.borrow().as_ref().map_or_else(
+            || {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "daemon endpoint is not bound",
+                ))
+            },
+            EndpointCleanup::publish,
+        )
+    }
+
     /// Retires this daemon's published endpoint artifacts.
     ///
     /// A daemon that lost custody because its data directory was deleted has
@@ -5253,6 +5298,170 @@ impl StaleDaemonCleanup for IpcReady<'_> {
 impl Drop for IpcReady<'_> {
     fn drop(&mut self) {
         let _ = DaemonReady::retire(self);
+    }
+}
+
+/// The current locator, as the generation that owns the endpoint publishes it.
+///
+/// Publishing is not one operation with one implementation: the owner proves its
+/// *own* socket inside the locator lock through the bind-time cleanup token,
+/// while a recovering process that republishes on behalf of another generation
+/// has to re-verify that generation's socket from the filesystem. Routing the two
+/// cases here keeps [`claim_authority`] free of the distinction — it publishes a
+/// [`PublishedLocator`], and the adapter knows which proof applies.
+struct OwnedCurrentLocator<'a> {
+    data_dir: &'a Path,
+    ready: &'a IpcReady<'a>,
+}
+
+impl OwnedCurrentLocator<'_> {
+    fn file(&self) -> CurrentLocatorFile {
+        CurrentLocatorFile::new(self.data_dir)
+    }
+}
+
+impl CurrentLocator for OwnedCurrentLocator<'_> {
+    fn read(&self) -> std::io::Result<LocatorObservation> {
+        self.file().read()
+    }
+
+    fn publish(&self, locator: &PublishedLocator) -> std::io::Result<()> {
+        let owned = self
+            .ready
+            .bound_endpoint()
+            .is_some_and(|bound| bound.generation.0 == locator.generation.as_str());
+        if owned {
+            self.ready.publish_current()
+        } else {
+            self.file().publish(locator)
+        }
+    }
+
+    fn retire(&self) -> std::io::Result<()> {
+        self.file().retire()
+    }
+}
+
+/// This daemon's participation in the durable generation registry.
+///
+/// It is the composition of three durable objects the pure authority
+/// ([`usagi_daemon::usecase::authority::activation`]) drives: the registry
+/// document, the current locator, and the OS process table that says whether a
+/// recorded authority is still alive.
+///
+/// The generation it claimed is remembered here rather than re-read on the way
+/// out, because endpoint retirement drops the cleanup token that named it — and
+/// the release must still be able to say *which* generation is giving up.
+struct RegistryAuthority<'a> {
+    data_dir: &'a Path,
+    ready: &'a IpcReady<'a>,
+    build: BuildIdentity,
+    pid: u32,
+    claimed: RefCell<Option<usagi_core::domain::id::DaemonGeneration>>,
+}
+
+impl RegistryAuthority<'_> {
+    fn registry(&self) -> std::io::Result<GenerationRegistry> {
+        Ok(GenerationRegistry::new(
+            GenerationRegistryFile::new(self.data_dir)?,
+            DEFAULT_GENERATION_LIMIT,
+        ))
+    }
+}
+
+impl GenerationAuthority for RegistryAuthority<'_> {
+    fn claim(&self) -> std::io::Result<()> {
+        let bound = self.ready.bound_endpoint().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "daemon endpoint must be bound before claiming generation authority",
+            )
+        })?;
+        let generation = usagi_core::domain::id::DaemonGeneration::parse(&bound.generation.0)
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "bound endpoint does not name a canonical daemon generation",
+                )
+            })?;
+        let process = own_process_identity(self.pid)?;
+        let claimed = claim_authority(
+            &self.registry()?,
+            &OwnedCurrentLocator {
+                data_dir: self.data_dir,
+                ready: self.ready,
+            },
+            &AuthorityClaim {
+                generation,
+                endpoint: &bound.endpoint,
+                process: &process,
+                build: &self.build,
+            },
+            &mut observe_generation_process,
+        )?;
+        // A start that had to reconcile something is a diagnosable event: an
+        // abandoned handoff, a repaired locator, or an authority that had to be
+        // failed closed all say a previous incarnation did not exit cleanly.
+        if claimed.recovery != RecoveryOutcome::Consistent {
+            ErrorLog::record(&format!(
+                "daemon generation recovery before activation: {:?}",
+                claimed.recovery
+            ));
+        }
+        *self.claimed.borrow_mut() = Some(generation);
+        Ok(())
+    }
+
+    fn release(&self) -> std::io::Result<()> {
+        let Some(generation) = *self.claimed.borrow() else {
+            return Ok(());
+        };
+        release_authority(&self.registry()?, generation).map_err(std::io::Error::other)
+    }
+}
+
+/// This process's own OS-observed identity, as the registry records it.
+///
+/// Both fields come from the process table rather than from the PID: a recorded
+/// authority is only ever re-verified by comparing them, and a PID alone cannot
+/// tell a reused PID from the original process.
+///
+/// The start identity is deliberately the *daemon's own* token — the same one
+/// `daemon.json` carries — rather than the child-probe spelling. One process must
+/// not describe its start time two ways, or a comparison against the registry
+/// would fail for a process that is plainly alive. Only the process group, which
+/// the daemon record has no field for, is read through the child probe.
+fn own_process_identity(pid: u32) -> std::io::Result<ProcessIdentity> {
+    Ok(ProcessIdentity {
+        pid,
+        start_identity: process_start_identity(pid)?,
+        process_group: ChildProcessProbe::process_group(&UnixChildProbe, pid)?,
+    })
+}
+
+/// Whether a recorded generation process is still exactly the process recorded.
+///
+/// An identity that does not match is `Unknown` rather than `Gone`: the PID is
+/// live, so nothing about the recorded owner has been proved either way. Only an
+/// absent process is `Gone`, and only `Gone` lets recovery retire an authority.
+fn observe_generation_process(process: &ProcessIdentity) -> ProcessObservation {
+    if process.start_identity.is_empty() {
+        return ProcessObservation::Unknown;
+    }
+    match process_start_identity(process.pid) {
+        // The PID names a live process: either the recorded owner, or a different
+        // incarnation that reused the PID — which proves nothing about the owner.
+        Ok(identity) => {
+            if identity == process.start_identity {
+                ProcessObservation::VerifiedAlive(process.clone())
+            } else {
+                ProcessObservation::Unknown
+            }
+        }
+        // Only an absent process is proof the owner is gone. An unreadable
+        // process table is uncertainty, and uncertainty never retires anything.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ProcessObservation::Gone,
+        Err(_) => ProcessObservation::Unknown,
     }
 }
 
@@ -5673,11 +5882,19 @@ fn run_inner(
     let census = DurableResourceCensus {
         daemon_dir: daemon_dir.clone(),
     };
+    let authority = RegistryAuthority {
+        data_dir: &data_dir,
+        ready: &ready,
+        build: current_build(),
+        pid,
+        claimed: RefCell::new(None),
+    };
     let env = DaemonEnv {
         store: &store,
         probe: &ExactProcessControl,
         terminator: &SigtermTerminator,
         ready: &ready,
+        authority: &authority,
         shutdown: &shutdown,
         launcher: &launcher,
         sleeper: &RealSleeper,
@@ -6565,6 +6782,23 @@ mod tests {
         }
 
         fn retire(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A generation authority that takes no authority at all.
+    ///
+    /// The pre-registration recovery cases below never reach a bound endpoint, so
+    /// there is nothing for a real authority to claim; this keeps those cases
+    /// about the record and endpoint fence they are testing.
+    struct NoGenerationAuthority;
+
+    impl GenerationAuthority for NoGenerationAuthority {
+        fn claim(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn release(&self) -> std::io::Result<()> {
             Ok(())
         }
     }
@@ -7463,13 +7697,21 @@ mod tests {
         let socket = RefCell::new(None);
         let ready = fresh_ipc_ready(data, &info);
 
+        let unsafe_locator_lock = |daemon: &Path| -> std::io::Result<()> {
+            let lock = daemon.join("current.lock");
+            if !lock.exists() {
+                std::fs::write(&lock, b"")?;
+            }
+            std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644))
+        };
+
         let error = ready
             .publish_with(|listener, _generation| {
                 *socket.borrow_mut() = Some(daemon.join(&listener.locator().endpoint));
-                std::fs::set_permissions(
-                    daemon.join("current.lock"),
-                    std::fs::Permissions::from_mode(0o644),
-                )?;
+                // Break the locator lock so the listener's own `Drop` cannot
+                // reclaim this endpoint: the retained cleanup token has to remain
+                // the only retry path.
+                unsafe_locator_lock(&daemon)?;
                 Err(std::io::Error::other("injected post-bind startup failure"))
             })
             .unwrap_err();
@@ -7477,7 +7719,23 @@ mod tests {
         assert!(ready.cleanup.borrow().is_some());
         assert!(ready.publication_attempted.load(Ordering::Acquire));
         assert!(socket.borrow().as_ref().unwrap().exists());
+        // Binding is not publishing: a startup that failed before the generation
+        // authority ran leaves nothing for a client to discover.
+        assert!(!daemon.join("current.json").exists());
+
+        std::fs::set_permissions(
+            daemon.join("current.lock"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        // Once published, an unreadable locator lock keeps retirement retryable
+        // rather than letting the endpoint look cleanly reclaimed.
+        ready.publish_current().unwrap();
         assert!(daemon.join("current.json").exists());
+        unsafe_locator_lock(&daemon).unwrap();
+        assert!(ready.retire().is_err());
+        assert!(ready.cleanup.borrow().is_some());
+        assert!(socket.borrow().as_ref().unwrap().exists());
 
         std::fs::set_permissions(
             daemon.join("current.lock"),
@@ -7488,6 +7746,204 @@ mod tests {
         assert!(ready.cleanup.borrow().is_none());
         assert!(!socket.borrow().as_ref().unwrap().exists());
         assert!(!daemon.join("current.json").exists());
+    }
+
+    /// A registry authority over a real data directory, bound to `ready`.
+    fn registry_authority<'a>(
+        data_dir: &'a Path,
+        ready: &'a IpcReady<'a>,
+    ) -> RegistryAuthority<'a> {
+        RegistryAuthority {
+            data_dir,
+            ready,
+            build: current_build(),
+            pid: std::process::id(),
+            claimed: RefCell::new(None),
+        }
+    }
+
+    /// The durable registry document, which must exist by the time this is read.
+    fn registry_document(
+        data_dir: &Path,
+    ) -> usagi_daemon::usecase::authority::registry::RegistryDocument {
+        usagi_daemon::infrastructure::generation_registry::read_registry_document(data_dir)
+            .unwrap()
+            .expect("the daemon registered a generation")
+    }
+
+    #[test]
+    fn claiming_authority_registers_this_generation_and_then_publishes_current() {
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let info = daemon_test_info();
+        let listener = SecureUnixListener::bind_private(data, ipc_generation()).unwrap();
+        let generation = listener.locator().generation.clone();
+        let ready = fresh_ipc_ready(data, &info);
+        *ready.cleanup.borrow_mut() = Some(listener.cleanup_handle());
+        let authority = registry_authority(data, &ready);
+
+        // A bound endpoint is not yet discoverable.
+        assert!(read_locator(&data.join("daemon")).is_err());
+
+        authority.claim().unwrap();
+
+        let document = registry_document(data);
+        assert_eq!(
+            document.current.map(|current| current.as_str()),
+            Some(generation.0.clone())
+        );
+        let entry = document.generations.first().unwrap();
+        assert_eq!(
+            entry.role,
+            usagi_daemon::usecase::generation::GenerationRole::Active
+        );
+        assert_eq!(entry.endpoint, listener.locator().endpoint);
+        assert_eq!(entry.process.pid, std::process::id());
+        // Only now is the endpoint discoverable, and by exactly the generation
+        // the registry named.
+        assert_eq!(
+            read_locator(&data.join("daemon")).unwrap().generation,
+            generation
+        );
+
+        // A repeated claim converges instead of consuming a second slot.
+        authority.claim().unwrap();
+        assert_eq!(registry_document(data).generations.len(), 1);
+
+        authority.release().unwrap();
+        assert_eq!(registry_document(data).current, None);
+        // Releasing an authority that is already given up is not a failure.
+        authority.release().unwrap();
+    }
+
+    #[test]
+    fn claiming_authority_before_binding_is_refused_without_touching_the_registry() {
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let info = daemon_test_info();
+        let ready = fresh_ipc_ready(data, &info);
+        let authority = registry_authority(data, &ready);
+
+        assert_eq!(
+            authority.claim().unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            usagi_daemon::infrastructure::generation_registry::read_registry_document(data),
+            Ok(None)
+        );
+        // Nothing was claimed, so there is nothing to release either.
+        authority.release().unwrap();
+    }
+
+    #[test]
+    fn a_non_canonical_bound_generation_is_refused_before_the_registry_is_written() {
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let info = daemon_test_info();
+        let listener = SecureUnixListener::bind_private(
+            data,
+            usagi_core::infrastructure::ipc::DaemonGeneration("not-a-generation".to_owned()),
+        )
+        .unwrap();
+        let ready = fresh_ipc_ready(data, &info);
+        *ready.cleanup.borrow_mut() = Some(listener.cleanup_handle());
+        let authority = registry_authority(data, &ready);
+
+        assert_eq!(
+            authority.claim().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            usagi_daemon::infrastructure::generation_registry::read_registry_document(data),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn a_live_registered_authority_is_repaired_rather_than_displaced() {
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let info = daemon_test_info();
+        let daemon = data.join("daemon");
+
+        // A generation whose recorded process is this very test binary: the
+        // recovery below can therefore prove it alive.
+        let holder_listener = SecureUnixListener::bind_private(data, ipc_generation()).unwrap();
+        let holder = holder_listener.locator().clone();
+        let holder_ready = fresh_ipc_ready(data, &info);
+        *holder_ready.cleanup.borrow_mut() = Some(holder_listener.cleanup_handle());
+        registry_authority(data, &holder_ready).claim().unwrap();
+        // Drop only the published locator, leaving the holder's endpoint bound and
+        // the registry as the only surviving statement of authority.
+        std::fs::remove_file(daemon.join("current.json")).unwrap();
+        assert!(read_locator(&daemon).is_err());
+
+        let listener = SecureUnixListener::bind_private(data, ipc_generation()).unwrap();
+        let ready = fresh_ipc_ready(data, &info);
+        *ready.cleanup.borrow_mut() = Some(listener.cleanup_handle());
+
+        let error = registry_authority(data, &ready).claim().unwrap_err();
+
+        assert!(
+            error.to_string().contains("still holds registry authority"),
+            "{error}"
+        );
+        // Recovery republished the live holder's own locator — the foreign-owner
+        // publication path — and this process's endpoint was never published.
+        assert_eq!(read_locator(&daemon).unwrap().generation, holder.generation);
+        assert_eq!(registry_document(data).generations.len(), 1);
+    }
+
+    #[test]
+    fn a_generation_process_is_only_verified_by_its_exact_recorded_identity() {
+        let pid = std::process::id();
+        let live = own_process_identity(pid).unwrap();
+        assert_eq!(
+            observe_generation_process(&live),
+            ProcessObservation::VerifiedAlive(live.clone())
+        );
+
+        let reused = ProcessIdentity {
+            start_identity: "another-incarnation".to_owned(),
+            ..live.clone()
+        };
+        assert_eq!(
+            observe_generation_process(&reused),
+            ProcessObservation::Unknown
+        );
+
+        let legacy = ProcessIdentity {
+            start_identity: String::new(),
+            ..live.clone()
+        };
+        assert_eq!(
+            observe_generation_process(&legacy),
+            ProcessObservation::Unknown
+        );
+
+        // A PID far above the OS maximum names no process at all.
+        let absent = ProcessIdentity {
+            pid: 2_000_000_000,
+            ..live
+        };
+        assert_eq!(
+            observe_generation_process(&absent),
+            ProcessObservation::Gone
+        );
+    }
+
+    #[test]
+    fn publishing_current_before_binding_is_refused() {
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let info = daemon_test_info();
+        let ready = fresh_ipc_ready(directory.path(), &info);
+
+        assert_eq!(
+            ready.publish_current().unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert!(ready.bound_endpoint().is_none());
     }
 
     #[test]
@@ -8046,6 +8502,7 @@ mod tests {
                     &mut Vec::new(),
                     &store,
                     &recovery,
+                    &NoGenerationAuthority,
                     &ImmediateTestShutdown,
                     &AcquiredWorkspaceFence,
                     &lock,
@@ -8076,6 +8533,7 @@ mod tests {
                 &mut Vec::new(),
                 &store,
                 &recovery,
+                &NoGenerationAuthority,
                 &ImmediateTestShutdown,
                 &AcquiredWorkspaceFence,
                 &lock,

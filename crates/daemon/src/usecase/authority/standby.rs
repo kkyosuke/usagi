@@ -22,7 +22,7 @@ use usagi_core::infrastructure::ipc::{
 };
 
 use crate::usecase::authority::registry::{
-    GenerationRegistry, RegistryError, RegistryFailure, RegistryFile, RegistrySnapshot,
+    GenerationRegistry, RegistryError, RegistryFailure, RegistrySnapshot,
 };
 use crate::usecase::generation::ProcessIdentity;
 
@@ -161,8 +161,8 @@ pub fn verify_readiness(
 /// # Errors
 /// Returns the registry refusal, the probe's IO error, or the readiness
 /// refusal. In every case the active generation and the locator are unchanged.
-pub fn prepare_standby<F: RegistryFile>(
-    registry: &GenerationRegistry<F>,
+pub fn prepare_standby(
+    registry: &GenerationRegistry,
     probe: &dyn StandbyProbe,
     generation: DaemonGeneration,
     endpoint: &str,

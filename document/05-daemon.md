@@ -208,6 +208,21 @@ lock を取得できない replacement は ready hook に到達しないため s
 snapshot と operation ID を使って再接続する。再送された create は durable operation journal で照合し、worktree
 effect を二重に実行しない。
 
+endpoint の公開は **bind** と **claim** の 2 段である。bind は endpoint を *応答する* 状態にし
+（generation directory と socket を作るが `current.json` は書かない）、claim は
+[durable registry](#durable-registry) へ自分の generation を単一の active として登録してから
+`current.json` を publish する。つまり endpoint が *発見可能* になるのは claim の後だけである。この順序が
+2 つの不変条件を与える。
+
+| 不変条件 | 破れた場合に起きること |
+|---|---|
+| registry entry は必ず accept 済みの endpoint を名指す | client が registry から解決した endpoint に到達できない |
+| published locator は必ず registry が知る generation を名指す | registry を読む client には active が居ないように見える |
+
+claim の契約と crash boundary は
+[first activation](#first-activation) が正本である。claim に失敗した `serve` は locator を publish して
+いないため、通常の startup failure として endpoint を retire し record を消去して終了する。
+
 `serve` は singleton lock 取得後、旧 lifecycle record を snapshot し、record の有無にかかわらず stale endpoint recovery を
 新 record の保存より先に完了する。recovery 後に record が snapshot と exact 一致することを再確認し、その場合だけ新 incarnation へ
 atomic save して publish する。recovery failure または concurrent record replacement では旧 record / replacement を上書きせず、
@@ -236,9 +251,14 @@ shutdown signal
   -> accept loop を join（listener ownership を回収）
   -> 既接続 client worker は shutdown / join しない（現行制約）
   -> owner generation の socket / current locator をこの順に retire
+  -> registry の自 generation を retired にして authority を返却
   -> 自 incarnation と一致する場合だけ daemon.json を消去
   -> daemon.lock を process exit で解放
 ```
+
+authority の返却は locator retirement の**後**である。逆順にすると「registry が知らない `current` が
+publish されている」瞬間ができ、後続 start の recovery がそれを fail closed の対象と読む。endpoint
+retirement に失敗した場合は authority を返却せず、`daemon.json` を completion fence として残す。
 
 `daemon.json` は endpoint retirement の completion fence である。`status` / `start` / `stop` / `restart` と
 ordinary client bootstrap の stale recovery は、record の有無と exact process 観測から成る次の 1 つの判定表を共有する。
@@ -336,18 +356,22 @@ seamless rollover は old process を draining generation として生かした�
 replacement 後も維持する。2 process を安全に運用する authority は
 [cross-process generation authority](#cross-process-generation-authority) と
 [owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
-に実装済みだが、現在の build には authority を渡す先の standby process を起動する lifecycle が無い。
-`serve` は process lifetime にわたり単一インスタンス lock を保持し、durable runtime state は
-process-local な whole-snapshot store だからである。seamless refusal は registry を読み、
-欠けている前提を名前で示す。
+に実装済みで、authority を**渡す元**（active generation）も `serve` が registry へ登録している
+（[first activation](#first-activation)）。まだ無いのは authority を**渡す先**の standby process を
+起動する lifecycle であり、`serve` が process lifetime にわたり単一インスタンス lock を保持するためである。
+seamless refusal は registry を読み、欠けている前提を名前で示す。
 
 | refusal | 意味 |
 |---|---|
-| `no generation registry` | registry が存在しない。authority を渡す先の generation が一つも登録されていない |
+| `no generation registry` | registry が存在しない。この data directory で daemon が一度も起動していない状態だけがこれに該当する |
 | `registry schema unsupported` | registry がこの build の書く schema ではない |
 | `registry unreadable` | registry を読めない / parse できない。fail closed |
-| `no verified standby` | readiness 後に artifact identity を検証済みの standby が居ない |
+| `no verified standby` | readiness 後に artifact identity を検証済みの standby が居ない。**稼働中 daemon に対する現在の答えはこれである** |
 | `standby not admitted` | 検証済み standby は居るが、この build には serve 中の standby を admit する lifecycle が無い |
+
+registry へ登録された active generation 自身は standby として数えない。`verified_build` は
+「その generation の hello がこの artifact を証明した」という意味であり、active は standby role を抜けた
+generation なので、seamless の successor 候補にはならない。
 
 残るのは cold transition であり、cold transition は old daemon が持つ PTY をすべて破棄する。
 そこで transition は次の 3 通りに分かれる。
@@ -388,7 +412,7 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `record.lock` | lock file | `daemon.json` の read、save、incarnation-conditional clear を cross-process で直列化する |
 | `current.lock` | lock file | current locator の publish と generation-fenced retire を cross-process で直列化する |
 | `current.json` | private atomic JSON locator | active daemon generation の Unix socket endpoint を公開する。安全な publication の正本は [4. IPC の Unix transport](04-ipc.md#unix-transport) |
-| `generations.json` | durable atomic JSON | cross-process generation registry。schema、document revision、各 generation の role / endpoint / process identity / expected・verified artifact、進行中 handoff を持つ（[cross-process generation authority](#cross-process-generation-authority)） |
+| `generations.json` | durable atomic JSON | cross-process generation registry。schema、document revision、各 generation の role / endpoint / process identity / expected・verified artifact、進行中 handoff を持つ。`serve` は起動時に自分を単一 active として登録し、終了時に返却する（[first activation](#first-activation)） |
 | `generations.lock` | lock file | `generations.json` の read・compare-and-swap を cross-process で直列化する |
 | `allocations.json` | durable atomic JSON | global resource allocator。resource claim（owner generation・kind・capacity pool・producer operation・semantic digest・state・revision）、producer launch operation の full outcome、compact tombstone、consume ledger、expiry watermark を持つ（[owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)） |
 | `allocations.lock` | lock file | `allocations.json` の read・compare-and-swap を cross-process で直列化する |
@@ -456,7 +480,7 @@ authority は、この 2 つの snapshot とは別の durable object（`shards/<
 [owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
 が正本である。shipping `serve` はまだ `terminals.json` / `agents.json` の single-writer store を使い、shard /
 allocator を駆動しない。統合は
-[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) が担う。
+[#562](../.usagi/issues/562-refactor-daemon-durable-runtime-state-owner-shard-global-allocator.md) が担う。
 
 daemon restart 時は `agents.json` と `terminals.json` を spawn admission より前に読む。Agent runtime は
 coordinator、semantic operation ledger、safe outcome を hydrate する。両 snapshot の未終端 runtime は
@@ -1106,8 +1130,12 @@ TUI は最新 snapshot を workspace の左ペイン下部にある v1 互換の
 ## cross-process generation authority
 
 2 つの daemon process が一時的に共存する planned restart の前提となる authority である。本節がその契約の正本で、
-process 内 1 世代の fence（[generation と orphan safety](#generation-と-orphan-safety)）とは別物である。shipping
-`serve` はまだこの authority を駆動しない（[planned replacement](#planned-replacement)）。統合は
+process 内 1 世代の fence（[generation と orphan safety](#generation-と-orphan-safety)）とは別物である。
+
+shipping `serve` はこの authority のうち **first activation** を駆動する。自分の generation を registry の
+単一 active として登録し、`current.json` を publish し、正常終了時に返却する。standby の登録・readiness・
+handoff の駆動はまだ行わない（[planned replacement](#planned-replacement)）。standby lifecycle は
+[#561](../.usagi/issues/561-refactor-daemon-serve-role-aware-standby-process.md)、rollover の有効化は
 [#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) が担う。
 
 ### durable registry
@@ -1128,6 +1156,40 @@ standby ──▶ active ──▶ draining ──▶ retired
 `standby` は known な expected artifact を宣言した場合だけ slot を取れる。同一 identity の再登録は idempotent で、
 lost ACK の再試行が 2 つ目の slot を消費しない。retained generation は最大 2（draining 1 + active 1）であり、
 繰り返しの rollover が process を増やさない。
+
+### first activation
+
+registry に retained generation が 1 つも無い状態から、`serve` が自分を単一の active にする経路である。
+handoff ではない: 移譲元も移譲先も無く、observable に動かす role も無いので、
+[standby readiness](#standby-readiness) を経由せず 1 回の compare-and-swap で
+「active はちょうど 1 つ、`current` がそれを名指す」を確立する。artifact を証明する相手が自分自身なので、
+cross-process standby が必要とする第三者の hello は要らない。
+
+write 順序は [handoff protocol](#handoff-protocol) の `from` が無い版であり、crash boundary の意味も同じ枠組みで読める。
+
+```text
+W1  registry CAS   この generation が active、current = それ
+W2  locator write  current.json がこの generation の endpoint を名指す
+```
+
+| crash 位置 | durable state | 次の start の挙動 |
+|---|---|---|
+| W1 より前 | registry entry も locator も無い | 通常どおり activation する |
+| W1..W2 | active が死んだ process を名指す、locator 無し | authority を証明できないので fail closed（entry を retire、`current` を空に） |
+| W2 の後 | active が死んだ process を名指す、locator がそれを名指す | 同じく fail closed し、locator も retire する |
+
+activation の前には必ず recovery が走る（[handoff protocol](#handoff-protocol) の recovery 表）。
+生存を証明できる active が既に居る registry は handoff protocol の領分なので、activation は
+`authority_retained` で**effect zero に拒否**する。この拒否は、単一インスタンス lock を取れた process が
+それでも registry 上の authority を奪わないことを保証する。
+
+前 incarnation が残した `retired` entry は同じ CAS で捨てる。retired generation は client から見て既に
+addressable でない（[4. IPC の owner generation routing](04-ipc.md#owner-generation-routing)）ため、record を残しても
+新しい事実を述べず、restart 1 回ごとに document を 1 entry 太らせるだけである。
+
+artifact identity が unknown な build も activation できる。`verified_build` は「hello がこの artifact を
+証明した」という意味なので、比較不能な identity は unknown のまま記録する。その generation は serve するが、
+rollover の successor にはならない。
 
 ### standby readiness
 
@@ -1209,11 +1271,19 @@ current locator、admission barrier、全 PTY は元のままである。
 client 側の routing 契約は [4. IPC の owner generation routing](04-ipc.md#owner-generation-routing) が正本である。
 capability は connection 単位で記録するため、旧 build の client が切断すれば refusal は解け、同じ client が
 新しい build で再接続すれば自分の答えを更新する。この gate は実装済みだが、それを駆動する shipping の
-`daemon restart` はまだ存在しない（[daemon process lifecycle](#daemon-process-lifecycle)）。
+`daemon restart` はまだ存在しない（[planned replacement](#planned-replacement)）。
+
+**この gate は client の広告を根拠に判断する。** shipping の client は
+`owner-generation-routing.v1` を広告しているが、合成ルートと TUI はまだ owner generation で routing しない。
+広告と実装を一致させるのは
+[#560](../.usagi/issues/560-feat-tui-client-ownerrouter-owner-generation-routing.md) であり、rollover の有効化
+（[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md)）はそれを前提条件に持つ。
 
 ### legacy migration
 
-registry を持たない `daemon.json` + `current.json` の状態は、record が exact な OS process
+`serve` は起動時に自分の generation を登録するため（[first activation](#first-activation)）、稼働中の daemon が
+registry を持たないことはない。この migration は、registry を書かない build が残した data directory を
+この build が引き継ぐ場合の経路である。registry を持たない `daemon.json` + `current.json` の状態は、record が exact な OS process
 （`DaemonProcessObservation::Exact`）を指し、かつ locator が読めて endpoint を名指ししている場合だけ active 1 件へ移行する。
 process identity を持たない legacy record、PID 再利用、観測不能、locator の欠落・破損はいずれも fail-closed で、
 所有者を推測しない。移行した entry は expected artifact が unknown なので、handoff の**移譲元にはなれるが移譲先にはならない**。
@@ -1225,7 +1295,7 @@ shard** に分け、capacity と producer operation の authority を **1 つの
 契約の正本で、[cross-process generation authority](#cross-process-generation-authority) が「どの generation が
 行動してよいか」を決めるのに対し、本節は「各 generation が何を所有できるか」を決める。shipping `serve` はまだ
 single-writer store（[daemon data directory](#daemon-data-directory)）を使い、この authority を駆動しない。統合は
-[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) が担う。
+[#562](../.usagi/issues/562-refactor-daemon-durable-runtime-state-owner-shard-global-allocator.md) が担う。
 
 ```text
 shards/<G1>.json   writer は G1 だけ ── outbox ──▶ allocations.json ──▶ G2 が consume
@@ -1392,7 +1462,11 @@ draining owner として維持する機構ではない。安全な landing order
 #515、[cross-process generation authority](#cross-process-generation-authority) と
 [owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
 を前提に、draining owner routing の
-[#508](../.usagi/issues/508-fix-tui-ipc-draining-generation-inventory-terminalref-owner-routing.md)、shipping lifecycle / final E2E の
+[#508](../.usagi/issues/508-fix-tui-ipc-draining-generation-inventory-terminalref-owner-routing.md)、active generation の registry 登録の
+[#568](../.usagi/issues/568-feat-daemon-serve-durable-generation-registry-active-generation.md)、standby lifecycle の
+[#561](../.usagi/issues/561-refactor-daemon-serve-role-aware-standby-process.md)、owner shard 移行の
+[#562](../.usagi/issues/562-refactor-daemon-durable-runtime-state-owner-shard-global-allocator.md)、client routing の
+[#560](../.usagi/issues/560-feat-tui-client-ownerrouter-owner-generation-routing.md)、shipping lifecycle / final E2E の
 [#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) の順である。standby serve・owner shard・client routing の production 配線が揃うまで
 seamless rollover は disabled であり、shipping の replacement は old active/current と live PTY を維持した
 typed refusal か明示的な cold transition になる（[planned replacement](#planned-replacement)）。

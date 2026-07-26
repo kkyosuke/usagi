@@ -635,6 +635,16 @@ impl SecureUnixListener {
 }
 
 impl EndpointCleanup {
+    /// The exact generation and endpoint this token owns.
+    ///
+    /// The composition root reads it to name the generation it registers in the
+    /// durable registry, so the registry entry and the locator always carry the
+    /// daemon's own single spelling of its endpoint.
+    #[must_use]
+    pub fn locator(&self) -> &EndpointLocator {
+        &self.locator
+    }
+
     /// Publishes this generation's locator, re-verifying the owned socket
     /// inside the locator lock.
     ///
@@ -854,6 +864,29 @@ pub fn retire_stale_current(data_dir: &Path) -> io::Result<()> {
     // exact comparison anyway so this function remains fail-closed if its
     // locking contract is accidentally weakened later.
     remove_locator_if_unchanged(&daemon, &locator)
+}
+
+/// Removes the published current locator, and nothing else.
+///
+/// This is retirement's locator half on its own, which is exactly what the
+/// authority protocol asks for when no generation may be named as `current`
+/// ([`crate::usecase::authority::handoff::RecoveryPlan::retire_locator`]).
+/// Sweeping generation endpoints as well — what [`retire_stale_current`] does —
+/// would let a process that is only giving up the locator delete a socket it does
+/// not own, including its own freshly bound one. Reclaiming an endpoint stays the
+/// job of the daemon that bound it, or of pre-bind stale recovery.
+///
+/// # Errors
+///
+/// Returns an error when the private daemon directory or the locator lock cannot
+/// be established, or when the locator cannot be removed. An absent locator is
+/// success.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=generation_registry_store
+pub fn remove_current_locator(data_dir: &Path) -> io::Result<()> {
+    let daemon = data_dir.join("daemon");
+    ensure_private_dir(&daemon)?;
+    let _lock = lock_locator(&daemon)?;
+    remove_file_if_present(&daemon.join("current.json"))
 }
 
 fn remove_locator_if_unchanged(daemon: &Path, locator: &EndpointLocator) -> io::Result<()> {

@@ -528,6 +528,117 @@ fn daemon_restart_initializes_a_private_endpoint_from_an_empty_data_dir() {
     stop_daemon(&home);
 }
 
+/// The shipping daemon registers itself in the durable generation registry, and
+/// the registry is what makes the published locator meaningful: `current.json`
+/// names an endpoint, `generations.json` says which generation owns it and that
+/// it holds authority. A rollover has nothing to hand authority *from* until both
+/// exist, which is why this is asserted on the real binary rather than a fixture.
+#[test]
+fn a_started_daemon_registers_its_generation_and_retires_it_on_stop() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let daemon_dir = home.data_dir().join("daemon");
+    let registry = daemon_dir.join("generations.json");
+
+    let start = home.run(&[OsStr::new("daemon"), OsStr::new("start")]);
+    assert!(start.status.success(), "{}", stderr(&start));
+    assert!(
+        wait_until(Duration::from_secs(15), || registry.is_file()
+            && daemon_dir.join("current.json").is_file()),
+        "daemon did not register a generation next to its locator"
+    );
+
+    let locator = read_locator(&daemon_dir).expect("a started daemon publishes a locator");
+    let document = registry_document(&registry);
+    let generations = document["generations"]
+        .as_array()
+        .expect("the registry lists generations");
+    assert_eq!(generations.len(), 1, "{document}");
+    let entry = &generations[0];
+    assert_eq!(document["current"], entry["generation"], "{document}");
+    assert_eq!(entry["role"], "active", "{document}");
+    // One spelling of the endpoint: the registry entry and the locator must name
+    // the same socket, or a client that resolved either would reach a different
+    // daemon than the other names.
+    assert_eq!(entry["endpoint"], locator.endpoint.as_str(), "{document}");
+    assert_eq!(
+        entry["generation"],
+        locator.generation.0.as_str(),
+        "{document}"
+    );
+    // The recorded process identity is the same token `daemon.json` carries, so a
+    // later start can prove whether this authority is still alive.
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(daemon_dir.join("daemon.json")).unwrap()).unwrap();
+    assert_eq!(
+        entry["process"]["start_identity"], record["process_start_identity"],
+        "{document}"
+    );
+
+    stop_daemon(&home);
+    // A clean stop gives the authority up rather than leaving a generation the
+    // next start would have to fail closed. The daemon releases it on its own way
+    // out, so the observable state is reached asynchronously.
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            let document = registry_document(&registry);
+            document["current"].is_null() && document["generations"][0]["role"] == "retired"
+        }),
+        "a stopped daemon kept its registry authority: {}",
+        registry_document(&registry)
+    );
+}
+
+/// A daemon that is restarted twice keeps the registry bounded: a retired
+/// generation is already unaddressable, so retaining its record forever would
+/// only grow the document one entry per restart.
+#[test]
+fn repeated_restarts_leave_exactly_one_registered_generation() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let registry = home.data_dir().join("daemon/generations.json");
+    let mut generations = Vec::new();
+
+    for _ in 0..3 {
+        let restart = home.run(&[OsStr::new("daemon"), OsStr::new("restart")]);
+        assert!(restart.status.success(), "{}", stderr(&restart));
+        let previous = generations.last().cloned();
+        assert!(
+            wait_until(Duration::from_secs(15), || {
+                registry.is_file() && {
+                    let current = registry_document(&registry)["current"].clone();
+                    !current.is_null() && Some(&current) != previous.as_ref()
+                }
+            }),
+            "restart did not register a new active generation"
+        );
+        let document = registry_document(&registry);
+        // Exactly one entry, restart after restart: a retired generation is
+        // already unaddressable, so keeping its record would only grow the
+        // document once per restart forever.
+        assert_eq!(
+            document["generations"].as_array().map(Vec::len),
+            Some(1),
+            "{document}"
+        );
+        generations.push(document["current"].clone());
+    }
+
+    generations.dedup();
+    assert_eq!(generations.len(), 3, "each restart is a new generation");
+    stop_daemon(&home);
+}
+
+/// The durable registry document, read as the daemon wrote it.
+fn registry_document(path: &Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(path).expect("the registry document exists"))
+        .expect("the registry document is JSON")
+}
+
 /// A daemon is started detached, so nothing reaps it when its launcher dies
 /// abnormally. Removing its single-instance lock takes away its custody of the
 /// data directory, and it must then exit on its own through the ordinary

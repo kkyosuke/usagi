@@ -259,8 +259,11 @@ impl CurrentLocator for CurrentLocatorFile {
         )
     }
 
+    /// Only the locator is removed. A generation's endpoint is its owner's to
+    /// reclaim, and a recovering process that gives up `current` may still be
+    /// sharing the data directory with a daemon that has bound one.
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=generation_registry_store
     fn retire(&self) -> io::Result<()> {
-        crate::infrastructure::unix_transport::retire_stale_current(&self.data_dir)
+        crate::infrastructure::unix_transport::remove_current_locator(&self.data_dir)
     }
 }

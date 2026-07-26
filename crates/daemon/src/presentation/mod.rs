@@ -51,8 +51,11 @@ pub struct DaemonEnv<'a, F, P, T, R, S, L, K, M, W> {
     pub probe: &'a P,
     /// 稼働中 daemon への終了要求（signal）。
     pub terminator: &'a T,
-    /// `serve` が exact owner record 登録後に IPC endpoint を公開する ready hook。
+    /// `serve` が exact owner record 登録後に IPC endpoint を bind する ready hook。
     pub ready: &'a R,
+    /// `serve` が endpoint 応答後に durable generation registry の authority を
+    /// 取得・返却する hook。locator の公開はこの authority が行う。
+    pub authority: &'a dyn usecase::serve::GenerationAuthority,
     /// `serve` が shutdown まで待つための待受。
     pub shutdown: &'a S,
     /// `start` が detached `serve` を spawn するための起動器。
@@ -109,6 +112,7 @@ pub fn run<
             out,
             env.store,
             env.ready,
+            env.authority,
             env.shutdown,
             env.workspace,
             env.lock,
@@ -161,8 +165,8 @@ pub fn run<
 mod tests {
     use super::{DaemonCommand, DaemonEnv, run};
     use crate::test_support::{
-        FakeLock, FakeWorkspaceFence, FixedProbe, ImmediateShutdown, InMemoryRecordFile, NoopReady,
-        NoopSleeper, RecordingTerminator, TestLauncher,
+        FakeAuthority, FakeLock, FakeWorkspaceFence, FixedProbe, ImmediateShutdown,
+        InMemoryRecordFile, NoopReady, NoopSleeper, RecordingTerminator, TestLauncher,
     };
     use crate::usecase::replacement::{
         LiveResources, ResourceCensus, SeamlessRefusal, TransitionMode,
@@ -214,6 +218,7 @@ mod tests {
         let launcher = TestLauncher::idle(store);
         let ready = NoopReady;
         let env = DaemonEnv {
+            authority: &FakeAuthority::default(),
             store,
             probe: &probe,
             terminator: &terminator,
@@ -263,6 +268,7 @@ mod tests {
             let launcher = TestLauncher::registering(&store, 5555);
             let ready = NoopReady;
             let env = DaemonEnv {
+                authority: &FakeAuthority::default(),
                 store: &store,
                 probe: &probe,
                 terminator: &terminator,
@@ -307,6 +313,7 @@ mod tests {
         let launcher = TestLauncher::registering(&store, 5555);
         let ready = NoopReady;
         let env = DaemonEnv {
+            authority: &FakeAuthority::default(),
             store: &store,
             probe: &probe,
             terminator: &terminator,
@@ -365,6 +372,7 @@ mod tests {
             let launcher = TestLauncher::idle(&store);
             let ready = NoopReady;
             let env = DaemonEnv {
+                authority: &FakeAuthority::default(),
                 store: &store,
                 probe: &probe,
                 terminator: &terminator,

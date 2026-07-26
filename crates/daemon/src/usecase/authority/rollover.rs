@@ -16,9 +16,7 @@ use crate::usecase::authority::handoff::{
     LocatorObservation, PublishedLocator, RecoveryOutcome, RolloverOutcome, begin_handoff,
     commit_registry, complete_handoff, plan_recovery,
 };
-use crate::usecase::authority::registry::{
-    GenerationRegistry, RegistryError, RegistryFailure, RegistryFile,
-};
+use crate::usecase::authority::registry::{GenerationRegistry, RegistryError, RegistryFailure};
 use crate::usecase::authority::routing::{RolloverRefusal, RoutingLedger, admit_rollover};
 use crate::usecase::authority::workers::{ClientWorkers, RetireReport};
 use crate::usecase::generation::{GenerationRole, ProcessIdentity, ProcessObservation};
@@ -147,8 +145,8 @@ pub struct RolloverPlan<'a> {
 /// Returns [`HandoffFailure::Routing`] with nothing written when a participant
 /// cannot route by owner generation or the registry moved, or any failure
 /// [`execute_rollover`] returns.
-pub fn execute_gated_rollover<F: RegistryFile>(
-    registry: &GenerationRegistry<F>,
+pub fn execute_gated_rollover(
+    registry: &GenerationRegistry,
     locator: &dyn CurrentLocator,
     gate: Option<&AdmissionGate>,
     plan: &RolloverPlan<'_>,
@@ -172,8 +170,8 @@ pub fn execute_gated_rollover<F: RegistryFile>(
 /// Returns the first refusal or IO failure. Refusals before the registry
 /// commit leave the old authority in place; a failure after it leaves the
 /// handoff `committed`, which recovery rolls forward.
-pub fn execute_rollover<F: RegistryFile>(
-    registry: &GenerationRegistry<F>,
+pub fn execute_rollover(
+    registry: &GenerationRegistry,
     locator: &dyn CurrentLocator,
     gate: Option<&AdmissionGate>,
     operation: &OperationId,
@@ -195,8 +193,8 @@ pub fn execute_rollover<F: RegistryFile>(
 ///
 /// # Errors
 /// Returns the hook's error, or any failure [`execute_rollover`] returns.
-pub fn execute_rollover_with<F: RegistryFile>(
-    registry: &GenerationRegistry<F>,
+pub fn execute_rollover_with(
+    registry: &GenerationRegistry,
     locator: &dyn CurrentLocator,
     gate: Option<&AdmissionGate>,
     operation: &OperationId,
@@ -267,8 +265,8 @@ pub fn execute_rollover_with<F: RegistryFile>(
 ///
 /// A failure anywhere in here is a failure *before* the commit becomes
 /// observable, which is what lets the caller reopen its barrier.
-fn commit_phase<F: RegistryFile>(
-    registry: &GenerationRegistry<F>,
+fn commit_phase(
+    registry: &GenerationRegistry,
     operation: &OperationId,
     step: &mut dyn FnMut(HandoffStep) -> io::Result<()>,
 ) -> Result<crate::usecase::authority::registry::RegistrySnapshot, HandoffFailure> {
@@ -286,8 +284,8 @@ fn commit_phase<F: RegistryFile>(
 ///
 /// # Errors
 /// Returns the locator or registry failure that stopped the repair.
-pub fn recover<F: RegistryFile>(
-    registry: &GenerationRegistry<F>,
+pub fn recover(
+    registry: &GenerationRegistry,
     locator: &dyn CurrentLocator,
     observe: &mut dyn FnMut(&ProcessIdentity) -> ProcessObservation,
 ) -> Result<RecoveryOutcome, HandoffFailure> {
@@ -316,8 +314,8 @@ pub fn recover<F: RegistryFile>(
 /// # Errors
 /// Returns [`AdmissionRefusal`] when the barrier is not satisfied, or the
 /// registry failure that prevented recording the retirement.
-pub fn collect_retired<F: RegistryFile>(
-    registry: &GenerationRegistry<F>,
+pub fn collect_retired(
+    registry: &GenerationRegistry,
     gate: &AdmissionGate,
     workers: &ClientWorkers,
     generation: DaemonGeneration,

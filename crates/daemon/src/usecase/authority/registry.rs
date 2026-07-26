@@ -153,6 +153,9 @@ pub enum RegistryError {
     UnknownOperation,
     /// The handoff is not in the phase this step requires.
     WrongPhase,
+    /// The registry still retains a generation (or an in-flight handoff), so a
+    /// fresh process may not claim authority outside the handoff protocol.
+    AuthorityRetained,
 }
 
 impl fmt::Display for RegistryError {
@@ -171,6 +174,7 @@ impl fmt::Display for RegistryError {
             Self::HandoffInProgress => "another handoff operation is in flight",
             Self::UnknownOperation => "handoff operation is not in flight",
             Self::WrongPhase => "handoff is not in the required phase",
+            Self::AuthorityRetained => "another generation still holds registry authority",
         })
     }
 }
@@ -264,15 +268,29 @@ impl RegistrySnapshot {
 }
 
 /// The durable registry over a [`RegistryFile`].
-pub struct GenerationRegistry<F> {
-    file: F,
+///
+/// The seam is a trait object rather than a type parameter, exactly as
+/// [`crate::usecase::resources::CasStore`] does: the production adapter and the
+/// in-memory fakes then share one compiled copy of the compare-and-swap
+/// protocol, so which store a caller binds cannot change the code that runs —
+/// and the swap's own error paths are proved once rather than once per
+/// instantiation.
+pub struct GenerationRegistry {
+    file: Box<dyn RegistryFile + Send + Sync>,
     limit: usize,
 }
 
-impl<F: RegistryFile> GenerationRegistry<F> {
+impl GenerationRegistry {
     /// Build a registry retaining at most `limit` non-retired generations.
-    pub fn new(file: F, limit: usize) -> Self {
-        Self { file, limit }
+    ///
+    /// The store must be shareable across threads: a daemon reads and commits
+    /// the registry from its lifecycle path and from workers, and a test drives
+    /// concurrent writers to prove the compare-and-swap.
+    pub fn new(file: impl RegistryFile + Send + Sync + 'static, limit: usize) -> Self {
+        Self {
+            file: Box::new(file),
+            limit,
+        }
     }
 
     /// The configured retention limit.
@@ -334,6 +352,14 @@ impl<F: RegistryFile> GenerationRegistry<F> {
     /// Load, apply `change`, and commit in one compare-and-swap. `change` runs
     /// on a copy: a refusal commits nothing.
     ///
+    /// This body is deliberately branch free. `change` is a closure, so a
+    /// generic `update` is monomorphized once per *call site*, and every branch
+    /// left inside it would be compiled — and measured — separately in each
+    /// copy. The decision it used to make lives in [`commit_changed`] instead,
+    /// where one compiled copy is proved by the whole suite.
+    ///
+    /// [`commit_changed`]: Self::commit_changed
+    ///
     /// # Errors
     /// Returns `change`'s refusal, or any [`load`](Self::load) /
     /// [`commit`](Self::commit) failure.
@@ -344,14 +370,27 @@ impl<F: RegistryFile> GenerationRegistry<F> {
         let snapshot = self.load()?;
         let mut next = snapshot.to_document();
         let value = change(&mut next)?;
+        Ok((value, self.commit_changed(snapshot, next)?))
+    }
+
+    /// Commit `next` when it differs from what `snapshot` was read as.
+    ///
+    /// A converged retry writes nothing at all, so a replayed operation cannot
+    /// be told apart from the original by its durable effect.
+    ///
+    /// # Errors
+    /// Returns the [`commit`](Self::commit) failure. An unchanged document is
+    /// not a failure — it is the retry's answer.
+    fn commit_changed(
+        &self,
+        snapshot: RegistrySnapshot,
+        mut next: RegistryDocument,
+    ) -> Result<RegistrySnapshot, RegistryFailure> {
         if next == snapshot.document {
-            // A converged retry writes nothing at all, so a replayed operation
-            // cannot be told apart from the original by its durable effect.
-            return Ok((value, snapshot));
+            return Ok(snapshot);
         }
         next.revision += 1;
-        let committed = self.commit(&snapshot, next)?;
-        Ok((value, committed))
+        self.commit(&snapshot, next)
     }
 }
 
@@ -475,6 +514,89 @@ impl RegistryDocument {
         }
         self.generations.push(candidate);
         Ok(())
+    }
+
+    /// Register this process's own generation as the single active generation.
+    ///
+    /// This is the *first* activation, and it is deliberately not a handoff.
+    /// There is no predecessor to drain, nothing observable to move, and no
+    /// cross-process trust problem to solve: the process registering is the
+    /// process serving, so its artifact needs no second peer to confirm it. Any
+    /// registry that still retains a generation belongs to
+    /// [`super::handoff`] instead, and is refused here rather than claimed.
+    ///
+    /// The retired entries a previous incarnation left are dropped in the same
+    /// swap. A retired generation is already absent from everything a client may
+    /// address ([`crate::infrastructure::generation_registry`]), so removing the
+    /// record says nothing new — it only keeps the document bounded across an
+    /// unbounded number of restarts.
+    ///
+    /// Repeating the claim for the identical generation is idempotent, so a
+    /// retried activation writes nothing at all.
+    ///
+    /// # Errors
+    /// Returns [`RegistryError::DuplicateGeneration`] when this generation is
+    /// retained under a different identity, [`RegistryError::AuthorityRetained`]
+    /// when another generation or an in-flight handoff is present, or
+    /// [`RegistryError::GenerationLimit`] when no generation may be retained at
+    /// all.
+    /// `endpoint` is deliberately `&str` rather than `impl Into<String>`: a
+    /// generic parameter would compile this body once per argument type, and
+    /// every branch would then be measured separately in each copy.
+    pub fn activate_first(
+        &mut self,
+        limit: usize,
+        generation: DaemonGeneration,
+        endpoint: &str,
+        process: ProcessIdentity,
+        build: BuildIdentity,
+    ) -> Result<(), RegistryError> {
+        let candidate = GenerationEntry {
+            generation,
+            role: GenerationRole::Active,
+            endpoint: endpoint.to_owned(),
+            process,
+            // An unknown artifact stays unknown rather than being promoted:
+            // `verified_build` means "a hello proved this exact artifact", which
+            // only a comparable identity can ever mean. A build that cannot name
+            // itself therefore serves, but never counts as a rollover successor.
+            verified_build: build.is_known().then(|| build.clone()),
+            expected_build: build,
+            revision: 1,
+        };
+        if let Some(existing) = self.entry(generation) {
+            return if existing == &candidate && self.current == Some(generation) {
+                Ok(())
+            } else {
+                Err(RegistryError::DuplicateGeneration)
+            };
+        }
+        if self.handoff.is_some() || self.retained() > 0 {
+            return Err(RegistryError::AuthorityRetained);
+        }
+        if limit == 0 {
+            return Err(RegistryError::GenerationLimit);
+        }
+        self.generations.clear();
+        self.generations.push(candidate);
+        self.current = Some(generation);
+        Ok(())
+    }
+
+    /// Give up `generation`'s authority on the way out of its process.
+    ///
+    /// Idempotent by construction: a generation that is already retired, or that
+    /// was never registered, is exactly the state this establishes, so a
+    /// shutdown path may call it without first proving what it registered.
+    ///
+    /// # Errors
+    /// Returns [`RegistryError::InvalidTransition`] only for a role the
+    /// transition table forbids retiring, which no registered role is.
+    pub fn retire_self(&mut self, generation: DaemonGeneration) -> Result<(), RegistryError> {
+        match self.role(generation) {
+            None | Some(GenerationRole::Retired) => Ok(()),
+            Some(_) => self.transition(generation, GenerationRole::Retired),
+        }
     }
 
     /// Record that a standby's own `ServerHello` advertised exactly the
