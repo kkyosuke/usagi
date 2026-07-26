@@ -13,12 +13,22 @@
 //!    endpoint, and prove that the record was not concurrently replaced;
 //! 4. **register** — replace the unchanged stale record with this process's pid
 //!    in `daemon.json`;
-//! 5. **publish** — expose its endpoint only after the lock and record prove it
-//!    is the active daemon;
-//! 6. **run** — block until asked to shut down;
-//! 7. **retire** — stop and join endpoint admission, generation-conditionally
-//!    unlink the endpoint, then conditionally clear this exact lifecycle record.
-//!    The lock is released by the OS when the process exits.
+//! 5. **bind** — expose its endpoint only after the lock and record prove it is
+//!    the active daemon;
+//! 6. **claim** — take the durable generation authority ([`GenerationAuthority`])
+//!    and publish `current`, so a client discovers this endpoint only once the
+//!    registry names this generation as the one serving;
+//! 7. **run** — block until asked to shut down;
+//! 8. **retire** — stop and join endpoint admission, generation-conditionally
+//!    unlink the endpoint, release the generation authority, then conditionally
+//!    clear this exact lifecycle record. The lock is released by the OS when the
+//!    process exits.
+//!
+//! Binding and claiming are separate steps because they answer different
+//! questions. Binding makes the endpoint *exist and answer*; claiming makes it
+//! *discoverable*. Doing them in that order means a registry entry never names an
+//! endpoint nobody is accepting on, and a published locator never names a
+//! generation the registry does not know.
 //!
 //! The two locks are the authoritative guards: because they wait briefly for a
 //! departing holder, a `restart` hands off cleanly, and because the OS drops them
@@ -84,6 +94,35 @@ impl<F: RecordFile> DaemonRecordPort for DaemonRecordStore<F> {
     }
 }
 
+/// This daemon's participation in the durable cross-process generation registry.
+///
+/// It is a port for the same reason the record store is: the registry and the
+/// current locator are two durable objects the composition root binds, and this
+/// state machine only needs the two verbs. Making it a seam is also what lets
+/// the whole claim/release ordering be driven deterministically here, without a
+/// filesystem or a second process.
+///
+/// Both verbs are idempotent, so a cleanup path may release an authority it is
+/// not sure was ever claimed.
+pub trait GenerationAuthority {
+    /// Reconcile what a previous incarnation left, record this process as the
+    /// single active generation, and publish `current`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reconciliation, registry, or locator failure. Nothing is
+    /// published when this fails, so no client can have discovered this daemon.
+    fn claim(&self) -> io::Result<()>;
+
+    /// Give up this generation's registry authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns the registry failure. A generation that never claimed authority
+    /// is not a failure.
+    fn release(&self) -> io::Result<()>;
+}
+
 /// Run the daemon in the foreground under process id `pid`, writing progress
 /// lines to `out`.
 ///
@@ -91,16 +130,18 @@ impl<F: RecordFile> DaemonRecordPort for DaemonRecordStore<F> {
 ///
 /// Returns the workspace fence's or instance lock's acquire error, the store's
 /// load / save / clear error, the shutdown preparation / wait error, the endpoint
-/// publish / quiesce / retire error, or an `out` write error.
+/// bind / quiesce / retire error, the generation authority's claim / release
+/// error, or an `out` write error.
 // The daemon serve entry binds one seam per real-IO concern (record store,
-// endpoint readiness, shutdown, workspace fence, single-instance lock, process
-// identity) plus its own pid and app info; grouping them would only hide the
-// composition wiring.
+// endpoint readiness, generation authority, shutdown, workspace fence,
+// single-instance lock, process identity) plus its own pid and app info;
+// grouping them would only hide the composition wiring.
 #[allow(clippy::too_many_arguments)]
 pub fn serve(
     out: &mut dyn Write,
     store: &dyn DaemonRecordPort,
     ready: &dyn DaemonReady,
+    authority: &dyn GenerationAuthority,
     shutdown: &dyn ShutdownSignal,
     workspace: &dyn WorkspaceFence,
     lock: &dyn InstanceLock,
@@ -168,54 +209,70 @@ pub fn serve(
     let record = DaemonRecord::identified(pid, process_start_identity);
     store.save(&record)?;
     if let Err(error) = ready.publish() {
-        // Binding may already have published a locator before a later startup
-        // step failed. Clear the lifecycle fence only after retryable endpoint
-        // ownership proves every artifact was retired.
-        clear_after_retire(ready, store, &record);
+        // Binding may already have created endpoint artifacts before a later
+        // startup step failed. Clear the lifecycle fence only after retryable
+        // endpoint ownership proves every artifact was retired.
+        clear_after_retire(ready, authority, store, &record);
+        return Err(error);
+    }
+    // The endpoint answers now, so the registry may name it. Until this returns
+    // no locator exists, which is exactly why a failure here is an ordinary
+    // startup failure rather than a half-published authority.
+    if let Err(error) = authority.claim() {
+        retire_and_clear_after_failure(ready, authority, store, &record);
         return Err(error);
     }
     if let Err(error) = writeln!(out, "{describe}: daemon serving (pid {pid})") {
-        retire_and_clear_after_failure(ready, store, &record);
+        retire_and_clear_after_failure(ready, authority, store, &record);
         return Err(error);
     }
 
     if let Err(error) = shutdown.wait() {
         // Preserve the primary wait error while best-effort cleanup removes only
         // this owner's metadata. A concurrently saved replacement survives.
-        retire_and_clear_after_failure(ready, store, &record);
+        retire_and_clear_after_failure(ready, authority, store, &record);
         return Err(error);
     }
 
     if let Err(error) = ready.quiesce() {
         // `retire` is idempotent and may still complete cleanup when the first
         // join attempt reported an error (or its worker unwound).
-        clear_after_retire(ready, store, &record);
+        clear_after_retire(ready, authority, store, &record);
         return Err(error);
     }
     // Keep the exact record as a completion fence until the generation endpoint
-    // is gone. A stop waiter can treat record disappearance as proof that join
-    // and generation-fenced retirement succeeded, while a retirement failure
-    // remains fail-closed and diagnosable through the retained record.
+    // is gone and this generation no longer claims authority. A stop waiter can
+    // treat record disappearance as proof that join, generation-fenced
+    // retirement, and authority release all succeeded, while a failure in any of
+    // them remains fail-closed and diagnosable through the retained record.
     ready.retire()?;
+    authority.release()?;
     store.clear_if(&record)?;
     writeln!(out, "{describe}: daemon stopped (pid {pid})")
 }
 
 fn retire_and_clear_after_failure(
     ready: &dyn DaemonReady,
+    authority: &dyn GenerationAuthority,
     store: &dyn DaemonRecordPort,
     record: &DaemonRecord,
 ) {
     let _ = ready.quiesce();
-    clear_after_retire(ready, store, record);
+    clear_after_retire(ready, authority, store, record);
 }
 
+/// Retire the endpoint, then the registry authority, then the lifecycle record.
+///
+/// The order is the reverse of startup's: the locator goes before the registry
+/// entry that names it, so no observer ever sees a published `current` the
+/// registry does not know about.
 fn clear_after_retire(
     ready: &dyn DaemonReady,
+    authority: &dyn GenerationAuthority,
     store: &dyn DaemonRecordPort,
     record: &DaemonRecord,
 ) {
-    if ready.retire().is_ok() {
+    if ready.retire().is_ok() && authority.release().is_ok() {
         let _ = store.clear_if(record);
     }
 }
@@ -224,8 +281,8 @@ fn clear_after_retire(
 mod tests {
     use super::serve;
     use crate::test_support::{
-        FailingShutdown, FakeLock, FakeWorkspaceFence, FixedProbe, ImmediateShutdown,
-        InMemoryRecordFile, NoopReady,
+        FailingShutdown, FakeAuthority, FakeLock, FakeWorkspaceFence, FixedProbe,
+        ImmediateShutdown, InMemoryRecordFile, NoopReady,
     };
     use std::cell::{Cell, RefCell};
     use std::io;
@@ -283,6 +340,7 @@ mod tests {
             &mut buf,
             store,
             &NoopReady,
+            &FakeAuthority::default(),
             &ImmediateShutdown,
             &FakeWorkspaceFence::Acquired,
             &FakeLock::Acquired,
@@ -340,6 +398,22 @@ mod tests {
     struct OrderedReady<'a> {
         events: &'a RefCell<Vec<&'static str>>,
         store: &'a DaemonRecordStore<InMemoryRecordFile>,
+    }
+
+    /// A generation authority that records where in the lifecycle it was driven.
+    struct OrderedAuthority<'a> {
+        events: &'a RefCell<Vec<&'static str>>,
+    }
+    impl super::GenerationAuthority for OrderedAuthority<'_> {
+        fn claim(&self) -> io::Result<()> {
+            self.events.borrow_mut().push("claim");
+            Ok(())
+        }
+
+        fn release(&self) -> io::Result<()> {
+            self.events.borrow_mut().push("release");
+            Ok(())
+        }
     }
 
     struct ReplacingReady<'a> {
@@ -546,6 +620,7 @@ mod tests {
             &mut Vec::new(),
             &store,
             &ready,
+            &OrderedAuthority { events: &events },
             &shutdown,
             &FakeWorkspaceFence::Acquired,
             &FakeLock::Acquired,
@@ -554,10 +629,112 @@ mod tests {
             &info(),
         )
         .unwrap();
+        // The authority is claimed only once the endpoint answers, and released
+        // only once it is retired: the registry never names an endpoint nobody
+        // accepts on, and a published locator never outlives its registry entry.
         assert_eq!(
             events.into_inner(),
-            ["prepare", "recover", "publish", "wait", "quiesce", "retire"]
+            [
+                "prepare", "recover", "publish", "claim", "wait", "quiesce", "retire", "release"
+            ]
         );
+    }
+
+    #[test]
+    fn an_unclaimable_authority_retires_the_endpoint_and_clears_the_record() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let ready = CleanupReady {
+            fail_publish: false,
+            fail_quiesce: false,
+            fail_retire: false,
+            quiesces: Cell::new(0),
+            retires: Cell::new(0),
+        };
+        let authority = FakeAuthority::failing_claim();
+
+        let error = serve(
+            &mut Vec::new(),
+            &store,
+            &ready,
+            &authority,
+            &ImmediateShutdown,
+            &FakeWorkspaceFence::Acquired,
+            &FakeLock::Acquired,
+            &FixedProbe(true),
+            2222,
+            &info(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "claim failed");
+        // Nothing was published, so the whole startup unwinds: the accept loop is
+        // joined, the endpoint retired, and the lifecycle fence cleared.
+        assert_eq!(ready.quiesces.get(), 1);
+        assert_eq!(ready.retires.get(), 1);
+        assert_eq!(authority.claims(), 1);
+        assert_eq!(authority.releases(), 1);
+        assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[test]
+    fn an_unreleasable_authority_retains_the_record_for_stale_recovery() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let authority = FakeAuthority::failing_release();
+
+        let error = serve(
+            &mut Vec::new(),
+            &store,
+            &NoopReady,
+            &authority,
+            &ImmediateShutdown,
+            &FakeWorkspaceFence::Acquired,
+            &FakeLock::Acquired,
+            &FixedProbe(true),
+            2222,
+            &info(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "release failed");
+        assert_eq!(authority.releases(), 1);
+        // The record is the completion fence: a generation that still claims
+        // authority must stay diagnosable rather than look cleanly stopped.
+        assert!(store.load().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_failed_endpoint_retirement_never_releases_the_authority() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let ready = CleanupReady {
+            fail_publish: false,
+            fail_quiesce: true,
+            fail_retire: true,
+            quiesces: Cell::new(0),
+            retires: Cell::new(0),
+        };
+        let authority = FakeAuthority::default();
+
+        assert!(
+            serve(
+                &mut Vec::new(),
+                &store,
+                &ready,
+                &authority,
+                &ImmediateShutdown,
+                &FakeWorkspaceFence::Acquired,
+                &FakeLock::Acquired,
+                &FixedProbe(true),
+                2222,
+                &info(),
+            )
+            .is_err()
+        );
+
+        // A locator that could not be retired still names this generation, so
+        // dropping its registry entry would leave `current` pointing at an
+        // authority the registry does not know.
+        assert_eq!(authority.releases(), 0);
+        assert!(store.load().unwrap().is_some());
     }
 
     #[test]
@@ -575,6 +752,7 @@ mod tests {
                 &mut Vec::new(),
                 &store,
                 &ready,
+                &FakeAuthority::default(),
                 &ImmediateShutdown,
                 &FakeWorkspaceFence::Acquired,
                 &FakeLock::Acquired,
@@ -592,6 +770,7 @@ mod tests {
             &mut Vec::new(),
             &store,
             &ready,
+            &FakeAuthority::default(),
             &ImmediateShutdown,
             &FakeWorkspaceFence::Acquired,
             &FakeLock::Acquired,
@@ -621,6 +800,7 @@ mod tests {
             &mut Vec::new(),
             &store,
             &ready,
+            &FakeAuthority::default(),
             &ImmediateShutdown,
             &FakeWorkspaceFence::Acquired,
             &FakeLock::Acquired,
@@ -652,6 +832,7 @@ mod tests {
                 &mut Vec::new(),
                 &store,
                 &ready,
+                &FakeAuthority::default(),
                 &ImmediateShutdown,
                 &FakeWorkspaceFence::Acquired,
                 &FakeLock::Acquired,
@@ -679,6 +860,7 @@ mod tests {
             &mut Vec::new(),
             &store,
             &ready,
+            &FakeAuthority::default(),
             &ImmediateShutdown,
             &FakeWorkspaceFence::Acquired,
             &FakeLock::Acquired,
@@ -701,6 +883,7 @@ mod tests {
                 &mut Vec::new(),
                 &store,
                 &NoopReady,
+                &FakeAuthority::default(),
                 &ConfigurableShutdown { fail_prepare: true },
                 &FakeWorkspaceFence::Acquired,
                 &FakeLock::Acquired,
@@ -727,6 +910,7 @@ mod tests {
             &mut Vec::new(),
             &store,
             &ready,
+            &FakeAuthority::default(),
             &ImmediateShutdown,
             &FakeWorkspaceFence::Acquired,
             &FakeLock::Acquired,
@@ -748,6 +932,7 @@ mod tests {
             &mut Vec::new(),
             &store,
             &NoopReady,
+            &FakeAuthority::default(),
             &ImmediateShutdown,
             &FakeWorkspaceFence::Acquired,
             &FakeLock::Acquired,
@@ -775,6 +960,7 @@ mod tests {
                 &mut Vec::new(),
                 &store,
                 &quiesce_failure,
+                &FakeAuthority::default(),
                 &ImmediateShutdown,
                 &FakeWorkspaceFence::Acquired,
                 &FakeLock::Acquired,
@@ -801,6 +987,7 @@ mod tests {
                 &mut Vec::new(),
                 &store,
                 &retire_failure,
+                &FakeAuthority::default(),
                 &ImmediateShutdown,
                 &FakeWorkspaceFence::Acquired,
                 &FakeLock::Acquired,
@@ -826,6 +1013,7 @@ mod tests {
             &mut Vec::new(),
             &store,
             &ready,
+            &FakeAuthority::default(),
             &ConfigurableShutdown {
                 fail_prepare: false,
             },
@@ -847,6 +1035,7 @@ mod tests {
             &mut Vec::new(),
             &refused,
             &refused_ready,
+            &FakeAuthority::default(),
             &ImmediateShutdown,
             &FakeWorkspaceFence::Acquired,
             &FakeLock::Held,
@@ -870,6 +1059,7 @@ mod tests {
             &mut Vec::new(),
             &store,
             &ready,
+            &FakeAuthority::default(),
             &ImmediateShutdown,
             &FakeWorkspaceFence::Acquired,
             &FakeLock::Acquired,
@@ -897,6 +1087,7 @@ mod tests {
                 &mut Vec::new(),
                 &store,
                 &ready,
+                &FakeAuthority::default(),
                 &ImmediateShutdown,
                 &FakeWorkspaceFence::Acquired,
                 &FakeLock::Acquired,
@@ -927,6 +1118,7 @@ mod tests {
                 &mut Vec::new(),
                 &store,
                 &ready,
+                &FakeAuthority::default(),
                 &ImmediateShutdown,
                 &FakeWorkspaceFence::Acquired,
                 &FakeLock::Acquired,
@@ -962,6 +1154,7 @@ mod tests {
             &mut buf,
             &store,
             &NoopReady,
+            &FakeAuthority::default(),
             &ImmediateShutdown,
             &FakeWorkspaceFence::Acquired,
             &FakeLock::Held,
@@ -986,6 +1179,7 @@ mod tests {
             &mut buf,
             &store,
             &NoopReady,
+            &FakeAuthority::default(),
             &ImmediateShutdown,
             &FakeWorkspaceFence::Acquired,
             &FakeLock::Held,
@@ -1012,6 +1206,7 @@ mod tests {
             &mut buf,
             &store,
             &NoopReady,
+            &FakeAuthority::default(),
             &ImmediateShutdown,
             fence,
             &FakeLock::Failing,
@@ -1054,6 +1249,7 @@ mod tests {
             &mut Vec::new(),
             &store,
             &NoopReady,
+            &FakeAuthority::default(),
             &ImmediateShutdown,
             &FakeWorkspaceFence::Failing,
             &FakeLock::Failing,
@@ -1075,6 +1271,7 @@ mod tests {
                 &mut buf,
                 &store,
                 &NoopReady,
+                &FakeAuthority::default(),
                 &ImmediateShutdown,
                 &FakeWorkspaceFence::Acquired,
                 &FakeLock::Failing,
@@ -1095,6 +1292,7 @@ mod tests {
                 &mut buf,
                 &store,
                 &NoopReady,
+                &FakeAuthority::default(),
                 &FailingShutdown,
                 &FakeWorkspaceFence::Acquired,
                 &FakeLock::Acquired,
@@ -1116,6 +1314,7 @@ mod tests {
                 &mut buf,
                 &store,
                 &NoopReady,
+                &FakeAuthority::default(),
                 &ImmediateShutdown,
                 &FakeWorkspaceFence::Acquired,
                 &FakeLock::Held,
@@ -1162,6 +1361,7 @@ mod tests {
                     &mut output,
                     &DaemonRecordStore::new(file),
                     &NoopReady,
+                    &FakeAuthority::default(),
                     &ImmediateShutdown,
                     &FakeWorkspaceFence::Acquired,
                     &FakeLock::Acquired,
@@ -1177,6 +1377,7 @@ mod tests {
                 &mut BrokenWriter,
                 &DaemonRecordStore::new(InMemoryRecordFile::default()),
                 &NoopReady,
+                &FakeAuthority::default(),
                 &ImmediateShutdown,
                 &FakeWorkspaceFence::Acquired,
                 &FakeLock::Acquired,

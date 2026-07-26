@@ -153,6 +153,9 @@ pub enum RegistryError {
     UnknownOperation,
     /// The handoff is not in the phase this step requires.
     WrongPhase,
+    /// The registry still retains a generation (or an in-flight handoff), so a
+    /// fresh process may not claim authority outside the handoff protocol.
+    AuthorityRetained,
 }
 
 impl fmt::Display for RegistryError {
@@ -171,6 +174,7 @@ impl fmt::Display for RegistryError {
             Self::HandoffInProgress => "another handoff operation is in flight",
             Self::UnknownOperation => "handoff operation is not in flight",
             Self::WrongPhase => "handoff is not in the required phase",
+            Self::AuthorityRetained => "another generation still holds registry authority",
         })
     }
 }
@@ -475,6 +479,86 @@ impl RegistryDocument {
         }
         self.generations.push(candidate);
         Ok(())
+    }
+
+    /// Register this process's own generation as the single active generation.
+    ///
+    /// This is the *first* activation, and it is deliberately not a handoff.
+    /// There is no predecessor to drain, nothing observable to move, and no
+    /// cross-process trust problem to solve: the process registering is the
+    /// process serving, so its artifact needs no second peer to confirm it. Any
+    /// registry that still retains a generation belongs to
+    /// [`super::handoff`] instead, and is refused here rather than claimed.
+    ///
+    /// The retired entries a previous incarnation left are dropped in the same
+    /// swap. A retired generation is already absent from everything a client may
+    /// address ([`crate::infrastructure::generation_registry`]), so removing the
+    /// record says nothing new — it only keeps the document bounded across an
+    /// unbounded number of restarts.
+    ///
+    /// Repeating the claim for the identical generation is idempotent, so a
+    /// retried activation writes nothing at all.
+    ///
+    /// # Errors
+    /// Returns [`RegistryError::DuplicateGeneration`] when this generation is
+    /// retained under a different identity, [`RegistryError::AuthorityRetained`]
+    /// when another generation or an in-flight handoff is present, or
+    /// [`RegistryError::GenerationLimit`] when no generation may be retained at
+    /// all.
+    pub fn activate_first(
+        &mut self,
+        limit: usize,
+        generation: DaemonGeneration,
+        endpoint: impl Into<String>,
+        process: ProcessIdentity,
+        build: BuildIdentity,
+    ) -> Result<(), RegistryError> {
+        let candidate = GenerationEntry {
+            generation,
+            role: GenerationRole::Active,
+            endpoint: endpoint.into(),
+            process,
+            // An unknown artifact stays unknown rather than being promoted:
+            // `verified_build` means "a hello proved this exact artifact", which
+            // only a comparable identity can ever mean. A build that cannot name
+            // itself therefore serves, but never counts as a rollover successor.
+            verified_build: build.is_known().then(|| build.clone()),
+            expected_build: build,
+            revision: 1,
+        };
+        if let Some(existing) = self.entry(generation) {
+            return if existing == &candidate && self.current == Some(generation) {
+                Ok(())
+            } else {
+                Err(RegistryError::DuplicateGeneration)
+            };
+        }
+        if self.handoff.is_some() || self.retained() > 0 {
+            return Err(RegistryError::AuthorityRetained);
+        }
+        if limit == 0 {
+            return Err(RegistryError::GenerationLimit);
+        }
+        self.generations.clear();
+        self.generations.push(candidate);
+        self.current = Some(generation);
+        Ok(())
+    }
+
+    /// Give up `generation`'s authority on the way out of its process.
+    ///
+    /// Idempotent by construction: a generation that is already retired, or that
+    /// was never registered, is exactly the state this establishes, so a
+    /// shutdown path may call it without first proving what it registered.
+    ///
+    /// # Errors
+    /// Returns [`RegistryError::InvalidTransition`] only for a role the
+    /// transition table forbids retiring, which no registered role is.
+    pub fn retire_self(&mut self, generation: DaemonGeneration) -> Result<(), RegistryError> {
+        match self.role(generation) {
+            None | Some(GenerationRole::Retired) => Ok(()),
+            Some(_) => self.transition(generation, GenerationRole::Retired),
+        }
     }
 
     /// Record that a standby's own `ServerHello` advertised exactly the

@@ -965,11 +965,14 @@ cross-process standby handoff は
 [#516](../.usagi/issues/516-refactor-daemon-cross-process-generation-registry-standby-handoff-authority.md) が、
 owner-generation runtime shard は
 [#518](../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md) が
-提供し、client 側の owner routing は本節の契約として実装済みである。これらは registry / locator の
-fixture 上で完結しており、shipping の `daemon restart` から rollover を起動する経路はまだ存在しない。
+提供し、client 側の owner routing は本節の契約として実装済みである。shipping の `serve` は自分の
+generation を durable registry の active として登録するため、`generations.json` は production に存在する
+（[5. daemon の first activation](05-daemon.md#first-activation)）。ただし合成ルートと TUI の client は
+まだ `OwnerRouter` を通らず active locator だけで接続し、standby process を起動する lifecycle も無いため、
+shipping の `daemon restart` から rollover を起動する経路はまだ存在しない。
 shipping の replacement は 1 本の durable operation に集約済みで、seamless に保てない live runtime を
 既定で拒否する（[5. daemon の planned replacement](05-daemon.md#planned-replacement)）。最終 enable /
-handoff / product E2E は [#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) が担当する。
+handoff / product E2E は [#566](../.usagi/issues/566-feat-daemon-replacement-seamless-rollover.md) が担当する。
 
 ## client の失敗処理
 

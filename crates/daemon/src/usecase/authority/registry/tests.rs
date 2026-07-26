@@ -432,3 +432,104 @@ fn every_refusal_reads_as_a_safety_outcome() {
     assert!(io.to_string().contains("disk"));
     assert_eq!(format!("{:?}", HandoffPhase::Committed), "Committed");
 }
+
+/// The document transitions a serving process performs on its own generation.
+/// The flow that drives them, and its crash boundaries, are
+/// [`crate::usecase::authority::activation`]'s.
+mod first_activation {
+    use super::*;
+
+    fn claim(
+        document: &mut RegistryDocument,
+        limit: usize,
+        generation: DaemonGeneration,
+    ) -> Result<(), RegistryError> {
+        document.activate_first(
+            limit,
+            generation,
+            format!("generations/{}/sock", generation.as_str()),
+            process(11),
+            build("next"),
+        )
+    }
+
+    #[test]
+    fn a_registry_that_may_retain_nothing_refuses_before_validation_would() {
+        let mut document = RegistryDocument::default();
+        assert_eq!(
+            claim(&mut document, 0, DaemonGeneration::new()),
+            Err(RegistryError::GenerationLimit)
+        );
+        assert_eq!(document, RegistryDocument::default());
+    }
+
+    #[test]
+    fn the_same_generation_registered_under_another_identity_is_a_duplicate() {
+        let generation = DaemonGeneration::new();
+        // A standby entry for this generation: same id, different role.
+        let mut document = RegistryDocument {
+            generations: vec![entry(generation, GenerationRole::Standby)],
+            ..RegistryDocument::default()
+        };
+        let before = document.clone();
+
+        assert_eq!(
+            claim(&mut document, 2, generation),
+            Err(RegistryError::DuplicateGeneration)
+        );
+        assert_eq!(document, before);
+    }
+
+    #[test]
+    fn an_active_entry_that_current_does_not_name_is_not_a_converged_retry() {
+        let generation = DaemonGeneration::new();
+        let mut document = RegistryDocument::default();
+        claim(&mut document, 2, generation).unwrap();
+        // Only `current` is lost — a state `validate` rejects, so a retry must
+        // not silently accept it as "already claimed".
+        document.current = None;
+
+        assert_eq!(
+            claim(&mut document, 2, generation),
+            Err(RegistryError::DuplicateGeneration)
+        );
+    }
+
+    #[test]
+    fn an_unknown_artifact_is_recorded_unknown_rather_than_verified() {
+        let generation = DaemonGeneration::new();
+        let mut document = RegistryDocument::default();
+
+        document
+            .activate_first(
+                2,
+                generation,
+                "generations/self/sock",
+                process(11),
+                unknown_build(),
+            )
+            .unwrap();
+
+        let recorded = document.entry(generation).unwrap();
+        assert_eq!(recorded.verified_build, None);
+        assert!(!recorded.is_build_verified());
+        document.validate(2).unwrap();
+    }
+
+    #[test]
+    fn retiring_is_idempotent_for_an_unregistered_or_already_retired_generation() {
+        let generation = DaemonGeneration::new();
+        let mut document = RegistryDocument::default();
+        document.retire_self(generation).unwrap();
+        assert_eq!(document, RegistryDocument::default());
+
+        claim(&mut document, 2, generation).unwrap();
+        document.retire_self(generation).unwrap();
+        assert_eq!(document.current, None);
+        assert_eq!(document.role(generation), Some(GenerationRole::Retired));
+
+        let retired = document.clone();
+        document.retire_self(generation).unwrap();
+        assert_eq!(document, retired);
+    }
+}

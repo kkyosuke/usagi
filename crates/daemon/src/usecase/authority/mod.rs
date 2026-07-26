@@ -9,6 +9,7 @@
 //! | piece | question it answers |
 //! |---|---|
 //! | [`registry`] | which generations exist, what role does each hold, and who is `current`? |
+//! | [`activation`] | how does a daemon starting from nothing become the first active generation? |
 //! | [`standby`] | is this candidate the exact build it was admitted for — proved without any side effect? |
 //! | [`handoff`] | how do the registry and the current locator — two independent durable objects — reach one outcome across a crash? |
 //! | [`admission`] | may *this* request, right now, produce an effect on *this* generation? |
@@ -31,6 +32,7 @@
 #[cfg(test)]
 mod fixture;
 
+pub mod activation;
 pub mod admission;
 pub mod handoff;
 pub mod migration;
