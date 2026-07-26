@@ -6123,8 +6123,8 @@ pub(crate) fn attached_client(policy: ClientPolicy) -> Result<impl DaemonClient,
 /// path — the exact cost that had to be removed from the daemon's own PTY path
 /// (#555). One [`RouteCache`] per process reads them on the first owner
 /// resolution and then only when it has a reason to: a resolution that fails, or
-/// [`invalidate_routes`] after a lane was lost. Reusing an already open lane
-/// resolves nothing at all.
+/// [`invalidate_routes`] after the endpoint it named turned out not to be that
+/// generation's. Reusing an already open lane resolves nothing at all.
 ///
 /// The directory is bound to the first caller's data directory. That is the same
 /// directory every other lane in this process uses ([`paths::data_dir`] is
@@ -6143,11 +6143,12 @@ fn route_cache(data_dir: &Path) -> &'static Mutex<usagi_core::usecase::owner_rou
 /// Report that the routing snapshot may no longer describe reality, so the next
 /// owner resolution re-reads the durable records.
 ///
-/// A client cannot observe a handoff by itself; what it can observe is that a
-/// lane it held stopped answering. That is the evidence this turns into a
-/// re-read, which keeps the read off the per-request path without letting the
-/// snapshot outlive a generation change indefinitely.
-pub(crate) fn invalidate_routes() {
+/// A client cannot observe a handoff by itself. What it can observe is that the
+/// endpoint the snapshot named did not answer, or answered as a *different*
+/// generation. That is the evidence this turns into a re-read, which keeps the
+/// read off the per-request path without letting the snapshot outlive a
+/// generation change indefinitely.
+fn invalidate_routes() {
     let Ok(data_dir) = paths::data_dir() else {
         return;
     };

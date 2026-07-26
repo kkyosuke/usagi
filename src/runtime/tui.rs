@@ -1240,6 +1240,22 @@ impl DaemonAgentCommandPort {
         request: TerminalRequest,
     ) -> Result<serde_json::Value, TerminalError> {
         let owner = owner_of_terminal_request(&request)?;
+        self.terminal_request_to(owner, action, request)
+    }
+
+    /// Sends one request to a named generation's persistent connection.
+    ///
+    /// The owner is explicit here because a scope query does not carry one: it is
+    /// asked of each generation in turn, and each answer speaks only for that
+    /// generation ([`Self::merged_inventory`]). Everything else derives it from
+    /// the payload through [`Self::terminal_request`].
+    #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
+    fn terminal_request_to(
+        &mut self,
+        owner: usagi_core::domain::id::DaemonGeneration,
+        action: TerminalAction,
+        request: TerminalRequest,
+    ) -> Result<serde_json::Value, TerminalError> {
         let payload = serde_json::to_value(request).expect("terminal request is serializable");
         let reply = {
             let client = self.armed_terminal_client(owner, action)?;
@@ -1261,19 +1277,17 @@ impl DaemonAgentCommandPort {
     /// connection closes, so each session attaches freshly instead of fencing
     /// its next input with an attachment that no longer exists.
     ///
-    /// Losing a lane is also the only evidence this client has that the set of
-    /// generations may have changed, so the routing snapshot is marked stale
-    /// here. That keeps the registry read off the per-request path without
-    /// letting a cached snapshot outlive a handoff.
+    /// The routing snapshot is deliberately *not* marked stale here. Dropping a
+    /// lane says nothing about which generations exist; what does say something
+    /// is the attempt to open the next one, and
+    /// [`owner_client`](crate::runtime::daemon::owner_client) re-reads the
+    /// records there — when the endpoint it resolved cannot be reached, or when
+    /// the peer names a different generation than the one that was asked for.
     fn reset_terminal(&mut self) {
         if let Some(cancelled) = self.terminal_watch_cancelled.take() {
             cancelled.store(true, Ordering::Release);
         }
-        let had_lane = !self.terminals.is_empty();
         self.terminals.clear();
-        if had_lane {
-            crate::runtime::daemon::invalidate_routes();
-        }
         self.terminal_epoch = self
             .terminal_epoch
             .checked_add(1)
@@ -1373,21 +1387,6 @@ impl DaemonAgentCommandPort {
         request: TerminalRequest,
     ) -> Result<serde_json::Value, TerminalError> {
         let owner = owner_of_terminal_request(&request)?;
-        self.poll_request_to(owner, action, request)
-    }
-
-    /// Sends one stateless request to a named generation's poll lane.
-    ///
-    /// The owner is explicit here because a scope query does not carry one: it is
-    /// asked of each generation in turn, and each answer speaks only for that
-    /// generation ([`Self::merged_inventory`]).
-    #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
-    fn poll_request_to(
-        &mut self,
-        owner: usagi_core::domain::id::DaemonGeneration,
-        action: TerminalAction,
-        request: TerminalRequest,
-    ) -> Result<serde_json::Value, TerminalError> {
         let payload = serde_json::to_value(request).expect("terminal request is serializable");
         let reply = {
             let client = self.poll_client(owner, action)?;
@@ -1415,6 +1414,12 @@ impl DaemonAgentCommandPort {
     /// simply not listed and stay tracked. Only a round in which nothing at all
     /// answered is a failure: that is an unobserved scope, not an empty one.
     ///
+    /// The query travels the attach lanes rather than the stateless ones, which
+    /// is where it has always travelled: opening the active generation's attach
+    /// lane is also what arms the restore-connection watcher, so listing a scope
+    /// keeps being the point at which this client starts noticing that its daemon
+    /// went away.
+    ///
     /// [`merge_inventory`]: usagi_core::usecase::owner_routing::merge_inventory
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
     fn merged_inventory(
@@ -1429,17 +1434,22 @@ impl DaemonAgentCommandPort {
         let endpoints = crate::runtime::daemon::trusted_generations()
             .map_err(|error| map_terminal_error(&error))?;
         // Leaving the trusted set is the verified retirement that lets this
-        // client collect a generation's lane. An owner that is merely
-        // unreachable stays in the set and keeps its lane slot.
-        self.polls
-            .retain(|generation, _| endpoints.iter().any(|e| e.generation == *generation));
+        // client collect a generation's lanes. An owner that is merely
+        // unreachable stays in the set and keeps its lane slots.
+        let trusted = |generation: &usagi_core::domain::id::DaemonGeneration| {
+            endpoints
+                .iter()
+                .any(|endpoint| endpoint.generation == *generation)
+        };
+        self.terminals.retain(|generation, _| trusted(generation));
+        self.polls.retain(|generation, _| trusted(generation));
         let mut parts = Vec::with_capacity(endpoints.len());
         for endpoint in &endpoints {
             let request = TerminalRequest::Inventory {
                 scope: scope.clone(),
             };
             let outcome = match self
-                .poll_request_to(endpoint.generation, TerminalAction::Inventory, request)
+                .terminal_request_to(endpoint.generation, TerminalAction::Inventory, request)
                 .and_then(|body| decode_terminal_inventory(&body))
             {
                 Ok(entries) => InventoryOutcome::Listed(entries),

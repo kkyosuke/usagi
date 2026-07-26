@@ -902,7 +902,7 @@ traversal と file 読み取りが乗る。client は trusted snapshot を cache
 |---|---|
 | 最初の解決 | 解決対象の snapshot がまだ無い |
 | 解決に失敗した | snapshot が、その owner を publish した handoff より古い可能性がある |
-| 保持していた lane を失った | client が自力で観測できる唯一の「generation 構成が変わったかもしれない」証拠 |
+| 解決した endpoint へ接続できなかった / 相手が別 generation を名乗った | snapshot が指す endpoint が現実と食い違っている証拠。snapshot からは見えない |
 
 refresh 後も解決できない owner はそのまま typed `stale_target` で拒否する。1 度の refresh で足りなかった場合、
 2 度目の失敗が答えである。directory を読めなかった場合は直前の snapshot を保持したまま拒否し、live owner を

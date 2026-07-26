@@ -31,8 +31,9 @@
 //!   does not discard a draining subscription.
 //! * **Resolving costs no IO.** The trusted set comes from files, so
 //!   [`RouteCache`] holds it and re-reads only on a reason — the first
-//!   resolution, one that fails, or a caller reporting a lost connection. A
-//!   request sent on a connection that is already open resolves nothing.
+//!   resolution, one that fails, or a caller reporting that the endpoint it
+//!   named did not answer for that generation. A request sent on a connection
+//!   that is already open resolves nothing.
 //!
 //! The client advertises
 //! [`OWNER_GENERATION_ROUTING_CAPABILITY`](crate::infrastructure::ipc::OWNER_GENERATION_ROUTING_CAPABILITY)
@@ -690,7 +691,7 @@ pub trait GenerationTransport {
 /// |---|---|
 /// | the first resolution | there is nothing to resolve against yet |
 /// | a resolution that fails | the snapshot may predate the handoff that published this owner |
-/// | [`RouteCache::invalidate`] | the caller lost a connection it held, which is the only generation change a client can observe for itself |
+/// | [`RouteCache::invalidate`] | the endpoint it named could not be reached, or the peer there named a different generation |
 ///
 /// A second failure after the refresh is the answer: nothing degrades into the
 /// active endpoint.
@@ -741,9 +742,10 @@ impl RouteCache {
     /// Require the next resolution to re-read the directory.
     ///
     /// This is the caller's way of reporting evidence the cache cannot see for
-    /// itself: a lane it held stopped answering, or a peer named a generation
-    /// other than the one that was asked for. Both mean the records may have
-    /// moved on, and neither is visible from the snapshot.
+    /// itself: the endpoint this snapshot named could not be reached, or the
+    /// peer at it named a generation other than the one that was asked for.
+    /// Both mean the records may have moved on, and neither is visible from the
+    /// snapshot.
     pub fn invalidate(&mut self) {
         self.loaded = false;
     }
