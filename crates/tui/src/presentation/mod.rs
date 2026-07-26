@@ -5095,6 +5095,28 @@ fn open_snapshot_via_controller(
     )
 }
 
+/// Open one workspace through the controller runtime, then say where the screen
+/// graph goes next.
+///
+/// `Some(exit)` means the TUI itself is finished; `None` means the workspace was
+/// left for Welcome and the graph keeps running. Recent, Open, and New all route
+/// through this one decision so leaving and quitting cannot diverge between the
+/// three entries (#556).
+fn enter_workspace(
+    term: &mut dyn Terminal,
+    snapshot: WorkspaceSnapshot,
+    settings: &mut dyn SettingsPort,
+    backend_factory: &mut dyn ControllerBackendFactory,
+    available_models: AvailableAgentModels,
+) -> io::Result<Option<Exit>> {
+    let step =
+        open_snapshot_via_controller(term, snapshot, settings, backend_factory, available_models)?;
+    Ok(match step {
+        WorkspaceStep::Quit => Some(Exit::Quit),
+        WorkspaceStep::Back => None,
+    })
+}
+
 struct CompatibilityBackendFactory<'a, 'b, 'c> {
     sessions: &'a mut dyn SessionCommandPortFactory,
     agents: Option<&'b mut dyn AgentCommandPortFactory>,
@@ -5256,16 +5278,16 @@ pub fn run_screen_graph_with_backend(
                     welcome.set_notice(None);
                     welcome.record_opened(&snapshot.workspace);
                     open.record_opened(&snapshot.workspace);
-                    match open_snapshot_via_controller(
+                    if let Some(exit) = enter_workspace(
                         term,
                         snapshot,
                         settings,
                         backend_factory,
                         available_models,
                     )? {
-                        WorkspaceStep::Quit => return Ok(Exit::Quit),
-                        WorkspaceStep::Back => screen = Screen::Welcome,
+                        return Ok(exit);
                     }
+                    screen = Screen::Welcome;
                 }
             },
             Screen::Open => match step_open(&mut open, key) {
@@ -5291,16 +5313,16 @@ pub fn run_screen_graph_with_backend(
                     // Leaving returns to Welcome, not to the list that was used
                     // to get here: all three entries share one way back so the
                     // switcher is always reachable from a workspace.
-                    match open_snapshot_via_controller(
+                    if let Some(exit) = enter_workspace(
                         term,
                         snapshot,
                         settings,
                         backend_factory,
                         available_models,
                     )? {
-                        WorkspaceStep::Quit => return Ok(Exit::Quit),
-                        WorkspaceStep::Back => screen = Screen::Welcome,
+                        return Ok(exit);
                     }
+                    screen = Screen::Welcome;
                 }
                 OpenStep::ConfirmCleanup => {
                     let removed = loader.cleanup_missing(&open.workspaces())?;
@@ -5320,16 +5342,16 @@ pub fn run_screen_graph_with_backend(
                         new_form.set_notice(None);
                         welcome.record_opened(&snapshot.workspace);
                         open.record_opened(&snapshot.workspace);
-                        match open_snapshot_via_controller(
+                        if let Some(exit) = enter_workspace(
                             term,
                             snapshot,
                             settings,
                             backend_factory,
                             available_models,
                         )? {
-                            WorkspaceStep::Quit => return Ok(Exit::Quit),
-                            WorkspaceStep::Back => screen = Screen::Welcome,
+                            return Ok(exit);
                         }
+                        screen = Screen::Welcome;
                     }
                     // 失敗時は入力中の draft を保持したまま notice を出して同画面に留まる。
                     Err(error) => new_form.set_notice(Some(new_project_notice(&error))),
@@ -16570,20 +16592,34 @@ mod tests {
     }
 
     /// #556 acceptance. Home can return to Welcome, another workspace opens from
-    /// there, and none of it needs a restarted process. `Exit::Quit` stays the
-    /// process-exit answer: it is reached only by choosing `quit`.
+    /// there, and none of it needs a restarted process. All three entries —
+    /// Recent, Open, New — lead back to the switcher, and `Exit::Quit` stays the
+    /// process-exit answer reached only by choosing `quit`.
     #[test]
-    fn a_workspace_returns_to_welcome_and_another_one_opens_without_restarting() {
-        // Recent order is [first, second]; `w` at the exit prompt leaves the
-        // first workspace, `2` opens the second, `q` at its prompt ends the run.
-        let mut term = FakeTerminal::with_keys(&[
-            Key::Char('1'),
+    fn every_workspace_entry_returns_to_welcome_without_restarting() {
+        // Recent `1` (first) → leave → Open `o`/↓/Enter (second) → leave →
+        // New Existing (`x`) → leave → quit from Welcome. Each `w` is the exit
+        // prompt's leave answer.
+        let mut keys = vec![Key::Char('1'), Key::CtrlQ, Key::Char('w')];
+        keys.extend([
+            Key::Char('o'),
+            Key::Down,
+            Key::Enter,
             Key::CtrlQ,
             Key::Char('w'),
-            Key::Char('2'),
-            Key::CtrlQ,
-            Key::Char('q'),
         ]);
+        keys.extend([
+            Key::Char('e'),
+            Key::Right,
+            Key::Down,
+            Key::Char('x'),
+            Key::Enter,
+            Key::CtrlQ,
+            Key::Char('w'),
+        ]);
+        // Back on Welcome for the third time, `q` ends the process.
+        keys.push(Key::Char('q'));
+        let mut term = FakeTerminal::with_keys(&keys);
         let mut loader = FakeLoader {
             opened_at: Some(now() + Duration::hours(1)),
             ..FakeLoader::default()
@@ -16610,42 +16646,109 @@ mod tests {
             Exit::Quit
         );
 
-        // Both workspaces were opened by the one process, in order, and each one
-        // rebound the settings port to its own root.
+        // Three distinct workspaces opened by the one process, in entry order,
+        // each one rebinding the settings port to its own root. (`loader.opened`
+        // records the New form's relative path; the snapshot resolves it.)
         assert_eq!(
             loader.opened,
-            vec![PathBuf::from("/tmp/first"), PathBuf::from("/tmp/second")]
+            vec![
+                PathBuf::from("/tmp/first"),
+                PathBuf::from("/tmp/second"),
+                PathBuf::from("x"),
+            ]
         );
         assert_eq!(
             settings.selected,
-            vec![PathBuf::from("/tmp/first"), PathBuf::from("/tmp/second")]
+            vec![
+                PathBuf::from("/tmp/first"),
+                PathBuf::from("/tmp/second"),
+                PathBuf::from("/tmp/x"),
+            ]
         );
+        assert_eq!(factory.drops_at_create.len(), 3);
 
-        // Welcome was drawn again between the two workspaces, and the second
-        // workspace's Home was drawn after it.
+        // Every departure landed on Welcome — the `Menu` heading belongs to the
+        // switcher alone, so it is absent from the Open list and the New form
+        // that were used to get there.
         let frames = term
             .frames
             .iter()
             .map(|frame| frame.join("\n"))
             .collect::<Vec<_>>();
-        let first_home = frames
-            .iter()
-            .position(|frame| frame.contains("first"))
-            .expect("the first workspace opens");
-        let welcome_again = frames
-            .iter()
-            .skip(first_home + 1)
-            .position(|frame| frame.contains("Menu"))
-            .expect("leaving the workspace draws Welcome again")
-            + first_home
-            + 1;
-        assert!(
-            frames
+        let mut from = 0;
+        for workspace in ["first", "second", "x"] {
+            let home = frames
                 .iter()
-                .skip(welcome_again + 1)
-                .any(|frame| frame.contains("second")),
-            "the second workspace opens from the returned Welcome"
-        );
+                .skip(from)
+                .position(|frame| frame.contains(workspace))
+                .unwrap_or_else(|| panic!("{workspace} opens"))
+                + from;
+            let welcome = frames
+                .iter()
+                .skip(home + 1)
+                .position(|frame| frame.contains("Menu"))
+                .unwrap_or_else(|| panic!("leaving {workspace} draws Welcome"))
+                + home
+                + 1;
+            assert!(
+                !frames[welcome].contains("Open Workspace"),
+                "leaving {workspace} must land on Welcome, not the Open list: {}",
+                frames[welcome]
+            );
+            from = welcome;
+        }
+    }
+
+    /// A workspace whose settings cannot be bound is a failure to report, not a
+    /// silent entry: the error propagates out of the screen graph instead of the
+    /// graph continuing with the previous workspace's settings.
+    #[test]
+    fn a_settings_binding_failure_while_opening_a_workspace_propagates() {
+        struct UnbindableSettings;
+
+        impl SettingsPort for UnbindableSettings {
+            fn select_workspace(&mut self, _workspace_root: &Path) -> io::Result<()> {
+                Err(io::Error::other("settings directory is unavailable"))
+            }
+
+            fn read(
+                &mut self,
+                _scope: usagi_core::usecase::settings::SettingsScope,
+            ) -> io::Result<Settings> {
+                Ok(Settings::default())
+            }
+
+            fn save(
+                &mut self,
+                _scope: usagi_core::usecase::settings::SettingsScope,
+                _settings: &Settings,
+            ) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut term = FakeTerminal::with_keys(&[Key::Char('1')]);
+        let mut loader = FakeLoader::default();
+        let mut factory = CountingBackendFactory::new();
+
+        let error = run_screen_graph_with_backend(
+            &mut term,
+            Vec::new(),
+            vec![recent_at("first", now())],
+            now(),
+            Start::Welcome,
+            &mut loader,
+            &mut UnbindableSettings,
+            &mut factory,
+            AvailableAgentModels::all(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "settings directory is unavailable");
+        // The failure happened before any daemon port was created, so nothing was
+        // established for a workspace that never opened.
+        assert!(factory.drops_at_create.is_empty());
+        assert_eq!(factory.drops.load(Ordering::SeqCst), 0);
     }
 
     /// #556 acceptance: leaving tears the workspace down. Every port of the
