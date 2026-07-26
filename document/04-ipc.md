@@ -972,7 +972,7 @@ generation を durable registry の active として登録するため、`genera
 shipping の `daemon restart` から rollover を起動する経路はまだ存在しない。
 shipping の replacement は 1 本の durable operation に集約済みで、seamless に保てない live runtime を
 既定で拒否する（[5. daemon の planned replacement](05-daemon.md#planned-replacement)）。最終 enable /
-handoff / product E2E は [#566](../.usagi/issues/566-feat-daemon-replacement-seamless-rollover.md) が担当する。
+handoff / product E2E は [#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) が担当する。
 
 ## client の失敗処理
 

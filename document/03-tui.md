@@ -1265,8 +1265,8 @@ daemon request を作らない。inventory refresh・reconnect・workspace open�
 planned な `daemon restart` は旧 generation の PTY を保持したまま control authority だけを移す別 failure mode である。
 その間の tab は interrupted ではなく、owner generation の endpoint へ配送される live tab のままである
 （[4. IPC の owner generation routing](04-ipc.md#owner-generation-routing)）。TUI client を owner routing に
-載せるのは [#565](../.usagi/issues/565-fix-tui-tui-client-ownerrouter.md)、rollover 自体の起動は
-[#566](../.usagi/issues/566-feat-daemon-replacement-seamless-rollover.md) の責務であり、
+載せるのは [#560](../.usagi/issues/560-feat-tui-client-ownerrouter-owner-generation-routing.md)、rollover 自体の起動は
+[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) の責務であり、
 本 projection は crash / cold restart を旧 PTY の継続と偽らないことだけを保証する。
 
 ## feedback と終了

@@ -332,7 +332,7 @@ hard crash では unique temporary が残り得るが、後続 save は別名を
 producer の停止、既接続 stream の shutdown/join を行う admission fence は
 [cross-process generation authority](#cross-process-generation-authority) に実装されているが、shipping `serve`
 はまだそれを駆動しないため、この順序自体は変わっていない。両者の接続は
-[#566](../.usagi/issues/566-feat-daemon-replacement-seamless-rollover.md) で行う。
+[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) で行う。
 正常終了後の discovery は stale socket への `ConnectionRefused` ではなく `NotFound` になる。client bootstrap は
 locator 自体の `NotFound` では replacement を一度起動する。検証済み locator の endpoint 検証または connect 後の
 `NotFound` は `ConnectionRefused` 相当に分類し、上記の fenced recovery が完了した場合だけ起動する。その他の接続失敗、
@@ -480,7 +480,7 @@ authority は、この 2 つの snapshot とは別の durable object（`shards/<
 [owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
 が正本である。shipping `serve` はまだ `terminals.json` / `agents.json` の single-writer store を使い、shard /
 allocator を駆動しない。統合は
-[#564](../.usagi/issues/564-refactor-daemon-production-durable-runtime-state-owner-shard-global-allocator.md) が担う。
+[#562](../.usagi/issues/562-refactor-daemon-durable-runtime-state-owner-shard-global-allocator.md) が担う。
 
 daemon restart 時は `agents.json` と `terminals.json` を spawn admission より前に読む。Agent runtime は
 coordinator、semantic operation ledger、safe outcome を hydrate する。両 snapshot の未終端 runtime は
@@ -1135,8 +1135,8 @@ process 内 1 世代の fence（[generation と orphan safety](#generation-と-o
 shipping `serve` はこの authority のうち **first activation** を駆動する。自分の generation を registry の
 単一 active として登録し、`current.json` を publish し、正常終了時に返却する。standby の登録・readiness・
 handoff の駆動はまだ行わない（[planned replacement](#planned-replacement)）。standby lifecycle は
-[#563](../.usagi/issues/563-feat-daemon-serve-role-aware-standby-process-registry.md)、rollover の有効化は
-[#566](../.usagi/issues/566-feat-daemon-replacement-seamless-rollover.md) が担う。
+[#561](../.usagi/issues/561-refactor-daemon-serve-role-aware-standby-process.md)、rollover の有効化は
+[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) が担う。
 
 ### durable registry
 
@@ -1276,8 +1276,8 @@ capability は connection 単位で記録するため、旧 build の client が
 **この gate は client の広告を根拠に判断する。** shipping の client は
 `owner-generation-routing.v1` を広告しているが、合成ルートと TUI はまだ owner generation で routing しない。
 広告と実装を一致させるのは
-[#565](../.usagi/issues/565-fix-tui-tui-client-ownerrouter.md) であり、rollover の有効化
-（[#566](../.usagi/issues/566-feat-daemon-replacement-seamless-rollover.md)）はそれを前提条件に持つ。
+[#560](../.usagi/issues/560-feat-tui-client-ownerrouter-owner-generation-routing.md) であり、rollover の有効化
+（[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md)）はそれを前提条件に持つ。
 
 ### legacy migration
 
@@ -1295,7 +1295,7 @@ shard** に分け、capacity と producer operation の authority を **1 つの
 契約の正本で、[cross-process generation authority](#cross-process-generation-authority) が「どの generation が
 行動してよいか」を決めるのに対し、本節は「各 generation が何を所有できるか」を決める。shipping `serve` はまだ
 single-writer store（[daemon data directory](#daemon-data-directory)）を使い、この authority を駆動しない。統合は
-[#564](../.usagi/issues/564-refactor-daemon-production-durable-runtime-state-owner-shard-global-allocator.md) が担う。
+[#562](../.usagi/issues/562-refactor-daemon-durable-runtime-state-owner-shard-global-allocator.md) が担う。
 
 ```text
 shards/<G1>.json   writer は G1 だけ ── outbox ──▶ allocations.json ──▶ G2 が consume
@@ -1463,11 +1463,11 @@ draining owner として維持する機構ではない。安全な landing order
 [owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
 を前提に、draining owner routing の
 [#508](../.usagi/issues/508-fix-tui-ipc-draining-generation-inventory-terminalref-owner-routing.md)、active generation の registry 登録の
-[#559](../.usagi/issues/559-feat-daemon-serve-durable-generation-registry-active-generation.md)、standby lifecycle の
-[#563](../.usagi/issues/563-feat-daemon-serve-role-aware-standby-process-registry.md)、owner shard 移行の
-[#564](../.usagi/issues/564-refactor-daemon-production-durable-runtime-state-owner-shard-global-allocator.md)、client routing の
-[#565](../.usagi/issues/565-fix-tui-tui-client-ownerrouter.md)、shipping lifecycle / final E2E の
-[#566](../.usagi/issues/566-feat-daemon-replacement-seamless-rollover.md) の順である。standby serve・owner shard・client routing の production 配線が揃うまで
+[#568](../.usagi/issues/568-feat-daemon-serve-durable-generation-registry-active-generation.md)、standby lifecycle の
+[#561](../.usagi/issues/561-refactor-daemon-serve-role-aware-standby-process.md)、owner shard 移行の
+[#562](../.usagi/issues/562-refactor-daemon-durable-runtime-state-owner-shard-global-allocator.md)、client routing の
+[#560](../.usagi/issues/560-feat-tui-client-ownerrouter-owner-generation-routing.md)、shipping lifecycle / final E2E の
+[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) の順である。standby serve・owner shard・client routing の production 配線が揃うまで
 seamless rollover は disabled であり、shipping の replacement は old active/current と live PTY を維持した
 typed refusal か明示的な cold transition になる（[planned replacement](#planned-replacement)）。
 

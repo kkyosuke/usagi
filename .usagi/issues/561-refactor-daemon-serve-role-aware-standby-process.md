@@ -4,11 +4,11 @@ title: refactor(daemon): serve を role-aware にして standby process の起�
 status: todo
 priority: high
 labels: [review, v2, daemon, lifecycle, durability]
-dependson: []
+dependson: [568]
 related: [515, 516, 542, 550, 559]
 parent: 559
 created_at: 2026-07-26T13:58:19.336697+00:00
-updated_at: 2026-07-26T13:58:19.336697+00:00
+updated_at: 2026-07-26T15:01:58.946415+00:00
 ---
 
 ## 問題・根拠（コード調査で確定）
