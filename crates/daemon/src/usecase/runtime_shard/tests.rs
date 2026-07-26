@@ -25,12 +25,47 @@ use super::*;
 use crate::usecase::generic_terminal::DurableTerminalRecord;
 use crate::usecase::resources::allocator::{ClaimState, OperationOutcome};
 use crate::usecase::resources::fixture::{
-    FakeClock, FakeProbe, MemoryFile, ProbeAnswer, SharedBytes, policy, probe_for,
+    FakeClock, FakeProbe, FileFault, MemoryFile, ProbeAnswer, SharedBytes, policy, probe_for,
 };
 use crate::usecase::resources::migration::AdoptionRefusal;
 use crate::usecase::resources::shard::collectable;
 use crate::usecase::runtime::{DurableOperationOutcome, DurableRuntimeRecord};
 use crate::usecase::terminal::TerminalReconcileState;
+
+/// A [`CasFile`] that fails the write at one shared position in a sequence, so a
+/// crash can be walked across every durable boundary an operation has.
+struct CrashAt {
+    bytes: SharedBytes,
+    countdown: Arc<AtomicUsize>,
+}
+
+impl CrashAt {
+    fn new(bytes: &SharedBytes, countdown: &Arc<AtomicUsize>) -> Self {
+        Self {
+            bytes: bytes.clone(),
+            countdown: Arc::clone(countdown),
+        }
+    }
+}
+
+impl crate::usecase::resources::CasFile for CrashAt {
+    fn read(&self) -> io::Result<Option<String>> {
+        Ok(self.bytes.get())
+    }
+
+    fn compare_and_write(&self, expected: Option<&str>, contents: &str) -> io::Result<bool> {
+        if self
+            .countdown
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_err()
+        {
+            return Err(io::Error::other("the process died at this boundary"));
+        }
+        MemoryFile::new(&self.bytes).compare_and_write(expected, contents)
+    }
+}
 
 /// A [`CasFile`] that loses the race a fixed number of times before behaving.
 struct FlakyFile {
@@ -1778,4 +1813,330 @@ fn scoping_a_snapshot_keeps_one_owners_records_and_its_ownership_binding() {
             .len(),
         0
     );
+}
+
+#[test]
+fn a_migration_that_dies_between_two_owners_adopts_the_rest_on_the_next_pass() {
+    /// A source that refuses to bind one generation, as a crash between two
+    /// owners leaves it: the first shard is written, the second never is.
+    struct PartialSource {
+        inner: MemorySource,
+        unreachable: Mutex<Option<DaemonGeneration>>,
+    }
+    impl ShardSource for PartialSource {
+        fn generations(&self) -> io::Result<Vec<DaemonGeneration>> {
+            self.inner.generations()
+        }
+        fn open(&self, generation: DaemonGeneration) -> io::Result<OwnerShard> {
+            if *self.unreachable.lock().unwrap() == Some(generation) {
+                return Err(io::Error::other("the shard could not be written"));
+            }
+            self.inner.open(generation)
+        }
+    }
+
+    let first = DaemonGeneration::new();
+    let second = DaemonGeneration::new();
+    let source = PartialSource {
+        inner: MemorySource::new(),
+        unreachable: Mutex::new(Some(second)),
+    };
+    let ledger = SharedBytes::default();
+    let allocator = ResourceAllocator::new(MemoryFile::new(&ledger), policy(4, 4));
+    let legacy = terminal_snapshot(vec![
+        terminal_record(
+            &terminal_of(first),
+            OperationId::new(),
+            TerminalRuntimeState::Reserved,
+            None,
+        ),
+        terminal_record(
+            &terminal_of(second),
+            OperationId::new(),
+            TerminalRuntimeState::Reserved,
+            None,
+        ),
+    ]);
+
+    assert!(
+        migrate_terminals(
+            &source,
+            &allocator,
+            &FakeProbe::new(),
+            &FakeClock::at(1),
+            &legacy,
+        )
+        .is_err()
+    );
+    assert_eq!(
+        shard_of(&source.inner.bytes(first), first).resources.len(),
+        1
+    );
+
+    // The legacy document is still there — the caller only retires it after a
+    // pass that finished — so the next pass adopts what is missing and repeats
+    // what is not.
+    *source.unreachable.lock().unwrap() = None;
+    let summary = migrate_terminals(
+        &source,
+        &allocator,
+        &FakeProbe::new(),
+        &FakeClock::at(1),
+        &legacy,
+    )
+    .unwrap();
+
+    assert_eq!(summary.owners, 2);
+    assert_eq!(
+        shard_of(&source.inner.bytes(first), first).resources.len(),
+        1
+    );
+    assert_eq!(
+        shard_of(&source.inner.bytes(second), second)
+            .resources
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn a_crash_at_any_durable_boundary_converges_without_a_second_effect() {
+    // A launch and its exit touch six durable boundaries in order: the claim, the
+    // owner's record, the operation's final, the published exit, the applied
+    // exit, and the reclaimed outbox. Each one is crashed in turn, and the owner
+    // that comes after finishes the job with the same durable answer.
+    for crash_at in 0..=6 {
+        let owner = DaemonGeneration::new();
+        let (shard, ledger) = (SharedBytes::default(), SharedBytes::default());
+        let resource = terminal_of(owner);
+        let operation = OperationId::new();
+        let running = terminal_snapshot(vec![terminal_record(
+            &resource,
+            operation,
+            TerminalRuntimeState::Running,
+            Some(process(181, "token")),
+        )]);
+        let records = project_terminals(&running, owner);
+        let countdown = Arc::new(AtomicUsize::new(crash_at));
+        let crashing = OwnerRuntimeState::new(
+            ResourceKind::Terminal,
+            OwnerShard::new(CrashAt::new(&shard, &countdown), owner),
+            ResourceAllocator::new(CrashAt::new(&ledger, &countdown), policy(4, 4)),
+            Box::new(probe_for(181, "token")),
+            Box::new(FakeClock::at(3)),
+        );
+
+        // Whatever it reached before dying, nothing else is inferred from it.
+        let _ = crashing
+            .commit(&json!({}), &records)
+            .and_then(|_| crashing.publish_exit(&resource, 0));
+
+        // The next owner of this state repeats the same sequence.
+        let resumed = writer(
+            ResourceKind::Terminal,
+            owner,
+            &shard,
+            &ledger,
+            probe_for(181, "token"),
+            (4, 4),
+        );
+        resumed
+            .commit(&json!({}), &records)
+            .unwrap_or_else(|error| panic!("crash at {crash_at}: {error}"));
+        // The exit is published again only if the crash lost it; a completed
+        // sequence has nothing left to publish.
+        let _ = resumed.publish_exit(&resource, 0);
+
+        let document = shard_of(&shard, owner);
+        let ledger_document = ledger_of(&ledger);
+        assert_eq!(
+            ledger_document.pool_used(ResourceKind::Terminal),
+            0,
+            "crash at {crash_at} left capacity held"
+        );
+        assert_eq!(
+            ledger_document
+                .operation(&operation)
+                .map(|record| record.outcome),
+            Some(OperationOutcome::Spawned),
+            "crash at {crash_at} lost the producer's answer"
+        );
+        assert!(
+            document.resource(&resource).is_none(),
+            "crash at {crash_at} left the resource behind"
+        );
+        assert_eq!(collectable(&document, &ledger_document), Ok(()));
+    }
+}
+
+#[test]
+fn a_crash_at_any_migration_boundary_adopts_the_same_records_once() {
+    // Adoption writes the claim before the shard, per owner. Crashing at either
+    // boundary leaves state the next pass rolls forward, never a second record.
+    for crash_at in 0..=2 {
+        let source = MemorySource::new();
+        let ledger = SharedBytes::default();
+        let owner = DaemonGeneration::new();
+        let resource = terminal_of(owner);
+        let operation = OperationId::new();
+        let legacy = terminal_snapshot(vec![terminal_record(
+            &resource,
+            operation,
+            TerminalRuntimeState::Running,
+            Some(process(191, "real")),
+        )]);
+        let countdown = Arc::new(AtomicUsize::new(crash_at));
+        let crashing = ResourceAllocator::new(CrashAt::new(&ledger, &countdown), policy(4, 4));
+        let shard_bytes = source.bytes(owner);
+        let crashing_source = CrashingSource {
+            bytes: shard_bytes.clone(),
+            countdown: Arc::clone(&countdown),
+        };
+        let _ = migrate_terminals(
+            &crashing_source,
+            &crashing,
+            &probe_for(191, "real"),
+            &FakeClock::at(5),
+            &legacy,
+        );
+
+        let allocator = ResourceAllocator::new(MemoryFile::new(&ledger), policy(4, 4));
+        let summary = migrate_terminals(
+            &source,
+            &allocator,
+            &probe_for(191, "real"),
+            &FakeClock::at(5),
+            &legacy,
+        )
+        .unwrap_or_else(|error| panic!("crash at {crash_at}: {error}"));
+
+        assert_eq!((summary.owners, summary.adopted), (1, 1));
+        assert_eq!(
+            shard_of(&shard_bytes, owner).resources.len(),
+            1,
+            "crash at {crash_at} adopted the record twice"
+        );
+        assert_eq!(ledger_of(&ledger).claims.len(), 1);
+        assert_eq!(
+            ledger_of(&ledger).operation(&operation).unwrap().outcome,
+            OperationOutcome::Spawned
+        );
+    }
+}
+
+/// A source whose one shard shares the crash countdown with the allocator.
+struct CrashingSource {
+    bytes: SharedBytes,
+    countdown: Arc<AtomicUsize>,
+}
+
+impl ShardSource for CrashingSource {
+    fn generations(&self) -> io::Result<Vec<DaemonGeneration>> {
+        Ok(Vec::new())
+    }
+
+    fn open(&self, generation: DaemonGeneration) -> io::Result<OwnerShard> {
+        Ok(OwnerShard::new(
+            CrashAt::new(&self.bytes, &self.countdown),
+            generation,
+        ))
+    }
+}
+
+#[test]
+fn a_crash_while_collecting_a_dead_owner_leaves_the_rest_for_the_next_pass() {
+    // Collection applies the published exit, seals and releases each live
+    // record, fences them, and reclaims the outbox. A crash at any of those
+    // boundaries converges on the next attempt.
+    for crash_at in 0..=4 {
+        let owner = DaemonGeneration::new();
+        let (shard, ledger) = (SharedBytes::default(), SharedBytes::default());
+        let resource = terminal_of(owner);
+        let exited = terminal_of(owner);
+        let records = terminal_snapshot(vec![
+            terminal_record(
+                &resource,
+                OperationId::new(),
+                TerminalRuntimeState::Running,
+                Some(process(201, "token")),
+            ),
+            terminal_record(
+                &exited,
+                OperationId::new(),
+                TerminalRuntimeState::Running,
+                Some(process(201, "token")),
+            ),
+        ]);
+        writer(
+            ResourceKind::Terminal,
+            owner,
+            &shard,
+            &ledger,
+            probe_for(201, "token"),
+            (4, 4),
+        )
+        .commit(&json!({}), &project_terminals(&records, owner))
+        .unwrap();
+        // One child's exit was published and never applied; the other is still
+        // recorded as running. Both halves of the collection have work to do.
+        OwnerShard::new(MemoryFile::new(&shard), owner)
+            .update(|document| document.commit_exit(&exited, 0))
+            .unwrap();
+        let countdown = Arc::new(AtomicUsize::new(crash_at));
+        let _ = collect_dead_owner(
+            &OwnerShard::new(CrashAt::new(&shard, &countdown), owner),
+            &ResourceAllocator::new(CrashAt::new(&ledger, &countdown), policy(4, 4)),
+            &FakeProbe::new(),
+            &FakeClock::at(9),
+        );
+
+        let report = collect_dead_owner(
+            &OwnerShard::new(MemoryFile::new(&shard), owner),
+            &ResourceAllocator::new(MemoryFile::new(&ledger), policy(4, 4)),
+            &FakeProbe::new(),
+            &FakeClock::at(9),
+        )
+        .unwrap_or_else(|error| panic!("crash at {crash_at}: {error}"));
+
+        assert_eq!(report.retained, 0, "crash at {crash_at} kept capacity");
+        let document = shard_of(&shard, owner);
+        let ledger_document = ledger_of(&ledger);
+        assert_eq!(
+            document.resource(&resource).unwrap().state,
+            ResourceState::OwnershipUnknown
+        );
+        assert!(
+            document.resource(&exited).is_none(),
+            "crash at {crash_at} left the applied exit unreclaimed"
+        );
+        assert_eq!(ledger_document.pool_used(ResourceKind::Terminal), 0);
+        assert_eq!(collectable(&document, &ledger_document), Ok(()));
+    }
+}
+
+#[test]
+fn a_retained_shard_that_cannot_be_read_is_never_read_as_empty() {
+    /// A source that lists one generation and then cannot deliver it.
+    struct Unreadable(DaemonGeneration, bool);
+    impl ShardSource for Unreadable {
+        fn generations(&self) -> io::Result<Vec<DaemonGeneration>> {
+            Ok(vec![self.0])
+        }
+        fn open(&self, generation: DaemonGeneration) -> io::Result<OwnerShard> {
+            if self.1 {
+                return Err(io::Error::other("the shard could not be bound"));
+            }
+            Ok(OwnerShard::new(
+                MemoryFile::faulty(&SharedBytes::default(), FileFault::ReadFails),
+                generation,
+            ))
+        }
+    }
+
+    for unbindable in [true, false] {
+        let source = Unreadable(DaemonGeneration::new(), unbindable);
+        assert!(hydrate_agents(&source).is_err());
+        assert!(hydrate_terminals(&source).is_err());
+        assert!(live_census(&source).is_err());
+    }
 }

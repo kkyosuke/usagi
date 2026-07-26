@@ -1485,7 +1485,10 @@ standby と retired はいずれの document も書かない。
 この判定は**書く側が問う**。`pr-inventory.json` を書くのは PTY output 経路の projection worker であり、role を
 知っている lifecycle 側からは遠い。write ごとに durable registry を読み直すと hot path に locked file read が入る
 （[PR 検出の投影](#pr-検出の投影)）ため、role は**変わる場所で一度 publish**し、worker はそれを安価に読んで
-verdict を得る。`serve` は起動時に自分を active として publish する。
+verdict を得る。`serve` は起動時に自分を active として publish する。active でない間、worker は observation を
+書かずに捨てる（deferred な owner-local event は draining できる process が現れる #559 と同時に入る）。PR の
+remote 突き合わせは [PR refresh scheduler](#pr-refresh-scheduler) が別 cadence で行うため、この drop は検出の
+遅延であって喪失ではない。
 
 ## generation と orphan safety
 

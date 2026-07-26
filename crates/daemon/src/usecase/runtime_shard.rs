@@ -364,7 +364,7 @@ impl OwnerRuntimeState {
                                 report.running += 1;
                             }
                             ProjectedState::Running(_) | ProjectedState::Unknown => {
-                                report.unknown += 1
+                                report.unknown += 1;
                             }
                             ProjectedState::Failed => {
                                 // A definite failure releases the capacity its
@@ -416,13 +416,15 @@ fn apply_record(
         projection.kind,
         &projection.resource,
     )?;
-    let unknown = document
+    // A record the shard has already finished with is not reopened by a save that
+    // still describes it as live: an exit is committed by the observation that
+    // reaped the child, and a record that lost its proof of ownership never
+    // regains it — the window in which the OS could have answered has passed.
+    let decided = document
         .resource(&projection.resource)
-        .is_some_and(|entry| entry.state == ResourceState::OwnershipUnknown);
+        .is_some_and(|entry| !entry.state.is_live());
     match (&projection.state, &resolved.verified) {
-        // A record that already lost its proof of ownership never regains it: the
-        // window in which the OS could have answered has passed.
-        (_, _) if unknown => Ok(()),
+        (_, _) if decided => Ok(()),
         (ProjectedState::Running(_), Some(identity)) => {
             document.record_spawn(&projection.resource, identity)
         }

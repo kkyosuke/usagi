@@ -2205,9 +2205,12 @@ fn start_agent_observer(
 ///
 /// `pr-inventory.json` is a whole-snapshot document, so it needs exactly one
 /// writer across every retained generation. The fence is asked here, on the write
-/// side: while this process is the active generation it writes, and once it is
-/// draining it drops its observations rather than replacing a document the new
-/// active generation now owns.
+/// side: while this process is the active generation it writes, and if it is ever
+/// not, it drops the observation rather than replacing a document another
+/// generation now owns. Dropping is the conservative half of the contract — the
+/// deferred owner-local event a draining process should publish instead arrives
+/// with the process that can be draining (#559) — and the refresh scheduler
+/// re-reads the remote anyway, so a dropped detection is late rather than lost.
 fn start_pr_projection_worker(
     pr_inventory: SharedPrInventory,
     projection: Arc<PrProjectionQueue>,
