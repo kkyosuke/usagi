@@ -475,6 +475,32 @@ impl AllocatorDocument {
         self.seal(operation, OperationOutcome::Ambiguous, now)
     }
 
+    /// Release a claim held by a generation that is no longer live, against the
+    /// active generation's own durable record of the resource being terminated.
+    ///
+    /// This is deliberately *not* a way to guess: it refuses the caller's own
+    /// claims, which must travel the owner outbox so their exit is published and
+    /// consumed exactly once ([`super::drain`]). It exists because a retired
+    /// owner can never publish again, and the record it left behind is state the
+    /// active generation is now the single authority for. A resource whose
+    /// ownership is merely *unknown* is not terminated, so nothing releases it.
+    ///
+    /// # Errors
+    /// Returns [`ResourceError::UnknownResource`] when no claim exists, or
+    /// [`ResourceError::WrongOwner`] when the claim belongs to `active`.
+    pub fn release_unowned(
+        &mut self,
+        active: DaemonGeneration,
+        resource: &TerminalRef,
+    ) -> Result<(), ResourceError> {
+        let claim = self.claim(resource).ok_or(ResourceError::UnknownResource)?;
+        if claim.owner == active {
+            return Err(ResourceError::WrongOwner);
+        }
+        self.release(resource);
+        Ok(())
+    }
+
     /// Apply one owner-published progress event (output, command completion).
     /// It advances the consumed revision without touching capacity.
     ///
@@ -613,7 +639,7 @@ pub struct ResourceAllocator {
 
 impl ResourceAllocator {
     /// Bind an allocator to its durable document and per-pool policy.
-    pub fn new(file: impl CasFile + 'static, policy: CapacityPolicy) -> Self {
+    pub fn new(file: impl CasFile + Send + 'static, policy: CapacityPolicy) -> Self {
         Self {
             store: CasStore::new(file),
             policy,

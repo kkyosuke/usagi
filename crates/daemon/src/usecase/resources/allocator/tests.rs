@@ -299,6 +299,37 @@ fn an_event_from_the_wrong_owner_or_for_an_unknown_resource_changes_nothing() {
 }
 
 #[test]
+fn only_another_generations_claim_can_be_released_without_its_event() {
+    let (mut document, operation, owner) = reserved(ResourceKind::Terminal, 4);
+    let resource = document.operation(&operation).unwrap().resource.clone();
+    document.mark_spawned(&operation, 1).unwrap();
+    let before = document.clone();
+
+    // The owner's own claim must travel its outbox, so its exit is published and
+    // consumed exactly once. Releasing it here would bypass that entirely.
+    assert_eq!(
+        document.release_unowned(owner, &resource),
+        Err(ResourceError::WrongOwner)
+    );
+    assert_eq!(
+        document.release_unowned(DaemonGeneration::new(), &terminal(owner)),
+        Err(ResourceError::UnknownResource)
+    );
+    assert_eq!(document, before);
+
+    // A generation that is gone can never publish again, so the active generation
+    // releases against its own record of the resource being terminated.
+    document
+        .release_unowned(DaemonGeneration::new(), &resource)
+        .unwrap();
+    assert_eq!(
+        document.claim(&resource).unwrap().state,
+        ClaimState::Released
+    );
+    assert_eq!(document.owner_claims(owner), 0);
+}
+
+#[test]
 fn a_compacted_or_below_watermark_operation_can_never_be_admitted_again() {
     let mut document = AllocatorDocument::default();
     let old = OperationId::parse("018f0000-0000-7000-8000-000000000001").unwrap();

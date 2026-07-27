@@ -76,7 +76,7 @@ impl Drained {
 #[test]
 fn one_exit_releases_capacity_once_across_redelivery_and_consumer_restarts() {
     let world = Drained::new();
-    publish_exit(&world.shard(), &world.resource, 7).unwrap();
+    publish_exit(&world.shard(), &world.resource, Some(7)).unwrap();
     let published = world.owner_shard();
     assert_eq!(published.unacked_outbox(), 1);
 
@@ -119,7 +119,7 @@ fn events_are_applied_in_owner_order_however_the_outbox_is_read() {
         .shard()
         .update(|document| {
             document.commit_output(&world.resource, 4)?;
-            document.commit_exit(&world.resource, 0)
+            document.commit_exit(&world.resource, Some(0))
         })
         .unwrap();
     let mut reordered = world.owner_shard();
@@ -139,7 +139,7 @@ fn events_are_applied_in_owner_order_however_the_outbox_is_read() {
 #[test]
 fn the_active_generation_never_writes_the_old_shard() {
     let world = Drained::new();
-    publish_exit(&world.shard(), &world.resource, 0).unwrap();
+    publish_exit(&world.shard(), &world.resource, Some(0)).unwrap();
     let published = world.owner_shard();
     let before = world.shard_bytes.get().unwrap();
 
@@ -162,7 +162,7 @@ fn the_active_generation_never_writes_the_old_shard() {
 #[test]
 fn an_event_about_another_owners_resource_is_refused_and_changes_nothing() {
     let world = Drained::new();
-    publish_exit(&world.shard(), &world.resource, 0).unwrap();
+    publish_exit(&world.shard(), &world.resource, Some(0)).unwrap();
     let mut forged = world.owner_shard();
     forged.owner = DaemonGeneration::new();
 
@@ -200,7 +200,7 @@ fn an_event_about_another_owners_resource_is_refused_and_changes_nothing() {
 #[test]
 fn a_store_failure_stops_the_pass_without_a_partial_acknowledgement() {
     let world = Drained::new();
-    publish_exit(&world.shard(), &world.resource, 0).unwrap();
+    publish_exit(&world.shard(), &world.resource, Some(0)).unwrap();
     let published = world.owner_shard();
 
     let broken = ResourceAllocator::new(
@@ -224,7 +224,7 @@ fn a_store_failure_stops_the_pass_without_a_partial_acknowledgement() {
     );
 
     assert_eq!(
-        publish_exit(&world.shard(), &terminal(world.owner), 0)
+        publish_exit(&world.shard(), &terminal(world.owner), Some(0))
             .unwrap_err()
             .refusal(),
         Some(ResourceError::UnknownResource)

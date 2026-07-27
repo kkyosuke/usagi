@@ -303,6 +303,13 @@ impl AgentRuntime {
     }
 }
 
+/// How many Agent runtimes one daemon admits at a time.
+///
+/// It is also the Agent capacity pool's global limit: the pool is shared by every
+/// retained generation and never implicitly summed with the generic terminal pool
+/// ([`crate::usecase::resources::allocator::CapacityPolicy`]).
+pub const AGENT_RUNTIME_LIMIT: usize = 16;
+
 impl AgentRuntime {
     /// Constructs an Agent runtime with an injected current executable locator.
     ///
@@ -322,7 +329,7 @@ impl AgentRuntime {
         dispatch: DispatchStore,
         locator: impl ExecutableLocator + 'static,
     ) -> Self {
-        let mut coordinator = RuntimeCoordinator::new(16, 64 * 1024, 64);
+        let mut coordinator = RuntimeCoordinator::new(AGENT_RUNTIME_LIMIT, 64 * 1024, 64);
         coordinator
             .activate_generation(generation)
             .expect("a fresh Agent coordinator accepts its production generation");
@@ -388,8 +395,13 @@ impl AgentRuntime {
         snapshot: super::runtime::RuntimeStoreSnapshot,
         retention: SharedTerminalRetention,
     ) -> Result<Self, super::runtime::RuntimeSnapshotError> {
-        let mut coordinator =
-            RuntimeCoordinator::hydrate_with_retention(snapshot, 16, 64 * 1024, 64, retention)?;
+        let mut coordinator = RuntimeCoordinator::hydrate_with_retention(
+            snapshot,
+            AGENT_RUNTIME_LIMIT,
+            64 * 1024,
+            64,
+            retention,
+        )?;
         coordinator.activate_generation(generation)?;
         store
             .save(coordinator.snapshot())
@@ -2009,6 +2021,21 @@ impl AgentRuntime {
     pub fn collect_retention_garbage(&mut self) -> usize {
         self.coordinator.retention().collect();
         self.coordinator.collect_garbage(&mut *self.store)
+    }
+
+    /// The resource ids this owner still answers for.
+    ///
+    /// Durable state of a generation that is gone may only be collected once
+    /// nothing retains its records any more, and this is the live half of that
+    /// question ([`crate::usecase::resources::durable::ShardedRuntimeState::collect`]).
+    #[must_use]
+    pub fn retained_resources(&self) -> std::collections::BTreeSet<String> {
+        self.coordinator
+            .snapshot()
+            .records
+            .iter()
+            .map(|record| record.runtime.terminal.terminal_id.as_str())
+            .collect()
     }
 }
 
@@ -5749,6 +5776,35 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn an_agent_runtime_refuses_a_snapshot_schema_it_cannot_read() {
+        let refused = AgentRuntime::hydrate_with_retention(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty::default(),
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+            PathExecutableLocator,
+            RuntimeStoreSnapshot {
+                schema_version: 99,
+                ..RuntimeStoreSnapshot::default()
+            },
+            SharedTerminalRetention::new(),
+        )
+        .err();
+
+        // Startup fails closed: no generation is activated and no admission opens.
+        assert_eq!(
+            refused,
+            Some(super::super::runtime::RuntimeSnapshotError::UnknownSchema(
+                99
+            ))
+        );
     }
 
     #[test]

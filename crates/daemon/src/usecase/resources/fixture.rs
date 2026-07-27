@@ -13,8 +13,10 @@ use usagi_core::domain::id::{
     DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
 };
 
+use crate::usecase::generation::ProcessIdentity;
 use crate::usecase::resources::CasFile;
 use crate::usecase::resources::allocator::{CapacityPolicy, ResourceAllocator, ResourceKind};
+use crate::usecase::resources::durable::{IdentityAuthority, LegacySnapshots, ShardArchive};
 use crate::usecase::resources::identity::{ChildIdentity, ChildProcessProbe, IDENTITY_SOURCE_OS};
 use crate::usecase::resources::launch::{LaunchIntent, ResourceSpawner, SpawnRefusal};
 use crate::usecase::resources::retention::{LogicalClock, RetentionLimits};
@@ -92,6 +94,114 @@ impl CasFile for MemoryFile {
         }
         *guard = Some(contents.to_owned());
         Ok(true)
+    }
+}
+
+/// A [`ShardArchive`] over shared memory.
+///
+/// Cloning it shares every document, so two "processes" can be bound to the same
+/// archive exactly as two daemons share one data directory.
+#[derive(Clone, Default)]
+pub struct MemoryArchive {
+    shards: Arc<Mutex<BTreeMap<String, SharedBytes>>>,
+    legacy: Arc<Mutex<LegacySnapshots>>,
+    marker: Arc<Mutex<Option<String>>>,
+    collected: Arc<Mutex<Vec<String>>>,
+}
+
+impl MemoryArchive {
+    /// An archive with no shard and nothing to migrate.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// An archive holding the legacy whole-snapshot stores.
+    pub fn with_legacy(agents: Option<&str>, terminals: Option<&str>) -> Self {
+        let archive = Self::default();
+        *archive.legacy.lock().unwrap() = LegacySnapshots {
+            agents: agents.map(str::to_owned),
+            terminals: terminals.map(str::to_owned),
+        };
+        archive
+    }
+
+    /// One generation's shard bytes, created empty on first use.
+    pub fn bytes(&self, owner: DaemonGeneration) -> SharedBytes {
+        self.shards
+            .lock()
+            .unwrap()
+            .entry(owner.as_str())
+            .or_default()
+            .clone()
+    }
+
+    /// The migration marker, once the legacy stores were sealed.
+    pub fn marker(&self) -> Option<String> {
+        self.marker.lock().unwrap().clone()
+    }
+
+    /// The generations whose shard was collected, in collection order.
+    pub fn collected(&self) -> Vec<String> {
+        self.collected.lock().unwrap().clone()
+    }
+}
+
+impl ShardArchive for MemoryArchive {
+    fn documents(&self) -> io::Result<Vec<String>> {
+        Ok(self
+            .shards
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(SharedBytes::get)
+            .collect())
+    }
+
+    fn shard(&self, owner: DaemonGeneration) -> io::Result<Box<dyn CasFile + Send>> {
+        Ok(Box::new(MemoryFile::new(&self.bytes(owner))))
+    }
+
+    fn collect(&self, owner: DaemonGeneration) -> io::Result<()> {
+        let name = owner.as_str();
+        self.shards.lock().unwrap().remove(&name);
+        self.collected.lock().unwrap().push(name);
+        Ok(())
+    }
+
+    fn legacy(&self) -> io::Result<LegacySnapshots> {
+        Ok(self.legacy.lock().unwrap().clone())
+    }
+
+    fn seal_legacy(&self, marker: &str) -> io::Result<()> {
+        *self.marker.lock().unwrap() = Some(marker.to_owned());
+        *self.legacy.lock().unwrap() = LegacySnapshots::default();
+        Ok(())
+    }
+}
+
+/// An identity authority that only vouches for the children it was told about.
+#[derive(Debug, Default)]
+pub struct ObservedChildren(BTreeMap<u32, String>);
+
+impl ObservedChildren {
+    /// An authority that proves nothing.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that this process observed `pid` starting with `start`.
+    pub fn with(mut self, pid: u32, start: &str) -> Self {
+        self.0.insert(pid, start.to_owned());
+        self
+    }
+}
+
+impl IdentityAuthority for ObservedChildren {
+    fn verified(&self, process: &ProcessIdentity) -> Option<ChildIdentity> {
+        self.0
+            .get(&process.pid)
+            .filter(|start| *start == &process.start_identity)
+            .map(|start| verified(process.pid, start))
     }
 }
 

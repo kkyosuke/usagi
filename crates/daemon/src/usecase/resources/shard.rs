@@ -43,8 +43,11 @@ pub enum ResourceState {
     Reserved,
     /// A child was spawned and its identity is OS verifiable.
     Running,
-    /// The child exited and the exit is committed to this shard.
-    Exited { status: i32 },
+    /// The child exited and the exit is committed to this shard. The status is
+    /// recorded when the owner observed one; `None` means the owner committed the
+    /// exit without retaining a status, which is never turned into a fabricated
+    /// one.
+    Exited { status: Option<i32> },
     /// Ownership cannot be proved. Nothing is spawned, signalled, or released
     /// for this record.
     OwnershipUnknown,
@@ -70,6 +73,14 @@ pub struct ShardResource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<ChildIdentity>,
     pub state: ResourceState,
+    /// The owner's own durable record for this resource, kept verbatim as
+    /// opaque bytes.
+    ///
+    /// The shard is the single writer of the record its owner is responsible for,
+    /// so the record travels *with* the state it belongs to and one
+    /// compare-and-swap commits both. Nothing in this module interprets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
     pub revision: u64,
 }
 
@@ -82,7 +93,7 @@ pub enum OwnerEvent {
     /// A terminal command reached its completion.
     CommandCompleted { command: OperationId },
     /// The child exited. This is the only event that releases capacity.
-    Exit { status: i32 },
+    Exit { status: Option<i32> },
 }
 
 impl OwnerEvent {
@@ -241,8 +252,30 @@ impl ShardDocument {
             digest: digest.to_owned(),
             process: None,
             state: ResourceState::Reserved,
+            payload: None,
             revision: 1,
         });
+        Ok(())
+    }
+
+    /// Replace the owner's opaque record for one resource.
+    ///
+    /// The payload rides on the same compare-and-swap as the state transition
+    /// staged with it, so a record and the state it describes can never be
+    /// committed apart.
+    ///
+    /// # Errors
+    /// Returns [`ResourceError::UnknownResource`].
+    pub fn set_payload(
+        &mut self,
+        resource: &TerminalRef,
+        payload: &str,
+    ) -> Result<(), ResourceError> {
+        let entry = self.resource_mut(resource)?;
+        if entry.payload.as_deref() != Some(payload) {
+            entry.payload = Some(payload.to_owned());
+            entry.revision += 1;
+        }
         Ok(())
     }
 
@@ -383,7 +416,7 @@ impl ShardDocument {
     pub fn commit_exit(
         &mut self,
         resource: &TerminalRef,
-        status: i32,
+        status: Option<i32>,
     ) -> Result<(), ResourceError> {
         let entry = self.resource_mut(resource)?;
         match entry.state {
@@ -404,15 +437,18 @@ impl ShardDocument {
     ///
     /// This is the owner's own write: the consumer never acknowledges into this
     /// document. Returns how many outbox entries were reclaimed.
+    ///
+    /// An exited resource that still carries a [`payload`](ShardResource::payload)
+    /// is *kept*: the payload is durable history the owner is still responsible
+    /// for, and it is dropped only when the owner itself stops retaining it
+    /// ([`forget`](Self::forget)). It holds no capacity and is not live, so
+    /// keeping it does not block collection.
     pub fn reclaim(&mut self, allocator: &AllocatorDocument) -> usize {
         let before = self.outbox.len();
-        self.outbox.retain(|event| {
-            allocator
-                .consumed_revision(&event.resource)
-                .is_none_or(|applied| applied < event.event_revision)
-        });
+        self.outbox.retain(|event| !applied(allocator, event));
         self.resources.retain(|entry| {
             !matches!(entry.state, ResourceState::Exited { .. })
+                || entry.payload.is_some()
                 || self
                     .outbox
                     .iter()
@@ -421,10 +457,44 @@ impl ShardDocument {
         before - self.outbox.len()
     }
 
+    /// Drop a resource this owner no longer retains. Absent resources converge
+    /// silently, so a repeated pass writes nothing.
+    ///
+    /// # Errors
+    /// Returns [`ResourceError::WrongState`] when the resource still holds a
+    /// child: a live record is never forgotten, because forgetting it would hide
+    /// a child nothing would ever reap.
+    pub fn forget(&mut self, resource: &TerminalRef) -> Result<(), ResourceError> {
+        let Some(entry) = self.resource(resource) else {
+            return Ok(());
+        };
+        if entry.state.is_live() {
+            return Err(ResourceError::WrongState);
+        }
+        self.resources
+            .retain(|entry| entry.resource.terminal_id != resource.terminal_id);
+        self.outbox
+            .retain(|event| event.resource.terminal_id != resource.terminal_id);
+        Ok(())
+    }
+
     /// The events the active consumer has not applied yet.
     #[must_use]
     pub fn unacked_outbox(&self) -> usize {
         self.outbox.len()
+    }
+
+    /// The events the allocator does not record as consumed yet.
+    ///
+    /// This is what a *retired* owner's outbox must be measured by: a dead
+    /// process can no longer [`reclaim`](Self::reclaim) its own entries, so the
+    /// raw length would keep a fully applied shard alive forever.
+    #[must_use]
+    pub fn unconsumed_outbox(&self, allocator: &AllocatorDocument) -> usize {
+        self.outbox
+            .iter()
+            .filter(|event| !applied(allocator, event))
+            .count()
     }
 
     fn publish(&mut self, resource: &TerminalRef, event: OwnerEvent) {
@@ -454,6 +524,19 @@ impl ShardDocument {
     }
 }
 
+/// Whether one published event has nothing left to do.
+///
+/// An event whose resource holds no claim at all has no addressee: the allocator
+/// either released and collected it or never knew it, so there is no capacity left
+/// to release and no consumer that could apply it. Keeping such an entry would
+/// block its generation from ever being collected.
+fn applied(allocator: &AllocatorDocument, event: &OutboxEvent) -> bool {
+    allocator.claim(&event.resource).is_none()
+        || allocator
+            .consumed_revision(&event.resource)
+            .is_some_and(|revision| revision >= event.event_revision)
+}
+
 /// Why a generation is not collectable yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CollectionBlocker {
@@ -476,13 +559,38 @@ pub fn collectable(
     shard: &ShardDocument,
     allocator: &AllocatorDocument,
 ) -> Result<(), CollectionBlocker> {
+    drained(shard, allocator, shard.unacked_outbox())
+}
+
+/// Whether a *retired* generation's shard may be removed by the active
+/// generation.
+///
+/// It differs from [`collectable`] in one place only: a dead owner can never
+/// reclaim its own outbox, so what counts is whether the allocator already
+/// recorded every published event as consumed, not whether the entries were
+/// swept away afterwards.
+///
+/// # Errors
+/// Returns the first [`CollectionBlocker`] that still holds.
+pub fn retired_collectable(
+    shard: &ShardDocument,
+    allocator: &AllocatorDocument,
+) -> Result<(), CollectionBlocker> {
+    drained(shard, allocator, shard.unconsumed_outbox(allocator))
+}
+
+fn drained(
+    shard: &ShardDocument,
+    allocator: &AllocatorDocument,
+    pending: usize,
+) -> Result<(), CollectionBlocker> {
     if shard.live_resources() > 0 {
         return Err(CollectionBlocker::LiveResource);
     }
     if !shard.in_flight.is_empty() {
         return Err(CollectionBlocker::InFlightCommand);
     }
-    if shard.unacked_outbox() > 0 {
+    if pending > 0 {
         return Err(CollectionBlocker::UnackedOutbox);
     }
     if allocator.owner_claims(shard.owner) > 0 {
@@ -616,7 +724,7 @@ pub struct OwnerShard {
 
 impl OwnerShard {
     /// Bind the shard of `owner`.
-    pub fn new(file: impl CasFile + 'static, owner: DaemonGeneration) -> Self {
+    pub fn new(file: impl CasFile + Send + 'static, owner: DaemonGeneration) -> Self {
         Self {
             store: CasStore::new(file),
             owner,
