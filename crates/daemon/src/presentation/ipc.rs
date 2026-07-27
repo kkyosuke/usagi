@@ -64,6 +64,12 @@ pub trait TerminalOwner {
 /// nothing puts nothing in.
 ///
 /// [`AdmissionLease`]: crate::usecase::authority::admission::AdmissionLease
+///
+/// The payload is deliberately never *read*. A permit's whole contribution is
+/// made when it is dropped — that is what releases the lease and lets a barrier
+/// proceed — so there is nothing for a getter to return and no `Debug` rendering
+/// worth having. Both would only invite the inspection the opacity is here to
+/// prevent.
 pub struct RequestPermit(#[allow(dead_code)] Option<Box<dyn Send>>);
 
 impl RequestPermit {
@@ -79,15 +85,6 @@ impl RequestPermit {
     #[must_use]
     pub fn holding(lease: impl Send + 'static) -> Self {
         Self(Some(Box::new(lease)))
-    }
-}
-
-impl std::fmt::Debug for RequestPermit {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self.0 {
-            Some(_) => "RequestPermit(fenced)",
-            None => "RequestPermit(unfenced)",
-        })
     }
 }
 
