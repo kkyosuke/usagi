@@ -39,6 +39,7 @@ pub enum Command {
     Agent { arguments: String },
     Close { arguments: String },
     Diff { arguments: String },
+    Env { arguments: String },
     Reopen { arguments: String },
     Terminal { arguments: String },
 }
@@ -80,6 +81,14 @@ const DEFINITIONS: &[CommandDefinition] = &[
     },
     CommandDefinition {
         info: CommandInfo {
+            name: "env",
+            description: "Edit this workspace's environment variables",
+            usage: "env [workspace|global]",
+        },
+        factory: |arguments| Command::Env { arguments },
+    },
+    CommandDefinition {
+        info: CommandInfo {
             name: "reopen",
             description: "Reopen a dismissed Agent lineage",
             usage: "reopen <continuation-ref>",
@@ -110,6 +119,7 @@ impl Command {
             Self::Agent { .. } => "agent",
             Self::Close { .. } => "close",
             Self::Diff { .. } => "diff",
+            Self::Env { .. } => "env",
             Self::Reopen { .. } => "reopen",
             Self::Terminal { .. } => "terminal",
         }
@@ -123,6 +133,7 @@ impl Command {
             Self::Agent { arguments } => Box::new(h::Agent { arguments }),
             Self::Close { arguments } => Box::new(h::Close { arguments }),
             Self::Diff { arguments } => Box::new(h::Diff { arguments }),
+            Self::Env { arguments } => Box::new(h::Env { arguments }),
             Self::Reopen { arguments } => Box::new(h::Reopen { arguments }),
             Self::Terminal { arguments } => Box::new(h::Terminal { arguments }),
         }
@@ -211,7 +222,10 @@ mod tests {
     fn command_metadata_is_complete_and_sorted() {
         let definitions: Vec<_> = commands().collect();
         let names: Vec<_> = definitions.iter().map(|command| command.name).collect();
-        assert_eq!(names, ["agent", "close", "diff", "reopen", "terminal"]);
+        assert_eq!(
+            names,
+            ["agent", "close", "diff", "env", "reopen", "terminal"]
+        );
         assert!(
             definitions
                 .iter()
@@ -256,6 +270,12 @@ mod tests {
                 "diff",
                 Command::Diff {
                     arguments: String::new(),
+                },
+            ),
+            (
+                "env global",
+                Command::Env {
+                    arguments: "global".to_owned(),
                 },
             ),
             (

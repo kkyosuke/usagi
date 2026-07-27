@@ -16,7 +16,7 @@ use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelection
 
 /// モーダルの枠の内側（内容）幅。
 const INNER_WIDTH: usize = 50;
-const BODY_HEIGHT: usize = 9;
+const BODY_HEIGHT: usize = 10;
 
 /// アクションメニューの状態。対象セッション名と、アクション一覧上のカーソルを持つ。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,6 +282,10 @@ impl CloseupModal {
                 })
                 .collect(),
             "close" => vec![ModalSubcommand::plain("--force")],
+            "env" => vec![
+                ModalSubcommand::plain("workspace"),
+                ModalSubcommand::plain("global"),
+            ],
             "reopen" => self
                 .reopen_choices
                 .iter()
@@ -325,6 +329,7 @@ impl CloseupModal {
         }
         let candidates = match command {
             "close" => vec!["--force".to_owned()],
+            "env" => vec!["workspace".to_owned(), "global".to_owned()],
             "reopen" => self
                 .reopen_choices
                 .iter()
@@ -485,10 +490,14 @@ mod tests {
 
     #[test]
     fn expanding_an_action_with_subcommands_lists_them() {
-        // `terminal` and `close` carry subcommands; expanding the selected action
+        // `terminal`, `close`, and `env` carry subcommands; expanding the selected action
         // renders that subcommand list (the completion the Ctrl-O command input
         // drives).
-        for (action, subcommand) in [("terminal", "open"), ("close", "--force")] {
+        for (action, subcommand) in [
+            ("terminal", "open"),
+            ("close", "--force"),
+            ("env", "workspace"),
+        ] {
             let mut modal = CloseupModal::new("daemon");
             for _ in 0..modal.actions().len() {
                 if modal.selected_action().name == action {
@@ -585,6 +594,7 @@ mod tests {
         // Other commands keep their own single-token completion.
         assert_eq!(complete("terminal n"), "terminal new");
         assert_eq!(complete("close --f"), "close --force");
+        assert_eq!(complete("env g"), "env global");
     }
 
     #[test]
@@ -592,8 +602,10 @@ mod tests {
         let modal = CloseupModal::new("tui");
         assert_eq!(modal.session(), "tui");
         assert_eq!(modal.selected(), 0);
-        assert_eq!(modal.actions().len(), 5);
+        assert_eq!(modal.actions().len(), 6);
         assert_eq!(modal.selected_action().name, "agent");
+        assert!(joined(&modal).contains("env"));
+        assert!(joined(&modal).contains("↑↓: select"));
         // derive された Clone / Debug も触れる。
         assert!(format!("{:?}", modal.clone()).contains("tui"));
         let action = modal.actions()[0];
@@ -605,7 +617,7 @@ mod tests {
     fn selection_wraps_both_ways() {
         let mut modal = CloseupModal::new("s");
         modal.select_prev(); // wrap to last (terminal)
-        assert_eq!(modal.selected(), 4);
+        assert_eq!(modal.selected(), 5);
         assert_eq!(modal.selected_action().name, "terminal");
         modal.select_next(); // wrap to 0
         assert_eq!(modal.selected(), 0);

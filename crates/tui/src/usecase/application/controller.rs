@@ -3408,6 +3408,9 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
             return Vec::new();
         }
     };
+    if let closeup::Command::Env { arguments } = &command {
+        return submit_closeup_env(state, arguments);
+    }
     let command_name = command.name();
     // Which CLI an accepted `agent` resolved to, so the confirmation names the
     // selection (including when it came from the configured default).
@@ -3474,6 +3477,7 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
             state.notice = Some(Notice::new(format!("{command_name} is not available")));
             None
         }
+        closeup::Command::Env { .. } => unreachable!("env returns before effect dispatch"),
         closeup::Command::Reopen { arguments } => {
             if let Ok(continuation) = AgentContinuationRef::parse(arguments.trim()) {
                 Some(Effect::ReopenAgent {
@@ -3518,6 +3522,20 @@ fn parse_close_force(arguments: &str) -> Option<bool> {
         .ok()
         .filter(|request| request.target.is_none())
         .map(|request| request.force)
+}
+
+/// Open the environment editor from Closeup, reusing the Overview `env` grammar.
+/// The editor is workspace-scoped, so a Closeup launch edits the same bindings as
+/// Overview rather than any session-specific environment.
+fn submit_closeup_env(state: &mut AppState, arguments: &str) -> Vec<Effect> {
+    if let Some(scope) = environment_scope(arguments) {
+        open_environment(state, scope)
+    } else {
+        state.notice = Some(Notice::new(
+            "env takes an optional scope (usage: env [workspace|global])",
+        ));
+        Vec::new()
+    }
 }
 
 /// Maximum elapsed time between presses on one stable session identity.
@@ -5722,6 +5740,63 @@ mod tests {
         assert_eq!(
             state.notice().map(|notice| notice.message.as_str()),
             Some("reopen requires a valid Agent continuation reference")
+        );
+    }
+
+    #[test]
+    fn closeup_env_opens_the_editor_and_rejects_an_unknown_scope() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+
+        // `env` from Closeup opens this workspace's editor and requests a read,
+        // replacing the Closeup overlay with the Environment editor.
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        let effects = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitCloseup("env".to_owned())),
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::LoadEnvironment {
+                scope: EnvScope::Workspace,
+            }]
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Environment));
+
+        // An explicit `global` scope edits the shared bindings.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        let effects = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitCloseup("env global".to_owned())),
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::LoadEnvironment {
+                scope: EnvScope::Global,
+            }]
+        );
+        assert_eq!(
+            state.environment_editor().unwrap().scope(),
+            EnvScope::Global
+        );
+
+        // An unknown scope is refused safely: the editor never opens and the
+        // Closeup overlay stays up with a usage notice.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        let effects = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitCloseup("env extra".to_owned())),
+        );
+        assert!(effects.is_empty());
+        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        assert!(state.environment_editor().is_none());
+        assert_eq!(
+            state.notice().map(|notice| notice.message.as_str()),
+            Some("env takes an optional scope (usage: env [workspace|global])")
         );
     }
 

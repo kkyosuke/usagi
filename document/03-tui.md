@@ -542,8 +542,10 @@ worker が続けるため（[5. daemon の session teardown worker](05-daemon.md
 
 ### env editor
 
-`env` は環境変数の editor を開く。引数なし（または `workspace`）でこの workspace のスコープ、`global` で
-全 workspace 共通のスコープを編集し、それ以外の引数は editor を開かず安全な notice で拒否する。保存場所・
+Overview と Closeup の `env [workspace|global]` は同じ環境変数 editor を開く。引数なし（または
+`workspace`）でこの workspace のスコープ、`global` で全 workspace 共通のスコープを編集し、それ以外の引数は
+editor を開かず安全な notice で拒否する。Closeup から開いた場合も対象 session 固有の環境を作らず、この
+workspace に属する root / session の次回 pane 起動へ共通して効く workspace スコープを編集する。保存場所・
 スコープの合成・secret の解決・注入は [9. 環境変数設定](09-env.md) が正本で、ここでは editor の操作だけを
 述べる。
 

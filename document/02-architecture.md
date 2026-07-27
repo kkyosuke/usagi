@@ -720,7 +720,7 @@ verified process identity の disappearance または orphan だけを記録し�
 ## TUI Closeup のコマンド dispatch
 
 `crates/tui` の `usecase/closeup/` は、Closeup 固有のコマンド語彙
-（`agent` / `close` / `diff` / `terminal`）を持つ。`interpret` は入力を
+（`agent` / `close` / `diff` / `env` / `reopen` / `terminal`）を持つ。`interpret` は入力を
 トップレベル名と trim 済みの未解釈引数に分け、`Command::into_handler` がコマンドごとの
 ハンドラへ変換する。ハンドラは `Run` トレイトを実装し、実 IO や画面状態を直接操作せず
 純粋な `CommandResult` を返す。コマンド固有処理を持たない現在のハンドラは、解釈した
