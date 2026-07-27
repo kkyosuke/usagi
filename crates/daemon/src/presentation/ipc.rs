@@ -52,6 +52,101 @@ pub trait TerminalOwner {
     fn disconnect(&mut self, connection: usagi_core::domain::id::ConnectionId);
 }
 
+/// The permit one admitted request holds while it is being dispatched.
+///
+/// It is opaque on purpose. The connection loop must *hold* it across the effect
+/// and drop it after the reply is written, and must not be able to inspect,
+/// re-check, or extend it: re-checking authority after an effect cannot un-spawn
+/// a process, which is the whole reason the fence runs first
+/// ([`crate::usecase::authority::admission`]).
+///
+/// A serving generation puts its [`AdmissionLease`] inside; a caller that fences
+/// nothing puts nothing in.
+///
+/// [`AdmissionLease`]: crate::usecase::authority::admission::AdmissionLease
+pub struct RequestPermit(#[allow(dead_code)] Option<Box<dyn Send>>);
+
+impl RequestPermit {
+    /// A permit that fences nothing. It is what an unfenced caller returns, and
+    /// what the fence itself returns for a request that needs no lease because it
+    /// produces no effect a handoff could have to wait for.
+    #[must_use]
+    pub const fn unfenced() -> Self {
+        Self(None)
+    }
+
+    /// A permit that releases `lease` when the request finishes.
+    #[must_use]
+    pub fn holding(lease: impl Send + 'static) -> Self {
+        Self(Some(Box::new(lease)))
+    }
+}
+
+impl std::fmt::Debug for RequestPermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self.0 {
+            Some(_) => "RequestPermit(fenced)",
+            None => "RequestPermit(unfenced)",
+        })
+    }
+}
+
+/// The generation authority one client connection is served under.
+///
+/// It is one port rather than three parameters because its three verbs are one
+/// responsibility observed at three moments of a connection's life, and getting
+/// any of them wrong breaks the same invariant:
+///
+/// | verb | moment | what it protects |
+/// |---|---|---|
+/// | [`admitted`](Self::admitted) | after the handshake | a rollover may only leave a draining generation behind if *every* live connection can address it ([`routing`]) |
+/// | [`admit`](Self::admit) | before each request is dispatched | authority is re-decided per request, so a connection opened under a previous role gains nothing from having got in ([`admission`]) |
+/// | [`disconnected`](Self::disconnected) | when the connection ends | a client that has gone away must stop blocking a rollover |
+///
+/// [`admission`]: crate::usecase::authority::admission
+/// [`routing`]: crate::usecase::authority::routing
+pub trait ConnectionFence {
+    /// Record what an admitted client advertised.
+    fn admitted(
+        &self,
+        connection: usagi_core::domain::id::ConnectionId,
+        hello: &usagi_core::infrastructure::ipc::ClientHello,
+    );
+
+    /// Admit one request body and return the permit to hold across its dispatch.
+    ///
+    /// # Errors
+    /// Returns the typed refusal that fails the request closed. Every refusal is
+    /// effect zero.
+    fn admit(&self, body: &serde_json::Value) -> Result<RequestPermit, ProtocolError>;
+
+    /// Forget a connection that has gone away.
+    fn disconnected(&self, connection: usagi_core::domain::id::ConnectionId);
+}
+
+/// A fence that admits everything and remembers nothing.
+///
+/// It is for callers that hold no generation authority to speak for — the
+/// protocol-level tests in this module, which exercise the transport rather than
+/// the authority. Production `serve` always passes a real fence: the parameter is
+/// required precisely so a new call site cannot end up unfenced by omission.
+pub struct UnfencedConnection;
+
+impl ConnectionFence for UnfencedConnection {
+    fn admitted(
+        &self,
+        _connection: usagi_core::domain::id::ConnectionId,
+        _hello: &usagi_core::infrastructure::ipc::ClientHello,
+    ) {
+    }
+
+    fn admit(&self, _body: &serde_json::Value) -> Result<RequestPermit, ProtocolError> {
+        Ok(RequestPermit::unfenced())
+    }
+
+    fn disconnected(&self, _connection: usagi_core::domain::id::ConnectionId) {}
+}
+
 /// An admitted connection and the peer identity durable per-client daemon state
 /// is bound to.
 ///
@@ -67,6 +162,11 @@ pub struct AdmittedConnection {
     /// stays on the connection-local sequence contract and it may not present a
     /// durable operation identity.
     pub client_incarnation: Option<usagi_core::domain::id::ClientId>,
+    /// What the peer itself declared, retained because the *negotiated*
+    /// [`ServerHello`] cannot answer for it: a rollover asks whether every live
+    /// client can address a draining generation, and only the client's own
+    /// capability list says so ([`ConnectionFence::admitted`]).
+    pub client: usagi_core::infrastructure::ipc::ClientHello,
 }
 
 /// Complete a bootstrap handshake. No ordinary envelope is accepted before this succeeds.
@@ -79,7 +179,7 @@ pub fn handshake(
 }
 
 /// As [`handshake`], but also reports the client incarnation durable per-client
-/// state is keyed by.
+/// state is keyed by, and the hello the peer declared.
 pub fn handshake_admitted(
     reader: &mut dyn Read,
     writer: &mut dyn Write,
@@ -106,6 +206,7 @@ pub fn handshake_admitted(
                 hello: reply,
                 client_incarnation: usagi_core::domain::id::ClientId::parse(&hello.client_id.0)
                     .ok(),
+                client: hello,
             }))
         }
         Err(error) => {
@@ -229,10 +330,18 @@ pub fn handle_connection_with(
 /// Serve one client with a shared terminal owner while preserving the caller's
 /// non-terminal dispatch.  The composition root uses this to keep session
 /// lifecycle routing independent from daemon-owned PTY ownership.
+///
+/// `fence` is this generation's authority over the connection. It runs *before*
+/// every dispatch — including the terminal path, which never reaches
+/// `dispatch_request` — and the permit it issues is held until the reply has been
+/// written. That ordering is the contract: a request refused here has produced no
+/// effect, and a request admitted here cannot have its lease revoked underneath
+/// it while its effect is still in flight.
 pub fn handle_connection_with_terminal_and(
     reader: &mut dyn Read,
     writer: &mut dyn Write,
     server: &ServerProtocol,
+    fence: &dyn ConnectionFence,
     terminal: &mut dyn TerminalOwner,
     dispatch_request: &mut dyn FnMut(
         usagi_core::infrastructure::ipc::RequestId,
@@ -248,6 +357,7 @@ pub fn handle_connection_with_terminal_and(
     let AdmittedConnection {
         hello,
         client_incarnation,
+        client: client_hello,
     } = admitted;
     let connection = usagi_core::domain::id::ConnectionId::new();
     // The ledger key is the client incarnation the peer declared, so a client
@@ -255,6 +365,7 @@ pub fn handle_connection_with_terminal_and(
     // peer without one gets a connection-local identity, which keeps its
     // sequence ledger working and leaves it unable to replay anything.
     let client = client_incarnation.unwrap_or_else(usagi_core::domain::id::ClientId::new);
+    fence.admitted(connection, &client_hello);
     let result = (|| {
         while let Some(envelope) =
             read_json_frame::<Envelope>(reader, hello.limits.max_frame_bytes as usize)?
@@ -271,47 +382,65 @@ pub fn handle_connection_with_terminal_and(
             let outcome_body = if envelope.protocol != hello.protocol
                 || envelope.daemon_generation != hello.daemon_generation
             {
+                // A request that does not even target this generation is answered
+                // without consulting the fence: taking a lease for work that will
+                // not happen would make a handoff barrier wait on nothing.
                 Err(ProtocolError::new(
                     ErrorCode::GenerationMismatch,
                     "request targets a different daemon generation",
                 ))
-            } else if let Ok(usagi_core::usecase::client::DaemonRequest::Terminal {
-                action,
-                payload,
-            }) = serde_json::from_value(body.clone())
-            {
-                if client_incarnation.is_none() && carries_input_operation(&payload) {
-                    Err(ProtocolError::new(
-                        ErrorCode::Unauthenticated,
-                        "durable terminal input requires a canonical client incarnation",
-                    ))
-                } else {
-                    match usagi_core::domain::id::RequestId::parse(&request_id.0) {
-                        Ok(owner_request_id) => terminal
-                            .request(
+            } else {
+                match fence.admit(&body) {
+                    // `_permit` is bound for the whole arm, so the lease it carries
+                    // is released only after the effect below has finished — never
+                    // between the authority check and the effect it authorized.
+                    Ok(_permit) => {
+                        if let Ok(usagi_core::usecase::client::DaemonRequest::Terminal {
+                            action,
+                            payload,
+                        }) = serde_json::from_value(body.clone())
+                        {
+                            if client_incarnation.is_none() && carries_input_operation(&payload) {
+                                Err(ProtocolError::new(
+                                    ErrorCode::Unauthenticated,
+                                    "durable terminal input requires a canonical client incarnation",
+                                ))
+                            } else {
+                                match usagi_core::domain::id::RequestId::parse(&request_id.0) {
+                                    Ok(owner_request_id) => terminal
+                                        .request(
+                                            connection,
+                                            client,
+                                            owner_request_id,
+                                            action,
+                                            payload,
+                                            crate::usecase::terminal::SnapshotWire::for_revision(
+                                                hello.protocol.revision,
+                                            ),
+                                        )
+                                        .map(ok_response),
+                                    Err(_) => Err(ProtocolError::new(
+                                        ErrorCode::InvalidArgument,
+                                        "terminal request_id must be a canonical resource ID",
+                                    )),
+                                }
+                            }
+                        } else {
+                            let dispatched = dispatch_request(
+                                request_id.clone(),
+                                body.clone(),
+                                &hello,
                                 connection,
                                 client,
-                                owner_request_id,
-                                action,
-                                payload,
-                                crate::usecase::terminal::SnapshotWire::for_revision(
-                                    hello.protocol.revision,
-                                ),
-                            )
-                            .map(ok_response),
-                        Err(_) => Err(ProtocolError::new(
-                            ErrorCode::InvalidArgument,
-                            "terminal request_id must be a canonical resource ID",
-                        )),
+                            );
+                            // Session, agent, and metrics dispatchers each own their
+                            // outcome.  Replacing a session error with `Ok(null)` makes a
+                            // client mistake the error body for a lifecycle snapshot.
+                            Ok(dispatched.kind_response())
+                        }
                     }
+                    Err(refusal) => Err(refusal),
                 }
-            } else {
-                let dispatched =
-                    dispatch_request(request_id.clone(), body.clone(), &hello, connection, client);
-                // Session, agent, and metrics dispatchers each own their
-                // outcome.  Replacing a session error with `Ok(null)` makes a
-                // client mistake the error body for a lifecycle snapshot.
-                Ok(dispatched.kind_response())
             };
             let (outcome, body) = match outcome_body {
                 Ok((outcome, body)) => (outcome, body),
@@ -331,6 +460,10 @@ pub fn handle_connection_with_terminal_and(
         Ok(())
     })();
     terminal.disconnect(connection);
+    // A connection that has gone away must stop blocking a rollover, so the fence
+    // forgets it on every exit from the loop — a clean end, a protocol error, and
+    // a transport failure alike.
+    fence.disconnected(connection);
     result
 }
 
@@ -706,6 +839,7 @@ mod tests {
                 &mut Cursor::new(frames),
                 &mut Vec::new(),
                 &server(),
+                &UnfencedConnection,
                 &mut owner,
                 &mut serve_ordinary,
             )
@@ -726,6 +860,7 @@ mod tests {
                 &mut Cursor::new(frames),
                 &mut Vec::new(),
                 &server(),
+                &UnfencedConnection,
                 &mut legacy_owner,
                 &mut serve_ordinary,
             )
@@ -751,6 +886,7 @@ mod tests {
             &mut Cursor::new(frames),
             &mut output,
             &server(),
+            &UnfencedConnection,
             &mut refused,
             &mut serve_ordinary,
         )
@@ -789,6 +925,7 @@ mod tests {
             &mut Cursor::new(input),
             &mut output,
             &server(),
+            &UnfencedConnection,
             &mut RecordingTerminal::default(),
             &mut |request_id, _, hello, _, _| Envelope {
                 protocol: hello.protocol,
@@ -874,6 +1011,7 @@ mod tests {
                 &mut Cursor::new(input),
                 &mut Vec::new(),
                 &server,
+                &UnfencedConnection,
                 &mut terminal,
                 &mut test_dispatch,
             )
@@ -903,6 +1041,7 @@ mod tests {
             &mut Cursor::new(input),
             &mut output,
             &server(),
+            &UnfencedConnection,
             &mut terminal,
             &mut test_dispatch,
         )
@@ -952,6 +1091,7 @@ mod tests {
             &mut Cursor::new(input),
             &mut output,
             &server(),
+            &UnfencedConnection,
             &mut terminal,
             &mut test_dispatch,
         )
@@ -978,6 +1118,7 @@ mod tests {
             &mut Cursor::new(Vec::<u8>::new()),
             &mut Vec::new(),
             &server(),
+            &UnfencedConnection,
             &mut terminal,
             &mut test_dispatch,
         )
@@ -1001,6 +1142,7 @@ mod tests {
             &mut Cursor::new(input),
             &mut Vec::new(),
             &server(),
+            &UnfencedConnection,
             &mut terminal,
             &mut test_dispatch,
         )
@@ -1111,6 +1253,7 @@ mod tests {
             &mut Cursor::new(input),
             &mut output,
             &server(),
+            &UnfencedConnection,
             &mut terminal,
             &mut test_dispatch,
         )
@@ -1162,6 +1305,7 @@ mod tests {
                 &mut Cursor::new(input),
                 &mut output,
                 &server(),
+                &UnfencedConnection,
                 &mut terminal,
                 &mut test_dispatch,
             )
@@ -1198,6 +1342,7 @@ mod tests {
             &mut Cursor::new(input),
             &mut Vec::new(),
             &server(),
+            &UnfencedConnection,
             &mut terminal,
             &mut test_dispatch,
         )

@@ -78,6 +78,48 @@ impl ClientWorkers {
         self.lock().len()
     }
 
+    /// Join the workers that have already finished, leaving the live ones alone.
+    ///
+    /// A generation serves connections for as long as it lives, so a set that
+    /// only ever grew would retain one thread handle per *historical* connection
+    /// — an unbounded cost paid by exactly the long-lived daemon this authority
+    /// exists to replace. Only a worker [`JoinHandle::is_finished`] reports
+    /// complete is taken, so this never blocks and never shuts a live connection
+    /// down: it is the ordinary path, and [`retire`](Self::retire) stays the only
+    /// thing that unblocks a parked reader.
+    ///
+    /// The report counts what was joined here rather than at retirement, which is
+    /// what keeps "every worker was joined exactly once" true across the two.
+    pub fn reap_finished(&self) -> RetireReport {
+        // Partitioned under the lock and joined after it is released: a finished
+        // thread cannot block its own join, but holding the lock across the joins
+        // would still serialize every concurrent registration behind them.
+        let finished = {
+            let mut entries = self.lock();
+            let mut finished = Vec::new();
+            let mut live = Vec::with_capacity(entries.len());
+            for worker in std::mem::take(&mut *entries) {
+                if worker.handle.is_finished() {
+                    // The shutdown half goes with it. Nothing is parked on a
+                    // connection whose worker has already returned.
+                    finished.push(worker.handle);
+                } else {
+                    live.push(worker);
+                }
+            }
+            *entries = live;
+            finished
+        };
+        let mut report = RetireReport::default();
+        for handle in finished {
+            if handle.join().is_err() {
+                report.panicked += 1;
+            }
+            report.joined += 1;
+        }
+        report
+    }
+
     /// Shut every retained connection down, then join every retained worker.
     ///
     /// The workers are taken out of the set before any of them is joined, so a
