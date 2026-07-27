@@ -117,6 +117,19 @@ pub fn footer(hints: &str) -> String {
     dim_body_line(hints)
 }
 
+/// A danger, body-indented message row for a refused command or a failed
+/// validation, clipped to the modal's content width so a long safe message
+/// cannot break the frame.
+#[must_use]
+pub fn error_line(message: &str, inner_width: usize) -> String {
+    clip_to_width(
+        &Role::Danger
+            .style()
+            .paint(&format!("{BODY_INDENT}{message}")),
+        inner_width,
+    )
+}
+
 /// The danger, bold `›` cursor drawn before a selected list row, or a blank
 /// cell when the row is not selected. Shared with [`super::select`] so the form
 /// widgets and every modal draw one cursor glyph.

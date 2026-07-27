@@ -33,6 +33,21 @@ pub struct CloseupModal {
     available_models: AvailableModels,
     /// The configured provider an `agent` without `-m` launches.
     default_model: DefaultModel,
+    /// Where repeated Tab presses are in the candidate list, if a cycle is open.
+    completion_cycle: Option<CompletionCycle>,
+    /// The reducer's safe message for the last refused submission. A refusal
+    /// keeps this modal open, so this line is the only signal the user gets.
+    error: Option<String>,
+}
+
+/// One open Tab-completion cycle.
+///
+/// `origin` is the text the cycle started from, kept because each Tab replaces
+/// the whole input and would otherwise lose the prefix the candidates came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompletionCycle {
+    origin: String,
+    index: usize,
 }
 
 impl CloseupModal {
@@ -58,6 +73,8 @@ impl CloseupModal {
             reopen_choices: Vec::new(),
             available_models: AvailableModels::all(),
             default_model: DefaultModel::default(),
+            completion_cycle: None,
+            error: None,
         }
     }
 
@@ -144,22 +161,40 @@ impl CloseupModal {
     /// Insert one character in Prompt mode.
     pub fn insert_char(&mut self, c: char) {
         self.input.insert(c);
-        self.selected = 0;
-        self.expanded = false;
+        self.edited();
     }
 
     /// Delete one character in Prompt mode.
     pub fn backspace(&mut self) {
         self.input.backspace();
-        self.selected = 0;
-        self.expanded = false;
+        self.edited();
     }
 
     /// Forward-delete one character at the prompt caret in Prompt mode.
     pub fn delete_forward(&mut self) {
         self.input.delete_forward();
+        self.edited();
+    }
+
+    /// Reset everything derived from the input text after an edit: the filter
+    /// selection, the expanded picker, the open Tab cycle (its candidates came
+    /// from text that no longer exists), and the previous refusal message.
+    fn edited(&mut self) {
         self.selected = 0;
         self.expanded = false;
+        self.completion_cycle = None;
+        self.error = None;
+    }
+
+    /// Show the reducer's safe message for a refused submission, or clear it.
+    pub fn set_error(&mut self, message: Option<String>) {
+        self.error = message;
+    }
+
+    /// The refusal message currently shown, if any.
+    #[must_use]
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
     }
 
     /// Move the prompt caret left in Prompt mode. Clears any selection.
@@ -208,26 +243,41 @@ impl CloseupModal {
         self.input.selection()
     }
 
-    /// Complete the selected command or an unambiguous supported subcommand.
-    /// Inputs outside the completion grammar are left untouched.
+    /// Complete the input from the candidates for what is typed, cycling through
+    /// them on repeated presses (`agent -m c` → `claude` → `codex` → `claude`).
+    ///
+    /// Ambiguity is not a dead end: the first Tab inserts the first candidate and
+    /// each further Tab replaces it with the next, so a shared prefix never
+    /// leaves the key doing nothing. The cycle is measured from the text it
+    /// started at, so it survives its own replacements and ends as soon as the
+    /// input is edited. Inputs outside the completion grammar are left untouched.
     pub fn complete_selected(&mut self) {
-        if let Some(input) = self.subcommand_completion() {
-            self.input = TextInput::with_value(input);
-            self.selected = 0;
-            self.expanded = false;
+        let cycle = self.completion_cycle.take();
+        let origin = cycle.as_ref().map_or_else(
+            || self.input.value().to_owned(),
+            |cycle| cycle.origin.clone(),
+        );
+        let candidates = self.completion_candidates(&origin);
+        if candidates.is_empty() {
             return;
         }
-        if !self.input.value().contains(char::is_whitespace)
-            && let Some(command) = self.matches().get(self.selected)
-        {
-            self.input = TextInput::with_value(command.name);
-            self.selected = 0;
-            self.expanded = false;
-        }
+        let index = match &cycle {
+            Some(cycle) => (cycle.index + 1) % candidates.len(),
+            // A fresh command-name cycle starts at the selected row, so ↑↓ then
+            // Tab still completes the command the user moved to.
+            None if origin.contains(char::is_whitespace) => 0,
+            None => self.selected.min(candidates.len() - 1),
+        };
+        self.input = TextInput::with_value(candidates[index].clone());
+        self.selected = 0;
+        self.expanded = false;
+        self.error = None;
+        self.completion_cycle = Some(CompletionCycle { origin, index });
     }
 
     /// 選択を次へ（末尾で先頭へ回り込む）。
     pub fn select_next(&mut self) {
+        self.completion_cycle = None;
         if self.expanded {
             let len = self.subcommands().len();
             if len > 0 {
@@ -243,6 +293,7 @@ impl CloseupModal {
 
     /// 選択を前へ（先頭で末尾へ回り込む）。
     pub fn select_prev(&mut self) {
+        self.completion_cycle = None;
         if self.expanded {
             let len = self.subcommands().len();
             if len > 0 {
@@ -258,6 +309,7 @@ impl CloseupModal {
 
     /// Expand the selected action's inline subcommand picker when available.
     pub fn expand_selected(&mut self) {
+        self.completion_cycle = None;
         if !self.matches().is_empty() && !self.subcommands().is_empty() {
             self.expanded = true;
             self.selected_subcommand = 0;
@@ -266,6 +318,7 @@ impl CloseupModal {
 
     /// Collapse an inline subcommand picker. Returns whether it was open.
     pub fn collapse(&mut self) -> bool {
+        self.completion_cycle = None;
         std::mem::take(&mut self.expanded)
     }
 
@@ -298,30 +351,41 @@ impl CloseupModal {
         }
     }
 
-    fn subcommand_completion(&self) -> Option<String> {
-        let input = self.input.value().trim_start();
+    /// Every completion for `origin`, each one the full input text that replaces
+    /// it. Returning the whole list (not just an unambiguous single hit) is what
+    /// lets [`Self::complete_selected`] cycle.
+    fn completion_candidates(&self, origin: &str) -> Vec<String> {
         // The command name itself is complete only once a separator follows it;
         // before that, command-name completion owns the input.
-        let separator = input.find(char::is_whitespace)?;
+        if !origin.contains(char::is_whitespace) {
+            return self
+                .matches_for(origin)
+                .into_iter()
+                .map(|action| action.name.to_owned())
+                .collect();
+        }
+        let input = origin.trim_start();
+        let Some(separator) = input.find(char::is_whitespace) else {
+            return Vec::new();
+        };
         let (command, arguments) = input.split_at(separator);
         // `agent` owns a multi-token grammar (`-m <cli>`), so it completes from
         // its own vocabulary rather than this single-token rule.
         if command == "agent" {
-            let mut candidates =
-                agent_command::completions(arguments, self.available_models).into_iter();
-            let candidate = candidates.next()?;
-            return candidates
-                .next()
-                .is_none()
-                .then(|| format!("{command} {candidate}"));
+            return agent_command::completions(arguments, self.available_models)
+                .into_iter()
+                .map(|candidate| format!("{command} {candidate}"))
+                .collect();
         }
         if input.ends_with(char::is_whitespace) {
-            return None;
+            return Vec::new();
         }
+        // The check above guarantees a trailing token here, so the default is
+        // unreachable rather than a silent match-everything.
         let mut tokens = arguments.split_whitespace();
-        let prefix = tokens.next()?;
+        let prefix = tokens.next().unwrap_or_default();
         if tokens.next().is_some() {
-            return None;
+            return Vec::new();
         }
         let candidates = match command {
             "close" => vec!["--force".to_owned()],
@@ -331,23 +395,23 @@ impl CloseupModal {
                 .map(|choice| choice.continuation.to_string())
                 .collect(),
             "terminal" => vec!["open".to_owned(), "new".to_owned()],
-            _ => return None,
+            _ => return Vec::new(),
         };
-        let mut matches = candidates
-            .iter()
-            .map(String::as_str)
-            .filter(|candidate| candidate.starts_with(prefix));
-        let candidate = matches.next()?;
-        matches
-            .next()
-            .is_none()
-            .then(|| format!("{command} {candidate}"))
+        candidates
+            .into_iter()
+            .filter(|candidate| candidate.starts_with(prefix))
+            .map(|candidate| format!("{command} {candidate}"))
+            .collect()
     }
 
     fn matches(&self) -> Vec<closeup::CommandInfo> {
+        self.matches_for(self.input.value())
+    }
+
+    fn matches_for(&self, prefix: &str) -> Vec<closeup::CommandInfo> {
         self.actions()
             .into_iter()
-            .filter(|action| action.name.starts_with(self.input.value()))
+            .filter(|action| action.name.starts_with(prefix))
             .collect()
     }
 }
@@ -390,7 +454,10 @@ fn body(state: &CloseupModal) -> Vec<String> {
                     state.input.cursor(),
                     state.input.selection(),
                 ),
-                String::new(),
+                // A refusal takes the spacer under the prompt: the modal stays
+                // open, so this row is the only signal the command was rejected.
+                // The box height is unchanged either way.
+                error_row(state),
                 modal::footer("Tab: complete   Enter: run   Esc: back"),
             ],
             BODY_HEIGHT,
@@ -404,6 +471,11 @@ fn body(state: &CloseupModal) -> Vec<String> {
             state.input.selection(),
         ),
     ];
+    // Above the action list, not next to the footer: an expanded picker pushes
+    // the last rows out of the fixed body, and a refusal must stay readable.
+    if state.error.is_some() {
+        lines.push(error_row(state));
+    }
     for (i, action) in state.matches().iter().enumerate() {
         lines.push(action_row(*action, i == state.selected, INNER_WIDTH));
         if state.expanded && i == state.selected {
@@ -415,11 +487,20 @@ fn body(state: &CloseupModal) -> Vec<String> {
             }
         }
     }
-    lines.push(String::new());
+    if state.error.is_none() {
+        lines.push(String::new());
+    }
     lines.push(modal::footer(
         "↑↓: select   →: expand   Enter: run   Esc: back",
     ));
     modal::fixed_body(lines, BODY_HEIGHT)
+}
+
+/// The refusal row, or an empty spacer when the last submission was not refused.
+fn error_row(state: &CloseupModal) -> String {
+    state.error.as_deref().map_or_else(String::new, |message| {
+        modal::error_line(message, INNER_WIDTH)
+    })
 }
 
 /// 生の端末サイズに対する closeup modal 1 フレーム分の行。中央に浮かぶ枠付きダイアログとして
@@ -583,12 +664,148 @@ mod tests {
         assert_eq!(complete("agent -m cod"), "agent -m cod");
         assert_eq!(complete("agent -m zzz"), "agent -m zzz");
         assert_eq!(complete("agent -m claude"), "agent -m claude");
-        // An ambiguous prefix leaves the input untouched.
-        assert_eq!(complete("agent -m "), "agent -m ");
+        // An ambiguous prefix takes the first candidate rather than doing nothing.
+        assert_eq!(complete("agent -m "), "agent -m claude");
         // Other commands keep their own single-token completion.
         assert_eq!(complete("terminal n"), "terminal new");
         assert_eq!(complete("close --f"), "close --force");
         assert_eq!(complete("env g"), "env g");
+        // Whitespace with no argument position after the command name has
+        // nothing to complete; the input is left exactly as typed.
+        assert_eq!(complete(" agent"), " agent");
+        assert_eq!(complete("terminal open "), "terminal open ");
+    }
+
+    #[test]
+    fn repeated_tab_cycles_the_candidates_for_what_was_typed() {
+        // `c` matches both `claude` and `codex`: the first Tab takes the first
+        // candidate and each further Tab advances, wrapping at the end. Without
+        // this, a shared prefix left Tab doing nothing at all.
+        let mut modal = CloseupModal::with_selection_mode("s", ModalSelectionMode::Prompt)
+            .with_agent_models(AvailableModels::all(), DefaultModel::Claude);
+        for character in "agent -m c".chars() {
+            modal.insert_char(character);
+        }
+        for expected in [
+            "agent -m claude",
+            "agent -m codex",
+            "agent -m claude",
+            "agent -m codex",
+        ] {
+            modal.complete_selected();
+            assert_eq!(modal.submission(), expected);
+        }
+
+        // Editing ends the cycle: the next Tab completes from the new text.
+        modal.backspace();
+        assert_eq!(modal.submission(), "agent -m code");
+        modal.complete_selected();
+        assert_eq!(modal.submission(), "agent -m codex");
+
+        // The cycle covers the whole vocabulary offered at that position.
+        let mut all = CloseupModal::with_selection_mode("s", ModalSelectionMode::Prompt)
+            .with_agent_models(AvailableModels::all(), DefaultModel::Claude);
+        for character in "agent ".chars() {
+            all.insert_char(character);
+        }
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            all.complete_selected();
+            seen.push(all.submission());
+        }
+        assert_eq!(
+            seen,
+            [
+                "agent -m",
+                "agent --model",
+                "agent claude",
+                "agent codex",
+                "agent sakana.ai",
+            ]
+        );
+        // Wrapping returns to the first candidate.
+        all.complete_selected();
+        assert_eq!(all.submission(), "agent -m");
+    }
+
+    #[test]
+    fn a_command_name_cycle_starts_at_the_selected_row_and_navigation_ends_it() {
+        // Command-name completion still honours ↑↓: Tab completes the row the
+        // user moved to, then advances from there.
+        let mut modal = CloseupModal::new("s");
+        modal.select_next(); // close
+        modal.complete_selected();
+        assert_eq!(modal.submission(), "close");
+        modal.complete_selected();
+        assert_eq!(modal.submission(), "diff");
+
+        // Moving the selection, expanding, or collapsing ends the open cycle, so
+        // the next Tab starts over at the first candidate instead of advancing.
+        for interrupt in [
+            CloseupModal::select_next,
+            CloseupModal::select_prev,
+            CloseupModal::expand_selected,
+            |modal: &mut CloseupModal| {
+                modal.collapse();
+            },
+        ] {
+            let mut restarted = CloseupModal::with_selection_mode("s", ModalSelectionMode::Prompt)
+                .with_agent_models(AvailableModels::all(), DefaultModel::Claude);
+            for character in "agent -m c".chars() {
+                restarted.insert_char(character);
+            }
+            restarted.complete_selected();
+            assert_eq!(restarted.submission(), "agent -m claude");
+            interrupt(&mut restarted);
+            restarted.complete_selected();
+            assert_eq!(restarted.submission(), "agent -m claude");
+        }
+    }
+
+    #[test]
+    fn a_refusal_row_is_drawn_in_danger_without_changing_the_box_height() {
+        // The refusal is the only feedback a rejected command gets, so it must be
+        // on screen in both interaction modes — and it must not resize the box or
+        // be pushed out of the fixed body by an expanded picker.
+        for mode in [ModalSelectionMode::Action, ModalSelectionMode::Prompt] {
+            let mut modal = CloseupModal::with_selection_mode("s", mode);
+            let before = render(24, 80, &modal).len();
+            assert!(!joined(&modal).contains("not installed"));
+
+            modal.set_error(Some("that agent CLI is not installed".to_owned()));
+            let rendered = render(24, 80, &modal);
+            assert_eq!(rendered.len(), before, "{mode:?}");
+            assert!(joined(&modal).contains("that agent CLI is not installed"));
+            // Danger, so a refusal reads as one at a glance.
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.contains("\u{1b}[31m") && line.contains("not installed")),
+                "{mode:?}"
+            );
+            assert_eq!(modal.error(), Some("that agent CLI is not installed"));
+
+            // Expanding the picker keeps the refusal visible.
+            modal.expand_selected();
+            assert!(joined(&modal).contains("that agent CLI is not installed"));
+
+            // Editing clears it and restores the original body.
+            modal.insert_char('a');
+            modal.backspace();
+            assert_eq!(modal.error(), None);
+            assert!(!joined(&modal).contains("not installed"));
+        }
+    }
+
+    #[test]
+    fn a_long_refusal_is_clipped_to_the_modal_body() {
+        // A safe message can be longer than the box; clipping keeps the frame
+        // rectangular instead of spilling past the border.
+        let mut modal = CloseupModal::with_selection_mode("s", ModalSelectionMode::Prompt);
+        modal.set_error(Some("x".repeat(super::INNER_WIDTH * 2)));
+        for line in render(24, 80, &modal) {
+            assert!(display_width(&strip_ansi(&line)) <= 80);
+        }
     }
 
     #[test]

@@ -21,6 +21,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [Sidebar mascot](#sidebar-mascot)
 - [Closeup pane](#closeup-pane)
 - [Closeup の agent CLI 選択](#closeup-の-agent-cli-選択)
+- [Closeup 入力の拒否表示](#closeup-入力の拒否表示)
 - [Closeup Agent の手動確認](#closeup-agent-の手動確認)
 - [workspace open 時の pane 復元](#workspace-open-時の-pane-復元)
 - [resume data compatibility](#resume-data-compatibility)
@@ -1022,16 +1023,41 @@ Closeup の `agent` は `-m`（長形式 `--model`）で起動する agent CLI �
 - **候補は install 済みの CLI だけ**である。合成ルートが各 CLI の実行可能性を観測して TUI に注入し、Action menu の
   展開行・Tab 補完・submit 時の検証はすべて同じ集合を使う。install されていない CLI は表示・補完せず、直接入力しても
   `that agent CLI is not installed` として拒否する（daemon へ request を送らない）。
-- **default は config の `default_model`** である。Action menu の展開行は default の行に `(default)` を付け、
-  `-m` を省略した submit は `Requested agent codex (default)` のようにどの CLI を起動したかを表示する。
+- **default は config の `default_model`** である。Action menu の展開行は default の行に `(default)` を付ける。
   default の CLI が install されていない場合は `the configured agent CLI is not installed` として拒否する。
 - **Tab 補完**は Prompt mode の入力欄と Action menu の filter で同じ文法を使う。`agent -m sak` → `agent -m sakana.ai`、
-  `agent --` → `agent --model` のように候補が 1 つに定まるときだけ入力を置き換え、曖昧・未知の入力は変更しない。
+  `agent --` → `agent --model` のように候補が 1 つなら確定し、**候補が複数のときは Tab を押すたびに巡回する**
+  （`agent -m c` → `agent -m claude` → `agent -m codex` → `agent -m claude`）。曖昧さで Tab が無反応になることはない。
   Action mode では `→` で `agent` 行を展開し、`↑↓` で `-m <cli>` を選ぶ。
 - 位置引数（`agent codex`）も同じ語彙・同じ install 判定で受け付ける。`-m` の重複、値の欠落、複数選択、未知の flag は
-  安全な文言で拒否し、modal を閉じない。
+  安全な文言で拒否し、modal を閉じない（拒否の文言は [Closeup 入力の拒否表示](#closeup-入力の拒否表示) が正本）。
 - CLI 名の解決は大文字小文字を区別せず、`-` / `_` / `.` を同じ区切りとして扱う（`sakana.ai` / `sakana_ai` /
   `sakana-ai` / `codex-fugu` はすべて同じ CLI）。
+
+## Closeup 入力の拒否表示
+
+Closeup の command 入力（Prompt mode の入力欄・Action menu の確定）が拒否されたとき、その理由を modal の中に
+表示する。この節が Closeup の拒否表示と Tab 補完の巡回の正本である。
+
+拒否された submit は effect を 1 つも生まず overlay を閉じないため、**画面に理由が出ないと Enter が無反応の
+キーと区別できない**。したがって modal は最後の拒否理由を 1 行の danger 行として持つ。
+
+| 状況 | 画面 |
+|---|---|
+| submit が拒否された | modal は開いたまま、入力を保持し、拒否理由を danger 行で表示する |
+| submit が受理された | overlay が閉じ、modal（と拒否理由）は破棄される。起動は pending tab の wave が示す |
+| 入力を編集した | 拒否理由は消える（古い理由を残さない） |
+
+- 表示位置は modal の body 内で、Prompt mode は入力欄の直下、Action mode は入力欄と action 一覧の間である。
+  どちらも枠の高さを変えず、Action mode で picker を展開しても押し出されない。理由の文言は幅で clip する。
+- 文言は reducer が持つ安全な文言そのもの（`unknown agent CLI` / `that agent CLI is not installed` /
+  `the configured agent CLI is not installed` / `agent accepts one -m selection` / `-m requires an agent CLI name` /
+  `unknown agent flag` / `unknown closeup command: "…"` / `invalid close arguments` /
+  `env takes no arguments (usage: env)` など）で、host path・argv・認証情報は含まない。
+- **Tab 補完は候補を巡回する**。候補が 1 つなら確定し、複数なら Tab を押すたびに次の候補へ進み、末尾で先頭へ戻る。
+  巡回は Tab を押し始めた時点の入力を基準に測るため、Tab 自身の置き換えで基準を失わない。入力の編集・`↑↓`・
+  `→`/`←` は巡回を終わらせ、次の Tab は新しい入力から数え直す。command 名の補完は選択中の行から始まるので、
+  `↑↓` で選んだ command はそのまま Tab で確定できる。
 
 ## Closeup Agent の手動確認
 
