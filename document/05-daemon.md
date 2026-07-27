@@ -1237,6 +1237,27 @@ activation の前には必ず recovery が走る（[handoff protocol](#handoff-p
 `authority_retained` で**effect zero に拒否**する。この拒否は、単一インスタンス lock を取れた process が
 それでも registry 上の authority を奪わないことを保証する。
 
+recovery が調停するのは **active と current locator の対**だけである。registry はそれ以外の generation も
+retain する（[standby](#standby-readiness) と、rollover 中の `draining` predecessor）ので、activation は
+recovery の直後・claim の直前に、**retained だが exact process identity で生存を証明できない generation を
+retire する**。
+
+| 誰が回収するか | 対象 | 走る条件 |
+|---|---|---|
+| recovery（[handoff protocol](#handoff-protocol)） | active（と locator） | activation のたび |
+| standby custody | 自分の incumbent が消えた standby | **その standby が生きている**間だけ |
+| activation の reclaim | retained な standby / draining のうち生存を証明できないもの | activation のたび |
+
+3 段目が無いと、**SIGKILL された standby の entry を誰も回収しない**。その standby は custody を回す
+process をもう持たず、locator も active も名指さないため recovery の対象外で、しかし `retained()` には
+数えられる。active が正常に stop したあとは唯一の retained generation として残り、以後の `daemon start` は
+すべて `authority_retained` で失敗し続ける（`generations.json` を手で消すまで復旧しない）。
+
+判定は recovery が active に使うものと同じで、`VerifiedAlive` を返せない観測（消滅・PID 再利用・観測不能）は
+すべて回収する。生存を証明できた generation が 1 つでも残るなら、これまでどおり `authority_retained` で
+effect zero に拒否する。回収が live な standby の entry を落とした場合も、その standby 自身の custody が
+`registry entry is gone` を検知して自主終了するので収束する。回収すべき entry が無い registry は書き換えない。
+
 前 incarnation が残した `retired` entry は同じ CAS で捨てる。retired generation は client から見て既に
 addressable でない（[4. IPC の owner generation routing](04-ipc.md#owner-generation-routing)）ため、record を残しても
 新しい事実を述べず、restart 1 回ごとに document を 1 entry 太らせるだけである。

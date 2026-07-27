@@ -66,6 +66,23 @@ fn claim_as(
     alive: Vec<ProcessIdentity>,
     artifact: &BuildIdentity,
 ) -> Result<AuthorityClaimed, ClaimFailure> {
+    claim_as_with(world, &mut observer(alive), artifact)
+}
+
+/// Claim with an arbitrary process observation, so a test can express
+/// "undecidable" as well as alive/gone.
+fn claim_with(
+    world: &World,
+    observe: &mut dyn FnMut(&ProcessIdentity) -> ProcessObservation,
+) -> Result<AuthorityClaimed, ClaimFailure> {
+    claim_as_with(world, observe, &build("self"))
+}
+
+fn claim_as_with(
+    world: &World,
+    observe: &mut dyn FnMut(&ProcessIdentity) -> ProcessObservation,
+    artifact: &BuildIdentity,
+) -> Result<AuthorityClaimed, ClaimFailure> {
     let process = own_process();
     claim_authority(
         &world.store,
@@ -76,7 +93,7 @@ fn claim_as(
             process: &process,
             build: artifact,
         },
-        &mut observer(alive),
+        observe,
     )
 }
 
@@ -337,4 +354,125 @@ fn a_claim_failure_converts_to_an_io_error_for_the_serve_state_machine() {
 
     assert_eq!(error.to_string(), message);
     assert!(message.contains("current locator failed"));
+}
+
+/// A retained generation that is neither the active nor the locator's — a
+/// standby, or a draining predecessor — with `role` and a `pid` to observe.
+fn retained_entry(generation: DaemonGeneration, role: GenerationRole, pid: u32) -> GenerationEntry {
+    GenerationEntry {
+        generation,
+        role,
+        endpoint: format!("generations/{pid}/sock"),
+        process: process(pid),
+        expected_build: build("next"),
+        verified_build: Some(build("next")),
+        revision: 1,
+    }
+}
+
+/// A standby that was killed leaves a `standby` entry nobody else revisits:
+/// recovery only reconciles the active against the locator, and the standby's
+/// own custody supervisor died with it. Because `activate_first` refuses while
+/// any generation is retained, that one entry would otherwise make every future
+/// start in this data directory fail `authority_retained` forever.
+#[test]
+fn a_killed_standby_does_not_wedge_the_next_activation() {
+    for role in [GenerationRole::Standby, GenerationRole::Draining] {
+        let world = world();
+        let dead = DaemonGeneration::new();
+        let mut seeded = RegistryDocument::default();
+        seeded.generations.push(retained_entry(dead, role, 4242));
+        seed(&world.file, &seeded);
+
+        // Nothing is alive, so the leftover is reclaimed and this start claims
+        // the authority normally.
+        claim(&world, Vec::new()).unwrap();
+
+        let document = world.document();
+        assert_eq!(document.current, Some(world.generation), "{role:?}");
+        assert_eq!(
+            document.role(world.generation),
+            Some(GenerationRole::Active),
+            "{role:?}"
+        );
+        // `activate_first` drops the retired leftovers in the same swap, so the
+        // document does not grow one entry per crashed standby either.
+        assert_eq!(document.generations.len(), 1, "{role:?}");
+    }
+}
+
+/// Reclamation is not a licence to displace: a standby whose process is provably
+/// alive still holds a slot, so the activation beside it is refused exactly as
+/// before, with the registry untouched.
+#[test]
+fn a_live_standby_still_refuses_the_activation_beside_it() {
+    let world = world();
+    let standby = DaemonGeneration::new();
+    let mut seeded = RegistryDocument::default();
+    seeded
+        .generations
+        .push(retained_entry(standby, GenerationRole::Standby, 4242));
+    seed(&world.file, &seeded);
+    let before = world.file.contents();
+
+    let failure = claim(&world, vec![process(4242)]).unwrap_err();
+
+    assert!(matches!(
+        failure,
+        ClaimFailure::Registry(failure)
+            if failure.refusal() == Some(RegistryError::AuthorityRetained)
+    ));
+    assert_eq!(world.file.contents(), before);
+    assert!(world.locator.publishes().is_empty());
+}
+
+/// An identity that cannot be *compared* is not proof of life either, so a
+/// reused PID never keeps a dead generation's slot alive.
+#[test]
+fn a_generation_whose_identity_cannot_be_matched_is_reclaimed() {
+    let world = world();
+    let dead = DaemonGeneration::new();
+    let mut seeded = RegistryDocument::default();
+    seeded
+        .generations
+        .push(retained_entry(dead, GenerationRole::Standby, 4242));
+    seed(&world.file, &seeded);
+
+    // The PID is live, but it is a different incarnation than the one recorded.
+    let mut observe = |_: &ProcessIdentity| ProcessObservation::Unknown;
+    claim_with(&world, &mut observe).unwrap();
+
+    assert_eq!(world.document().current, Some(world.generation));
+}
+
+/// A registry with nothing to reclaim is not rewritten, so an ordinary start
+/// still costs exactly the writes the activation itself needs.
+#[test]
+fn reclamation_writes_nothing_when_every_retained_generation_is_alive() {
+    let world = world();
+    claim(&world, Vec::new()).unwrap();
+    let writes = world.file.writes();
+
+    claim(&world, vec![own_process()]).unwrap();
+
+    assert_eq!(world.file.writes(), writes);
+}
+
+/// A registry that cannot be written during reclamation stops the claim before
+/// it takes any authority.
+#[test]
+fn a_reclamation_that_cannot_be_committed_refuses_the_claim() {
+    let world = world();
+    let dead = DaemonGeneration::new();
+    let mut seeded = RegistryDocument::default();
+    seeded
+        .generations
+        .push(retained_entry(dead, GenerationRole::Standby, 4242));
+    seed(&world.file, &seeded);
+    world.file.fail_write(true);
+
+    let failure = claim(&world, Vec::new()).unwrap_err();
+
+    assert!(matches!(failure, ClaimFailure::Registry(_)));
+    assert!(world.locator.publishes().is_empty());
 }

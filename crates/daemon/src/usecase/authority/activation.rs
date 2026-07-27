@@ -26,6 +26,19 @@
 //! the two writes recoverable by retirement rather than by guesswork: an entry
 //! whose process cannot be proved alive is never adopted as an authority.
 //!
+//! That table is about the *active* generation, which is the pair
+//! [`super::handoff::plan_recovery`] reconciles against the locator. A registry
+//! also retains generations that are not part of that pair — a `standby`
+//! ([`super::standby`]) and, during a rollover, a `draining` predecessor — and a
+//! process holding one of those can be killed too. Nobody else ever revisits
+//! their entries: a standby's own custody supervisor only runs while the standby
+//! is alive, and the locator says nothing about them. Since `activate_first`
+//! refuses while *any* generation is retained, one killed standby would
+//! otherwise make every future start in that data directory fail
+//! `authority_retained` forever. [`reclaim_dead_generations`] closes that,
+//! immediately before the claim, under the same liveness rule recovery already
+//! applies to the active.
+//!
 //! The endpoint must already be bound and answering before W1. A registry entry
 //! naming an endpoint nobody is accepting on would be an authority a client can
 //! discover and not reach, so binding is the caller's precondition, not a step
@@ -40,7 +53,7 @@ use usagi_core::infrastructure::ipc::BuildIdentity;
 use crate::usecase::authority::handoff::{PublishedLocator, RecoveryOutcome};
 use crate::usecase::authority::registry::{GenerationRegistry, RegistryFailure};
 use crate::usecase::authority::rollover::{CurrentLocator, HandoffFailure, recover};
-use crate::usecase::generation::{ProcessIdentity, ProcessObservation};
+use crate::usecase::generation::{GenerationRole, ProcessIdentity, ProcessObservation};
 
 /// What a serving process claims authority as.
 ///
@@ -117,6 +130,7 @@ pub fn claim_authority(
     observe: &mut dyn FnMut(&ProcessIdentity) -> ProcessObservation,
 ) -> Result<AuthorityClaimed, ClaimFailure> {
     let recovery = recover(registry, locator, observe).map_err(ClaimFailure::Recovery)?;
+    reclaim_dead_generations(registry, observe).map_err(ClaimFailure::Registry)?;
     let limit = registry.limit();
     registry
         .update(|document| {
@@ -136,6 +150,50 @@ pub fn claim_authority(
         })
         .map_err(ClaimFailure::Locator)?;
     Ok(AuthorityClaimed { recovery })
+}
+
+/// Retire every retained generation whose exact recorded process the OS proves
+/// is no longer there.
+///
+/// Recovery reconciles the active generation against the locator; this covers
+/// the generations that pair with neither. A `standby` or `draining` entry left
+/// by a killed process is not an authority anyone can hand work to, but it does
+/// count against [`super::registry::RegistryDocument::retained`] — and that
+/// count is what refuses the next activation. Reclaiming it here is the only
+/// point in the lifecycle where a *different* process is both looking at the
+/// registry and able to prove the entry's owner is gone.
+///
+/// The liveness rule is deliberately the one [`super::handoff::plan_recovery`]
+/// applies to the active: anything short of `VerifiedAlive` for the exact
+/// recorded identity is reclaimed. Reclaiming a standby that was in fact alive
+/// converges rather than corrupts — its own custody supervisor
+/// ([`super::standby::evaluate_custody`]) sees the entry disappear and stands
+/// the process down.
+///
+/// A registry with nothing to reclaim is not written at all.
+///
+/// # Errors
+/// Returns the registry read or compare-and-swap failure.
+fn reclaim_dead_generations(
+    registry: &GenerationRegistry,
+    observe: &mut dyn FnMut(&ProcessIdentity) -> ProcessObservation,
+) -> Result<(), RegistryFailure> {
+    registry.update(|document| {
+        let dead: Vec<_> = document
+            .generations
+            .iter()
+            .filter(|entry| entry.role != GenerationRole::Retired)
+            .filter(|entry| {
+                observe(&entry.process) != ProcessObservation::VerifiedAlive(entry.process.clone())
+            })
+            .map(|entry| entry.generation)
+            .collect();
+        for generation in dead {
+            document.retire_self(generation)?;
+        }
+        Ok(())
+    })?;
+    Ok(())
 }
 
 /// Give up this generation's registry authority.
