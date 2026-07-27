@@ -365,11 +365,12 @@ parent directory fsync は platform / filesystem が対応する範囲の best-e
 hard crash では unique temporary が残り得るが、後続 save は別名を使うため阻害されない。
 
 この順序は新規 connection を止めるが、accept 済み connection の frame dispatch、reserve/spawn/control effect を
-停止しない。shipping `serve` は client worker の JoinHandle も保持しない。role 付き request lease、internal
-producer の停止、既接続 stream の shutdown/join を行う admission fence は
-[cross-process generation authority](#cross-process-generation-authority) に実装されているが、shipping `serve`
-はまだそれを駆動しないため、この順序自体は変わっていない。両者の接続は
-[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) で行う。
+停止しない。shipping `serve` の active generation は [admission fence](#admission-fence) を通して全 connection を
+serve し、request ごとに role 付きの lease を発行し、client worker を shutdown 半分とともに保持する
+（[client worker の保持](#client-worker-の保持)）。したがって role が `draining` へ移れば control と spawn は
+次の request から拒否されるが、**この停止順序を駆動する collection そのもの**（internal producer の停止と
+retirement）はまだ無い。それを起動する rollover は
+[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) の残りである。
 正常終了後の discovery は stale socket への `ConnectionRefused` ではなく `NotFound` になる。client bootstrap は
 locator 自体の `NotFound` では replacement を一度起動する。検証済み locator の endpoint 検証または connect 後の
 `NotFound` は `ConnectionRefused` 相当に分類し、上記の fenced recovery が完了した場合だけ起動する。その他の接続失敗、
@@ -393,9 +394,15 @@ seamless rollover は old process を draining generation として生かした�
 replacement 後も維持する。2 process を安全に運用する authority は
 [cross-process generation authority](#cross-process-generation-authority) と
 [owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
-に実装済みで、authority を**渡す元**（active generation）も `serve` が registry へ登録している
-（[first activation](#first-activation)）。まだ無いのは authority を**渡す先**の standby process を
-起動する lifecycle であり、`serve` が process lifetime にわたり単一インスタンス lock を保持するためである。
+に実装済みである。前提のうち次の 3 つは production に配線済みで、残るのは handoff を**起動する** lifecycle だけである。
+
+| 前提 | 状態 |
+|---|---|
+| authority を渡す**元**（active generation）が registry に登録される | `serve` が起動時に登録する（[first activation](#first-activation)） |
+| authority を渡す**先**（standby process）が起動して registry に登録される | `serve --standby` が登録し readiness 後に `verified_build` を立てる（[standby process の lifecycle](#standby-process-の-lifecycle)） |
+| active generation が request ごとに role を決め直し、rollover の routing 前提を判定できる | active generation が [admission fence](#admission-fence) と [routing 前提条件](#rollover-の-routing-前提条件)の ledger を通して serve する |
+| 検証済み standby を active へ昇格させる handoff の起動 | **未実装**。`standby not admitted` がこれを名指す |
+
 seamless refusal は registry を読み、欠けている前提を名前で示す。
 
 | refusal | 意味 |
@@ -1389,7 +1396,7 @@ outcome になる。異なる operation の割り込みは `handoff_in_progress`
 ### admission fence
 
 authority は request ごとに live な role・revision・resource owner から決め直す。**接続が確立済みという事実は authority に
-ならない**。
+ならない**。serving role（`active` / `standby`）はいずれもこの fence を通して全 connection を serve する。
 
 | role | control / spawn | 自 generation の terminal IO | 他 generation の resource | read / inventory |
 |---|---|---|---|---|
@@ -1398,16 +1405,48 @@ authority は request ごとに live な role・revision・resource owner から
 | `standby` | 拒否 | 拒否 | 拒否 | 受理 |
 | `retired` | 拒否 | 拒否 | 拒否 | 拒否 |
 
+wire request をこの表の縦軸（work の種類）へ写す分類は 1 か所にあり、両 role が同じものを読む。role ごとに
+違うのは **その generation が runtime を所有するかどうか**という role 自身の表明だけである。
+
+| wire の `kind`（terminal は `action`） | work の種類 | runtime を名指すか |
+|---|---|---|
+| `terminal` / `launch`、`agent`、`resume_agent` | spawn | no |
+| `terminal` / `inventory`・`completed_inventory`、`agent_inventory` | inventory | no |
+| `terminal` / `input_outcome` | read | yes |
+| `terminal` のその他の action | terminal IO | yes |
+| `metrics`、`pr` | read | no |
+| 上記以外（`session`、`dispatch`、`*_tool`、未知の kind を含む） | control | no |
+
+未知の `kind` と未知の terminal `action` は **control / terminal IO** 側へ倒す（read へは倒さない）。この build が
+名前を知らない request は、その effect の範囲も保証できないからである。runtime を名指す request は、runtime を
+所有しない role（standby）では常に「他 generation の resource」に解決され、拒否される。
+
+どの record を名指しているか（ref が stale かどうか）は fence の判断ではなく terminal runtime の判断である。
+`TerminalRef` は owner generation を含む exact 一致で fence されるため、他 generation の ref が同 scope の別
+terminal へ解決されることはない。fence が担うのは **role の可否と lease** であり、記録を持たない層で
+staleness を再判定しない。
+
 active-only の work は durable reservation より前に role / revision 付きの RAII admission lease を取り、external effect と
-durable commit が終わるまで保持する。`active → draining` は **lease の新規発行を止め、既存 lease と active-only
-background worker が 0 になるまで待ってから** registry / locator handoff を commit する。effect 後の再検証で発生済みの
-spawn を取り消せるとは扱わない。owner-terminal の lease は別 class で継続し、collection は発行停止と 0 確認の後だけ許可する。
+durable commit が終わるまで保持する。lease は request が admit された時点で発行し、**その reply を書き終えるまで
+保持する**。認可の後・effect の前に lease が落ちる隙間は作らない。`active → draining` は
+**lease の新規発行を止め、既存 lease と active-only background worker が 0 になるまで待ってから** registry /
+locator handoff を commit する。effect 後の再検証で発生済みの spawn を取り消せるとは扱わない。owner-terminal の
+lease は別 class で継続し、collection は発行停止と 0 確認の後だけ許可する。
 
 barrier は W2 より前は **process local** であり、client からは観測できない。したがって commit 前に handoff が失敗した場合は
 barrier を戻して旧 authority を維持する。W2 が成功した後の barrier は durable であり、二度と `active` へ戻らない。
 
+#### client worker の保持
+
 `retired` への遷移は、保持した client worker の stream を shutdown して parked な frame read を解除し、**全 JoinHandle を
-join してから** endpoint と process を回収する。count だけを待って JoinHandle を捨てることはしない。
+join してから** endpoint と process を回収する。count だけを待って JoinHandle を捨てることはしない。そのために
+serving generation は accept した connection ごとに、worker の JoinHandle と、その stream を外から
+`shutdown(2)` できる複製 descriptor を保持する。
+
+descriptor を複製できなかった connection は**保持しない**。unblock 手段の無い thread を保持すると retirement が
+join で止まるため、そのことを記録して serve だけ継続する。長命な generation が歴史上の全 connection を持ち続けない
+ように、新しい connection を保持する前に **finished な worker だけを join して回収する**。この回収は live な
+connection の stream に触らない（`shutdown` を行うのは retirement だけである）。
 
 ### rollover の routing 前提条件
 
@@ -1416,6 +1455,10 @@ client が 1 つでも残ったまま rollover すると、その client が持�
 new active の別 terminal へ誤配送される。したがって rollover の入口は最初の durable write より前に次を
 検証し、1 つでも満たさなければ typed refusal で止める。refusal は **effect zero** であり、registry、
 current locator、admission barrier、全 PTY は元のままである。
+
+active generation は connection ごとに `ClientHello` の routing 回答を記録し、connection が終わったら忘れる。
+記録は connection 単位であり client incarnation 単位ではない: 新しい build で再接続した client は回答を
+変えられなければならず、去った client は rollover を阻害し続けてはならない。
 
 | 参加者 | 条件 | 満たさない場合 |
 |---|---|---|
