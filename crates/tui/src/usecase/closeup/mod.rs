@@ -83,7 +83,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         info: CommandInfo {
             name: "env",
             description: "Edit this workspace's environment variables",
-            usage: "env [workspace|global]",
+            usage: "env",
         },
         factory: |arguments| Command::Env { arguments },
     },

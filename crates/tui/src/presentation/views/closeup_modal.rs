@@ -282,10 +282,6 @@ impl CloseupModal {
                 })
                 .collect(),
             "close" => vec![ModalSubcommand::plain("--force")],
-            "env" => vec![
-                ModalSubcommand::plain("workspace"),
-                ModalSubcommand::plain("global"),
-            ],
             "reopen" => self
                 .reopen_choices
                 .iter()
@@ -329,7 +325,6 @@ impl CloseupModal {
         }
         let candidates = match command {
             "close" => vec!["--force".to_owned()],
-            "env" => vec!["workspace".to_owned(), "global".to_owned()],
             "reopen" => self
                 .reopen_choices
                 .iter()
@@ -490,14 +485,10 @@ mod tests {
 
     #[test]
     fn expanding_an_action_with_subcommands_lists_them() {
-        // `terminal`, `close`, and `env` carry subcommands; expanding the selected action
+        // `terminal` and `close` carry subcommands; expanding the selected action
         // renders that subcommand list (the completion the Ctrl-O command input
         // drives).
-        for (action, subcommand) in [
-            ("terminal", "open"),
-            ("close", "--force"),
-            ("env", "workspace"),
-        ] {
+        for (action, subcommand) in [("terminal", "open"), ("close", "--force")] {
             let mut modal = CloseupModal::new("daemon");
             for _ in 0..modal.actions().len() {
                 if modal.selected_action().name == action {
@@ -547,16 +538,19 @@ mod tests {
 
     #[test]
     fn an_action_without_subcommands_neither_expands_nor_completes_arguments() {
-        // `diff` takes no arguments, so it has no picker rows and its argument
-        // text is outside every completion vocabulary.
-        let mut modal = CloseupModal::new("s");
-        while modal.selected_action().name != "diff" {
-            modal.select_next();
+        // `diff` and Closeup's workspace-only `env` take no arguments, so they
+        // have no picker rows.
+        for action in ["diff", "env"] {
+            let mut modal = CloseupModal::new("s");
+            while modal.selected_action().name != action {
+                modal.select_next();
+            }
+            modal.expand_selected();
+            assert_eq!(modal.submission(), action);
+            assert!(!joined(&modal).contains("-m"));
         }
-        modal.expand_selected();
-        assert_eq!(modal.submission(), "diff");
-        assert!(!joined(&modal).contains("-m"));
 
+        // Argument text for either command is outside every completion vocabulary.
         let mut prompt = CloseupModal::with_selection_mode("s", ModalSelectionMode::Prompt);
         for character in "diff s".chars() {
             prompt.insert_char(character);
@@ -594,7 +588,7 @@ mod tests {
         // Other commands keep their own single-token completion.
         assert_eq!(complete("terminal n"), "terminal new");
         assert_eq!(complete("close --f"), "close --force");
-        assert_eq!(complete("env g"), "env global");
+        assert_eq!(complete("env g"), "env g");
     }
 
     #[test]
