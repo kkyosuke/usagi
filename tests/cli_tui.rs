@@ -795,6 +795,83 @@ fn a_standby_stands_down_with_its_incumbent_so_the_next_start_succeeds() {
     stop_daemon_in_production(&home);
 }
 
+/// The standby's own custody supervisor is what stands it down when its
+/// incumbent goes away — and a killed standby has no supervisor left to run it.
+/// Its `standby` entry therefore survives with nobody to revisit it: recovery
+/// reconciles the *active* against the locator and never looks at the rest, so
+/// once the active has cleanly retired its own entry the leftover is the only
+/// retained generation — and `activate_first` refuses while any generation is
+/// retained. Every subsequent `daemon start` would fail `authority_retained`
+/// forever, until someone deleted `generations.json` by hand.
+#[test]
+fn a_killed_standby_does_not_wedge_every_later_start() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let daemon_dir = home.production_data_dir().join("daemon");
+    let registry = daemon_dir.join("generations.json");
+
+    let mut active = home.spawn_serve();
+    assert!(
+        wait_until(Duration::from_secs(15), || registry.is_file()
+            && daemon_dir.join("current.json").is_file()),
+        "the active daemon did not register its generation"
+    );
+    let mut standby = home.spawn_standby();
+    assert!(
+        wait_until(Duration::from_secs(20), || {
+            standby_entry(&registry).is_some_and(|entry| entry["verified_build"].is_object())
+        }),
+        "the standby never reached verified readiness: {}",
+        registry_document(&registry)
+    );
+
+    // SIGKILL, so nothing on the standby's side runs: no stand-down, no custody
+    // tick, no entry retirement.
+    standby.kill_and_reap();
+    assert!(
+        standby_entry(&registry).is_some_and(|entry| entry["role"] == "standby"),
+        "the killed standby was expected to leave its entry behind: {}",
+        registry_document(&registry)
+    );
+
+    // A clean stop retires only the active's own entry, which leaves the dead
+    // standby as the single retained generation.
+    stop_daemon_in_production(&home);
+    assert!(
+        active.wait_for_exit(Duration::from_secs(10)),
+        "the active daemon did not exit"
+    );
+    assert_eq!(
+        registry_document(&registry)["generations"]
+            .as_array()
+            .map(|entries| entries
+                .iter()
+                .filter(|entry| entry["role"] != "retired")
+                .count()),
+        Some(1),
+        "{}",
+        registry_document(&registry)
+    );
+
+    // The next start proves the leftover's process is gone, reclaims it, and
+    // takes the authority — no manual cleanup anywhere.
+    let restarted = run_in_production(&[OsStr::new("daemon"), OsStr::new("start")], &home);
+    assert!(restarted.status.success(), "{}", stderr(&restarted));
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            !registry_document(&registry)["current"].is_null()
+        }),
+        "the next start could not take authority: {}",
+        registry_document(&registry)
+    );
+    let document = registry_document(&registry);
+    assert_eq!(document["generations"].as_array().map(Vec::len), Some(1));
+    assert_eq!(document["generations"][0]["role"], "active", "{document}");
+    stop_daemon_in_production(&home);
+}
+
 /// A standby is not a way to start serving. Without a live daemon that the
 /// registry itself names as active there is nothing to stand by for, and the
 /// refusal has to land before anything is created inside a data directory this
