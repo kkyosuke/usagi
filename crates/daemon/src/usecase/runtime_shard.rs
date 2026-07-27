@@ -420,14 +420,22 @@ fn apply_record(
     // still describes it as live: an exit is committed by the observation that
     // reaped the child, and a record that lost its proof of ownership never
     // regains it — the window in which the OS could have answered has passed.
-    let decided = document
+    let recorded = document
         .resource(&projection.resource)
-        .is_some_and(|entry| !entry.state.is_live());
+        .map(|entry| entry.state);
     match (&projection.state, &resolved.verified) {
-        (_, _) if decided => Ok(()),
+        _ if recorded.is_some_and(|state| !state.is_live()) => Ok(()),
         (ProjectedState::Running(_), Some(identity)) => {
             document.record_spawn(&projection.resource, identity)
         }
+        // The payload still calls this record live, and the shard already proved
+        // its child once. A single observation that cannot confirm it is not
+        // counter-evidence: the child that died a moment ago has not been reaped
+        // yet, and the exit that releases its slot is published by the
+        // observation that reaps it. Taking ownership away here would close that
+        // path — `commit_exit` refuses an unowned record — and strand the slot
+        // until the whole generation is collected.
+        (ProjectedState::Running(_), None) if recorded == Some(ResourceState::Running) => Ok(()),
         (ProjectedState::Running(_) | ProjectedState::Unknown | ProjectedState::Failed, _) => {
             document.mark_ownership_unknown(&projection.resource)
         }

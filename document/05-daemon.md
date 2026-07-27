@@ -488,9 +488,16 @@ durable record の state は contract state へ次のように写る。exit だ�
 |---|---|---|
 | `reserved` | reservation | claim を取る（capacity gate） |
 | `running` で OS が exact process を確認 | running + verified child identity | operation を spawned で seal |
-| `running` で OS が確認できない | `ownership_unknown` | claim を保持（child が存在し得る） |
+| `running` で OS が確認できず、shard も未証明 | `ownership_unknown` | claim を保持（child が存在し得る） |
+| `running` で OS が確認できないが、shard は既に running | 触らない | 触らない（後述） |
 | `spawn_failed` | `ownership_unknown` | 1 度だけ release（child は存在しない） |
 | `exited` / `reclaimed` | 触らない | 触らない（exit path が publish 済み） |
+
+**一度証明された running record は、後続の save が再観測に失敗しても降格しない**。確認できないことは反証では
+なく、child が死んだ直後（まだ reap されていない）や process table が答えない瞬間に save が挟まると、
+ownership を奪ってしまう。奪うと `commit_exit` が `wrong_state` で拒否されるため、その slot を解放する唯一の
+経路（exit の publish）が閉じ、capacity が generation collection まで戻らない。降格させてよいのは payload 自身が
+live でなくなったと言うとき（reconcile state・`spawn_failed`）だけである。
 
 capacity pool の上限は Agent 16 / generic terminal 16 で、process ごとではなく **retained generation 全体**で
 数える。reservation の失敗は spawn effect zero であり、store refusal として launch を拒否する。

@@ -2140,3 +2140,60 @@ fn a_retained_shard_that_cannot_be_read_is_never_read_as_empty() {
         assert!(live_census(&source).is_err());
     }
 }
+
+#[test]
+fn a_child_that_dies_between_two_saves_keeps_the_exit_that_releases_its_slot() {
+    let owner = DaemonGeneration::new();
+    let (shard, ledger) = (SharedBytes::default(), SharedBytes::default());
+    let resource = terminal_of(owner);
+    let operation = OperationId::new();
+    let running = terminal_snapshot(vec![terminal_record(
+        &resource,
+        operation,
+        TerminalRuntimeState::Running,
+        Some(process(41, "token")),
+    )]);
+    let records = project_terminals(&running, owner);
+    let writer_with = |probe| {
+        writer(
+            ResourceKind::Terminal,
+            owner,
+            &shard,
+            &ledger,
+            probe,
+            (2, 2),
+        )
+    };
+
+    // The spawn proves the child, exactly as it does in production.
+    writer_with(probe_for(41, "token"))
+        .commit(&json!({}), &records)
+        .unwrap();
+    assert_eq!(
+        shard_of(&shard, owner).resource(&resource).unwrap().state,
+        ResourceState::Running
+    );
+
+    // The child dies. Its exit observation has not arrived yet, and a save the
+    // *other* terminals caused carries this record along — with a pid the OS no
+    // longer answers for. That is not counter-evidence, and the record must keep
+    // the ownership it already proved.
+    writer_with(FakeProbe::new().with(41, ProbeAnswer::Gone))
+        .commit(&json!({}), &records)
+        .unwrap();
+    assert_eq!(
+        shard_of(&shard, owner).resource(&resource).unwrap().state,
+        ResourceState::Running,
+        "one observation that could not confirm is not proof of the opposite"
+    );
+
+    // So the exit still publishes, and the slot comes back exactly once.
+    writer_with(FakeProbe::new())
+        .publish_exit(&resource, 0)
+        .expect("the record that owns the child can still report its exit");
+    assert_eq!(
+        ledger_of(&ledger).claim(&resource).map(|claim| claim.state),
+        Some(ClaimState::Released)
+    );
+    assert_eq!(shard_of(&shard, owner).live_resources(), 0);
+}
