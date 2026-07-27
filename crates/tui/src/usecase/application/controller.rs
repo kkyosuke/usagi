@@ -3408,9 +3408,6 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
             return Vec::new();
         }
     };
-    if let closeup::Command::Env { arguments } = &command {
-        return submit_closeup_env(state, arguments);
-    }
     let command_name = command.name();
     // Which CLI an accepted `agent` resolved to, so the confirmation names the
     // selection (including when it came from the configured default).
@@ -3477,7 +3474,9 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
             state.notice = Some(Notice::new(format!("{command_name} is not available")));
             None
         }
-        closeup::Command::Env { .. } => unreachable!("env returns before effect dispatch"),
+        // `env` owns the workspace-scoped editor rather than a per-session effect,
+        // so it opens the editor and returns before the shared dismiss/notice tail.
+        closeup::Command::Env { arguments } => return submit_closeup_env(state, &arguments),
         closeup::Command::Reopen { arguments } => {
             if let Ok(continuation) = AgentContinuationRef::parse(arguments.trim()) {
                 Some(Effect::ReopenAgent {
