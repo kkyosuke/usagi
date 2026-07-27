@@ -445,7 +445,18 @@ impl WorkspaceRuntime {
             }
             Key::Enter => {
                 let submission = modal.submission();
-                self.apply_event(AppEvent::Key(AppKey::SubmitCloseup(submission)))
+                let effects = self.apply_event(AppEvent::Key(AppKey::SubmitCloseup(submission)));
+                // An accepted command produces its effect and closes the overlay
+                // (which drops the modal). A refused one produces nothing and
+                // leaves the modal on screen, so carry the reducer's safe message
+                // into it — otherwise the refusal looks like a dead key.
+                if effects.is_empty() {
+                    let message = self.state.notice().map(|notice| notice.message.clone());
+                    if let Some(modal) = self.closeup_modal.as_mut() {
+                        modal.set_error(message);
+                    }
+                }
+                effects
             }
             Key::Escape => self.apply_event(AppEvent::Key(AppKey::Escape)),
             other => match app_event_from_key(other) {
@@ -1324,6 +1335,40 @@ mod tests {
         // Submitting closes the action modal; the edge-triggered live-pane level
         // no longer re-opens it while the launched pane is still pending.
         assert_eq!(runtime.state().overlay(), None);
+        assert!(runtime.closeup_modal().is_none());
+    }
+
+    #[test]
+    fn a_refused_closeup_submission_shows_its_reason_in_the_still_open_modal() {
+        // A refusal produces no effect and leaves the overlay open. Without the
+        // reducer's message reaching the modal, Enter looked like a dead key and
+        // the user could only conclude that the Agent would not start.
+        let mut runtime = closeup_on(WorkspaceId::new(), SessionId::new());
+        runtime.set_agent_models(AvailableModels::default(), DefaultModel::OpenAi);
+        assert!(runtime.closeup_modal().unwrap().error().is_none());
+
+        let effects = runtime.handle_key(Key::Enter);
+        assert!(effects.is_empty(), "{effects:?}");
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
+        assert_eq!(
+            runtime.closeup_modal().unwrap().error(),
+            Some("the configured agent CLI is not installed")
+        );
+
+        // Editing the input clears the stale reason.
+        let _ = runtime.handle_key(Key::Char('c'));
+        assert!(runtime.closeup_modal().unwrap().error().is_none());
+
+        // An accepted submission closes the overlay, so no reason can linger.
+        runtime.set_agent_models(AvailableModels::all(), DefaultModel::OpenAi);
+        let _ = runtime.handle_key(Key::Backspace);
+        let effects = runtime.handle_key(Key::Enter);
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::LaunchAgent { .. })),
+            "{effects:?}"
+        );
         assert!(runtime.closeup_modal().is_none());
     }
 
