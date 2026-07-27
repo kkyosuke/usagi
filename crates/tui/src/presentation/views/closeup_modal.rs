@@ -16,7 +16,7 @@ use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelection
 
 /// モーダルの枠の内側（内容）幅。
 const INNER_WIDTH: usize = 50;
-const BODY_HEIGHT: usize = 9;
+const BODY_HEIGHT: usize = 10;
 
 /// アクションメニューの状態。対象セッション名と、アクション一覧上のカーソルを持つ。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -538,16 +538,19 @@ mod tests {
 
     #[test]
     fn an_action_without_subcommands_neither_expands_nor_completes_arguments() {
-        // `diff` takes no arguments, so it has no picker rows and its argument
-        // text is outside every completion vocabulary.
-        let mut modal = CloseupModal::new("s");
-        while modal.selected_action().name != "diff" {
-            modal.select_next();
+        // `diff` and Closeup's workspace-only `env` take no arguments, so they
+        // have no picker rows.
+        for action in ["diff", "env"] {
+            let mut modal = CloseupModal::new("s");
+            while modal.selected_action().name != action {
+                modal.select_next();
+            }
+            modal.expand_selected();
+            assert_eq!(modal.submission(), action);
+            assert!(!joined(&modal).contains("-m"));
         }
-        modal.expand_selected();
-        assert_eq!(modal.submission(), "diff");
-        assert!(!joined(&modal).contains("-m"));
 
+        // Argument text for either command is outside every completion vocabulary.
         let mut prompt = CloseupModal::with_selection_mode("s", ModalSelectionMode::Prompt);
         for character in "diff s".chars() {
             prompt.insert_char(character);
@@ -585,6 +588,7 @@ mod tests {
         // Other commands keep their own single-token completion.
         assert_eq!(complete("terminal n"), "terminal new");
         assert_eq!(complete("close --f"), "close --force");
+        assert_eq!(complete("env g"), "env g");
     }
 
     #[test]
@@ -592,8 +596,10 @@ mod tests {
         let modal = CloseupModal::new("tui");
         assert_eq!(modal.session(), "tui");
         assert_eq!(modal.selected(), 0);
-        assert_eq!(modal.actions().len(), 5);
+        assert_eq!(modal.actions().len(), 6);
         assert_eq!(modal.selected_action().name, "agent");
+        assert!(joined(&modal).contains("env"));
+        assert!(joined(&modal).contains("↑↓: select"));
         // derive された Clone / Debug も触れる。
         assert!(format!("{:?}", modal.clone()).contains("tui"));
         let action = modal.actions()[0];
@@ -605,7 +611,7 @@ mod tests {
     fn selection_wraps_both_ways() {
         let mut modal = CloseupModal::new("s");
         modal.select_prev(); // wrap to last (terminal)
-        assert_eq!(modal.selected(), 4);
+        assert_eq!(modal.selected(), 5);
         assert_eq!(modal.selected_action().name, "terminal");
         modal.select_next(); // wrap to 0
         assert_eq!(modal.selected(), 0);

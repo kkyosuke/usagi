@@ -287,6 +287,11 @@ pub struct EnvironmentEditor {
     /// `true` while a save is in flight. Local edits and re-saves are ignored
     /// until the owning port refluxes, so a save can never be double-submitted.
     saving: bool,
+    /// `true` when this editor is pinned to a single scope and the workspace ⇄
+    /// global toggle is inert. Closeup opens the editor locked to the workspace
+    /// scope, so the session/root surface only ever edits this workspace; the
+    /// Overview palette opens it unlocked to reach the global scope too.
+    locked: bool,
 }
 
 /// Local navigation and draft state for a durable user decision.  The durable
@@ -448,6 +453,14 @@ impl PreviewOverlay {
 
 impl EnvironmentEditor {
     fn loading(scope: EnvScope) -> Self {
+        Self::loading_with_lock(scope, false)
+    }
+
+    fn loading_locked(scope: EnvScope) -> Self {
+        Self::loading_with_lock(scope, true)
+    }
+
+    fn loading_with_lock(scope: EnvScope, locked: bool) -> Self {
         Self {
             scope,
             entries: Vec::new(),
@@ -456,6 +469,7 @@ impl EnvironmentEditor {
             error: None,
             loading: true,
             saving: false,
+            locked,
         }
     }
 
@@ -498,6 +512,11 @@ impl EnvironmentEditor {
     #[must_use]
     pub const fn is_saving(&self) -> bool {
         self.saving
+    }
+    /// Whether this editor is pinned to its current scope.
+    #[must_use]
+    pub const fn is_scope_locked(&self) -> bool {
+        self.locked
     }
     /// Whether the editor is accepting local edits and saves (neither the
     /// initial read nor a save is in flight).
@@ -3151,6 +3170,9 @@ fn toggle_environment_scope(state: &mut AppState, environment_open: bool) -> Vec
     let Some(editor) = editable_environment(state, environment_open) else {
         return Vec::new();
     };
+    if editor.locked {
+        return Vec::new();
+    }
     let scope = match editor.scope {
         EnvScope::Workspace => EnvScope::Global,
         EnvScope::Global => EnvScope::Workspace,
@@ -3184,6 +3206,16 @@ fn open_environment(state: &mut AppState, scope: EnvScope) -> Vec<Effect> {
     state.note_editor = None;
     state.environment_editor = Some(EnvironmentEditor::loading(scope));
     vec![Effect::LoadEnvironment { scope }]
+}
+
+/// Open the workspace-only environment editor used by Closeup.
+fn open_closeup_environment(state: &mut AppState) -> Vec<Effect> {
+    state.overlay = Some(Overlay::Environment);
+    state.note_editor = None;
+    state.environment_editor = Some(EnvironmentEditor::loading_locked(EnvScope::Workspace));
+    vec![Effect::LoadEnvironment {
+        scope: EnvScope::Workspace,
+    }]
 }
 
 fn open_prs(state: &mut AppState) -> Vec<Effect> {
@@ -3474,6 +3506,9 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
             state.notice = Some(Notice::new(format!("{command_name} is not available")));
             None
         }
+        // `env` owns the workspace-scoped editor rather than a per-session effect,
+        // so it opens the editor and returns before the shared dismiss/notice tail.
+        closeup::Command::Env { arguments } => return submit_closeup_env(state, &arguments),
         closeup::Command::Reopen { arguments } => {
             if let Ok(continuation) = AgentContinuationRef::parse(arguments.trim()) {
                 Some(Effect::ReopenAgent {
@@ -3518,6 +3553,18 @@ fn parse_close_force(arguments: &str) -> Option<bool> {
         .ok()
         .filter(|request| request.target.is_none())
         .map(|request| request.force)
+}
+
+/// Open the environment editor from Closeup, reusing the Overview `env` grammar.
+/// The editor is workspace-scoped, so a Closeup launch edits the same bindings as
+/// Overview rather than any session-specific environment.
+fn submit_closeup_env(state: &mut AppState, arguments: &str) -> Vec<Effect> {
+    if arguments.trim().is_empty() {
+        open_closeup_environment(state)
+    } else {
+        state.notice = Some(Notice::new("env takes no arguments (usage: env)"));
+        Vec::new()
+    }
 }
 
 /// Maximum elapsed time between presses on one stable session identity.
@@ -5726,6 +5773,68 @@ mod tests {
     }
 
     #[test]
+    fn closeup_env_opens_a_workspace_locked_editor_and_rejects_arguments() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+
+        // `env` from Closeup opens this workspace's editor and requests a read,
+        // replacing the Closeup overlay with the Environment editor.
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        let effects = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitCloseup("env".to_owned())),
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::LoadEnvironment {
+                scope: EnvScope::Workspace,
+            }]
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Environment));
+        let editor = state.environment_editor().unwrap();
+        assert_eq!(editor.scope(), EnvScope::Workspace);
+        assert!(editor.is_scope_locked());
+
+        // Once the read refluxes the editor accepts edits, but Closeup owns only
+        // this workspace's scope: Tab cannot move the locked editor to global or
+        // issue another load.
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentLoaded {
+                scope: EnvScope::Workspace,
+                entries: Vec::new(),
+                inherited: Vec::new(),
+            }),
+        );
+        assert!(update(&mut state, AppEvent::Key(AppKey::Tab)).is_empty());
+        let editor = state.environment_editor().unwrap();
+        assert_eq!(editor.scope(), EnvScope::Workspace);
+        assert!(editor.is_scope_locked());
+
+        // Arguments (including `global`) are refused safely: the editor never
+        // opens and the Closeup overlay stays up with a usage notice.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        for input in ["env workspace", "env global", "env extra"] {
+            assert!(
+                update(
+                    &mut state,
+                    AppEvent::Key(AppKey::SubmitCloseup(input.to_owned())),
+                )
+                .is_empty()
+            );
+            assert_eq!(state.overlay(), Some(Overlay::Closeup));
+            assert!(state.environment_editor().is_none());
+            assert_eq!(
+                state.notice().map(|notice| notice.message.as_str()),
+                Some("env takes no arguments (usage: env)")
+            );
+        }
+    }
+
+    #[test]
     fn entry_open_single_preserves_the_selected_identity_into_home() {
         let first = WorkspaceId::new();
         let chosen = WorkspaceId::new();
@@ -7095,6 +7204,7 @@ mod tests {
             draft: String::new(),
             loading: false,
             saving: false,
+            locked: false,
             error: None,
         });
         let _ = update_editor_key(

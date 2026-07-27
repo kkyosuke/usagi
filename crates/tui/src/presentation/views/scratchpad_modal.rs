@@ -106,9 +106,13 @@ fn note_body(editor: &NoteEditor) -> Vec<String> {
 }
 
 fn environment_body(editor: &EnvironmentEditor) -> Vec<String> {
-    let (caption, scope_hint) = match editor.scope() {
-        EnvScope::Workspace => ("this workspace's environment", "Tab: global"),
-        EnvScope::Global => ("global environment · every workspace", "Tab: workspace"),
+    let (caption, scope_hint) = match (editor.scope(), editor.is_scope_locked()) {
+        (EnvScope::Workspace, true) => ("this workspace's environment", None),
+        (EnvScope::Workspace, false) => ("this workspace's environment", Some("Tab: global")),
+        (EnvScope::Global, _) => (
+            "global environment · every workspace",
+            Some("Tab: workspace"),
+        ),
     };
     let mut lines = vec![modal::caption(caption)];
     if editor.is_loading() {
@@ -132,8 +136,10 @@ fn environment_body(editor: &EnvironmentEditor) -> Vec<String> {
     // a second Save until the owning port refluxes — no double-submit.
     let footer = if editor.is_saving() {
         "Esc: close   Saving…".to_owned()
-    } else {
+    } else if let Some(scope_hint) = scope_hint {
         format!("Enter: NAME=value / save   {scope_hint}   Esc: close")
+    } else {
+        "Enter: NAME=value / save   Esc: close".to_owned()
     };
     lines.push(modal::footer(&footer));
     modal::fixed_body(lines, ENVIRONMENT_BODY_HEIGHT)
@@ -390,6 +396,40 @@ mod tests {
         assert!(global.contains("global environment"));
         assert!(global.contains("Tab: workspace"));
         assert!(!global.contains("inherited from global"));
+    }
+
+    #[test]
+    fn closeup_environment_overlay_is_workspace_only_and_hides_the_scope_toggle() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitCloseup("env".to_owned())),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentLoaded {
+                scope: EnvScope::Workspace,
+                entries: vec![EnvironmentEntry {
+                    name: "RUST_LOG".to_owned(),
+                    value: "debug".to_owned(),
+                }],
+                inherited: vec![EnvironmentEntry {
+                    name: "GLOBAL_TOKEN".to_owned(),
+                    value: "op://vault/item/token".to_owned(),
+                }],
+            }),
+        );
+
+        let frame = render_environment_over(40, 80, &base(), state.environment_editor().unwrap())
+            .join("\n");
+        assert!(frame.contains("this workspace's environment"));
+        assert!(frame.contains("RUST_LOG=debug"));
+        assert!(frame.contains("inherited from global"));
+        assert!(!frame.contains("Tab: global"));
+        assert!(!frame.contains("Tab: workspace"));
+        assert!(frame.contains("Enter: NAME=value / save   Esc: close"));
     }
 
     #[test]
