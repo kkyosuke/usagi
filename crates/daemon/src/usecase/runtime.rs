@@ -29,6 +29,7 @@ use super::{
         GenerationRole, GenerationSnapshot, ProcessIdentity, ProcessObservation, TerminalOwnership,
         TerminalState,
     },
+    resources::pool::{ForeignOccupancy, foreign_occupancy},
     terminal::{
         Attached, Geometry, InputAck, InputRequest, Output, PtyWriter, RegistryError, Snapshot,
         TerminalRegistry,
@@ -435,6 +436,10 @@ pub enum RuntimeError {
 #[derive(Debug)]
 pub struct RuntimeCoordinator {
     limit: usize,
+    /// The slots the *other* retained generations hold, when this process shares
+    /// its pool with them. `None` while this daemon is the only generation, which
+    /// is the single-writer case the limit was originally written for (#562).
+    foreign: Option<Box<dyn ForeignOccupancy>>,
     records: BTreeMap<String, DurableRuntimeRecord>,
     terminals: TerminalRegistry,
     generation: GenerationCoordinator,
@@ -463,11 +468,30 @@ impl RuntimeCoordinator {
     ) -> Self {
         Self {
             limit,
+            foreign: None,
             records: BTreeMap::new(),
             terminals: TerminalRegistry::new(journal_limit, input_cache_limit),
             generation: GenerationCoordinator::new(DEFAULT_GENERATION_LIMIT),
             retention,
         }
+    }
+
+    /// Share this owner's pool with every other retained generation.
+    ///
+    /// Until this is called the coordinator counts only its own live records,
+    /// which is right for a daemon that is the sole generation and wrong the
+    /// moment a rollover keeps a draining owner alive next to it. Asking here —
+    /// *before* a record is inserted — is also what keeps a full pool from
+    /// leaving a reservation behind: the durable refusal would arrive at the
+    /// persist, by which point this coordinator already holds a record for a
+    /// runtime that will never exist (#562).
+    pub fn share_pool(&mut self, foreign: Box<dyn ForeignOccupancy>) {
+        self.foreign = Some(foreign);
+    }
+
+    /// Whether one more launch would put the shared pool over its limit.
+    fn pool_exhausted(&self, own_occupied: usize) -> bool {
+        own_occupied + foreign_occupancy(self.foreign.as_deref(), self.limit) >= self.limit
     }
 
     pub fn hydrate(
@@ -516,6 +540,7 @@ impl RuntimeCoordinator {
         }
         Ok(Self {
             limit,
+            foreign: None,
             records,
             terminals: TerminalRegistry::new(journal_limit, input_cache_limit),
             generation,
@@ -726,7 +751,7 @@ impl RuntimeCoordinator {
                 })
             })
             .count();
-        if self.occupied_slots().saturating_sub(released_slots) >= self.limit {
+        if self.pool_exhausted(self.occupied_slots().saturating_sub(released_slots)) {
             return Err(RuntimeError::ConcurrencyExhausted);
         }
         // Reserve the worst-case final this runtime will leave behind before
@@ -1559,6 +1584,14 @@ mod tests {
             }
         }
     }
+    /// The slots other retained generations hold, as a coordinator sees them.
+    #[derive(Debug)]
+    struct Foreign(Option<usize>);
+    impl crate::usecase::resources::pool::ForeignOccupancy for Foreign {
+        fn occupied(&self) -> Option<usize> {
+            self.0
+        }
+    }
     struct FailingStore(usize);
     impl RuntimeStore for FailingStore {
         fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
@@ -2204,6 +2237,34 @@ mod tests {
             None,
         )
     }
+    #[test]
+    fn a_pool_the_other_generations_filled_refuses_before_a_record_exists() {
+        // Full across the generations, and unreadable: both mean "no slot", and
+        // neither may leave a runtime record for an Agent that never exists.
+        for foreign in [Some(2), None] {
+            let request = request();
+            let (runtime, fence) = refs(&request);
+            let mut coordinator = RuntimeCoordinator::new(2, 1024, 2);
+            coordinator
+                .activate_generation(runtime.terminal.daemon_generation)
+                .unwrap();
+            coordinator.share_pool(Box::new(Foreign(foreign)));
+            let mut store = Store::default();
+            assert_eq!(
+                launch(
+                    &mut coordinator,
+                    &request,
+                    runtime,
+                    fence,
+                    &mut Spawner(Ok(process())),
+                    &mut store,
+                ),
+                Err(RuntimeError::ConcurrencyExhausted)
+            );
+            assert_eq!(coordinator.occupied_slots(), 0);
+        }
+    }
+
     #[test]
     fn resolve_once_persists_before_spawn_and_replays_after_detach() {
         let first_request = request();

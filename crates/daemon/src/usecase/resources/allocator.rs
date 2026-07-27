@@ -317,6 +317,21 @@ impl AllocatorDocument {
             .count()
     }
 
+    /// How much of one pool every generation *other* than `owner` holds.
+    ///
+    /// This is the number an owner adds to its own occupancy to see the whole
+    /// pool: its own live records already account for its own claims, so summing
+    /// both would double-count them.
+    #[must_use]
+    pub fn foreign_pool_used(&self, kind: ResourceKind, owner: DaemonGeneration) -> usize {
+        self.claims
+            .iter()
+            .filter(|claim| {
+                claim.kind == kind && claim.owner != owner && claim.state != ClaimState::Released
+            })
+            .count()
+    }
+
     /// How many claims one generation still holds, which gates its collection.
     #[must_use]
     pub fn owner_claims(&self, owner: DaemonGeneration) -> usize {
@@ -642,7 +657,7 @@ pub struct ResourceAllocator {
 
 impl ResourceAllocator {
     /// Bind an allocator to its durable document and per-pool policy.
-    pub fn new(file: impl CasFile + Send + 'static, policy: CapacityPolicy) -> Self {
+    pub fn new(file: impl CasFile + Send + Sync + 'static, policy: CapacityPolicy) -> Self {
         Self {
             store: CasStore::new(file),
             policy,

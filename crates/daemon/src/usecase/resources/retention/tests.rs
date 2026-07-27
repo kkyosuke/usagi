@@ -385,13 +385,16 @@ fn a_full_pass_walks_the_phases_and_reports_what_it_did() {
 /// whose capacity has been claimed again.
 struct RacingFile {
     bytes: SharedBytes,
-    reads: std::cell::Cell<usize>,
+    reads: std::sync::atomic::AtomicUsize,
 }
 
 impl crate::usecase::resources::CasFile for RacingFile {
     fn read(&self) -> std::io::Result<Option<String>> {
-        self.reads.set(self.reads.get() + 1);
-        if self.reads.get() == 2
+        let reads = self
+            .reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        if reads == 2
             && let Some(stored) = self.bytes.get()
         {
             let mut document: AllocatorDocument = serde_json::from_str(&stored).unwrap();
@@ -435,7 +438,7 @@ fn a_phase_whose_record_was_reclaimed_between_plan_and_apply_is_dropped() {
     let racing = ResourceAllocator::new(
         RacingFile {
             bytes: bytes.clone(),
-            reads: std::cell::Cell::new(0),
+            reads: std::sync::atomic::AtomicUsize::new(0),
         },
         policy(8, 8),
     );

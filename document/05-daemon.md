@@ -500,7 +500,11 @@ ownership を奪ってしまう。奪うと `commit_exit` が `wrong_state` で�
 live でなくなったと言うとき（reconcile state・`spawn_failed`）だけである。
 
 capacity pool の上限は Agent 16 / generic terminal 16 で、process ごとではなく **retained generation 全体**で
-数える。reservation の失敗は spawn effect zero であり、store refusal として launch を拒否する。
+数える。coordinator は record を作る**前に** allocator の foreign claim 数を加えて判定し、満杯なら typed
+`concurrency_exhausted` で拒否する（共有 document が読めない場合も満杯として扱う）。この先行判定が無いと、
+満杯を知るのは persist の時点になり、存在しない terminal の reservation が memory に残ってしまう。
+最終的な保証は allocator の compare-and-swap であり、race に負けた側の reservation 失敗も spawn effect zero で
+launch を拒否する。
 
 `ProcessIdentity.start_identity` は spawn 直後に OS から読んだ process-start token である。record 側は出自を
 語れないため、shard へ写すときは **その pid に対して同じ token を OS が返すか再観測**して判定する。一致だけが

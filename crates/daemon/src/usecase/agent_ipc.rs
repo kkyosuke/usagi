@@ -254,6 +254,14 @@ pub struct AgentRuntime {
 }
 
 impl AgentRuntime {
+    /// Share the Agent pool with every other retained generation (#562).
+    pub fn share_pool(
+        &mut self,
+        foreign: Box<dyn crate::usecase::resources::pool::ForeignOccupancy>,
+    ) {
+        self.coordinator.share_pool(foreign);
+    }
+
     #[must_use]
     pub fn new(
         generation: DaemonGeneration,

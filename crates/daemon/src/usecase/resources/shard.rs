@@ -665,7 +665,7 @@ pub struct OwnerShard {
 
 impl OwnerShard {
     /// Bind the shard of `owner`.
-    pub fn new(file: impl CasFile + Send + 'static, owner: DaemonGeneration) -> Self {
+    pub fn new(file: impl CasFile + Send + Sync + 'static, owner: DaemonGeneration) -> Self {
         Self {
             store: CasStore::new(file),
             owner,

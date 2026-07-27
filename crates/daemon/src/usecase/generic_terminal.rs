@@ -30,6 +30,7 @@ use usagi_core::domain::{
 
 use super::{
     generation::{ProcessIdentity, ProcessObservation},
+    resources::pool::{ForeignOccupancy, foreign_occupancy},
     terminal::{
         Attached, Geometry, InputAck, InputRequest, Output, PtyWriter, RegistryError, Snapshot,
         SpawnFailure, TerminalReconcileState, TerminalRegistry, TerminalRuntimeState,
@@ -160,6 +161,10 @@ pub enum GenericTerminalError {
 #[derive(Debug)]
 pub struct GenericTerminalCoordinator {
     limit: usize,
+    /// The slots the *other* retained generations hold, when this process shares
+    /// its pool with them. `None` while this daemon is the only generation, which
+    /// is the single-writer case the limit was originally written for (#562).
+    foreign: Option<Box<dyn ForeignOccupancy>>,
     records: BTreeMap<String, DurableTerminalRecord>,
     terminals: TerminalRegistry,
     retention: SharedTerminalRetention,
@@ -185,6 +190,7 @@ impl GenericTerminalCoordinator {
     ) -> Self {
         Self {
             limit,
+            foreign: None,
             records: BTreeMap::new(),
             terminals: TerminalRegistry::new(journal_limit, input_cache_limit),
             retention,
@@ -246,11 +252,30 @@ impl GenericTerminalCoordinator {
         }
         Ok(Self {
             limit,
+            foreign: None,
             records,
             terminals: TerminalRegistry::new(journal_limit, input_cache_limit),
             retention,
         })
     }
+    /// Share this owner's pool with every other retained generation.
+    ///
+    /// Until this is called the coordinator counts only its own live records,
+    /// which is right for a daemon that is the sole generation and wrong the
+    /// moment a rollover keeps a draining owner alive next to it. Asking here —
+    /// *before* a record is inserted — is also what keeps a full pool from
+    /// leaving a reservation behind: the durable refusal would arrive at the
+    /// persist, by which point this coordinator already holds a record for a
+    /// terminal that will never exist (#562).
+    pub fn share_pool(&mut self, foreign: Box<dyn ForeignOccupancy>) {
+        self.foreign = Some(foreign);
+    }
+
+    /// Whether one more launch would put the shared pool over its limit.
+    fn pool_exhausted(&self) -> bool {
+        self.occupied_slots() + foreign_occupancy(self.foreign.as_deref(), self.limit) >= self.limit
+    }
+
     pub fn launch(
         &mut self,
         request: &TerminalLaunchRequest,
@@ -266,7 +291,7 @@ impl GenericTerminalCoordinator {
         if self.records.contains_key(&key) {
             return Err(GenericTerminalError::TerminalAlreadyExists);
         }
-        if self.occupied_slots() >= self.limit {
+        if self.pool_exhausted() {
             return Err(GenericTerminalError::ConcurrencyExhausted);
         }
         // Reserve the worst-case final this runtime will leave behind before
@@ -768,6 +793,14 @@ mod tests {
             Err(())
         }
     }
+    /// The slots other retained generations hold, as a coordinator sees them.
+    #[derive(Debug)]
+    struct Foreign(Option<usize>);
+    impl crate::usecase::resources::pool::ForeignOccupancy for Foreign {
+        fn occupied(&self) -> Option<usize> {
+            self.0
+        }
+    }
     struct FailAfter(usize);
     impl TerminalStore for FailAfter {
         fn save(&mut self, _: TerminalStoreSnapshot) -> Result<(), ()> {
@@ -847,6 +880,35 @@ mod tests {
             process_group: 7,
         }
     }
+    #[test]
+    fn a_pool_the_other_generations_filled_refuses_before_a_record_exists() {
+        let request = request();
+        // Every combination that means "no slot": the pool is full across the
+        // generations, and the pool cannot be read at all. Both must refuse, and
+        // neither may leave a reservation for a terminal that never exists.
+        for foreign in [Some(2), None] {
+            let (terminal, fence) = refs(&request);
+            let mut coordinator = GenericTerminalCoordinator::new(2, 64, 1);
+            coordinator.share_pool(Box::new(Foreign(foreign)));
+            let mut store = Store::default();
+            assert_eq!(
+                coordinator.launch(
+                    &request,
+                    terminal,
+                    fence,
+                    Geometry { cols: 80, rows: 24 },
+                    &mut Resolver,
+                    &mut store,
+                    &mut Spawner(Ok(process())),
+                ),
+                Err(GenericTerminalError::ConcurrencyExhausted)
+            );
+            assert_eq!(coordinator.occupied_slots(), 0);
+            assert!(coordinator.inventory(&request.scope).is_empty());
+            assert!(store.0.is_empty(), "a refusal writes nothing at all");
+        }
+    }
+
     #[test]
     fn restart_projection_fences_reserved_records_and_rejects_unknown_launch_schema() {
         let request = request();

@@ -106,6 +106,15 @@ pub struct GenericTerminalRuntime<R, S, P, Q> {
 }
 
 impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
+    /// Share the generic-terminal pool with every other retained generation
+    /// (#562).
+    pub fn share_pool(
+        &mut self,
+        foreign: Box<dyn crate::usecase::resources::pool::ForeignOccupancy>,
+    ) {
+        self.coordinator.share_pool(foreign);
+    }
+
     pub fn new(generation: DaemonGeneration, resolver: R, store: S, pty: P, scope: Q) -> Self {
         Self {
             generation,

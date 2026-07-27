@@ -96,6 +96,7 @@ use usagi_daemon::usecase::resources::allocator::{
 };
 use usagi_daemon::usecase::resources::fence::{SharedRole, SharedWriter};
 use usagi_daemon::usecase::resources::identity::{ChildProcessProbe, record_child};
+use usagi_daemon::usecase::resources::pool::{ForeignOccupancy, SharedPool};
 use usagi_daemon::usecase::resources::retention::LogicalClock;
 use usagi_daemon::usecase::resources::shard::OwnerShard;
 use usagi_daemon::usecase::runtime::{
@@ -225,6 +226,26 @@ fn resource_allocator(data_dir: &Path) -> std::io::Result<ResourceAllocator> {
         AllocatorFile::new(data_dir)?,
         capacity_policy(),
     ))
+}
+
+/// The slots the other retained generations hold in one pool.
+///
+/// A coordinator asks this *before* it inserts a record, so a pool that is full
+/// across every generation refuses with a typed `concurrency_exhausted` and
+/// leaves nothing behind. The allocator's compare-and-swap is still the
+/// guarantee — two processes can both read a pool with one slot left — but the
+/// loser of that race would otherwise learn it only at the persist, with a
+/// reservation for a terminal that will never exist already in memory (#562).
+fn shared_pool(
+    data_dir: &Path,
+    generation: usagi_core::domain::id::DaemonGeneration,
+    kind: ResourceKind,
+) -> std::io::Result<Box<dyn ForeignOccupancy>> {
+    Ok(Box::new(SharedPool::new(
+        Arc::new(resource_allocator(data_dir)?),
+        generation,
+        kind,
+    )))
 }
 
 /// Bind one resource kind's durable state for the generation this process is.
@@ -2095,6 +2116,8 @@ fn open_agent_runtime(
             format!("invalid agent runtime snapshot: {error:?}"),
         )
     })?;
+    let mut runtime = runtime;
+    runtime.share_pool(shared_pool(data_dir, generation, ResourceKind::Agent)?);
     Ok(Arc::new(Mutex::new(runtime)))
 }
 
@@ -2293,6 +2316,8 @@ fn new_terminal_runtime(
         retention,
     )
     .map_err(|_| std::io::Error::other("invalid generic terminal snapshot"))?;
+    let mut runtime = runtime;
+    runtime.share_pool(shared_pool(data_dir, generation, ResourceKind::Terminal)?);
     Ok(Arc::new(Mutex::new(runtime)))
 }
 

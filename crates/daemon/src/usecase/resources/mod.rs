@@ -16,6 +16,7 @@
 //! | [`retention`] | how the operation ledger stays bounded without ever replaying a wrong answer |
 //! | [`migration`] | can the legacy single-writer stores be adopted, or must the rollover refuse? |
 //! | [`fence`] | which other shared writers a draining process must not whole-save |
+//! | [`pool`] | how one owner sees the slots the other retained generations hold |
 //!
 //! The split is deliberate: a shard has exactly one writer (its owner
 //! generation), so the owner never needs to merge. The allocator is shared, so
@@ -32,6 +33,7 @@ pub mod fence;
 pub mod identity;
 pub mod launch;
 pub mod migration;
+pub mod pool;
 pub mod retention;
 pub mod shard;
 
@@ -231,7 +233,7 @@ impl<D: CasDocument> CasSnapshot<D> {
 /// swap protocol, so nothing about which store a caller binds can change the
 /// code that runs.
 pub struct CasStore<D> {
-    file: Box<dyn CasFile + Send>,
+    file: Box<dyn CasFile + Send + Sync>,
     document: PhantomData<D>,
 }
 
@@ -241,7 +243,7 @@ impl<D: CasDocument> CasStore<D> {
     /// The seam is `Send` because a bound store lives inside the runtime the
     /// daemon's observer threads share; it is never used from two threads at once,
     /// which the cross-process lock inside the adapter would serialize anyway.
-    pub fn new(file: impl CasFile + Send + 'static) -> Self {
+    pub fn new(file: impl CasFile + Send + Sync + 'static) -> Self {
         Self {
             file: Box::new(file),
             document: PhantomData,
