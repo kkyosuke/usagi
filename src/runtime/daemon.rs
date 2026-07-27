@@ -46,14 +46,16 @@ use usagi_core::usecase::client::{
 use usagi_core::usecase::client::{DaemonRequest, DispatchToolAction, SupervisorToolAction};
 use usagi_daemon::infrastructure::child_identity::UnixChildProbe;
 use usagi_daemon::infrastructure::generation_registry::{
-    CurrentLocatorFile, GenerationRegistryFile,
+    CurrentLocatorFile, GenerationRegistryFile, read_registry_document,
 };
 use usagi_daemon::infrastructure::pty::PtyTerminal;
 use usagi_daemon::infrastructure::unix_transport::{
-    EndpointCleanup, EndpointLocator, SecureUnixListener, ensure_private_dir,
-    ensure_private_dir_all, peer_pid, read_locator, retire_stale_current,
+    EndpointCleanup, EndpointLocator, SecureUnixListener, connect_generation, ensure_private_dir,
+    ensure_private_dir_all, peer_pid, read_locator, retire_stale_current_preserving,
 };
-use usagi_daemon::presentation::{DaemonCommand as PresentationDaemonCommand, DaemonEnv};
+use usagi_daemon::presentation::{
+    DaemonCommand as PresentationDaemonCommand, DaemonEnv, ServeRole,
+};
 use usagi_daemon::usecase::agent_ipc::{
     AgentRuntime, AgentTerminalActor, ResolvedAgentScope, ScopeResolveError, SessionScopeResolver,
     SharedTerminalOwner, TerminalOutcome,
@@ -61,11 +63,19 @@ use usagi_daemon::usecase::agent_ipc::{
 use usagi_daemon::usecase::authority::activation::{
     AuthorityClaim, claim_authority, release_authority,
 };
+use usagi_daemon::usecase::authority::admission::{
+    AdmissionGate, LeaseClass, RequestClass, ResourceOwner,
+};
 use usagi_daemon::usecase::authority::handoff::{
     LocatorObservation, PublishedLocator, RecoveryOutcome,
 };
-use usagi_daemon::usecase::authority::registry::{DEFAULT_GENERATION_LIMIT, GenerationRegistry};
+use usagi_daemon::usecase::authority::registry::{
+    DEFAULT_GENERATION_LIMIT, GenerationRegistry, RegistryDocument,
+};
 use usagi_daemon::usecase::authority::rollover::CurrentLocator;
+use usagi_daemon::usecase::authority::standby::{
+    ActiveOwner, StandbyCustody, StandbyProbe, admissible_active, evaluate_custody, prepare_standby,
+};
 use usagi_daemon::usecase::claude::{
     ClaudeAdapter, ClaudeProvision, ClaudeProvisionFailure, ClaudeProvisioner, scoped_settings_json,
 };
@@ -95,6 +105,7 @@ use usagi_daemon::usecase::runtime::{
     SandboxLauncher, SpawnProvision, TerminateReapError,
 };
 use usagi_daemon::usecase::serve::{DaemonRecordPort, GenerationAuthority};
+use usagi_daemon::usecase::serve_standby::{StandbyAuthority, StandbyEndpoint};
 use usagi_daemon::usecase::session_runtime::{
     SessionRuntime, SessionRuntimeError, SharedSessionTeardown, SystemGit, WorktreeTeardown,
     perform_create, perform_remove,
@@ -5098,7 +5109,30 @@ struct IpcReady<'a> {
     listener: RefCell<Option<SecureUnixListener>>,
     cleanup: RefCell<Option<EndpointCleanup>>,
 }
-impl IpcReady<'_> {
+impl<'a> IpcReady<'a> {
+    /// Bind the production endpoint seam for one `serve` process.
+    fn new(
+        data_dir: &'a Path,
+        workspace_root: &'a Path,
+        instance_lock: &'a FileInstanceLock,
+    ) -> Self {
+        Self {
+            data_dir,
+            workspace_root,
+            instance_lock,
+            // The daemon advertises the exact artifact it started as for its
+            // whole process lifetime. Atomic replacement of the executable path
+            // cannot mutate this startup snapshot.
+            build: current_build(),
+            shutdown: Arc::new(ShutdownRequest::new()),
+            published: AtomicBool::new(false),
+            publication_attempted: AtomicBool::new(false),
+            worker: RefCell::new(None),
+            listener: RefCell::new(None),
+            cleanup: RefCell::new(None),
+        }
+    }
+
     fn publish_with(
         &self,
         start: impl FnOnce(
@@ -5188,7 +5222,12 @@ impl IpcReady<'_> {
 
 impl DaemonReady for IpcReady<'_> {
     fn recover_stale_endpoint(&self) -> std::io::Result<()> {
-        retire_stale_current(self.data_dir)
+        // The instance lock excludes another *active* daemon, not every daemon:
+        // a standby runs in this data directory without holding it, so its live
+        // socket must be told apart from residue by the durable registry rather
+        // than by the lock.
+        let live = live_generation_endpoints(self.data_dir);
+        retire_stale_current_preserving(self.data_dir, &|generation| live.contains(generation))
     }
 
     fn publish(&self) -> std::io::Result<()> {
@@ -5418,6 +5457,570 @@ impl GenerationAuthority for RegistryAuthority<'_> {
         };
         release_authority(&self.registry()?, generation).map_err(std::io::Error::other)
     }
+}
+
+/// The generations whose endpoints pre-bind reclamation must leave alone.
+///
+/// The sweep cannot tell a live standby's socket from a crashed generation's
+/// leftover, because a standby holds no lock to be excluded by. This is the
+/// durable answer it uses instead: a generation the registry still retains and
+/// whose recorded process the OS proves is exactly the process recorded. An
+/// unreadable registry names nothing, which is the safe direction for a *sweep*
+/// — it reclaims what it can prove is residue and the registry's own recovery
+/// still fails the authority closed.
+fn live_generation_endpoints(data_dir: &Path) -> BTreeSet<String> {
+    let Ok(Some(document)) = read_registry_document(data_dir) else {
+        return BTreeSet::new();
+    };
+    document
+        .generations
+        .iter()
+        .filter(|entry| {
+            entry.role != usagi_daemon::usecase::generation::GenerationRole::Retired
+                && observe_generation_process(&entry.process)
+                    == ProcessObservation::VerifiedAlive(entry.process.clone())
+        })
+        .map(|entry| entry.generation.as_str().clone())
+        .collect()
+}
+
+/// How often a standby re-reads its registry entry.
+///
+/// The same period as the active daemon's custody supervision, and for the same
+/// reason: both are detached from their launcher, so a process that has lost its
+/// authority has to reap itself. Only the invariant differs — the active watches
+/// a lock and a record, a standby watches the one entry that names it.
+const STANDBY_CUSTODY_TICK: Duration = Duration::from_secs(1);
+
+/// The private endpoint a standby generation binds, and nothing else.
+///
+/// Everything the active [`IpcReady`] does that a standby must not do is simply
+/// absent here: no locator publication, no runtime store reconcile or save, no
+/// PTY / supervisor / PR / teardown worker, no spawn. What remains is a socket
+/// that completes a readiness handshake and refuses every request through the
+/// role admission fence.
+struct StandbyIpc<'a> {
+    data_dir: &'a Path,
+    build: BuildIdentity,
+    pid: u32,
+    shutdown: Arc<ShutdownRequest>,
+    worker: RefCell<Option<std::thread::JoinHandle<SecureUnixListener>>>,
+    listener: RefCell<Option<SecureUnixListener>>,
+    cleanup: RefCell<Option<EndpointCleanup>>,
+    /// The admission fence this process answers requests through. It is created
+    /// at bind time in the `standby` role and never activated here: promoting it
+    /// is the handoff's job, in a process that has taken the authority.
+    gate: RefCell<Option<AdmissionGate>>,
+}
+
+impl<'a> StandbyIpc<'a> {
+    /// Bind the standby endpoint seam for one `serve --standby` process.
+    fn new(data_dir: &'a Path, pid: u32, shutdown: Arc<ShutdownRequest>) -> Self {
+        Self {
+            data_dir,
+            build: current_build(),
+            pid,
+            shutdown,
+            worker: RefCell::new(None),
+            listener: RefCell::new(None),
+            cleanup: RefCell::new(None),
+            gate: RefCell::new(None),
+        }
+    }
+
+    /// The generation and endpoint this process bound, read from the retained
+    /// cleanup token so the registry entry and the accepting socket can only
+    /// ever be the same generation.
+    fn bound_endpoint(&self) -> Option<EndpointLocator> {
+        self.cleanup
+            .borrow()
+            .as_ref()
+            .map(|cleanup| cleanup.locator().clone())
+    }
+
+    /// Read the durable runtime state without touching it.
+    ///
+    /// This is the whole of a standby's hydrate in this build: one read of the
+    /// lifecycle store, which yields the workspace root the active generation
+    /// took authority over and the state revision that read was sealed at. No
+    /// reconcile, no save, no legacy migration — every one of those is a write,
+    /// and the active generation is the only writer.
+    ///
+    /// An uninitialized store is refused rather than initialized: the process
+    /// that initializes it is by definition the one that owns it.
+    fn hydrate(&self) -> std::io::Result<(PathBuf, u64)> {
+        let store = usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore::new(
+            &self.data_dir.join("daemon"),
+        );
+        let (root, state) = store
+            .load_with_workspace()
+            .map_err(|error| std::io::Error::other(format!("{error:#}")))?
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "durable runtime state is not initialized; a standby hydrates it read-only",
+                )
+            })?;
+        Ok((root, state.state_revision))
+    }
+}
+
+impl StandbyEndpoint for StandbyIpc<'_> {
+    fn bind(&self) -> std::io::Result<()> {
+        // Hydrate first: a standby that cannot read the state it would serve has
+        // nothing to prove by binding, and refusing here leaves no socket for a
+        // rollback to reclaim.
+        let (workspace_root, revision) = self.hydrate()?;
+        let (listener, wire) = bind_ipc_listener(self.data_dir)?;
+        let generation = usagi_core::domain::id::DaemonGeneration::parse(&wire.0)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let cleanup = listener.cleanup_handle();
+        let gate = AdmissionGate::new(
+            generation,
+            usagi_daemon::usecase::generation::GenerationRole::Standby,
+        );
+        let protocol = usagi_daemon::presentation::ipc::standby_server_protocol(
+            wire,
+            generation.as_str().clone(),
+            self.build.clone(),
+            // The standby asserts its *own* process, which is the only process it
+            // can speak for. It is not the data directory's owner record and is
+            // never written down; owner binding requires the `active` role, so no
+            // client can mistake this for authority.
+            DaemonRecord::identified(self.pid, process_start_identity(self.pid)?),
+            paths::wire_workspace_root(&workspace_root),
+        );
+        let worker =
+            spawn_standby_ipc_server(listener, protocol, gate.clone(), Arc::clone(&self.shutdown));
+        match worker {
+            Ok(worker) => {
+                *self.cleanup.borrow_mut() = Some(cleanup);
+                *self.gate.borrow_mut() = Some(gate);
+                *self.worker.borrow_mut() = Some(worker);
+                ErrorLog::record(&format!(
+                    "daemon standby hydrated read-only at runtime state revision {revision}"
+                ));
+                Ok(())
+            }
+            // The listener is dropped with the failure, and its Drop retires the
+            // socket it bound. Nothing durable was written.
+            Err(error) => Err(error),
+        }
+    }
+
+    fn retire(&self) -> std::io::Result<()> {
+        self.shutdown.request();
+        // Closing the two lease classes is what makes "stopped admitting"
+        // observable to a request already in flight, rather than only to the next
+        // connection.
+        if let Some(gate) = self.gate.borrow().as_ref() {
+            gate.close(LeaseClass::ActiveControl);
+            gate.close(LeaseClass::OwnerTerminal);
+        }
+        let joined = match self.worker.borrow_mut().take() {
+            Some(worker) => worker
+                .join()
+                .map(|listener| *self.listener.borrow_mut() = Some(listener))
+                .map_err(|_| std::io::Error::other("daemon standby accept loop panicked")),
+            None => Ok(()),
+        };
+        let cleanup = match self.cleanup.borrow().as_ref() {
+            // A standby never published `current.json`, so this only ever removes
+            // its own socket: the token refuses to touch a locator that names
+            // another generation.
+            Some(cleanup) => cleanup.retire(),
+            None => Ok(()),
+        };
+        if cleanup.is_ok() {
+            self.listener.borrow_mut().take();
+            self.cleanup.borrow_mut().take();
+        }
+        joined.and(cleanup)
+    }
+}
+
+impl Drop for StandbyIpc<'_> {
+    fn drop(&mut self) {
+        // A panic unwinds past the state machine's own stand-down, and a socket
+        // this process bound is a socket only this process can prove it owns.
+        // Retirement is idempotent, so the ordinary path is unaffected.
+        //
+        // The guard matters because the composition root binds this seam for
+        // *both* roles: an active `serve` never binds it, and dropping it must
+        // not then request that process's shutdown.
+        if self.cleanup.borrow().is_some() {
+            let _ = StandbyEndpoint::retire(self);
+        }
+    }
+}
+
+/// Serve a standby's private endpoint.
+///
+/// The loop is deliberately not [`start_ipc_accept_loop`]: that one owns a
+/// session runtime, a terminal runtime, an Agent runtime, a supervisor and a
+/// PR projector, and a standby owns none of them. Every admitted connection here
+/// gets a handshake and then a typed refusal.
+fn spawn_standby_ipc_server(
+    listener: SecureUnixListener,
+    protocol: usagi_core::infrastructure::ipc::ServerProtocol,
+    gate: AdmissionGate,
+    shutdown: Arc<ShutdownRequest>,
+) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
+    std::thread::Builder::new()
+        .name("usagi-ipc-standby".to_string())
+        .spawn(move || {
+            let _exit = ShutdownOnIpcWorkerExit {
+                shutdown: Arc::clone(&shutdown),
+            };
+            let wake = match ShutdownPipe::mirroring(&shutdown) {
+                Ok(wake) => wake,
+                Err(error) => {
+                    ErrorLog::record(&format!("daemon standby accept wait unavailable: {error}"));
+                    return listener;
+                }
+            };
+            while !shutdown.is_requested() {
+                if !wake.wait_for_listener(listener.readiness_fd()) {
+                    break;
+                }
+                while !shutdown.is_requested() {
+                    match listener.accept() {
+                        Ok(stream) => {
+                            let protocol = protocol.clone();
+                            let gate = gate.clone();
+                            let _ = std::thread::Builder::new()
+                                .name("usagi-ipc-standby-client".to_string())
+                                .spawn(move || {
+                                    let _ = stream.set_nonblocking(false);
+                                    let Ok(mut writer) = stream.try_clone() else {
+                                        return;
+                                    };
+                                    let mut reader = stream;
+                                    let _ = usagi_daemon::presentation::ipc::handle_connection_with(
+                                        &mut reader,
+                                        &mut writer,
+                                        &protocol,
+                                        &mut |request_id, body, hello| {
+                                            standby_reply(&gate, request_id, &body, hello)
+                                        },
+                                    );
+                                });
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(_) => std::thread::sleep(ACCEPT_ERROR_BACKOFF),
+                    }
+                }
+            }
+            listener
+        })
+}
+
+/// The one answer a standby has for a post-handshake request.
+///
+/// The role admission fence decides it, which is what
+/// `daemon.generation-handoff.v1` claims this peer does. Control, spawn and
+/// terminal IO are refused by the fence itself; a read the fence admits is still
+/// refused here, because this build's standby holds no runtime state to read —
+/// the owner shard it would read is not wired yet.
+///
+/// A fence refusal is reported as `generation_rolled_over`, which is the same
+/// code the draining generation's fence reports for the same decision
+/// (`crates/daemon/tests/generation_authority.rs`). Both mean "this generation
+/// may not do this; re-resolve the authority", and both are effect zero, so the
+/// two roles stay one contract for a client rather than two.
+fn standby_reply(
+    gate: &AdmissionGate,
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    body: &serde_json::Value,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    use usagi_core::infrastructure::ipc::{
+        Envelope, EnvelopeKind, ErrorCode, ProtocolError, ResponseOutcome,
+    };
+    let (class, owner) = standby_request_class(body);
+    let error = match gate.admit(class, owner) {
+        Ok(lease) => {
+            drop(lease);
+            ProtocolError::new(
+                ErrorCode::Unavailable,
+                "standby generation serves no runtime state",
+            )
+        }
+        Err(refusal) => ProtocolError::new(ErrorCode::GenerationRolledOver, refusal.to_string()),
+    };
+    Envelope {
+        protocol: hello.protocol,
+        daemon_generation: hello.daemon_generation.clone(),
+        kind: EnvelopeKind::Response {
+            request_id,
+            outcome: ResponseOutcome::Error(error),
+            body: serde_json::Value::Null,
+        },
+    }
+}
+
+/// Classify a request for the admission fence.
+///
+/// Unrecognized kinds are classified as control, not as reads: a request this
+/// build cannot name is exactly the one whose effects it cannot bound.
+fn standby_request_class(body: &serde_json::Value) -> (RequestClass, ResourceOwner) {
+    match body.get("kind").and_then(serde_json::Value::as_str) {
+        // A standby owns no terminal, so every terminal request names a resource
+        // that belongs to another generation.
+        Some("terminal") => (RequestClass::TerminalIo, ResourceOwner::OtherGeneration),
+        Some("metrics" | "pr" | "agent_inventory") => (RequestClass::Read, ResourceOwner::Unscoped),
+        _ => (RequestClass::Control, ResourceOwner::Unscoped),
+    }
+}
+
+/// A standby's participation in the durable generation registry.
+///
+/// It is the composition of the registry document, the data directory's owner
+/// record, and a read-only handshake against this process's own private
+/// endpoint. The pure decisions it drives —
+/// [`admissible_active`] and [`prepare_standby`] — never touch the current
+/// locator, which is what keeps every client pointed at the active generation
+/// throughout.
+struct StandbyRegistryAuthority<'a> {
+    data_dir: &'a Path,
+    endpoint: &'a StandbyIpc<'a>,
+    build: BuildIdentity,
+    pid: u32,
+    shutdown: Arc<ShutdownRequest>,
+    registered: RefCell<Option<usagi_core::domain::id::DaemonGeneration>>,
+}
+
+impl<'a> StandbyRegistryAuthority<'a> {
+    /// Bind the standby registry seam against the endpoint that process bound.
+    fn new(data_dir: &'a Path, endpoint: &'a StandbyIpc<'a>, pid: u32) -> Self {
+        Self {
+            data_dir,
+            build: current_build(),
+            pid,
+            shutdown: Arc::clone(&endpoint.shutdown),
+            endpoint,
+            registered: RefCell::new(None),
+        }
+    }
+
+    fn registry(&self) -> std::io::Result<GenerationRegistry> {
+        Ok(GenerationRegistry::new(
+            GenerationRegistryFile::new(self.data_dir)?,
+            DEFAULT_GENERATION_LIMIT,
+        ))
+    }
+
+    /// The registry document, as a reader that must not become a writer sees it.
+    fn document(&self) -> std::io::Result<Option<RegistryDocument>> {
+        read_registry_document(self.data_dir).map_err(std::io::Error::other)
+    }
+
+    /// The live registered active generation of this data directory, proved from
+    /// the registry document and the owner record together. Reads only.
+    fn active_generation(&self) -> std::io::Result<usagi_core::domain::id::DaemonGeneration> {
+        let record = DaemonRecordStore::new(FsRecordFile {
+            path: self.data_dir.join("daemon").join("daemon.json"),
+        })
+        .load()?;
+        let observation = record
+            .as_ref()
+            .map_or(DaemonProcessObservation::Unknown, |record| {
+                LivenessProbe::observe(&ExactProcessControl, record)
+            });
+        let document = self.document()?;
+        Ok(admissible_active(
+            document.as_ref(),
+            &ActiveOwner {
+                record: record.as_ref(),
+                observation,
+            },
+        )?)
+    }
+}
+
+impl StandbyAuthority for StandbyRegistryAuthority<'_> {
+    fn preflight(&self) -> std::io::Result<()> {
+        self.active_generation().map(|_| ())
+    }
+
+    fn admit(&self) -> std::io::Result<()> {
+        let bound = self.endpoint.bound_endpoint().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "standby endpoint must be bound before registering",
+            )
+        })?;
+        let generation = usagi_core::domain::id::DaemonGeneration::parse(&bound.generation.0)
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "bound endpoint does not name a canonical daemon generation",
+                )
+            })?;
+        // Re-proved immediately before the compare-and-swap: the owner could have
+        // died while this process was binding, and a standby beside a dead active
+        // is a successor with nothing to succeed.
+        let active = self.active_generation()?;
+        let process = own_process_identity(self.pid)?;
+        prepare_standby(
+            &self.registry()?,
+            &UnixStandbyProbe {
+                data_dir: self.data_dir,
+                build: self.build.clone(),
+            },
+            generation,
+            &bound.endpoint,
+            &process,
+            &self.build,
+        )
+        .map_err(std::io::Error::other)?;
+        *self.registered.borrow_mut() = Some(generation);
+        ErrorLog::record(&format!(
+            "daemon standby {generation} verified for active generation {active}"
+        ));
+        // Supervision starts once there is an entry to supervise, so a refused
+        // admission never leaves a thread watching for one.
+        start_standby_custody_worker(
+            self.data_dir.to_path_buf(),
+            generation,
+            process,
+            Arc::clone(&self.shutdown),
+        )
+    }
+
+    fn release(&self) -> std::io::Result<()> {
+        let Some(generation) = *self.registered.borrow() else {
+            return Ok(());
+        };
+        release_authority(&self.registry()?, generation).map_err(std::io::Error::other)
+    }
+}
+
+impl Drop for StandbyRegistryAuthority<'_> {
+    fn drop(&mut self) {
+        // Dropped before the endpoint it registered (declaration order in the
+        // composition root is what fixes that), so an unwind gives up the entry
+        // that names the socket before the socket goes.
+        if self.registered.borrow().is_some() {
+            let _ = StandbyAuthority::release(self);
+        }
+    }
+}
+
+/// The real readiness handshake: connect to this generation's own private
+/// endpoint by name and complete one hello.
+///
+/// It is deliberately the same endpoint resolution a client uses for a
+/// non-current generation, so readiness proves the socket a rollover would
+/// actually name rather than a path this process remembers.
+struct UnixStandbyProbe<'a> {
+    data_dir: &'a Path,
+    build: BuildIdentity,
+}
+
+impl StandbyProbe for UnixStandbyProbe<'_> {
+    fn hello(
+        &self,
+        endpoint: &str,
+    ) -> std::io::Result<usagi_core::infrastructure::ipc::ServerHello> {
+        use usagi_core::infrastructure::ipc::{
+            Bootstrap, ClientHello, ClientId, DEFAULT_MAX_FRAME_BYTES, ProtocolRange,
+            TERMINAL_CHECKPOINT_REVISION, TERMINAL_WIRE_GENERATION, read_json_frame,
+            write_json_frame,
+        };
+        let generation = usagi_core::domain::id::DaemonGeneration::parse(
+            endpoint
+                .strip_prefix("generations/")
+                .and_then(|rest| rest.split('/').next())
+                .unwrap_or_default(),
+        )
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "standby endpoint does not name a canonical daemon generation",
+            )
+        })?;
+        let mut stream = connect_generation(
+            self.data_dir,
+            &usagi_core::usecase::owner_routing::TrustedEndpoint {
+                generation,
+                // Only the endpoint spelling is used by the connect; the role is
+                // carried for the caller's own bookkeeping.
+                role: usagi_core::infrastructure::ipc::GenerationRole::Standby,
+                endpoint: endpoint.to_owned(),
+            },
+        )?;
+        // One bootstrap frame out, one in, then the connection is dropped. There
+        // is deliberately no request path here: a readiness probe that could
+        // mutate its peer would not be a proof of readiness.
+        write_json_frame(
+            &mut stream,
+            &Bootstrap::ClientHello(ClientHello {
+                client_id: ClientId(format!("standby-readiness-{}", std::process::id())),
+                connection_nonce: format!("{}", std::process::id()),
+                expected_daemon_generation: None,
+                supported_protocols: vec![ProtocolRange {
+                    generation: TERMINAL_WIRE_GENERATION,
+                    min_revision: 0,
+                    max_revision: TERMINAL_CHECKPOINT_REVISION,
+                }],
+                capabilities: Vec::new(),
+                required_capabilities: Vec::new(),
+                build: self.build.clone(),
+                workspace: Some(ClientWorkspace::Unbound),
+            }),
+            DEFAULT_MAX_FRAME_BYTES,
+        )?;
+        match read_json_frame::<Bootstrap>(&mut stream, DEFAULT_MAX_FRAME_BYTES)? {
+            Some(Bootstrap::ServerHello(hello)) => Ok(hello),
+            other => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("standby endpoint did not complete a handshake: {other:?}"),
+            )),
+        }
+    }
+}
+
+/// Start the only standby custody supervisor.
+///
+/// A standby holds neither the instance lock nor a lifecycle record, so the
+/// active daemon's two custody invariants do not exist for it. Its registry entry
+/// is the whole of its authority: recovery that fails an abandoned handoff closed
+/// retires every generation, and the standby it retired must exit rather than
+/// keep a socket a future rollover might trust.
+fn start_standby_custody_worker(
+    data_dir: PathBuf,
+    generation: usagi_core::domain::id::DaemonGeneration,
+    process: ProcessIdentity,
+    shutdown: Arc<ShutdownRequest>,
+) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("usagi-daemon-standby-custody".to_string())
+        .spawn(move || {
+            while !shutdown.is_requested() {
+                // An unreadable registry is uncertainty, not a loss: it never
+                // terminates a standby that may still hold its entry.
+                if let Ok(Some(document)) = read_registry_document(&data_dir)
+                    && let StandbyCustody::Lost(loss) = evaluate_custody(
+                        &document,
+                        generation,
+                        &process,
+                        &mut observe_generation_process,
+                    )
+                {
+                    ErrorLog::record(&format!(
+                        "daemon standby custody lost ({}); shutting down",
+                        loss.reason()
+                    ));
+                    shutdown.request();
+                    return;
+                }
+                if shutdown.wait_for_tick(STANDBY_CUSTODY_TICK) {
+                    break;
+                }
+            }
+        })
+        .map(|_| ())
 }
 
 /// This process's own OS-observed identity, as the registry records it.
@@ -5821,7 +6424,14 @@ fn run_inner(
                 path.display()
             );
         }
-        CliDaemonCommand::Serve => PresentationDaemonCommand::Serve,
+        // The role is fixed by argv before anything is locked, bound, or
+        // written: a process does not discover which role it is partway through
+        // startup.
+        CliDaemonCommand::Serve { standby } => PresentationDaemonCommand::Serve(if standby {
+            ServeRole::Standby
+        } else {
+            ServeRole::Active
+        }),
         CliDaemonCommand::Start => PresentationDaemonCommand::Start,
         CliDaemonCommand::Status => PresentationDaemonCommand::Status,
         CliDaemonCommand::Stop { force } => PresentationDaemonCommand::Stop(transition_mode(force)),
@@ -5863,21 +6473,7 @@ fn run_inner(
         pid,
         held: RefCell::new(None),
     };
-    let ready = IpcReady {
-        data_dir: &data_dir,
-        workspace_root: &workspace_root,
-        instance_lock: &lock,
-        // The daemon advertises the exact artifact it started as for its whole
-        // process lifetime. Atomic replacement of the executable path cannot
-        // mutate this startup snapshot.
-        build: current_build(),
-        shutdown: Arc::new(ShutdownRequest::new()),
-        published: AtomicBool::new(false),
-        publication_attempted: AtomicBool::new(false),
-        worker: RefCell::new(None),
-        listener: RefCell::new(None),
-        cleanup: RefCell::new(None),
-    };
+    let ready = IpcReady::new(&data_dir, &workspace_root, &lock);
     let shutdown = SignalShutdown::new(Arc::clone(&ready.shutdown));
     let census = DurableResourceCensus {
         daemon_dir: daemon_dir.clone(),
@@ -5889,12 +6485,18 @@ fn run_inner(
         pid,
         claimed: RefCell::new(None),
     };
+    // The standby seams share this process's one shutdown request, so a SIGTERM
+    // to a standby takes the same graceful path it takes to an active daemon.
+    let standby_endpoint = StandbyIpc::new(&data_dir, pid, Arc::clone(&ready.shutdown));
+    let standby_authority = StandbyRegistryAuthority::new(&data_dir, &standby_endpoint, pid);
     let env = DaemonEnv {
         store: &store,
         probe: &ExactProcessControl,
         terminator: &SigtermTerminator,
         ready: &ready,
         authority: &authority,
+        standby_endpoint: &standby_endpoint,
+        standby_authority: &standby_authority,
         shutdown: &shutdown,
         launcher: &launcher,
         sleeper: &RealSleeper,
@@ -6642,7 +7244,15 @@ fn recover_stale_client_endpoint_with(
 
     // Socket-first retirement and current.lock provide the endpoint commit
     // fence. The record remains present on every cleanup error.
-    retire_stale_current(data_dir)?;
+    //
+    // The instance lock this path holds excludes another *active* daemon, not a
+    // standby — which holds no lock and whose live socket is therefore
+    // indistinguishable on the filesystem from a crashed generation's leftover.
+    // Sweeping it would leave the registry naming a verified successor nobody
+    // accepts on, so the same durable answer the daemon-side sweep uses applies
+    // here.
+    let live = live_generation_endpoints(data_dir);
+    retire_stale_current_preserving(data_dir, &|generation| live.contains(generation))?;
     if store.clear_if(&expected)? {
         Ok(bootstrap::StaleRecovery::Recovered)
     } else {
@@ -8477,6 +9087,106 @@ mod tests {
 
         // SAFETY: the listener has not moved and still owns normal cleanup.
         unsafe { ManuallyDrop::drop(&mut listener) };
+    }
+
+    /// The instance lock this recovery holds excludes another *active* daemon,
+    /// not a standby — which holds no lock, so its live socket looks exactly like
+    /// a crashed generation's leftover on the filesystem. Sweeping it would leave
+    /// the registry naming a verified successor that nobody accepts on, which is
+    /// the same hazard the daemon-side sweep already guards against.
+    #[test]
+    fn client_bootstrap_recovery_preserves_a_live_standby_endpoint() {
+        use std::mem::ManuallyDrop;
+        use std::os::unix::fs::PermissionsExt;
+        use usagi_daemon::usecase::authority::registry::{
+            GenerationEntry, REGISTRY_SCHEMA, RegistryDocument,
+        };
+        use usagi_daemon::usecase::generation::GenerationRole;
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let daemon = data.join("daemon");
+
+        // The dead active's published endpoint, and a live standby's private one.
+        let mut dead = ManuallyDrop::new(SecureUnixListener::bind(data, ipc_generation()).unwrap());
+        let dead_socket = daemon.join(&dead.locator().endpoint);
+        let standby = SecureUnixListener::bind_private(data, ipc_generation()).unwrap();
+        let standby_socket = daemon.join(&standby.locator().endpoint);
+        assert!(dead_socket.exists() && standby_socket.exists());
+
+        let active_generation =
+            usagi_core::domain::id::DaemonGeneration::parse(&dead.locator().generation.0).unwrap();
+        let standby_generation =
+            usagi_core::domain::id::DaemonGeneration::parse(&standby.locator().generation.0)
+                .unwrap();
+        // The standby's recorded process is this one, which the OS proves alive;
+        // the active's is a PID that has been reused, which it cannot.
+        let live = own_process_identity(std::process::id()).unwrap();
+        let mut gone = live.clone();
+        gone.start_identity = "gone".to_owned();
+        let entry = |generation, role, endpoint: &str, process: ProcessIdentity| GenerationEntry {
+            generation,
+            role,
+            endpoint: endpoint.to_owned(),
+            process,
+            expected_build: current_build(),
+            verified_build: Some(current_build()),
+            revision: 1,
+        };
+        let document = RegistryDocument {
+            schema: REGISTRY_SCHEMA.to_owned(),
+            revision: 1,
+            current: Some(active_generation),
+            generations: vec![
+                entry(
+                    active_generation,
+                    GenerationRole::Active,
+                    &dead.locator().endpoint,
+                    gone,
+                ),
+                entry(
+                    standby_generation,
+                    GenerationRole::Standby,
+                    &standby.locator().endpoint,
+                    live,
+                ),
+            ],
+            handoff: None,
+            completed_operation: None,
+        };
+        // Written the way the daemon writes it: the private read this recovery
+        // performs rejects a world-readable document.
+        let registry = daemon.join("generations.json");
+        std::fs::write(&registry, serde_json::to_string(&document).unwrap()).unwrap();
+        std::fs::set_permissions(&registry, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // A record whose identity no longer matches its PID is proved stale, which
+        // is what admits this recovery at all.
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: daemon.join("daemon.json"),
+        });
+        store
+            .save(&DaemonRecord::identified(std::process::id(), "gone"))
+            .unwrap();
+
+        assert_eq!(
+            recover_stale_client_endpoint(data).unwrap(),
+            bootstrap::StaleRecovery::Recovered
+        );
+
+        // The crashed generation's residue is reclaimed, and the live standby's
+        // socket — which its own process is still accepting on — is not.
+        assert!(!dead_socket.exists());
+        assert!(
+            standby_socket.exists(),
+            "client recovery swept a live standby endpoint"
+        );
+        assert_eq!(store.load().unwrap(), None);
+
+        drop(standby);
+        // SAFETY: recovery removed only filesystem artifacts; dropping closes the
+        // still-owned listener fd and its cleanup is idempotent.
+        unsafe { ManuallyDrop::drop(&mut dead) };
     }
 
     #[test]

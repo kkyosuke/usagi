@@ -847,18 +847,45 @@ fn classify_published_endpoint_error(error: io::Error) -> io::Error {
 /// or an absent locator is accompanied by a generation socket whose ownership
 /// cannot be inferred. The caller must retain the daemon record on error.
 pub fn retire_stale_current(data_dir: &Path) -> io::Result<()> {
+    retire_stale_current_preserving(data_dir, &|_| false)
+}
+
+/// As [`retire_stale_current`], but keeps the endpoints of the generations
+/// `preserve` names as live.
+///
+/// The instance lock excludes another *active* daemon, and it used to exclude
+/// every other daemon process there could be — which is what made an
+/// unidentified generation socket, by itself, proof of a crashed generation. A
+/// standby breaks that inference: it holds no lock, so its socket is
+/// indistinguishable on the filesystem from a leftover, and sweeping it would
+/// leave the registry naming an endpoint nobody accepts on while its process is
+/// still very much alive.
+///
+/// The predicate is therefore the caller's durable answer — a generation the
+/// registry still retains and whose recorded process the OS proves alive
+/// ([`crate::usecase::authority::standby::evaluate_custody`] is the same
+/// judgement from the standby's own side). Anything it does not name is swept
+/// exactly as before, so a crashed standby is reclaimed like any other.
+///
+/// # Errors
+///
+/// As [`retire_stale_current`].
+pub fn retire_stale_current_preserving(
+    data_dir: &Path,
+    preserve: &dyn Fn(&str) -> bool,
+) -> io::Result<()> {
     let daemon = data_dir.join("daemon");
     ensure_private_dir(&daemon)?;
     let _lock = lock_locator(&daemon)?;
     let locator = match read_locator(&daemon) {
         Ok(locator) => locator,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return remove_recoverable_generation_sockets(&daemon);
+            return remove_recoverable_generation_sockets(&daemon, preserve);
         }
         Err(error) => return Err(error),
     };
     endpoint_path(&daemon, &locator)?;
-    remove_recoverable_generation_sockets(&daemon)?;
+    remove_recoverable_generation_sockets(&daemon, preserve)?;
 
     // `current.lock` excludes every cooperative publish/retire writer. Keep an
     // exact comparison anyway so this function remains fail-closed if its
@@ -1840,7 +1867,18 @@ fn verify_owned_socket_metadata(
     Ok(())
 }
 
-fn remove_recoverable_generation_sockets(daemon: &Path) -> io::Result<()> {
+/// The generation a directory under `generations/` is named for, when its name
+/// can be spelled the way a locator and a registry entry spell it. A name that
+/// cannot be is not a generation this build wrote, so it is swept rather than
+/// preserved.
+fn named_generation(path: &Path) -> Option<&str> {
+    path.file_name().and_then(std::ffi::OsStr::to_str)
+}
+
+fn remove_recoverable_generation_sockets(
+    daemon: &Path,
+    preserve: &dyn Fn(&str) -> bool,
+) -> io::Result<()> {
     let generations = daemon.join("generations");
     match fs::symlink_metadata(&generations) {
         Ok(_) => ensure_private_dir(&generations)?,
@@ -1853,6 +1891,12 @@ fn remove_recoverable_generation_sockets(daemon: &Path) -> io::Result<()> {
         .collect::<io::Result<Vec<_>>>()?;
     verify_open_directory(&generations, &root_guard, true)?;
     for generation in entries {
+        // A live generation's directory is skipped whole. Its socket is not
+        // recoverable residue, and even repairing the directory's permissions
+        // would be a write into a tree this process does not own.
+        if named_generation(&generation).is_some_and(preserve) {
+            continue;
+        }
         verify_open_directory(&generations, &root_guard, true)?;
         #[cfg(test)]
         pause_generation_root_recheck(&generation);
@@ -3972,6 +4016,33 @@ mod tests {
         unsafe { ManuallyDrop::drop(&mut listener) };
     }
 
+    /// A standby holds no instance lock, so its live socket looks exactly like a
+    /// crashed generation's leftover on the filesystem. The caller's durable
+    /// answer — the registry entry plus an exact process observation — is what
+    /// keeps it, and everything it does not name is still swept.
+    #[test]
+    fn stale_recovery_preserves_the_generations_the_caller_proves_live() {
+        let temp = TempDir::new_in("/tmp").unwrap();
+        let live = SecureUnixListener::bind_private(temp.path(), generation()).unwrap();
+        let dead = SecureUnixListener::bind_private(temp.path(), generation()).unwrap();
+        let live_socket = live.cleanup.socket.clone();
+        let dead_socket = dead.cleanup.socket.clone();
+        let live_generation = live.cleanup.locator.generation.0.clone();
+
+        retire_stale_current_preserving(temp.path(), &|generation| generation == live_generation)
+            .unwrap();
+
+        assert!(live_socket.exists(), "a live standby lost its endpoint");
+        assert!(!dead_socket.exists(), "residue was not reclaimed");
+
+        // Preserving nothing is what every caller without a durable answer does,
+        // and it reclaims the same socket the predicate had spared.
+        retire_stale_current(temp.path()).unwrap();
+        assert!(!live_socket.exists());
+        drop(dead);
+        drop(live);
+    }
+
     #[test]
     fn stale_recovery_preserves_locator_when_generation_scan_becomes_inaccessible() {
         let temp = TempDir::new_in("/tmp").unwrap();
@@ -4335,7 +4406,7 @@ mod tests {
             io::ErrorKind::InvalidInput
         );
         assert_eq!(
-            remove_recoverable_generation_sockets(&invalid)
+            remove_recoverable_generation_sockets(&invalid, &|_| false)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidInput

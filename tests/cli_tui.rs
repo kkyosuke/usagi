@@ -23,6 +23,8 @@ use usagi_daemon::infrastructure::unix_transport::{
     EndpointLocator, EndpointState, SecureUnixListener, connect_current, ensure_private_dir_all,
     read_locator,
 };
+use usagi_daemon::usecase::authority::registry::RegistryDocument;
+use usagi_daemon::usecase::replacement::{SeamlessRefusal, seamless_refusal};
 
 /// 起動する usagi プロセスはすべてこの fixture 経由にする。daemon の workspace root は
 /// 起動時 cwd で決まるため、cwd を fixture へ固定して開発者のチェックアウトを掴ませない。
@@ -631,6 +633,344 @@ fn repeated_restarts_leave_exactly_one_registered_generation() {
     generations.dedup();
     assert_eq!(generations.len(), 3, "each restart is a new generation");
     stop_daemon(&home);
+}
+
+/// A standby process is the second daemon in one data directory. Everything this
+/// asserts is about what it does *not* do: it takes neither guard, writes no
+/// lifecycle record, and above all leaves `current.json` naming the active
+/// generation, so no client can be routed to it. What it does do is become a
+/// registered standby whose artifact was verified after readiness — which is
+/// exactly what a rollover needs to be able to name a successor.
+#[test]
+fn a_standby_registers_beside_the_active_generation_without_publishing_a_locator() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let daemon_dir = home.production_data_dir().join("daemon");
+    let registry = daemon_dir.join("generations.json");
+
+    let mut active = home.spawn_serve();
+    assert!(
+        wait_until(Duration::from_secs(15), || registry.is_file()
+            && daemon_dir.join("current.json").is_file()),
+        "the active daemon did not register its generation"
+    );
+    let published = std::fs::read(daemon_dir.join("current.json")).unwrap();
+    let record = std::fs::read(daemon_dir.join("daemon.json")).unwrap();
+
+    let mut standby = home.spawn_standby();
+    assert!(
+        wait_until(Duration::from_secs(20), || {
+            standby_entry(&registry).is_some_and(|entry| entry["verified_build"].is_object())
+        }),
+        "the standby never reached verified readiness: {}",
+        registry_document(&registry)
+    );
+
+    let document = registry_document(&registry);
+    let entry = standby_entry(&registry).expect("the standby is registered");
+    // Two retained generations, one active and one standby, and `current` still
+    // names the active one. A standby that moved `current` would have handed
+    // itself authority nobody granted.
+    assert_eq!(document["generations"].as_array().map(Vec::len), Some(2));
+    assert_ne!(document["current"], entry["generation"], "{document}");
+    assert_eq!(
+        std::fs::read(daemon_dir.join("current.json")).unwrap(),
+        published,
+        "the standby republished the current locator"
+    );
+    // The owner record is the active daemon's alone: a standby owns nothing, so
+    // it registers nothing about who owns the data directory.
+    assert_eq!(
+        std::fs::read(daemon_dir.join("daemon.json")).unwrap(),
+        record
+    );
+    assert_eq!(
+        entry["verified_build"], entry["expected_build"],
+        "{document}"
+    );
+    // The registry entry names a socket that is actually accepting: readiness
+    // completed a handshake against this exact path.
+    let socket = daemon_dir.join(entry["endpoint"].as_str().unwrap());
+    assert!(socket.exists(), "the standby endpoint is not bound");
+    // The refusal a rollover reports is now an *observation* of this document
+    // rather than the constant it used to be. Naming a verified standby is the
+    // whole point of registering one; enabling the rollover itself is #559.
+    assert_eq!(
+        seamless_refusal(Some(
+            &serde_json::from_slice::<RegistryDocument>(&std::fs::read(&registry).unwrap())
+                .expect("the shipping daemon writes a registry this build understands")
+        )),
+        SeamlessRefusal::StandbyNotAdmitted
+    );
+
+    // Standing the standby down gives up the entry and the socket, and leaves the
+    // active generation exactly as it was.
+    assert!(standby.terminate_and_wait(), "the standby ignored SIGTERM");
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            standby_entry(&registry).is_none_or(|entry| entry["role"] == "retired")
+                && !socket.exists()
+        }),
+        "a stopped standby kept its registry entry or its socket: {}",
+        registry_document(&registry)
+    );
+    let document = registry_document(&registry);
+    assert_eq!(
+        Some(&document["current"]),
+        published_generation(&daemon_dir).as_ref()
+    );
+    // The active daemon was never disturbed by any of it.
+    assert!(!active.wait_for_exit(Duration::from_millis(1)));
+    stop_daemon_in_production(&home);
+}
+
+/// A standby is a *retained* generation, and activation refuses a registry that
+/// retains one. So a standby that outlives its incumbent does not merely idle —
+/// it refuses every future `daemon start` in this data directory with
+/// `authority_retained`, forever, until someone kills it by hand.
+///
+/// The crash path happens to be safe on its own (recovery fails the abandoned
+/// authority closed and retires *every* generation, which the standby notices),
+/// so this pins the path that is not: an ordinary, clean `daemon stop`, which
+/// retires only the active's own entry.
+#[test]
+fn a_standby_stands_down_with_its_incumbent_so_the_next_start_succeeds() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let daemon_dir = home.production_data_dir().join("daemon");
+    let registry = daemon_dir.join("generations.json");
+
+    let mut active = home.spawn_serve();
+    assert!(
+        wait_until(Duration::from_secs(15), || registry.is_file()
+            && daemon_dir.join("current.json").is_file()),
+        "the active daemon did not register its generation"
+    );
+    let mut standby = home.spawn_standby();
+    assert!(
+        wait_until(Duration::from_secs(20), || {
+            standby_entry(&registry).is_some_and(|entry| entry["verified_build"].is_object())
+        }),
+        "the standby never reached verified readiness: {}",
+        registry_document(&registry)
+    );
+
+    // A clean stop, not a kill: the active gives up its own entry and nothing
+    // else in the registry changes.
+    stop_daemon_in_production(&home);
+    assert!(
+        active.wait_for_exit(Duration::from_secs(10)),
+        "the active daemon did not exit"
+    );
+
+    assert!(
+        standby.wait_for_exit(Duration::from_secs(20)),
+        "the standby outlived the authority it was admitted to succeed: {}",
+        registry_document(&registry)
+    );
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            registry_document(&registry)["generations"]
+                .as_array()
+                .is_some_and(|entries| entries.iter().all(|entry| entry["role"] == "retired"))
+        }),
+        "a retained generation survived both daemons: {}",
+        registry_document(&registry)
+    );
+
+    // The whole point: activation is possible again without manual cleanup.
+    let restarted = run_in_production(&[OsStr::new("daemon"), OsStr::new("start")], &home);
+    assert!(restarted.status.success(), "{}", stderr(&restarted));
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            !registry_document(&registry)["current"].is_null()
+        }),
+        "the next start could not take authority: {}",
+        registry_document(&registry)
+    );
+    stop_daemon_in_production(&home);
+}
+
+/// A standby is not a way to start serving. Without a live daemon that the
+/// registry itself names as active there is nothing to stand by for, and the
+/// refusal has to land before anything is created inside a data directory this
+/// process does not own.
+#[test]
+fn a_standby_is_refused_when_no_registered_active_owns_the_data_directory() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let daemon_dir = home.production_data_dir().join("daemon");
+    let registry = daemon_dir.join("generations.json");
+
+    // A data directory no daemon has ever taken authority over.
+    let fresh = run_in_production(
+        &[
+            OsStr::new("daemon"),
+            OsStr::new("serve"),
+            OsStr::new("--standby"),
+        ],
+        &home,
+    );
+    assert_eq!(fresh.status.code(), Some(1), "{}", stderr(&fresh));
+    assert!(
+        stderr(&fresh).contains("no generation registry exists"),
+        "{}",
+        stderr(&fresh)
+    );
+    assert!(!registry.exists(), "a refused standby wrote the registry");
+    assert!(!daemon_dir.join("generations").exists());
+
+    // A data directory whose daemon has stopped: the registry exists and names a
+    // retired generation, and there is no owner record at all.
+    let start = run_in_production(&[OsStr::new("daemon"), OsStr::new("start")], &home);
+    assert!(start.status.success(), "{}", stderr(&start));
+    assert!(wait_until(Duration::from_secs(15), || registry.is_file()));
+    stop_daemon_in_production(&home);
+    assert!(wait_until(Duration::from_secs(10), || {
+        registry_document(&registry)["current"].is_null()
+    }));
+    let before = std::fs::read(&registry).unwrap();
+
+    let stopped = run_in_production(
+        &[
+            OsStr::new("daemon"),
+            OsStr::new("serve"),
+            OsStr::new("--standby"),
+        ],
+        &home,
+    );
+    assert_eq!(stopped.status.code(), Some(1), "{}", stderr(&stopped));
+    assert!(
+        stderr(&stopped).contains("no live daemon owns this data directory"),
+        "{}",
+        stderr(&stopped)
+    );
+    // Effect zero: not one byte of the registry moved, and no endpoint was bound.
+    assert_eq!(std::fs::read(&registry).unwrap(), before);
+}
+
+/// One data directory holds one active generation. The workspace fence refuses
+/// the second `serve` before it touches anything, and the registry it did not
+/// reach is byte-identical afterwards — the two guards agree, and neither one
+/// alone is what the refusal rests on.
+#[test]
+fn a_second_active_daemon_is_refused_without_disturbing_the_registry() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let daemon_dir = home.production_data_dir().join("daemon");
+    let registry = daemon_dir.join("generations.json");
+
+    let mut owner = home.spawn_serve();
+    assert!(
+        wait_until(Duration::from_secs(15), || registry.is_file()
+            && daemon_dir.join("current.json").is_file()),
+        "the first daemon did not take authority"
+    );
+    let before = std::fs::read(&registry).unwrap();
+    let published = std::fs::read(daemon_dir.join("current.json")).unwrap();
+
+    let second = run_in_production(&[OsStr::new("daemon"), OsStr::new("serve")], &home);
+    assert!(
+        stdout(&second).contains("another daemon already owns this workspace"),
+        "{}",
+        stdout(&second)
+    );
+    assert_eq!(std::fs::read(&registry).unwrap(), before);
+    assert_eq!(
+        std::fs::read(daemon_dir.join("current.json")).unwrap(),
+        published
+    );
+    assert!(!owner.wait_for_exit(Duration::from_millis(1)));
+    stop_daemon_in_production(&home);
+}
+
+/// A `SIGKILL`ed active daemon leaves a registry entry naming a process that no
+/// longer exists. Nothing may adopt that entry as an authority, and nothing may
+/// be blocked by it either: the next start proves the process gone, retires the
+/// entry, and activates in its place.
+#[test]
+fn a_killed_active_leaves_a_stale_entry_the_next_start_reclaims() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let daemon_dir = home.production_data_dir().join("daemon");
+    let registry = daemon_dir.join("generations.json");
+
+    let mut killed = home.spawn_serve();
+    assert!(
+        wait_until(Duration::from_secs(15), || registry.is_file()
+            && daemon_dir.join("current.json").is_file()),
+        "the daemon did not take authority before being killed"
+    );
+    let stale = registry_document(&registry)["current"].clone();
+    assert!(!stale.is_null());
+    killed.kill_and_reap();
+
+    // The durable state is exactly the crash matrix's "after W2" row: an active
+    // entry naming a dead process, and a locator naming it.
+    assert_eq!(registry_document(&registry)["current"], stale);
+    assert!(daemon_dir.join("current.json").exists());
+
+    let restart = run_in_production(&[OsStr::new("daemon"), OsStr::new("start")], &home);
+    assert!(restart.status.success(), "{}", stderr(&restart));
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            let document = registry_document(&registry);
+            !document["current"].is_null()
+                && document["current"] != stale
+                // The locator is written after the registry commit, so both have
+                // to agree before the reclamation is complete.
+                && published_generation(&daemon_dir).as_ref() == Some(&document["current"])
+        }),
+        "the stale entry was never reclaimed: {}",
+        registry_document(&registry)
+    );
+    let document = registry_document(&registry);
+    // The dead generation is not merely retired but gone: a retired record says
+    // nothing a client can act on, so keeping it would only grow the document.
+    assert_eq!(document["generations"].as_array().map(Vec::len), Some(1));
+    assert_eq!(document["generations"][0]["role"], "active");
+    assert_eq!(
+        Some(&document["current"]),
+        published_generation(&daemon_dir).as_ref()
+    );
+    stop_daemon_in_production(&home);
+}
+
+/// The retained entry `current` does not name: with one active generation and one
+/// standby, that is the standby — before and after it is retired.
+fn standby_entry(registry: &Path) -> Option<serde_json::Value> {
+    let document = registry_document(registry);
+    let current = document["current"].clone();
+    document["generations"]
+        .as_array()?
+        .iter()
+        .find(|entry| entry["generation"] != current)
+        .cloned()
+}
+
+/// The generation the published locator names, when a locator is published.
+///
+/// Publication follows the registry commit, so a reader that has just seen a new
+/// active generation can legitimately find no locator yet.
+fn published_generation(daemon_dir: &Path) -> Option<serde_json::Value> {
+    let bytes = std::fs::read(daemon_dir.join("current.json")).ok()?;
+    let locator: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    Some(locator["generation"].clone())
+}
+
+fn stop_daemon_in_production(home: &DaemonHome) {
+    let output = run_in_production(&[OsStr::new("daemon"), OsStr::new("stop")], home);
+    assert!(output.status.success(), "{}", stderr(&output));
 }
 
 /// The durable registry document, read as the daemon wrote it.

@@ -150,11 +150,24 @@ impl DaemonHome {
 
     /// 指定 channel の `daemon serve` を、この fixture が所有する子プロセスとして起動する。
     pub fn spawn_serve_in(&self, channel: Channel) -> OwnedDaemon {
-        let mut command = self.command_at(
-            channel,
-            self.workspace(),
-            &[OsStr::new("daemon"), OsStr::new("serve")],
-        );
+        self.spawn_role(channel, Role::Active)
+    }
+
+    /// production channel の `daemon serve --standby` を、この fixture が所有する子プロセスと
+    /// して起動する。
+    ///
+    /// standby は `daemon.json` に載らないため `daemon stop` の対象にならない。teardown は
+    /// この子プロセスを直接落とす（[`OwnedDaemon::drop`]）。
+    pub fn spawn_standby(&self) -> OwnedDaemon {
+        self.spawn_role(Channel::Production, Role::Standby)
+    }
+
+    fn spawn_role(&self, channel: Channel, role: Role) -> OwnedDaemon {
+        let mut args = vec![OsStr::new("daemon"), OsStr::new("serve")];
+        if role == Role::Standby {
+            args.push(OsStr::new("--standby"));
+        }
+        let mut command = self.command_at(channel, self.workspace(), &args);
         command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -162,6 +175,7 @@ impl DaemonHome {
         OwnedDaemon {
             home: self.path().to_path_buf(),
             channel,
+            role,
             child: command.spawn().expect("daemon serve を起動できる"),
         }
     }
@@ -211,9 +225,19 @@ impl Drop for DaemonHome {
 ///
 /// `Child` は起動した exact incarnation を指すので、cleanup が pid 再利用や置き換わった
 /// daemon を撃つことはない。
+/// 起動した `serve` の role。teardown の経路が role で異なる。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Role {
+    /// data directory の authority を取る通常の daemon。
+    Active,
+    /// authority を取らない standby generation。
+    Standby,
+}
+
 pub struct OwnedDaemon {
     home: PathBuf,
     channel: Channel,
+    role: Role,
     child: Child,
 }
 
@@ -244,11 +268,33 @@ impl OwnedDaemon {
     }
 }
 
+impl OwnedDaemon {
+    /// SIGTERM を送って graceful shutdown を待つ。standby は `daemon stop` の対象では
+    /// ないため、standby を落とす唯一の協調的な経路である。
+    pub fn terminate_and_wait(&mut self) -> bool {
+        signal_child(self.child.id(), libc::SIGTERM);
+        self.wait_for_exit(SIGNAL_TIMEOUT)
+    }
+}
+
+/// 起動した exact child へ signal を送る（pid 再利用は `Child` が持つ handle が防ぐ）。
+fn signal_child(pid: u32, signal: libc::c_int) {
+    if let Ok(pid) = libc::pid_t::try_from(pid) {
+        // SAFETY: `pid` はこの fixture が spawn した未 reap の子プロセスである。
+        unsafe { libc::kill(pid, signal) };
+    }
+}
+
 impl Drop for OwnedDaemon {
     fn drop(&mut self) {
-        let _ = stop_command(&self.home, self.channel)
-            .spawn()
-            .map(|mut child| wait_with_timeout(&mut child, STOP_TIMEOUT));
+        if self.role == Role::Standby {
+            // standby は record を持たないので stop client が見つけられない。
+            self.terminate_and_wait();
+        } else {
+            let _ = stop_command(&self.home, self.channel)
+                .spawn()
+                .map(|mut child| wait_with_timeout(&mut child, STOP_TIMEOUT));
+        }
         if !self.wait_for_exit(SIGNAL_TIMEOUT) {
             let _ = self.child.kill();
             let _ = self.child.wait();

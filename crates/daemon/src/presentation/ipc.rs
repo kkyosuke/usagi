@@ -408,6 +408,50 @@ pub fn server_protocol(
     }
 }
 
+/// Build the server protocol a **standby** generation answers its readiness
+/// handshake with.
+///
+/// Two things differ from the active policy, and both are what makes readiness
+/// meaningful rather than decorative:
+///
+/// * the role is [`GenerationRole::Standby`], so a client that somehow reached
+///   this private endpoint cannot bind it as the data directory's owner (owner
+///   binding requires `active`);
+/// * it advertises
+///   [`GENERATION_HANDOFF_CAPABILITY`](crate::usecase::authority::standby::GENERATION_HANDOFF_CAPABILITY),
+///   which is the peer's claim that it participates in the durable registry and
+///   re-decides authority per request. A standby that could not honour role
+///   admission must not be namable as a successor, and
+///   [`verify_readiness`](crate::usecase::authority::standby::verify_readiness)
+///   refuses a hello without it.
+///
+/// The active policy deliberately does *not* advertise that capability: this
+/// build's active generation registers itself
+/// ([`crate::usecase::authority::activation`]) but serves its requests without a
+/// role-admission barrier, so claiming otherwise would be a claim a rollover
+/// would then trust.
+#[must_use]
+pub fn standby_server_protocol(
+    daemon_generation: DaemonGeneration,
+    connection_id: String,
+    build: usagi_core::infrastructure::ipc::BuildIdentity,
+    daemon_process: usagi_core::domain::daemon::DaemonRecord,
+    workspace_root: String,
+) -> ServerProtocol {
+    let mut protocol = server_protocol(
+        daemon_generation,
+        connection_id,
+        build,
+        daemon_process,
+        workspace_root,
+    );
+    protocol.generation_role = usagi_core::infrastructure::ipc::GenerationRole::Standby;
+    protocol
+        .capabilities
+        .push(crate::usecase::authority::standby::GENERATION_HANDOFF_CAPABILITY.to_owned());
+    protocol
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,6 +525,41 @@ mod tests {
             TRUSTED_ROOT.to_owned(),
         )
     }
+    /// A standby answers a readiness handshake with the same policy in every
+    /// respect but two: the role it names itself, and the capability that says it
+    /// re-decides authority per request.
+    #[test]
+    fn a_standby_names_its_role_and_advertises_the_handoff_capability() {
+        let active = server();
+        let standby = standby_server_protocol(
+            active.daemon_generation.clone(),
+            active.connection_id.0.clone(),
+            active.build.clone(),
+            active
+                .daemon_process
+                .clone()
+                .expect("the fixture asserts an owner process"),
+            active.workspace_root.clone(),
+        );
+        assert_eq!(
+            standby.generation_role,
+            usagi_core::infrastructure::ipc::GenerationRole::Standby
+        );
+        // Owner binding requires `active`, so a client can never mistake a
+        // standby's private endpoint for the data directory's authority.
+        assert_eq!(
+            active.generation_role,
+            usagi_core::infrastructure::ipc::GenerationRole::Active
+        );
+        let required = crate::usecase::authority::standby::GENERATION_HANDOFF_CAPABILITY;
+        assert!(standby.capabilities.iter().any(|it| it == required));
+        assert!(!active.capabilities.iter().any(|it| it == required));
+        // Readiness compares the artifact byte for byte, so the standby must
+        // advertise exactly the artifact it was admitted for.
+        assert_eq!(standby.build, active.build);
+        assert_eq!(standby.workspace_root, active.workspace_root);
+    }
+
     fn hello() -> Bootstrap {
         Bootstrap::ClientHello(client_hello())
     }

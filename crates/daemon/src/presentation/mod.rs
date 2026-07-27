@@ -16,6 +16,20 @@ use crate::usecase;
 
 pub mod ipc;
 
+/// `serve` がどの role で常駐するか。
+///
+/// 同じ data directory に同時に存在できるのは active 1 つだが、standby は
+/// **何も所有しない**ため active の隣で走れる（[`usecase::serve_standby`] が正本）。
+/// role は起動時に固定され、process の途中で変わることはない（standby から active への
+/// 昇格は handoff であり、別 process の仕事である）。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServeRole {
+    /// data directory の authority を取り、endpoint を publish して runtime を所有する。
+    Active,
+    /// private endpoint だけを bind し、registry に standby として登録される。
+    Standby,
+}
+
 /// 合成ルートで検証済みの daemon 制御要求。
 ///
 /// argv の文字列解釈と usage error の整形は合成ルートが担い、この層には実行可能な
@@ -23,7 +37,7 @@ pub mod ipc;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DaemonCommand {
     /// 前景で daemon を常駐させる。
-    Serve,
+    Serve(ServeRole),
     /// daemon を背景起動する。
     Start,
     /// daemon の稼働状態を表示する。
@@ -56,6 +70,10 @@ pub struct DaemonEnv<'a, F, P, T, R, S, L, K, M, W> {
     /// `serve` が endpoint 応答後に durable generation registry の authority を
     /// 取得・返却する hook。locator の公開はこの authority が行う。
     pub authority: &'a dyn usecase::serve::GenerationAuthority,
+    /// `serve --standby` が bind する private endpoint。locator は公開しない。
+    pub standby_endpoint: &'a dyn usecase::serve_standby::StandbyEndpoint,
+    /// `serve --standby` が registry へ standby として登録・返却する hook。
+    pub standby_authority: &'a dyn usecase::serve_standby::StandbyAuthority,
     /// `serve` が shutdown まで待つための待受。
     pub shutdown: &'a S,
     /// `start` が detached `serve` を spawn するための起動器。
@@ -81,7 +99,8 @@ pub struct DaemonEnv<'a, F, P, T, R, S, L, K, M, W> {
 /// 書き出しの配線に徹し、独自のビジネスロジックは持たない。
 ///
 /// 実 IO を伴う verb は、注入された [`DaemonEnv`] を使う usecase へ振り分ける:
-/// `serve` は前景の常駐 [`usecase::serve::serve`]、`start` は背景起動の
+/// `serve` は role によって前景の常駐 [`usecase::serve::serve`]（active）と
+/// [`usecase::serve_standby::serve_standby`]（standby）へ分かれ、`start` は背景起動の
 /// [`usecase::start::start`]、`status` は [`usecase::status::report`]。
 /// `stop` と `replace` は [`usecase::replacement`] を通り、live runtime を壊す遷移を
 /// そこで一度だけ判定してから [`usecase::stop::stop`] /
@@ -108,7 +127,7 @@ pub fn run<
     env: &DaemonEnv<F, P, T, R, S, L, K, M, W>,
 ) -> std::io::Result<()> {
     match command {
-        DaemonCommand::Serve => usecase::serve::serve(
+        DaemonCommand::Serve(ServeRole::Active) => usecase::serve::serve(
             out,
             env.store,
             env.ready,
@@ -117,6 +136,16 @@ pub fn run<
             env.workspace,
             env.lock,
             env.probe,
+            env.pid,
+            info,
+        ),
+        // A standby owns nothing, so it reaches neither guard and touches
+        // neither the lifecycle record nor the locator.
+        DaemonCommand::Serve(ServeRole::Standby) => usecase::serve_standby::serve_standby(
+            out,
+            env.standby_endpoint,
+            env.standby_authority,
+            env.shutdown,
             env.pid,
             info,
         ),
@@ -163,10 +192,11 @@ pub fn run<
 
 #[cfg(test)]
 mod tests {
-    use super::{DaemonCommand, DaemonEnv, run};
+    use super::{DaemonCommand, DaemonEnv, ServeRole, run};
     use crate::test_support::{
-        FakeAuthority, FakeLock, FakeWorkspaceFence, FixedProbe, ImmediateShutdown,
-        InMemoryRecordFile, NoopReady, NoopSleeper, RecordingTerminator, TestLauncher,
+        CountingStandbyAuthority, FakeAuthority, FakeLock, FakeWorkspaceFence, FixedProbe,
+        ImmediateShutdown, InMemoryRecordFile, NoopReady, NoopSleeper, NoopStandbyEndpoint,
+        RecordingTerminator, TestLauncher,
     };
     use crate::usecase::replacement::{
         LiveResources, ResourceCensus, SeamlessRefusal, TransitionMode,
@@ -219,6 +249,8 @@ mod tests {
         let ready = NoopReady;
         let env = DaemonEnv {
             authority: &FakeAuthority::default(),
+            standby_endpoint: &NoopStandbyEndpoint,
+            standby_authority: &CountingStandbyAuthority::default(),
             store,
             probe: &probe,
             terminator: &terminator,
@@ -242,10 +274,61 @@ mod tests {
         // With no record and an immediate shutdown, serve registers, then clears.
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         assert_eq!(
-            run_line(DaemonCommand::Serve, &store),
+            run_line(DaemonCommand::Serve(ServeRole::Active), &store),
             "usagi v0.1.0: daemon serving (pid 4321)\nusagi v0.1.0: daemon stopped (pid 4321)\n"
         );
         assert_eq!(store.load().unwrap(), None);
+    }
+
+    /// The standby role reaches the standby state machine, and reaching it is
+    /// observable in what it did *not* do: no lifecycle record was written, so
+    /// the data directory's owner is untouched.
+    #[test]
+    fn run_routes_the_standby_role_to_the_standby_server() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let owner = DaemonRecord::identified(1111, "test:1111");
+        store.save(&owner).unwrap();
+        let (probe, terminator, shutdown, sleeper) = (
+            FixedProbe(true),
+            RecordingTerminator::default(),
+            ImmediateShutdown,
+            NoopSleeper,
+        );
+        let launcher = TestLauncher::idle(&store);
+        let ready = NoopReady;
+        let standby_authority = CountingStandbyAuthority::default();
+        let env = DaemonEnv {
+            authority: &FakeAuthority::default(),
+            standby_endpoint: &NoopStandbyEndpoint,
+            standby_authority: &standby_authority,
+            store: &store,
+            probe: &probe,
+            terminator: &terminator,
+            ready: &ready,
+            shutdown: &shutdown,
+            launcher: &launcher,
+            sleeper: &sleeper,
+            // A standby reaches neither guard, so a held one cannot refuse it.
+            lock: &FakeLock::Held,
+            workspace: &FakeWorkspaceFence::Held(1111),
+            pid: 4321,
+            census: &Owning(0),
+            seamless: SeamlessRefusal::NoVerifiedStandby,
+        };
+        let mut buf = Vec::new();
+        run(
+            &mut buf,
+            DaemonCommand::Serve(ServeRole::Standby),
+            &info(),
+            &env,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "usagi v0.1.0: daemon standing by (pid 4321)\nusagi v0.1.0: daemon standby stopped (pid 4321)\n"
+        );
+        assert_eq!(standby_authority.admits(), 1);
+        assert_eq!(store.load().unwrap(), Some(owner));
     }
 
     #[test]
@@ -269,6 +352,8 @@ mod tests {
             let ready = NoopReady;
             let env = DaemonEnv {
                 authority: &FakeAuthority::default(),
+                standby_endpoint: &NoopStandbyEndpoint,
+                standby_authority: &CountingStandbyAuthority::default(),
                 store: &store,
                 probe: &probe,
                 terminator: &terminator,
@@ -314,6 +399,8 @@ mod tests {
         let ready = NoopReady;
         let env = DaemonEnv {
             authority: &FakeAuthority::default(),
+            standby_endpoint: &NoopStandbyEndpoint,
+            standby_authority: &CountingStandbyAuthority::default(),
             store: &store,
             probe: &probe,
             terminator: &terminator,
@@ -373,6 +460,8 @@ mod tests {
             let ready = NoopReady;
             let env = DaemonEnv {
                 authority: &FakeAuthority::default(),
+                standby_endpoint: &NoopStandbyEndpoint,
+                standby_authority: &CountingStandbyAuthority::default(),
                 store: &store,
                 probe: &probe,
                 terminator: &terminator,

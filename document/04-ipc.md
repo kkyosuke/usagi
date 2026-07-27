@@ -95,10 +95,10 @@ trigger の生成自体は effect-free だが、`usagi daemon replace` はその
 `usagi daemon restart` と同じ経路で replacement を実行する。live runtime を持つ daemon はそこで拒否されるため、
 この verb が PTY を暗黙に破棄することはない（[5. daemon の planned replacement](05-daemon.md#planned-replacement)）。
 
-private standby、generation limit / draining admission、authority handoff は
-[#516](../.usagi/issues/516-refactor-daemon-cross-process-generation-registry-standby-handoff-authority.md) の consumer である。
-その consumer が接続されるまで production / local は trigger を typed outcome として返すだけで、blind cold replacement や
-二重 daemon spawn を行わない。development の cold restart でも singleton lifecycle lock を維持し、二重 daemon を
+private standby の起動・登録・readiness は shipping の `daemon serve --standby` が駆動する
+（[5. daemon の standby process の lifecycle](05-daemon.md#standby-process-の-lifecycle)）。generation limit /
+draining admission と authority handoff を駆動する consumer はまだ接続されていないため、production / local は
+trigger を typed outcome として返すだけで、blind cold replacement や二重 daemon spawn を行わない。development の cold restart でも singleton lifecycle lock を維持し、二重 daemon を
 spawn しない。通常 envelope は handshake の成功後だけ受理する。
 
 ## workspace fence

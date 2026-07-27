@@ -138,19 +138,22 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 | `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。live runtime を持つ daemon は `--force` なしでは拒否する（[planned replacement](#planned-replacement)）。stale record（owner 消滅・PID 再利用のいずれも）は process に signal を送らず、singleton lock 下で stale endpoint を回収してから消去する。unverified record は signal・回収とも拒否する |
 | `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime を持つ daemon は `--force` なしでは拒否する。実行される transition は cold であり、active / draining handoff は行わない |
 | `usagi daemon replace` | exact artifact の意図的な replacement trigger を要求し、その operation で `restart` と同じ transition を実行する。同じ artifact pair / channel は同じ operation ID へ収束する |
-| `usagi daemon` / `usagi daemon serve` | 前景で daemon を serve する。`serve` は内部用の subcommand であり、[workspace / data directory の 2 段 fence](#単一-daemon-の-2-段-fence)を取得してから公開し、[custody を失うと自主終了する](#custody-喪失による-self-shutdown) |
+| `usagi daemon` / `usagi daemon serve` | 前景で daemon を active role で serve する。`serve` は内部用の subcommand であり、[workspace / data directory の 2 段 fence](#単一-daemon-の-2-段-fence)を取得してから公開し、[custody を失うと自主終了する](#custody-喪失による-self-shutdown) |
+| `usagi daemon serve --standby` | 前景で daemon を standby role で常駐させる（内部用）。fence を取らず、`daemon.json` も `current.json` も書かず、private endpoint だけを bind して registry に standby として登録する（[standby process の lifecycle](#standby-process-の-lifecycle)） |
 | `usagi daemon install-service` | macOS の LaunchAgent を明示的に install し、前景 `serve` を login と異常終了後に supervise する |
 | `usagi daemon uninstall-service` | install 済み LaunchAgent を unload して remove する |
 
-`serve` は process lifetime にわたって単一インスタンス lock を保持する。record は daemon の発見と exact owner
-確認に使い、単一インスタンスの権威は lock である。record の owner identity は PID と OS が返す process-start
+active role の `serve` は process lifetime にわたって単一インスタンス lock を保持する。lock が意味するのは
+「この process がこの data directory の **active role** である」ことであり、「この data directory の process が
+1 つだけである」ことではない（[単一 daemon の 2 段 fence](#単一-daemon-の-2-段-fence)）。record は daemon の発見と
+exact owner 確認に使う。record の owner identity は PID と OS が返す process-start
 identity の組であり、macOS では process start time、Linux では `/proc/<pid>/stat` の start time を opaque token
 として保存する。
 
 ### 単一 daemon の 2 段 fence
 
-`serve` は **workspace** と **data directory** の 2 つを、どちらも process lifetime にわたって fence する。
-2 つは異なる問いに答えるため、片方が他方を包含しない。
+**active role の** `serve` は **workspace** と **data directory** の 2 つを、どちらも process lifetime にわたって
+fence する。2 つは異なる問いに答えるため、片方が他方を包含しない。
 
 | fence | node | scope | 守る対象 |
 |---|---|---|---|
@@ -160,6 +163,31 @@ identity の組であり、macOS では process start time、Linux では `/proc
 取得順序は **workspace fence → 単一インスタンス lock** に固定する。順序が固定なので、逆向きに競合する 2 つの
 start が deadlock することはない。どちらも [IPC endpoint 公開](#daemon-process-lifecycle)の ready hook より前に
 取得し、取得できなかった `serve` は record・endpoint に触れずに typed refusal を出して終了する。
+
+#### 2 段 fence が答える問いと、答えない問い
+
+単一インスタンス lock が意味するのは「**この process がこの data directory の active role である**」であり、
+「この data directory の process が 1 つだけである」ではない。同じ data directory には
+[standby process](#standby-process-の-lifecycle) が同時に存在してよく、standby は
+**どちらの fence も取らない**（所有するものが無いため、守る対象が無い）。
+
+したがって active が 1 つであることは 3 つが**重ねて**保証し、どれ 1 つも単独の根拠ではない。
+
+| 権威 | 拒否する対象 | 拒否の形 |
+|---|---|---|
+| workspace fence | 同じ workspace を所有しようとする 2 つ目の daemon（data directory と mode を問わない） | `flock` が失敗し、owner pid を示して終了する |
+| 単一インスタンス lock | 同じ data directory の active role を取ろうとする 2 つ目の daemon | `flock` が失敗し、`daemon.json` の pid を示して終了する |
+| durable registry | 生存を証明できる active generation が既に居る registry への activation（[first activation](#first-activation)） | `authority_retained` の typed refusal。**effect zero** |
+
+lock を取れた process でも registry の CAS で拒否されうるのが要点である。lock は 2 つの start を直列化するが、
+「lock が空いていた」ことは authority が空いていることの証明ではない（crash 直後の lock は空いていて、registry には
+死んだ active の entry が残る）。証明は registry 側が exact な process identity で行い、証明できなければ
+**fail closed** する。
+
+standby が fence の外に居ることは fence の契約を弱めない。standby は spawn も reconcile も行わず、
+`daemon.json` も `current.json` も書かないため、fence が守る対象（worktree の所有権、record・locator の単一書き手）に
+到達しない。standby が active になるのは handoff であり、それを駆動するのは
+[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) である。
 
 workspace fence の node は **runtime mode の子 directory の下に置かない**。data directory は `$USAGI_HOME` と
 runtime mode で選ばれるため、同一 workspace に対して mode を変えるだけで別の単一インスタンス lock に届いてしまい、
@@ -227,6 +255,15 @@ claim の契約と crash boundary は
 新 record の保存より先に完了する。recovery 後に record が snapshot と exact 一致することを再確認し、その場合だけ新 incarnation へ
 atomic save して publish する。recovery failure または concurrent record replacement では旧 record / replacement を上書きせず、
 新 endpoint も公開しない。この pre-registration fence は ordinary `start` と LaunchAgent による直接 `serve` の双方に適用される。
+
+stale endpoint recovery は `generations/` 配下の socket を residue として掃除するが、**registry が retain していて
+かつ recorded process を exact に生存証明できる generation の endpoint は掃除しない**。単一インスタンス lock は
+active しか排除しないため、lock を取れたことは「他に process が無い」ことの証明にならず、生存中の
+[standby](#standby-process-の-lifecycle) の socket は filesystem 上では crash 残骸と見分けが付かない。判断の根拠は
+durable な registry entry と process identity であり、証明できない socket は従来どおり掃除する（crash した standby も
+これで回収される）。この保護は `serve` の pre-registration recovery と、client bootstrap の
+[stale cleanup](#daemon-process-lifecycle) の**両方**に適用される。どちらも同じ lock しか持たないため、
+片方だけに掛けると生存中の standby の socket がもう片方で掃かれてしまう。
 
 endpoint bind 後の startup failure では、listener fd と独立した exact generation cleanup token を保持する。
 accept-loop panic や join / retire failure で worker または listener を失っても token を再試行し、socket と locator の
@@ -366,8 +403,8 @@ seamless refusal は registry を読み、欠けている前提を名前で示�
 | `no generation registry` | registry が存在しない。この data directory で daemon が一度も起動していない状態だけがこれに該当する |
 | `registry schema unsupported` | registry がこの build の書く schema ではない |
 | `registry unreadable` | registry を読めない / parse できない。fail closed |
-| `no verified standby` | readiness 後に artifact identity を検証済みの standby が居ない。**稼働中 daemon に対する現在の答えはこれである** |
-| `standby not admitted` | 検証済み standby は居るが、この build には serve 中の standby を admit する lifecycle が無い |
+| `no verified standby` | readiness 後に artifact identity を検証済みの standby が居ない。standby process が起動していない稼働中 daemon に対する答えはこれである |
+| `standby not admitted` | 検証済み standby は居るが、この build には serve 中の standby を admit する lifecycle が無い。[standby process](#standby-process-の-lifecycle) が readiness を通した状態に対する答えはこれである |
 
 registry へ登録された active generation 自身は standby として数えない。`verified_build` は
 「その generation の hello がこの artifact を証明した」という意味であり、active は standby role を抜けた
@@ -394,8 +431,8 @@ macOS では `usagi daemon install-service` が `~/Library/LaunchAgents/com.usag
 session state は保存しない。
 
 launchd は process supervisor であり、managed session や Agent の権威を持たない。手動の `start` と
-LaunchAgent が競合しても、`serve` が保持する `daemon.lock` が単一インスタンスを決める。lock を取得できない
-process は IPC endpoint を公開しない。`uninstall-service` は supervision を止めるが、実行中 daemon の
+LaunchAgent が競合しても、active role の `serve` が保持する `daemon.lock` がその data directory の active を
+決める。lock を取得できない process は IPC endpoint を公開しない。`uninstall-service` は supervision を止めるが、実行中 daemon の
 停止は `usagi daemon stop` が担う。非 macOS では service 操作は unsupported として失敗し、既存の detached
 `start` 経路は変わらない。
 
@@ -407,12 +444,12 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | path | 種別 | 用途 |
 |---|---|---|
 | `daemon.json` | JSON | 稼働中 daemon の pid と登録時刻を持つ lifecycle record。daemon は起動時に書き、endpoint cleanup 後に exact record だけを消去する |
-| `daemon.lock` | lock file | `serve` が保持する単一インスタンス lock。process 終了時に OS が解放する |
+| `daemon.lock` | lock file | active role の `serve` が保持する単一インスタンス lock（standby は取らない）。process 終了時に OS が解放する |
 | `bootstrap.lock` | lock file | client の connect/start/restart/recover bootstrap を cross-process で直列化する |
 | `record.lock` | lock file | `daemon.json` の read、save、incarnation-conditional clear を cross-process で直列化する |
 | `current.lock` | lock file | current locator の publish と generation-fenced retire を cross-process で直列化する |
 | `current.json` | private atomic JSON locator | active daemon generation の Unix socket endpoint を公開する。安全な publication の正本は [4. IPC の Unix transport](04-ipc.md#unix-transport) |
-| `generations.json` | durable atomic JSON | cross-process generation registry。schema、document revision、各 generation の role / endpoint / process identity / expected・verified artifact、進行中 handoff を持つ。`serve` は起動時に自分を単一 active として登録し、終了時に返却する（[first activation](#first-activation)） |
+| `generations.json` | durable atomic JSON | cross-process generation registry。schema、document revision、各 generation の role / endpoint / process identity / expected・verified artifact、進行中 handoff を持つ。active role の `serve` は起動時に自分を単一 active として登録し、終了時に返却する（[first activation](#first-activation)）。standby role の `serve` は自分を standby として登録し、readiness 後に `verified_build` を記録する（[standby process の lifecycle](#standby-process-の-lifecycle)） |
 | `generations.lock` | lock file | `generations.json` の read・compare-and-swap を cross-process で直列化する |
 | `allocations.json` | durable atomic JSON | global resource allocator。resource claim（owner generation・kind・capacity pool・producer operation・semantic digest・state・revision）、producer launch operation の full outcome、compact tombstone、consume ledger、expiry watermark を持つ（[owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)） |
 | `allocations.lock` | lock file | `allocations.json` の read・compare-and-swap を cross-process で直列化する |
@@ -1148,11 +1185,12 @@ TUI は最新 snapshot を workspace の左ペイン下部にある v1 互換の
 2 つの daemon process が一時的に共存する planned restart の前提となる authority である。本節がその契約の正本で、
 process 内 1 世代の fence（[generation と orphan safety](#generation-と-orphan-safety)）とは別物である。
 
-shipping `serve` はこの authority のうち **first activation** を駆動する。自分の generation を registry の
-単一 active として登録し、`current.json` を publish し、正常終了時に返却する。standby の登録・readiness・
-handoff の駆動はまだ行わない（[planned replacement](#planned-replacement)）。standby lifecycle は
-[#561](../.usagi/issues/561-refactor-daemon-serve-role-aware-standby-process.md)、rollover の有効化は
-[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) が担う。
+shipping `serve` はこの authority のうち **role の取得**までを駆動する。active role では自分の generation を
+registry の単一 active として登録し（[first activation](#first-activation)）、`current.json` を publish し、
+正常終了時に返却する。standby role では private endpoint を bind して registry へ standby として登録し、
+readiness 後に `verified_build` を立てる（[standby process の lifecycle](#standby-process-の-lifecycle)）。
+**handoff の駆動と old generation の回収は行わない**（[planned replacement](#planned-replacement)）。rollover の
+有効化は [#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) が担う。
 
 ### durable registry
 
@@ -1220,6 +1258,87 @@ reconcile / save、supervisor tick、worker 起動、spawn を一切行わない
 | `ServerHello` の artifact が admit 時の expected artifact と exact match すること | old active / current を維持 |
 
 version と target が同じでも source tree が異なる build、どちらか一方でも unknown な identity は match にしない。
+
+### standby process の lifecycle
+
+`usagi daemon serve --standby` が駆動する process の lifecycle である。role は argv で起動時に確定し、process の
+途中で変わることはない。standby が active になるのは [handoff protocol](#handoff-protocol) であり、それは
+authority を受け取った process の仕事である。
+
+standby は **何も所有しない**。この 1 点から lifecycle の差が全部出る。
+
+| | active role | standby role |
+|---|---|---|
+| [2 段 fence](#単一-daemon-の-2-段-fence) | 両方を process lifetime 保持する | どちらも取らない |
+| `daemon.json` | 自分を owner として登録する | 書かない |
+| endpoint | bind して `current.json` を publish する | `bind_private` のみ。publish しない |
+| durable runtime state | 起動時に reconcile する | read-only で hydrate する（[standby hydrate と activation](#standby-hydrate-と-activation)） |
+| worker | PTY / supervisor / PR / teardown / retention を起動する | 起動しない |
+| custody | lock と record（[custody 喪失による self-shutdown](#custody-喪失による-self-shutdown)） | 自分の registry entry と live な incumbent |
+
+段は 6 つで、最初の refusal は**何も作る前**に置く。
+
+```text
+1  prepare     shutdown 配送を用意する
+2  preflight   生存する「registry が名指す」active がこの data directory を所有していることを証明する
+3  bind        bind_private で private endpoint を bind し、readiness handshake に応答し始める
+4  admit       preflight を再証明し、registry へ standby 登録 → readiness → verified_build を記録する
+5  run         shutdown 要求まで待つ
+6  stand down  registry entry を返却してから endpoint を retire する
+```
+
+preflight が先にあるのは、standby が現実に受ける refusal（daemon が動いていない、旧 build が registry に登録せず
+data directory を所有している）で **他 process の tree に socket を作らない**ためである。`admit` で同じ証明を
+繰り返すのは、bind に掛かる時間の間に active が死にうるからで、窓を registry write 1 回の幅に縮める。
+
+| preflight / admit の refusal | 状態 |
+|---|---|
+| `no generation registry` | registry が無い。この data directory で daemon が一度も起動していない |
+| `registry schema unsupported` | この build が書く schema ではない |
+| `no live owner` | `daemon.json` が無い、または exact に生存証明できない。standby は serve を**始める**手段ではない |
+| `owner unregistered` | 生存 owner が居るが registry の active ではない。**旧 build 混在の fail closed**（登録しない `serve` が所有する directory に standby を付けない） |
+| `handoff in flight` | 進行中の handoff が 2 つの role を使い切っている |
+
+これらはすべて **effect zero** である。registry、`current.json`、`daemon.json`、active の endpoint はいずれも動かない。
+2 つ目の standby は registry の generation 上限（active 1 + standby 1）に当たり `generation_limit` で拒否される。
+
+stand down の順序は active の**逆**である。active は `current.json`（endpoint を名指すもの）を registry entry より
+先に retire するが、standby は何も publish していないため、その registry entry が endpoint を名指す唯一のものになる。
+entry を先に返却しないと、「retain された standby が既に消えた socket を名指す」状態が残り、それは rollover が
+信じてしまう state である。entry の返却に失敗しても endpoint は retire する。この順序が守っているのは
+**process が生きている間**の窓であり、stand down を抜けた時点で process は終了するため、socket file を残しても
+応答は返らない（残せば次の sweep が回収すべき residue が増えるだけである）。retain されたままの entry も、
+handoff が successor に対して行う生存確認を通らないので successor には選ばれない。報告するのは最初の失敗である。
+
+standby の custody は **自分の registry entry と、後継すべき incumbent** の 2 つである。lock も record も持たない
+ため active の 2 invariant は存在しない。約 1 秒周期で registry を読み直し、次のいずれかを観測した時点で graceful
+shutdown を要求する（registry が読めない場合は「不明」として継続する）。
+
+| custody loss | 意味 |
+|---|---|
+| entry が無い | この generation は registry から消えた |
+| entry が retired | handoff の fail closed、active 消滅後の recovery、または collection が退役させた |
+| entry が別 process を名指す | この process はもうその generation ではない |
+| live な active が居ない | 後継すべき authority が消えた（in-flight handoff 中は判定を保留する） |
+
+standby から active / draining への昇格は loss ではない（退役だけが loss であり、昇格した generation は
+incumbent 判定の対象からも外れる）。生存判定は他の authority 判定と同じく registry が記録した exact
+process-start identity で行い、PID の再利用は incumbent の生存を証明しない。
+
+**incumbent 側の invariant は省略できない。** standby は retained generation であり、activation は retained
+generation が 1 つでもある registry を `authority_retained` で拒否する（[first
+activation](#first-activation)）。したがって incumbent より長生きした standby は、以後この data directory の
+`daemon start` を恒久的に失敗させる。crash 経路だけなら entry の invariant で足りる（次の start の
+[recovery](#handoff-protocol) が全 generation を retired にし、standby はそれを観測して終了する）が、**通常の
+`daemon stop` は active 自身の entry しか retire しない**ため、standby の entry は無傷のまま残る。この経路を
+閉じるのが incumbent custody である。
+
+standby の endpoint が答えるのは handshake と typed refusal だけである。`ServerHello` は role を `standby` と名乗り
+（owner binding は `active` を要求するので、client がこれを data directory の authority と誤認することはない）、
+`daemon.generation-handoff.v1` を advertise する。handshake 後の request は
+[admission fence](#admission-fence) を通し、control / spawn / 他 generation の terminal は fence が拒否する。
+fence が受理する read も、この build の standby は読む runtime state を所有していないため typed に拒否する
+（owner shard の接続は [#562](../.usagi/issues/562-refactor-daemon-durable-runtime-state-owner-shard-global-allocator.md)）。
 
 ### handoff protocol
 
@@ -1397,6 +1516,12 @@ standby は自分の shard を **read-only** で hydrate し、読んだ shard r
 readiness 中は reconcile / save、worker / tick、spawn を行わない。handoff commit 後に writer を開くとき、両
 revision を再検証し、どちらかが動いていれば `sealed_elsewhere` で admission を開始しない。
 
+shipping の standby process はまだ owner shard を持たないため、hydrate の対象は single-writer store
+（`sessions.json`）である。読むのは lifecycle state 1 回だけで、そこから active が authority を取った workspace root と
+seal した state revision を得る。reconcile も legacy migration も行わず、未初期化の store は「初期化するのは所有者だけ」
+として拒否する。shard 化された hydrate への移行は
+[#562](../.usagi/issues/562-refactor-daemon-durable-runtime-state-owner-shard-global-allocator.md) が担う。
+
 ### generation collection
 
 old generation が回収可能になるのは、自 shard の live resource 0、in-flight terminal command 0、未 ACK outbox 0、
@@ -1483,9 +1608,9 @@ draining owner として維持する機構ではない。安全な landing order
 [#561](../.usagi/issues/561-refactor-daemon-serve-role-aware-standby-process.md)、owner shard 移行の
 [#562](../.usagi/issues/562-refactor-daemon-durable-runtime-state-owner-shard-global-allocator.md)、client routing の
 [#560](../.usagi/issues/560-feat-tui-client-ownerrouter-owner-generation-routing.md)、shipping lifecycle / final E2E の
-[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) の順である。standby serve・owner shard・client routing の production 配線が揃うまで
-seamless rollover は disabled であり、shipping の replacement は old active/current と live PTY を維持した
-typed refusal か明示的な cold transition になる（[planned replacement](#planned-replacement)）。
+[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) の順である。owner shard 移行と
+rollover の駆動が揃うまで seamless rollover は disabled であり、shipping の replacement は old active/current と
+live PTY を維持した typed refusal か明示的な cold transition になる（[planned replacement](#planned-replacement)）。
 
 spawn reservation は process spawn より先に保存する。crash 後に process identity を証明できない terminal は
 `identity_unknown` として扱い、replacement spawn、input、kill を自動で行わない。PID の生存だけでは ownership

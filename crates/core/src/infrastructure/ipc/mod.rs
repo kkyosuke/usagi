@@ -381,11 +381,19 @@ pub struct ServerHello {
     pub daemon_process: Option<crate::domain::daemon::DaemonRecord>,
 }
 
+/// The authority a serving generation advertises for itself.
+///
+/// A client only ever *binds* to `Active` (`usecase::client` refuses anything
+/// else as an owner), so the other roles exist to let a peer say what it is
+/// rather than to widen what a client may trust. `Standby` is what a generation
+/// that has bound a private endpoint but publishes no locator answers with: it
+/// is reachable by name for a readiness handshake, and nothing more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GenerationRole {
     Active,
     Draining,
+    Standby,
 }
 
 /// Bootstrap messages are deliberately separate from post-handshake envelopes.
