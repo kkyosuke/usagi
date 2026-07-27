@@ -505,8 +505,8 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
     let rows = restored_screen(&snapshot);
     assert!(screen_contains(&rows, "ready"), "{rows:?}");
     assert!(screen_contains(&rows, "input:go"), "{rows:?}");
-    let durable = fs::read_to_string(data_dir.join("daemon/agents.json")).unwrap();
-    assert!(durable.contains("provider_structured"));
+    let durable = serde_json::to_string(&durable_records(&data_dir)).unwrap();
+    assert!(durable.contains("provider_structured"), "{durable}");
 
     let (resume_operation, resumed_terminal) = resume(&mut reattached, "agent-e2e");
     assert_ne!(terminal, resumed_terminal);
@@ -1100,19 +1100,13 @@ fn live_terminal_pid(data_dir: &Path) -> u64 {
 }
 
 fn live_terminal(data_dir: &Path) -> (TerminalRef, u64) {
-    let path = data_dir.join("daemon/terminals.json");
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut last = String::new();
     loop {
-        last = fs::read_to_string(&path).unwrap_or(last);
-        let found = serde_json::from_str::<serde_json::Value>(&last)
-            .ok()
-            .and_then(|snapshot| snapshot["records"].as_array().cloned())
-            .and_then(|records| {
-                let record = records
-                    .iter()
-                    .find(|record| record["state"] == "running")?
-                    .clone();
+        let records = durable_records(data_dir);
+        let found = records
+            .iter()
+            .find(|record| record["state"] == "running" && record["terminal"].is_object())
+            .and_then(|record| {
                 let terminal = serde_json::from_value(record["terminal"].clone()).ok()?;
                 Some((terminal, record["process"]["pid"].as_u64()?))
             });
@@ -1121,10 +1115,43 @@ fn live_terminal(data_dir: &Path) -> (TerminalRef, u64) {
         }
         assert!(
             Instant::now() < deadline,
-            "no live generic terminal was persisted: {last}"
+            "no live generic terminal was persisted: {records:?}"
         );
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// The production records every retained owner shard holds.
+///
+/// The durable runtime state is one document per owner generation now, and each
+/// record travels as the opaque payload of its shard resource (#562). Reading them
+/// back gives the tests the same record list the whole-snapshot stores used to
+/// hold.
+fn durable_records(data_dir: &Path) -> Vec<serde_json::Value> {
+    let shards = data_dir.join("daemon").join("shards");
+    let Ok(entries) = fs::read_dir(&shards) else {
+        return Vec::new();
+    };
+    let mut records = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(document) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(resources) = document["resources"].as_array() else {
+            continue;
+        };
+        records.extend(resources.iter().filter_map(|resource| {
+            serde_json::from_str::<serde_json::Value>(resource["payload"].as_str()?).ok()
+        }));
+    }
+    records
 }
 
 fn daemon_pid(data_dir: &Path) -> u64 {

@@ -130,6 +130,7 @@ pub fn adopt_legacy(owner: DaemonGeneration, records: &[LegacyRuntimeRecord]) ->
             digest: record.digest.clone().unwrap_or_default(),
             process,
             state,
+            payload: None,
             revision: 1,
         });
     }

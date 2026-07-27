@@ -305,7 +305,7 @@ fn an_old_exit_and_a_new_spawn_run_in_two_processes_without_losing_either() {
     await_until("the draining owner's child being gone", || {
         observe_child(&UnixChildProbe, child.process.as_ref().unwrap()).is_definitely_gone()
     });
-    publish_exit(&shard(data_dir, old), &old_resource, status).unwrap();
+    publish_exit(&shard(data_dir, old), &old_resource, Some(status)).unwrap();
 
     assert!(
         worker.wait().unwrap().success(),

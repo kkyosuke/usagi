@@ -16,6 +16,7 @@
 //! | [`retention`] | how the operation ledger stays bounded without ever replaying a wrong answer |
 //! | [`migration`] | can the legacy single-writer stores be adopted, or must the rollover refuse? |
 //! | [`fence`] | which other shared writers a draining process must not whole-save |
+//! | [`durable`] | how the shipping Agent and terminal stores are carried by all of the above |
 //!
 //! The split is deliberate: a shard has exactly one writer (its owner
 //! generation), so the owner never needs to merge. The allocator is shared, so
@@ -28,6 +29,7 @@
 
 pub mod allocator;
 pub mod drain;
+pub mod durable;
 pub mod fence;
 pub mod identity;
 pub mod launch;
@@ -182,6 +184,16 @@ pub trait CasFile {
     fn compare_and_write(&self, expected: Option<&str>, contents: &str) -> io::Result<bool>;
 }
 
+impl CasFile for Box<dyn CasFile + Send> {
+    fn read(&self) -> io::Result<Option<String>> {
+        self.as_ref().read()
+    }
+
+    fn compare_and_write(&self, expected: Option<&str>, contents: &str) -> io::Result<bool> {
+        self.as_ref().compare_and_write(expected, contents)
+    }
+}
+
 /// A durable document that can be compare-and-swapped.
 pub trait CasDocument: Clone + PartialEq + Serialize + DeserializeOwned {
     /// The document-wide revision every commit advances by exactly one.
@@ -231,13 +243,13 @@ impl<D: CasDocument> CasSnapshot<D> {
 /// swap protocol, so nothing about which store a caller binds can change the
 /// code that runs.
 pub struct CasStore<D> {
-    file: Box<dyn CasFile>,
+    file: Box<dyn CasFile + Send>,
     document: PhantomData<D>,
 }
 
 impl<D: CasDocument> CasStore<D> {
     /// Bind a store to its byte seam.
-    pub fn new(file: impl CasFile + 'static) -> Self {
+    pub fn new(file: impl CasFile + Send + 'static) -> Self {
         Self {
             file: Box::new(file),
             document: PhantomData,

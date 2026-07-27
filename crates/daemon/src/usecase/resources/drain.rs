@@ -107,7 +107,7 @@ impl<'a> ActiveConsumer<'a> {
 pub fn publish_exit(
     shard: &OwnerShard,
     resource: &usagi_core::domain::id::TerminalRef,
-    status: i32,
+    status: Option<i32>,
 ) -> Result<(), ResourceFailure> {
     shard.update(|document| document.commit_exit(resource, status))?;
     Ok(())

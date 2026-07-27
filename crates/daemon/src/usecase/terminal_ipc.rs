@@ -105,11 +105,18 @@ pub struct GenericTerminalRuntime<R, S, P, Q> {
     scope: Q,
 }
 
+/// How many generic terminals one daemon admits at a time.
+///
+/// It is also the generic terminal capacity pool's global limit, which every
+/// retained generation shares and which is never implicitly summed with the Agent
+/// pool ([`crate::usecase::resources::allocator::CapacityPolicy`]).
+pub const GENERIC_TERMINAL_LIMIT: usize = 16;
+
 impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
     pub fn new(generation: DaemonGeneration, resolver: R, store: S, pty: P, scope: Q) -> Self {
         Self {
             generation,
-            coordinator: GenericTerminalCoordinator::new(16, 64 * 1024, 64),
+            coordinator: GenericTerminalCoordinator::new(GENERIC_TERMINAL_LIMIT, 64 * 1024, 64),
             resolver,
             store,
             pty,
@@ -149,7 +156,7 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
         Ok(Self {
             generation,
             coordinator: GenericTerminalCoordinator::from_snapshot_with_retention(
-                16,
+                GENERIC_TERMINAL_LIMIT,
                 64 * 1024,
                 64,
                 snapshot,
@@ -172,6 +179,21 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
     {
         self.coordinator.retention().collect();
         self.coordinator.collect_garbage(&mut self.store)
+    }
+
+    /// The resource ids this owner still answers for.
+    ///
+    /// Durable state of a generation that is gone may only be collected once
+    /// nothing retains its records any more, and this is the live half of that
+    /// question ([`crate::usecase::resources::durable::ShardedRuntimeState::collect`]).
+    #[must_use]
+    pub fn retained_resources(&self) -> std::collections::BTreeSet<String> {
+        self.coordinator
+            .snapshot()
+            .records
+            .iter()
+            .map(|record| record.terminal.terminal_id.as_str())
+            .collect()
     }
     pub fn output(
         &mut self,
@@ -1672,9 +1694,16 @@ mod tests {
         runtime.exit(&terminal, 0).unwrap();
         // Nothing is due yet, so an idle tick collects nothing.
         assert_eq!(runtime.collect_retention_garbage(), 0);
+        // While the record is retained, the durable state of a retired generation
+        // that holds it may not be collected either (#562).
+        assert_eq!(
+            runtime.retained_resources(),
+            std::iter::once(terminal.terminal_id.as_str()).collect()
+        );
         clock.advance(1000);
         assert_eq!(runtime.collect_retention_garbage(), 1);
         assert!(retention.lookup(&terminal).marker().is_some());
+        assert!(runtime.retained_resources().is_empty());
     }
 
     /// The wire contract of #519: one operation identity, one PTY write, and a

@@ -4,7 +4,7 @@ use usagi_core::domain::id::{DaemonGeneration, OperationId, TerminalRef};
 
 use super::{
     CollectionBlocker, OwnerEvent, ResourceState, SHARD_SCHEMA, ShardDocument, collectable,
-    hydrate, open_writer,
+    hydrate, open_writer, retired_collectable,
 };
 use crate::usecase::resources::allocator::{AllocatorDocument, ClaimState, ResourceKind};
 use crate::usecase::resources::fixture::{
@@ -38,7 +38,7 @@ fn a_reservation_is_idempotent_and_a_contradicting_one_is_refused() {
     assert!(ResourceState::Reserved.is_live());
     assert!(ResourceState::Running.is_live());
     assert!(!ResourceState::OwnershipUnknown.is_live());
-    assert!(!ResourceState::Exited { status: 0 }.is_live());
+    assert!(!ResourceState::Exited { status: Some(0) }.is_live());
 
     document
         .reserve(&operation, "digest", ResourceKind::Terminal, &resource)
@@ -112,7 +112,7 @@ fn an_unprovable_record_stays_visible_and_holds_no_child() {
         Err(ResourceError::UnknownResource)
     );
     assert_eq!(
-        document.commit_exit(&resource, 0),
+        document.commit_exit(&resource, Some(0)),
         Err(ResourceError::WrongState),
         "an unprovable record never produces an exit"
     );
@@ -180,7 +180,7 @@ fn output_progress_publishes_one_event_per_offset() {
     );
     assert!(!OwnerEvent::Output { offset: 10 }.is_terminal());
     assert!(
-        OwnerEvent::Exit { status: 0 }.is_terminal(),
+        OwnerEvent::Exit { status: Some(0) }.is_terminal(),
         "only an exit releases capacity"
     );
     assert!(
@@ -200,10 +200,10 @@ fn an_exit_records_and_publishes_in_one_transition() {
         .accept_command(&resource, &OperationId::new())
         .unwrap();
 
-    document.commit_exit(&resource, 3).unwrap();
+    document.commit_exit(&resource, Some(3)).unwrap();
     assert_eq!(
         document.resource(&resource).unwrap().state,
-        ResourceState::Exited { status: 3 }
+        ResourceState::Exited { status: Some(3) }
     );
     assert_eq!(document.unacked_outbox(), 1);
     assert!(
@@ -211,14 +211,14 @@ fn an_exit_records_and_publishes_in_one_transition() {
         "an exit ends this owner's in-flight commands"
     );
 
-    document.commit_exit(&resource, 3).unwrap();
+    document.commit_exit(&resource, Some(3)).unwrap();
     assert_eq!(document.unacked_outbox(), 1, "an exit publishes once");
     assert_eq!(
-        document.commit_exit(&resource, 9),
+        document.commit_exit(&resource, Some(9)),
         Err(ResourceError::WrongState)
     );
     assert_eq!(
-        document.commit_exit(&terminal(owner), 0),
+        document.commit_exit(&terminal(owner), Some(0)),
         Err(ResourceError::UnknownResource)
     );
     document.validate().unwrap();
@@ -229,7 +229,7 @@ fn the_owner_reclaims_only_what_the_consumer_has_applied() {
     let owner = DaemonGeneration::new();
     let (mut document, operation, resource, _) = running(owner);
     document.commit_output(&resource, 5).unwrap();
-    document.commit_exit(&resource, 0).unwrap();
+    document.commit_exit(&resource, Some(0)).unwrap();
     assert_eq!(document.unacked_outbox(), 2);
 
     let mut allocator = AllocatorDocument::default();
@@ -259,6 +259,63 @@ fn the_owner_reclaims_only_what_the_consumer_has_applied() {
     assert_eq!(document.unacked_outbox(), 0);
     assert!(document.resource(&resource).is_none());
     document.validate().unwrap();
+}
+
+#[test]
+fn a_record_the_owner_stops_retaining_is_dropped_unless_it_holds_a_child() {
+    let owner = DaemonGeneration::new();
+    let (mut document, _, resource, _) = running(owner);
+    let absent = terminal(owner);
+
+    // Nothing to forget converges silently, so a repeated pass writes nothing.
+    document.forget(&absent).unwrap();
+    // A live record is never forgotten: that would hide a child nothing reaps.
+    assert_eq!(document.forget(&resource), Err(ResourceError::WrongState));
+
+    document.commit_exit(&resource, None).unwrap();
+    assert_eq!(document.unacked_outbox(), 1);
+    document.forget(&resource).unwrap();
+    assert!(document.resource(&resource).is_none());
+    // Its published events go with it: nothing can apply an event for a record
+    // that no longer exists.
+    assert_eq!(document.unacked_outbox(), 0);
+    document.validate().unwrap();
+}
+
+#[test]
+fn a_retired_owners_outbox_is_measured_by_what_the_allocator_applied() {
+    let owner = DaemonGeneration::new();
+    let (mut document, operation, resource, _) = running(owner);
+    document.commit_exit(&resource, Some(0)).unwrap();
+    let mut allocator = AllocatorDocument::default();
+
+    // No claim at all: the event has no addressee, so it cannot keep this
+    // generation alive forever.
+    assert_eq!(document.unconsumed_outbox(&allocator), 0);
+    assert_eq!(retired_collectable(&document, &allocator), Ok(()));
+
+    allocator
+        .reserve(
+            &operation,
+            "digest",
+            ResourceKind::Terminal,
+            owner,
+            &resource,
+            policy(4, 4),
+        )
+        .unwrap();
+    allocator.mark_spawned(&operation, 1).unwrap();
+    assert_eq!(document.unconsumed_outbox(&allocator), 1);
+    assert_eq!(
+        retired_collectable(&document, &allocator),
+        Err(CollectionBlocker::UnackedOutbox)
+    );
+
+    allocator.consume_exit(owner, &resource, 1).unwrap();
+    assert_eq!(document.unconsumed_outbox(&allocator), 0);
+    // The dead owner never swept its own outbox, and that no longer blocks it.
+    assert!(document.unacked_outbox() > 0);
+    assert_eq!(retired_collectable(&document, &allocator), Ok(()));
 }
 
 #[test]
@@ -353,7 +410,7 @@ fn a_self_contradicting_shard_is_refused_rather_than_repaired() {
     outbox_ahead.outbox.push(super::OutboxEvent {
         event_revision: 9,
         resource: resource.clone(),
-        event: OwnerEvent::Exit { status: 0 },
+        event: OwnerEvent::Exit { status: Some(0) },
     });
     assert_eq!(outbox_ahead.validate(), Err(ResourceError::Corrupt));
 
@@ -363,7 +420,7 @@ fn a_self_contradicting_shard_is_refused_rather_than_repaired() {
         duplicate_revision.outbox.push(super::OutboxEvent {
             event_revision: 1,
             resource: resource.clone(),
-            event: OwnerEvent::Exit { status: 0 },
+            event: OwnerEvent::Exit { status: Some(0) },
         });
     }
     assert_eq!(duplicate_revision.validate(), Err(ResourceError::Corrupt));
@@ -373,7 +430,7 @@ fn a_self_contradicting_shard_is_refused_rather_than_repaired() {
     unknown_outbox_resource.outbox.push(super::OutboxEvent {
         event_revision: 1,
         resource: terminal(owner),
-        event: OwnerEvent::Exit { status: 0 },
+        event: OwnerEvent::Exit { status: Some(0) },
     });
     assert_eq!(
         unknown_outbox_resource.validate(),

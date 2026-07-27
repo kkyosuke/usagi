@@ -566,7 +566,7 @@ fn the_planner_answers_every_durable_shape_from_evidence_alone() {
     );
 
     let mut exited = running.clone();
-    exited.commit_exit(&resource, 0).unwrap();
+    exited.commit_exit(&resource, Some(0)).unwrap();
     assert_eq!(
         plan_launch(&ledger, &exited, &plan, &mut exact).unwrap(),
         LaunchStep::CommitFinal {

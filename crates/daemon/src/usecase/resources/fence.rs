@@ -19,6 +19,12 @@
 //! semantics cannot lose an update. Whole-snapshot writers need exactly one
 //! writer, which is the active generation.
 
+use std::collections::BTreeMap;
+
+use usagi_core::domain::id::SessionId;
+use usagi_core::domain::pr_inventory::PrInventory;
+use usagi_core::usecase::pr_inventory::PrInventoryPort;
+
 use crate::usecase::generation::GenerationRole;
 
 /// How a shared document is written.
@@ -113,6 +119,89 @@ pub fn fenced_writers() -> Vec<SharedWriter> {
         .into_iter()
         .filter(|writer| writer.mode() == WriteMode::WholeSnapshot)
         .collect()
+}
+
+/// Why a fenced write was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FenceRefusal {
+    pub writer: SharedWriter,
+    pub role: GenerationRole,
+}
+
+impl std::fmt::Display for FenceRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{:?} may not be written by a {:?} generation",
+            self.writer, self.role
+        )
+    }
+}
+
+/// Either the underlying port's failure or this fence's refusal.
+#[derive(Debug)]
+pub enum FencedError<E> {
+    Port(E),
+    Refused(FenceRefusal),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for FencedError<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Port(error) => write!(formatter, "{error}"),
+            Self::Refused(refusal) => write!(formatter, "{refusal}"),
+        }
+    }
+}
+
+/// The PR inventory, behind its generation fence.
+///
+/// The inventory is refreshed from PTY output observation, which a draining owner
+/// still produces — and it is a whole-snapshot document, so two writers would lose
+/// an update in exactly the way the runtime shards were split to avoid.
+///
+/// The decision this fence encodes is that a draining generation *does not write
+/// the inventory at all*: the observation it holds belongs to terminals that are
+/// ending, and the active generation's own refresh recomputes the sessions it
+/// still owns. Nothing has to be deferred to an outbox, so the cache the active
+/// single writer keeps is never invalidated by somebody else's write.
+///
+/// Reads stay open to every role: hydrating a cache observes state, and observing
+/// cannot lose an update.
+pub struct FencedPrInventory<P> {
+    port: P,
+    role: GenerationRole,
+}
+
+impl<P> FencedPrInventory<P> {
+    /// Bind `port` to the role of the process that holds it.
+    pub const fn new(port: P, role: GenerationRole) -> Self {
+        Self { port, role }
+    }
+
+    /// Whether this process is the inventory's single writer.
+    #[must_use]
+    pub fn writable(&self) -> bool {
+        shared_write_verdict(SharedWriter::PrInventory, self.role) == WriteVerdict::Allowed
+    }
+}
+
+impl<P: PrInventoryPort> PrInventoryPort for FencedPrInventory<P> {
+    type Error = FencedError<P::Error>;
+
+    fn load(&self) -> Result<BTreeMap<SessionId, PrInventory>, Self::Error> {
+        self.port.load().map_err(FencedError::Port)
+    }
+
+    fn save(&self, sessions: &BTreeMap<SessionId, PrInventory>) -> Result<(), Self::Error> {
+        if !self.writable() {
+            return Err(FencedError::Refused(FenceRefusal {
+                writer: SharedWriter::PrInventory,
+                role: self.role,
+            }));
+        }
+        self.port.save(sessions).map_err(FencedError::Port)
+    }
 }
 
 #[cfg(test)]

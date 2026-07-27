@@ -454,64 +454,55 @@ fn daemon_generation(home: &Path) -> String {
 }
 
 fn agent_processes(home: &Path, expected: usize) -> Vec<(TerminalRef, u64)> {
-    let path = channel_data_dir(home).join("daemon/agents.json");
+    let data_dir = channel_data_dir(home);
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut last_snapshot = String::new();
     loop {
-        let text = fs::read_to_string(&path).unwrap_or_default();
-        last_snapshot.clone_from(&text);
-        let processes = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|snapshot| snapshot["records"].as_array().cloned())
-            .map(|records| {
-                let mut processes = records
-                    .into_iter()
-                    .filter_map(|record| {
-                        if record["state"] != "running" {
-                            return None;
-                        }
-                        let terminal =
-                            serde_json::from_value(record["runtime"]["terminal"].clone()).ok()?;
-                        let pid = record["process"]["pid"].as_u64()?;
-                        process_is_alive(pid).then_some((terminal, pid))
-                    })
-                    .collect::<Vec<_>>();
-                processes.sort_by_key(|(terminal, _)| serde_json::to_string(terminal).unwrap());
-                processes
+        let records = durable_records(&data_dir);
+        let mut processes = records
+            .iter()
+            .filter(|record| record["state"] == "running")
+            .filter_map(|record| {
+                let terminal =
+                    serde_json::from_value(record["runtime"]["terminal"].clone()).ok()?;
+                let pid = record["process"]["pid"].as_u64()?;
+                process_is_alive(pid).then_some((terminal, pid))
             })
-            .unwrap_or_default();
+            .collect::<Vec<_>>();
+        processes.sort_by_key(|(terminal, _)| serde_json::to_string(terminal).unwrap());
         if processes.len() == expected {
             return processes;
         }
         assert!(
             Instant::now() < deadline,
-            "Agent process identities did not reach exactly {expected} live entries: {last_snapshot}"
+            "Agent process identities did not reach exactly {expected} live entries: {records:?}"
         );
         thread::sleep(Duration::from_millis(20));
     }
 }
 
 fn generic_terminal_process(home: &Path) -> (TerminalRef, u64) {
-    let path = channel_data_dir(home).join("daemon/terminals.json");
+    let data_dir = channel_data_dir(home);
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut last_snapshot = String::new();
+    let mut last_snapshot;
     loop {
-        let text = fs::read_to_string(&path).unwrap_or_default();
-        last_snapshot.clone_from(&text);
-        let process = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|snapshot| snapshot["records"].as_array().cloned())
-            .and_then(|records| {
-                let [record] = records.as_slice() else {
-                    return None;
-                };
-                if record["state"] != "running" {
-                    return None;
-                }
-                let terminal = serde_json::from_value(record["terminal"].clone()).ok()?;
-                let pid = record["process"]["pid"].as_u64()?;
-                process_is_alive(pid).then_some((terminal, pid))
-            });
+        let records = durable_records(&data_dir);
+        last_snapshot = format!("{records:?}");
+        let process = Some(records).and_then(|records| {
+            let generic: Vec<_> = records
+                .iter()
+                .filter(|record| record["terminal"].is_object())
+                .cloned()
+                .collect();
+            let [record] = generic.as_slice() else {
+                return None;
+            };
+            if record["state"] != "running" {
+                return None;
+            }
+            let terminal = serde_json::from_value(record["terminal"].clone()).ok()?;
+            let pid = record["process"]["pid"].as_u64()?;
+            process_is_alive(pid).then_some((terminal, pid))
+        });
         if let Some(process) = process {
             return process;
         }
@@ -615,27 +606,21 @@ fn launch_agent(
 
 /// `expected` 件の live generic terminal が persist されるまで待ち、その exact ref と pid を返す。
 fn generic_terminal_processes(home: &Path, expected: usize) -> Vec<(TerminalRef, u64)> {
-    let path = channel_data_dir(home).join("daemon/terminals.json");
+    let data_dir = channel_data_dir(home);
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut last_snapshot = String::new();
+    let mut last_snapshot;
     loop {
-        let text = fs::read_to_string(&path).unwrap_or_default();
-        last_snapshot.clone_from(&text);
-        let processes = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|snapshot| snapshot["records"].as_array().cloned())
-            .map(|records| {
-                records
-                    .iter()
-                    .filter(|record| record["state"] == "running")
-                    .filter_map(|record| {
-                        let terminal = serde_json::from_value(record["terminal"].clone()).ok()?;
-                        let pid = record["process"]["pid"].as_u64()?;
-                        process_is_alive(pid).then_some((terminal, pid))
-                    })
-                    .collect::<Vec<_>>()
+        let records = durable_records(&data_dir);
+        last_snapshot = format!("{records:?}");
+        let processes = records
+            .iter()
+            .filter(|record| record["state"] == "running" && record["terminal"].is_object())
+            .filter_map(|record| {
+                let terminal = serde_json::from_value(record["terminal"].clone()).ok()?;
+                let pid = record["process"]["pid"].as_u64()?;
+                process_is_alive(pid).then_some((terminal, pid))
             })
-            .unwrap_or_default();
+            .collect::<Vec<_>>();
         if processes.len() == expected {
             return processes;
         }
@@ -2420,4 +2405,37 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
     drop(slave);
     drop(master);
     reader.join().unwrap();
+}
+
+/// The production records every retained owner shard holds.
+///
+/// The durable runtime state is one document per owner generation now, and each
+/// record travels as the opaque payload of its shard resource (#562). Reading them
+/// back gives the tests the same record list the whole-snapshot stores used to
+/// hold.
+fn durable_records(data_dir: &Path) -> Vec<serde_json::Value> {
+    let shards = data_dir.join("daemon").join("shards");
+    let Ok(entries) = fs::read_dir(&shards) else {
+        return Vec::new();
+    };
+    let mut records = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(document) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(resources) = document["resources"].as_array() else {
+            continue;
+        };
+        records.extend(resources.iter().filter_map(|resource| {
+            serde_json::from_str::<serde_json::Value>(resource["payload"].as_str()?).ok()
+        }));
+    }
+    records
 }

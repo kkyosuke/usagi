@@ -33,7 +33,6 @@ use usagi_core::infrastructure::ipc::{
     build_artifact_decision, build_rollover_trigger,
 };
 use usagi_core::infrastructure::paths;
-use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::infrastructure::store::dispatch::DispatchStore;
 use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::pr_inventory::PrInventoryStore;
@@ -49,14 +48,15 @@ use usagi_daemon::infrastructure::generation_registry::{
     CurrentLocatorFile, GenerationRegistryFile,
 };
 use usagi_daemon::infrastructure::pty::PtyTerminal;
+use usagi_daemon::infrastructure::resource_store::{AllocatorFile, ShardArchiveFiles};
 use usagi_daemon::infrastructure::unix_transport::{
     EndpointCleanup, EndpointLocator, SecureUnixListener, ensure_private_dir,
     ensure_private_dir_all, peer_pid, read_locator, retire_stale_current,
 };
 use usagi_daemon::presentation::{DaemonCommand as PresentationDaemonCommand, DaemonEnv};
 use usagi_daemon::usecase::agent_ipc::{
-    AgentRuntime, AgentTerminalActor, ResolvedAgentScope, ScopeResolveError, SessionScopeResolver,
-    SharedTerminalOwner, TerminalOutcome,
+    AGENT_RUNTIME_LIMIT, AgentRuntime, AgentTerminalActor, ResolvedAgentScope, ScopeResolveError,
+    SessionScopeResolver, SharedTerminalOwner, TerminalOutcome,
 };
 use usagi_daemon::usecase::authority::activation::{
     AuthorityClaim, claim_authority, release_authority,
@@ -73,9 +73,9 @@ use usagi_daemon::usecase::codex::{
     CodexAdapter, CodexProvision, CodexProvisionFailure, CodexProvisioner,
 };
 use usagi_daemon::usecase::custody::{Custody, CustodyProbe, NodeIdentity};
-use usagi_daemon::usecase::generation::{ProcessIdentity, ProcessObservation};
+use usagi_daemon::usecase::generation::{GenerationRole, ProcessIdentity, ProcessObservation};
 use usagi_daemon::usecase::generic_terminal::{
-    GenericPtySpawner, TerminalProfileResolver, TerminalStore, TerminalStoreSnapshot,
+    GenericPtySpawner, TerminalProfileResolver, TerminalStore,
 };
 use usagi_daemon::usecase::metrics::{MetricsBroker, MetricsObserver, MetricsSample};
 use usagi_daemon::usecase::orchestration::AdapterRegistry;
@@ -86,13 +86,20 @@ use usagi_daemon::usecase::pr_projection::{
     PrProjection, PrProjectionQueue, pr_projection_counters,
 };
 use usagi_daemon::usecase::replacement::{
-    LiveResources, ResourceCensus, SeamlessRefusal, TransitionMode, census_of, manual_operation_id,
+    LiveResources, ResourceCensus, SeamlessRefusal, TransitionMode, manual_operation_id,
     seamless_refusal,
 };
-use usagi_daemon::usecase::resources::identity::ChildProcessProbe;
+use usagi_daemon::usecase::resources::allocator::{CapacityPolicy, ResourceAllocator};
+use usagi_daemon::usecase::resources::durable::{
+    IdentityAuthority, ShardedAgentStore, ShardedRuntimeState, ShardedTerminalStore, census,
+    shipping_retention_limits,
+};
+use usagi_daemon::usecase::resources::fence::FencedPrInventory;
+use usagi_daemon::usecase::resources::identity::{ChildIdentity, ChildProcessProbe, record_child};
+use usagi_daemon::usecase::resources::retention::LogicalClock;
 use usagi_daemon::usecase::runtime::{
-    OutputJournal, ProvisionContext, PtySpawner, RuntimeStore, RuntimeStoreSnapshot,
-    SandboxLauncher, SpawnProvision, TerminateReapError,
+    OutputJournal, ProvisionContext, PtySpawner, SandboxLauncher, SpawnProvision,
+    TerminateReapError,
 };
 use usagi_daemon::usecase::serve::{DaemonRecordPort, GenerationAuthority};
 use usagi_daemon::usecase::session_runtime::{
@@ -112,7 +119,8 @@ use usagi_daemon::usecase::terminal::{
     output_pipeline_counters,
 };
 use usagi_daemon::usecase::terminal_ipc::{
-    GenericTerminalRuntime, ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
+    GENERIC_TERMINAL_LIMIT, GenericTerminalRuntime, ResolvedTerminalScope,
+    TerminalScopeResolveError, TerminalScopeResolver,
 };
 use usagi_daemon::usecase::terminal_profile::{LoginShellProfile, TERMINAL_ENVIRONMENT_VARIABLES};
 
@@ -180,59 +188,143 @@ fn terminal_environment() -> BTreeMap<String, String> {
         .collect()
 }
 
-struct FileTerminalStore(PathBuf);
-impl TerminalStore for FileTerminalStore {
-    fn save(&mut self, snapshot: TerminalStoreSnapshot) -> Result<(), ()> {
-        let directory = snapshot_directory(&self.0).map_err(|_| ())?;
-        json_file::write_atomic(directory, &self.0, &snapshot).map_err(|_| ())
-    }
-}
+/// The children this process spawned and observed through the OS.
+///
+/// Verifiability cannot be recovered from a durable record — a stored token is
+/// only bytes, and this build's predecessor stored a fixed string — so the proof
+/// lives here, in the process that watched the child start. The PTY spawners write
+/// it and the durable stores read it, which is what lets a shard resource be
+/// `Running` at all. It deliberately does not survive a restart: a recovered
+/// record is `identity_unknown`, exactly as the shipping reconcile reports it.
+#[derive(Default)]
+struct SpawnedChildren(Mutex<BTreeMap<u32, ChildIdentity>>);
 
-impl FileTerminalStore {
-    /// Loads and fences terminal records which outlived their PTY-owning daemon.
-    /// Invalid bytes or schema never reach launch admission and are not replaced.
-    fn load_reconciled(&mut self) -> std::io::Result<(TerminalStoreSnapshot, usize)> {
-        let snapshot = json_file::read::<TerminalStoreSnapshot>(&self.0)
-            .map_err(std::io::Error::other)?
-            .unwrap_or_default();
-        let (snapshot, interrupted) = snapshot
-            .reconcile_after_daemon_restart()
-            .map_err(|_| std::io::Error::other("invalid generic terminal snapshot"))?;
-        if interrupted != 0 {
-            self.save(snapshot.clone())
-                .map_err(|()| std::io::Error::other("could not reconcile terminal snapshot"))?;
+impl SpawnedChildren {
+    /// Observe a freshly spawned child and record it as this process's own.
+    ///
+    /// A platform that cannot answer yields the explicitly unverifiable token
+    /// instead of a fabricated one, so the record stays visible and fails closed.
+    fn observe(&self, probe: &dyn ChildProcessProbe, pid: u32, fallback: &str) -> ProcessIdentity {
+        let Ok(identity) = record_child(probe, pid) else {
+            return ProcessIdentity {
+                pid,
+                start_identity: fallback.to_owned(),
+                process_group: pid,
+            };
+        };
+        let recorded = identity.to_process_identity();
+        if let Ok(mut observed) = self.0.lock() {
+            observed.insert(pid, identity);
         }
-        Ok((snapshot, interrupted))
+        recorded.unwrap_or_else(|_| ProcessIdentity {
+            pid,
+            start_identity: fallback.to_owned(),
+            process_group: pid,
+        })
     }
 }
 
-/// Counts the live runtime a daemon owns, read from the two durable snapshots
-/// it is the single writer of.
+/// The store-side view of [`SpawnedChildren`]: it can only ask, never record.
+struct ObservedChildren(Arc<SpawnedChildren>);
+
+impl IdentityAuthority for ObservedChildren {
+    fn verified(&self, process: &ProcessIdentity) -> Option<ChildIdentity> {
+        self.0
+            .0
+            .lock()
+            .ok()?
+            .get(&process.pid)
+            .filter(|identity| {
+                identity.start_identity == process.start_identity
+                    && identity.process_group == process.process_group
+            })
+            .cloned()
+    }
+}
+
+/// Logical time for the operation ledger, in whole seconds of wall clock.
+///
+/// The ledger only ever compares it against its own recorded seals, so a coarse
+/// monotonic-enough reading is all its windows need.
+struct SystemLogicalClock;
+
+impl LogicalClock for SystemLogicalClock {
+    fn now(&self) -> u64 {
+        u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0)
+    }
+}
+
+/// Binds this daemon generation to its own runtime shard and the shared allocator.
+///
+/// The pools keep the per-kind limits the coordinators enforce in memory, so the
+/// allocator refuses exactly what a single process would have refused — except
+/// that it also counts the generations that are still draining.
+fn open_runtime_state(
+    data_dir: &Path,
+    generation: usagi_core::domain::id::DaemonGeneration,
+    children: &Arc<SpawnedChildren>,
+) -> std::io::Result<ShardedRuntimeState> {
+    ShardedRuntimeState::new(
+        generation,
+        GenerationRole::Active,
+        ResourceAllocator::new(
+            AllocatorFile::new(data_dir)?,
+            CapacityPolicy::new(AGENT_RUNTIME_LIMIT, GENERIC_TERMINAL_LIMIT),
+        ),
+        Box::new(ShardArchiveFiles::new(data_dir)?),
+        Box::new(ObservedChildren(Arc::clone(children))),
+        Box::new(SystemLogicalClock),
+    )
+}
+
+/// Reads this generation's shard and every retained one, migrating the legacy
+/// whole-snapshot stores on the first start that finds them.
+fn hydrate_runtime_state(
+    state: &ShardedRuntimeState,
+    what: &str,
+) -> std::io::Result<usagi_daemon::usecase::resources::durable::HydratedState> {
+    let hydrated = state.hydrate().map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid durable runtime state: {error}"),
+        )
+    })?;
+    if let Some(migration) = &hydrated.migration {
+        ErrorLog::record(&format!(
+            "daemon startup migrated {} legacy runtime record(s) into {} owner shard(s); {} could not prove ownership",
+            migration.marker.adopted,
+            migration.marker.generations.len(),
+            migration.marker.unknown
+        ));
+    }
+    if hydrated.interrupted != 0 {
+        ErrorLog::record(&format!(
+            "daemon startup reconciled {} {what}(s) as interrupted (identity_unknown)",
+            hydrated.interrupted
+        ));
+    }
+    Ok(hydrated)
+}
+
+/// Counts the live runtime this data directory holds, across every retained
+/// generation.
 ///
 /// It deliberately reads rather than reconciles: a lifecycle verb that is about
 /// to refuse must not rewrite the state it is refusing to destroy. Absent
-/// snapshots mean a daemon that has never launched anything, and unreadable
+/// documents mean a daemon that has never launched anything, and unreadable
 /// ones are an error — never "nothing is live".
 struct DurableResourceCensus {
-    daemon_dir: PathBuf,
+    data_dir: PathBuf,
 }
 
 impl ResourceCensus for DurableResourceCensus {
     fn live(&self) -> std::io::Result<LiveResources> {
-        let agents = json_file::read::<RuntimeStoreSnapshot>(&self.daemon_dir.join("agents.json"))
-            .map_err(std::io::Error::other)?
-            .unwrap_or_default();
-        let terminals =
-            json_file::read::<TerminalStoreSnapshot>(&self.daemon_dir.join("terminals.json"))
-                .map_err(std::io::Error::other)?
-                .unwrap_or_default();
-        let agents: Vec<_> = agents.records.iter().map(|record| record.state).collect();
-        let terminals: Vec<_> = terminals
-            .records
-            .iter()
-            .map(|record| record.state)
-            .collect();
-        Ok(census_of(&agents, &terminals))
+        let archive = ShardArchiveFiles::new(&self.data_dir)?;
+        let live = census(&archive).map_err(std::io::Error::other)?;
+        Ok(LiveResources {
+            agents: live.agents,
+            terminals: live.terminals,
+        })
     }
 }
 
@@ -257,63 +349,6 @@ const fn transition_mode(force: bool) -> TransitionMode {
     } else {
         TransitionMode::Planned
     }
-}
-
-/// Persists the durable Agent runtime snapshot next to the terminal store.
-struct FileRuntimeStore(PathBuf);
-impl RuntimeStore for FileRuntimeStore {
-    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
-        let directory = snapshot_directory(&self.0).map_err(|_| ())?;
-        json_file::write_atomic(directory, &self.0, &snapshot).map_err(|_| ())
-    }
-}
-
-impl FileRuntimeStore {
-    /// Reconcile a snapshot which outlived the daemon that owned its PTYs.
-    /// Missing snapshots are normal on a first launch.  Parse/write failures
-    /// deliberately leave the old bytes untouched so a later recovery can
-    /// inspect the last known-good durable snapshot.
-    fn reconcile_after_restart(&mut self) -> std::io::Result<RuntimeStoreSnapshot> {
-        let Some(snapshot) =
-            json_file::read::<RuntimeStoreSnapshot>(&self.0).map_err(std::io::Error::other)?
-        else {
-            return Ok(RuntimeStoreSnapshot::default());
-        };
-        snapshot.validate_schema().map_err(|error| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("invalid agent runtime snapshot schema: {error:?}"),
-            )
-        })?;
-        snapshot.validate_ownership().map_err(|error| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("invalid agent generation ownership: {error:?}"),
-            )
-        })?;
-        let legacy = snapshot.schema_version < 3;
-        let (snapshot, interrupted) = snapshot.reconcile_after_daemon_restart();
-        if interrupted != 0 || legacy {
-            self.save(snapshot.clone())
-                .map_err(|()| std::io::Error::other("could not reconcile runtime snapshot"))?;
-        }
-        if interrupted != 0 {
-            ErrorLog::record(&format!(
-                "daemon startup reconciled {interrupted} agent runtime(s) as interrupted (identity_unknown)"
-            ));
-        }
-        Ok(snapshot)
-    }
-}
-
-/// Returns the durable snapshot's data directory.
-fn snapshot_directory(path: &Path) -> std::io::Result<&Path> {
-    path.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "daemon snapshot path has no parent",
-        )
-    })
 }
 
 /// The registry's bounded in-memory replay buffer already serves reconnect
@@ -899,6 +934,7 @@ struct AgentPty {
     observations: SyncSender<AgentPtyObservation>,
     metrics: Arc<TerminalPipelineMetrics>,
     environment: BTreeMap<String, String>,
+    children: Arc<SpawnedChildren>,
 }
 
 struct OwnedPty {
@@ -927,6 +963,7 @@ impl AgentPty {
     fn new(
         environment: BTreeMap<String, String>,
         metrics: Arc<TerminalPipelineMetrics>,
+        children: Arc<SpawnedChildren>,
     ) -> (Self, Receiver<AgentPtyObservation>) {
         let (observations, receiver) = mpsc::sync_channel(PTY_OBSERVATION_QUEUE_ITEMS);
         (
@@ -936,6 +973,7 @@ impl AgentPty {
                 observations,
                 metrics,
                 environment,
+                children,
             },
             receiver,
         )
@@ -1009,11 +1047,9 @@ impl PtySpawner for AgentPty {
                 let _ = observations.send(AgentPtyObservation::Exited(output_terminal, status));
             }
         });
-        Ok(ProcessIdentity {
-            pid,
-            start_identity: "daemon-owned-agent-pty".to_owned(),
-            process_group: pid,
-        })
+        Ok(self
+            .children
+            .observe(&UnixChildProbe, pid, "daemon-owned-agent-pty"))
     }
 
     fn terminate_reap(&mut self, terminal: &TerminalRef) -> Result<(), TerminateReapError> {
@@ -1097,9 +1133,13 @@ struct DaemonPty {
     selected: Option<String>,
     observations: SyncSender<PtyObservation>,
     metrics: Arc<TerminalPipelineMetrics>,
+    children: Arc<SpawnedChildren>,
 }
 impl DaemonPty {
-    fn new(metrics: Arc<TerminalPipelineMetrics>) -> (Self, Receiver<PtyObservation>) {
+    fn new(
+        metrics: Arc<TerminalPipelineMetrics>,
+        children: Arc<SpawnedChildren>,
+    ) -> (Self, Receiver<PtyObservation>) {
         let (observations, receiver) = mpsc::sync_channel(PTY_OBSERVATION_QUEUE_ITEMS);
         (
             Self {
@@ -1107,6 +1147,7 @@ impl DaemonPty {
                 selected: None,
                 observations,
                 metrics,
+                children,
             },
             receiver,
         )
@@ -1166,11 +1207,9 @@ impl GenericPtySpawner for DaemonPty {
                 let _ = output_sender.send(PtyObservation::Exited(output_terminal, status));
             }
         });
-        Ok(ProcessIdentity {
-            pid,
-            start_identity: "daemon-owned-pty".to_owned(),
-            process_group: pid,
-        })
+        Ok(self
+            .children
+            .observe(&UnixChildProbe, pid, "daemon-owned-pty"))
     }
 }
 
@@ -1235,7 +1274,7 @@ struct SharedTerminal(
         Mutex<
             GenericTerminalRuntime<
                 TrustedLoginShell,
-                FileTerminalStore,
+                ShardedTerminalStore,
                 DaemonPty,
                 SharedTerminalScopeResolver,
             >,
@@ -1247,13 +1286,16 @@ type SharedTerminalRuntime = Arc<
     Mutex<
         GenericTerminalRuntime<
             TrustedLoginShell,
-            FileTerminalStore,
+            ShardedTerminalStore,
             DaemonPty,
             SharedTerminalScopeResolver,
         >,
     >,
 >;
-type SharedPrInventory = Arc<Mutex<OutputPrProjector<PrInventoryStore>>>;
+/// The PR inventory projector, behind the generation fence that keeps it a single
+/// writer ([`FencedPrInventory`]). Only the active generation reaches the
+/// document, so a draining process's PTY observation cannot lose an update.
+type SharedPrInventory = Arc<Mutex<OutputPrProjector<FencedPrInventory<PrInventoryStore>>>>;
 
 /// How often the PR refresh worker claims due work.
 ///
@@ -1461,9 +1503,16 @@ fn spawn_ipc_server(
         &data_dir.join("daemon"),
         daemon_generation,
     )?;
-    let pr_inventory = Arc::new(Mutex::new(OutputPrProjector::new(PrInventoryStore::new(
-        data_dir.join("daemon"),
+    // The inventory is a whole-snapshot document, so exactly one generation may
+    // write it. This process is the active one; a draining generation's projector
+    // is refused the document rather than merged with it (#562).
+    let pr_inventory = Arc::new(Mutex::new(OutputPrProjector::new(FencedPrInventory::new(
+        PrInventoryStore::new(data_dir.join("daemon")),
+        GenerationRole::Active,
     ))));
+    // The children this process observes while spawning them. It is the only proof
+    // that a durable record describes a child this generation owns (#562).
+    let children = Arc::new(SpawnedChildren::default());
     // Deferred PR detection. The observers submit committed bytes here after
     // releasing the runtime lock, so no scan and no durable write happens inside
     // it (#555).
@@ -1474,7 +1523,7 @@ fn spawn_ipc_server(
     // their finals into it, so short-lived runtimes cannot grow the daemon's
     // tombstones without bound.
     let retention = usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention::new();
-    let (pty, observations) = DaemonPty::new(Arc::clone(&pipeline_metrics));
+    let (pty, observations) = DaemonPty::new(Arc::clone(&pipeline_metrics), Arc::clone(&children));
     let workspace_root = trusted_repository_root(&runtime)?;
     // The handshake fence compares a client's declared workspace against the
     // same trusted root the session runtime resolved, so a client working in
@@ -1497,10 +1546,14 @@ fn spawn_ipc_server(
         Arc::clone(&runtime),
         Arc::clone(&user_environment),
         retention.clone(),
+        &children,
     )?;
     start_terminal_observer(Arc::clone(&terminal), observations, Arc::clone(&projection))?;
-    let (agent_pty, agent_observations) =
-        AgentPty::new(terminal_environment(), Arc::clone(&pipeline_metrics));
+    let (agent_pty, agent_observations) = AgentPty::new(
+        terminal_environment(),
+        Arc::clone(&pipeline_metrics),
+        Arc::clone(&children),
+    );
     let mcp_command = std::env::current_exe()?;
     let agent = open_agent_runtime(
         data_dir,
@@ -1510,6 +1563,7 @@ fn spawn_ipc_server(
         mcp_command,
         user_environment,
         retention.clone(),
+        &children,
     )?;
     let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(&data_dir.join("daemon"))));
     if let Ok(runtime) = supervisor.lock()
@@ -1535,6 +1589,7 @@ fn spawn_ipc_server(
     start_retention_gc_worker(
         Arc::clone(&terminal),
         Arc::clone(&agent),
+        open_runtime_state(data_dir, daemon_generation, &children)?,
         Arc::clone(&shutdown),
     )?;
     start_custody_worker(
@@ -1783,15 +1838,25 @@ const RETENTION_GC_TICK: Duration = Duration::from_secs(30);
 fn start_retention_gc_worker(
     terminal: SharedTerminalRuntime,
     agent: SharedAgentRuntime,
+    durable: ShardedRuntimeState,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<()> {
+    let limits = shipping_retention_limits();
     spawn_retention_gc_worker(
         move || {
+            // The in-memory budgets first: what the owners stop retaining is what
+            // the durable pass is then allowed to collect.
+            let mut retained = BTreeSet::new();
             if let Ok(mut terminal) = terminal.lock() {
                 terminal.collect_retention_garbage();
+                retained.extend(terminal.retained_resources());
             }
             if let Ok(mut agent) = agent.lock() {
                 agent.collect_retention_garbage();
+                retained.extend(agent.retained_resources());
+            }
+            if let Err(error) = durable.collect(&retained, &limits) {
+                ErrorLog::record(&format!("durable runtime collection deferred: {error}"));
             }
         },
         shutdown,
@@ -1901,6 +1966,7 @@ fn spawn_decision_maintenance(
         })
 }
 
+#[allow(clippy::too_many_arguments)] // Composition injects each Agent dependency separately.
 fn open_agent_runtime(
     data_dir: &Path,
     generation: usagi_core::domain::id::DaemonGeneration,
@@ -1909,9 +1975,11 @@ fn open_agent_runtime(
     mcp_command: PathBuf,
     environment: Arc<SharedUserEnvironment>,
     retention: usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention,
+    children: &Arc<SpawnedChildren>,
 ) -> std::io::Result<SharedAgentRuntime> {
-    let mut store = FileRuntimeStore(data_dir.join("daemon").join("agents.json"));
-    let snapshot = store.reconcile_after_restart()?;
+    let state = open_runtime_state(data_dir, generation, children)?;
+    let snapshot = hydrate_runtime_state(&state, "agent runtime")?.agents;
+    let store = ShardedAgentStore::new(state);
     let mut registry = AdapterRegistry::new();
     let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness);
     // Agent MCP children receive the mode-neutral base. They apply the same
@@ -2084,6 +2152,7 @@ fn trusted_repository_root(sessions: &SharedSessionRuntime) -> std::io::Result<P
         .map_err(|_| std::io::Error::other("session runtime is unavailable"))
 }
 
+#[allow(clippy::too_many_arguments)] // Composition injects each terminal dependency separately.
 fn new_terminal_runtime(
     data_dir: &Path,
     generation: usagi_core::domain::id::DaemonGeneration,
@@ -2092,14 +2161,11 @@ fn new_terminal_runtime(
     sessions: SharedSessionRuntime,
     environment: Arc<SharedUserEnvironment>,
     retention: usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention,
+    children: &Arc<SpawnedChildren>,
 ) -> std::io::Result<SharedTerminalRuntime> {
-    let mut store = FileTerminalStore(data_dir.join("daemon").join("terminals.json"));
-    let (snapshot, interrupted) = store.load_reconciled()?;
-    if interrupted != 0 {
-        ErrorLog::record(&format!(
-            "daemon startup reconciled {interrupted} generic terminal(s) as identity_unknown"
-        ));
-    }
+    let state = open_runtime_state(data_dir, generation, children)?;
+    let snapshot = hydrate_runtime_state(&state, "generic terminal")?.terminals;
+    let store = ShardedTerminalStore::new(state);
     let runtime = GenericTerminalRuntime::from_snapshot_with_retention(
         generation,
         TrustedLoginShell {
@@ -5880,7 +5946,7 @@ fn run_inner(
     };
     let shutdown = SignalShutdown::new(Arc::clone(&ready.shutdown));
     let census = DurableResourceCensus {
-        daemon_dir: daemon_dir.clone(),
+        data_dir: data_dir.clone(),
     };
     let authority = RegistryAuthority {
         data_dir: &data_dir,
@@ -6796,6 +6862,9 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::sync::atomic::AtomicUsize;
+
+    use usagi_daemon::usecase::generic_terminal::TerminalStoreSnapshot;
+    use usagi_daemon::usecase::runtime::{RuntimeStore, RuntimeStoreSnapshot};
 
     use usagi_core::domain::{
         id::{
@@ -8995,8 +9064,9 @@ mod tests {
         let identity =
             usagi_core::domain::pr_inventory::canonicalize("https://github.com/o/r/pull/493")
                 .unwrap();
-        let inventory = Arc::new(Mutex::new(OutputPrProjector::new(PrInventoryStore::new(
-            directory.path(),
+        let inventory = Arc::new(Mutex::new(OutputPrProjector::new(FencedPrInventory::new(
+            PrInventoryStore::new(directory.path()),
+            GenerationRole::Active,
         ))));
         inventory
             .lock()
@@ -9784,7 +9854,7 @@ mod tests {
         .resolve(&request)
         .unwrap();
         let metrics = Arc::new(TerminalPipelineMetrics::default());
-        let (mut pty, observations) = DaemonPty::new(metrics);
+        let (mut pty, observations) = DaemonPty::new(metrics, Arc::new(SpawnedChildren::default()));
 
         pty.spawn(&launch, &terminal, Geometry { cols: 80, rows: 24 })
             .unwrap();
@@ -9880,8 +9950,10 @@ mod tests {
 
         let baseline = std::fs::read_dir("/dev/fd").unwrap().count();
         let metrics = Arc::new(TerminalPipelineMetrics::default());
-        let (mut generic, generic_observations) = DaemonPty::new(Arc::clone(&metrics));
-        let (mut agent, agent_observations) = AgentPty::new(BTreeMap::new(), metrics);
+        let children = Arc::new(SpawnedChildren::default());
+        let (mut generic, generic_observations) =
+            DaemonPty::new(Arc::clone(&metrics), Arc::clone(&children));
+        let (mut agent, agent_observations) = AgentPty::new(BTreeMap::new(), metrics, children);
         let generation = DaemonGeneration::new();
 
         let generic_scope = TerminalLaunchScope {
@@ -10053,8 +10125,9 @@ mod tests {
     #[test]
     fn the_projection_worker_owns_every_scan_and_durable_write() {
         let directory = tempfile::tempdir().unwrap();
-        let projector = Arc::new(Mutex::new(OutputPrProjector::new(PrInventoryStore::new(
-            directory.path(),
+        let projector = Arc::new(Mutex::new(OutputPrProjector::new(FencedPrInventory::new(
+            PrInventoryStore::new(directory.path()),
+            GenerationRole::Active,
         ))));
         let projection = Arc::new(PrProjectionQueue::new());
         start_pr_projection_worker(Arc::clone(&projector), Arc::clone(&projection)).unwrap();
@@ -10134,7 +10207,7 @@ mod tests {
             worktree_id: worktree,
         };
         let metrics = Arc::new(TerminalPipelineMetrics::default());
-        let (pty, observations) = DaemonPty::new(metrics);
+        let (pty, observations) = DaemonPty::new(metrics, Arc::new(SpawnedChildren::default()));
         let runtime = Arc::new(Mutex::new(GenericTerminalRuntime::new(
             DaemonGeneration::new(),
             TrustedLoginShell {
@@ -10153,8 +10226,9 @@ mod tests {
         start_terminal_observer(Arc::clone(&runtime), observations, Arc::clone(&projection))
             .unwrap();
         start_pr_projection_worker(
-            Arc::new(Mutex::new(OutputPrProjector::new(PrInventoryStore::new(
-                directory.path(),
+            Arc::new(Mutex::new(OutputPrProjector::new(FencedPrInventory::new(
+                PrInventoryStore::new(directory.path()),
+                GenerationRole::Active,
             )))),
             Arc::clone(&projection),
         )
@@ -10360,26 +10434,112 @@ mod tests {
         assert_eq!(launch.snapshot.working_directory, original_root);
     }
 
+    /// One process's durable runtime state over a real data directory.
+    fn sharded_state(
+        data_dir: &Path,
+        generation: DaemonGeneration,
+    ) -> usagi_daemon::usecase::resources::durable::ShardedRuntimeState {
+        open_runtime_state(data_dir, generation, &Arc::new(SpawnedChildren::default())).unwrap()
+    }
+
+    /// The shard document one generation wrote, as raw bytes.
+    fn shard_bytes(data_dir: &Path, generation: DaemonGeneration) -> Vec<u8> {
+        std::fs::read(shard_path(data_dir, generation)).unwrap()
+    }
+
+    fn shard_path(data_dir: &Path, generation: DaemonGeneration) -> PathBuf {
+        data_dir
+            .join("daemon")
+            .join("shards")
+            .join(format!("{}.json", generation.as_str()))
+    }
+
+    /// One durable generic terminal record, reserved and owned by `generation`.
+    fn reserved_terminal_record(
+        generation: DaemonGeneration,
+    ) -> usagi_daemon::usecase::generic_terminal::DurableTerminalRecord {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let worktree = WorktreeId::new();
+        let scope = TerminalLaunchScope {
+            workspace_id: workspace,
+            session_id: Some(session),
+            worktree_id: worktree,
+        };
+        let terminal = TerminalRef {
+            daemon_generation: generation,
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: Some(session),
+            worktree_id: worktree,
+        };
+        usagi_daemon::usecase::generic_terminal::DurableTerminalRecord {
+            terminal,
+            operation: usagi_core::domain::id::CompletionFence {
+                workspace_id: workspace,
+                session_id: Some(session),
+                operation_id: usagi_core::domain::id::OperationId::new(),
+                owner_daemon_generation: generation,
+                execution_attempt: 1,
+                lifecycle_attempt: 1,
+                expected_revision: 1,
+            },
+            launch: usagi_core::domain::terminal_launch::DurableTerminalLaunchSnapshot::new(
+                TerminalLaunchRequest {
+                    profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                    scope,
+                },
+                1,
+                "sh",
+                Vec::new(),
+                PathBuf::from("/tmp"),
+                [],
+            )
+            .unwrap(),
+            state: usagi_daemon::usecase::terminal::TerminalRuntimeState::Reserved,
+            process: None,
+            launch_digest: Some("digest".to_owned()),
+        }
+    }
+
+    fn terminal_truth(generation: DaemonGeneration) -> TerminalStoreSnapshot {
+        TerminalStoreSnapshot {
+            records: vec![reserved_terminal_record(generation)],
+            ..TerminalStoreSnapshot::default()
+        }
+    }
+
     #[test]
-    fn file_terminal_store_writes_a_readable_snapshot() {
+    fn the_terminal_store_writes_this_generations_own_shard() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("terminals.json");
-        let mut store = FileTerminalStore(path.clone());
-        let snapshot = TerminalStoreSnapshot::default();
+        let generation = DaemonGeneration::new();
+        let mut store = ShardedTerminalStore::new(sharded_state(dir.path(), generation));
 
-        store.save(snapshot.clone()).unwrap();
+        store.save(terminal_truth(generation)).unwrap();
 
+        // The shard is named after its only writer and carries the record itself.
+        let document: serde_json::Value =
+            serde_json::from_slice(&shard_bytes(dir.path(), generation)).unwrap();
+        assert_eq!(document["owner"], generation.as_str());
         assert_eq!(
-            serde_json::from_slice::<TerminalStoreSnapshot>(&std::fs::read(path).unwrap()).unwrap(),
-            snapshot
+            document["schema"],
+            usagi_daemon::usecase::resources::shard::SHARD_SCHEMA
         );
+        let resources = document["resources"].as_array().unwrap();
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0]["kind"], "terminal");
+        assert_eq!(resources[0]["state"], "reserved");
+        assert!(resources[0]["payload"].is_string());
+        // The capacity claim is durable before the reservation the spawn follows.
+        assert!(dir.path().join("daemon").join("allocations.json").exists());
     }
 
     #[test]
     #[allow(clippy::too_many_lines)] // Two daemon instances and every fenced effect form one restart contract.
     fn generic_terminal_restart_hydrates_inventory_and_preserves_records() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("terminals.json");
+        let first_generation = DaemonGeneration::new();
+        let second_generation = DaemonGeneration::new();
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let worktree = WorktreeId::new();
@@ -10394,13 +10554,13 @@ mod tests {
         };
         let first_effects = Arc::new(Mutex::new(RestartEffects::default()));
         let mut first = GenericTerminalRuntime::new(
-            DaemonGeneration::new(),
+            first_generation,
             TrustedLoginShell {
                 profile: LoginShellProfile::new(BTreeMap::new(), dir.path().to_path_buf()),
                 environment: None,
                 workspace_root: PathBuf::new(),
             },
-            FileTerminalStore(path.clone()),
+            ShardedTerminalStore::new(sharded_state(dir.path(), first_generation)),
             RestartPty(Arc::clone(&first_effects)),
             TestTerminalScope {
                 scope: scope.clone(),
@@ -10431,15 +10591,18 @@ mod tests {
         assert_eq!(first_effects.lock().unwrap().spawns, 1);
         drop(first);
 
-        let before_restart: TerminalStoreSnapshot =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        let old_record = before_restart.records[0].clone();
+        // The restarted process owns a new generation, so the old record reaches it
+        // through the retained shard its dead owner wrote, never by rewriting it.
+        let before_restart = sharded_state(dir.path(), second_generation)
+            .hydrate()
+            .unwrap();
+        assert_eq!(before_restart.interrupted, 1);
+        let old_record = before_restart.terminals.records[0].clone();
+        let reconciled = before_restart.terminals;
         let second_effects = Arc::new(Mutex::new(RestartEffects::default()));
-        let mut second_store = FileTerminalStore(path.clone());
-        let (reconciled, interrupted) = second_store.load_reconciled().unwrap();
-        assert_eq!(interrupted, 1);
+        let second_store = ShardedTerminalStore::new(sharded_state(dir.path(), second_generation));
         let mut second = GenericTerminalRuntime::from_snapshot(
-            DaemonGeneration::new(),
+            second_generation,
             TrustedLoginShell {
                 profile: LoginShellProfile::new(BTreeMap::new(), dir.path().to_path_buf()),
                 environment: None,
@@ -10528,9 +10691,13 @@ mod tests {
         assert!(!new_terminal.fences(&old_terminal));
         assert_eq!(second_effects.lock().unwrap().spawns, 1);
 
-        let after_launch: TerminalStoreSnapshot =
-            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let after_launch = sharded_state(dir.path(), second_generation)
+            .hydrate()
+            .unwrap()
+            .terminals;
         assert_eq!(after_launch.records.len(), 2);
+        // The old owner's shard still holds its record exactly as it left it.
+        assert!(!shard_bytes(dir.path(), first_generation).is_empty());
         let retained = after_launch
             .records
             .iter()
@@ -10548,124 +10715,173 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_or_unknown_terminal_snapshot_fails_closed_without_effect_or_overwrite() {
+    fn a_corrupt_or_unknown_shard_fails_closed_without_effect_or_overwrite() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("terminals.json");
-        let effects = Arc::new(Mutex::new(RestartEffects::default()));
+        let generation = DaemonGeneration::new();
+        // Write the shard the way a first start would.
+        ShardedTerminalStore::new(sharded_state(dir.path(), generation))
+            .save(terminal_truth(generation))
+            .unwrap();
+        let path = shard_path(dir.path(), generation);
         for bytes in [
             b"{broken".as_slice(),
-            br#"{"schema_version":999,"records":[]}"#.as_slice(),
+            br#"{"schema":"usagi-owner-shard-v999"}"#.as_slice(),
         ] {
             std::fs::write(&path, bytes).unwrap();
             let preserved = std::fs::read(&path).unwrap();
-            assert!(FileTerminalStore(path.clone()).load_reconciled().is_err());
+            assert!(sharded_state(dir.path(), generation).hydrate().is_err());
+            // Startup fails closed and leaves the last bytes for inspection.
             assert_eq!(std::fs::read(&path).unwrap(), preserved);
-            assert_eq!(*effects.lock().unwrap(), RestartEffects::default());
         }
     }
 
     #[test]
-    fn file_runtime_store_writes_a_readable_snapshot() {
+    fn both_stores_share_one_shard_without_clobbering_each_other() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("agents.json");
-        let mut store = FileRuntimeStore(path.clone());
-        let snapshot = RuntimeStoreSnapshot::default();
+        let generation = DaemonGeneration::new();
+        let mut agents = ShardedAgentStore::new(sharded_state(dir.path(), generation));
+        let mut terminals = ShardedTerminalStore::new(sharded_state(dir.path(), generation));
 
-        store.save(snapshot.clone()).unwrap();
+        // Two stores, one document, and every write a compare-and-swap: the Agent
+        // save must not erase the terminal reservation or the other way round.
+        terminals.save(terminal_truth(generation)).unwrap();
+        agents.save(RuntimeStoreSnapshot::default()).unwrap();
 
-        assert_eq!(
-            serde_json::from_slice::<RuntimeStoreSnapshot>(&std::fs::read(path).unwrap()).unwrap(),
-            snapshot
-        );
+        let document: serde_json::Value =
+            serde_json::from_slice(&shard_bytes(dir.path(), generation)).unwrap();
+        assert_eq!(document["owner"], generation.as_str());
+        assert_eq!(document["resources"].as_array().unwrap().len(), 1);
+        assert_eq!(document["resources"][0]["kind"], "terminal");
     }
 
     #[test]
-    fn corrupt_or_unknown_agent_snapshot_fails_closed_without_overwrite() {
+    fn a_legacy_store_this_build_cannot_read_is_never_sealed() {
         for bytes in [
             b"{not-json".as_slice(),
             br#"{"schema_version":999,"records":[]}"#.as_slice(),
         ] {
             let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("agents.json");
-            std::fs::write(&path, bytes).unwrap();
-            let before = std::fs::read(&path).unwrap();
+            // The archive creates the private directories a daemon start needs.
+            let state = sharded_state(dir.path(), DaemonGeneration::new());
+            let daemon = dir.path().join("daemon");
+            let legacy = daemon.join("agents.json");
+            std::fs::write(&legacy, bytes).unwrap();
+            let before = std::fs::read(&legacy).unwrap();
 
-            assert!(
-                FileRuntimeStore(path.clone())
-                    .reconcile_after_restart()
-                    .is_err()
-            );
-            assert_eq!(std::fs::read(path).unwrap(), before);
+            assert!(state.hydrate().is_err());
+            // The legacy bytes stay exactly where they are: nothing is migrated,
+            // renamed, or marked, so a fix or a rollback is still possible.
+            assert_eq!(std::fs::read(&legacy).unwrap(), before);
+            assert!(!daemon.join("runtime-migration.json").exists());
         }
+    }
 
+    #[test]
+    fn a_legacy_store_is_migrated_once_and_retired_in_place() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("agents.json");
+        let legacy_generation = DaemonGeneration::new();
+        let state = sharded_state(dir.path(), DaemonGeneration::new());
+        let daemon = dir.path().join("daemon");
+        std::fs::write(
+            daemon.join("terminals.json"),
+            serde_json::to_vec(&terminal_truth(legacy_generation)).unwrap(),
+        )
+        .unwrap();
+
+        let hydrated = state.hydrate().unwrap();
+        let marker = hydrated.migration.unwrap().marker;
+        assert_eq!(
+            marker.schema,
+            usagi_daemon::usecase::resources::durable::MIGRATION_SCHEMA
+        );
+        assert_eq!(marker.generations, vec![legacy_generation.as_str()]);
+        // A legacy reservation cannot prove a child, so it is adopted as a
+        // non-spawnable safe failure rather than as live runtime.
+        assert_eq!(marker.unknown, 1);
+        assert_eq!(hydrated.terminals.records.len(), 1);
+        // The store is retired by rename, so its bytes stay inspectable while no
+        // build reads them again — the migration is one way.
+        assert!(!daemon.join("terminals.json").exists());
+        assert!(daemon.join("terminals.json.migrated").exists());
+        assert!(daemon.join("runtime-migration.json").exists());
+        assert!(state.hydrate().unwrap().migration.is_none());
+    }
+
+    #[test]
+    fn a_record_that_leaves_the_owners_truth_is_fenced_and_still_counted() {
+        let dir = tempfile::tempdir().unwrap();
         let generation = DaemonGeneration::new();
-        let mut corrupt = RuntimeStoreSnapshot::default();
-        corrupt
-            .generation
-            .terminals
-            .push(usagi_daemon::usecase::generation::TerminalOwnership {
-                terminal: TerminalRef {
-                    daemon_generation: generation,
-                    terminal_id: TerminalId::new(),
-                    workspace_id: WorkspaceId::new(),
-                    session_id: Some(SessionId::new()),
-                    worktree_id: WorktreeId::new(),
-                },
-                process: None,
-                state: usagi_daemon::usecase::generation::TerminalState::IdentityUnknown,
-            });
-        assert_eq!(
-            usagi_daemon::usecase::generation::GenerationCoordinator::restore(
-                corrupt.generation.clone(),
-                2,
-            )
-            .unwrap_err(),
-            usagi_daemon::usecase::generation::GenerationError::UnknownGeneration
-        );
-        std::fs::write(&path, serde_json::to_vec(&corrupt).unwrap()).unwrap();
-        let before = std::fs::read(&path).unwrap();
+        let mut store = ShardedTerminalStore::new(sharded_state(dir.path(), generation));
+        let truth = terminal_truth(generation);
+        store.save(truth.clone()).unwrap();
 
-        assert!(
-            FileRuntimeStore(path.clone())
-                .reconcile_after_restart()
-                .is_err()
-        );
-        assert_eq!(std::fs::read(path).unwrap(), before);
+        // A reserved record still owns a PTY reservation a cold transition would
+        // destroy, so the lifecycle census counts it.
+        let census = DurableResourceCensus {
+            data_dir: dir.path().to_path_buf(),
+        };
+        assert_eq!(census.live().unwrap().terminals, 1);
+
+        // Dropping it from the owner's truth cannot silently forget a live record:
+        // it becomes unprovable and keeps its capacity instead.
+        store.save(TerminalStoreSnapshot::default()).unwrap();
+        let document: serde_json::Value =
+            serde_json::from_slice(&shard_bytes(dir.path(), generation)).unwrap();
+        assert_eq!(document["resources"][0]["state"], "ownership_unknown");
+        assert_eq!(census.live().unwrap().terminals, 0);
     }
 
     #[test]
-    fn file_terminal_store_failure_preserves_target_and_cleans_temp() {
-        assert_failed_snapshot_write_is_consistent(|path| {
-            FileTerminalStore(path.to_path_buf()).save(TerminalStoreSnapshot::default())
-        });
-    }
-
-    #[test]
-    fn file_runtime_store_failure_preserves_target_and_cleans_temp() {
-        assert_failed_snapshot_write_is_consistent(|path| {
-            FileRuntimeStore(path.to_path_buf()).save(RuntimeStoreSnapshot::default())
-        });
-    }
-
-    fn assert_failed_snapshot_write_is_consistent(save: impl FnOnce(&Path) -> Result<(), ()>) {
+    fn a_collection_pass_removes_the_shard_of_a_generation_nothing_retains() {
         let dir = tempfile::tempdir().unwrap();
-        // An existing non-empty directory cannot be replaced by the final
-        // rename. This fails after the durable temp has been written, so it
-        // exercises both preservation of the old target and temp cleanup.
-        let target = dir.path().join("snapshot.json");
-        std::fs::create_dir(&target).unwrap();
-        let preserved = target.join("preserved");
-        std::fs::write(&preserved, "old snapshot owner").unwrap();
+        let old = DaemonGeneration::new();
+        let record = reserved_terminal_record(old);
+        let mut exited = record.clone();
+        exited.state = usagi_daemon::usecase::terminal::TerminalRuntimeState::Exited;
+        let mut store = ShardedTerminalStore::new(sharded_state(dir.path(), old));
+        store
+            .save(TerminalStoreSnapshot {
+                records: vec![exited],
+                ..TerminalStoreSnapshot::default()
+            })
+            .unwrap();
+        assert!(shard_path(dir.path(), old).exists());
 
-        assert!(save(&target).is_err());
-        assert_eq!(
-            std::fs::read_to_string(preserved).unwrap(),
-            "old snapshot owner"
-        );
+        let active = sharded_state(dir.path(), DaemonGeneration::new());
+        let limits = shipping_retention_limits();
+        let retained: BTreeSet<String> =
+            std::iter::once(record.terminal.terminal_id.as_str()).collect();
 
-        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        // While the active generation still answers for the record, its history
+        // stays; once it does not, the whole document goes.
+        assert_eq!(active.collect(&retained, &limits).unwrap().1, 0);
+        assert!(shard_path(dir.path(), old).exists());
+        assert_eq!(active.collect(&BTreeSet::new(), &limits).unwrap().1, 1);
+        assert!(!shard_path(dir.path(), old).exists());
+    }
+
+    #[test]
+    fn a_failed_shard_write_is_a_refused_save_that_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let generation = DaemonGeneration::new();
+        let mut store = ShardedTerminalStore::new(sharded_state(dir.path(), generation));
+        store.save(terminal_truth(generation)).unwrap();
+        let shards = dir.path().join("daemon").join("shards");
+        let document = shard_path(dir.path(), generation);
+        let preserved = std::fs::read(&document).unwrap();
+        // An unwritable shard directory fails the swap after the document was read.
+        let mut mode = std::fs::metadata(&shards).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o500);
+        std::fs::set_permissions(&shards, mode).unwrap();
+
+        let refused = store.save(terminal_truth(generation)).is_err();
+
+        let mut mode = std::fs::metadata(&shards).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o700);
+        std::fs::set_permissions(&shards, mode).unwrap();
+        assert!(refused || std::fs::read(&document).unwrap() == preserved);
+        assert_eq!(std::fs::read(&document).unwrap(), preserved);
+        let leftovers: Vec<_> = std::fs::read_dir(&shards)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .filter(|name| name.to_string_lossy().contains(".tmp."))

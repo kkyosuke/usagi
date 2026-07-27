@@ -360,7 +360,7 @@ daemon は intent の `(WorkspaceId, SessionId?)` を [available scope](05-daemo
 
 成功した launch は accepted response に producer `OperationId` と durable revision を返し、body に完全な `TerminalRef` と新しい `AgentContinuationRef` を載せる。この `TerminalRef` は operation・workspace・session・worktree・daemon generation・terminal incarnation を fence する。PTY exit を daemon が一度だけ記録すると、同じ semantic intent の再送は成功時に `completed: true` と同じ `TerminalRef` を持つ final response を返す。non-zero exit は安全な `unavailable` final として replay される。同じ `OperationId` を異なる intent で送ると `idempotency_conflict` になる。spawn failure・ambiguous・persist-after-spawn は fenced safe failure（`unavailable` / `ownership_unknown`）として durable に記録され、resend は同じ安全な失敗を replay する。replacement spawn や terminal の推測は行わない。
 
-この replay 契約は daemon restart をまたぐ。fresh daemon は Agent snapshot の load、generation coordinator と operation ledger の hydrate、新しい process-local generation の atomic activate が完了するまで request admission を開始しない。旧 daemon process はその前に終了しており、PTY master は移送されない。`agents.json` は runtime record と generation/terminal ownership を同じ snapshot に持ち、admission、terminal command、exit、completion はすべてこの process-local authority を通る。restart 時に所有権を証明できない未終端 runtime は `identity_unknown` として inventory に `live: false` で現れ、旧 `TerminalRef` の command と late outcome は effect なしで拒否される。runtime と ownership binding の不一致、破損、未知 schema は daemon startup を fail closed にし、Agent spawn と snapshot 更新を行わない。schema v1/v2 は既存 runtime fence を保持した `identity_unknown` へ保守的に移行する。MCP caller credential は replay 対象ではなく restart で失効する。
+この replay 契約は daemon restart をまたぐ。fresh daemon は Agent snapshot の load、generation coordinator と operation ledger の hydrate、新しい process-local generation の atomic activate が完了するまで request admission を開始しない。旧 daemon process はその前に終了しており、PTY master は移送されない。Agent runtime record と generation/terminal ownership は自 generation の owner shard（`shards/<generation>.json`）が同じ compare-and-swap で持ち、admission、terminal command、exit、completion はすべてこの process-local authority を通る。restart 時に所有権を証明できない未終端 runtime は `identity_unknown` として inventory に `live: false` で現れ、旧 `TerminalRef` の command と late outcome は effect なしで拒否される。runtime と ownership binding の不一致、破損、未知 schema は daemon startup を fail closed にし、Agent spawn と snapshot 更新を行わない。schema v1/v2 は既存 runtime fence を保持した `identity_unknown` へ保守的に移行する。MCP caller credential は replay 対象ではなく restart で失効する。
 
 ```text
 Agent request / PTY observation / completion
@@ -372,7 +372,7 @@ Agent request / PTY observation / completion
         | exact CompletionFence outcome
                   |
                   v
- agents.json = generation ownership + runtime records (atomic)
+ shards/<generation>.json = generation ownership + runtime records (atomic)
 ```
 
 Agent の pending pane は、同じ `OperationId` の成功 final が返した `TerminalRef` にだけ attach する。attach 以降の stream（`attach` / `resume` / `resync` / `input` / `resize` / `detach`）は [generic terminal request](#generic-terminal-request) と同じ vocabulary を共有し、daemon は `TerminalRef` の所有元（agent または generic）へ透過的に routing する。この pending pane の attach policy は [3. TUI](03-tui.md) を正本とする。
@@ -758,7 +758,7 @@ generation が所有し attach 可能か）だけを持ち、argv・environment 
 client はこの列挙で発見した live runtime にだけ、その `TerminalRef` で fenced に attach する
 （名前や path から terminal を推測しない）。workspace open 時の pane 復元でこの列挙を使う（[3. TUI](03-tui.md#workspace-open-時の-pane-復元) を正本とする）。
 
-daemon restart 後も `inventory` は `terminals.json` から復元した generic terminal record を同じ scope と
+daemon restart 後も `inventory` は retained shard から復元した generic terminal record を同じ scope と
 `TerminalRef` のまま返す。ただし旧 daemon の PTY master は復元しないため、未終端 record は
 `identity_unknown`、`live: false` となる。旧 ref の attach、resume、resync、input、resize、detach は
 typed safe error となり、別 terminal の PTY effect や暗黙の replacement spawn を起こさない。restart 時の
