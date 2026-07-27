@@ -21,17 +21,21 @@ tasks:
     cmds:
       - USAGI_RUNTIME_MODE=production cargo run --release
 
-  'daemon:restart':
-    desc: Restart the daemon using .usagi/local runtime state
+  # The daemon tasks forward everything after `--` to `usagi daemon`, so any
+  # subcommand and flag reaches it unchanged:
+  #   task daemon:dev -- restart --force
+  #   task daemon:dev -- status
+  daemon:
+    desc: 'Run a usagi daemon subcommand with .usagi/local runtime state (task daemon -- restart --force)'
     cmds:
-      - USAGI_RUNTIME_MODE=local cargo run -- daemon restart
+      - USAGI_RUNTIME_MODE=local cargo run -- daemon {{.CLI_ARGS}}
 
-  'daemon:restart:dev':
-    desc: Restart the daemon using .usagi/dev runtime state
+  'daemon:dev':
+    desc: 'Run a usagi daemon subcommand with .usagi/dev runtime state (task daemon:dev -- restart --force)'
     cmds:
-      - USAGI_RUNTIME_MODE=development cargo run -- daemon restart
+      - USAGI_RUNTIME_MODE=development cargo run -- daemon {{.CLI_ARGS}}
 
-  'daemon:restart:prd':
-    desc: Restart the release daemon using .usagi runtime state
+  'daemon:prd':
+    desc: 'Run a usagi daemon subcommand on the release build with .usagi runtime state (task daemon:prd -- restart --force)'
     cmds:
-      - USAGI_RUNTIME_MODE=production cargo run --release -- daemon restart
+      - USAGI_RUNTIME_MODE=production cargo run --release -- daemon {{.CLI_ARGS}}
