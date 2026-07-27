@@ -18,6 +18,7 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 - [変更箇所からの推奨テスト](#変更箇所からの推奨テスト)
 - [結合テストからの daemon 起動](#結合テストからの-daemon-起動)
   - [重い E2E の直列化](#重い-e2e-の直列化)
+- [背景 worker を残したままテストを終えない](#背景-worker-を残したままテストを終えない)
 - [Git Hooks（lefthook）](#git-hookslefthook)
 - [CI（GitHub Actions）](#cigithub-actions)
 - [リリース](#リリース)
@@ -284,6 +285,21 @@ shipping binary・daemon・fixture provider・実 PTY を同時に走らせる E
 直列に実行する**。`tests/agent_ipc_e2e.rs` は daemon 起動 lock、`tests/cli_tui_pty.rs` は file 全体の serial lock で
 直列化する。並行させると frame 待ちが product の失敗ではなく CPU 競合による timeout になり、偽陽性の失敗を生む。
 新しい実 PTY / 実 daemon E2E を追加するときは、同じ lock を取る。
+
+## 背景 worker を残したままテストを終えない
+
+product の worker thread（restore job・resident lane など）を動かすテストは、**その worker が仕事を終えてから終了する**。
+実行中の worker を残して test が返ると、worker は残りの suite の間も product 関数の coverage counter を書き続け、
+harness が profile を書き出す瞬間と競合する。counter の増分はアトミックでなく、region の一部は差分（counter 式）で
+表現されるため、この競合は**別のテストが確実に踏んでいる行を「未達」として報告させる**。coverage gate は全 PR で
+共有されるため、これは無関係な変更の PR を落とす。
+
+- 待つ条件は fake 側の観測に載せる（呼び出し回数が数 tick 進まない、完了通知を受け取る、など）。固定 sleep で
+  代用しない。
+- テストの決定性そのものも同じ形で作る。frame skip や retry のような**タイミングで決まる事象は、観測できるまで
+  loop を駆動し、観測できない run は上限で失敗させる**（skip が起きなかった run を pass と読み替えない）。
+  `usagi-tui` の `presentation::tests::a_skipped_tick_still_admits_the_restore_retry` がこの形で、restore retry が
+  frame を skip した tick で admit されるのを観測し、その job の inventory 呼び出しが静まってから quit する。
 
 ## Git Hooks（lefthook）
 
