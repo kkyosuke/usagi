@@ -18,6 +18,7 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 - [変更箇所からの推奨テスト](#変更箇所からの推奨テスト)
 - [結合テストからの daemon 起動](#結合テストからの-daemon-起動)
   - [重い E2E の直列化](#重い-e2e-の直列化)
+- [実時間に依存する受入テスト](#実時間に依存する受入テスト)
 - [Git Hooks（lefthook）](#git-hookslefthook)
 - [CI（GitHub Actions）](#cigithub-actions)
 - [リリース](#リリース)
@@ -284,6 +285,22 @@ shipping binary・daemon・fixture provider・実 PTY を同時に走らせる E
 直列に実行する**。`tests/agent_ipc_e2e.rs` は daemon 起動 lock、`tests/cli_tui_pty.rs` は file 全体の serial lock で
 直列化する。並行させると frame 待ちが product の失敗ではなく CPU 競合による timeout になり、偽陽性の失敗を生む。
 新しい実 PTY / 実 daemon E2E を追加するときは、同じ lock を取る。
+
+## 実時間に依存する受入テスト
+
+frame skip・backoff・retry のように**実時間と入力比較で決まる事象**を主張する受入テストは、その事象が起きたことを
+**観測してから**判定する。固定の tick 数・key 列で「この run なら起きているはず」と仮定したテストは run ごとに
+揺れ、`test` / `coverage` job の test 実行を abort させて**その領域に触っていない PR の共有 gate まで落とす**。
+
+| 守ること | 理由 |
+|---|---|
+| 事象が観測されるまでテスト側の driver（fake terminal 等）が loop を回し、観測できたら終える | 事象が起きなかった run を pass に読み替えない |
+| 判定は事象そのものを観測する。間接的な proxy を条件にしない | product が正しくても proxy が崩れる run で落ちる |
+| driver には上限（tick 数など）を置き、到達したら失敗させる | 「product が事象を起こさなくなった」退行を pass にしない |
+
+`usagi-tui` の frame budget 受入テストがこの形である。どの tick が frame を skip するかは renderer 入力の比較と
+壁時計の秒境界で決まるため、fake terminal は skip した tick 上の restore admission を観測するまで inert key を
+送り続け、観測できた tick で終了する。
 
 ## Git Hooks（lefthook）
 

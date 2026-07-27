@@ -8567,16 +8567,76 @@ mod tests {
         assert!(lane_drains.load(Ordering::SeqCst) >= ticks);
     }
 
-    /// A restore client that always fails and records, once per admitted job,
-    /// how many frames the terminal had drawn when that job started. Each job
-    /// runs on its own thread, so the thread id is what separates two
-    /// admissions from the several inventory calls inside one of them.
-    struct AdmissionCountingRestorePort {
-        draws: Arc<AtomicUsize>,
-        admitted_at: Arc<Mutex<Vec<(std::thread::ThreadId, usize)>>>,
+    /// What one controller run drew and admitted, shared by the fake terminal
+    /// (which counts frames and paces ticks) and the restore port (which reports
+    /// admissions).
+    ///
+    /// The frame loop decides a tick's redraw *above* the restore admission and
+    /// asks for the next key *below* it, so "did the tick that admitted this job
+    /// draw a frame?" is exactly `draws > draws_at_tick_start` read while that
+    /// tick is still open — which is what the admitted worker reads, microseconds
+    /// after the controller spawned it and a whole pace interval before the
+    /// terminal opens the next tick.
+    struct SkipTimeline {
+        /// Frames the terminal was asked to draw.
+        draws: usize,
+        /// Frames drawn when the currently open tick started.
+        draws_at_tick_start: usize,
+        /// Loop iterations opened so far. The first one is open before any key
+        /// is read, so it is counted from the start.
+        ticks: usize,
+        /// One entry per admitted restore job: whether the tick that admitted it
+        /// drew a frame.
+        admissions: Vec<bool>,
+        /// Worker of the newest admission. Each job runs on its own thread, so
+        /// the thread id is what separates two admissions from the several
+        /// inventory calls inside one of them.
+        newest_job: Option<std::thread::ThreadId>,
     }
 
-    impl AgentCommandPort for AdmissionCountingRestorePort {
+    impl SkipTimeline {
+        fn new() -> Self {
+            Self {
+                draws: 0,
+                draws_at_tick_start: 0,
+                ticks: 1,
+                admissions: Vec::new(),
+                newest_job: None,
+            }
+        }
+
+        fn drew(&mut self) {
+            self.draws += 1;
+        }
+
+        /// Open the tick that the key being handed out starts.
+        fn open_tick(&mut self) {
+            self.draws_at_tick_start = self.draws;
+            self.ticks += 1;
+        }
+
+        fn admitted(&mut self, job: std::thread::ThreadId) {
+            if self.newest_job == Some(job) {
+                return;
+            }
+            self.newest_job = Some(job);
+            self.admissions.push(self.draws > self.draws_at_tick_start);
+        }
+
+        /// The evidence this test drives for: a restore retry admitted on a tick
+        /// that drew nothing.
+        fn skipped_tick_admissions(&self) -> usize {
+            self.admissions.iter().filter(|drew| !**drew).count()
+        }
+    }
+
+    /// A restore client that always fails and reports, once per admitted job,
+    /// whether the tick that admitted it drew a frame.
+    struct AdmissionReportingRestorePort {
+        timeline: Arc<Mutex<SkipTimeline>>,
+    }
+
+    impl AgentCommandPort for AdmissionReportingRestorePort {
         fn launch(
             &mut self,
             _operation: OperationId,
@@ -8588,33 +8648,71 @@ mod tests {
         }
 
         fn list_terminals(&mut self) -> Result<Vec<TerminalInventoryEntry>, TerminalError> {
-            let job = std::thread::current().id();
-            let mut admitted_at = self
-                .admitted_at
+            self.timeline
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if admitted_at.last().map(|(id, _)| *id) != Some(job) {
-                admitted_at.push((job, self.draws.load(Ordering::SeqCst)));
-            }
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .admitted(std::thread::current().id());
             Err(TerminalError::Unavailable)
         }
     }
 
-    /// A terminal that paces its keys so wall time advances between frames, and
-    /// counts the frames it was actually asked to draw.
-    struct PacedTerminal {
-        keys: VecDeque<Key>,
+    /// A terminal that paces its keys so wall time advances between frames,
+    /// counts the frames it was asked to draw, and keeps feeding the inert key
+    /// until the run has produced the evidence the test needs.
+    ///
+    /// Driving to the evidence is what makes the assertion independent of *when*
+    /// a skip happens (#567): the redraw gate compares renderer inputs, so which
+    /// tick skips depends on where a wall-clock second lands among the ticks, and
+    /// a fixed key script can spend all of its admissions on drawing ticks.
+    struct SkipDrivenTerminal {
+        timeline: Arc<Mutex<SkipTimeline>>,
+        /// Wall time each tick spends waiting for a key, so the controller's
+        /// restore backoff comes due and the second behind the frame material
+        /// advances.
         pace: std::time::Duration,
-        draws: Arc<AtomicUsize>,
+        /// Ticks to spend driving for the evidence before leaving the loop
+        /// without it. Reaching it fails the test: the product stopped admitting
+        /// retries on skipped ticks.
+        tick_budget: usize,
+        /// Queued once the run is over: `CtrlQ` opens the exit prompt and the
+        /// confirmation answers it.
+        quitting: VecDeque<Key>,
     }
 
-    impl Terminal for PacedTerminal {
+    impl SkipDrivenTerminal {
+        fn next_key(&mut self) -> Key {
+            if let Some(key) = self.quitting.pop_front() {
+                return key;
+            }
+            // The admitted worker reports while this elapses.
+            std::thread::sleep(self.pace);
+            let timeline = self
+                .timeline
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let done = timeline.skipped_tick_admissions() > 0 && timeline.admissions.len() >= 2;
+            let spent = timeline.ticks >= self.tick_budget;
+            drop(timeline);
+            if done || spent {
+                self.quitting.push_back(Key::Char('y'));
+                return Key::CtrlQ;
+            }
+            // `Escape` is inert on the base Switch route, so it advances the loop
+            // without ever making the frame material change by itself.
+            Key::Escape
+        }
+    }
+
+    impl Terminal for SkipDrivenTerminal {
         fn size(&mut self) -> io::Result<(usize, usize)> {
             Ok((20, 80))
         }
 
         fn draw(&mut self, _frame: &[String]) -> io::Result<()> {
-            self.draws.fetch_add(1, Ordering::SeqCst);
+            self.timeline
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .drew();
             Ok(())
         }
 
@@ -8623,39 +8721,38 @@ mod tests {
         }
 
         fn read_key(&mut self) -> io::Result<Key> {
-            std::thread::sleep(self.pace);
-            self.keys
-                .pop_front()
-                .ok_or_else(|| io::Error::other("no more keys"))
+            let key = self.next_key();
+            self.timeline
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .open_tick();
+            Ok(key)
         }
     }
 
-    /// #554 acceptance. The skip covers the drawing and nothing else: the
-    /// restore retry's admission sits after the gate and must still fire on a
-    /// tick that drew nothing. Two admissions recorded at the same frame count
-    /// mean no frame was drawn between them, so the second one ran on a skipped
-    /// tick.
+    /// #554 acceptance. The skip covers the drawing and nothing else: the restore
+    /// retry's admission sits below the gate and must still fire on a tick that
+    /// drew nothing. The run drives until it has observed one such admission, so
+    /// a run in which no frame was skipped is never read as a pass (#567).
     #[test]
     fn a_skipped_tick_still_admits_the_restore_retry() {
-        let draws = Arc::new(AtomicUsize::new(0));
-        let admitted_at = Arc::new(Mutex::new(Vec::new()));
+        let timeline = Arc::new(Mutex::new(SkipTimeline::new()));
 
-        // `Escape` is inert on the base Switch route, so after the first
-        // failure notice the frame's material stops changing entirely.
-        let mut keys = vec![Key::Escape; 24];
-        keys.extend([Key::CtrlQ, Key::Char('y')]);
-        let mut term = PacedTerminal {
-            keys: keys.into(),
+        // 16 ticks per wall-clock second and a restore backoff capped at 4s: the
+        // budget leaves room for several admissions after the first, whose tick
+        // always draws the first frame.
+        let mut term = SkipDrivenTerminal {
+            timeline: Arc::clone(&timeline),
             pace: std::time::Duration::from_millis(60),
-            draws: Arc::clone(&draws),
+            tick_budget: 300,
+            quitting: VecDeque::new(),
         };
         let mut factory = FixedBackendFactory {
             sessions: Some(Box::new(UnavailableSessionCommandPort)),
             agent: Some(Box::new(UnavailableAgentCommandPort)),
             launch: None,
-            restore: Some(Box::new(AdmissionCountingRestorePort {
-                draws: Arc::clone(&draws),
-                admitted_at: Arc::clone(&admitted_at),
+            restore: Some(Box::new(AdmissionReportingRestorePort {
+                timeline: Arc::clone(&timeline),
             })),
             metrics: Some(Box::new(NoMetrics)),
             browser: Some(Box::new(UnavailableBrowserOpener)),
@@ -8670,19 +8767,29 @@ mod tests {
             Exit::Quit
         );
 
-        let admitted_at = admitted_at
+        let timeline = timeline
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let drawn_at: Vec<usize> = admitted_at.iter().map(|(_, drawn)| *drawn).collect();
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The retry is admitted more than once: the first admission rides the
+        // tick that draws the first frame, so it can never be the evidence.
         assert!(
-            drawn_at.len() >= 2,
-            "the restore retry was admitted {} time(s)",
-            drawn_at.len()
+            timeline.admissions.len() >= 2,
+            "the restore retry was admitted {} time(s) over {} tick(s)",
+            timeline.admissions.len(),
+            timeline.ticks
+        );
+        // The run really did skip frames, so "admitted on a tick that drew
+        // nothing" is a statement about the gate and not about an idle loop.
+        assert!(
+            timeline.draws < timeline.ticks,
+            "{} draws for {} ticks: the redraw gate did nothing",
+            timeline.draws,
+            timeline.ticks
         );
         assert!(
-            drawn_at.windows(2).any(|pair| pair[0] == pair[1]),
-            "every restore admission followed a redraw: {drawn_at:?}"
+            timeline.skipped_tick_admissions() > 0,
+            "every restore admission rode a tick that drew a frame: {:?}",
+            timeline.admissions
         );
     }
 
