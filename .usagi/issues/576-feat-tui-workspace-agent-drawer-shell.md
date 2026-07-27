@@ -24,7 +24,7 @@ Epic #571 は workspace root Agent を managed session の Closeup から分離�
 - Home の最前面 surface として `WorkspaceAgentDrawer` の open/closed state を追加する。drawer open 中は背景 sidebar、managed pane、header の別 action、通常 overlay へ入力/clickを伝播しない。
 - Esc と再度の `Ctrl-O g` で drawer を閉じる。close 後は開く前の cursor、active managed session、Home mode、selected managed tab、scroll/selection stateを変更しない。
 - Home header 下から右端に重なる drawer frame を描く。通常幅は約60%、上限96 columns、下限56 columnsを目安に clampし、背景と併存できない狭幅では全幅へ縮退する。
-- drawer の empty state、conversation selector placeholder、`New` affordance、footer を描く。ただし本 issue ではAgent inventory、live terminal、picker launchを接続せず、それらを受け取れる presentation model / event seamまでを提供する。
+- drawer の empty state、conversation selector placeholder、disabled な `New` affordance、footer を描く。ただし本 issue ではAgent inventory、live terminal、picker launchを接続せず、それらを受け取れる presentation model / event seamまでを提供する。`New` は #578 がlaunchを接続するまでrequestを発行しない。
 - drawer 固有の terminal viewport geometry を pure function として定義し、背景 Closeup viewport と混同しない。
 - 既存 modal（Overview、Closeup action、Config、decision、notes、create/error、quit等）との優先順位を明示する。既存 modal が前面にある間はdrawer entryを処理せず、drawerから既存modalを暗黙に開かない。
 
@@ -43,7 +43,7 @@ Epic #571 は workspace root Agent を managed session の Closeup から分離�
 - [ ] 既存modalが入力所有中はdrawer shortcut/header clickがeffect zeroで、modalを壊さない。
 - [ ] 通常幅、境界幅、極小幅、0 geometry、resize、CJK workspace名、notice badgeありで、renderとhit-testが一致しpanic/style leakしない。
 - [ ] drawer viewport geometryが背景right paneと独立して計算され、後続runtimeが利用できる。
-- [ ] empty drawerは自動Agent launch/resumeを発行せず、placeholderとNew affordanceだけを表示する。
+- [ ] empty drawerは自動Agent launch/resumeを発行せず、placeholderとdisabledなNew affordanceだけを表示する。
 
 ## 必須テスト
 

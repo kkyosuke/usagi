@@ -24,7 +24,7 @@ Epic #571 の機能実装は #575〜#578 に分割する。本 issue は各unit/
 - rootに複数Agentを作成し、非先頭selection/reorder/close/dismiss/reopenを保存してnormal quit、abrupt TUI exit、fresh reopenを行い、exact tab/order/selectionとspawn count不変を検証する。
 - daemon cold restart後にroot historyがinterruptedとして投影され、TUI open/inventory/drawer open/reconnectからprovider resume invocationが0、選択tabへの明示`Ctrl-O r`後だけreplacement spawn 1になることを検証する。
 - CLI pickerでinstall済み各fixtureを選択し、explicit profile/root scope、double submit/replayの1 spawn/1 tab収束、0 CLIのsafe empty stateを検証する。
-- session 0件、managed foregroundあり、daemon outage、duplicate/conflicting inventory、wrong-scope final、persist/future-schema failure、narrow/resize、drawer open中のworkspace leaveをprocessまたは最も近いdeterministic harnessで固定する。
+- session 0件、managed foregroundあり、narrow/resize、drawer open中のworkspace leaveをprocess E2Eで固定する。daemon outage、duplicate/conflicting inventory、wrong-scope final、persist/future-schema failureの全failure matrixは#577/#578のdeterministic testを正本とし、本issueでは代表ケースだけをproduction compositionから確認する。
 - production compositionから旧root sidebar/Closeup/Terminal/Diff actionへ到達する経路が残っていないことを検証し、未リリース機能なので互換shimやmigration fixtureを残さない。
 - `document/03-tui.md` の Home/target、sidebar、drawer、input、Agent CLI選択、pane restore/resumeを実装済み現在形へ更新する。必要な場合だけarchitecture/IPC/daemon docsへ「wire root scopeは不変」を記載し、事実を重複させない。
 - issue #571 の受入条件を子issue/テストへ対応付け、Epic完了時に矛盾・未所有項目がないことを確認する。

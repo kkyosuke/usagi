@@ -16,6 +16,8 @@ updated_at: 2026-07-27T23:04:06.141688+00:00
 #575 で managed-session navigation から workspace root を分離し、#576 で Workspace Agent drawer shell と入力所有境界を追加する。本 issue は既存の root scope Agent 基盤（`session_id: None`、live/interrupted inventory、`AgentTabIntent`、exact resume、daemon-owned PTY）を drawer に接続する。
 
 本 issue の主眼は **前回 conversation の復元、Agent-only invariant、foreground attach/input/resize、明示 resume** である。新しい conversation を起動するCLI pickerは #578 が所有する。
+既存の `AgentTabIntent` reconcile、pane reducer、exact resume contractを再実装せず、root drawerへのprojection・foreground
+handoff・admissionの配線に限定する。
 
 ## 対象責務
 
