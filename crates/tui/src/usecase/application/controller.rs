@@ -5797,8 +5797,17 @@ mod tests {
         assert_eq!(editor.scope(), EnvScope::Workspace);
         assert!(editor.is_scope_locked());
 
-        // Closeup owns only this workspace's scope. Tab cannot move the locked
-        // editor to global or issue another load.
+        // Once the read refluxes the editor accepts edits, but Closeup owns only
+        // this workspace's scope: Tab cannot move the locked editor to global or
+        // issue another load.
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentLoaded {
+                scope: EnvScope::Workspace,
+                entries: Vec::new(),
+                inherited: Vec::new(),
+            }),
+        );
         assert!(update(&mut state, AppEvent::Key(AppKey::Tab)).is_empty());
         let editor = state.environment_editor().unwrap();
         assert_eq!(editor.scope(), EnvScope::Workspace);
