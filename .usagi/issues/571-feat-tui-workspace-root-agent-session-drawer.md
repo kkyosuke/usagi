@@ -4,10 +4,10 @@ title: feat(tui): workspace root Agent を session 一覧から分離して右 d
 status: todo
 priority: high
 labels: [v2, tui, agent, ux, design, epic]
-dependson: []
+dependson: [575, 576, 577, 578, 579]
 related: [388, 506, 510, 545]
 created_at: 2026-07-27T22:43:36.804576+00:00
-updated_at: 2026-07-27T22:43:36.804576+00:00
+updated_at: 2026-07-27T23:05:42.278193+00:00
 ---
 
 ## 背景・現状
@@ -137,6 +137,19 @@ sidebar rows は `session* → + new session` とし、root row と直後の div
 - stale delayed restore/attach/resize/input ACK は既存 pane-registry revision、interaction、subscription/sequence fence で current drawer selection を上書きしない。
 
 ## 実装範囲
+
+本 issue は全体設計と最終受入を管理する Epic とし、実装は次の子 issue に分割する。
+
+| 順序 | Issue | 所有する責務 |
+|---|---|---|
+| 1 | #575 | sidebar / navigation から root target を分離し、session 0 件を含む managed-session state を整理する |
+| 2 | #576 | header entry、`Ctrl-O g`、右 overlay drawer shell、geometry、入力 ownership を追加する |
+| 3 | #577 | root Agent conversation の durable restore、Agent-only pane、foreground attach / input / resize / explicit resume を接続する |
+| 4 | #578 | install 済み CLI picker と explicit profile による新規 root Agent launch を追加する |
+| 5 | #579 | shipping TUI / daemon / PTY E2E、旧 root Closeup 経路の除去確認、仕様ドキュメント更新を完了する |
+
+依存順は `#575 → #576 → #577 → #578 → #579` とする。各 issue は直前までの public seam を使い、後続責務を
+先行実装しない。Epic #571 は全子 issue が完了し、下記の横断受入条件が満たされた時点で完了する。
 
 1. **controller/state**
    - root を sidebar selection/active fallback から分離する。
