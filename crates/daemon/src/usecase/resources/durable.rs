@@ -389,9 +389,9 @@ impl ShardedRuntimeState {
             ..CommitReport::default()
         };
         self.claim(&owned)?;
-        self.project(kind, &owned)?;
+        let shard = self.project(kind, &owned)?;
         report.released = self.release_retired(&foreign)?;
-        report.consumed = self.drain()?;
+        report.consumed = self.drain(&shard)?;
         Ok(report)
     }
 
@@ -493,6 +493,11 @@ impl ShardedRuntimeState {
 
     /// L1: every record that holds capacity has a durable claim first.
     fn claim(&self, projections: &[&RuntimeProjection]) -> Result<(), ResourceFailure> {
+        if projections.is_empty() {
+            // Nothing of this owner's is being saved, so the shared document is not
+            // even read: a save about somebody else's records costs no lock here.
+            return Ok(());
+        }
         let policy = self.allocator.policy();
         let owner = self.owner;
         let now = self.clock.now();
@@ -506,31 +511,36 @@ impl ShardedRuntimeState {
     }
 
     /// L2/L4: the owner's shard, which only this process writes.
+    ///
+    /// Returns the committed document, so the drain below decides what to do
+    /// without reading the shard a second time.
     fn project(
         &self,
         kind: ResourceKind,
         projections: &[&RuntimeProjection],
-    ) -> Result<(), ResourceFailure> {
-        self.shard.update(|document| {
+    ) -> Result<ShardDocument, ResourceFailure> {
+        let ((), committed) = self.shard.update(|document| {
             for projection in projections {
                 project_one(document, projection)?;
             }
             forget_absent(document, kind, projections);
             Ok(())
         })?;
-        Ok(())
+        Ok(committed.to_document())
     }
 
     /// E2/E3: apply this generation's own published events and sweep the outbox.
     ///
     /// Only an active generation consumes: a draining owner publishes and waits
     /// for the active consumer, which is what keeps the allocator single writer.
-    fn drain(&self) -> Result<usize, ResourceFailure> {
-        if self.role != GenerationRole::Active {
+    /// A save that published nothing — every save but an exit or a completion —
+    /// touches neither document again, so an ordinary transition costs one
+    /// compare-and-swap per document instead of five locked reads.
+    fn drain(&self, shard: &ShardDocument) -> Result<usize, ResourceFailure> {
+        if self.role != GenerationRole::Active || shard.outbox.is_empty() {
             return Ok(0);
         }
-        let document = self.shard.load()?.to_document();
-        let report = ActiveConsumer::new(&self.allocator).consume(&document)?;
+        let report = ActiveConsumer::new(&self.allocator).consume(shard)?;
         let consumed = self.allocator.load()?.to_document();
         self.shard
             .update(|document| Ok(document.reclaim(&consumed)))?;
