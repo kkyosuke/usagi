@@ -357,8 +357,15 @@ fn a_wait_failure_and_an_output_failure_both_stand_down() {
     assert_eq!(authority.releases.get(), 1);
 }
 
+/// A release that fails is reported, and the endpoint is still retired.
+///
+/// The ordering this path protects is the window while the process runs, and
+/// that window closes the moment it returns: the socket stops answering whether
+/// or not its file survives, so leaving the file behind would only add residue.
+/// The retained entry is not made reachable by it either — a handoff refuses a
+/// successor whose process it cannot prove alive.
 #[test]
-fn an_unreleasable_entry_keeps_the_endpoint_bound() {
+fn an_unreleasable_entry_is_reported_and_still_retires_the_endpoint() {
     let endpoint = FakeEndpoint::default();
     let authority = FakeStandbyAuthority::failing_release();
     let error = serve_standby(
@@ -370,11 +377,10 @@ fn an_unreleasable_entry_keeps_the_endpoint_bound() {
         &info(),
     )
     .unwrap_err();
+    // The release failure is the primary error, not the retirement's success.
     assert_eq!(error.to_string(), "release failed");
-    // The entry may still name this endpoint, and a rollover reads that entry.
-    // Unlinking the socket anyway is the one thing that would make the registry
-    // name something unreachable.
-    assert_eq!(endpoint.retires.get(), 0);
+    assert_eq!(authority.releases.get(), 1);
+    assert_eq!(endpoint.retires.get(), 1);
 }
 
 #[test]
@@ -394,27 +400,28 @@ fn a_failed_retirement_is_reported_after_the_entry_is_released() {
     assert_eq!(authority.releases.get(), 1);
 }
 
-/// The stand-down path is best effort, but it is still ordered: a release that
-/// fails leaves the socket alone there too.
+/// The stand-down path is best effort, but it is still ordered: the entry goes
+/// before the socket there too. An unwind whose release also fails still gives
+/// the socket back, and still reports the failure that started the unwind
+/// rather than either cleanup's.
 #[test]
-fn a_stand_down_whose_release_fails_leaves_the_endpoint_alone() {
+fn a_stand_down_whose_release_fails_still_retires_the_endpoint() {
     let endpoint = FakeEndpoint::default();
     let authority = FakeStandbyAuthority {
         fail_admit: true,
         fail_release: true,
         ..FakeStandbyAuthority::default()
     };
-    assert!(
-        serve_standby(
-            &mut Vec::new(),
-            &endpoint,
-            &authority,
-            &ImmediateShutdown,
-            4242,
-            &info(),
-        )
-        .is_err()
-    );
+    let error = serve_standby(
+        &mut Vec::new(),
+        &endpoint,
+        &authority,
+        &ImmediateShutdown,
+        4242,
+        &info(),
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), "admit failed");
     assert_eq!(authority.releases.get(), 1);
-    assert_eq!(endpoint.retires.get(), 0);
+    assert_eq!(endpoint.retires.get(), 1);
 }

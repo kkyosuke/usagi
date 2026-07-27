@@ -36,7 +36,10 @@
 //! before its registry entry); for a standby nothing is published at all, so its
 //! registry entry is the only thing that names its socket — and a retained
 //! standby entry naming a socket nobody accepts on is exactly what a rollover
-//! would trust.
+//! would trust. The order is what matters here, not stopping at the first
+//! failure: both steps are attempted on the way out, because after this process
+//! exits the socket is dead either way and only the first error is worth
+//! reporting.
 //!
 //! Every seam is injected, so this whole ordering is proved with fakes; the
 //! synthesis root binds the real private endpoint, the real registry, and the
@@ -153,22 +156,31 @@ pub fn serve_standby(
         return Err(error);
     }
 
-    // Nothing may name this endpoint once it stops answering, so the registry
-    // entry goes first and a failure to give it up keeps the endpoint bound.
-    authority.release()?;
-    endpoint.retire()?;
+    // The entry goes first, then the endpoint. Both are attempted even when the
+    // first fails, and the first failure is the one reported.
+    //
+    // Retiring after a failed release is not a violation of the ordering: what
+    // the order protects is the window *while this process still runs*, where an
+    // entry naming a live socket is a state a rollover may act on and a retained
+    // entry naming a dead one is not. Once this returns the process exits, so
+    // the socket stops answering whether or not its file survives — keeping the
+    // file would leave residue for the next sweep to reclaim without making the
+    // retained entry any more reachable. A standby whose process is gone is
+    // refused as a successor by the liveness check every handoff performs.
+    let released = authority.release();
+    let retired = endpoint.retire();
+    released.and(retired)?;
     writeln!(out, "{describe}: daemon standby stopped (pid {pid})")
 }
 
 /// Best-effort stand-down that preserves a primary error.
 ///
 /// The order is the successful path's order: the entry that names the endpoint
-/// is released before the endpoint is unlinked, so a second failure cannot leave
-/// a retained standby whose socket is already gone.
+/// is released before the endpoint is unlinked, so no observer sees a retained
+/// standby whose socket is already gone while this process is still running.
 fn stand_down(endpoint: &dyn StandbyEndpoint, authority: &dyn StandbyAuthority) {
-    if authority.release().is_ok() {
-        let _ = endpoint.retire();
-    }
+    let _ = authority.release();
+    let _ = endpoint.retire();
 }
 
 #[cfg(test)]

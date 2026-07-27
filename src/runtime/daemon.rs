@@ -5722,6 +5722,12 @@ fn spawn_standby_ipc_server(
 /// terminal IO are refused by the fence itself; a read the fence admits is still
 /// refused here, because this build's standby holds no runtime state to read —
 /// the owner shard it would read is not wired yet.
+///
+/// A fence refusal is reported as `generation_rolled_over`, which is the same
+/// code the draining generation's fence reports for the same decision
+/// (`crates/daemon/tests/generation_authority.rs`). Both mean "this generation
+/// may not do this; re-resolve the authority", and both are effect zero, so the
+/// two roles stay one contract for a client rather than two.
 fn standby_reply(
     gate: &AdmissionGate,
     request_id: usagi_core::infrastructure::ipc::RequestId,

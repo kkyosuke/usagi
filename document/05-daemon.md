@@ -1289,7 +1289,10 @@ data directory を所有している）で **他 process の tree に socket を
 stand down の順序は active の**逆**である。active は `current.json`（endpoint を名指すもの）を registry entry より
 先に retire するが、standby は何も publish していないため、その registry entry が endpoint を名指す唯一のものになる。
 entry を先に返却しないと、「retain された standby が既に消えた socket を名指す」状態が残り、それは rollover が
-信じてしまう state である。entry の返却に失敗した場合は endpoint を retire せず、失敗を報告して終了する。
+信じてしまう state である。entry の返却に失敗しても endpoint は retire する。この順序が守っているのは
+**process が生きている間**の窓であり、stand down を抜けた時点で process は終了するため、socket file を残しても
+応答は返らない（残せば次の sweep が回収すべき residue が増えるだけである）。retain されたままの entry も、
+handoff が successor に対して行う生存確認を通らないので successor には選ばれない。報告するのは最初の失敗である。
 
 standby の custody は **自分の registry entry と、後継すべき incumbent** の 2 つである。lock も record も持たない
 ため active の 2 invariant は存在しない。約 1 秒周期で registry を読み直し、次のいずれかを観測した時点で graceful
