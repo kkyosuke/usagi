@@ -83,7 +83,7 @@ Workspace Agent drawer は Agent conversation だけを持つ。
 - live Agent は既存の VT terminal projection、input、resize、scroll、link/copy、detach/reconnect 契約を再利用する。provider transcript を別形式へ再構成する native chat renderer は作らない。
 - interrupted Agent は既存の safe label/body と明示 `Ctrl-O r` resume を使う。
 - conversation 切替、reorder、close/dismiss、reopen、resume は `AgentContinuationRef` / exact `TerminalRef` と root target の `AgentTabIntent` を正本にする。
-- root scope の generic Terminal、Diff、pending Terminal、Terminal 起動 action は drawer に表示しない。既に daemon 上で動いている root Terminal を drawer open/close の副作用で kill せず、単にこの surface へ投影しない。
+- root scope の generic Terminal、Diff、pending Terminal、Terminal 起動 action は drawer に表示せず、作成経路も持たない。未リリース機能の後方互換は考慮せず、Workspace Agent の root pane は Agent-only を invariant とする。
 - drawer から `terminal` / `diff` / session close / root close を起動できない。Agent-only 制約は表示だけでなく reducer/effect 境界でも検証する。
 
 ## 前回 Agent の選択と復元
@@ -146,7 +146,7 @@ sidebar rows は `session* → + new session` とし、root row と直後の div
    - sidebar から `main`/divider を削除し viewport/click geometry を更新する。
    - header button と right-aligned drawer、狭幅 fallback、drawer-local conversation selector / New picker を実装する。
 3. **pane/runtime**
-   - root Agent registry/intent/inventory を drawer に接続し、root generic Terminal/Diff を filter する。
+   - root Agent registry/intent/inventory を drawer に接続し、root pane に generic Terminal / Diff を作成できない invariant を設ける。
    - drawer foreground attach、close 時の managed-session foreground restore、drawer geometry resize を実装する。
 4. **input**
    - `Ctrl-O g` と header click を同じ open/close action へ束縛し、live Agent、Switch、Closeup、overlay precedence を統一する。
@@ -168,7 +168,7 @@ sidebar rows は `session* → + new session` とし、root row と直後の div
 - [ ] interrupted root Agent は前回 selection のまま表示され、drawer open/reconnect では resume せず、選択 tabへの明示 Resume だけが replacement を 1 回 spawn する。
 - [ ] `New` は install 済み CLI の picker を必ず経由し、選択した explicit profile で root Agent を 1 回だけ起動する。未 install CLI は候補/補完/admission に現れない。
 - [ ] root Agent の複数 conversation で selection/reorder/close/reopen が durable に保持され、duplicate/stale inventory と concurrent client CAS でも lost update・二重 tab・focus steal を起こさない。
-- [ ] 既存 root Terminal が daemon にある状態でも drawer に現れず、drawer open/close や migration で kill されない。
+- [ ] TUI から root generic Terminal / Diff を作成・復元・表示する経路が存在せず、root pane は Agent-only である。
 - [ ] drawer open 中の daemon outage、wrong-scope final、persist failure、future schema、CLI 0 件を fail closed に扱い、既存 pane/intent/bytes を成功扱いで変更しない。
 - [ ] 極小幅・resize・CJK workspace/session 名・notice badge ありでも drawer/header/sidebar の表示幅と click target が一致し、panic・style leak・誤 resize を起こさない。
 - [ ] managed session の create/remove/Closeup、Overview/config/env/decision、pane restore、quit/Welcome への離脱に回帰がない。
@@ -188,7 +188,7 @@ sidebar rows は `session* → + new session` とし、root row と直後の div
 shipping TUI、実 daemon process/socket/PTY、fixture Agent CLI を使い、最低限次を固定する。
 
 1. managed session pane を foreground にしたまま drawer を開き、root Agent を CLI picker から起動する。drawer closeで managed pane、再openで同じ root Agentへ戻り、両 child PID/spawn count が不変である。
-2. root に複数 Agent を作り、非先頭 selection/reorder/close を保存して TUI を終了・再openする。drawer は exact tab/order/selectionを復元し、root Terminal fixture は表示しない。
+2. root に複数 Agent を作り、非先頭 selection/reorder/close を保存して TUI を終了・再openする。drawer は exact tab/order/selectionを復元し、root generic Terminal / Diff の作成 request は発行されない。
 3. daemon cold restart 後は選択していた root history を interrupted として表示し、自動 resume 0、明示 `Ctrl-O r` 後だけ replacement spawn 1 になる。
 4. session 0 件、CLI 0 件、daemon outage、duplicate final、resize/narrow terminal、drawer open 中の workspace leave を通し、local spawn・二重 tab・background input leakage が無いことを確認する。
 
