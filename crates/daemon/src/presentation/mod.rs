@@ -91,7 +91,9 @@ pub struct DaemonEnv<'a, F, P, T, R, S, L, K, M, W> {
     pub census: &'a dyn usecase::replacement::ResourceCensus,
     /// この build が live successor へ authority を渡せない理由。durable な
     /// generation registry の観測から導く。
-    pub seamless: usecase::replacement::SeamlessRefusal,
+    pub seamless: Option<usecase::replacement::SeamlessRefusal>,
+    /// standby の staging と old active への rollover IPC 要求。
+    pub rollover: &'a dyn usecase::replacement::RolloverRequester,
 }
 
 /// daemon 面の entry point。合成ルートが `usagi daemon` の argv を検証して構築した
@@ -180,7 +182,8 @@ pub fn run<
                 env.sleeper,
                 env.ready,
                 env.census,
-                &env.seamless,
+                env.seamless.as_ref(),
+                env.rollover,
                 mode,
                 operation.as_ref(),
                 info,
@@ -199,7 +202,7 @@ mod tests {
         RecordingTerminator, TestLauncher,
     };
     use crate::usecase::replacement::{
-        LiveResources, ResourceCensus, SeamlessRefusal, TransitionMode,
+        LiveResources, ResourceCensus, RolloverRequester, SeamlessRefusal, TransitionMode,
     };
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::daemon::DaemonRecord;
@@ -220,6 +223,15 @@ mod tests {
                 agents: self.0,
                 terminals: 0,
             })
+        }
+    }
+    struct NoopRollover;
+    impl RolloverRequester for NoopRollover {
+        fn rollover(
+            &self,
+            operation: &usagi_core::infrastructure::ipc::OperationId,
+        ) -> std::io::Result<String> {
+            Ok(format!("rolled over {}", operation.0))
         }
     }
 
@@ -262,7 +274,8 @@ mod tests {
             workspace: &FakeWorkspaceFence::Acquired,
             pid: 4321,
             census: &Owning(0),
-            seamless: SeamlessRefusal::NoGenerationRegistry,
+            seamless: Some(SeamlessRefusal::NoGenerationRegistry),
+            rollover: &NoopRollover,
         };
         let mut buf = Vec::new();
         run(&mut buf, command, &info(), &env).unwrap();
@@ -313,7 +326,8 @@ mod tests {
             workspace: &FakeWorkspaceFence::Held(1111),
             pid: 4321,
             census: &Owning(0),
-            seamless: SeamlessRefusal::NoVerifiedStandby,
+            seamless: Some(SeamlessRefusal::NoLiveRegisteredActive),
+            rollover: &NoopRollover,
         };
         let mut buf = Vec::new();
         run(
@@ -365,12 +379,64 @@ mod tests {
                 workspace: &FakeWorkspaceFence::Acquired,
                 pid: 4321,
                 census: &Owning(0),
-                seamless: SeamlessRefusal::NoGenerationRegistry,
+                seamless: Some(SeamlessRefusal::NoGenerationRegistry),
+                rollover: &NoopRollover,
             };
             let mut buf = Vec::new();
             run(&mut buf, command, &info(), &env).unwrap();
             assert_eq!(String::from_utf8(buf).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn run_routes_a_live_planned_replacement_to_the_rollover_port() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        store.save(&DaemonRecord::new(4321)).unwrap();
+        let (probe, terminator, shutdown, sleeper) = (
+            FixedProbe(true),
+            RecordingTerminator::default(),
+            ImmediateShutdown,
+            NoopSleeper,
+        );
+        let launcher = TestLauncher::idle(&store);
+        let ready = NoopReady;
+        let env = DaemonEnv {
+            authority: &FakeAuthority::default(),
+            standby_endpoint: &NoopStandbyEndpoint,
+            standby_authority: &CountingStandbyAuthority::default(),
+            store: &store,
+            probe: &probe,
+            terminator: &terminator,
+            ready: &ready,
+            shutdown: &shutdown,
+            launcher: &launcher,
+            sleeper: &sleeper,
+            lock: &FakeLock::Acquired,
+            workspace: &FakeWorkspaceFence::Acquired,
+            pid: 4321,
+            census: &Owning(1),
+            seamless: None,
+            rollover: &NoopRollover,
+        };
+        let mut buf = Vec::new();
+        run(
+            &mut buf,
+            DaemonCommand::Replace {
+                operation: Some(usagi_core::infrastructure::ipc::OperationId(
+                    "build-rollover-v1-live".into(),
+                )),
+                mode: TransitionMode::Planned,
+            },
+            &info(),
+            &env,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "rolled over build-rollover-v1-live\n"
+        );
+        assert!(terminator.terminated().is_empty());
+        assert_eq!(launcher.launches(), 0);
     }
 
     #[test]
@@ -412,7 +478,8 @@ mod tests {
             workspace: &FakeWorkspaceFence::Acquired,
             pid: 4321,
             census: &Owning(1),
-            seamless: SeamlessRefusal::NoGenerationRegistry,
+            seamless: Some(SeamlessRefusal::NoGenerationRegistry),
+            rollover: &NoopRollover,
         };
         for command in [stop(), replace()] {
             let error = run(&mut Vec::new(), command, &info(), &env).unwrap_err();
@@ -473,7 +540,8 @@ mod tests {
                 workspace: &FakeWorkspaceFence::Acquired,
                 pid: 4321,
                 census: &Owning(0),
-                seamless: SeamlessRefusal::NoGenerationRegistry,
+                seamless: Some(SeamlessRefusal::NoGenerationRegistry),
+                rollover: &NoopRollover,
             };
             let mut buf = Vec::new();
             assert!(run(&mut buf, command, &info(), &env).is_err());

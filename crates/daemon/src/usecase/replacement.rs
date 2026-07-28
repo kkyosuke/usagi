@@ -15,22 +15,16 @@
 //! | why this build cannot hand authority to a live successor | [`seamless_refusal`] |
 //!
 //! A *seamless* rollover keeps the old process alive as a draining generation so
-//! its PTYs survive the replacement. The authority that makes two daemon
-//! processes safe is implemented in [`crate::usecase::authority`], but nothing
-//! in this build can start a standby process to hand authority *to*: `serve`
-//! takes the data directory's single-instance lock for its whole process
-//! lifetime, and the durable runtime state is a process-local whole-snapshot
-//! store. [`seamless_refusal`] reads the durable registry and names the exact
-//! prerequisite that is missing, so the refusal is a statement about observed
-//! state and not a constant.
+//! its PTYs survive the replacement. The synthesis root stages a standby and
+//! asks the old active over IPC to drive its own process-local barrier.
 //!
-//! What is left is therefore a *cold* transition, and a cold transition
-//! destroys every PTY the old daemon owns. That is fine when it owns none and
-//! never acceptable by accident, so:
+//! A cold transition destroys every PTY the old daemon owns. It is used when
+//! the daemon owns none or when the operator explicitly gives them up; otherwise
+//! the planned path is seamless:
 //!
 //! ```text
 //! live runtime = 0            -> cold transition
-//! live runtime > 0, planned   -> refused, nothing signalled, every PTY alive
+//! live runtime > 0, planned   -> seamless rollover when the registry permits it
 //! live runtime > 0, cold      -> cold transition, explicitly asked for
 //! ```
 //!
@@ -52,7 +46,6 @@ use usagi_core::infrastructure::daemon::{
 use usagi_core::infrastructure::ipc::{BuildIdentity, OperationId, build_rollover_trigger};
 
 use crate::usecase::authority::registry::{REGISTRY_SCHEMA, RegistryDocument};
-use crate::usecase::generation::GenerationRole;
 use crate::usecase::stop::StaleDaemonCleanup;
 use crate::usecase::terminal::TerminalRuntimeState;
 use crate::usecase::{restart, stop};
@@ -155,13 +148,10 @@ pub enum SeamlessRefusal {
     /// The registry cannot be read or does not parse. Fail closed rather than
     /// guess at an authority.
     RegistryUnreadable(String),
-    /// The registry names no standby whose artifact identity was verified after
-    /// readiness, so there is no generation eligible to become active.
-    NoVerifiedStandby,
-    /// A verified standby is registered, but this build has no lifecycle that
-    /// admits it: `serve` holds the single-instance lock for its whole process
-    /// lifetime and the durable runtime state has no cross-process owner shard.
-    StandbyNotAdmitted,
+    /// The registry does not name a live registered active generation.
+    NoLiveRegisteredActive,
+    /// No additional retained generation can be staged.
+    GenerationLimit,
 }
 
 impl fmt::Display for SeamlessRefusal {
@@ -176,36 +166,35 @@ impl fmt::Display for SeamlessRefusal {
             Self::RegistryUnreadable(detail) => {
                 write!(f, "the generation registry cannot be trusted: {detail}")
             }
-            Self::NoVerifiedStandby => f.write_str("no verified standby generation is registered"),
-            Self::StandbyNotAdmitted => {
-                f.write_str("this build cannot admit a standby generation while it serves")
+            Self::NoLiveRegisteredActive => {
+                f.write_str("no live registered active generation exists")
             }
+            Self::GenerationLimit => f.write_str("the generation limit is already reached"),
         }
     }
 }
 
 /// Why this build cannot hand authority to a live successor right now.
 ///
-/// The answer comes from the durable registry alone: a successor must already
-/// be a registered standby whose artifact was verified after readiness before
-/// any handoff could name it.
+/// The answer comes from the durable registry plus exact liveness observation.
+/// A free generation slot is required because the synthesis root stages the
+/// successor after this preflight.
 #[must_use]
-pub fn seamless_refusal(registry: Option<&RegistryDocument>) -> SeamlessRefusal {
+pub fn seamless_refusal(
+    registry: Option<&RegistryDocument>,
+    active_is_alive: bool,
+    generation_limit: usize,
+) -> Option<SeamlessRefusal> {
     let Some(document) = registry else {
-        return SeamlessRefusal::NoGenerationRegistry;
+        return Some(SeamlessRefusal::NoGenerationRegistry);
     };
     if document.schema != REGISTRY_SCHEMA {
-        return SeamlessRefusal::RegistrySchemaUnsupported;
+        return Some(SeamlessRefusal::RegistrySchemaUnsupported);
     }
-    if document
-        .generations
-        .iter()
-        .any(|entry| entry.role == GenerationRole::Standby && entry.is_build_verified())
-    {
-        SeamlessRefusal::StandbyNotAdmitted
-    } else {
-        SeamlessRefusal::NoVerifiedStandby
+    if !active_is_alive || document.active().is_none() {
+        return Some(SeamlessRefusal::NoLiveRegisteredActive);
     }
+    (document.retained() >= generation_limit).then_some(SeamlessRefusal::GenerationLimit)
 }
 
 /// Whether the operator gave up the live runtime a transition would destroy.
@@ -224,6 +213,8 @@ pub enum ReplacementPlan {
     /// Stop the recorded daemon and start a fresh one. Whatever it owned is
     /// gone with it.
     ColdTransition,
+    /// Stage a standby and ask the old active to drive its own gated handoff.
+    SeamlessRollover,
     /// Do nothing at all.
     Refused {
         /// Why the live runtime could not have been preserved instead.
@@ -237,17 +228,30 @@ pub enum ReplacementPlan {
 #[must_use]
 pub fn plan_replacement(
     mode: TransitionMode,
-    seamless: &SeamlessRefusal,
+    seamless: Option<&SeamlessRefusal>,
     live: LiveResources,
 ) -> ReplacementPlan {
     if live.is_empty() || mode == TransitionMode::Cold {
         ReplacementPlan::ColdTransition
     } else {
-        ReplacementPlan::Refused {
-            seamless: seamless.clone(),
-            live,
+        match seamless {
+            None => ReplacementPlan::SeamlessRollover,
+            Some(seamless) => ReplacementPlan::Refused {
+                seamless: seamless.clone(),
+                live,
+            },
         }
     }
+}
+
+/// The synthesis-root operation that stages a standby and sends the rollover
+/// IPC verb to the old active daemon.
+pub trait RolloverRequester {
+    /// Execute the operation and return the user-facing report.
+    ///
+    /// # Errors
+    /// Returns staging, readiness, IPC, or handoff failures.
+    fn rollover(&self, operation: &OperationId) -> io::Result<String>;
 }
 
 /// What a stop is allowed to do.
@@ -377,7 +381,8 @@ pub fn replace_daemon<
     sleeper: &K,
     stale_cleanup: &dyn StaleDaemonCleanup,
     census: &dyn ResourceCensus,
-    seamless: &SeamlessRefusal,
+    seamless: Option<&SeamlessRefusal>,
+    rollover: &dyn RolloverRequester,
     mode: TransitionMode,
     operation: Option<&OperationId>,
     info: &AppInfo,
@@ -398,6 +403,14 @@ pub fn replace_daemon<
                 Some(operation) => format!("{report} (operation {})", operation.0),
                 None => report,
             })
+        }
+        ReplacementPlan::SeamlessRollover => {
+            let operation = operation.ok_or_else(|| {
+                io::Error::other(
+                    "daemon artifact identity is unavailable for a durable rollover operation",
+                )
+            })?;
+            rollover.rollover(operation)
         }
         ReplacementPlan::Refused { seamless, live } => {
             Err(refuse_live("replace the daemon", live, Some(&seamless)))

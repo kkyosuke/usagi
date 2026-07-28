@@ -34,6 +34,10 @@ use crate::infrastructure::ipc::{
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DaemonRequest {
+    /// Ask the currently active daemon to hand authority to its verified
+    /// standby. The old active drives the process-local admission barrier;
+    /// clients only supply the durable operation identity.
+    Rollover { operation_id: String },
     /// Revisioned daemon-owned PR inventory. Events are only hints; clients
     /// always converge by reading this snapshot.
     Pr {
@@ -1018,6 +1022,25 @@ mod metrics_schema_tests {
     use super::{DaemonMetrics, DaemonRequest, MetricsAction};
 
     #[test]
+    fn rollover_request_round_trips_with_its_durable_operation() {
+        let request = DaemonRequest::Rollover {
+            operation_id: "build-rollover-v1-test".into(),
+        };
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "kind": "rollover",
+                "operation_id": "build-rollover-v1-test"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<DaemonRequest>(encoded).unwrap(),
+            request
+        );
+    }
+
+    #[test]
     fn metrics_schema_is_tagged_and_versioned() {
         assert_eq!(
             serde_json::to_value(DaemonRequest::Metrics {
@@ -1436,7 +1459,8 @@ impl RetryEligibility {
                     Self::NoCrossConnectionEvidence
                 }
             }
-            DaemonRequest::Agent { .. }
+            DaemonRequest::Rollover { .. }
+            | DaemonRequest::Agent { .. }
             | DaemonRequest::ResumeAgent { .. }
             | DaemonRequest::Dispatch { .. } => Self::DurableOperation,
             DaemonRequest::Terminal { .. }

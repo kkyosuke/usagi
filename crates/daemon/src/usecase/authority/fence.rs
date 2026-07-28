@@ -101,6 +101,7 @@ impl OwnedRuntime {
 #[must_use]
 pub fn classify_request(body: &Value, owned: OwnedRuntime) -> (RequestClass, ResourceOwner) {
     match body.get("kind").and_then(Value::as_str) {
+        Some("rollover") => (RequestClass::Rollover, ResourceOwner::Unscoped),
         Some("terminal") => terminal_class(body, owned),
         // Creating a daemon-owned runtime is the effect a control barrier exists
         // to have already stopped, so it is named apart from the rest of the

@@ -1,14 +1,14 @@
 ---
 number: 572
 title: feat(daemon): rollover trigger を IPC verb にして old active が gated handoff を駆動する
-status: todo
+status: done
 priority: high
 labels: [review, v2, daemon, lifecycle, ipc, recovery]
 dependson: []
 related: [507, 508, 516, 559, 573, 574]
 parent: 559
 created_at: 2026-07-27T22:57:44.389093+00:00
-updated_at: 2026-07-27T22:59:20.845453+00:00
+updated_at: 2026-07-28T12:25:52.074054+00:00
 ---
 
 ## 問題・根拠（コード調査で確定）

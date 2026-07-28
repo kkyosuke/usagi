@@ -13,15 +13,17 @@ fn gate(role: GenerationRole) -> AdmissionGate {
 #[test]
 fn classification_is_a_closed_table_over_role_request_and_owner() {
     use GenerationRole::{Active, Draining, Retired, Standby};
-    use RequestClass::{Control, Inventory, Read, Spawn, TerminalIo};
+    use RequestClass::{Control, Inventory, Read, Rollover, Spawn, TerminalIo};
     use ResourceOwner::{OtherGeneration, SelfGeneration, Unscoped};
 
     let expected = |role, request, owner| -> Result<Option<LeaseClass>, AdmissionRefusal> {
         match (role, request, owner) {
             (_, _, OtherGeneration) => Err(AdmissionRefusal::NotOwner),
             (Retired, _, _) => Err(AdmissionRefusal::Retired),
-            (_, Read | Inventory, _) => Ok(None),
-            (Standby, _, _) | (Draining, Control | Spawn, _) => Err(AdmissionRefusal::NotActive),
+            (_, Read | Inventory, _) | (Active, Rollover, _) => Ok(None),
+            (Standby, _, _) | (Draining, Rollover | Control | Spawn, _) => {
+                Err(AdmissionRefusal::NotActive)
+            }
             (_, TerminalIo, SelfGeneration) => Ok(Some(LeaseClass::OwnerTerminal)),
             (_, TerminalIo, Unscoped) => Err(AdmissionRefusal::NotOwner),
             (Active, Control | Spawn, _) => Ok(Some(LeaseClass::ActiveControl)),
@@ -29,7 +31,7 @@ fn classification_is_a_closed_table_over_role_request_and_owner() {
     };
 
     for role in [Standby, Active, Draining, Retired] {
-        for request in [Control, Spawn, TerminalIo, Read, Inventory] {
+        for request in [Rollover, Control, Spawn, TerminalIo, Read, Inventory] {
             for owner in [SelfGeneration, OtherGeneration, Unscoped] {
                 assert_eq!(
                     classify(role, request, owner),
