@@ -27,7 +27,13 @@ use usagi_core::usecase::client::{
     IpcClient, McpCallerContext, SessionAction, TerminalAction, TerminalGeometry,
     TerminalLaunchIntent, TerminalRequest,
 };
-use usagi_daemon::infrastructure::unix_transport::connect_current;
+use usagi_core::usecase::owner_routing::GenerationDirectory;
+use usagi_daemon::infrastructure::generation_registry::{
+    TrustedGenerationDirectory, read_registry_document,
+};
+use usagi_daemon::infrastructure::unix_transport::{
+    connect_current, connect_generation, read_locator,
+};
 
 /// daemon の起動はすべて共有 fixture 経由にする（cwd の fixture 固定と exact reap）。
 #[path = "support/daemon.rs"]
@@ -993,6 +999,301 @@ fn root_ipc_cold_restart_projects_interrupted_history_and_resumes_one_exact_tab(
     );
 }
 
+/// #574 product E2E: a shipping restart hands authority to a second daemon
+/// process without replacing either real PTY child.
+///
+/// The old client stays connected while a second client closes and reopens
+/// directly against the daemon-written owner endpoint. This pins both routing
+/// modes across the locator switch: control moves to the new active generation,
+/// while terminal traffic continues to reach the draining owner. The fixture
+/// children exit only after input reaches those exact PTYs; a concurrent launch
+/// on the successor then proves that the old owner's capacity was released.
+#[test]
+#[allow(clippy::too_many_lines)] // One two-process rollover contract, asserted end to end.
+fn root_restart_rolls_over_two_real_pty_children_without_provider_resume() {
+    let _serial = DAEMON_START_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let repo = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    let agent_spawns = home.path().join("agent-spawn-count");
+    let shell_spawns = home.path().join("shell-spawn-count");
+    write_codex(&bin, &agent_spawns, 0);
+    let shell = bin.join("fixture-shell");
+    write_shell(&shell, &shell_spawns);
+
+    let old_daemon = start_daemon(repo.path(), home.path(), &bin, Some(&shell));
+    let data_dir = channel_data_dir(home.path());
+    let mut persistent = client(&data_dir);
+    let (workspace, session, worktree) = available_scope(&mut persistent);
+    let (_, agent_terminal) = launch(&mut persistent, workspace, session, None);
+    let agent_subscription = attach(&mut persistent, &agent_terminal);
+    let DaemonReply::Ok(launched) = persistent
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Launch,
+            payload: serde_json::to_value(TerminalRequest::Launch {
+                intent: TerminalLaunchIntent {
+                    request: TerminalLaunchRequest {
+                        profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                        scope: TerminalLaunchScope {
+                            workspace_id: workspace,
+                            session_id: Some(session),
+                            worktree_id: worktree,
+                        },
+                    },
+                    geometry: TerminalGeometry { cols: 80, rows: 24 },
+                    launch_operation: None,
+                },
+            })
+            .unwrap(),
+        })
+        .expect("the generic PTY launches before rollover")
+    else {
+        panic!("generic terminal launch is synchronous");
+    };
+    let shell_terminal: TerminalRef = serde_json::from_value(launched["terminal"].clone()).unwrap();
+    assert_eq!(
+        shell_terminal.daemon_generation,
+        agent_terminal.daemon_generation
+    );
+    wait_for_spawns(&agent_spawns, 1);
+    wait_for_spawns(&shell_spawns, 1);
+
+    let old_generation = agent_terminal.daemon_generation;
+    let before = live_process_identities(&data_dir);
+    assert_eq!(before.len(), 2, "Agent and generic PTY are both live");
+    let old_pid = daemon_pid(&data_dir);
+    let old_registry = read_registry_document(&data_dir)
+        .unwrap()
+        .expect("the active generation is registered");
+    let old_entry = old_registry
+        .generations
+        .iter()
+        .find(|entry| entry.generation == old_generation)
+        .expect("the terminal owner is registered");
+    assert_eq!(u64::from(old_entry.process.pid), old_pid);
+
+    let mut restart = usagi_command(
+        home.path(),
+        Channel::Local,
+        repo.path(),
+        &["daemon".as_ref(), "restart".as_ref()],
+    );
+    let restarted = restart.output().expect("the shipping restart command runs");
+    assert!(
+        restarted.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&restarted.stdout),
+        String::from_utf8_lossy(&restarted.stderr)
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let (new_pid, new_generation) = loop {
+        let document = read_registry_document(&data_dir)
+            .unwrap()
+            .expect("rollover keeps a registry");
+        let active = document.current.and_then(|current| {
+            document
+                .generations
+                .iter()
+                .find(|entry| entry.generation == current)
+        });
+        let draining = document.generations.iter().any(|entry| {
+            entry.generation == old_generation
+                && entry.role == usagi_daemon::usecase::generation::GenerationRole::Draining
+        });
+        if let Some(active) = active
+            && draining
+            && active.process.pid != old_entry.process.pid
+            && read_locator(&data_dir.join("daemon"))
+                .is_ok_and(|locator| locator.generation.0 == active.generation.as_str())
+        {
+            break (u64::from(active.process.pid), active.generation);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the second daemon never committed authority: {document:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_ne!(new_pid, old_pid);
+    assert_ne!(new_generation, old_generation);
+    assert!(alive(old_pid), "the PTY owner must remain draining");
+    assert_eq!(
+        live_process_identities(&data_dir),
+        before,
+        "rollover must preserve both child process identities"
+    );
+    assert_eq!(
+        fs::read_to_string(&agent_spawns).unwrap().lines().count(),
+        1
+    );
+    assert_eq!(
+        fs::read_to_string(&shell_spawns).unwrap().lines().count(),
+        1
+    );
+
+    let refused = persistent
+        .request(DaemonRequest::Session {
+            action: SessionAction::Remove,
+            operation_id: OperationId::new().to_string(),
+            payload: serde_json::json!({"name": "missing"}),
+        })
+        .expect_err("a persistent old connection loses control authority");
+    assert_eq!(refused.code(), ErrorCode::GenerationRolledOver);
+
+    // Simulate a TUI lane closing and reopening after current.json changed. The
+    // endpoint comes only from the daemon-written trusted directory.
+    let directory = TrustedGenerationDirectory::new(&data_dir);
+    let endpoints = directory.snapshot().unwrap();
+    let old_endpoint = endpoints
+        .owner(old_generation)
+        .expect("the draining owner remains addressable");
+    let stream = connect_generation(&data_dir, old_endpoint)
+        .expect("the TUI can reconnect to the draining endpoint");
+    let mut reopened = IpcClient::connect(
+        stream,
+        client_incarnation().to_owned(),
+        OperationId::new().to_string(),
+        ClientPolicy::tui(),
+        shipping_build_identity(),
+        daemon_fixture::client_workspace(&data_dir),
+    )
+    .expect("the draining owner completes an ordinary handshake");
+    let shell_subscription = attach(&mut reopened, &shell_terminal);
+
+    persistent
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Input,
+            payload: serde_json::to_value(TerminalRequest::Input {
+                terminal: agent_terminal,
+                subscription: agent_subscription,
+                input_seq: 0,
+                input_operation: Some(OperationId::new()),
+                bytes: b"finish-agent\n".to_vec(),
+            })
+            .unwrap(),
+        })
+        .expect("the persistent lane still reaches its old Agent PTY");
+    reopened
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Input,
+            payload: serde_json::to_value(TerminalRequest::Input {
+                terminal: shell_terminal,
+                subscription: shell_subscription,
+                input_seq: 0,
+                input_operation: Some(OperationId::new()),
+                bytes: b"finish-shell\n".to_vec(),
+            })
+            .unwrap(),
+        })
+        .expect("the reopened lane reaches the old generic PTY");
+    drop(reopened);
+    drop(persistent);
+
+    // Race G1's two exits with a G2 spawn. The global allocator must release the
+    // old claims without waiting for the old generation's retained tombstones
+    // to age out.
+    let successor_intent = TerminalLaunchIntent {
+        request: TerminalLaunchRequest {
+            profile_id: TerminalProfileId::new("login-shell").unwrap(),
+            scope: TerminalLaunchScope {
+                workspace_id: workspace,
+                session_id: Some(session),
+                worktree_id: worktree,
+            },
+        },
+        geometry: TerminalGeometry { cols: 80, rows: 24 },
+        launch_operation: Some(OperationId::new()),
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let successor_launch = loop {
+        let mut successor = client(&data_dir);
+        match successor.request(DaemonRequest::Terminal {
+            action: TerminalAction::Launch,
+            payload: serde_json::to_value(TerminalRequest::Launch {
+                intent: successor_intent.clone(),
+            })
+            .unwrap(),
+        }) {
+            Ok(DaemonReply::Ok(body)) => break body,
+            Ok(other) => panic!("successor generic terminal launch is synchronous: {other:?}"),
+            Err(error) if error.code() == ErrorCode::GenerationRolledOver => {
+                assert!(
+                    Instant::now() < deadline,
+                    "the successor never opened its control gate"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => panic!("the successor refused a launch: {error:?}"),
+        }
+    };
+    let successor_terminal: TerminalRef =
+        serde_json::from_value(successor_launch["terminal"].clone()).unwrap();
+    assert_eq!(successor_terminal.daemon_generation, new_generation);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let successor_child = loop {
+        if let Some(identity) = durable_records(&data_dir).into_iter().find_map(|record| {
+            let terminal: TerminalRef = serde_json::from_value(record["terminal"].clone()).ok()?;
+            (terminal == successor_terminal && record["state"] == "running").then(|| {
+                (
+                    record["process"]["pid"].as_u64().unwrap(),
+                    record["process"]["start_identity"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned(),
+                )
+            })
+        }) {
+            break identity;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "successor PTY did not publish a live process identity"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(
+        !before.contains(&successor_child),
+        "G2 must spawn a new child rather than adopt either G1 child"
+    );
+    assert_eq!(
+        fs::read_to_string(&shell_spawns).unwrap().lines().count(),
+        1,
+        "rollover must not respawn the old generic child"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if before.iter().all(|(pid, _)| !alive(*pid)) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the old Agent or generic PTY child did not exit"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        alive(new_pid),
+        "the successor remains active after collection"
+    );
+    assert_eq!(
+        fs::read_to_string(&agent_spawns).unwrap().lines().count(),
+        1
+    );
+    assert_eq!(
+        fs::read_to_string(&shell_spawns).unwrap().lines().count(),
+        1
+    );
+
+    // The replacement is not this test's direct Child, so reap it through the
+    // fixture's exact lifecycle-record path before the temporary home vanishes.
+    daemon_fixture::reap(home.path());
+    drop(old_daemon);
+}
+
 /// A planned `daemon stop` must not destroy a live PTY, and an explicit
 /// `--force` must still be able to.
 ///
@@ -1156,6 +1457,21 @@ fn durable_records(data_dir: &Path) -> Vec<serde_json::Value> {
         }));
     }
     records
+}
+
+fn live_process_identities(data_dir: &Path) -> Vec<(u64, String)> {
+    let mut identities = durable_records(data_dir)
+        .into_iter()
+        .filter(|record| record["state"] == "running")
+        .filter_map(|record| {
+            Some((
+                record["process"]["pid"].as_u64()?,
+                record["process"]["start_identity"].as_str()?.to_owned(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    identities.sort();
+    identities
 }
 
 fn daemon_pid(data_dir: &Path) -> u64 {

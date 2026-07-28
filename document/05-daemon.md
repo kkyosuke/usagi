@@ -184,10 +184,10 @@ lock を取れた process でも registry の CAS で拒否されうるのが要
 死んだ active の entry が残る）。証明は registry 側が exact な process identity で行い、証明できなければ
 **fail closed** する。
 
-standby が fence の外に居ることは fence の契約を弱めない。standby は spawn も reconcile も行わず、
+standby が fence の外に居ることは fence の契約を弱めない。readiness 中の standby は spawn も reconcile も行わず、
 `daemon.json` も `current.json` も書かないため、fence が守る対象（worktree の所有権、record・locator の単一書き手）に
-到達しない。standby が active になるのは handoff であり、それを駆動するのは
-[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) である。
+到達しない。handoff commit 後は同じ process・generation・socket のまま active runtime を開き、`daemon.json` を
+自分の exact process identity へ切り替える。
 
 workspace fence の node は **runtime mode の子 directory の下に置かない**。data directory は `$USAGI_HOME` と
 runtime mode で選ばれるため、同一 workspace に対して mode を変えるだけで別の単一インスタンス lock に届いてしまい、
@@ -401,7 +401,7 @@ replacement 後も維持する。2 process を安全に運用する authority �
 | authority を渡す**元**（active generation）が registry に登録される | `serve` が起動時に登録する（[first activation](#first-activation)） |
 | authority を渡す**先**（standby process）が起動して registry に登録される | `serve --standby` が登録し readiness 後に `verified_build` を立てる（[standby process の lifecycle](#standby-process-の-lifecycle)） |
 | active generation が request ごとに role を決め直し、rollover の routing 前提を判定できる | active generation が [admission fence](#admission-fence) と [routing 前提条件](#rollover-の-routing-前提条件)の ledger を通して serve する |
-| 検証済み standby を active へ昇格させる handoff の起動 | CLI が standby を stage し、old active へ durable operation ID 付き `rollover` IPC verb を送る。old active が successor hello を再検証し、自 process の gate で `execute_gated_rollover` を駆動する |
+| 検証済み standby を active へ昇格させる handoff の起動 | CLI が standby を stage し、old active へ durable operation ID 付き `rollover` IPC verb を送る。old active が successor hello を再検証し、自 process の gate で `execute_gated_rollover` を駆動する。successor は commit を custody loop で観測し、同じ socket・generation の readiness-only loop を active runtime loop へ切り替える |
 
 seamless refusal は registry を読み、欠けている前提を名前で示す。
 
@@ -1294,30 +1294,30 @@ version と target が同じでも source tree が異なる build、どちらか
 
 ### standby process の lifecycle
 
-`usagi daemon serve --standby` が駆動する process の lifecycle である。role は argv で起動時に確定し、process の
-途中で変わることはない。standby が active になるのは [handoff protocol](#handoff-protocol) であり、それは
-authority を受け取った process の仕事である。
+`usagi daemon serve --standby` が駆動する process の lifecycle である。argv は readiness を standby role で
+開始することを確定し、handoff commit 後は同じ process・generation・socket のまま active runtime へ昇格する。
 
 standby は **何も所有しない**。この 1 点から lifecycle の差が全部出る。
 
 | | active role | standby role |
 |---|---|---|
 | [2 段 fence](#単一-daemon-の-2-段-fence) | 両方を process lifetime 保持する | どちらも取らない |
-| `daemon.json` | 自分を owner として登録する | 書かない |
-| endpoint | bind して `current.json` を publish する | `bind_private` のみ。publish しない |
-| durable runtime state | 起動時に reconcile する | read-only で hydrate する（[standby hydrate と activation](#standby-hydrate-と-activation)） |
-| worker | PTY / supervisor / PR / teardown / retention を起動する | 起動しない |
-| custody | lock と record（[custody 喪失による self-shutdown](#custody-喪失による-self-shutdown)） | 自分の registry entry と live な incumbent |
+| `daemon.json` | 自分を owner として登録する | readiness 中は書かず、handoff commit 後に自分の exact identity を登録する |
+| endpoint | bind して `current.json` を publish する | `bind_private` し、old active が同じ endpoint を publish する。昇格時に socket を bind し直さない |
+| durable runtime state | 起動時に reconcile する | readiness 中は read-only hydrate。昇格後は空の自 owner shard を writer として開き、old owner shard を restart reconcile しない |
+| worker | PTY / supervisor / PR / teardown / retention を起動する | readiness 中は起動せず、昇格後に active worker 群を起動する |
+| custody | lock と record（[custody 喪失による self-shutdown](#custody-喪失による-self-shutdown)） | registry entry と live incumbent。昇格後も registry role/process identity を監視する |
 
-段は 6 つで、最初の refusal は**何も作る前**に置く。
+段は 7 つで、最初の refusal は**何も作る前**に置く。
 
 ```text
 1  prepare     shutdown 配送を用意する
 2  preflight   生存する「registry が名指す」active がこの data directory を所有していることを証明する
 3  bind        bind_private で private endpoint を bind し、readiness handshake に応答し始める
 4  admit       preflight を再証明し、registry へ standby 登録 → readiness → verified_build を記録する
-5  run         shutdown 要求まで待つ
-6  stand down  registry entry を返却してから endpoint を retire する
+5  run         registry role と shutdown 要求を監視する
+6  promote     active commit を観測したら readiness loop を止め、同じ listener で active runtime を開く
+7  stand down  registry entry を返却してから endpoint を retire する
 ```
 
 preflight が先にあるのは、standby が現実に受ける refusal（daemon が動いていない、旧 build が registry に登録せず
@@ -1366,12 +1366,13 @@ activation](#first-activation)）。したがって incumbent より長生きし
 `daemon stop` は active 自身の entry しか retire しない**ため、standby の entry は無傷のまま残る。この経路を
 閉じるのが incumbent custody である。
 
-standby の endpoint が答えるのは handshake と typed refusal だけである。`ServerHello` は role を `standby` と名乗り
+readiness 中の standby endpoint が答えるのは handshake と typed refusal だけである。`ServerHello` は role を `standby` と名乗り
 （owner binding は `active` を要求するので、client がこれを data directory の authority と誤認することはない）、
 `daemon.generation-handoff.v1` を advertise する。handshake 後の request は
 [admission fence](#admission-fence) を通し、control / spawn / 他 generation の terminal は fence が拒否する。
-fence が受理する read も、この build の standby は読む runtime state を所有していないため typed に拒否する
-（owner shard の接続は [#562](../.usagi/issues/562-refactor-daemon-durable-runtime-state-owner-shard-global-allocator.md)）。
+fence が受理する read も readiness 中は runtime state を所有していないため typed に拒否する。handoff commit 後は
+standby accept loop を join してから同じ listener を active server へ渡すため、旧 standby loop と active loop が
+同時に request を admit する窓はない。
 
 ### handoff protocol
 
@@ -1581,15 +1582,13 @@ wall clock・PID 由来の値は identity にしない。観測結果は `exact`
 
 ### standby hydrate と activation
 
-standby は自分の shard を **read-only** で hydrate し、読んだ shard revision と allocator revision を seal する。
-readiness 中は reconcile / save、worker / tick、spawn を行わない。handoff commit 後に writer を開くとき、両
-revision を再検証し、どちらかが動いていれば `sealed_elsewhere` で admission を開始しない。
+standby readiness が hydrate するのは single-writer lifecycle store（`sessions.json`）だけである。読むのは 1 回で、
+active が authority を取った workspace root と state revision を得る。readiness 中は reconcile / save、
+worker / tick、spawn を行わず、未初期化の store は「初期化するのは所有者だけ」として拒否する。
 
-shipping の standby process はまだ owner shard を持たないため、hydrate の対象は single-writer store
-（`sessions.json`）である。読むのは lifecycle state 1 回だけで、そこから active が authority を取った workspace root と
-seal した state revision を得る。reconcile も legacy migration も行わず、未初期化の store は「初期化するのは所有者だけ」
-として拒否する。shard 化された hydrate への移行は
-[#562](../.usagi/issues/562-refactor-daemon-durable-runtime-state-owner-shard-global-allocator.md) が担う。
+handoff commit 後は readiness-only accept loop を止めて listener を回収し、同じ generation の空 owner shard と
+global allocator を active writer として開く。retained shard は owner routing で旧 generation 自身が serve するため、
+successor はそれらを cold-restart の `identity_unknown` に reconcile せず、provider resume も実行しない。
 
 ### generation collection
 

@@ -87,7 +87,7 @@ use usagi_daemon::usecase::codex::{
 use usagi_daemon::usecase::custody::{Custody, CustodyProbe, NodeIdentity};
 use usagi_daemon::usecase::generation::{GenerationRole, ProcessIdentity, ProcessObservation};
 use usagi_daemon::usecase::generic_terminal::{
-    GenericPtySpawner, TerminalProfileResolver, TerminalStore,
+    GenericPtySpawner, TerminalProfileResolver, TerminalStore, TerminalStoreSnapshot,
 };
 use usagi_daemon::usecase::metrics::{MetricsBroker, MetricsObserver, MetricsSample};
 use usagi_daemon::usecase::orchestration::AdapterRegistry;
@@ -111,8 +111,8 @@ use usagi_daemon::usecase::resources::identity::{ChildIdentity, ChildProcessProb
 use usagi_daemon::usecase::resources::retention::LogicalClock;
 use usagi_daemon::usecase::rollover_trigger;
 use usagi_daemon::usecase::runtime::{
-    OutputJournal, ProvisionContext, PtySpawner, SandboxLauncher, SpawnProvision,
-    TerminateReapError,
+    OutputJournal, ProvisionContext, PtySpawner, RuntimeStoreSnapshot, SandboxLauncher,
+    SpawnProvision, TerminateReapError,
 };
 use usagi_daemon::usecase::serve::{DaemonRecordPort, GenerationAuthority};
 use usagi_daemon::usecase::serve_standby::{StandbyAuthority, StandbyEndpoint};
@@ -1514,7 +1514,8 @@ fn spawn_ipc_server(
     workspace_root: &Path,
     build: &BuildIdentity,
     daemon_process: DaemonRecord,
-    custody: FsCustodyProbe,
+    custody: Option<FsCustodyProbe>,
+    hydrate_retained: bool,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
     let owner = daemon_process.clone();
@@ -1583,6 +1584,7 @@ fn spawn_ipc_server(
         Arc::clone(&user_environment),
         retention.clone(),
         &children,
+        hydrate_retained,
     )?;
     start_terminal_observer(Arc::clone(&terminal), observations, Arc::clone(&projection))?;
     let (agent_pty, agent_observations) = AgentPty::new(
@@ -1600,6 +1602,7 @@ fn spawn_ipc_server(
         user_environment,
         retention.clone(),
         &children,
+        hydrate_retained,
     )?;
     let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(&data_dir.join("daemon"))));
     if let Ok(runtime) = supervisor.lock()
@@ -1639,12 +1642,15 @@ fn spawn_ipc_server(
         Arc::clone(&workers),
         Arc::clone(&shutdown),
     )?;
-    start_custody_worker(
-        custody,
-        owner,
-        data_dir.to_path_buf(),
-        Arc::clone(&shutdown),
-    )?;
+    if let Some(custody) = custody {
+        start_custody_worker(
+            custody,
+            owner,
+            data_dir.to_path_buf(),
+            fence.gate.clone(),
+            Arc::clone(&shutdown),
+        )?;
+    }
     start_ipc_accept_loop(
         listener,
         server,
@@ -1854,15 +1860,17 @@ fn start_custody_worker(
     probe: FsCustodyProbe,
     owner: DaemonRecord,
     data_dir: PathBuf,
+    gate: AdmissionGate,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<()> {
-    spawn_custody_worker(probe, owner, data_dir, shutdown, CUSTODY_TICK).map(|_| ())
+    spawn_custody_worker(probe, owner, data_dir, gate, shutdown, CUSTODY_TICK).map(|_| ())
 }
 
 fn spawn_custody_worker<P>(
     probe: P,
     owner: DaemonRecord,
     data_dir: PathBuf,
+    gate: AdmissionGate,
     shutdown: Arc<ShutdownRequest>,
     tick: Duration,
 ) -> std::io::Result<std::thread::JoinHandle<()>>
@@ -1873,6 +1881,16 @@ where
         .name("usagi-daemon-custody".to_string())
         .spawn(move || {
             while !shutdown.is_requested() {
+                // After a handoff this process deliberately no longer owns the
+                // lifecycle record. Its authority is the draining registry
+                // entry and the exact PTYs it still owns, so losing active
+                // custody must not tear those PTYs down.
+                if gate.role() != GenerationRole::Active {
+                    if shutdown.wait_for_tick(tick) {
+                        break;
+                    }
+                    continue;
+                }
                 match usagi_daemon::usecase::custody::evaluate(&probe, &owner) {
                     Ok(Custody::Lost(loss)) => {
                         // The error log lives inside the data directory. Record
@@ -2127,9 +2145,14 @@ fn open_agent_runtime(
     environment: Arc<SharedUserEnvironment>,
     retention: usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention,
     children: &Arc<SpawnedChildren>,
+    hydrate_retained: bool,
 ) -> std::io::Result<SharedAgentRuntime> {
     let state = open_runtime_state(data_dir, generation, children)?;
-    let snapshot = hydrate_runtime_state(&state, "agent runtime")?.agents;
+    let snapshot = if hydrate_retained {
+        hydrate_runtime_state(&state, "agent runtime")?.agents
+    } else {
+        RuntimeStoreSnapshot::default()
+    };
     let store = ShardedAgentStore::new(state);
     let mut registry = AdapterRegistry::new();
     let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness);
@@ -2313,9 +2336,14 @@ fn new_terminal_runtime(
     environment: Arc<SharedUserEnvironment>,
     retention: usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention,
     children: &Arc<SpawnedChildren>,
+    hydrate_retained: bool,
 ) -> std::io::Result<SharedTerminalRuntime> {
     let state = open_runtime_state(data_dir, generation, children)?;
-    let snapshot = hydrate_runtime_state(&state, "generic terminal")?.terminals;
+    let snapshot = if hydrate_retained {
+        hydrate_runtime_state(&state, "generic terminal")?.terminals
+    } else {
+        TerminalStoreSnapshot::default()
+    };
     let store = ShardedTerminalStore::new(state);
     let runtime = GenericTerminalRuntime::from_snapshot_with_retention(
         generation,
@@ -5533,7 +5561,8 @@ impl DaemonReady for IpcReady<'_> {
                 self.workspace_root,
                 &self.build,
                 process,
-                custody,
+                Some(custody),
+                true,
                 Arc::clone(&self.shutdown),
             )
         })
@@ -5779,8 +5808,9 @@ struct StandbyIpc<'a> {
     build: BuildIdentity,
     pid: u32,
     shutdown: Arc<ShutdownRequest>,
-    worker: RefCell<Option<std::thread::JoinHandle<SecureUnixListener>>>,
-    listener: RefCell<Option<SecureUnixListener>>,
+    standby_shutdown: Arc<ShutdownRequest>,
+    worker: Arc<Mutex<Option<std::thread::JoinHandle<SecureUnixListener>>>>,
+    listener: Arc<Mutex<Option<SecureUnixListener>>>,
     cleanup: RefCell<Option<EndpointCleanup>>,
     /// The admission fence this process answers requests through. It is created
     /// at bind time in the `standby` role and never activated here: promoting it
@@ -5796,8 +5826,9 @@ impl<'a> StandbyIpc<'a> {
             build: current_build(),
             pid,
             shutdown,
-            worker: RefCell::new(None),
-            listener: RefCell::new(None),
+            standby_shutdown: Arc::new(ShutdownRequest::new()),
+            worker: Arc::new(Mutex::new(None)),
+            listener: Arc::new(Mutex::new(None)),
             cleanup: RefCell::new(None),
             gate: RefCell::new(None),
         }
@@ -5865,13 +5896,21 @@ impl StandbyEndpoint for StandbyIpc<'_> {
             DaemonRecord::identified(self.pid, process_start_identity(self.pid)?),
             paths::wire_workspace_root(&workspace_root),
         );
-        let worker =
-            spawn_standby_ipc_server(listener, protocol, gate.clone(), Arc::clone(&self.shutdown));
+        let worker = spawn_standby_ipc_server(
+            listener,
+            protocol,
+            gate.clone(),
+            Arc::clone(&self.standby_shutdown),
+        );
         match worker {
             Ok(worker) => {
                 *self.cleanup.borrow_mut() = Some(cleanup);
                 *self.gate.borrow_mut() = Some(gate);
-                *self.worker.borrow_mut() = Some(worker);
+                *self
+                    .worker
+                    .lock()
+                    .map_err(|_| std::io::Error::other("standby worker lock is poisoned"))? =
+                    Some(worker);
                 ErrorLog::record(&format!(
                     "daemon standby hydrated read-only at runtime state revision {revision}"
                 ));
@@ -5885,6 +5924,7 @@ impl StandbyEndpoint for StandbyIpc<'_> {
 
     fn retire(&self) -> std::io::Result<()> {
         self.shutdown.request();
+        self.standby_shutdown.request();
         // Closing the two lease classes is what makes "stopped admitting"
         // observable to a request already in flight, rather than only to the next
         // connection.
@@ -5892,10 +5932,19 @@ impl StandbyEndpoint for StandbyIpc<'_> {
             gate.close(LeaseClass::ActiveControl);
             gate.close(LeaseClass::OwnerTerminal);
         }
-        let joined = match self.worker.borrow_mut().take() {
+        let joined = match self
+            .worker
+            .lock()
+            .map_err(|_| std::io::Error::other("standby worker lock is poisoned"))?
+            .take()
+        {
             Some(worker) => worker
                 .join()
-                .map(|listener| *self.listener.borrow_mut() = Some(listener))
+                .map(|listener| {
+                    if let Ok(mut retained) = self.listener.lock() {
+                        *retained = Some(listener);
+                    }
+                })
                 .map_err(|_| std::io::Error::other("daemon standby accept loop panicked")),
             None => Ok(()),
         };
@@ -5907,7 +5956,9 @@ impl StandbyEndpoint for StandbyIpc<'_> {
             None => Ok(()),
         };
         if cleanup.is_ok() {
-            self.listener.borrow_mut().take();
+            if let Ok(mut listener) = self.listener.lock() {
+                listener.take();
+            }
             self.cleanup.borrow_mut().take();
         }
         joined.and(cleanup)
@@ -6224,6 +6275,10 @@ impl StandbyAuthority for StandbyRegistryAuthority<'_> {
             self.data_dir.to_path_buf(),
             generation,
             process,
+            self.endpoint.hydrate()?.0,
+            self.build.clone(),
+            Arc::clone(&self.endpoint.standby_shutdown),
+            Arc::clone(&self.endpoint.worker),
             Arc::clone(&self.shutdown),
         )
     }
@@ -6328,32 +6383,59 @@ impl StandbyProbe for UnixStandbyProbe<'_> {
 /// is the whole of its authority: recovery that fails an abandoned handoff closed
 /// retires every generation, and the standby it retired must exit rather than
 /// keep a socket a future rollover might trust.
+#[allow(clippy::too_many_arguments)] // Promotion carries the exact process, endpoint, runtime root, and both shutdown domains.
 fn start_standby_custody_worker(
     data_dir: PathBuf,
     generation: usagi_core::domain::id::DaemonGeneration,
     process: ProcessIdentity,
+    workspace_root: PathBuf,
+    build: BuildIdentity,
+    standby_shutdown: Arc<ShutdownRequest>,
+    worker: Arc<Mutex<Option<std::thread::JoinHandle<SecureUnixListener>>>>,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("usagi-daemon-standby-custody".to_string())
         .spawn(move || {
+            let mut promoted = false;
             while !shutdown.is_requested() {
                 // An unreadable registry is uncertainty, not a loss: it never
                 // terminates a standby that may still hold its entry.
-                if let Ok(Some(document)) = read_registry_document(&data_dir)
-                    && let StandbyCustody::Lost(loss) = evaluate_custody(
+                if let Ok(Some(document)) = read_registry_document(&data_dir) {
+                    if !promoted && document.role(generation) == Some(GenerationRole::Active) {
+                        match promote_standby_generation(
+                            &data_dir,
+                            &workspace_root,
+                            generation,
+                            &process,
+                            &build,
+                            &standby_shutdown,
+                            &worker,
+                            Arc::clone(&shutdown),
+                        ) {
+                            Ok(()) => promoted = true,
+                            Err(error) => {
+                                ErrorLog::record(&format!(
+                                    "daemon standby promotion failed: {error}"
+                                ));
+                                shutdown.request();
+                                return;
+                            }
+                        }
+                    }
+                    if let StandbyCustody::Lost(loss) = evaluate_custody(
                         &document,
                         generation,
                         &process,
                         &mut observe_generation_process,
-                    )
-                {
-                    ErrorLog::record(&format!(
-                        "daemon standby custody lost ({}); shutting down",
-                        loss.reason()
-                    ));
-                    shutdown.request();
-                    return;
+                    ) {
+                        ErrorLog::record(&format!(
+                            "daemon standby custody lost ({}); shutting down",
+                            loss.reason()
+                        ));
+                        shutdown.request();
+                        return;
+                    }
                 }
                 if shutdown.wait_for_tick(STANDBY_CUSTODY_TICK) {
                     break;
@@ -6361,6 +6443,52 @@ fn start_standby_custody_worker(
             }
         })
         .map(|_| ())
+}
+
+/// Replace the readiness-only standby accept loop with the full active runtime
+/// on the same bound socket and generation after the durable handoff commits.
+#[allow(clippy::too_many_arguments)] // Each handoff fence is passed explicitly; bundling would hide identity or listener ownership.
+fn promote_standby_generation(
+    data_dir: &Path,
+    workspace_root: &Path,
+    generation: usagi_core::domain::id::DaemonGeneration,
+    process: &ProcessIdentity,
+    build: &BuildIdentity,
+    standby_shutdown: &ShutdownRequest,
+    worker: &Mutex<Option<std::thread::JoinHandle<SecureUnixListener>>>,
+    shutdown: Arc<ShutdownRequest>,
+) -> std::io::Result<()> {
+    standby_shutdown.request();
+    let standby = worker
+        .lock()
+        .map_err(|_| std::io::Error::other("standby worker lock is poisoned"))?
+        .take()
+        .ok_or_else(|| std::io::Error::other("standby accept loop is unavailable"))?;
+    let listener = standby
+        .join()
+        .map_err(|_| std::io::Error::other("daemon standby accept loop panicked"))?;
+
+    let record = DaemonRecord::identified(process.pid, process.start_identity.clone());
+    DaemonRecordStore::new(FsRecordFile {
+        path: data_dir.join("daemon/daemon.json"),
+    })
+    .save(&record)?;
+    let wire = usagi_core::infrastructure::ipc::DaemonGeneration(generation.as_str().clone());
+    let active = spawn_ipc_server(
+        listener,
+        &wire,
+        data_dir,
+        workspace_root,
+        build,
+        record,
+        None,
+        false,
+        shutdown,
+    )?;
+    *worker
+        .lock()
+        .map_err(|_| std::io::Error::other("standby worker lock is poisoned"))? = Some(active);
+    Ok(())
 }
 
 /// This process's own OS-observed identity, as the registry records it.
@@ -10344,6 +10472,7 @@ mod tests {
             probe,
             owner,
             data_dir.to_path_buf(),
+            AdmissionGate::new(DaemonGeneration::new(), GenerationRole::Active),
             Arc::clone(shutdown),
             Duration::from_millis(5),
         )
@@ -10426,6 +10555,36 @@ mod tests {
         .save(&DaemonRecord::identified(4321, "custody:replacement"))
         .unwrap();
         assert!(wait_for_request(&shutdown, Duration::from_secs(5)));
+        handle.join().unwrap();
+        drop(lock);
+    }
+
+    #[test]
+    fn draining_custody_ignores_the_record_transferred_to_its_successor() {
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let (lock, owner, probe) = custody_fixture(home.path());
+        let shutdown = Arc::new(ShutdownRequest::new());
+        let gate = AdmissionGate::new(DaemonGeneration::new(), GenerationRole::Active);
+        gate.close(LeaseClass::ActiveControl);
+        gate.await_drain(LeaseClass::ActiveControl).unwrap();
+        gate.enter_draining().unwrap();
+        let handle = spawn_custody_worker(
+            probe,
+            owner,
+            home.path().to_path_buf(),
+            gate,
+            Arc::clone(&shutdown),
+            Duration::from_millis(5),
+        )
+        .unwrap();
+
+        DaemonRecordStore::new(FsRecordFile {
+            path: home.path().join("daemon/daemon.json"),
+        })
+        .save(&DaemonRecord::identified(4321, "custody:successor"))
+        .unwrap();
+        assert!(!wait_for_request(&shutdown, Duration::from_millis(50)));
+        shutdown.request();
         handle.join().unwrap();
         drop(lock);
     }
