@@ -225,6 +225,15 @@ fn a_live_active_and_one_free_generation_slot_enable_rollover() {
         seamless_refusal(Some(&ready), true, 2),
         Some(SeamlessRefusal::GenerationLimit)
     );
+
+    let active = entry(GenerationRole::Active, true);
+    let current = active.generation;
+    let mut waiting = document(vec![entry(GenerationRole::Draining, true), active]);
+    waiting.current = Some(current);
+    assert_eq!(
+        seamless_refusal(Some(&waiting), true, 2),
+        Some(SeamlessRefusal::DrainingCollectionPending)
+    );
 }
 
 #[test]
@@ -247,6 +256,10 @@ fn every_refusal_names_the_prerequisite_it_is_missing() {
             "no live registered active generation",
         ),
         (SeamlessRefusal::GenerationLimit, "generation limit"),
+        (
+            SeamlessRefusal::DrainingCollectionPending,
+            "draining generation is still awaiting collection",
+        ),
     ] {
         assert!(
             refusal.to_string().contains(expected),

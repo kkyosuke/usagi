@@ -31,6 +31,12 @@ struct ClientWorker {
     handle: JoinHandle<()>,
 }
 
+#[derive(Default)]
+struct WorkerSet {
+    entries: Vec<ClientWorker>,
+    retired: bool,
+}
+
 /// What retirement observed. It is reported rather than swallowed: a worker
 /// that could not be unblocked is exactly the thing that must not be mistaken
 /// for a clean collection.
@@ -57,7 +63,7 @@ impl RetireReport {
 /// Every client worker this generation is responsible for joining.
 #[derive(Default)]
 pub struct ClientWorkers {
-    entries: Mutex<Vec<ClientWorker>>,
+    state: Mutex<WorkerSet>,
 }
 
 impl ClientWorkers {
@@ -68,14 +74,34 @@ impl ClientWorkers {
     }
 
     /// Retain a worker together with the handle that can unblock it.
-    pub fn register(&self, connection: Box<dyn ConnectionShutdown>, handle: JoinHandle<()>) {
-        self.lock().push(ClientWorker { connection, handle });
+    ///
+    /// Before retirement the returned report is empty. After the set is sealed,
+    /// this call retires the late worker synchronously and returns that report,
+    /// so an accept-loop race cannot leave a worker past endpoint cleanup.
+    pub fn register(
+        &self,
+        connection: Box<dyn ConnectionShutdown>,
+        handle: JoinHandle<()>,
+    ) -> RetireReport {
+        let worker = ClientWorker { connection, handle };
+        let mut state = self.lock();
+        if !state.retired {
+            state.entries.push(worker);
+            return RetireReport::default();
+        }
+        // The accept loop can already have accepted and spawned a connection
+        // worker when collection seals the set. It still calls `register`
+        // before the accept-loop thread can finish; joining it synchronously
+        // here means the composition root's accept-loop join remains a barrier
+        // for every worker, including this last race.
+        drop(state);
+        retire_workers(vec![worker])
     }
 
     /// How many workers are retained.
     #[must_use]
     pub fn outstanding(&self) -> usize {
-        self.lock().len()
+        self.lock().entries.len()
     }
 
     /// Join the workers that have already finished, leaving the live ones alone.
@@ -95,10 +121,10 @@ impl ClientWorkers {
         // thread cannot block its own join, but holding the lock across the joins
         // would still serialize every concurrent registration behind them.
         let finished = {
-            let mut entries = self.lock();
+            let mut state = self.lock();
             let mut finished = Vec::new();
-            let mut live = Vec::with_capacity(entries.len());
-            for worker in std::mem::take(&mut *entries) {
+            let mut live = Vec::with_capacity(state.entries.len());
+            for worker in std::mem::take(&mut state.entries) {
                 if worker.handle.is_finished() {
                     // The shutdown half goes with it. Nothing is parked on a
                     // connection whose worker has already returned.
@@ -107,7 +133,7 @@ impl ClientWorkers {
                     live.push(worker);
                 }
             }
-            *entries = live;
+            state.entries = live;
             finished
         };
         let mut report = RetireReport::default();
@@ -123,32 +149,42 @@ impl ClientWorkers {
     /// Shut every retained connection down, then join every retained worker.
     ///
     /// The workers are taken out of the set before any of them is joined, so a
-    /// worker that registers a successor while retiring cannot deadlock against
-    /// this call, and a second retirement is a no-op.
+    /// worker that registers while retiring cannot deadlock against this call.
+    /// The set is sealed before the lock is released: a registration that races
+    /// after that point shuts down and joins its own worker synchronously instead
+    /// of escaping the retirement barrier. A second retirement is a no-op.
     pub fn retire(&self) -> RetireReport {
-        let workers = std::mem::take(&mut *self.lock());
-        let mut report = RetireReport::default();
-        let mut handles = Vec::with_capacity(workers.len());
-        for worker in workers {
-            if let Err(error) = worker.connection.shutdown() {
-                report.shutdown_failures.push(error);
-            }
-            handles.push(worker.handle);
-        }
-        for handle in handles {
-            if handle.join().is_err() {
-                report.panicked += 1;
-            }
-            report.joined += 1;
-        }
-        report
+        let workers = {
+            let mut state = self.lock();
+            state.retired = true;
+            std::mem::take(&mut state.entries)
+        };
+        retire_workers(workers)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<ClientWorker>> {
-        self.entries
+    fn lock(&self) -> std::sync::MutexGuard<'_, WorkerSet> {
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+}
+
+fn retire_workers(workers: Vec<ClientWorker>) -> RetireReport {
+    let mut report = RetireReport::default();
+    let mut handles = Vec::with_capacity(workers.len());
+    for worker in workers {
+        if let Err(error) = worker.connection.shutdown() {
+            report.shutdown_failures.push(error);
+        }
+        handles.push(worker.handle);
+    }
+    for handle in handles {
+        if handle.join().is_err() {
+            report.panicked += 1;
+        }
+        report.joined += 1;
+    }
+    report
 }
 
 #[cfg(test)]

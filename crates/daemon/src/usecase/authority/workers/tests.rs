@@ -70,6 +70,27 @@ fn retirement_unblocks_every_stream_before_joining_its_worker() {
 }
 
 #[test]
+fn a_worker_registered_after_the_set_is_sealed_is_joined_immediately() {
+    let workers = ClientWorkers::new();
+    assert_eq!(workers.retire().joined, 0);
+
+    let (connection, receiver) = FakeConnection::new(None);
+    let joined = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handle = {
+        let joined = Arc::clone(&joined);
+        std::thread::spawn(move || {
+            assert!(receiver.recv().is_err());
+            joined.store(true, std::sync::atomic::Ordering::Release);
+        })
+    };
+    let report = workers.register(Box::new(connection), handle);
+    assert!(report.is_clean());
+    assert_eq!(report.joined, 1);
+    assert!(joined.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(workers.outstanding(), 0);
+}
+
+#[test]
 fn a_shutdown_failure_is_reported_and_the_worker_is_still_joined() {
     let workers = ClientWorkers::default();
     let (connection, receiver) = FakeConnection::new(Some("shutdown refused"));

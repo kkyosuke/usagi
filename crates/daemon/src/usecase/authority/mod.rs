@@ -16,6 +16,7 @@
 //! | [`fence`] | which kind of work is *this* wire request, so [`admission`] can decide it? |
 //! | [`routing`] | may this rollover leave a draining generation behind — can every participant still address it? |
 //! | [`workers`] | which client threads must be unblocked and joined before a generation is collected? |
+//! | [`collection`] | when has a draining generation lost its last runtime claim and may retire itself? |
 //! | [`rollover`] | driving the above against the durable objects, with a named boundary at every write |
 //! | [`migration`] | can the legacy single-generation state be adopted, or must it fail closed? |
 //!
@@ -35,6 +36,7 @@ pub(crate) mod fixture;
 
 pub mod activation;
 pub mod admission;
+pub mod collection;
 pub mod fence;
 pub mod handoff;
 pub mod migration;

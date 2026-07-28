@@ -152,6 +152,10 @@ pub enum SeamlessRefusal {
     NoLiveRegisteredActive,
     /// No additional retained generation can be staged.
     GenerationLimit,
+    /// The retained-generation limit is occupied by a predecessor that is
+    /// correctly still draining. Refuse a repeated rollover rather than
+    /// overwriting it or disguising the wait as a generic capacity failure.
+    DrainingCollectionPending,
 }
 
 impl fmt::Display for SeamlessRefusal {
@@ -170,6 +174,9 @@ impl fmt::Display for SeamlessRefusal {
                 f.write_str("no live registered active generation exists")
             }
             Self::GenerationLimit => f.write_str("the generation limit is already reached"),
+            Self::DrainingCollectionPending => f.write_str(
+                "the generation limit is already reached while a draining generation is still awaiting collection",
+            ),
         }
     }
 }
@@ -194,7 +201,20 @@ pub fn seamless_refusal(
     if !active_is_alive || document.active().is_none() {
         return Some(SeamlessRefusal::NoLiveRegisteredActive);
     }
-    (document.retained() >= generation_limit).then_some(SeamlessRefusal::GenerationLimit)
+    if document.retained() < generation_limit {
+        return None;
+    }
+    Some(
+        if document
+            .generations
+            .iter()
+            .any(|entry| entry.role == crate::usecase::generation::GenerationRole::Draining)
+        {
+            SeamlessRefusal::DrainingCollectionPending
+        } else {
+            SeamlessRefusal::GenerationLimit
+        },
+    )
 }
 
 /// Whether the operator gave up the live runtime a transition would destroy.

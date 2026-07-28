@@ -412,6 +412,7 @@ seamless refusal は registry を読み、欠けている前提を名前で示�
 | `registry unreadable` | registry を読めない / parse できない。fail closed |
 | `no live registered active` | registry の active と exact process identity の生存を一致させられない |
 | `generation limit` | retained generation が上限に達しており、standby を追加できない |
+| `draining collection pending` | retained generation 上限を、まだ resource / lease / outbox / capacity claim のいずれかを持つ draining predecessor が占有している。PTY を落として slot を空けず fail closed |
 
 registry へ登録された active generation 自身は standby として数えない。`verified_build` は
 「その generation の hello がこの artifact を証明した」という意味であり、active は standby role を抜けた
@@ -1195,12 +1196,13 @@ TUI は最新 snapshot を workspace の左ペイン下部にある v1 互換の
 2 つの daemon process が一時的に共存する planned restart の前提となる authority である。本節がその契約の正本で、
 process 内 1 世代の fence（[generation と orphan safety](#generation-と-orphan-safety)）とは別物である。
 
-shipping `serve` はこの authority のうち **role の取得**までを駆動する。active role では自分の generation を
+shipping `serve` はこの authority の role 取得・handoff・draining collection を駆動する。active role では自分の generation を
 registry の単一 active として登録し（[first activation](#first-activation)）、`current.json` を publish し、
 正常終了時に返却する。standby role では private endpoint を bind して registry へ standby として登録し、
 readiness 後に `verified_build` を立てる（[standby process の lifecycle](#standby-process-の-lifecycle)）。
-**handoff の駆動と old generation の回収は行わない**（[planned replacement](#planned-replacement)）。rollover の
-有効化は [#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) が担う。
+planned replacement は old active 自身へ `rollover` IPC verb を送り、その process-local gate を閉じて handoff を
+commit する。old process はその後 `draining` として owner terminal を serve し、[generation collection](#generation-collection)
+の条件が揃ったときだけ自動終了する。
 
 ### durable registry
 
@@ -1454,6 +1456,10 @@ join で止まるため、そのことを記録して serve だけ継続する�
 ように、新しい connection を保持する前に **finished な worker だけを join して回収する**。この回収は live な
 connection の stream に触らない（`shutdown` を行うのは retirement だけである）。
 
+retirement が worker set を seal した瞬間に accept loop が最後の connection worker を spawn 済みである race も閉じる。
+seal 後の `register` は worker を set へ追加せず、その場で stream を shutdown して JoinHandle を join する。
+endpoint cleanup は accept-loop thread 自体の join より後なので、この late registration も endpoint より先に必ず完了する。
+
 ### rollover の routing 前提条件
 
 handoff は「終わったあとも全参加者が draining generation に到達できる」場合だけ開始してよい。到達できない
@@ -1588,8 +1594,32 @@ seal した state revision を得る。reconcile も legacy migration も行わ�
 ### generation collection
 
 old generation が回収可能になるのは、自 shard の live resource 0、in-flight terminal command 0、未 ACK outbox 0、
-global capacity claim 0 を **すべて** 検証できた場合だけである。1 つの 0 を他の 0 の代わりにしない。role と
-endpoint の最終回収は [cross-process generation authority](#cross-process-generation-authority) と #559 が行う。
+global capacity claim 0 を **すべて** 検証できた場合だけである。1 つの 0 を他の 0 の代わりにしない。
+
+この 4 つの 0 を観測して自分を終わらせるのは **draining generation 自身の回収 worker** である。draining owner は
+handoff 後も自分の PTY を serve し続けるため、その最後の child が exit したことを知り得るのは他ならぬ本人だからで
+ある。owner shard（自 generation の resource / in-flight command / outbox）と global allocator（capacity claim）は
+別 document だが、draining owner は control / spawn を [admission fence](#admission-fence) で拒否され **新しい claim を
+一切発行しない**。したがってここで観測した 0 は増加へ戻らず、2 つの document を別々に読んでも「片方の 0 が別の 0 の
+代わり」にはならない。回収は lease と同じ「発行停止 → 0 確認」の形を取る。まず安価に durable state を読み、drained なら
+owner-terminal lease の発行を止めて既存 lease が 0 になるまで待ち、**もう一度** durable state を読んでから初めて
+retire する。2 回目の読みで claim が残っていれば gate は閉じたまま次の tick へ延期し、再び開くことはない（最初の読みで
+live resource が無いことは既に証明済みで、再開は次の 0 観測と owner-terminal effect を競わせるだけだからである）。
+
+drained を確認したら `collect_retired` が gate を `retired` にし、保持した client worker を**全 join してから**
+registry role を `retired` として記録する。その後 endpoint を回収し、process は SIGTERM と同じ graceful path で
+exit する。retired entry 自体は次の first activation が同じ CAS で compaction する
+（[first activation](#first-activation)）。
+
+回収前に SIGKILL された draining の registry entry は、次の start の activation reclaim が回収する。capacity claim は
+registry liveness から推測解放しない。owner が exit event を publish 済みなら active successor が consume して 1 度だけ
+解放するが、publish 前に死んだ resource は ownership を証明できないため claim を保持したまま fail closed にする。
+registry slot の解放と capacity の推測解放を結び付けないことが、PID reuse や生存 child に対する二重 spawn を防ぐ。
+
+PTY が長時間生き続ければ draining generation はその間ずっと残る。これは PTY を守るための正しい挙動だが
+generation 上限と衝突する。次の rollover が上限に当たったとき、draining generation が居れば
+`draining collection pending` を typed に報告して fail closed になり、居なければ `generation limit` になる
+（[planned replacement](#planned-replacement)）。いずれも old active / current / PTY を変更しない。
 
 ### operation ledger の retention / expiry / GC
 
@@ -1679,14 +1709,16 @@ history が残っている間は shard も残る。
 ## generation と orphan safety
 
 generation coordinator は一つの daemon process 内で Agent admission、terminal control/exit、completion outcome を
-current generation に fence する。shipping `serve` は process lifetime の 2 段 fence（workspace と data directory。
-[単一 daemon の 2 段 fence](#単一-daemon-の-2-段-fence)）を保持するため、同じ data directory でも同じ workspace でも
-2 process は共存せず、production lifecycle は coordinator の `rollover` を呼ばない。standby endpoint、cross-process
-generation registry、draining process への admission は [cross-process generation
-authority](#cross-process-generation-authority) が持ち、owner ごとの runtime state と capacity は
-[owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
-が持つが、shipping `serve` はまだどちらも駆動しない。generic terminal runtime も、この process 内 coordinator の
-authority には含まれない。
+current generation に fence する。planned restart では active と standby の 2 process が一時的に共存し、standby は
+workspace / data-directory の単一 owner lock を取らず、自分の private endpoint と registry entry だけを持つ。
+handoff 後の authority は [cross-process generation authority](#cross-process-generation-authority) が決め、
+request ごとの effect は [admission fence](#admission-fence) が決める。
+
+shipping `serve` の Agent / generic Terminal store は owner generation ごとの shard と global allocator を使う。
+old generation は `draining` へ移ったあと control / spawn を失い、自分が既に所有する terminal IO と exit publish だけを
+継続する。new active の spawn と old owner の exit は別 shard + allocator CAS なので同時に実行しても lost update せず、
+old exit の capacity release は event revision により 1 度だけ apply される。draining process は
+[generation collection](#generation-collection) の 4 条件と lease 0 を確認して自主終了する。
 
 daemon owner process の exact identity と fenced SIGTERM は lifecycle record に実装されている。そのため PID reuse や
 legacy record を daemon owner と推測しない。
@@ -1698,20 +1730,11 @@ mismatch は active generation を変えず、candidate を standby のまま保
 `build_verified` が立つまで `rollover` も拒否する。同じ artifact 契約を durable registry の
 [standby readiness](#standby-readiness) が使い、TOCTOU で別 artifact を active にしない。
 
-そのため current generation の exact fence は stale request の誤適用を防ぐが、planned restart 中に旧 PTY を
-draining owner として維持する機構ではない。安全な landing order は、artifact identity / trigger の
-[#528](../.usagi/issues/528-fix-daemon-build-artifact-identity-safe-rollover-trigger.md)、daemon identity / locator の
-#515、[cross-process generation authority](#cross-process-generation-authority) と
-[owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
-を前提に、draining owner routing の
-[#508](../.usagi/issues/508-fix-tui-ipc-draining-generation-inventory-terminalref-owner-routing.md)、active generation の registry 登録の
-[#568](../.usagi/issues/568-feat-daemon-serve-durable-generation-registry-active-generation.md)、standby lifecycle の
-[#561](../.usagi/issues/561-refactor-daemon-serve-role-aware-standby-process.md)、owner shard 移行の
-[#562](../.usagi/issues/562-refactor-daemon-durable-runtime-state-owner-shard-global-allocator.md)、client routing の
-[#560](../.usagi/issues/560-feat-tui-client-ownerrouter-owner-generation-routing.md)、shipping lifecycle / final E2E の
-[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) の順である。owner shard 移行と
-rollover の駆動が揃うまで seamless rollover は disabled であり、shipping の replacement は old active/current と
-live PTY を維持した typed refusal か明示的な cold transition になる（[planned replacement](#planned-replacement)）。
+current generation の exact fence は stale request の誤適用を防ぎ、owner generation routing は planned restart 中の
+旧 PTY を draining endpoint へ送り続ける。回収待ちの draining が generation slot を占有している間の次の restart は
+typed `draining collection pending` で拒否し、slot を空けるために live PTY を落とさない。shipping binary・2 daemon
+process・実 PTY を通した最終回帰は
+[#574](../.usagi/issues/574-test-daemon-seamless-rollover-product-e2e-2-daemon-process-pty.md) が正本である。
 
 spawn reservation は process spawn より先に保存する。crash 後に process identity を証明できない terminal は
 `identity_unknown` として扱い、replacement spawn、input、kill を自動で行わない。PID の生存だけでは ownership

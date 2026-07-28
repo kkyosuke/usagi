@@ -64,6 +64,7 @@ use usagi_daemon::usecase::authority::activation::{
     AuthorityClaim, claim_authority, release_authority,
 };
 use usagi_daemon::usecase::authority::admission::{AdmissionGate, AdmissionLease, LeaseClass};
+use usagi_daemon::usecase::authority::collection::{Collection, collect_if_drained};
 use usagi_daemon::usecase::authority::fence::{OwnedRuntime, classify_request};
 use usagi_daemon::usecase::authority::handoff::{
     LocatorObservation, PublishedLocator, RecoveryOutcome,
@@ -1627,6 +1628,17 @@ fn spawn_ipc_server(
         open_runtime_state(data_dir, daemon_generation, &children)?,
         Arc::clone(&shutdown),
     )?;
+    start_draining_collection_worker(
+        open_runtime_state(data_dir, daemon_generation, &children)?,
+        GenerationRegistry::new(
+            GenerationRegistryFile::new(data_dir)?,
+            DEFAULT_GENERATION_LIMIT,
+        ),
+        fence.gate.clone(),
+        daemon_generation,
+        Arc::clone(&workers),
+        Arc::clone(&shutdown),
+    )?;
     start_custody_worker(
         custody,
         owner,
@@ -1668,7 +1680,14 @@ fn retain_client_worker(
     handle: std::thread::JoinHandle<()>,
 ) {
     match unblock {
-        Ok(unblock) => workers.register(Box::new(unblock), handle),
+        Ok(unblock) => {
+            let report = workers.register(Box::new(unblock), handle);
+            if !report.is_clean() {
+                ErrorLog::record(&format!(
+                    "daemon client worker retired after collection with failures: {report:?}"
+                ));
+            }
+        }
         Err(error) => ErrorLog::record(&format!(
             "daemon client worker is not collectable: \
              the accepted stream could not be duplicated: {error}"
@@ -1890,6 +1909,13 @@ where
 /// visibility TTL. Both are measured in minutes, so a 30 s tick is far finer than
 /// the state it observes.
 const RETENTION_GC_TICK: Duration = Duration::from_secs(30);
+/// How quickly a generation notices that its last draining claim disappeared.
+///
+/// Resource exits already wake their own observers; this worker only bridges
+/// the two durable documents (owner shard and global allocator) to process
+/// lifetime, so a sub-second tick keeps retirement prompt without putting the
+/// allocator lock on a hot path.
+const DRAINING_COLLECTION_TICK: Duration = Duration::from_millis(250);
 
 /// Starts the only production retention collector. Launch and exit already
 /// collect on the spot; this worker covers an idle daemon, where the age budget
@@ -1939,6 +1965,72 @@ where
         .spawn(move || {
             while !shutdown.is_requested() {
                 collect();
+                if shutdown.wait_for_tick(tick) {
+                    break;
+                }
+            }
+        })
+}
+
+/// Starts the worker that ends this process after a handoff once its owner shard
+/// and global allocator have no claim left.
+fn start_draining_collection_worker(
+    durable: ShardedRuntimeState,
+    registry: GenerationRegistry,
+    gate: AdmissionGate,
+    generation: usagi_core::domain::id::DaemonGeneration,
+    workers: Arc<ClientWorkers>,
+    shutdown: Arc<ShutdownRequest>,
+) -> std::io::Result<()> {
+    spawn_draining_collection_worker(
+        move || match collect_if_drained(&registry, &gate, &workers, generation, &durable) {
+            Ok(Collection::Collected(report)) => {
+                if !report.is_clean() {
+                    ErrorLog::record(&format!(
+                        "draining generation retired with client worker failures: {report:?}"
+                    ));
+                }
+                true
+            }
+            Ok(Collection::NotDraining | Collection::Pending(_)) => false,
+            Err(error) => {
+                ErrorLog::record(&format!("draining generation collection deferred: {error}"));
+                // `collect_retired` moves the process-local gate first and the
+                // registry second. If the second write failed, this process can
+                // no longer serve anything; exit so activation can reclaim the
+                // dead draining entry instead of leaving a retired endpoint
+                // process alive forever.
+                gate.role() == GenerationRole::Retired
+            }
+        },
+        shutdown,
+        DRAINING_COLLECTION_TICK,
+    )
+    .map(|_| ())
+}
+
+/// The collection loop with the observation injected for deterministic tests.
+///
+/// `collect` returns `true` only after retirement completed (or failed after the
+/// local gate had irreversibly retired). The shutdown request wakes the serve
+/// thread, which joins the accept loop and every late-registered client worker
+/// before it unlinks the endpoint and exits the process.
+fn spawn_draining_collection_worker<C>(
+    mut collect: C,
+    shutdown: Arc<ShutdownRequest>,
+    tick: Duration,
+) -> std::io::Result<std::thread::JoinHandle<()>>
+where
+    C: FnMut() -> bool + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("usagi-draining-collection".to_string())
+        .spawn(move || {
+            while !shutdown.is_requested() {
+                if collect() {
+                    shutdown.request();
+                    return;
+                }
                 if shutdown.wait_for_tick(tick) {
                     break;
                 }
@@ -10453,6 +10545,39 @@ mod tests {
             },
             cancelled,
             Duration::from_millis(1),
+        )
+        .unwrap();
+        handle.join().unwrap();
+        assert_eq!(skipped.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn the_draining_collector_retries_observations_and_never_outlives_shutdown() {
+        let shutdown = Arc::new(ShutdownRequest::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let handle = spawn_draining_collection_worker(
+            move || observed.fetch_add(1, Ordering::AcqRel) >= 1,
+            Arc::clone(&shutdown),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        handle.join().unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), 2);
+        assert!(shutdown.is_requested());
+
+        // Tests do not leave the product worker parked on a fixed sleep: an
+        // already-observed shutdown makes it return without another collection
+        // observation, and the handle is always joined.
+        let skipped = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&skipped);
+        let handle = spawn_draining_collection_worker(
+            move || {
+                counter.fetch_add(1, Ordering::AcqRel);
+                false
+            },
+            shutdown,
+            Duration::from_secs(30),
         )
         .unwrap();
         handle.join().unwrap();
