@@ -13,6 +13,7 @@
 //! | [`standby`] | is this candidate the exact build it was admitted for — proved without any side effect? |
 //! | [`handoff`] | how do the registry and the current locator — two independent durable objects — reach one outcome across a crash? |
 //! | [`admission`] | may *this* request, right now, produce an effect on *this* generation? |
+//! | [`fence`] | which kind of work is *this* wire request, so [`admission`] can decide it? |
 //! | [`routing`] | may this rollover leave a draining generation behind — can every participant still address it? |
 //! | [`workers`] | which client threads must be unblocked and joined before a generation is collected? |
 //! | [`rollover`] | driving the above against the durable objects, with a named boundary at every write |
@@ -34,6 +35,7 @@ mod fixture;
 
 pub mod activation;
 pub mod admission;
+pub mod fence;
 pub mod handoff;
 pub mod migration;
 pub mod registry;

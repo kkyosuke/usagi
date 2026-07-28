@@ -63,9 +63,8 @@ use usagi_daemon::usecase::agent_ipc::{
 use usagi_daemon::usecase::authority::activation::{
     AuthorityClaim, claim_authority, release_authority,
 };
-use usagi_daemon::usecase::authority::admission::{
-    AdmissionGate, LeaseClass, RequestClass, ResourceOwner,
-};
+use usagi_daemon::usecase::authority::admission::{AdmissionGate, AdmissionLease, LeaseClass};
+use usagi_daemon::usecase::authority::fence::{OwnedRuntime, classify_request};
 use usagi_daemon::usecase::authority::handoff::{
     LocatorObservation, PublishedLocator, RecoveryOutcome,
 };
@@ -73,9 +72,11 @@ use usagi_daemon::usecase::authority::registry::{
     DEFAULT_GENERATION_LIMIT, GenerationRegistry, RegistryDocument,
 };
 use usagi_daemon::usecase::authority::rollover::CurrentLocator;
+use usagi_daemon::usecase::authority::routing::RoutingLedger;
 use usagi_daemon::usecase::authority::standby::{
     ActiveOwner, StandbyCustody, StandbyProbe, admissible_active, evaluate_custody, prepare_standby,
 };
+use usagi_daemon::usecase::authority::workers::{ClientWorkers, ConnectionShutdown};
 use usagi_daemon::usecase::claude::{
     ClaudeAdapter, ClaudeProvision, ClaudeProvisionFailure, ClaudeProvisioner, scoped_settings_json,
 };
@@ -1521,6 +1522,19 @@ fn spawn_ipc_server(
         PrInventoryStore::new(data_dir.join("daemon")),
         GenerationRole::Active,
     ))));
+    // This generation's authority over the connections it serves. It is created
+    // in the `active` role, which is the role `serve` binds and the registry
+    // claim confirms: the gate opens both lease classes, so nothing this build
+    // dispatched before is refused, and the leases it now issues are what a
+    // handoff barrier gets to wait on (#559).
+    let fence = Arc::new(GenerationFence {
+        gate: AdmissionGate::new(daemon_generation, GenerationRole::Active),
+        ledger: Arc::new(RoutingLedger::new()),
+    });
+    // Every client worker this generation must unblock and join before it may be
+    // collected. Nothing collects it in this build, so it is retained and reaped
+    // rather than retired.
+    let workers = Arc::new(ClientWorkers::new());
     // The children this process observes while spawning them. It is the only proof
     // that a durable record describes a child this generation owns (#562).
     let children = Arc::new(SpawnedChildren::default());
@@ -1624,8 +1638,31 @@ fn spawn_ipc_server(
         Arc::new(Mutex::new(ProcessResourceSampler { previous: None })),
         pipeline_metrics,
         supervisor,
+        fence,
+        workers,
         shutdown,
     )
+}
+
+/// Retain one accepted connection's worker so a collection can unblock and join it.
+///
+/// A worker whose shutdown half could not be duplicated is deliberately *not*
+/// retained: a collection could never unblock it, so pretending it is joinable
+/// would park the retirement instead of reporting it. The connection itself still
+/// serves — only the descriptor duplication failed — and the peer's own
+/// disconnect is what ends it.
+fn retain_client_worker(
+    workers: &ClientWorkers,
+    unblock: std::io::Result<AcceptedStream>,
+    handle: std::thread::JoinHandle<()>,
+) {
+    match unblock {
+        Ok(unblock) => workers.register(Box::new(unblock), handle),
+        Err(error) => ErrorLog::record(&format!(
+            "daemon client worker is not collectable: \
+             the accepted stream could not be duplicated: {error}"
+        )),
+    }
 }
 
 fn bind_ipc_listener(
@@ -2256,6 +2293,8 @@ fn start_ipc_accept_loop(
     process_metrics: SharedProcessResourceSampler,
     pipeline_metrics: Arc<TerminalPipelineMetrics>,
     supervisor: SharedSupervisorRuntime,
+    fence: Arc<GenerationFence>,
+    workers: Arc<ClientWorkers>,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
     std::thread::Builder::new()
@@ -2313,6 +2352,14 @@ fn start_ipc_accept_loop(
                         let process_metrics = Arc::clone(&process_metrics);
                         let pipeline_metrics = Arc::clone(&pipeline_metrics);
                         let supervisor = Arc::clone(&supervisor);
+                        let connection_fence = Arc::clone(&fence);
+                        // Retained before the worker starts so a collection that
+                        // begins while this connection is still being set up
+                        // cannot miss it. Reaping first keeps the retained set
+                        // proportional to the *live* connections rather than to
+                        // every connection this generation has ever served.
+                        workers.reap_finished();
+                        let unblock = stream.try_clone().map(AcceptedStream);
                         let _ = std::thread::Builder::new()
                             .name("usagi-ipc-client".to_string())
                             .spawn(move || {
@@ -2333,6 +2380,7 @@ fn start_ipc_accept_loop(
                                     &mut reader,
                                     &mut writer,
                                     &server,
+                                    connection_fence.as_ref(),
                                     &mut owner,
                                     &mut |request_id, body, hello, connection, _client| match body
                                         .get("kind")
@@ -2357,7 +2405,8 @@ fn start_ipc_accept_loop(
                                     broker.unsubscribe(observer.subscription());
                                 }
                                 let _ = result;
-                            });
+                            })
+                            .map(|handle| retain_client_worker(&workers, unblock, handle));
                     }
                     // Drained: nothing more is queued, so wait for readiness.
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -5781,6 +5830,79 @@ fn spawn_standby_ipc_server(
         })
 }
 
+/// The serving generation's authority over one client connection.
+///
+/// Both halves of it were already implemented and had no production caller. This
+/// is where the shipping active daemon acquires them:
+///
+/// | half | what it decides |
+/// |---|---|
+/// | [`AdmissionGate`] | may this request produce an effect on this generation *right now* |
+/// | [`RoutingLedger`] | may a rollover leave this generation draining — can every live client still address it |
+///
+/// Neither changes what a single active generation does: the gate opens both
+/// lease classes for the `active` role, so every request that this build
+/// dispatched before is still dispatched, and the ledger only records. What they
+/// add is the *ability* to stop: a generation whose role moves to `draining`
+/// refuses control and new spawns from the next request onwards while its owned
+/// terminals keep being served, and the barrier a handoff waits on is the leases
+/// the gate has already issued.
+///
+/// It is shared by every connection thread of one generation, so it is `Sync` and
+/// both halves are internally locked.
+struct GenerationFence {
+    gate: AdmissionGate,
+    ledger: Arc<RoutingLedger>,
+}
+
+impl usagi_daemon::presentation::ipc::ConnectionFence for GenerationFence {
+    fn admitted(
+        &self,
+        connection: usagi_core::domain::id::ConnectionId,
+        hello: &usagi_core::infrastructure::ipc::ClientHello,
+    ) {
+        self.ledger.admit(connection, hello);
+    }
+
+    fn admit(
+        &self,
+        body: &serde_json::Value,
+    ) -> Result<Option<AdmissionLease>, usagi_core::infrastructure::ipc::ProtocolError> {
+        // The stance is `Own` because this process is the one that holds the data
+        // directory's runtime state. Which *exact* record a ref names is the
+        // terminal runtime's answer, not the fence's
+        // (`usagi_daemon::usecase::authority::fence`).
+        let (class, owner) = classify_request(body, OwnedRuntime::Own);
+        self.gate.admit(class, owner).map_err(|refusal| {
+            // The same code and the same meaning as a standby's refusal
+            // ([`standby_reply`]): "this generation may not do this; re-resolve
+            // the authority", with zero effect.
+            usagi_core::infrastructure::ipc::ProtocolError::new(
+                usagi_core::infrastructure::ipc::ErrorCode::GenerationRolledOver,
+                refusal.to_string(),
+            )
+        })
+    }
+
+    fn disconnected(&self, connection: usagi_core::domain::id::ConnectionId) {
+        self.ledger.disconnect(&connection);
+    }
+}
+
+/// The accepted stream half that can unblock a worker parked in a frame read.
+///
+/// A retained worker is joined at collection ([`ClientWorkers::retire`]), and a
+/// thread blocked in `read` on a live socket would never return to be joined —
+/// so what is retained alongside it is a duplicate descriptor that
+/// `shutdown(2)` can close from the outside.
+struct AcceptedStream(std::os::unix::net::UnixStream);
+
+impl ConnectionShutdown for AcceptedStream {
+    fn shutdown(&self) -> std::io::Result<()> {
+        self.0.shutdown(std::net::Shutdown::Both)
+    }
+}
+
 /// The one answer a standby has for a post-handshake request.
 ///
 /// The role admission fence decides it, which is what
@@ -5788,6 +5910,12 @@ fn spawn_standby_ipc_server(
 /// terminal IO are refused by the fence itself; a read the fence admits is still
 /// refused here, because this build's standby holds no runtime state to read —
 /// the owner shard it would read is not wired yet.
+///
+/// The classification is
+/// [`classify_request`](usagi_daemon::usecase::authority::fence::classify_request),
+/// the same one the active generation's fence reads, under this role's honest
+/// stance: a standby owns nothing, so every request that names a runtime names
+/// another generation's ([`OwnedRuntime::Nothing`]).
 ///
 /// A fence refusal is reported as `generation_rolled_over`, which is the same
 /// code the draining generation's fence reports for the same decision
@@ -5803,7 +5931,7 @@ fn standby_reply(
     use usagi_core::infrastructure::ipc::{
         Envelope, EnvelopeKind, ErrorCode, ProtocolError, ResponseOutcome,
     };
-    let (class, owner) = standby_request_class(body);
+    let (class, owner) = classify_request(body, OwnedRuntime::Nothing);
     let error = match gate.admit(class, owner) {
         Ok(lease) => {
             drop(lease);
@@ -5822,20 +5950,6 @@ fn standby_reply(
             outcome: ResponseOutcome::Error(error),
             body: serde_json::Value::Null,
         },
-    }
-}
-
-/// Classify a request for the admission fence.
-///
-/// Unrecognized kinds are classified as control, not as reads: a request this
-/// build cannot name is exactly the one whose effects it cannot bound.
-fn standby_request_class(body: &serde_json::Value) -> (RequestClass, ResourceOwner) {
-    match body.get("kind").and_then(serde_json::Value::as_str) {
-        // A standby owns no terminal, so every terminal request names a resource
-        // that belongs to another generation.
-        Some("terminal") => (RequestClass::TerminalIo, ResourceOwner::OtherGeneration),
-        Some("metrics" | "pr" | "agent_inventory") => (RequestClass::Read, ResourceOwner::Unscoped),
-        _ => (RequestClass::Control, ResourceOwner::Unscoped),
     }
 }
 
@@ -11600,5 +11714,346 @@ mod tests {
             leftovers.is_empty(),
             "temp files left behind: {leftovers:?}"
         );
+    }
+
+    // ---------------------------------------------------------------- fence
+    //
+    // The generation fence the shipping accept loop now serves every connection
+    // through (#559). These tests drive the real presentation connection loop
+    // with the real `GenerationFence`, so what they fix is the *wiring*: the
+    // pure decisions are covered in `usagi_daemon::usecase::authority`.
+
+    /// A terminal owner that records what actually reached it. The fence's whole
+    /// job is to decide what does, so "the owner never saw it" is the only
+    /// statement of effect zero worth making.
+    #[derive(Default)]
+    struct FenceWitness {
+        seen: Vec<TerminalAction>,
+    }
+
+    impl TerminalOwner for FenceWitness {
+        fn request(
+            &mut self,
+            _connection: ConnectionId,
+            _client: ClientId,
+            _request_id: RequestId,
+            action: TerminalAction,
+            _payload: serde_json::Value,
+            _wire: usagi_daemon::usecase::terminal::SnapshotWire,
+        ) -> Result<serde_json::Value, usagi_core::infrastructure::ipc::ProtocolError> {
+            self.seen.push(action);
+            Ok(serde_json::json!({"served": true}))
+        }
+
+        fn disconnect(&mut self, _connection: ConnectionId) {}
+    }
+
+    /// The client hello a routing-capable peer sends.
+    fn fence_client_hello(
+        capabilities: Vec<String>,
+    ) -> usagi_core::infrastructure::ipc::ClientHello {
+        use usagi_core::infrastructure::ipc::{
+            ClientHello, ProtocolRange, TERMINAL_CHECKPOINT_REVISION, TERMINAL_WIRE_GENERATION,
+        };
+        ClientHello {
+            client_id: usagi_core::infrastructure::ipc::ClientId(ClientId::new().as_str().clone()),
+            connection_nonce: "fence".to_owned(),
+            expected_daemon_generation: None,
+            supported_protocols: vec![ProtocolRange {
+                generation: TERMINAL_WIRE_GENERATION,
+                min_revision: 0,
+                max_revision: TERMINAL_CHECKPOINT_REVISION,
+            }],
+            capabilities,
+            required_capabilities: Vec::new(),
+            build: current_build(),
+            workspace: Some(ClientWorkspace::Unbound),
+        }
+    }
+
+    /// Serve `requests` to one connection through `fence` and report each
+    /// response's outcome alongside what reached the terminal owner.
+    ///
+    /// The bytes are a real hello frame plus real request envelopes, so the fence
+    /// is exercised exactly where production puts it: inside
+    /// `handle_connection_with_terminal_and`, ahead of both the terminal path and
+    /// the dispatch closure.
+    fn serve_through_fence(
+        fence: &GenerationFence,
+        hello: &usagi_core::infrastructure::ipc::ClientHello,
+        requests: &[serde_json::Value],
+    ) -> (
+        Vec<usagi_core::infrastructure::ipc::ResponseOutcome>,
+        Vec<TerminalAction>,
+    ) {
+        use usagi_core::infrastructure::ipc::{
+            Bootstrap, DEFAULT_MAX_FRAME_BYTES, Envelope, EnvelopeKind, RequestId as WireRequestId,
+            read_json_frame, write_json_frame,
+        };
+        let generation = ipc_generation();
+        let protocol = usagi_daemon::presentation::ipc::server_protocol(
+            generation.clone(),
+            generation.0.clone(),
+            current_build(),
+            DaemonRecord::new(std::process::id()),
+            String::new(),
+        );
+        // The version and generation every envelope must target are the ones the
+        // handshake will settle on, so they are read from the same negotiation the
+        // connection loop performs rather than assumed. An envelope that named a
+        // different pair would be answered by the generation-mismatch branch,
+        // which never reaches the fence.
+        let negotiated = usagi_core::infrastructure::ipc::negotiate(hello, &protocol)
+            .expect("the fence fixture's client must be admissible");
+        let mut inbound = Vec::new();
+        write_json_frame(
+            &mut inbound,
+            &Bootstrap::ClientHello(hello.clone()),
+            DEFAULT_MAX_FRAME_BYTES,
+        )
+        .unwrap();
+        for body in requests {
+            write_json_frame(
+                &mut inbound,
+                &Envelope {
+                    protocol: negotiated.protocol,
+                    daemon_generation: negotiated.daemon_generation.clone(),
+                    kind: EnvelopeKind::Request {
+                        request_id: WireRequestId(RequestId::new().as_str().clone()),
+                        timeout_ms: None,
+                        body: body.clone(),
+                    },
+                },
+                DEFAULT_MAX_FRAME_BYTES,
+            )
+            .unwrap();
+        }
+
+        let mut reader = std::io::Cursor::new(inbound);
+        let mut outbound = Vec::new();
+        let mut owner = FenceWitness::default();
+        usagi_daemon::presentation::ipc::handle_connection_with_terminal_and(
+            &mut reader,
+            &mut outbound,
+            &protocol,
+            fence,
+            &mut owner,
+            &mut |request_id, _body, hello, _connection, _client| Envelope {
+                protocol: hello.protocol,
+                daemon_generation: hello.daemon_generation.clone(),
+                kind: EnvelopeKind::Response {
+                    request_id,
+                    outcome: usagi_core::infrastructure::ipc::ResponseOutcome::Ok,
+                    body: serde_json::json!({"dispatched": true}),
+                },
+            },
+        )
+        .unwrap();
+
+        let mut replies = std::io::Cursor::new(outbound);
+        // The server hello is the first frame out; the responses follow it.
+        assert!(matches!(
+            read_json_frame::<Bootstrap>(&mut replies, DEFAULT_MAX_FRAME_BYTES).unwrap(),
+            Some(Bootstrap::ServerHello(_))
+        ));
+        let mut outcomes = Vec::new();
+        while let Some(envelope) =
+            read_json_frame::<Envelope>(&mut replies, DEFAULT_MAX_FRAME_BYTES).unwrap()
+        {
+            let EnvelopeKind::Response { outcome, .. } = envelope.kind else {
+                panic!("daemon replied with something other than a response");
+            };
+            outcomes.push(outcome);
+        }
+        (outcomes, owner.seen)
+    }
+
+    fn fence_in(role: GenerationRole) -> GenerationFence {
+        GenerationFence {
+            gate: AdmissionGate::new(DaemonGeneration::new(), role),
+            ledger: Arc::new(RoutingLedger::new()),
+        }
+    }
+
+    fn session_request() -> serde_json::Value {
+        serde_json::json!({"kind": "session", "action": "list", "operation_id": "op", "payload": null})
+    }
+
+    fn attach_request() -> serde_json::Value {
+        serde_json::json!({
+            "kind": "terminal",
+            "action": "attach",
+            "payload": {"operation": "attach", "terminal": null},
+        })
+    }
+
+    /// The fence changes nothing for the one active generation this build runs:
+    /// every request a client sent before is still dispatched, and the terminal
+    /// owner still sees its own IO.
+    #[test]
+    fn an_active_generation_serves_every_request_through_its_fence_unchanged() {
+        use usagi_core::infrastructure::ipc::ResponseOutcome;
+        let fence = fence_in(GenerationRole::Active);
+        let (outcomes, seen) = serve_through_fence(
+            &fence,
+            &fence_client_hello(vec![
+                usagi_core::infrastructure::ipc::OWNER_GENERATION_ROUTING_CAPABILITY.to_owned(),
+            ]),
+            &[session_request(), attach_request()],
+        );
+        assert_eq!(outcomes.len(), 2);
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| !matches!(outcome, ResponseOutcome::Error(_))),
+            "{outcomes:?}"
+        );
+        assert_eq!(seen, vec![TerminalAction::Attach]);
+        // Every lease the two requests took has been released, so a barrier
+        // starting now would not wait on this connection.
+        assert_eq!(fence.gate.outstanding(LeaseClass::ActiveControl), 0);
+        assert_eq!(fence.gate.outstanding(LeaseClass::OwnerTerminal), 0);
+    }
+
+    /// The pair this fence exists for: once the role is `draining`, control is
+    /// refused with zero effect from the *next request onwards* — on a connection
+    /// that was admitted while the generation was still active — while IO on the
+    /// terminals it owns keeps being served.
+    #[test]
+    fn a_draining_generation_refuses_control_and_still_serves_its_own_terminals() {
+        use usagi_core::infrastructure::ipc::{ErrorCode, ResponseOutcome};
+        let fence = fence_in(GenerationRole::Active);
+        fence.gate.close(LeaseClass::ActiveControl);
+        fence.gate.await_drain(LeaseClass::ActiveControl).unwrap();
+        fence.gate.enter_draining().unwrap();
+
+        let (outcomes, seen) = serve_through_fence(
+            &fence,
+            &fence_client_hello(vec![
+                usagi_core::infrastructure::ipc::OWNER_GENERATION_ROUTING_CAPABILITY.to_owned(),
+            ]),
+            &[session_request(), attach_request()],
+        );
+        match &outcomes[0] {
+            ResponseOutcome::Error(error) => {
+                assert_eq!(error.code, ErrorCode::GenerationRolledOver);
+            }
+            other => panic!("a draining generation admitted control work: {other:?}"),
+        }
+        assert!(
+            !matches!(outcomes[1], ResponseOutcome::Error(_)),
+            "{:?}",
+            outcomes[1]
+        );
+        // Effect zero for the refused control request: the owner saw only the
+        // terminal IO it owns.
+        assert_eq!(seen, vec![TerminalAction::Attach]);
+    }
+
+    /// A retired generation admits nothing at all, terminal IO included, and the
+    /// terminal owner is never reached.
+    #[test]
+    fn a_retired_generation_admits_nothing_and_reaches_no_owner() {
+        use usagi_core::infrastructure::ipc::{ErrorCode, ResponseOutcome};
+        let fence = fence_in(GenerationRole::Active);
+        fence.gate.close(LeaseClass::ActiveControl);
+        fence.gate.close(LeaseClass::OwnerTerminal);
+        fence.gate.enter_retired().unwrap();
+
+        let (outcomes, seen) = serve_through_fence(
+            &fence,
+            &fence_client_hello(Vec::new()),
+            &[session_request(), attach_request()],
+        );
+        assert_eq!(outcomes.len(), 2);
+        for outcome in &outcomes {
+            match outcome {
+                ResponseOutcome::Error(error) => {
+                    assert_eq!(error.code, ErrorCode::GenerationRolledOver);
+                }
+                other => panic!("a retired generation admitted work: {other:?}"),
+            }
+        }
+        assert!(seen.is_empty(), "{seen:?}");
+    }
+
+    /// The ledger half: a connection is recorded with the routing answer it
+    /// advertised, which is what decides whether a rollover may leave this
+    /// generation draining at all — a client that cannot address a draining owner
+    /// is counted as unsupported and blocks the rollover.
+    #[test]
+    fn the_fence_records_each_connections_routing_answer() {
+        use usagi_daemon::presentation::ipc::ConnectionFence;
+        let fence = fence_in(GenerationRole::Active);
+        let routing = fence_client_hello(vec![
+            usagi_core::infrastructure::ipc::OWNER_GENERATION_ROUTING_CAPABILITY.to_owned(),
+        ]);
+        let old_build = fence_client_hello(Vec::new());
+
+        let (first, second) = (ConnectionId::new(), ConnectionId::new());
+        fence.admitted(first, &routing);
+        fence.admitted(second, &old_build);
+        assert_eq!(fence.ledger.connections(), 2);
+        assert_eq!(fence.ledger.unsupported(), 1);
+
+        // The peer that could not address a draining owner has gone away, so it
+        // stops blocking a rollover.
+        fence.disconnected(second);
+        assert_eq!(fence.ledger.connections(), 1);
+        assert_eq!(fence.ledger.unsupported(), 0);
+    }
+
+    /// The loop itself performs that pair: a connection is admitted after the
+    /// handshake and forgotten on every exit, so the ledger tracks live
+    /// connections rather than historical ones.
+    #[test]
+    fn serving_a_connection_admits_it_to_the_ledger_and_forgets_it_at_the_end() {
+        let fence = fence_in(GenerationRole::Active);
+        assert_eq!(fence.ledger.connections(), 0);
+        serve_through_fence(
+            &fence,
+            &fence_client_hello(Vec::new()),
+            &[session_request()],
+        );
+        assert_eq!(fence.ledger.connections(), 0);
+    }
+
+    /// A worker whose stream could not be duplicated is not retained: retirement
+    /// must never park on a thread it has no way to unblock.
+    #[test]
+    fn only_a_collectable_client_worker_is_retained() {
+        let workers = ClientWorkers::new();
+        // A refused worker's handle is consumed and dropped, so nothing can join
+        // it afterwards — it is driven to completion *before* being handed over.
+        // A worker thread still running writes coverage counters while the harness
+        // dumps the profile, and that race reports lines other tests certainly
+        // executed as unreached.
+        let refused = std::thread::spawn(|| {});
+        while !refused.is_finished() {
+            std::thread::yield_now();
+        }
+        retain_client_worker(
+            &workers,
+            Err(std::io::Error::other("no descriptors")),
+            refused,
+        );
+        assert_eq!(workers.outstanding(), 0);
+
+        let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let parked = std::thread::spawn(move || {
+            // Parked exactly as a client worker is: blocked reading a frame that
+            // never arrives.
+            let mut byte = [0_u8; 1];
+            let _ = std::io::Read::read(&mut { &server }, &mut byte);
+        });
+        let unblock = client.try_clone().map(AcceptedStream);
+        retain_client_worker(&workers, unblock, parked);
+        assert_eq!(workers.outstanding(), 1);
+
+        // Retirement shuts the retained half down, which is what lets the join
+        // return. A test that hung here would be reporting a real defect.
+        let report = workers.retire();
+        assert_eq!(report.joined, 1);
+        assert!(report.is_clean(), "{report:?}");
     }
 }
