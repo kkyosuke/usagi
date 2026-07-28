@@ -159,6 +159,11 @@ daemon はどの workspace の client も admit してしまうため、capabili
 | daemon metrics subscription（[daemon metrics subscription](#daemon-metrics-subscription)） | daemon process の表示専用 sample であり、workspace の state を読まない。加えてこの接続は daemon を起動しない（entry 画面が workspace を選ぶ前に、起動 directory へ束縛された daemon を作らないため） |
 | `usagi daemon replace` | 広告された build identity を読む lifecycle 操作であり、workspace に紐づかない |
 
+残る lifecycle command（`usagi daemon start` / `status` / `stop` / `restart`）は handshake を行わない。lifecycle record と
+process-start identity の観測だけで動き、client 接続を張らないため、`unbound` の申告を持つ免除経路ではなく
+**fence の対象外**である（[5. daemon の process lifecycle](05-daemon.md#daemon-process-lifecycle) が各 command の動作の正本）。
+したがって daemon がどの workspace を serve していても、これらは workspace の外から従来どおり実行できる。
+
 この fence は**同一 UID の協調する peer 同士の一貫性 fence**であり、authorization boundary ではない
 （accept 時に UID を検証済みで、到達できた peer は任意の root を綴れる）。したがって `unbound` は
 per-request の権限判定ではなく、「workspace 作業をしない」という申告である。
