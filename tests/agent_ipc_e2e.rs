@@ -993,14 +993,19 @@ fn root_ipc_cold_restart_projects_interrupted_history_and_resumes_one_exact_tab(
     );
 }
 
-/// A planned `daemon stop` / `daemon restart` must not destroy a live PTY, and
-/// an explicit `--force` must still be able to.
+/// A planned `daemon stop` must not destroy a live PTY, and an explicit
+/// `--force` must still be able to.
 ///
 /// This drives the shipping binary end to end: a real daemon process owning a
 /// real generic-terminal child, and the same `usagi daemon …` verbs an operator
 /// runs. The refusal has to be observable there, not only in the usecase.
+///
+/// `daemon restart` deliberately does *not* refuse here any more: a planned
+/// restart with live runtime stages a standby and hands authority over through a
+/// gated rollover (#572). That two-process handoff is exercised as a product E2E
+/// by #574; this test keeps the unchanged `daemon stop` refusal (#507).
 #[test]
-fn root_planned_stop_and_restart_refuse_while_a_terminal_is_live() {
+fn root_planned_stop_refuses_while_a_terminal_is_live() {
     let _serial = DAEMON_START_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1053,19 +1058,18 @@ fn root_planned_stop_and_restart_refuse_while_a_terminal_is_live() {
         command.output().expect("the shipping binary runs")
     };
 
-    // Both planned verbs refuse, name what they saved, and name the missing
+    // The planned stop refuses, names what it saved, and names the missing
     // prerequisite that would otherwise have preserved it.
-    for args in [&["daemon", "stop"][..], &["daemon", "restart"][..]] {
-        let refused = lifecycle(args);
-        let message = String::from_utf8_lossy(&refused.stderr).into_owned()
-            + &String::from_utf8_lossy(&refused.stdout);
-        assert!(!refused.status.success(), "{args:?} was not refused");
-        assert!(
-            message.contains("1 generic terminal(s)"),
-            "{args:?}: {message}"
-        );
-        assert!(message.contains("--force"), "{args:?}: {message}");
-    }
+    let args = &["daemon", "stop"][..];
+    let refused = lifecycle(args);
+    let message = String::from_utf8_lossy(&refused.stderr).into_owned()
+        + &String::from_utf8_lossy(&refused.stdout);
+    assert!(!refused.status.success(), "{args:?} was not refused");
+    assert!(
+        message.contains("1 generic terminal(s)"),
+        "{args:?}: {message}"
+    );
+    assert!(message.contains("--force"), "{args:?}: {message}");
     assert!(
         message_free_of_effect(&data_dir, owner_pid, child_pid),
         "a refused transition changed the daemon or its child"
