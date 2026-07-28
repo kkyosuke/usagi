@@ -52,42 +52,6 @@ pub trait TerminalOwner {
     fn disconnect(&mut self, connection: usagi_core::domain::id::ConnectionId);
 }
 
-/// The permit one admitted request holds while it is being dispatched.
-///
-/// It is opaque on purpose. The connection loop must *hold* it across the effect
-/// and drop it after the reply is written, and must not be able to inspect,
-/// re-check, or extend it: re-checking authority after an effect cannot un-spawn
-/// a process, which is the whole reason the fence runs first
-/// ([`crate::usecase::authority::admission`]).
-///
-/// A serving generation puts its [`AdmissionLease`] inside; a caller that fences
-/// nothing puts nothing in.
-///
-/// [`AdmissionLease`]: crate::usecase::authority::admission::AdmissionLease
-///
-/// The payload is deliberately never *read*. A permit's whole contribution is
-/// made when it is dropped — that is what releases the lease and lets a barrier
-/// proceed — so there is nothing for a getter to return and no `Debug` rendering
-/// worth having. Both would only invite the inspection the opacity is here to
-/// prevent.
-pub struct RequestPermit(#[allow(dead_code)] Option<Box<dyn Send>>);
-
-impl RequestPermit {
-    /// A permit that fences nothing. It is what an unfenced caller returns, and
-    /// what the fence itself returns for a request that needs no lease because it
-    /// produces no effect a handoff could have to wait for.
-    #[must_use]
-    pub const fn unfenced() -> Self {
-        Self(None)
-    }
-
-    /// A permit that releases `lease` when the request finishes.
-    #[must_use]
-    pub fn holding(lease: impl Send + 'static) -> Self {
-        Self(Some(Box::new(lease)))
-    }
-}
-
 /// The generation authority one client connection is served under.
 ///
 /// It is one port rather than three parameters because its three verbs are one
@@ -110,12 +74,21 @@ pub trait ConnectionFence {
         hello: &usagi_core::infrastructure::ipc::ClientHello,
     );
 
-    /// Admit one request body and return the permit to hold across its dispatch.
+    /// Admit one request body and return the lease to hold across its dispatch.
+    ///
+    /// `Ok(None)` is an admitted request that needs no lease: it produces no
+    /// effect a handoff barrier could have to wait for. The connection loop holds
+    /// whatever it gets until the reply is written and must not re-check it —
+    /// re-checking authority after an effect cannot un-spawn a process, which is
+    /// the whole reason this runs first.
     ///
     /// # Errors
     /// Returns the typed refusal that fails the request closed. Every refusal is
     /// effect zero.
-    fn admit(&self, body: &serde_json::Value) -> Result<RequestPermit, ProtocolError>;
+    fn admit(
+        &self,
+        body: &serde_json::Value,
+    ) -> Result<Option<crate::usecase::authority::admission::AdmissionLease>, ProtocolError>;
 
     /// Forget a connection that has gone away.
     fn disconnected(&self, connection: usagi_core::domain::id::ConnectionId);
@@ -137,8 +110,11 @@ impl ConnectionFence for UnfencedConnection {
     ) {
     }
 
-    fn admit(&self, _body: &serde_json::Value) -> Result<RequestPermit, ProtocolError> {
-        Ok(RequestPermit::unfenced())
+    fn admit(
+        &self,
+        _body: &serde_json::Value,
+    ) -> Result<Option<crate::usecase::authority::admission::AdmissionLease>, ProtocolError> {
+        Ok(None)
     }
 
     fn disconnected(&self, _connection: usagi_core::domain::id::ConnectionId) {}
@@ -388,10 +364,10 @@ pub fn handle_connection_with_terminal_and(
                 ))
             } else {
                 match fence.admit(&body) {
-                    // `_permit` is bound for the whole arm, so the lease it carries
-                    // is released only after the effect below has finished — never
-                    // between the authority check and the effect it authorized.
-                    Ok(_permit) => {
+                    // `_lease` is bound for the whole arm, so it is released only
+                    // after the effect below has finished — never between the
+                    // authority check and the effect it authorized.
+                    Ok(_lease) => {
                         if let Ok(usagi_core::usecase::client::DaemonRequest::Terminal {
                             action,
                             payload,
@@ -771,6 +747,126 @@ mod tests {
             Some(Bootstrap::ServerHello(_))
         ));
     }
+    /// A fence that refuses everything, and counts what it was asked.
+    ///
+    /// `UnfencedConnection` can only prove the admitted path; this is the other
+    /// half of the seam's contract, and the refusal is where the whole thing earns
+    /// its place — a request the fence rejects must reach nothing.
+    #[derive(Default)]
+    struct RefusingConnection {
+        admitted: std::cell::Cell<usize>,
+        disconnected: std::cell::Cell<usize>,
+    }
+
+    impl ConnectionFence for RefusingConnection {
+        fn admitted(
+            &self,
+            _connection: usagi_core::domain::id::ConnectionId,
+            _hello: &ClientHello,
+        ) {
+            self.admitted.set(self.admitted.get() + 1);
+        }
+
+        fn admit(
+            &self,
+            _body: &serde_json::Value,
+        ) -> Result<Option<crate::usecase::authority::admission::AdmissionLease>, ProtocolError>
+        {
+            Err(ProtocolError::new(
+                ErrorCode::GenerationRolledOver,
+                "generation stopped admitting this work",
+            ))
+        }
+
+        fn disconnected(&self, _connection: usagi_core::domain::id::ConnectionId) {
+            self.disconnected.set(self.disconnected.get() + 1);
+        }
+    }
+
+    /// A refused request is answered with the fence's own typed error and reaches
+    /// **neither** the terminal owner nor the dispatcher.
+    ///
+    /// Both are asserted because the fence sits ahead of two different paths: a
+    /// terminal request never reaches `dispatch_request` at all, so a fence placed
+    /// in the dispatch closure would leave terminal IO unfenced. Each round below
+    /// sends one request of each kind.
+    ///
+    /// The unfenced round runs first and is not a formality: it establishes that
+    /// this fixture's dispatcher and terminal owner *are* reachable, without which
+    /// the refused round's zero counts would be satisfied by a broken fixture.
+    #[test]
+    fn a_refused_request_reaches_neither_the_terminal_owner_nor_the_dispatcher() {
+        let round = |fence: &dyn ConnectionFence| {
+            let mut input = Vec::new();
+            write_json_frame(&mut input, &hello(), 1024).unwrap();
+            write_json_frame(&mut input, &request(), 1024).unwrap();
+            write_json_frame(
+                &mut input,
+                &terminal_request(usagi_core::domain::id::RequestId::new().as_str()),
+                1024,
+            )
+            .unwrap();
+
+            let mut terminal = RecordingTerminal::default();
+            let mut dispatched = 0_usize;
+            let mut output = Vec::new();
+            handle_connection_with_terminal_and(
+                &mut Cursor::new(input),
+                &mut output,
+                &server(),
+                fence,
+                &mut terminal,
+                &mut |request_id, body, hello, _connection, _client| {
+                    dispatched += 1;
+                    dispatch(request_id, body, hello)
+                },
+            )
+            .unwrap();
+
+            let mut replies = Cursor::new(output);
+            let _ = read_json_frame::<Bootstrap>(&mut replies, 1024).unwrap();
+            let mut answered = Vec::new();
+            while let Some(envelope) = read_json_frame::<Envelope>(&mut replies, 1024).unwrap() {
+                answered.push(envelope.kind);
+            }
+            (answered, dispatched, terminal)
+        };
+
+        // Reachable: the non-terminal request lands in the dispatcher and the
+        // terminal one lands on the owner.
+        let (served, dispatched, terminal) = round(&UnfencedConnection);
+        assert_eq!(served.len(), 2);
+        assert_eq!(dispatched, 1);
+        assert_eq!(terminal.requests, 1);
+
+        // Refused: the same two requests reach neither, and both are still
+        // answered — with the fence's typed error and a null body, so no client
+        // can mistake a refusal for a served request.
+        let fence = RefusingConnection::default();
+        let (refused, dispatched, terminal) = round(&fence);
+        assert_eq!(refused.len(), 2);
+        for kind in &refused {
+            assert!(
+                matches!(
+                    kind,
+                    EnvelopeKind::Response {
+                        outcome: ResponseOutcome::Error(error),
+                        body,
+                        ..
+                    } if error.code == ErrorCode::GenerationRolledOver && body.is_null()
+                ),
+                "{kind:?}"
+            );
+        }
+        assert_eq!(dispatched, 0);
+        assert_eq!(terminal.requests, 0);
+        // The connection is still admitted to the ledger and forgotten at the end,
+        // whatever its requests were answered with.
+        assert_eq!(fence.admitted.get(), 1);
+        assert_eq!(fence.disconnected.get(), 1);
+        assert_eq!(terminal.disconnects, 1);
+    }
+
     #[test]
     fn connection_requires_hello_then_correlates_response() {
         let mut input = Vec::new();

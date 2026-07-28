@@ -63,7 +63,7 @@ use usagi_daemon::usecase::agent_ipc::{
 use usagi_daemon::usecase::authority::activation::{
     AuthorityClaim, claim_authority, release_authority,
 };
-use usagi_daemon::usecase::authority::admission::{AdmissionGate, LeaseClass};
+use usagi_daemon::usecase::authority::admission::{AdmissionGate, AdmissionLease, LeaseClass};
 use usagi_daemon::usecase::authority::fence::{OwnedRuntime, classify_request};
 use usagi_daemon::usecase::authority::handoff::{
     LocatorObservation, PublishedLocator, RecoveryOutcome,
@@ -5867,29 +5867,21 @@ impl usagi_daemon::presentation::ipc::ConnectionFence for GenerationFence {
     fn admit(
         &self,
         body: &serde_json::Value,
-    ) -> Result<
-        usagi_daemon::presentation::ipc::RequestPermit,
-        usagi_core::infrastructure::ipc::ProtocolError,
-    > {
-        use usagi_daemon::presentation::ipc::RequestPermit;
+    ) -> Result<Option<AdmissionLease>, usagi_core::infrastructure::ipc::ProtocolError> {
         // The stance is `Own` because this process is the one that holds the data
         // directory's runtime state. Which *exact* record a ref names is the
         // terminal runtime's answer, not the fence's
         // (`usagi_daemon::usecase::authority::fence`).
         let (class, owner) = classify_request(body, OwnedRuntime::Own);
-        match self.gate.admit(class, owner) {
-            // No lease means the request produces no effect a handoff could have
-            // to wait for, so there is nothing for the permit to hold.
-            Ok(None) => Ok(RequestPermit::unfenced()),
-            Ok(Some(lease)) => Ok(RequestPermit::holding(lease)),
+        self.gate.admit(class, owner).map_err(|refusal| {
             // The same code and the same meaning as a standby's refusal
             // ([`standby_reply`]): "this generation may not do this; re-resolve
             // the authority", with zero effect.
-            Err(refusal) => Err(usagi_core::infrastructure::ipc::ProtocolError::new(
+            usagi_core::infrastructure::ipc::ProtocolError::new(
                 usagi_core::infrastructure::ipc::ErrorCode::GenerationRolledOver,
                 refusal.to_string(),
-            )),
-        }
+            )
+        })
     }
 
     fn disconnected(&self, connection: usagi_core::domain::id::ConnectionId) {
@@ -12031,10 +12023,19 @@ mod tests {
     #[test]
     fn only_a_collectable_client_worker_is_retained() {
         let workers = ClientWorkers::new();
+        // A refused worker's handle is consumed and dropped, so nothing can join
+        // it afterwards — it is driven to completion *before* being handed over.
+        // A worker thread still running writes coverage counters while the harness
+        // dumps the profile, and that race reports lines other tests certainly
+        // executed as unreached.
+        let refused = std::thread::spawn(|| {});
+        while !refused.is_finished() {
+            std::thread::yield_now();
+        }
         retain_client_worker(
             &workers,
             Err(std::io::Error::other("no descriptors")),
-            std::thread::spawn(|| {}),
+            refused,
         );
         assert_eq!(workers.outstanding(), 0);
 
