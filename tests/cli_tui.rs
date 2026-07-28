@@ -2047,7 +2047,8 @@ fn open_registers_and_renders_an_explicit_or_current_workspace() {
     assert!(output.status.success());
     let out = stdout(&output);
     assert!(out.contains("explicit-workspace"));
-    assert!(out.contains("main"));
+    assert!(out.contains("+ new session"));
+    assert!(!out.contains("workspace main"));
     assert!(!out.contains("workspace TUI ("));
     assert_eq!(
         WorkspaceSettingsStore::new(&explicit).load().unwrap(),
@@ -2093,7 +2094,8 @@ fn open_registers_and_renders_an_explicit_or_current_workspace() {
     assert!(output.status.success(), "{}", stderr(&output));
     let out = stdout(&output);
     assert!(out.contains("current-workspace"));
-    assert!(out.contains("main"));
+    assert!(out.contains("+ new session"));
+    assert!(!out.contains("workspace main"));
     stop_daemon(&current_home);
 }
 

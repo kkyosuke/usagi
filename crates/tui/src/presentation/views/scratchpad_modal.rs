@@ -250,7 +250,7 @@ mod tests {
         SafeMessage, Target, update,
     };
     use chrono::{TimeZone, Utc};
-    use usagi_core::domain::id::WorkspaceId;
+    use usagi_core::domain::id::{SessionId, WorkspaceId};
     use usagi_core::domain::note::{Scratchpad, SessionDecision, SessionTodo};
     use usagi_core::usecase::env::EnvScope;
 
@@ -263,7 +263,8 @@ mod tests {
     #[test]
     fn overlays_keep_background_visible_and_render_editor_values() {
         let workspace = WorkspaceId::new();
-        let mut state = AppState::home(workspace, Vec::new());
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenNotes));
         let empty_notes = render_notes_over(0, 0, &base(), state.note_editor().unwrap());
         let notes_height = empty_notes
@@ -293,7 +294,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::NotesLoaded {
-                target: Target::Root(workspace),
+                target: Target::Session(session),
                 scratchpad: Scratchpad {
                     note: Some("remember this\nand this".into()),
                     todos: vec![SessionTodo::new("first"), SessionTodo::new("second")],
@@ -311,7 +312,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::NotesError {
-                target: Target::Root(workspace),
+                target: Target::Session(session),
                 error: SafeError {
                     message: SafeMessage::new("Could not save notes"),
                     error_id: "safe-notes".into(),
@@ -346,7 +347,7 @@ mod tests {
     #[test]
     fn environment_overlay_marks_inherited_rows_and_names_the_edited_scope() {
         let workspace = WorkspaceId::new();
-        let mut state = AppState::home(workspace, Vec::new());
+        let mut state = AppState::home(workspace, vec![SessionId::new()]);
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenEnvironment));
         let inherited = (0..5)
             .map(|index| EnvironmentEntry {
@@ -401,7 +402,7 @@ mod tests {
     #[test]
     fn closeup_environment_overlay_is_workspace_only_and_hides_the_scope_toggle() {
         let workspace = WorkspaceId::new();
-        let mut state = AppState::home(workspace, Vec::new());
+        let mut state = AppState::home(workspace, vec![SessionId::new()]);
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
         let _ = update(
             &mut state,

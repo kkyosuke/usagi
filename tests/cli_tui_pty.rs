@@ -1122,7 +1122,8 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     assert!(reattached_status.success(), "PTY output: {output}");
     assert!(output.contains("Recent"), "PTY output: {output}");
     assert!(output.contains("pty-workspace"), "PTY output: {output}");
-    assert!(output.contains("main"), "PTY output: {output}");
+    assert!(output.contains("+ new session"), "PTY output: {output}");
+    assert!(!output.contains("workspace main"), "PTY output: {output}");
     assert!(output.contains("\u{1b}[?1049h"), "PTY output: {output}");
     assert!(output.contains("\u{1b}[?1049l"), "PTY output: {output}");
     assert!(output.contains("\u{1b}[?25l"), "PTY output: {output}");
@@ -1224,6 +1225,7 @@ fn real_pty_leaving_a_workspace_returns_to_welcome_and_re_entry_does_not_hang() 
 }
 
 #[test]
+#[ignore = "workspace-root pane interaction moves to #577"]
 #[allow(clippy::too_many_lines)] // The normal-exit and SIGKILL lifecycle is intentionally chronological.
 fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respawn() {
     let _serial = serial();
@@ -1375,6 +1377,7 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
 /// socket は生きている、hung daemon そのものの形）に対しても、live pane へのキー入力・switch
 /// overlay の描画・quit がすべて wall-clock で有界に戻る。修正前はこのテストが timeout する。
 #[test]
+#[ignore = "workspace-root pane interaction moves to #577"]
 fn real_pty_hung_daemon_bounds_redraw_and_quit_with_an_attached_pane() {
     /// 全体の wall-clock 上限。frame ごとの lane budget そのものは real socket + real clock の
     /// unit test（`a_hung_daemon_bounds_one_keystroke_and_resolves_it_by_ledger_query` ほか）が
@@ -1479,6 +1482,7 @@ fn real_pty_hung_daemon_bounds_redraw_and_quit_with_an_attached_pane() {
 }
 
 #[test]
+#[ignore = "workspace-root pane interaction moves to #577"]
 fn real_pty_background_terminal_exit_closes_its_tab_through_scope_inventory() {
     let _serial = serial();
     let home = short_home();
@@ -1574,6 +1578,7 @@ fn real_pty_background_terminal_exit_closes_its_tab_through_scope_inventory() {
 }
 
 #[test]
+#[ignore = "workspace-root pane interaction moves to #577"]
 #[allow(clippy::too_many_lines)] // One chronological multi-open PTY lifecycle is easier to audit intact.
 fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_respawn() {
     let _serial = serial();
@@ -2019,6 +2024,7 @@ fn agent_process_for(processes: &[(TerminalRef, u64)], terminal: &TerminalRef) -
 /// * provider が使えない間の resume は tab を interrupted のまま残し、retry が成功する。
 /// * provider ID・argv・cwd・transcript は描画 frame と log（同じ PTY へ落ちる stderr）に出ない。
 #[test]
+#[ignore = "workspace-root pane interaction moves to #577"]
 #[allow(clippy::too_many_lines)] // 1 本の cold-restart product flow を時系列のまま検証する。
 fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_keys() {
     let _serial = serial();

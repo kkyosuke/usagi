@@ -241,19 +241,18 @@ alternate screen を復元する。
 
 ## Home と target
 
-Home の navigation target は `Root(WorkspaceId)` または `Session(SessionId)` である。表示名と
-配列 index は identity に使わない。selected は cursor、active は command と Closeup の対象であり、
-cursor の移動だけでは active を変更しない。
+Home の navigation target は managed `Session(SessionId)` である。表示名と配列 index は identity に
+使わない。selected は cursor、active は command と Closeup の managed session であり、cursor の移動だけでは
+active を変更しない。session が 0 件なら selected は `+ new session`、active は `None` となる。
 
-`Root`（`⌂ root`）と `Session` はどちらも Agent / Terminal を作成できる scope である。Closeup の
-`agent` / `terminal` action は active target から scope（root は `session_id` なし、session はその
-`SessionId`）を導出し、pane は target ごとに独立して投影される。root の Agent / Terminal は daemon が
-trusted repository root を cwd として起動し、live 出力・入力・resize・detach/reconnect は session pane と
-同じ vocabulary で動く（設計根拠は [proposals/10-workspace-root-scope.md](proposals/10-workspace-root-scope.md)）。root 行は `x` / `X` による削除の対象外のままである。
+Closeup の `agent` / `terminal` action は active managed session の `SessionId` から scope を導出する。
+managed session が無い Home は Closeup を開かず、これらの effect を発行しない。`Target::Root` と
+`session_id: None` は daemon の workspace-root scope 語彙として残るが、通常 Home の Closeup entry からは
+生成しない。
 
-daemon snapshot で selected または active の session が見つからなくなった場合、両方を同じ
-workspace の root へ戻す。これにより、削除済み session を target にした古い local state を実行に
-使わない。
+daemon snapshot または lifecycle refresh で selected / active session が消えたか使用不能になった場合、
+表示順上の surviving session へ決定的に着地する。surviving session が無ければ selected は
+`+ new session`、active は `None` となり、削除済み session を target にした古い local state を実行に使わない。
 
 Home の mode は Switch と Closeup である。Switch 中の右ペインは tab strip、content、footer を含めて dim
 表示し、左 sidebar が操作対象であることを示す。この間、右ペインの scroll、tab close / reorder、text selection、copy、link open は入力を受け取らない。
@@ -288,14 +287,14 @@ Home 背景の dim は各 ANSI span の reset 後にも維持し、行末で必�
 
 左 sidebar の marker は Home target 表示の正本である。Switch では selected cursor と current
 target を別々に stable identity から照合し、同じ行なら cursor を優先する。Switch の cursor ではない
-root / session / `+ new session` 行は v1 と同じ dim の非アクティブ色で描き、selected session の Accent は
-保つ。Closeup では root / session を Accent で描き、current session だけを太字にする。`+ new session` は
+session / `+ new session` 行は v1 と同じ dim の非アクティブ色で描き、selected session の Accent は
+保つ。Closeup では session を Accent で描き、current session だけを太字にする。`+ new session` は
 色付けされるときは常に Success（緑）で、accent（青）へは決して落ちない。cursor が乗る Switch の選択時は
 Success の太字、Closeup は Success の非太字で描き、太字は Switch の選択時だけに限る。Switch で cursor が
 乗っていない `+ new session` は上記の非アクティブ dim に従う（この dim だけが Success 色を上書きする）。この Success 色は
 full sidebar 行・rail の `+`・右ペイン preview 見出しで共有する単一の役割決定であり、生の ANSI 色ではなく
 意味的 palette 役割で描くため、theme を retune しても追従し accent（青）へは落ちない。Closeup では cursor を
-描かず、current marker だけを残す。session cursor はうさぎ `󰤇` と太字の名前、main の cursor は `>`、
+描かず、current marker だけを残す。session cursor はうさぎ `󰤇` と太字の名前、
 `+ new session` は Switch で選択されていても chevron を描かない。cursor ではない current target は緑の `▎`
 で示す。`+ new session` と pending
 skeleton は current target にならない。名前・補足・marker は ANSI を閉じた表示幅で clip/pad するため、
@@ -306,7 +305,7 @@ ANSI span の reset 後にも dim を再適用するため、current marker や 
 戻らない。
 
 Home controller の management input では、Switch の `Ctrl-A` は新規 session 作成フォームを開く。session 行を
-選択中の `x` は `session remove`、`Shift`+`x`（`X`）は `session remove -f` を実行する。root と `+ new session`
+選択中の `x` は `session remove`、`Shift`+`x`（`X`）は `session remove -f` を実行する。`+ new session`
 行では削除しない。`Ctrl-Q` は exit prompt を開く（離脱と終了の区別は
 [workspace の離脱と終了](#workspace-の離脱と終了)）。Switch の `Ctrl-C` は何もしない。Closeup の live pane でも、leader が
 待機していない `Ctrl-C` / `Ctrl-Q` / `Ctrl-D` は global shortcut として management transition に渡す。Closeup の `Ctrl-O o` は
@@ -316,11 +315,11 @@ Switch へ戻り、Switch 中の `Ctrl-O` は単体では mode を変えない�
 `Ctrl-C` / `Ctrl-Q` を route より先に所有し、通常は overlay に留まる。例外は `Ctrl-C` で Switch へ戻る Closeup action
 modal と、`Ctrl-C` を acknowledge として閉じる session 作成エラーだけであり、いずれも TUI の終了には伝播しない。
 
-左 sidebar は、root・実 session・`+ new session` の左クリックで cursor だけを移し、active target や mode を
+左 sidebar は、実 session・`+ new session` の左クリックで cursor だけを移し、active session や mode を
 変更しない。実 session は、同じ stable `SessionId` を 400ms 以内（境界を含む）にもう一度左クリックした場合だけ、
 Enter と同じくその session を active target にして Closeup を開く。座標や表示順は同一性の判定に使わないため、
-scroll や daemon snapshot によって同じセルの session が入れ替わっても Closeup を誤って開かない。root・
-`+ new session`・divider・mascot・footer はダブルクリックの対象外であり、それらへの click は直前の session click と
+scroll や daemon snapshot によって同じセルの session が入れ替わっても Closeup を誤って開かない。
+`+ new session`・mascot・footer はダブルクリックの対象外であり、それらへの click は直前の session click と
 結合しない。modal と inline 作成中は背景の sidebar click を受け取らず、その前後の click も結合しない。daemon
 snapshot で session 一覧を置き換えた場合も、置換前後の click は同じ `SessionId` が残っていても結合しない。
 
@@ -453,13 +452,14 @@ material にかかわらず必ず描き直す。
 
 ## Session sidebar rows
 
-Home sidebar は `main → divider → session* → + new session` の順序と target identity を保つ。main と作成 action は
-1 行、各 session は固定 2 行で描画する。`Sessions` 見出しは表示せず、session が 0 件でも main の直後に divider を置く。作成中の skeleton は `+ new session` の直前に置く。session の 1 行目は cursor / active marker、表示名、常に幅を
+Home sidebar は `session* → + new session` の順序と stable session identity を保つ。作成 action は
+1 行、各 session は固定 2 行で描画する。`main` 行・root divider・`Sessions` 見出しは表示しない。session が
+0 件なら `+ new session` が唯一の selectable row となる。作成中の skeleton は `+ new session` の直前に置く。session の 1 行目は cursor / active marker、表示名、常に幅を
 予約する note icon を表示する。note icon は既存の text overlay を開く入力を増やさず、内容の有無だけを示す。
 
 2 行目は daemon snapshot の `last_active`、または旧 record の `created_at` を基準に、`now`、`12m ago`、`3h ago`
 のような相対時刻で表示し、dismissed でない PR があれば先頭の PR 番号と残り件数を続ける。Git の検査が完了した session は、remote の既定 branch（`origin/HEAD`）を優先した base との差分として `↑ahead ↓behind + added - removed` を続ける。base branch 名は表示しない。追加数は緑、削除数は赤で描く。相対時刻・commit 差分・追加数・削除数は、表示中の全 session で共有する固定幅の列に配置する。検査は sidebar の描画とは別スレッドで行い、完了後は 1 秒以上あけて現在の session 集合を再検査する。未完了・取得不能・意味を持たない base branch 自身の状態は表示しない。PR title の解決はこの行の前提にしない。snapshot に無い
-session は selected / active を main に縮退させ、空一覧でも main と作成 action は残る。作成に失敗した `failed` session は
+session は selected / active を surviving session、または `+ new session` / active なしへ縮退させる。空一覧でも作成 action は残る。作成に失敗した `failed` session は
 Danger 表現で `failed` タグとその失敗理由（daemon の安全な `failure.summary`）を 2 行目に表示し、使用可能な行と区別する。
 
 Switch で `+ new session` を選び Enter（または `t`）を押すと、その行が `+ new: <name>` の
@@ -1127,7 +1127,7 @@ identity は daemon-issued `AgentContinuationRef` だけである。表示名、
 
 | 復元時の入力 | 判定 | fallback |
 |---|---|---|
-| saved target が snapshot に無い | target identity が stale | selected / active を root に戻す |
+| saved managed session target が snapshot に無い | target identity が stale | active pane にせず、Home は surviving session または `+ new session` へ reconcile する |
 | saved `TerminalRef` が live inventory に無いが continuation history は残る | attach 不可 | slot / dismissal を保持し live tab は投影しない |
 | inventory から continuation が消えた | absence は retention / GC の証明ではない | slot と dismissal を保持する。aggregate allocator / retention policy は [#526](../.usagi/issues/526-fix-daemon-terminal-agent-tombstone-retention-aggregate-bound-gc.md) の責務 |
 | terminal ID が同じでも daemon generation など fencing field が異なる | old / stale data | trusted owner が無ければ attach せず、名前や ID から置換しない |

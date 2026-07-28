@@ -335,7 +335,8 @@ impl PaneRuntime {
 fn selected_live(pane: &PaneState) -> Option<TerminalRef> {
     match pane.selected() {
         super::pane::PaneSelection::Tab(TabSelection::Live(terminal)) => Some(terminal.clone()),
-        super::pane::PaneSelection::Target(_)
+        super::pane::PaneSelection::None
+        | super::pane::PaneSelection::Target(_)
         | super::pane::PaneSelection::Tab(
             TabSelection::Pending(_) | TabSelection::Ready(_) | TabSelection::Interrupted(_),
         ) => None,

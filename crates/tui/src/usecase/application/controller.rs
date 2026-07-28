@@ -741,7 +741,9 @@ pub struct AppState {
     /// as `Available`, so pre-lifecycle callers keep their behaviour.
     session_lifecycles: BTreeMap<SessionId, SessionLifecycle>,
     selected: Selection,
-    active: Target,
+    /// Managed session shown in Closeup. `None` means Home has no managed
+    /// session target; workspace-root scope is deliberately not a fallback.
+    active: Option<SessionId>,
     notice: Option<Notice>,
     runtimes: Vec<RuntimePhase>,
     feedback: Option<Feedback>,
@@ -829,10 +831,14 @@ impl ExitChoice {
 }
 
 impl AppState {
-    /// workspace root を selected / active にした Home を作る。
+    /// The first managed session is selected/active when present. An empty Home
+    /// selects `+ new session` and has no active managed target.
     #[must_use]
     pub fn home(workspace: WorkspaceId, sessions: Vec<SessionId>) -> Self {
-        let root = Target::Root(workspace);
+        let active = sessions.first().copied();
+        let selected = active.map_or(Selection::NewSession, |session| {
+            Selection::Target(Target::Session(session))
+        });
         Self {
             route: Route::Home(HomeMode::Switch),
             overlay: None,
@@ -849,8 +855,8 @@ impl AppState {
             sessions,
             session_names: Vec::new(),
             session_lifecycles: BTreeMap::new(),
-            selected: Selection::Target(root),
-            active: root,
+            selected,
+            active,
             notice: None,
             runtimes: Vec::new(),
             feedback: None,
@@ -936,9 +942,9 @@ impl AppState {
     pub const fn selected(&self) -> Selection {
         self.selected
     }
-    /// command / Closeup の target。
+    /// command / Closeup の managed session。
     #[must_use]
-    pub const fn active(&self) -> Target {
+    pub const fn active(&self) -> Option<SessionId> {
         self.active
     }
     /// この Home が投影している workspace identity。
@@ -1051,13 +1057,14 @@ impl AppState {
         self.default_model = default;
     }
 
-    fn root(&self) -> Target {
-        Target::Root(self.workspace)
+    /// Convert the managed active session to the target vocabulary used at
+    /// daemon/pane boundaries. This never manufactures `Target::Root`.
+    fn active_target(&self) -> Option<Target> {
+        self.active.map(Target::Session)
     }
 
     fn rows(&self) -> Vec<Selection> {
-        let mut rows = Vec::with_capacity(self.sessions.len() + 2);
-        rows.push(Selection::Target(self.root()));
+        let mut rows = Vec::with_capacity(self.sessions.len() + 1);
         rows.extend(
             self.sessions
                 .iter()
@@ -1094,7 +1101,7 @@ impl AppState {
 
     /// Resolve a 0-based terminal cell to the Home sidebar row it lands on, using
     /// the same viewport geometry the frame is drawn with. Returns `None` for the
-    /// header, the divider under Root, the mascot sidecar, the footer, or a click
+    /// header, the mascot sidecar, the footer, or a click
     /// outside the sidebar body.
     ///
     /// This is the controller-owned hit-test the pointer reducer shares with the
@@ -1149,30 +1156,69 @@ impl AppState {
                 return Some(*entry);
             }
             offset += lines;
-            if matches!(entry, Selection::Target(Target::Root(_))) && offset < content_capacity {
-                if clicked == offset {
-                    return None;
-                }
-                offset += 1;
-            }
         }
         None
     }
 
-    fn reconcile_selection(&mut self) {
+    fn reconcile_sessions(&mut self, previous_sessions: &[SessionId]) {
         let rows = self.rows();
         if !rows.contains(&self.selected) {
-            self.selected = Selection::Target(self.root());
+            self.selected = match self.selected {
+                Selection::Target(Target::Session(session)) => {
+                    replacement_session(previous_sessions, &self.sessions, session, |_| true)
+                        .map_or(Selection::NewSession, |session| {
+                            Selection::Target(Target::Session(session))
+                        })
+                }
+                Selection::Target(Target::Root(_)) | Selection::NewSession => self
+                    .sessions
+                    .first()
+                    .copied()
+                    .map_or(Selection::NewSession, |session| {
+                        Selection::Target(Target::Session(session))
+                    }),
+            };
         }
-        if !self
-            .sessions
-            .iter()
-            .any(|id| self.active == Target::Session(*id))
-            && !matches!(self.active, Target::Root(_))
+        if let Some(active) = self.active
+            && (!self.sessions.contains(&active) || !self.session_can_use(active))
         {
-            self.active = self.root();
+            self.active =
+                replacement_session(previous_sessions, &self.sessions, active, |session| {
+                    self.session_can_use(session)
+                });
+        }
+        if self.active.is_none() {
+            self.route = Route::Home(HomeMode::Switch);
+            if self.overlay == Some(Overlay::Closeup) {
+                self.overlay = None;
+                self.closeup_action_forced = false;
+            }
         }
     }
+}
+
+/// Choose a deterministic surviving row at the removed session's former
+/// display position. Candidates after that position win; otherwise the last
+/// earlier candidate wins. The predicate lets active reconciliation exclude
+/// failed/deleting sessions while cursor reconciliation retains their rows.
+fn replacement_session(
+    previous: &[SessionId],
+    current: &[SessionId],
+    removed: SessionId,
+    eligible: impl Fn(SessionId) -> bool,
+) -> Option<SessionId> {
+    let former_index = previous
+        .iter()
+        .position(|session| *session == removed)
+        .unwrap_or_default();
+    current
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, session)| eligible(*session))
+        .find(|(index, _)| *index >= former_index)
+        .map(|(_, session)| session)
+        .or_else(|| current.iter().copied().rfind(|session| eligible(*session)))
 }
 
 /// Fixed chrome rows (title + spacer) above the Home sidebar's row body. Mirrors
@@ -1202,19 +1248,19 @@ fn sidebar_mascot_rows(left: usize, body_capacity: usize) -> usize {
     }
 }
 
-/// Scroll rows the sidebar viewport uses to weight one row: Root spans its
-/// identity line plus the divider beneath it, a session spans its identity and
-/// metadata lines, and the `+ new session` action is a single line.
+/// Scroll rows the sidebar viewport uses to weight one row: a session spans its
+/// identity and metadata lines, and the `+ new session` action is a single line.
 fn sidebar_row_height(row: Selection) -> usize {
     match row {
-        Selection::Target(Target::Root(_) | Target::Session(_)) => 2,
-        Selection::NewSession => 1,
+        Selection::Target(Target::Session(_)) => 2,
+        // Root is not a Home row. Treat a stale/private synthetic value as one
+        // line so geometry remains total without reintroducing a divider.
+        Selection::Target(Target::Root(_)) | Selection::NewSession => 1,
     }
 }
 
-/// Body lines a row actually draws, excluding the divider `home_left_pane`
-/// inserts after Root: a session identity row carries a metadata row, while Root
-/// and the action row are single lines.
+/// Body lines a row actually draws: a session identity row carries a metadata
+/// row, while the action row is a single line.
 fn sidebar_row_content_lines(row: Selection) -> usize {
     match row {
         Selection::Target(Target::Session(_)) => 2,
@@ -2424,7 +2470,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             // Never combine a press from before an authoritative snapshot with
             // one after it, even when the same stable ID remains visible.
             state.pending_session_click = None;
-            state.sessions = sessions;
+            let previous_sessions = std::mem::replace(&mut state.sessions, sessions);
             state
                 .runtimes
                 // A workspace-root runtime (no session) is always retained; a
@@ -2435,7 +2481,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                         .session_id
                         .is_none_or(|session| state.sessions.contains(&session))
                 });
-            state.reconcile_selection();
+            state.reconcile_sessions(&previous_sessions);
             Vec::new()
         }
         AppEvent::Backend(BackendEvent::SessionNames(names)) => {
@@ -2447,6 +2493,8 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         }
         AppEvent::Backend(BackendEvent::SessionLifecycles(lifecycles)) => {
             state.session_lifecycles = lifecycles;
+            let sessions = state.sessions.clone();
+            state.reconcile_sessions(&sessions);
             Vec::new()
         }
         AppEvent::Backend(BackendEvent::Notice(notice)) => {
@@ -2494,7 +2542,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 {
                     state.sessions.push(created);
                     state.selected = Selection::Target(Target::Session(created));
-                    state.active = Target::Session(created);
+                    state.active = Some(created);
                     state.route = Route::Home(HomeMode::Closeup);
                     // Match the ordinary session-activation path: a newly
                     // created session has no live pane yet, so its Closeup
@@ -2906,6 +2954,9 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
             Vec::new()
         }
         AppKey::OpenCloseupOverlay => {
+            if state.active.is_none() {
+                return Vec::new();
+            }
             state.overlay = Some(Overlay::Closeup);
             state.closeup_action_forced = state.has_live_pane;
             Vec::new()
@@ -2913,6 +2964,10 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         AppKey::CtrlA => match state.route {
             Route::Home(HomeMode::Switch) => open_create_session(state),
             Route::Home(HomeMode::Closeup) => {
+                if state.active.is_none() {
+                    state.route = Route::Home(HomeMode::Switch);
+                    return Vec::new();
+                }
                 state.overlay = Some(Overlay::Closeup);
                 state.closeup_action_forced = state.has_live_pane;
                 Vec::new()
@@ -3182,7 +3237,9 @@ fn toggle_environment_scope(state: &mut AppState, environment_open: bool) -> Vec
 }
 
 fn open_notes(state: &mut AppState) -> Vec<Effect> {
-    let target = state.active;
+    let Some(target) = state.active_target() else {
+        return Vec::new();
+    };
     state.overlay = Some(Overlay::Notes);
     state.environment_editor = None;
     state.note_editor = Some(NoteEditor::loading(target));
@@ -3219,7 +3276,9 @@ fn open_closeup_environment(state: &mut AppState) -> Vec<Effect> {
 }
 
 fn open_prs(state: &mut AppState) -> Vec<Effect> {
-    let target = state.active;
+    let Some(target) = state.active_target() else {
+        return Vec::new();
+    };
     state.overlay = Some(Overlay::Prs);
     state.pr_overlay = Some(PrOverlay::loading(target));
     state.preview_overlay = None;
@@ -3227,7 +3286,9 @@ fn open_prs(state: &mut AppState) -> Vec<Effect> {
 }
 
 fn open_preview(state: &mut AppState) -> Vec<Effect> {
-    let target = state.active;
+    let Some(target) = state.active_target() else {
+        return Vec::new();
+    };
     state.overlay = Some(Overlay::Preview);
     state.preview_overlay = Some(PreviewOverlay::loading(target));
     state.pr_overlay = None;
@@ -3433,6 +3494,18 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
     if state.overlay != Some(Overlay::Closeup) {
         return Vec::new();
     }
+    let Some(active_session) = state
+        .active
+        .filter(|session| state.sessions.contains(session) && state.session_can_use(*session))
+    else {
+        // Managed-session Closeup has no workspace-root fallback. A stale modal
+        // is dismissed without emitting terminal/Agent/diff effects.
+        state.overlay = None;
+        state.route = Route::Home(HomeMode::Switch);
+        state.closeup_action_forced = false;
+        return Vec::new();
+    };
+    let active_target = Target::Session(active_session);
     let command = match closeup::interpret(input) {
         Ok(command) => command,
         Err(error) => {
@@ -3447,10 +3520,10 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
     let effect = match command {
         closeup::Command::Terminal { arguments } => match terminal_arguments(&arguments) {
             Ok(arguments) if arguments == "new" => Some(Effect::OpenExternalTerminal {
-                target: state.active,
+                target: active_target,
             }),
             Ok(arguments) => Some(Effect::OpenTerminal {
-                target: state.active,
+                target: active_target,
                 operation_id: OperationId::new(),
                 arguments,
             }),
@@ -3473,7 +3546,7 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
                     });
                     Some(Effect::LaunchAgent {
                         workspace: state.workspace,
-                        session: state.active.session_id(),
+                        session: Some(active_session),
                         operation_id: OperationId::new(),
                         profile: Some(profile_for(request.model)),
                     })
@@ -3484,24 +3557,18 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
                 }
             }
         }
-        closeup::Command::Close { arguments } => match state.active {
-            Target::Session(session) => {
-                if let Some(force) = parse_close_force(&arguments) {
-                    Some(Effect::RemoveSession {
-                        workspace: state.workspace,
-                        session,
-                        force,
-                    })
-                } else {
-                    state.notice = Some(Notice::new("invalid close arguments"));
-                    None
-                }
-            }
-            Target::Root(_) => {
-                state.notice = Some(Notice::new("workspace root cannot be closed"));
+        closeup::Command::Close { arguments } => {
+            if let Some(force) = parse_close_force(&arguments) {
+                Some(Effect::RemoveSession {
+                    workspace: state.workspace,
+                    session: active_session,
+                    force,
+                })
+            } else {
+                state.notice = Some(Notice::new("invalid close arguments"));
                 None
             }
-        },
+        }
         closeup::Command::Diff { .. } => {
             state.notice = Some(Notice::new(format!("{command_name} is not available")));
             None
@@ -3635,13 +3702,16 @@ fn activate_selected(state: &mut AppState) -> Vec<Effect> {
         Selection::Target(Target::Session(session)) if !state.session_can_use(session) => {
             Vec::new()
         }
-        Selection::Target(target) => {
-            state.active = target;
+        Selection::Target(Target::Session(session)) if state.sessions.contains(&session) => {
+            state.active = Some(session);
             state.route = Route::Home(HomeMode::Closeup);
             state.closeup_action_forced = false;
             state.overlay = closeup_launcher_on_entry(state);
             Vec::new()
         }
+        // Root and stale session selections are not Home rows and cannot open a
+        // managed Closeup.
+        Selection::Target(Target::Root(_) | Target::Session(_)) => Vec::new(),
         Selection::NewSession => open_create_session(state),
     }
 }
@@ -3772,45 +3842,42 @@ mod tests {
         let session = SessionId::new();
         let mut state = sized_home(workspace, vec![session], 100, 30);
 
-        // Content begins after the two chrome rows: the Root identity line (row 2),
-        // the divider (row 3), the session's two lines (rows 4-5), then the action
-        // row (row 6). Each click moves the navigation cursor to that row.
+        // Content begins after the two chrome rows: the session's two lines
+        // (rows 2-3), then the action row (row 4). There is no `main` row or
+        // root divider. Each click moves the navigation cursor to that row.
         assert_eq!(
             click_at(&mut state, 5, 2, 0),
-            Selection::Target(Target::Root(workspace))
-        );
-        assert_eq!(
-            click_at(&mut state, 5, 4, 1_000),
             Selection::Target(Target::Session(session))
         );
         assert_eq!(
-            click_at(&mut state, 5, 5, 2_000),
+            click_at(&mut state, 5, 3, 1_000),
             Selection::Target(Target::Session(session))
         );
-        assert_eq!(click_at(&mut state, 5, 6, 3_000), Selection::NewSession);
+        assert_eq!(click_at(&mut state, 5, 4, 2_000), Selection::NewSession);
 
-        // The divider under Root and a click below every rendered row select
-        // nothing new: the cursor stays where it last landed.
+        // A click below every rendered row selects nothing new: the cursor stays
+        // where it last landed.
         let before = state.selected();
         let effects = update(
             &mut state,
             AppEvent::Pointer {
                 column: 5,
-                row: 3,
+                row: 8,
                 at: std::time::Duration::from_millis(4_000),
             },
         );
         assert!(effects.is_empty());
         assert_eq!(state.selected(), before);
-        let _ = click_at(&mut state, 5, 8, 5_000);
+        let _ = click_at(&mut state, 5, 9, 5_000);
         assert_eq!(state.selected(), before);
     }
 
     #[test]
     fn pointer_click_outside_the_sidebar_body_is_inert() {
         let workspace = WorkspaceId::new();
+        let session = SessionId::new();
         // A pointer before the first resize has no geometry and cannot resolve.
-        let mut ungeometried = AppState::home(workspace, Vec::new());
+        let mut ungeometried = AppState::home(workspace, vec![session]);
         assert!(
             update(
                 &mut ungeometried,
@@ -3824,25 +3891,25 @@ mod tests {
         );
         assert_eq!(
             ungeometried.selected(),
-            Selection::Target(Target::Root(workspace))
+            Selection::Target(Target::Session(session))
         );
 
-        let mut state = sized_home(workspace, Vec::new(), 100, 30);
-        let root = Selection::Target(Target::Root(workspace));
+        let mut state = sized_home(workspace, vec![session], 100, 30);
+        let resting = Selection::Target(Target::Session(session));
         for (column, row) in [
             (90, 4), // right-pane column
             (5, 0),  // header row
             (5, 1),  // spacer row
         ] {
             let _ = click_at(&mut state, column, row, u64::from(row));
-            assert_eq!(state.selected(), root);
+            assert_eq!(state.selected(), resting);
         }
         // Zero dimensions fall back to 80x24, so a mid-sidebar click still lands.
-        let mut zeroed = sized_home(workspace, Vec::new(), 0, 0);
-        assert_eq!(click_at(&mut zeroed, 5, 2, 0), root);
+        let mut zeroed = sized_home(workspace, vec![session], 0, 0);
+        assert_eq!(click_at(&mut zeroed, 5, 2, 0), resting);
         // A viewport at or under the chrome, and a click past the content
         // capacity, both resolve to nothing.
-        let tiny = sized_home(workspace, Vec::new(), 100, 2);
+        let tiny = sized_home(workspace, vec![session], 100, 2);
         assert!(tiny.sidebar_selection_at(5, 2).is_none());
         let short = sized_home(workspace, vec![SessionId::new()], 100, 8);
         assert!(short.sidebar_selection_at(5, 7).is_none());
@@ -3856,12 +3923,11 @@ mod tests {
         let single = sized_home(workspace, vec![session], 100, 3);
         assert_eq!(
             single.sidebar_selection_at(5, 2),
-            Some(Selection::Target(Target::Root(workspace)))
+            Some(Selection::Target(Target::Session(session)))
         );
         assert_eq!(single.sidebar_selection_at(5, 5), None);
-        // At height 6 the content capacity is 3, so the session's two lines
-        // overflow after the Root row and divider and cannot be hit.
-        let overflow = sized_home(workspace, vec![session], 100, 6);
+        // A click past the single addressable body line resolves to nothing.
+        let overflow = sized_home(workspace, vec![session], 100, 3);
         assert_eq!(overflow.sidebar_selection_at(5, 4), None);
     }
 
@@ -3873,7 +3939,7 @@ mod tests {
         // tail (`+ new session`) scrolls the list, and a click on the last body row
         // still resolves to the row the frame now shows there.
         let mut state = sized_home(workspace, sessions.clone(), 100, 10);
-        for _ in 0..=sessions.len() {
+        for _ in 0..sessions.len() {
             let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         }
         assert_eq!(state.selected(), Selection::NewSession);
@@ -3895,19 +3961,19 @@ mod tests {
         let mut state = sized_home(workspace, vec![session], 100, 30);
 
         assert_eq!(
-            click_at(&mut state, 5, 4, 1_000),
+            click_at(&mut state, 5, 2, 1_000),
             Selection::Target(Target::Session(session))
         );
-        assert_eq!(state.active(), Target::Root(workspace));
+        assert_eq!(state.active(), Some(session));
         assert!(matches!(state.route(), Route::Home(HomeMode::Switch)));
         assert_eq!(state.overlay(), None);
 
         // The inclusive 400ms boundary is the same activation path as Enter.
         assert_eq!(
-            click_at(&mut state, 5, 4, 1_400),
+            click_at(&mut state, 5, 2, 1_400),
             Selection::Target(Target::Session(session))
         );
-        assert_eq!(state.active(), Target::Session(session));
+        assert_eq!(state.active(), Some(session));
         assert!(matches!(state.route(), Route::Home(HomeMode::Closeup)));
         assert_eq!(state.overlay(), Some(Overlay::Closeup));
     }
@@ -3916,24 +3982,24 @@ mod tests {
     fn session_pointer_outside_window_starts_a_new_pair_and_regressed_time_is_safe() {
         let (workspace, session, _) = ids();
         let mut state = sized_home(workspace, vec![session], 100, 30);
-        let _ = click_at(&mut state, 5, 4, 1_000);
-        let _ = click_at(&mut state, 5, 4, 1_401);
-        assert_eq!(state.active(), Target::Root(workspace));
-        let _ = click_at(&mut state, 5, 4, 1_200);
-        assert_eq!(state.active(), Target::Root(workspace));
-        let _ = click_at(&mut state, 5, 4, 1_600);
-        assert_eq!(state.active(), Target::Session(session));
+        let _ = click_at(&mut state, 5, 2, 1_000);
+        let _ = click_at(&mut state, 5, 2, 1_401);
+        assert!(matches!(state.route(), Route::Home(HomeMode::Switch)));
+        let _ = click_at(&mut state, 5, 2, 1_200);
+        assert!(matches!(state.route(), Route::Home(HomeMode::Switch)));
+        let _ = click_at(&mut state, 5, 2, 1_600);
+        assert!(matches!(state.route(), Route::Home(HomeMode::Closeup)));
     }
 
     #[test]
     fn non_session_pointer_hits_invalidate_the_pending_session_press() {
         let (workspace, session, _) = ids();
-        for (column, row) in [(5, 2), (5, 6), (5, 3), (90, 4)] {
+        for (column, row) in [(5, 4), (5, 8), (5, 1), (90, 4)] {
             let mut state = sized_home(workspace, vec![session], 100, 30);
-            let _ = click_at(&mut state, 5, 4, 1_000);
+            let _ = click_at(&mut state, 5, 2, 1_000);
             let _ = click_at(&mut state, column, row, 1_100);
-            let _ = click_at(&mut state, 5, 4, 1_200);
-            assert_eq!(state.active(), Target::Root(workspace));
+            let _ = click_at(&mut state, 5, 2, 1_200);
+            assert!(matches!(state.route(), Route::Home(HomeMode::Switch)));
         }
     }
 
@@ -3942,9 +4008,9 @@ mod tests {
         let workspace = WorkspaceId::new();
         let sessions: Vec<SessionId> = (0..6).map(|_| SessionId::new()).collect();
         let mut other = sized_home(workspace, sessions[..2].to_vec(), 100, 30);
-        let _ = click_at(&mut other, 5, 4, 1_000);
-        let _ = click_at(&mut other, 5, 6, 1_100);
-        assert_eq!(other.active(), Target::Root(workspace));
+        let _ = click_at(&mut other, 5, 2, 1_000);
+        let _ = click_at(&mut other, 5, 4, 1_100);
+        assert!(matches!(other.route(), Route::Home(HomeMode::Switch)));
 
         let mut scrolled = sized_home(workspace, sessions.clone(), 100, 14);
         let mut tail = scrolled.clone();
@@ -3967,22 +4033,22 @@ mod tests {
         scrolled.selected = Selection::NewSession;
         assert_ne!(first, second);
         let _ = click_at(&mut scrolled, 5, row, 1_100);
-        assert_eq!(scrolled.active(), Target::Root(workspace));
+        assert!(matches!(scrolled.route(), Route::Home(HomeMode::Switch)));
     }
 
     #[test]
     fn session_snapshot_invalidates_pending_press_even_when_identity_remains() {
         let (workspace, session, _) = ids();
         let mut state = sized_home(workspace, vec![session], 100, 30);
-        let _ = click_at(&mut state, 5, 4, 1_000);
+        let _ = click_at(&mut state, 5, 2, 1_000);
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::Sessions(vec![session])),
         );
-        let _ = click_at(&mut state, 5, 4, 1_100);
-        assert_eq!(state.active(), Target::Root(workspace));
-        let _ = click_at(&mut state, 5, 4, 1_500);
-        assert_eq!(state.active(), Target::Session(session));
+        let _ = click_at(&mut state, 5, 2, 1_100);
+        assert!(matches!(state.route(), Route::Home(HomeMode::Switch)));
+        let _ = click_at(&mut state, 5, 2, 1_500);
+        assert!(matches!(state.route(), Route::Home(HomeMode::Closeup)));
     }
 
     #[test]
@@ -3990,13 +4056,12 @@ mod tests {
         let (workspace, session, _) = ids();
         let mut state = sized_home(workspace, vec![session], 100, 30);
         let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
-        let _ = click_at(&mut state, 5, 4, 1_000);
-        let _ = click_at(&mut state, 5, 4, 1_100);
-        assert_eq!(state.active(), Target::Session(session));
-        state.active = Target::Root(workspace);
+        let _ = click_at(&mut state, 5, 2, 1_000);
+        let _ = click_at(&mut state, 5, 2, 1_100);
+        assert_eq!(state.active(), Some(session));
         state.route = Route::Home(HomeMode::Switch);
-        let _ = click_at(&mut state, 5, 4, 1_200);
-        assert_eq!(state.active(), Target::Root(workspace));
+        let _ = click_at(&mut state, 5, 2, 1_200);
+        assert!(matches!(state.route(), Route::Home(HomeMode::Switch)));
     }
 
     #[test]
@@ -4013,7 +4078,7 @@ mod tests {
             &mut state,
             AppEvent::Pointer {
                 column: 5,
-                row: 4,
+                row: 2,
                 at: std::time::Duration::from_millis(1_100),
             },
         );
@@ -4022,8 +4087,8 @@ mod tests {
         assert_eq!(state.overlay(), Some(Overlay::Overview));
         assert!(state.pending_session_click.is_none());
         state.overlay = None;
-        let _ = click_at(&mut state, 5, 4, 1_200);
-        assert_eq!(state.active(), Target::Root(workspace));
+        let _ = click_at(&mut state, 5, 2, 1_200);
+        assert!(matches!(state.route(), Route::Home(HomeMode::Switch)));
 
         // The inline create form owns the same background pointer boundary.
         state.overlay = Some(Overlay::CreateSession);
@@ -4031,14 +4096,14 @@ mod tests {
             &mut state,
             AppEvent::Pointer {
                 column: 5,
-                row: 4,
+                row: 2,
                 at: std::time::Duration::from_millis(1_300),
             },
         );
         assert!(state.pending_session_click.is_none());
         state.overlay = None;
-        let _ = click_at(&mut state, 5, 4, 1_400);
-        assert_eq!(state.active(), Target::Root(workspace));
+        let _ = click_at(&mut state, 5, 2, 1_400);
+        assert!(matches!(state.route(), Route::Home(HomeMode::Switch)));
     }
 
     #[test]
@@ -4359,13 +4424,17 @@ mod tests {
     }
 
     #[test]
-    fn home_starts_with_root_selected_and_active() {
+    fn home_starts_with_first_session_or_new_session_when_empty() {
         let (workspace, first, second) = ids();
         let state = AppState::home(workspace, vec![first, second]);
         assert_eq!(state.route(), Route::Home(HomeMode::Switch));
-        assert_eq!(state.selected(), Selection::Target(Target::Root(workspace)));
-        assert_eq!(state.active(), Target::Root(workspace));
+        assert_eq!(state.selected(), Selection::Target(Target::Session(first)));
+        assert_eq!(state.active(), Some(first));
         assert_eq!(state.sessions(), &[first, second]);
+
+        let empty = AppState::home(workspace, Vec::new());
+        assert_eq!(empty.selected(), Selection::NewSession);
+        assert_eq!(empty.active(), None);
     }
 
     #[test]
@@ -4764,7 +4833,6 @@ mod tests {
     fn live_pane_availability_reacts_on_the_edge_not_the_level() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
         assert!(state.has_live_pane());
@@ -4831,7 +4899,6 @@ mod tests {
             // Enter Closeup on a session with no live pane: the action modal is
             // the base surface.
             let mut state = AppState::home(workspace, vec![session]);
-            let _ = update(&mut state, AppEvent::Key(AppKey::Down));
             let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
             assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
             assert_eq!(state.overlay(), Some(Overlay::Closeup));
@@ -4855,7 +4922,6 @@ mod tests {
         let (workspace, session, _) = ids();
         for exit_key in [AppKey::Escape, AppKey::CtrlC] {
             let mut state = AppState::home(workspace, vec![session]);
-            let _ = update(&mut state, AppEvent::Key(AppKey::Down));
             let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
             let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
             assert!(state.has_live_pane());
@@ -4880,10 +4946,10 @@ mod tests {
         let (workspace, first, second) = ids();
         let mut state = AppState::home(workspace, vec![first, second]);
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
-        assert_eq!(state.selected(), Selection::Target(Target::Session(first)));
-        assert_eq!(state.active(), Target::Root(workspace));
+        assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
+        assert_eq!(state.active(), Some(first));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
-        assert_eq!(state.active(), Target::Session(first));
+        assert_eq!(state.active(), Some(second));
     }
 
     #[test]
@@ -4891,7 +4957,7 @@ mod tests {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
         let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));
-        assert_eq!(state.active(), Target::Root(workspace));
+        assert_eq!(state.active(), None);
         assert_eq!(state.selected(), Selection::NewSession);
         assert_eq!(state.overlay(), Some(Overlay::CreateSession));
         assert_eq!(state.create_session_form().unwrap().name(), "");
@@ -4938,7 +5004,7 @@ mod tests {
             state.notice().map(|notice| notice.message.as_str()),
             Some("created")
         );
-        assert_eq!(state.active(), Target::Session(created));
+        assert_eq!(state.active(), Some(created));
         assert_eq!(
             state.selected(),
             Selection::Target(Target::Session(created))
@@ -5010,7 +5076,7 @@ mod tests {
         );
         // No half-created state leaks: sidebar rows and active target are unchanged.
         assert!(state.sessions().is_empty());
-        assert_eq!(state.active(), Target::Root(workspace));
+        assert_eq!(state.active(), None);
     }
 
     #[test]
@@ -5081,7 +5147,8 @@ mod tests {
 
         // On an active session in Closeup, Ctrl-A owns the target action surface,
         // and must not resurrect the workspace-level create form.
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        // Ctrl-A moved the cursor to `+ new session`; return it to the session.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
         let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));
@@ -5126,7 +5193,7 @@ mod tests {
                 notice: None,
             }),
         );
-        assert_eq!(state.active(), Target::Root(workspace));
+        assert_eq!(state.active(), None);
         assert_ne!(
             state.selected(),
             Selection::Target(Target::Session(created))
@@ -5154,17 +5221,22 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_falls_back_missing_selected_and_active_sessions_to_root() {
+    fn snapshot_reconciles_missing_selected_and_active_sessions_by_display_order() {
         let (workspace, first, second) = ids();
         let mut state = AppState::home(workspace, vec![first, second]);
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
-        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::Sessions(vec![second])),
         );
-        assert_eq!(state.selected(), Selection::Target(Target::Root(workspace)));
-        assert_eq!(state.active(), Target::Root(workspace));
+        assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
+        assert_eq!(state.active(), Some(second));
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Sessions(Vec::new())),
+        );
+        assert_eq!(state.selected(), Selection::NewSession);
+        assert_eq!(state.active(), None);
     }
 
     #[test]
@@ -5339,10 +5411,6 @@ mod tests {
         let (workspace, first, second) = ids();
         let mut state = AppState::home(workspace, vec![first, second]);
 
-        // The root is never a removal target.
-        assert!(update(&mut state, AppEvent::Key(AppKey::Char('x'))).is_empty());
-
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         assert_eq!(
             update(&mut state, AppEvent::Key(AppKey::Char('x'))),
             vec![Effect::RemoveSession {
@@ -5351,10 +5419,9 @@ mod tests {
                 force: false,
             }]
         );
-        assert_eq!(state.selected(), Selection::Target(Target::Root(workspace)));
+        assert_eq!(state.selected(), Selection::NewSession);
 
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
         assert_eq!(
             update(&mut state, AppEvent::Key(AppKey::Char('X'))),
             vec![Effect::RemoveSession {
@@ -5378,16 +5445,15 @@ mod tests {
                 SessionLifecycle::Failed,
             )]))),
         );
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         assert_eq!(
             state.selected(),
             Selection::Target(Target::Session(session))
         );
 
         // Activation does not attach a Failed row (`can_use=false`): no effect,
-        // the active target stays the root, and the route never enters Closeup.
+        // no active managed target remains, and the route never enters Closeup.
         assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
-        assert_eq!(state.active(), Target::Root(workspace));
+        assert_eq!(state.active(), None);
         assert!(matches!(state.route(), Route::Home(HomeMode::Switch)));
 
         // Removal is still offered (`can_remove=true`).
@@ -5412,16 +5478,15 @@ mod tests {
                 SessionLifecycle::Available,
             )]))),
         );
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         // An Available row attaches as before: the route enters Closeup and the
         // session becomes the active target.
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
-        assert_eq!(state.active(), Target::Session(session));
+        assert_eq!(state.active(), Some(session));
         assert!(matches!(state.route(), Route::Home(HomeMode::Closeup)));
     }
 
     #[test]
-    fn modal_registry_dispatches_once_and_rejects_invalid_root_and_repeated_requests() {
+    fn modal_registry_dispatches_once_and_rejects_invalid_or_repeated_requests() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
 
@@ -5462,18 +5527,17 @@ mod tests {
         assert!(
             update(
                 &mut state,
-                AppEvent::Key(AppKey::SubmitCloseup("close".to_owned())),
+                AppEvent::Key(AppKey::SubmitCloseup("close invalid".to_owned())),
             )
             .is_empty()
         );
         assert_eq!(state.overlay(), Some(Overlay::Closeup));
         assert_eq!(
             state.notice().map(|notice| notice.message.as_str()),
-            Some("workspace root cannot be closed")
+            Some("invalid close arguments")
         );
 
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
         let effects = update(
@@ -5508,36 +5572,43 @@ mod tests {
     }
 
     #[test]
-    fn workspace_root_active_starts_a_session_less_agent_and_terminal() {
+    fn empty_home_refuses_root_agent_terminal_and_closeup_actions() {
         let (workspace, session, _) = ids();
-        let mut state = AppState::home(workspace, vec![session]);
-        // The workspace root is selected and active by default.
-        assert_eq!(state.active, Target::Root(workspace));
+        let mut state = AppState::home(workspace, Vec::new());
+        assert_eq!(state.active, None);
         assert_eq!(Target::Root(workspace).session_id(), None);
         assert_eq!(Target::Session(session).session_id(), Some(session));
 
+        // The public entry is inert without an active managed session.
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        assert_eq!(state.overlay(), None);
+        state.overlay = Some(Overlay::Closeup);
         let agent = update(
             &mut state,
             AppEvent::Key(AppKey::SubmitCloseup("agent".to_owned())),
         );
-        // An `agent` without `-m` resolves the configured default provider, so
-        // the root launch carries that explicit profile.
-        assert!(matches!(
-            agent.as_slice(),
-            [Effect::LaunchAgent { workspace: actual, session: None, profile: Some(profile), .. }]
-                if *actual == workspace && profile.as_str() == "codex"
-        ));
+        assert!(agent.is_empty());
 
-        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        state.overlay = Some(Overlay::Closeup);
         let terminal = update(
             &mut state,
             AppEvent::Key(AppKey::SubmitCloseup("terminal open".to_owned())),
         );
+        assert!(terminal.is_empty());
+        assert_eq!(state.route(), Route::Home(HomeMode::Switch));
+        assert_eq!(state.selected(), Selection::NewSession);
+
+        // Workspace-global surfaces remain independent of managed navigation.
         assert!(matches!(
-            terminal.as_slice(),
-            [Effect::OpenTerminal { target: Target::Root(actual), arguments, .. }]
-                if *actual == workspace && arguments == "open"
+            update(&mut state, AppEvent::Key(AppKey::OpenEnvironment)).as_slice(),
+            [Effect::LoadEnvironment {
+                scope: EnvScope::Workspace
+            }]
+        ));
+        state.overlay = None;
+        assert!(matches!(
+            update(&mut state, AppEvent::Key(AppKey::OpenDecisions)).as_slice(),
+            [Effect::RefreshDecisions { workspace: actual }] if *actual == workspace
         ));
     }
 
@@ -5598,7 +5669,6 @@ mod tests {
             Some("session was not found")
         );
 
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
         assert_eq!(
@@ -5620,7 +5690,6 @@ mod tests {
     fn closeup_agent_selects_an_installed_cli_and_refuses_the_rest() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
 
         let launch = |state: &mut AppState, input: &str| {
@@ -5700,7 +5769,6 @@ mod tests {
     fn closeup_registry_dispatches_agent_and_validated_session_remove() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
 
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
@@ -5776,7 +5844,6 @@ mod tests {
     fn closeup_env_opens_a_workspace_locked_editor_and_rejects_arguments() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
 
         // `env` from Closeup opens this workspace's editor and requests a read,
@@ -5865,7 +5932,7 @@ mod tests {
         };
         assert_eq!(home.workspace(), chosen);
         assert_eq!(home.sessions(), &[session]);
-        assert_eq!(home.selected(), Selection::Target(Target::Root(chosen)));
+        assert_eq!(home.selected(), Selection::Target(Target::Session(session)));
     }
 
     #[test]
@@ -6012,7 +6079,6 @@ mod tests {
         let (workspace, session, _) = ids();
         let target = Target::Session(session);
         let mut state = AppState::home(workspace, vec![session]);
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
         let mut backend = FakeBackend::default();
@@ -6448,7 +6514,7 @@ mod tests {
 
     #[test]
     fn environment_keys_are_inert_without_an_open_editor() {
-        let (workspace, _, _) = ids();
+        let (workspace, session, _) = ids();
         let environment_keys = || {
             [
                 AppKey::SetEnvironmentDraft("A=1".to_owned()),
@@ -6470,7 +6536,7 @@ mod tests {
 
         // And while a different editor owns input: the notes overlay keeps its
         // own draft, and no environment editor appears behind it.
-        let mut state = AppState::home(workspace, Vec::new());
+        let mut state = AppState::home(workspace, vec![session]);
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenNotes));
         for key in environment_keys() {
             assert!(update(&mut state, AppEvent::Key(key)).is_empty());
@@ -6621,13 +6687,13 @@ mod tests {
     #[test]
     fn pr_overlay_opens_reflows_material_navigates_opens_and_closes() {
         let (workspace, session, _) = ids();
-        let root = Target::Root(workspace);
+        let target = Target::Session(session);
         let mut state = AppState::home(workspace, vec![session]);
 
         // `p` opens the PR overlay for the active target and requests its list.
         assert_eq!(
             update(&mut state, AppEvent::Key(AppKey::Char('p'))),
-            vec![Effect::LoadPullRequests { target: root }]
+            vec![Effect::LoadPullRequests { target }]
         );
         assert_eq!(state.overlay(), Some(Overlay::Prs));
         assert!(state.pr_overlay().unwrap().prs().is_empty());
@@ -6636,7 +6702,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PullRequestsLoaded {
-                target: Target::Session(session),
+                target: Target::Root(workspace),
                 prs: vec![pr_link(9)],
             }),
         );
@@ -6645,7 +6711,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PullRequestsLoaded {
-                target: root,
+                target,
                 prs: prs.clone(),
             }),
         );
@@ -6676,9 +6742,9 @@ mod tests {
 
     #[test]
     fn pr_overlay_enter_is_inert_while_empty_and_errors_stay_visible() {
-        let (workspace, _, _) = ids();
-        let root = Target::Root(workspace);
-        let mut state = AppState::home(workspace, Vec::new());
+        let (workspace, session, _) = ids();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
         // Enter with no entries emits nothing and keeps the overlay open.
         assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
@@ -6687,7 +6753,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PullRequestsError {
-                target: root,
+                target,
                 error: safe_error("gh unavailable"),
             }),
         );
@@ -6766,13 +6832,13 @@ mod tests {
     #[test]
     fn preview_overlay_opens_reflows_scrolls_errors_and_closes() {
         let (workspace, session, _) = ids();
-        let root = Target::Root(workspace);
+        let target = Target::Session(session);
         let mut state = AppState::home(workspace, vec![session]);
 
         // `v` opens the preview overlay for the active target and requests it.
         assert_eq!(
             update(&mut state, AppEvent::Key(AppKey::Char('v'))),
-            vec![Effect::LoadPreview { target: root }]
+            vec![Effect::LoadPreview { target }]
         );
         assert_eq!(state.overlay(), Some(Overlay::Preview));
 
@@ -6780,7 +6846,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
-                target: Target::Session(session),
+                target: Target::Root(workspace),
                 lines: vec!["stale".into()],
             }),
         );
@@ -6788,7 +6854,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
-                target: root,
+                target,
                 lines: vec!["# Title".into(), "body".into()],
             }),
         );
@@ -6805,7 +6871,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewError {
-                target: root,
+                target,
                 error: safe_error("no preview"),
             }),
         );
@@ -6826,8 +6892,8 @@ mod tests {
 
     #[test]
     fn opening_one_overlay_discards_the_other_state() {
-        let (workspace, _, _) = ids();
-        let mut state = AppState::home(workspace, Vec::new());
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
         // Open PRs, dismiss, then open preview: the PR state must not linger.
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
         assert!(state.pr_overlay().is_some());
@@ -7221,7 +7287,7 @@ mod tests {
         let _ = submit_overview(&mut state, "session create");
         state.overlay = Some(Overlay::Closeup);
         let _ = submit_closeup(&mut state, "diff status");
-        state.active = Target::Session(session);
+        state.active = Some(session);
         state.overlay = Some(Overlay::Closeup);
         let _ = submit_closeup(&mut state, "close invalid");
         state.overlay = Some(Overlay::Closeup);

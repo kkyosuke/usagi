@@ -2,7 +2,7 @@
 //!
 //! workspace を開いている間の主画面。全幅の **header** の下を 2 ペインに割る:
 //!
-//! - 左ペイン **session menu** — セッション一覧（session）・root 行（root）・キー操作の footer。
+//! - 左ペイン **session menu** — セッション一覧（session）・作成 action・キー操作の footer。
 //! - 右ペイン **closeup** — フォーカス中セッションの header・タブ切替の tabmenu・content・footer。
 //!
 //! 状態 [`Workspace`] は core の workspace と永続化済み [`WorkspaceState`] から構築する、端末 IO を
@@ -36,7 +36,7 @@ use crate::usecase::application::pane::{
     PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
 };
 use crate::usecase::application::terminal_selection::TerminalPoint;
-use usagi_core::domain::id::{SessionId, WorkspaceId};
+use usagi_core::domain::id::SessionId;
 
 /// 左ペイン（session menu）の希望表示幅。ここだけを変更して sidebar 幅を調整する。
 const LEFT_WIDTH: usize = 36;
@@ -168,17 +168,16 @@ pub struct TerminalViewProjection {
     pub feedback: Option<String>,
 }
 
-/// controller の Home state を描画可能な root / session / action row へ投影した値。
+/// controller の Home state を描画可能な session / action row へ投影した値。
 ///
 /// session の順番は controller snapshot の `SessionId` 順を使い、表示情報は ID で結合する。
 /// そのため表示名や入力 `Vec` の index を identity として扱わない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HomeProjection {
-    workspace: WorkspaceId,
     workspace_name: String,
     sessions: Vec<ProjectedSession>,
     selected: Selection,
-    active: Target,
+    active: Option<SessionId>,
     mode: HomeMode,
     active_phase: TargetPhase,
     feedback: Option<Feedback>,
@@ -273,7 +272,8 @@ impl HomeProjection {
     /// `state` を snapshot 表示情報へ安全に結合する。
     ///
     /// state にある ID だけをその順番で採用する。欠損した表示情報は描画せず、controller
-    /// 側の snapshot reconciliation が selected / active を root に縮退させる。
+    /// 側の snapshot reconciliation が selected / active を surviving session
+    /// または `+ new session` / active なしへ縮退させる。
     #[must_use]
     pub fn from_state(
         state: &AppState,
@@ -293,7 +293,6 @@ impl HomeProjection {
         }
         let create_draft = state.create_session_form().map(CreateDraft::from);
         Self {
-            workspace: state.workspace(),
             workspace_name: workspace_name.to_owned(),
             sessions,
             selected: state.selected(),
@@ -301,7 +300,9 @@ impl HomeProjection {
             mode: match state.route() {
                 crate::usecase::application::controller::Route::Home(mode) => mode,
             },
-            active_phase: state.phase_for(state.active()),
+            active_phase: state.active().map_or(TargetPhase::Absent, |session| {
+                state.phase_for(Target::Session(session))
+            }),
             feedback: state.feedback().cloned(),
             mascot_tick: state.mascot_tick(),
             mascot_speech: None,
@@ -457,11 +458,10 @@ impl HomeProjection {
         self
     }
 
-    /// 左 sidebar の rows。main と `+ new session` は session 数にかかわらず常設する。
+    /// 左 sidebar の rows。managed sessions の末尾に `+ new session` を置く。
     #[must_use]
     pub fn rows(&self) -> Vec<Selection> {
-        let mut rows = Vec::with_capacity(self.sessions.len() + 2);
-        rows.push(Selection::Target(Target::Root(self.workspace)));
+        let mut rows = Vec::with_capacity(self.sessions.len() + 1);
         rows.extend(
             self.sessions
                 .iter()
@@ -473,13 +473,12 @@ impl HomeProjection {
 
     fn active_label(&self) -> &str {
         match self.active {
-            Target::Root(id) if id == self.workspace => "main",
-            Target::Session(id) => self
+            Some(id) => self
                 .sessions
                 .iter()
                 .find(|session| session.id == id)
-                .map_or("main", |session| session.label.as_str()),
-            Target::Root(_) => "main",
+                .map_or("No session selected", |session| session.label.as_str()),
+            None => "No session selected",
         }
     }
 }
@@ -744,16 +743,6 @@ fn header_spacer(width: usize) -> String {
 }
 
 // ── left pane: session menu ─────────────────────────────────────────────────
-
-fn sidebar_divider(width: usize) -> String {
-    // Indenting the rule gives the root row and the session group distinct
-    // breathing room without moving the pane boundary itself.
-    let indent = "  ".repeat(usize::from(width >= 2));
-    let rule = Style::new()
-        .dim()
-        .paint(&"─".repeat(width.saturating_sub(widgets::display_width(&indent))));
-    widgets::pad_to_width(&format!("{indent}{rule}"), width)
-}
 
 /// Git summary columns are sized once for the entire sidebar.  This keeps the
 /// time, commit, and line-count cells at the same positions for every session.
@@ -1269,10 +1258,6 @@ fn home_left_pane(
         }
         row_line_count += row_lines.len();
         lines.extend(row_lines);
-        if matches!(row, Selection::Target(Target::Root(_))) && row_line_count < viewport_capacity {
-            lines.push(sidebar_divider(width));
-            row_line_count += 1;
-        }
     }
     lines.resize(content_capacity, String::new());
     if show_mascot {
@@ -1348,11 +1333,7 @@ fn create_skeleton_lines(width: usize, name: &str, tick: u64) -> Vec<String> {
 }
 
 fn home_row_height(row: Selection) -> usize {
-    if matches!(row, Selection::Target(Target::Root(_))) {
-        2
-    } else {
-        usize::from(matches!(row, Selection::Target(Target::Session(_)))) + 1
-    }
+    usize::from(matches!(row, Selection::Target(Target::Session(_)))) + 1
 }
 
 /// Row height accounting for the inline create form. When the `+ new session` row
@@ -1455,12 +1436,14 @@ fn home_row_lines_at(
         Selection::NewSession => None,
     };
     let (label, detail, session) = match row {
-        Selection::Target(Target::Root(_)) => ("main", "workspace main", None),
+        // Root is not part of managed Home rows. Keep the branch total for
+        // stale synthetic projections without rendering a hidden root action.
+        Selection::Target(Target::Root(_)) => ("", "", None),
         Selection::Target(Target::Session(id)) => home
             .sessions
             .iter()
             .find(|session| session.id == id)
-            .map_or(("main", "workspace main", None), |session| {
+            .map_or(("", "", None), |session| {
                 (
                     session.label.as_str(),
                     session.detail.as_str(),
@@ -1486,7 +1469,7 @@ fn home_row_lines_at(
             String::new(),
         ];
     }
-    let current = target == Some(home.active);
+    let current = target.and_then(Target::session_id) == home.active;
     if let Some(session) = session.filter(|session| session.lifecycle == SessionLifecycle::Failed) {
         return home_failed_row_lines(session, row, width, selected, current);
     }
@@ -1615,15 +1598,13 @@ fn new_session_input_lines(width: usize, draft: &CreateDraft) -> Vec<String> {
 /// v1-compatible sidebar marker with explicit precedence.
 ///
 /// A selected session starts with v1's usagi glyph and uses a red `|` continuation;
-/// in Closeup its active two-line stack is green. Root and action rows retain the compact
-/// red `>` cursor in Switch, except that `+ new session` remains chevron-free
-/// even while it owns the Switch cursor.
+/// in Closeup its active two-line stack is green. The action row remains
+/// chevron-free even while it owns the Switch cursor.
 fn home_row_marker(row: Selection, selected: bool, current: bool) -> String {
     if selected {
         return match row {
             Selection::Target(Target::Session(_)) => Role::Danger.style().bold().paint("\u{f0907}"),
-            Selection::Target(Target::Root(_)) => Role::Danger.style().bold().paint(">"),
-            Selection::NewSession => " ".to_string(),
+            Selection::Target(Target::Root(_)) | Selection::NewSession => " ".to_string(),
         };
     }
     if current {
@@ -2129,7 +2110,7 @@ mod tests {
     }
 
     #[test]
-    fn home_projection_keeps_root_sessions_and_new_in_identity_order() {
+    fn home_projection_keeps_sessions_and_new_in_identity_order() {
         let workspace = WorkspaceId::new();
         let first = SessionId::new();
         let second = SessionId::new();
@@ -2143,15 +2124,16 @@ mod tests {
         assert_eq!(
             home.rows(),
             vec![
-                Selection::Target(Target::Root(workspace)),
                 Selection::Target(Target::Session(second)),
                 Selection::Target(Target::Session(first)),
                 Selection::NewSession,
             ]
         );
         let text = joined_home(&home);
-        assert!(text.contains("main  workspace main"));
-        assert_eq!(text.matches("same label").count(), 2);
+        assert!(!text.contains("workspace main"));
+        assert!(!text.contains("main  workspace"));
+        // Two sidebar rows plus the active-session right-pane header.
+        assert_eq!(text.matches("same label").count(), 3);
         assert!(text.contains("+ new session"));
         assert!(!text.contains("+ new session  action"));
         assert!(text.contains("No tabs stirring yet. Enter starts one."));
@@ -2400,7 +2382,9 @@ mod tests {
     #[test]
     fn render_home_draws_the_pr_overlay_at_its_selection() {
         let workspace = WorkspaceId::new();
-        let mut state = AppState::home(workspace, Vec::new());
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
         let _ = update(&mut state, AppEvent::Key(AppKey::Char('p')));
         let mut first = PrLink::new(7, "https://github.com/o/r/pull/7");
         first.title = Some("add feature".into());
@@ -2410,13 +2394,18 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PullRequestsLoaded {
-                target: Target::Root(workspace),
+                target,
                 prs: vec![first, second],
             }),
         );
         // Move the cursor to the second PR so the detail reflects the selection.
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
-        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
+        let home = HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[projected_session(session, "session", "/work/session")],
+        );
         let text = joined_home(&home);
         assert!(text.contains("Pull Request"));
         assert!(text.contains("#7"));
@@ -2429,16 +2418,23 @@ mod tests {
     #[test]
     fn render_home_draws_a_pr_fetch_error_as_a_safe_notice() {
         let workspace = WorkspaceId::new();
-        let mut state = AppState::home(workspace, Vec::new());
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PullRequestsError {
-                target: Target::Root(workspace),
+                target,
                 error: pr_error(),
             }),
         );
-        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
+        let home = HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[projected_session(session, "session", "/work/session")],
+        );
         let text = joined_home(&home);
         assert!(text.contains("Pull Request"));
         assert!(text.contains("gh unavailable"));
@@ -2447,12 +2443,14 @@ mod tests {
     #[test]
     fn render_home_draws_the_preview_overlay_and_its_error() {
         let workspace = WorkspaceId::new();
-        let mut state = AppState::home(workspace, Vec::new());
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
         let _ = update(&mut state, AppEvent::Key(AppKey::Char('v')));
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
-                target: Target::Root(workspace),
+                target,
                 lines: vec!["# Heading".into(), "content line".into()],
             }),
         );
@@ -2460,7 +2458,7 @@ mod tests {
             &state,
             "work",
             Path::new("/work"),
-            &[],
+            &[projected_session(session, "session", "/work/session")],
         ));
         assert!(ready.contains("Preview"));
         assert!(ready.contains("Heading"));
@@ -2469,7 +2467,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewError {
-                target: Target::Root(workspace),
+                target,
                 error: SafeError {
                     message: SafeMessage::new("no preview available"),
                     error_id: "preview".into(),
@@ -2480,7 +2478,7 @@ mod tests {
             &state,
             "work",
             Path::new("/work"),
-            &[],
+            &[projected_session(session, "session", "/work/session")],
         ));
         assert!(errored.contains("Preview"));
         assert!(errored.contains("no preview available"));
@@ -2530,9 +2528,7 @@ mod tests {
         let first = SessionId::new();
         let second = SessionId::new();
         let mut state = AppState::home(workspace, vec![first, second]);
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
-        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
-        let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+        // The first session is active; move only the Switch cursor to second.
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let home = HomeProjection::from_state(
             &state,
@@ -2549,7 +2545,7 @@ mod tests {
             .map(|line| strip(line))
             .collect::<Vec<_>>();
         assert!(lines.iter().any(|line| line.contains("| first")));
-        assert!(!lines.iter().any(|line| line.contains("\u{f0907} second")));
+        assert!(lines.iter().any(|line| line.contains("\u{f0907} second")));
         let text = joined_home(&home);
         assert!(text.contains("No tabs stirring yet. Enter starts one."));
     }
@@ -2559,7 +2555,6 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let mut state = AppState::home(workspace, vec![session]);
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
@@ -2576,9 +2571,9 @@ mod tests {
         );
         let refreshed = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
         // `+ new` は常設 action row のため refresh で消えない。一方、消えた active
-        // session は typed identity で検出され root へ縮退する。
+        // session は typed identity で検出され active なしへ縮退する。
         assert_eq!(state.selected(), Selection::NewSession);
-        assert_eq!(state.active(), Target::Root(workspace));
+        assert_eq!(state.active(), None);
         assert!(joined_home(&refreshed).contains("No tabs stirring yet. Enter starts one."));
     }
 
@@ -2589,7 +2584,6 @@ mod tests {
         let second = SessionId::new();
         let mut state = AppState::home(workspace, vec![first, second]);
         // Activate first, then move the cursor to second without changing the current target.
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
@@ -2627,7 +2621,6 @@ mod tests {
         let first = SessionId::new();
         let second = SessionId::new();
         let mut state = AppState::home(workspace, vec![first, second]);
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
@@ -2657,7 +2650,6 @@ mod tests {
         // Make `active` the current target, move the cursor to `selected`, then
         // return to Switch. This is the transition that previously left `now`
         // bright after the green current marker reset.
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
@@ -2701,10 +2693,8 @@ mod tests {
     #[test]
     fn switch_paints_the_selected_new_session_row_success_not_accent() {
         let workspace = WorkspaceId::new();
-        let mut state = AppState::home(workspace, Vec::new());
-        // Rows are [root, + new session]; one Down rests the Switch cursor on
-        // `+ new session` without opening the create form.
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let state = AppState::home(workspace, Vec::new());
+        // An empty Home rests the Switch cursor on `+ new session`.
         assert_eq!(state.selected(), Selection::NewSession);
         assert_eq!(state.route(), Route::Home(HomeMode::Switch));
         let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
@@ -2739,7 +2729,6 @@ mod tests {
         let mut state = AppState::home(workspace, vec![session]);
         // Activate the session to enter Closeup; the persistent `+ new session`
         // row still renders and, outside Switch, carries no cursor.
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
         assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
@@ -2760,11 +2749,10 @@ mod tests {
     }
 
     #[test]
-    fn home_projection_handles_tiny_geometry_and_an_unrelated_root_target_safely() {
+    fn home_projection_handles_tiny_geometry_without_an_active_session() {
         let workspace = WorkspaceId::new();
         let state = AppState::home(workspace, Vec::new());
-        let mut home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
-        home.active = Target::Root(WorkspaceId::new());
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
 
         let zero_body = render_home(2, 20, &home);
         let one_row_body = render_home(3, 20, &home);
@@ -3078,8 +3066,9 @@ mod tests {
     #[test]
     fn home_right_pane_is_dim_in_switch_and_bright_in_closeup() {
         let workspace = WorkspaceId::new();
+        let session = SessionId::new();
         let operation = OperationId::new();
-        let target = Target::Root(workspace);
+        let target = Target::Session(session);
         let mut pane = PaneState::new(PaneSelection::Target(target));
         let _ = reduce(
             &mut pane,
@@ -3089,28 +3078,29 @@ mod tests {
                 kind: PaneKind::Agent,
             },
         );
-        let state = AppState::home(workspace, Vec::new());
-        let switch =
-            HomeProjection::from_state(&state, "work", Path::new("/work"), &[]).with_pane(&pane);
+        let state = AppState::home(workspace, vec![session]);
+        let sessions = [projected_session(session, "session", "/work/session")];
+        let switch = HomeProjection::from_state(&state, "work", Path::new("/work"), &sessions)
+            .with_pane(&pane);
         let switch_frame = render_home(18, 100, &switch);
         let switch_right = switch_frame[CHROME_ROWS]
             .split_once('│')
             .expect("pane divider")
             .1;
         assert!(switch_right.contains("\u{1b}[2m"));
-        assert!(switch_right.contains("\u{1b}[2;36mmain"));
+        assert!(switch_right.contains("\u{1b}[2;36msession"));
         assert!(!switch_right.contains("\u{1b}[1;36m"));
 
         let mut state = state;
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
-        let closeup =
-            HomeProjection::from_state(&state, "work", Path::new("/work"), &[]).with_pane(&pane);
+        let closeup = HomeProjection::from_state(&state, "work", Path::new("/work"), &sessions)
+            .with_pane(&pane);
         let closeup_frame = render_home(18, 100, &closeup);
         let closeup_right = closeup_frame[CHROME_ROWS]
             .split_once('│')
             .expect("pane divider")
             .1;
-        assert!(closeup_right.contains("\u{1b}[1;36mmain"));
+        assert!(closeup_right.contains("\u{1b}[1;36msession"));
         assert!(!closeup_right.starts_with("\u{1b}[2m"));
     }
 
