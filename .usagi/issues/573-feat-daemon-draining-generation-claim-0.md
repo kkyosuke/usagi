@@ -1,14 +1,14 @@
 ---
 number: 573
 title: feat(daemon): draining generation を claim が 0 になった後だけ自動回収する
-status: in-progress
+status: done
 priority: high
 labels: [review, v2, daemon, lifecycle, recovery]
 dependson: [572]
 related: [516, 518, 526, 559, 572]
 parent: 559
 created_at: 2026-07-27T22:58:20.258958+00:00
-updated_at: 2026-07-28T20:56:16.756758+00:00
+updated_at: 2026-07-28T21:31:02.424367+00:00
 ---
 
 ## 問題・根拠（コード調査で確定）
