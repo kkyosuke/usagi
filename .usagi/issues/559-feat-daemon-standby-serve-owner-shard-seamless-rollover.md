@@ -1,14 +1,14 @@
 ---
 number: 559
 title: feat(daemon): standby serve と owner shard を配線して seamless rollover を有効化する
-status: in-progress
+status: done
 priority: high
 labels: [review, v2, daemon, lifecycle, recovery]
 dependson: [560, 561, 562, 572, 573, 574]
 related: [209, 221, 275, 350, 492, 507, 508, 515, 516, 518, 528, 550]
 parent: 505
 created_at: 2026-07-26T13:20:50.130410+00:00
-updated_at: 2026-07-27T23:00:12.329709+00:00
+updated_at: 2026-07-28T23:52:54.509415+00:00
 ---
 
 ## 問題・影響
