@@ -125,11 +125,12 @@ pub fn render_over(
     let title = Role::Accent.style().bold().paint("Workspace Agent");
     let panel = modal::boxed(&title, inner_width, &body);
 
-    for (offset, panel_line) in panel.iter().take(drawer.height).enumerate() {
+    // The panel is `drawer.height` rows and is anchored at `drawer.top`, so it
+    // always fits inside the `frame.len()` == height rows built above. Bound the
+    // splice by the remaining band so the row index can never leave the frame.
+    let band = frame.len().saturating_sub(drawer.top);
+    for (offset, panel_line) in panel.iter().take(band).enumerate() {
         let row = drawer.top + offset;
-        if row >= frame.len() {
-            break;
-        }
         let background = &frame[row];
         let prefix = modal::columns(background, 0, drawer.left);
         frame[row] = format!("{prefix}{panel_line}\u{1b}[0m");
@@ -286,6 +287,38 @@ mod tests {
         assert!(text.contains("New unavailable"));
         assert!(frame[1].contains("\u{1b}[2m"));
         assert!(!frame[0].contains("\u{1b}[2m"));
+    }
+
+    #[test]
+    fn populated_projection_renders_selected_conversation_and_terminal_rows() {
+        let projection = WorkspaceAgentDrawerProjection {
+            conversations: vec![
+                WorkspaceAgentConversation {
+                    label: "older".to_owned(),
+                    selected: false,
+                },
+                WorkspaceAgentConversation {
+                    label: "active conversation".to_owned(),
+                    selected: true,
+                },
+            ],
+            terminal_rows: vec![
+                "agent output one".to_owned(),
+                "agent output two".to_owned(),
+                "agent output three".to_owned(),
+            ],
+        };
+        let frame = render_over(12, 80, &vec![String::new(); 12], &projection);
+        let text = frame
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Conversation  [active conversation]"));
+        assert!(text.contains("agent output one"));
+        assert!(text.contains("agent output two"));
+        assert!(text.contains("agent output three"));
+        assert!(!text.contains("No conversations yet"));
     }
 
     #[test]

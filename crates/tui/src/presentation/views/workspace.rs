@@ -1902,6 +1902,9 @@ mod tests {
         terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Style};
+    use crate::presentation::views::workspace_agent_drawer::{
+        WorkspaceAgentConversation, WorkspaceAgentDrawerProjection,
+    };
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{display_width, modal, wrap_to_width};
     use crate::usecase::application::controller::{
@@ -2149,6 +2152,36 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn drawer_projection_seam_only_replaces_material_while_the_drawer_is_open() {
+        let workspace = WorkspaceId::new();
+        let material = WorkspaceAgentDrawerProjection {
+            conversations: vec![WorkspaceAgentConversation {
+                label: "root conversation".to_owned(),
+                selected: true,
+            }],
+            terminal_rows: vec!["workspace agent output".to_owned()],
+        };
+
+        let closed_state = AppState::home(workspace, Vec::new());
+        let closed = HomeProjection::from_state(&closed_state, "atlas", Path::new("/work"), &[])
+            .with_workspace_agent_drawer(material.clone());
+        let closed_text = render_home(20, 100, &closed).join("\n");
+        assert!(!closed_text.contains("root conversation"));
+        assert!(!closed_text.contains("workspace agent output"));
+
+        let mut open_state = AppState::home(workspace, Vec::new());
+        let _ = update(
+            &mut open_state,
+            AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer),
+        );
+        let open = HomeProjection::from_state(&open_state, "atlas", Path::new("/work"), &[])
+            .with_workspace_agent_drawer(material);
+        let open_text = render_home(20, 100, &open).join("\n");
+        assert!(open_text.contains("root conversation"));
+        assert!(open_text.contains("workspace agent output"));
     }
 
     #[test]
