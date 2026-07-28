@@ -503,7 +503,7 @@ fn repaired_selection(
         {
             return target.tabs[index..]
                 .iter()
-                .chain(target.tabs[..index].iter().rev())
+                .chain(target.tabs[..index].iter())
                 .find(|slot| available(slot))
                 .map(|slot| slot.continuation);
         }

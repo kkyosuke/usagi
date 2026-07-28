@@ -376,15 +376,33 @@ Workspace Agent drawer state を toggle する。drawer は Home header の下�
 drawer 内の terminal viewport は drawer の border、conversation selector、spacer、footer を除いて計算し、
 managed-session Closeup の right pane viewport とは別の pure geometry とする。
 
-drawer は conversation selector の `No conversations` placeholder、disabled な `[ New ]`、empty state、
-footer を表示する。現在の drawer shell は Agent inventory、terminal attach/input/resize/resume、picker、
-launch を実行しない。描画 projection は conversation choice と terminal row を受け取れるが、empty projection
-から Agent を自動起動・resume せず、`New` click / Enter も request を発行しない。
+drawer は root scope（`session_id: None`）の live / pending / interrupted Agent conversation だけを
+conversation selector に表示する。generic Terminal、Diff、Terminal pending/action は restore projection と pane
+admission の両方で拒否する。`[ New ]` は disabled のままで、empty state や drawer open を契機に Agent を自動起動・
+resume せず、`New` click / Enter も request を発行しない。
+
+coherent inventory は drawer が閉じていても root target の `AgentTabIntent` と reconcile し、保存済み order /
+selection / dismissal を準備する。保存済み exact ref が trusted live なら同じ `TerminalRef`、同 lineage が
+resumable なら同じ slot の interrupted tab を投影する。inventory-only conversation は deterministic order で末尾へ
+加え、消失した selection は同 slot より後の surviving tab、なければ先頭、conversation が無ければ empty state へ
+縮退する。drawer 自体は observation から自動 open しない。
+
+drawer open 時は root の selected live Agent だけを foreground attach / resync し、drawer 専用 viewport geometry で
+daemon PTY と local VT screen を resize する。選択中 Agent へ既存の ordered input / ACK、scroll、selection /
+copy / link を接続する。他の root tab と managed pane は detached background である。drawer close 時は root
+subscription を detach し、開く前の managed-session selected live tab を attach / resync する。どちらの操作も
+PTY/process を kill / spawn しない。
+
+interrupted tab は read-only で、open / reconnect / restore から provider resume を発行しない。選択中 interrupted
+tab の `Ctrl-O r` だけが既存の exact resume contract を実行し、operation / source / relation / lineage / root scope /
+new exact `TerminalRef` がすべて一致した成功だけを同 slot の live Agent tab へ置換する。drawer を閉じている間に
+応答した置換は root background entry だけを更新し、managed foreground を奪わない。
 
 drawer open 中は drawer が sidebar、managed pane、Home header の別 action、通常の global action の入力を所有し、
-それらへ key / click / pointer を伝播しない。`Esc` または再度の `Ctrl-O g` だけが drawer を閉じる。開閉は
-Home mode、selected cursor、active managed session、selected pane tab、terminal scroll / text selection を
-変更しない。既存 modal が前面にある間は drawer shortcut と header button を受理しない。非同期 completion で
+それらへ key / click / pointer を伝播しない。root Agent tab の terminal input と `Ctrl-O` tab controls、および
+`Esc` / `Ctrl-O g` の close だけを受理する。開閉は Home mode、selected cursor、active managed session、
+managed pane の selected tab、terminal scroll / text selection を変更しない。既存 modal が前面にある間は drawer
+shortcut と header button を受理しない。非同期 completion で
 既存 modal が drawer より後に開いた場合も modal が描画・入力の優先権を持ち、drawer から modal を暗黙に開かない。
 
 ## Home frame loop と背景観測 lane

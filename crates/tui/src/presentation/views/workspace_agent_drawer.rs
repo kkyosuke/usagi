@@ -8,6 +8,7 @@
 
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::{self, modal};
+use crate::usecase::application::terminal_selection::TerminalPoint;
 
 /// Desired lower bound while the drawer can coexist with a visible background.
 pub const MIN_DRAWER_WIDTH: usize = 56;
@@ -94,6 +95,30 @@ pub fn terminal_viewport(raw_height: usize, raw_width: usize) -> WorkspaceAgentT
     }
 }
 
+/// Map a frame-cell pointer into the retained root Agent terminal viewport.
+#[must_use]
+pub fn terminal_point_at(
+    raw_height: usize,
+    raw_width: usize,
+    rows_len: usize,
+    scroll: usize,
+    column: u16,
+    row: u16,
+) -> Option<TerminalPoint> {
+    let drawer = geometry(raw_height, raw_width);
+    let viewport = terminal_viewport(raw_height, raw_width);
+    let column = usize::from(column).checked_sub(drawer.left.saturating_add(2))?;
+    let content_row = usize::from(row).checked_sub(drawer.top.saturating_add(3))?;
+    if column >= viewport.cols || content_row >= viewport.rows {
+        return None;
+    }
+    let start = rows_len.saturating_sub(viewport.rows.saturating_add(scroll));
+    Some(TerminalPoint {
+        row: start + content_row,
+        column,
+    })
+}
+
 /// Render the drawer over a dimmed Home frame.
 #[must_use]
 pub fn render_over(
@@ -155,7 +180,7 @@ fn drawer_body(
         .dim()
         .paint("Esc / Ctrl-O g: close  ·  New unavailable");
     let content_capacity = height.saturating_sub(rows.len() + 1);
-    if projection.terminal_rows.is_empty() {
+    if projection.conversations.is_empty() {
         let before = content_capacity.saturating_sub(3) / 2;
         rows.extend(std::iter::repeat_n(String::new(), before));
         if content_capacity > before {
@@ -264,6 +289,34 @@ mod tests {
                 terminal_viewport(24, 100).cols
             ),
             crate::presentation::views::workspace::terminal_viewport(24, 100)
+        );
+    }
+
+    #[test]
+    fn terminal_pointer_mapping_uses_drawer_content_geometry() {
+        let drawer = geometry(24, 100);
+        assert_eq!(
+            terminal_point_at(
+                24,
+                100,
+                30,
+                0,
+                u16::try_from(drawer.left + 2).unwrap(),
+                u16::try_from(drawer.top + 3).unwrap(),
+            ),
+            Some(TerminalPoint { row: 12, column: 0 })
+        );
+        assert_eq!(terminal_point_at(24, 100, 30, 0, 0, 0), None);
+        assert_eq!(
+            terminal_point_at(
+                24,
+                100,
+                30,
+                0,
+                u16::try_from(drawer.left + 2).unwrap(),
+                u16::try_from(drawer.top + 3 + terminal_viewport(24, 100).rows).unwrap(),
+            ),
+            None
         );
     }
 
