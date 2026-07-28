@@ -88,6 +88,8 @@ pub enum TabSelection {
 /// attach 判断に必要な TUI-local の選択位置。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneSelection {
+    /// No managed target is active (session 0 Home).
+    None,
     /// Closeup target が選択中。これに対する request は completion 時に attach する。
     Target(Target),
     /// tab が選択中。pending placeholder の completion だけが attach 対象になる。
@@ -155,8 +157,11 @@ impl PaneState {
 /// completion や exit も、その entry だけを還元する。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneRegistry {
-    active: Target,
+    /// The managed target whose pane is shown. `None` when Home has no active
+    /// managed session; the registry never falls back to `Target::Root`.
+    active: Option<Target>,
     entries: Vec<PaneRegistryEntry>,
+    inactive: PaneState,
     revision: u64,
 }
 
@@ -181,6 +186,8 @@ pub enum PaneInputOwner {
 pub enum PaneRegistryEvent {
     /// 表示 target を切り替える。既存 target の tab state は保持する。
     SelectTarget(Target),
+    /// active managed target を外す。既存 entry は background state として保持する。
+    ClearTarget,
     /// `target` が所有する pane reducer だけへ event を渡す。
     Pane { target: Target, event: PaneEvent },
     /// tab があっても action modal を明示的に開く。
@@ -212,19 +219,25 @@ pub enum PaneRegistryEffect {
 }
 
 impl PaneRegistry {
-    /// `active` target を持つ空の registry を作る。
+    /// `active` target を持つ空の registry を作る。`None` は active managed target
+    /// を持たない Home（session 0 件）で、root を fallback にしない。
     #[must_use]
-    pub fn new(active: Target) -> Self {
+    pub fn new(active: impl Into<Option<Target>>) -> Self {
+        let active = active.into();
+        let entries = active
+            .map(|target| vec![PaneRegistryEntry::empty(target)])
+            .unwrap_or_default();
         Self {
             active,
-            entries: vec![PaneRegistryEntry::empty(active)],
+            entries,
+            inactive: PaneState::new(PaneSelection::None),
             revision: 0,
         }
     }
 
-    /// 現在表示する target。
+    /// 現在表示する target。active managed target が無ければ `None`。
     #[must_use]
-    pub const fn active(&self) -> Target {
+    pub const fn active(&self) -> Option<Target> {
         self.active
     }
 
@@ -245,21 +258,18 @@ impl PaneRegistry {
             .map(|entry| &entry.pane)
     }
 
-    /// 現在表示中 target の pane state。
-    ///
-    /// # Panics
-    ///
-    /// Panics if the registry invariant that every active target has an entry
-    /// is broken internally.
+    /// 現在表示中 target の pane state。active managed target が無ければ、tab を
+    /// 持たない inert state を返す。
     #[must_use]
     pub fn active_pane(&self) -> &PaneState {
-        // `new` and `entry_mut` always create the active entry.
-        &self
-            .entries
-            .iter()
-            .find(|entry| entry.target == self.active)
-            .expect("active target always has a pane registry entry")
-            .pane
+        self.active
+            .and_then(|active| {
+                self.entries
+                    .iter()
+                    .find(|entry| entry.target == active)
+                    .map(|entry| &entry.pane)
+            })
+            .unwrap_or(&self.inactive)
     }
 
     /// 全 target の live tab を表示順に列挙する。
@@ -291,10 +301,15 @@ impl PaneRegistry {
     /// active target の input owner。
     #[must_use]
     pub fn input_owner(&self) -> PaneInputOwner {
-        if self.action_modal_visible(self.active) {
-            PaneInputOwner::ActionModal
-        } else {
+        // Without an active managed target there is no tab to own input, so the
+        // action-modal owner is reported (an empty Home never routes tab input).
+        let owned_by_tab = self
+            .active
+            .is_some_and(|active| !self.action_modal_visible(active));
+        if owned_by_tab {
             PaneInputOwner::Tab
+        } else {
+            PaneInputOwner::ActionModal
         }
     }
 
@@ -329,8 +344,12 @@ pub fn reduce_registry(
     let before_entries = registry.entries.clone();
     let effects = match event {
         PaneRegistryEvent::SelectTarget(target) => {
-            registry.active = target;
+            registry.active = Some(target);
             registry.entry_mut(target);
+            Vec::new()
+        }
+        PaneRegistryEvent::ClearTarget => {
+            registry.active = None;
             Vec::new()
         }
         PaneRegistryEvent::OpenActionModal { target } => {
@@ -348,7 +367,7 @@ pub fn reduce_registry(
             if !event_belongs_to_target(&event, target) {
                 return Vec::new();
             }
-            let active = registry.active == target;
+            let active = registry.active == Some(target);
             let entry = registry.entry_mut(target);
             if matches!(event, PaneEvent::Request { .. }) {
                 entry.action_modal_forced = false;
@@ -369,6 +388,11 @@ pub fn reduce_registry(
 }
 
 /// Route a tab command only when the active target's tab owns input.
+///
+/// # Panics
+///
+/// Panics if the registry reports a tab input owner without an active target,
+/// which the [`PaneRegistry::input_owner`] contract makes unreachable.
 #[must_use]
 pub fn route_tab_command(
     registry: &mut PaneRegistry,
@@ -377,7 +401,9 @@ pub fn route_tab_command(
     if registry.input_owner() != PaneInputOwner::Tab {
         return Vec::new();
     }
-    let target = registry.active;
+    let target = registry
+        .active
+        .expect("tab input owner always has an active target");
     match command {
         PaneTabCommand::Select(selection) => reduce_registry(
             registry,
@@ -406,6 +432,7 @@ pub fn route_tab_command(
 
 fn event_belongs_to_target(event: &PaneEvent, target: Target) -> bool {
     match event {
+        PaneEvent::Select(PaneSelection::None) => false,
         PaneEvent::Select(PaneSelection::Target(selected)) => *selected == target,
         // Tab-keyed events name their own stable identity, so only the entry
         // that owns that tab reacts. Resume progress is keyed by lineage the
@@ -998,6 +1025,9 @@ fn restore_batch(
                 || {
                     PaneSelection::Target(fallback_target.unwrap_or_else(
                         || match &state.selected {
+                            PaneSelection::None => {
+                                unreachable!("target-scoped pane restore has an active target")
+                            }
                             PaneSelection::Target(target) => *target,
                             PaneSelection::Tab(TabSelection::Live(terminal)) => {
                                 target_for_terminal(terminal)
@@ -1877,7 +1907,7 @@ mod tests {
             )
             .is_empty()
         );
-        assert_eq!(registry.active(), session_b);
+        assert_eq!(registry.active(), Some(session_b));
         assert!(registry.action_modal_visible(session_b));
         assert!(
             registry.pane(session_b).unwrap().tabs().iter().any(
@@ -1951,7 +1981,7 @@ mod tests {
             .is_empty()
         );
 
-        assert_eq!(registry.active(), visible);
+        assert_eq!(registry.active(), Some(visible));
         assert_eq!(registry.input_owner(), PaneInputOwner::Tab);
         assert_eq!(
             registry.active_pane().selected(),
@@ -2534,6 +2564,61 @@ mod tests {
         assert_eq!(
             registry.active_pane().selected(),
             &PaneSelection::Target(target)
+        );
+    }
+
+    #[test]
+    fn optional_registry_state_is_inert_and_live_inventory_skips_non_live_tabs() {
+        let target = target();
+        let operation = OperationId::new();
+        let live = terminal(target);
+        let history = interrupted(target, true);
+        let mut registry = PaneRegistry::new(target);
+        registry.entries[0].pane.tabs = vec![
+            PaneTab::Pending(PendingPane {
+                operation,
+                target,
+                kind: PaneKind::Terminal,
+            }),
+            PaneTab::Ready(PendingPane {
+                operation: OperationId::new(),
+                target,
+                kind: PaneKind::Diff,
+            }),
+            PaneTab::Interrupted(InterruptedPane {
+                tab: history,
+                resuming: None,
+            }),
+            PaneTab::Live(LivePane {
+                terminal: live.clone(),
+                kind: PaneKind::Agent,
+            }),
+        ];
+        assert_eq!(registry.live_terminals(), vec![live]);
+
+        assert!(
+            reduce_registry(
+                &mut registry,
+                PaneRegistryEvent::Pane {
+                    target,
+                    event: PaneEvent::Select(PaneSelection::None),
+                },
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "target-scoped pane restore has an active target")]
+    fn target_scoped_restore_rejects_an_impossible_none_selection() {
+        let mut state = PaneState::new(PaneSelection::None);
+        let _ = reduce(
+            &mut state,
+            PaneEvent::RestoreBatch {
+                panes: Vec::new(),
+                selected: None,
+                replace_order: true,
+            },
         );
     }
 }

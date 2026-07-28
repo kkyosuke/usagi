@@ -1,14 +1,14 @@
 ---
 number: 575
 title: refactor(tui): Home navigation から workspace root target を分離する
-status: todo
+status: done
 priority: high
 labels: [v2, tui, refactor, navigation]
 dependson: []
 related: [388, 506, 510, 545]
 parent: 571
 created_at: 2026-07-27T23:03:12.865600+00:00
-updated_at: 2026-07-27T23:03:12.865600+00:00
+updated_at: 2026-07-28T00:35:12.002447+00:00
 ---
 
 ## 背景

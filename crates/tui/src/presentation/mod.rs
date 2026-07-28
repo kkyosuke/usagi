@@ -3899,7 +3899,7 @@ fn close_focused_terminal_pane(
             .and_then(|terminal| ui.agent_continuation_for(terminal));
         if let Err(error) = ui.mutate_agent_intent(AgentTabIntentMutation::DismissAndSelect {
             continuation,
-            session_id: runtime.panes().active().session_id(),
+            session_id: runtime.panes().active().and_then(Target::session_id),
             selected,
         }) {
             surface_agent_tab_intent_error(runtime, error);
@@ -4077,7 +4077,11 @@ fn intercept_live_terminal_control(
                 })
                 .collect::<Vec<_>>();
             let next = runtime.terminal_order_after_reorder(direction);
-            match ui.persist_agent_order(runtime.panes().active().session_id(), &current, &next) {
+            match ui.persist_agent_order(
+                runtime.panes().active().and_then(Target::session_id),
+                &current,
+                &next,
+            ) {
                 Ok(()) => {
                     let _ = runtime.reorder_tab(direction);
                 }
@@ -4096,7 +4100,11 @@ fn intercept_live_terminal_control(
                 })
                 .collect::<Vec<_>>();
             let next = runtime.terminal_order_after_reorder(direction);
-            match ui.persist_agent_order(runtime.panes().active().session_id(), &current, &next) {
+            match ui.persist_agent_order(
+                runtime.panes().active().and_then(Target::session_id),
+                &current,
+                &next,
+            ) {
                 Ok(()) => {
                     let _ = runtime.reorder_tab(direction);
                 }
@@ -4428,7 +4436,9 @@ fn drain_controller_host_actions(
                 }
             }
             ControllerHostAction::SelectTab(direction) => {
-                let active = runtime.panes().active();
+                let Some(active) = runtime.panes().active() else {
+                    continue;
+                };
                 let Some(next_terminal) = runtime.terminal_after_select(direction) else {
                     continue;
                 };
@@ -4565,7 +4575,7 @@ fn apply_exact_resume(
     if accepted.is_err() {
         return;
     }
-    let session_id = runtime.panes().active().session_id();
+    let session_id = runtime.panes().active().and_then(Target::session_id);
     if let Err(error) = ui.mutate_agent_intent(AgentTabIntentMutation::Upsert {
         session_id,
         continuation,
@@ -4590,13 +4600,15 @@ fn resume_focused_interrupted_tab(
     let Some(workspace) = ui.agent.as_ref().map(|agent| agent.workspace) else {
         return;
     };
+    let Some(target) = runtime.panes().active() else {
+        return;
+    };
     let Some(continuation) = runtime
         .focused_interrupted()
         .map(|interrupted| interrupted.continuation)
     else {
         return;
     };
-    let target = runtime.panes().active();
     // A refusal (no trustworthy exact target, or a repeated activation whose
     // request is already in flight) is already the pane's own feedback and must
     // never reach the daemon as a second request.
@@ -6602,7 +6614,13 @@ mod tests {
             Some(projected_records),
             Some(vec![session]),
             None,
-            None,
+            Some(std::collections::BTreeMap::from([(
+                session,
+                usagi_core::domain::session_lifecycle::SessionLifecycleProjection {
+                    lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
+                    failure_summary: None,
+                },
+            )])),
         );
 
         let operation = OperationId::new();
@@ -7630,9 +7648,8 @@ mod tests {
             );
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let mut pending = std::collections::HashMap::new();
-        let _ = runtime.apply_event(AppEvent::Key(AppKey::Down));
         let _ = runtime.apply_event(AppEvent::Key(AppKey::Enter));
-        assert_eq!(runtime.panes().active(), Target::Session(session));
+        assert_eq!(runtime.panes().active(), Some(Target::Session(session)));
 
         let agent_operation = OperationId::new();
         runtime.on_effect(&Effect::LaunchAgent {
@@ -7705,6 +7722,31 @@ mod tests {
                 continuation: Some(actual_continuation),
             }) if *actual == session && *actual_continuation == continuation
         ));
+    }
+
+    #[test]
+    fn select_tab_host_action_is_inert_without_an_active_target_or_tabs() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut pending = std::collections::HashMap::new();
+
+        for mut runtime in [
+            WorkspaceRuntime::new(workspace, Vec::new()),
+            WorkspaceRuntime::new(workspace, vec![session]),
+        ] {
+            let view = WorkspaceView::with_runtime_ids(
+                ws("demo"),
+                state("demo"),
+                runtime.state().sessions().to_vec(),
+            );
+            let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+            let (sender, receiver) = std::sync::mpsc::channel();
+            sender
+                .send(ControllerHostAction::SelectTab(TabDirection::Next))
+                .unwrap();
+            drain_host_actions(&receiver, &mut ui, &mut runtime, &mut pending);
+            assert!(runtime.focused_terminal().is_none());
+        }
     }
 
     #[test]
@@ -10047,7 +10089,7 @@ mod tests {
         });
         let _ = runtime.apply_event(sidebar_pointer_event(
             5,
-            4,
+            2,
             std::time::Duration::from_millis(1_000),
         ));
 
@@ -10080,11 +10122,12 @@ mod tests {
         assert_eq!(runtime.state().sessions(), &[session]);
         let _ = runtime.apply_event(sidebar_pointer_event(
             5,
-            4,
+            2,
             std::time::Duration::from_millis(1_100),
         ));
 
-        assert_eq!(runtime.state().active(), Target::Root(workspace_id));
+        let _ = workspace_id;
+        assert_eq!(runtime.state().active(), Some(session));
         assert!(matches!(
             runtime.state().route(),
             Route::Home(HomeMode::Switch)
@@ -10201,8 +10244,7 @@ mod tests {
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_context(workspace, vec![session], port);
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
-        // Down selects the session row; Enter activates it into Closeup.
-        let _ = runtime.handle_key(Key::Down);
+        // The first managed session is already selected; Enter activates it.
         let _ = runtime.handle_key(Key::Enter);
         let operation = OperationId::new();
         let _ = runtime.request_pane(Target::Session(session), operation, PaneKind::Agent);
@@ -12047,7 +12089,7 @@ mod tests {
             runtime
                 .panes()
                 .pane(Target::Session(original_session))
-                .is_none()
+                .is_some_and(|pane| pane.tabs().is_empty())
         );
         assert_ne!(runtime.focused_terminal(), Some(terminal));
     }
@@ -12055,29 +12097,30 @@ mod tests {
     #[test]
     fn restore_intent_publish_failure_keeps_bytes_but_does_not_block_generic_restore() {
         let workspace = WorkspaceId::new();
-        let generic = scoped_terminal_ref(workspace, None);
+        let session = SessionId::new();
+        let generic = scoped_terminal_ref(workspace, Some(session));
         let durable = Arc::new(Mutex::new(AgentTabIntent::empty(workspace)));
         let bytes_before = serde_json::to_vec(&*durable.lock().unwrap()).unwrap();
         let attempts = Arc::new(AtomicUsize::new(0));
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_tab_intent(
                 workspace,
-                BTreeSet::new(),
+                BTreeSet::from([session]),
                 Box::new(FailingIntentPort {
                     state: Arc::clone(&durable),
                     error: AgentTabIntentError::Unavailable,
                     attempts: Arc::clone(&attempts),
                 }),
             );
-        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let fence = runtime.restore_fence();
         let applied = super::apply_restore_completion(
             super::RestoreCompletion {
                 port: Box::new(UnavailableAgentCommandPort),
                 dispatched_interaction: fence.0,
                 dispatched_registry_revision: fence.1,
-                dispatched_allowed_sessions: BTreeSet::new(),
+                dispatched_allowed_sessions: BTreeSet::from([session]),
                 terminals: Ok(vec![TerminalInventoryEntry {
                     terminal: generic.clone(),
                     kind: TerminalKind::Terminal,
@@ -12093,7 +12136,7 @@ mod tests {
             &mut ui,
             &mut runtime,
             workspace,
-            &BTreeSet::new(),
+            &BTreeSet::from([session]),
         );
 
         assert_eq!(
@@ -12133,15 +12176,16 @@ mod tests {
     #[allow(clippy::too_many_lines)] // Mixed inventory and prior runtime state share one failure fixture.
     fn mixed_restore_intent_failure_preserves_visible_agents_and_restores_generics() {
         let workspace = WorkspaceId::new();
+        let session = SessionId::new();
         let continuation = AgentContinuationRef::new();
         let inventory_only_continuation = AgentContinuationRef::new();
-        let agent = scoped_terminal_ref(workspace, None);
-        let inventory_only_agent = scoped_terminal_ref(workspace, None);
-        let existing_generic = scoped_terminal_ref(workspace, None);
-        let new_generic = scoped_terminal_ref(workspace, None);
+        let agent = scoped_terminal_ref(workspace, Some(session));
+        let inventory_only_agent = scoped_terminal_ref(workspace, Some(session));
+        let existing_generic = scoped_terminal_ref(workspace, Some(session));
+        let new_generic = scoped_terminal_ref(workspace, Some(session));
         let mut intent = AgentTabIntent::empty(workspace);
         intent.apply(AgentTabIntentMutation::Upsert {
-            session_id: None,
+            session_id: Some(session),
             continuation,
             terminal: agent.clone(),
             select: true,
@@ -12150,24 +12194,24 @@ mod tests {
         let durable = Arc::new(Mutex::new(intent));
         let bytes_before = serde_json::to_vec(&*durable.lock().unwrap()).unwrap();
         let attempts = Arc::new(AtomicUsize::new(0));
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_tab_intent(
                 workspace,
-                BTreeSet::new(),
+                BTreeSet::from([session]),
                 Box::new(FailingIntentPort {
                     state: Arc::clone(&durable),
                     error: AgentTabIntentError::Unavailable,
                     attempts: Arc::clone(&attempts),
                 }),
             );
-        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let fence = runtime.restore_fence();
         assert!(runtime.restore_snapshot(
             fence.0,
             fence.1,
             vec![super::PaneRestoreTarget {
-                target: Target::Root(workspace),
+                target: Target::Session(session),
                 panes: vec![
                     LivePane {
                         terminal: agent.clone(),
@@ -12188,7 +12232,7 @@ mod tests {
                 port: Box::new(UnavailableAgentCommandPort),
                 dispatched_interaction: fence.0,
                 dispatched_registry_revision: fence.1,
-                dispatched_allowed_sessions: BTreeSet::new(),
+                dispatched_allowed_sessions: BTreeSet::from([session]),
                 terminals: Ok(vec![
                     TerminalInventoryEntry {
                         terminal: agent.clone(),
@@ -12218,7 +12262,7 @@ mod tests {
                             runtime: AgentRuntimeRef::new(
                                 AgentRuntimeId::new(),
                                 agent.clone(),
-                                None,
+                                Some(session),
                             )
                             .unwrap(),
                             continuation,
@@ -12229,7 +12273,7 @@ mod tests {
                             runtime: AgentRuntimeRef::new(
                                 AgentRuntimeId::new(),
                                 inventory_only_agent.clone(),
-                                None,
+                                Some(session),
                             )
                             .unwrap(),
                             continuation: inventory_only_continuation,
@@ -12244,7 +12288,7 @@ mod tests {
             &mut ui,
             &mut runtime,
             workspace,
-            &BTreeSet::new(),
+            &BTreeSet::from([session]),
         );
 
         assert_eq!(
@@ -12565,12 +12609,13 @@ mod tests {
     #[allow(clippy::too_many_lines)] // The stale and fresh observations must share one durable fixture.
     fn cross_tui_stale_observe_omits_old_ref_then_fresh_observation_restores_replacement() {
         let workspace = WorkspaceId::new();
+        let session = SessionId::new();
         let continuation = AgentContinuationRef::new();
-        let old = scoped_terminal_ref(workspace, None);
-        let replacement = scoped_terminal_ref(workspace, None);
+        let old = scoped_terminal_ref(workspace, Some(session));
+        let replacement = scoped_terminal_ref(workspace, Some(session));
         let mut initial = AgentTabIntent::empty(workspace);
         initial.apply(AgentTabIntentMutation::Upsert {
-            session_id: None,
+            session_id: Some(session),
             continuation,
             terminal: old.clone(),
             select: true,
@@ -12578,24 +12623,24 @@ mod tests {
         initial.revision = 1;
         let durable = Arc::new(Mutex::new(initial));
         let mutations = Arc::new(Mutex::new(Vec::new()));
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_tab_intent(
                 workspace,
-                BTreeSet::new(),
+                BTreeSet::from([session]),
                 Box::new(MemoryIntentPort {
                     state: Arc::clone(&durable),
                     mutations: Arc::clone(&mutations),
                 }),
             );
-        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let dispatched = runtime.restore_fence();
 
         // Another TUI replaces O with R after this controller loaded revision 1.
         {
             let mut latest = durable.lock().unwrap();
             latest.apply(AgentTabIntentMutation::Upsert {
-                session_id: None,
+                session_id: Some(session),
                 continuation,
                 terminal: replacement.clone(),
                 select: true,
@@ -12605,8 +12650,12 @@ mod tests {
         let inventory = |terminal: &TerminalRef| AgentInventory {
             workspace_id: workspace,
             runtimes: vec![AgentRuntimeInventoryItem {
-                runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), None)
-                    .unwrap(),
+                runtime: AgentRuntimeRef::new(
+                    AgentRuntimeId::new(),
+                    terminal.clone(),
+                    Some(session),
+                )
+                .unwrap(),
                 continuation,
                 state: AgentRuntimeInventoryState::Live,
                 resumed_from: None,
@@ -12627,7 +12676,7 @@ mod tests {
                 port: Box::new(UnavailableAgentCommandPort),
                 dispatched_interaction: dispatched.0,
                 dispatched_registry_revision: dispatched.1,
-                dispatched_allowed_sessions: BTreeSet::new(),
+                dispatched_allowed_sessions: BTreeSet::from([session]),
                 terminals: Ok(terminals(&old)),
                 agents: Ok(inventory(&old)),
                 observation_coherent: true,
@@ -12635,7 +12684,7 @@ mod tests {
             &mut ui,
             &mut runtime,
             workspace,
-            &BTreeSet::new(),
+            &BTreeSet::from([session]),
         );
 
         assert_eq!(stale.outcome, super::RestoreJobOutcome::FenceRejected);
@@ -12657,7 +12706,7 @@ mod tests {
                 port: stale.port,
                 dispatched_interaction: fresh_fence.0,
                 dispatched_registry_revision: fresh_fence.1,
-                dispatched_allowed_sessions: BTreeSet::new(),
+                dispatched_allowed_sessions: BTreeSet::from([session]),
                 terminals: Ok(terminals(&replacement)),
                 agents: Ok(inventory(&replacement)),
                 observation_coherent: true,
@@ -12665,7 +12714,7 @@ mod tests {
             &mut ui,
             &mut runtime,
             workspace,
-            &BTreeSet::new(),
+            &BTreeSet::from([session]),
         );
         assert_eq!(fresh.outcome, super::RestoreJobOutcome::Applied);
         assert!(!retry.complete(redispatch_at, fresh.outcome));
@@ -12677,34 +12726,39 @@ mod tests {
     #[allow(clippy::too_many_lines)] // This regression keeps the visible stale ref and latest lineage together.
     fn visible_old_ref_can_close_latest_lineage_while_fresh_observation_is_pending() {
         let workspace = WorkspaceId::new();
+        let session = SessionId::new();
         let continuation = AgentContinuationRef::new();
-        let old = scoped_terminal_ref(workspace, None);
-        let replacement = scoped_terminal_ref(workspace, None);
+        let old = scoped_terminal_ref(workspace, Some(session));
+        let replacement = scoped_terminal_ref(workspace, Some(session));
         let mut initial = AgentTabIntent::empty(workspace);
         initial.apply(AgentTabIntentMutation::Upsert {
-            session_id: None,
+            session_id: Some(session),
             continuation,
             terminal: old.clone(),
             select: true,
         });
         initial.revision = 1;
         let durable = Arc::new(Mutex::new(initial));
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_tab_intent(
                 workspace,
-                BTreeSet::new(),
+                BTreeSet::from([session]),
                 Box::new(MemoryIntentPort {
                     state: Arc::clone(&durable),
                     mutations: Arc::new(Mutex::new(Vec::new())),
                 }),
             );
-        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let inventory = |terminal: &TerminalRef| AgentInventory {
             workspace_id: workspace,
             runtimes: vec![AgentRuntimeInventoryItem {
-                runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), None)
-                    .unwrap(),
+                runtime: AgentRuntimeRef::new(
+                    AgentRuntimeId::new(),
+                    terminal.clone(),
+                    Some(session),
+                )
+                .unwrap(),
                 continuation,
                 state: AgentRuntimeInventoryState::Live,
                 resumed_from: None,
@@ -12724,7 +12778,7 @@ mod tests {
                     port,
                     dispatched_interaction: fence.0,
                     dispatched_registry_revision: fence.1,
-                    dispatched_allowed_sessions: BTreeSet::new(),
+                    dispatched_allowed_sessions: BTreeSet::from([session]),
                     terminals: Ok(terminals(terminal)),
                     agents: Ok(inventory(terminal)),
                     observation_coherent: true,
@@ -12737,7 +12791,7 @@ mod tests {
             &mut ui,
             &mut runtime,
             workspace,
-            &BTreeSet::new(),
+            &BTreeSet::from([session]),
         );
         assert_eq!(first.outcome, super::RestoreJobOutcome::Applied);
         assert_eq!(runtime.focused_terminal(), Some(old.clone()));
@@ -12748,7 +12802,7 @@ mod tests {
         {
             let mut latest = durable.lock().unwrap();
             latest.apply(AgentTabIntentMutation::Upsert {
-                session_id: None,
+                session_id: Some(session),
                 continuation,
                 terminal: replacement.clone(),
                 select: true,
@@ -12761,7 +12815,7 @@ mod tests {
             &mut ui,
             &mut runtime,
             workspace,
-            &BTreeSet::new(),
+            &BTreeSet::from([session]),
         );
         assert_eq!(stale.outcome, super::RestoreJobOutcome::FenceRejected);
         assert_eq!(runtime.focused_terminal(), Some(old.clone()));
@@ -12786,7 +12840,7 @@ mod tests {
             &mut ui,
             &mut runtime,
             workspace,
-            &BTreeSet::new(),
+            &BTreeSet::from([session]),
         );
         assert_eq!(fresh.outcome, super::RestoreJobOutcome::Applied);
         assert!(runtime.active_pane().tabs().is_empty());
@@ -12794,10 +12848,12 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn successful_restore_retains_port_and_reconnect_reobserves_exactly_once() {
         let workspace = WorkspaceId::new();
+        let session = SessionId::new();
         let continuation = AgentContinuationRef::new();
-        let terminal = scoped_terminal_ref(workspace, None);
+        let terminal = scoped_terminal_ref(workspace, Some(session));
         let terminal_attempts = Arc::new(AtomicUsize::new(0));
         let agent_attempts = Arc::new(AtomicUsize::new(0));
         let port: Box<dyn AgentCommandPort> = Box::new(RetryRestorePort {
@@ -12808,8 +12864,12 @@ mod tests {
                 live: true,
             }],
             runtimes: vec![AgentRuntimeInventoryItem {
-                runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), None)
-                    .unwrap(),
+                runtime: AgentRuntimeRef::new(
+                    AgentRuntimeId::new(),
+                    terminal.clone(),
+                    Some(session),
+                )
+                .unwrap(),
                 continuation,
                 state: AgentRuntimeInventoryState::Live,
                 resumed_from: None,
@@ -12820,17 +12880,17 @@ mod tests {
         });
         let durable = Arc::new(Mutex::new(AgentTabIntent::empty(workspace)));
         let mutations = Arc::new(Mutex::new(Vec::new()));
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_tab_intent(
                 workspace,
-                BTreeSet::new(),
+                BTreeSet::from([session]),
                 Box::new(MemoryIntentPort {
                     state: Arc::clone(&durable),
                     mutations: Arc::clone(&mutations),
                 }),
             );
-        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let (sender, receiver) = std::sync::mpsc::channel();
         let mut retry = super::RestoreRetryState::new();
 
@@ -12839,7 +12899,7 @@ mod tests {
         super::spawn_restore_job(
             port,
             workspace,
-            BTreeSet::new(),
+            BTreeSet::from([session]),
             fence.0,
             fence.1,
             sender.clone(),
@@ -12852,7 +12912,7 @@ mod tests {
             &mut ui,
             &mut runtime,
             workspace,
-            &BTreeSet::new(),
+            &BTreeSet::from([session]),
         );
         assert_eq!(first.outcome, super::RestoreJobOutcome::Applied);
         assert!(!retry.complete(std::time::Duration::ZERO, super::RestoreJobOutcome::Applied));
@@ -12875,7 +12935,7 @@ mod tests {
         super::spawn_restore_job(
             first.port,
             workspace,
-            BTreeSet::new(),
+            BTreeSet::from([session]),
             fence.0,
             fence.1,
             sender,
@@ -12888,7 +12948,7 @@ mod tests {
             &mut ui,
             &mut runtime,
             workspace,
-            &BTreeSet::new(),
+            &BTreeSet::from([session]),
         );
         assert_eq!(second.outcome, super::RestoreJobOutcome::Applied);
         assert!(!retry.complete(reconnect_at, super::RestoreJobOutcome::Applied));
@@ -12903,19 +12963,25 @@ mod tests {
     #[allow(clippy::too_many_lines)] // Lifecycle cleanup, durable state, and retry admission share one fixture.
     fn session_membership_change_requests_one_observation_and_cleans_owned_intent() {
         let workspace = WorkspaceId::new();
+        let session = SessionId::new();
         let removed_session = SessionId::new();
         let root_open = AgentContinuationRef::new();
         let root_dismissed = AgentContinuationRef::new();
         let removed_selected = AgentContinuationRef::new();
         let removed_dismissed = AgentContinuationRef::new();
-        let root_open_terminal = scoped_terminal_ref(workspace, None);
-        let root_dismissed_terminal = scoped_terminal_ref(workspace, None);
+        let root_open_terminal = scoped_terminal_ref(workspace, Some(session));
+        let root_dismissed_terminal = scoped_terminal_ref(workspace, Some(session));
         let removed_selected_terminal = scoped_terminal_ref(workspace, Some(removed_session));
         let removed_dismissed_terminal = scoped_terminal_ref(workspace, Some(removed_session));
         let mut initial = AgentTabIntent::empty(workspace);
         for (session_id, continuation, terminal, select) in [
-            (None, root_open, root_open_terminal.clone(), true),
-            (None, root_dismissed, root_dismissed_terminal.clone(), false),
+            (Some(session), root_open, root_open_terminal.clone(), true),
+            (
+                Some(session),
+                root_dismissed,
+                root_dismissed_terminal.clone(),
+                false,
+            ),
             (
                 Some(removed_session),
                 removed_selected,
@@ -12946,17 +13012,17 @@ mod tests {
         initial.validate(workspace).unwrap();
         let durable = Arc::new(Mutex::new(initial));
         let mutations = Arc::new(Mutex::new(Vec::new()));
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_tab_intent(
                 workspace,
-                BTreeSet::from([removed_session]),
+                BTreeSet::from([session, removed_session]),
                 Box::new(MemoryIntentPort {
                     state: Arc::clone(&durable),
                     mutations: Arc::clone(&mutations),
                 }),
             );
-        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let mut retry = super::RestoreRetryState::new();
         assert!(retry.begin_if_due(std::time::Duration::ZERO));
         let initial_fence = runtime.restore_fence();
@@ -12971,7 +13037,7 @@ mod tests {
                 port: Box::new(UnavailableAgentCommandPort),
                 dispatched_interaction: initial_fence.0,
                 dispatched_registry_revision: initial_fence.1,
-                dispatched_allowed_sessions: BTreeSet::from([removed_session]),
+                dispatched_allowed_sessions: BTreeSet::from([session, removed_session]),
                 terminals: Ok(initial_pairs
                     .iter()
                     .map(|(terminal, _)| TerminalInventoryEntry {
@@ -13003,16 +13069,16 @@ mod tests {
             &mut ui,
             &mut runtime,
             workspace,
-            &BTreeSet::from([removed_session]),
+            &BTreeSet::from([session, removed_session]),
         );
         assert_eq!(initial_restore.outcome, super::RestoreJobOutcome::Applied);
         assert!(!retry.complete(std::time::Duration::ZERO, initial_restore.outcome));
         assert_eq!(mutations.lock().unwrap().len(), 1);
         assert!(!ui.take_agent_observation_request());
 
-        ui.set_allowed_agent_sessions(BTreeSet::new());
+        ui.set_allowed_agent_sessions(BTreeSet::from([session]));
         assert!(ui.take_agent_observation_request());
-        ui.set_allowed_agent_sessions(BTreeSet::new());
+        ui.set_allowed_agent_sessions(BTreeSet::from([session]));
         assert!(!ui.take_agent_observation_request());
         let now = std::time::Duration::from_secs(1);
         retry.request_observation(now);
@@ -13024,7 +13090,7 @@ mod tests {
                 port: Box::new(UnavailableAgentCommandPort),
                 dispatched_interaction: fence.0,
                 dispatched_registry_revision: fence.1,
-                dispatched_allowed_sessions: BTreeSet::new(),
+                dispatched_allowed_sessions: BTreeSet::from([session]),
                 terminals: Ok(vec![TerminalInventoryEntry {
                     terminal: root_open_terminal.clone(),
                     kind: TerminalKind::Agent,
@@ -13036,7 +13102,7 @@ mod tests {
                         runtime: AgentRuntimeRef::new(
                             AgentRuntimeId::new(),
                             root_open_terminal.clone(),
-                            None,
+                            Some(session),
                         )
                         .unwrap(),
                         continuation: root_open,
@@ -13050,7 +13116,7 @@ mod tests {
             &mut ui,
             &mut runtime,
             workspace,
-            &BTreeSet::new(),
+            &BTreeSet::from([session]),
         );
 
         assert_eq!(applied.outcome, super::RestoreJobOutcome::Applied);
@@ -13068,8 +13134,8 @@ mod tests {
                     allowed_sessions: removed_allowed,
                     ..
                 }
-            ] if *initial_allowed == BTreeSet::from([removed_session])
-                && removed_allowed.is_empty()
+            ] if *initial_allowed == BTreeSet::from([session, removed_session])
+                && *removed_allowed == BTreeSet::from([session])
         ));
         drop(mutations);
         let durable = durable.lock().unwrap();
@@ -13276,7 +13342,6 @@ mod tests {
                 }),
             );
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
-        let _ = runtime.handle_key(Key::Down);
         let _ = runtime.handle_key(Key::Enter);
         let (interaction, revision) = runtime.restore_fence();
         let _ = runtime.restore_snapshot(
@@ -13301,6 +13366,10 @@ mod tests {
         let geometry = terminal_geometry(20, 80);
 
         ui.sync_foreground_terminal(runtime.focused_terminal().as_ref(), geometry);
+        // Re-syncing while the same selection is already attached keeps it in
+        // place, exercising the fence check that avoids relaunching a live
+        // foreground terminal.
+        ui.sync_foreground_terminal(runtime.focused_terminal().as_ref(), geometry);
         assert!(ui.terminal_rows(&first, None).is_some());
         assert!(ui.terminal_rows(&second, None).is_none());
 
@@ -13315,11 +13384,12 @@ mod tests {
     #[allow(clippy::too_many_lines)] // Close and reopen rollback use the same failure fixture.
     fn persistence_failures_leave_close_and_reopen_ui_unchanged_with_typed_notice() {
         let workspace = WorkspaceId::new();
+        let session = SessionId::new();
         let continuation = AgentContinuationRef::new();
-        let terminal = scoped_terminal_ref(workspace, None);
+        let terminal = scoped_terminal_ref(workspace, Some(session));
         let mut open_intent = AgentTabIntent::empty(workspace);
         open_intent.apply(AgentTabIntentMutation::Upsert {
-            session_id: None,
+            session_id: Some(session),
             continuation,
             terminal: terminal.clone(),
             select: true,
@@ -13327,25 +13397,29 @@ mod tests {
         let durable = Arc::new(Mutex::new(open_intent));
         let attempts = Arc::new(AtomicUsize::new(0));
         let bytes_before = serde_json::to_vec(&*durable.lock().unwrap()).unwrap();
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
-            .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(UnavailableAgentCommandPort),
+            )
             .with_agent_tab_intent(
                 workspace,
-                BTreeSet::new(),
+                BTreeSet::from([session]),
                 Box::new(FailingIntentPort {
                     state: Arc::clone(&durable),
                     error: AgentTabIntentError::Unavailable,
                     attempts: Arc::clone(&attempts),
                 }),
             );
-        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let fence = runtime.restore_fence();
         assert!(runtime.restore_snapshot(
             fence.0,
             fence.1,
             vec![super::PaneRestoreTarget {
-                target: Target::Root(workspace),
+                target: Target::Session(session),
                 panes: vec![LivePane {
                     terminal: terminal.clone(),
                     kind: PaneKind::Agent,
@@ -13381,19 +13455,23 @@ mod tests {
         let closed = Arc::new(Mutex::new(closed_intent));
         let closed_bytes = serde_json::to_vec(&*closed.lock().unwrap()).unwrap();
         let reopen_attempts = Arc::new(AtomicUsize::new(0));
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
-            .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(UnavailableAgentCommandPort),
+            )
             .with_agent_tab_intent(
                 workspace,
-                BTreeSet::new(),
+                BTreeSet::from([session]),
                 Box::new(FailingIntentPort {
                     state: Arc::clone(&closed),
                     error: AgentTabIntentError::ReadOnlySchema,
                     attempts: Arc::clone(&reopen_attempts),
                 }),
             );
-        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let (sender, receiver) = std::sync::mpsc::channel();
         sender
             .send(ControllerHostAction::ReopenAgent(ReopenAgentRequest {
@@ -13428,17 +13506,22 @@ mod tests {
     #[allow(clippy::too_many_lines)] // The stale-cache regression needs both pane kinds and a fresh observation.
     fn same_tui_reopen_waits_for_fresh_observation_and_preserves_new_generic_pane() {
         let workspace = WorkspaceId::new();
+        let session = SessionId::new();
         let continuation = AgentContinuationRef::new();
-        let agent_terminal = scoped_terminal_ref(workspace, None);
-        let generic_terminal = scoped_terminal_ref(workspace, None);
+        let agent_terminal = scoped_terminal_ref(workspace, Some(session));
+        let generic_terminal = scoped_terminal_ref(workspace, Some(session));
         let durable = Arc::new(Mutex::new(AgentTabIntent::empty(workspace)));
         let mutations = Arc::new(Mutex::new(Vec::new()));
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
-            .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(UnavailableAgentCommandPort),
+            )
             .with_agent_tab_intent(
                 workspace,
-                BTreeSet::new(),
+                BTreeSet::from([session]),
                 Box::new(MemoryIntentPort {
                     state: Arc::clone(&durable),
                     mutations: Arc::clone(&mutations),
@@ -13459,19 +13542,19 @@ mod tests {
             .cas_accepted
         );
         ui.mutate_agent_intent(AgentTabIntentMutation::Upsert {
-            session_id: None,
+            session_id: Some(session),
             continuation,
             terminal: agent_terminal.clone(),
             select: true,
         })
         .unwrap();
-        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let fence = runtime.restore_fence();
         assert!(runtime.restore_snapshot(
             fence.0,
             fence.1,
             vec![super::PaneRestoreTarget {
-                target: Target::Root(workspace),
+                target: Target::Session(session),
                 panes: vec![
                     LivePane {
                         terminal: agent_terminal.clone(),
@@ -13530,7 +13613,7 @@ mod tests {
                 port: Box::new(UnavailableAgentCommandPort),
                 dispatched_interaction: fence.0,
                 dispatched_registry_revision: fence.1,
-                dispatched_allowed_sessions: BTreeSet::new(),
+                dispatched_allowed_sessions: BTreeSet::from([session]),
                 terminals: Ok(vec![
                     TerminalInventoryEntry {
                         terminal: agent_terminal.clone(),
@@ -13549,7 +13632,7 @@ mod tests {
                         runtime: AgentRuntimeRef::new(
                             AgentRuntimeId::new(),
                             agent_terminal.clone(),
-                            None,
+                            Some(session),
                         )
                         .unwrap(),
                         continuation,
@@ -13563,7 +13646,7 @@ mod tests {
             &mut ui,
             &mut runtime,
             workspace,
-            &BTreeSet::new(),
+            &BTreeSet::from([session]),
         );
         assert_eq!(applied.outcome, super::RestoreJobOutcome::Applied);
         assert!(!retry.complete(now, applied.outcome));
@@ -13669,42 +13752,43 @@ mod tests {
     #[test]
     fn closing_selected_agent_persists_the_generic_successor_without_focus_drift() {
         let workspace = WorkspaceId::new();
+        let session = SessionId::new();
         let first = AgentContinuationRef::new();
         let closed = AgentContinuationRef::new();
-        let first_terminal = scoped_terminal_ref(workspace, None);
-        let closed_terminal = scoped_terminal_ref(workspace, None);
-        let generic = scoped_terminal_ref(workspace, None);
+        let first_terminal = scoped_terminal_ref(workspace, Some(session));
+        let closed_terminal = scoped_terminal_ref(workspace, Some(session));
+        let generic = scoped_terminal_ref(workspace, Some(session));
         let mut intent = AgentTabIntent::empty(workspace);
         intent.apply(AgentTabIntentMutation::Upsert {
-            session_id: None,
+            session_id: Some(session),
             continuation: first,
             terminal: first_terminal.clone(),
             select: false,
         });
         intent.apply(AgentTabIntentMutation::Upsert {
-            session_id: None,
+            session_id: Some(session),
             continuation: closed,
             terminal: closed_terminal.clone(),
             select: true,
         });
         let durable = Arc::new(Mutex::new(intent));
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_tab_intent(
                 workspace,
-                BTreeSet::new(),
+                BTreeSet::from([session]),
                 Box::new(MemoryIntentPort {
                     state: Arc::clone(&durable),
                     mutations: Arc::new(Mutex::new(Vec::new())),
                 }),
             );
-        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let fence = runtime.restore_fence();
         assert!(runtime.restore_snapshot(
             fence.0,
             fence.1,
             vec![super::PaneRestoreTarget {
-                target: Target::Root(workspace),
+                target: Target::Session(session),
                 panes: vec![
                     LivePane {
                         terminal: first_terminal,
@@ -13724,7 +13808,7 @@ mod tests {
             }],
         ));
         let _ = runtime.focus_terminal(
-            Target::Root(workspace),
+            Target::Session(session),
             durable.lock().unwrap().targets[0].tabs[1].terminal.clone(),
         );
 
@@ -13744,8 +13828,9 @@ mod tests {
     #[allow(clippy::too_many_lines)] // Agent and generic routing share one persistence-failure fixture.
     fn persistence_failures_block_agent_reorder_and_selection_but_not_generic_tabs() {
         let workspace = WorkspaceId::new();
-        let first_terminal = scoped_terminal_ref(workspace, None);
-        let second_terminal = scoped_terminal_ref(workspace, None);
+        let session = SessionId::new();
+        let first_terminal = scoped_terminal_ref(workspace, Some(session));
+        let second_terminal = scoped_terminal_ref(workspace, Some(session));
         let first = AgentContinuationRef::new();
         let second = AgentContinuationRef::new();
         let mut intent = AgentTabIntent::empty(workspace);
@@ -13754,7 +13839,7 @@ mod tests {
             (second, second_terminal.clone(), false),
         ] {
             intent.apply(AgentTabIntentMutation::Upsert {
-                session_id: None,
+                session_id: Some(session),
                 continuation,
                 terminal,
                 select,
@@ -13763,24 +13848,24 @@ mod tests {
         let durable = Arc::new(Mutex::new(intent));
         let bytes_before = serde_json::to_vec(&*durable.lock().unwrap()).unwrap();
         let attempts = Arc::new(AtomicUsize::new(0));
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_tab_intent(
                 workspace,
-                BTreeSet::new(),
+                BTreeSet::from([session]),
                 Box::new(FailingIntentPort {
                     state: Arc::clone(&durable),
                     error: AgentTabIntentError::Unavailable,
                     attempts: Arc::clone(&attempts),
                 }),
             );
-        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let fence = runtime.restore_fence();
         assert!(runtime.restore_snapshot(
             fence.0,
             fence.1,
             vec![super::PaneRestoreTarget {
-                target: Target::Root(workspace),
+                target: Target::Session(session),
                 panes: vec![
                     LivePane {
                         terminal: first_terminal.clone(),
@@ -13855,28 +13940,28 @@ mod tests {
 
         // A generic-only pane has no Agent intent to persist, so the same
         // unavailable store cannot regress its normal tab controls.
-        let generic_first = scoped_terminal_ref(workspace, None);
-        let generic_second = scoped_terminal_ref(workspace, None);
+        let generic_first = scoped_terminal_ref(workspace, Some(session));
+        let generic_second = scoped_terminal_ref(workspace, Some(session));
         let empty = Arc::new(Mutex::new(AgentTabIntent::empty(workspace)));
         let generic_attempts = Arc::new(AtomicUsize::new(0));
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
         let mut generic_ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_tab_intent(
                 workspace,
-                BTreeSet::new(),
+                BTreeSet::from([session]),
                 Box::new(FailingIntentPort {
                     state: empty,
                     error: AgentTabIntentError::Unavailable,
                     attempts: Arc::clone(&generic_attempts),
                 }),
             );
-        let mut generic_runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let mut generic_runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let fence = generic_runtime.restore_fence();
         assert!(generic_runtime.restore_snapshot(
             fence.0,
             fence.1,
             vec![super::PaneRestoreTarget {
-                target: Target::Root(workspace),
+                target: Target::Session(session),
                 panes: vec![
                     LivePane {
                         terminal: generic_first.clone(),
@@ -13982,7 +14067,6 @@ mod tests {
                 interrupted: Vec::new(),
             }],
         );
-        let _ = runtime.apply_event(AppEvent::Key(AppKey::Down));
         let _ = runtime.apply_event(AppEvent::Key(AppKey::Enter));
         runtime.on_effect(&Effect::LaunchAgent {
             workspace,
@@ -14042,10 +14126,10 @@ mod tests {
     fn restore_open_panes_projects_live_runtimes_and_skips_dead_and_duplicates() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
-        let root_terminal = scoped_terminal_ref(workspace, None);
-        let root_agent = scoped_terminal_ref(workspace, None);
+        let root_terminal = scoped_terminal_ref(workspace, Some(session));
+        let root_agent = scoped_terminal_ref(workspace, Some(session));
         let session_terminal = scoped_terminal_ref(workspace, Some(session));
-        let dead = scoped_terminal_ref(workspace, None);
+        let dead = scoped_terminal_ref(workspace, Some(session));
         let entries = vec![
             TerminalInventoryEntry {
                 terminal: root_terminal.clone(),
@@ -14090,8 +14174,9 @@ mod tests {
 
         restore_open_panes(&mut ui, &mut runtime, terminal_geometry(20, 80));
 
-        // The active (root) pane shows exactly the two root runtimes, deduped.
-        assert_eq!(runtime.active_pane().tabs().len(), 2);
+        // All three managed-session runtimes are projected, with the duplicate
+        // terminal removed.
+        assert_eq!(runtime.active_pane().tabs().len(), 3);
         assert!(runtime.state().has_live_pane());
         // Every live runtime is attached and streaming; the dead one is not.
         assert!(ui.terminal_rows(&root_terminal, None).is_some());
@@ -14103,8 +14188,9 @@ mod tests {
     #[test]
     fn restored_terminal_and_agent_tabs_deliver_ordinary_closeup_input() {
         let workspace = WorkspaceId::new();
-        let terminal = scoped_terminal_ref(workspace, None);
-        let agent = scoped_terminal_ref(workspace, None);
+        let session = SessionId::new();
+        let terminal = scoped_terminal_ref(workspace, Some(session));
+        let agent = scoped_terminal_ref(workspace, Some(session));
         let inputs = Arc::new(Mutex::new(Vec::new()));
         let entries = vec![
             TerminalInventoryEntry {
@@ -14118,7 +14204,7 @@ mod tests {
                 live: true,
             },
         ];
-        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_context(
                 workspace,
@@ -14129,7 +14215,7 @@ mod tests {
                     inputs: inputs.clone(),
                 }),
             );
-        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let mut controls = LiveTerminalControls::default();
         let mut term = FakeTerminal::default();
 
@@ -14240,7 +14326,7 @@ mod tests {
         for at in [1_000, 1_100] {
             let _ = runtime.apply_event(AppEvent::Pointer {
                 column: 5,
-                row: 4,
+                row: 2,
                 at: std::time::Duration::from_millis(at),
             });
         }
@@ -17198,7 +17284,6 @@ mod tests {
                 }),
             );
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
-        let _ = runtime.handle_key(Key::Down);
         let _ = runtime.handle_key(Key::Enter);
         let (interaction, revision) = runtime.restore_fence();
         assert!(runtime.restore_snapshot(
@@ -17556,6 +17641,15 @@ mod tests {
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         super::resume_focused_interrupted_tab(&mut bare, &mut runtime, &mut pending);
         assert!(bare.pane_launches.is_empty());
+
+        // An Agent context with no active managed target stops at the runtime
+        // target boundary before looking for an interrupted tab.
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut inactive = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        super::resume_focused_interrupted_tab(&mut inactive, &mut runtime, &mut pending);
+        assert!(inactive.pane_launches.is_empty());
 
         // An Agent context whose selected tab is live, not interrupted.
         let history = interrupted_history(workspace, Some(session), true);

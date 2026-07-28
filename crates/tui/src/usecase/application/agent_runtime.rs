@@ -73,15 +73,20 @@ impl<P: AgentLaunchPort + TerminalPort> AgentRuntime<P> {
     }
 
     fn sync_live_pane(&mut self) {
-        // The active target's pane owns the live signal whether it is a session
-        // or the workspace root; both are keyed uniformly in the host.
-        let live = self.host.pane(self.state.active()).is_some_and(|runtime| {
-            runtime
-                .pane()
-                .tabs()
-                .iter()
-                .any(|tab| matches!(tab, PaneTab::Live(_)))
-        });
+        // The active managed session's pane owns the live signal. With no active
+        // managed session there is no live pane; the workspace root is not a
+        // fallback here.
+        let live = self
+            .state
+            .active()
+            .and_then(|session| self.host.pane(Target::Session(session)))
+            .is_some_and(|runtime| {
+                runtime
+                    .pane()
+                    .tabs()
+                    .iter()
+                    .any(|tab| matches!(tab, PaneTab::Live(_)))
+            });
         let _ = controller::update(&mut self.state, AppEvent::LivePaneAvailability(live));
     }
 }
@@ -391,7 +396,6 @@ mod tests {
             AgentRuntime::new(AppState::home(workspace, vec![session]), Fake::default());
         assert_eq!(runtime.state().workspace(), workspace);
 
-        let _ = runtime.update(AppEvent::Key(controller::AppKey::Down));
         let _ = runtime.update(AppEvent::Key(controller::AppKey::Enter));
         let effects = runtime.update(AppEvent::Key(controller::AppKey::SubmitCloseup(
             "agent".to_owned(),

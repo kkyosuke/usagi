@@ -95,8 +95,8 @@ pub struct WorkspaceRuntime {
 
 impl WorkspaceRuntime {
     /// Start a Home runtime for `workspace` with the daemon-authoritative
-    /// `sessions`. The initial selection and active target are the workspace
-    /// root, matching [`AppState::home`].
+    /// `sessions`. The first managed session is active when present; an empty
+    /// snapshot has no active pane target and never falls back to workspace root.
     #[must_use]
     pub fn new(workspace: usagi_core::domain::id::WorkspaceId, sessions: Vec<SessionId>) -> Self {
         Self::with_selection_mode(workspace, sessions, ModalSelectionMode::Action)
@@ -111,7 +111,7 @@ impl WorkspaceRuntime {
         modal_selection_mode: ModalSelectionMode,
     ) -> Self {
         let state = AppState::home(workspace, sessions);
-        let panes = PaneRegistry::new(state.active());
+        let panes = PaneRegistry::new(state.active().map(Target::Session));
         Self {
             state,
             panes,
@@ -534,7 +534,8 @@ impl WorkspaceRuntime {
             PaneSelection::Tab(
                 TabSelection::Pending(_) | TabSelection::Ready(_) | TabSelection::Interrupted(_),
             )
-            | PaneSelection::Target(_) => None,
+            | PaneSelection::Target(_)
+            | PaneSelection::None => None,
         }
     }
 
@@ -707,9 +708,9 @@ impl WorkspaceRuntime {
             },
             // An interrupted tab owns no daemon transport: closing it is purely
             // a display dismissal, which the shell persists through #506 intent.
-            PaneSelection::Tab(TabSelection::Interrupted(_)) | PaneSelection::Target(_) => {
-                CloseOutcome::default()
-            }
+            PaneSelection::Tab(TabSelection::Interrupted(_))
+            | PaneSelection::Target(_)
+            | PaneSelection::None => CloseOutcome::default(),
         };
         // A cancelled pending launch will never complete, so drop its focus gate
         // before the placeholder leaves the registry.
@@ -761,7 +762,9 @@ impl WorkspaceRuntime {
         &mut self,
         operation: OperationId,
     ) -> Result<ResumeCommand, ResumeRejection> {
-        let target = self.panes.active();
+        let Some(target) = self.panes.active() else {
+            return Err(ResumeRejection::NotResumable);
+        };
         let Some(pane) = self.selected_interrupted_pane() else {
             return Err(ResumeRejection::NotResumable);
         };
@@ -808,7 +811,9 @@ impl WorkspaceRuntime {
         relation: Option<&AgentResumeRelation>,
         terminal: &TerminalRef,
     ) -> Result<Vec<PaneRegistryEffect>, ResumeRejection> {
-        let target = self.panes.active();
+        let Some(target) = self.panes.active() else {
+            return Err(ResumeRejection::NotResumable);
+        };
         let Some(pane) = self.interrupted_pane(continuation) else {
             return Err(ResumeRejection::NotResumable);
         };
@@ -861,7 +866,9 @@ impl WorkspaceRuntime {
         operation: Option<OperationId>,
         message: String,
     ) {
-        let target = self.panes.active();
+        let Some(target) = self.panes.active() else {
+            return;
+        };
         let _ = reduce_registry(
             &mut self.panes,
             PaneRegistryEvent::Pane {
@@ -1020,7 +1027,7 @@ impl WorkspaceRuntime {
             PaneSelection::Tab(selection) => {
                 tabs.iter().position(|tab| tab_selection(tab) == *selection)
             }
-            PaneSelection::Target(_) => None,
+            PaneSelection::Target(_) | PaneSelection::None => None,
         };
         let index = match (current, direction) {
             (Some(index), TabDirection::Next) => (index + 1) % tabs.len(),
@@ -1032,11 +1039,13 @@ impl WorkspaceRuntime {
     }
 
     fn follow_active_target(&mut self) {
-        if self.panes.active() != self.state.active() {
-            let _ = reduce_registry(
-                &mut self.panes,
-                PaneRegistryEvent::SelectTarget(self.state.active()),
+        let active = self.state.active().map(Target::Session);
+        if self.panes.active() != active {
+            let event = active.map_or(
+                PaneRegistryEvent::ClearTarget,
+                PaneRegistryEvent::SelectTarget,
             );
+            let _ = reduce_registry(&mut self.panes, event);
         }
         self.sync_live_pane();
     }
@@ -1124,16 +1133,18 @@ mod tests {
     use chrono::Utc;
     use std::collections::BTreeMap;
     use usagi_core::domain::id::{
-        DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
+        AgentContinuationRef, DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef,
+        WorkspaceId, WorktreeId,
     };
     use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
 
     #[test]
     fn effective_prompt_mode_is_used_for_both_workspace_modals() {
         let workspace = WorkspaceId::new();
+        let session = SessionId::new();
         let mut runtime = WorkspaceRuntime::with_selection_mode(
             workspace,
-            Vec::new(),
+            vec![session],
             ModalSelectionMode::Prompt,
         );
 
@@ -1168,9 +1179,10 @@ mod tests {
     /// Drive the runtime into Closeup with the given session active.
     fn closeup_on(workspace: WorkspaceId, session: SessionId) -> WorkspaceRuntime {
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
-        let _ = runtime.handle_key(Key::Down); // select the session
+        // A single session is selected and active from the start; Enter activates
+        // it into Closeup.
         let _ = runtime.handle_key(Key::Enter); // activate → Closeup
-        assert_eq!(runtime.state().active(), Target::Session(session));
+        assert_eq!(runtime.state().active(), Some(session));
         assert!(matches!(
             runtime.state().route(),
             Route::Home(HomeMode::Closeup)
@@ -1578,12 +1590,23 @@ mod tests {
     }
 
     #[test]
-    fn new_starts_at_root_with_an_empty_pane() {
+    fn new_starts_on_the_first_session_with_an_empty_pane() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let runtime = WorkspaceRuntime::new(workspace, vec![session]);
-        assert_eq!(runtime.state().active(), Target::Root(workspace));
-        assert_eq!(runtime.panes().active(), Target::Root(workspace));
+        assert_eq!(runtime.state().active(), Some(session));
+        assert_eq!(runtime.panes().active(), Some(Target::Session(session)));
+        assert!(runtime.active_pane().tabs().is_empty());
+        assert!(!runtime.state().has_live_pane());
+        assert!(!runtime.wants_live_input());
+    }
+
+    #[test]
+    fn empty_home_has_no_active_pane_target() {
+        let workspace = WorkspaceId::new();
+        let runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        assert_eq!(runtime.state().active(), None);
+        assert_eq!(runtime.panes().active(), None);
         assert!(runtime.active_pane().tabs().is_empty());
         assert!(!runtime.state().has_live_pane());
         assert!(!runtime.wants_live_input());
@@ -1599,11 +1622,10 @@ mod tests {
         // ignores here (Left, which only moves the Yes/No quit focus) is inert.
         assert!(runtime.handle_key(Key::Passthrough(vec![0x1b])).is_empty());
         assert!(runtime.handle_key(Key::Left).is_empty());
-        assert!(runtime.handle_key(Key::Down).is_empty());
-        // Down selected the session; Enter now activates it.
+        // The single session is already selected; Enter activates it.
         let effects = runtime.handle_key(Key::Enter);
         assert!(effects.is_empty());
-        assert_eq!(runtime.state().active(), Target::Session(session));
+        assert_eq!(runtime.state().active(), Some(session));
         // Passthrough never reaches the reducer.
         assert!(runtime.handle_key(Key::Passthrough(vec![0x1b])).is_empty());
     }
@@ -1612,8 +1634,7 @@ mod tests {
     fn new_session_row_enter_emits_create_effect() {
         let workspace = WorkspaceId::new();
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
-        // Root, then + new session, activate it, then submit the form.
-        let _ = runtime.handle_key(Key::Down); // + new session
+        // An empty Home already rests on `+ new session`; open the form.
         let _ = runtime.handle_key(Key::Enter); // open create form
         let _ = runtime.handle_key(Key::Char('a'));
         let effects = runtime.handle_key(Key::Enter);
@@ -1630,7 +1651,7 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let runtime = closeup_on(workspace, session);
-        assert_eq!(runtime.panes().active(), Target::Session(session));
+        assert_eq!(runtime.panes().active(), Some(Target::Session(session)));
     }
 
     #[test]
@@ -1674,13 +1695,16 @@ mod tests {
         for at in [1_000, 1_100] {
             let _ = runtime.apply_event(AppEvent::Pointer {
                 column: 5,
-                row: 6,
+                row: 4,
                 at: std::time::Duration::from_millis(at),
             });
         }
 
-        assert_eq!(runtime.state().active(), Target::Session(second_session));
-        assert_eq!(runtime.panes().active(), Target::Session(second_session));
+        assert_eq!(runtime.state().active(), Some(second_session));
+        assert_eq!(
+            runtime.panes().active(),
+            Some(Target::Session(second_session))
+        );
         assert_eq!(runtime.focused_terminal(), Some(second_terminal));
         assert!(runtime.wants_live_input());
         assert_eq!(runtime.state().overlay(), None);
@@ -2007,17 +2031,17 @@ mod tests {
     }
 
     #[test]
-    fn on_effect_records_a_terminal_placeholder_for_the_root() {
+    fn on_effect_records_a_terminal_placeholder_for_the_active_session() {
         let workspace = WorkspaceId::new();
-        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
-        assert_eq!(runtime.state().active(), Target::Root(workspace));
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
         runtime.on_effect(&Effect::OpenTerminal {
-            target: Target::Root(workspace),
+            target: Target::Session(session),
             operation_id: OperationId::new(),
             arguments: String::new(),
         });
-        // The workspace root owns a pane strip like any target: the request
-        // records a pending placeholder the daemon completion later promotes.
+        // The active session owns a pane strip: the request records a pending
+        // placeholder the daemon completion later promotes.
         assert!(matches!(
             runtime.active_pane().tabs().last(),
             Some(PaneTab::Pending(pending)) if pending.kind == PaneKind::Terminal
@@ -2448,15 +2472,12 @@ mod tests {
         let session = SessionId::new();
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let history = interrupted_tab(workspace, session, true);
-        // Root is the initially selected target, so restore its history first and
-        // activate afterwards: exactly the cold-restart order the shell observes.
+        // The managed session is initially selected, so restore its history first
+        // and activate afterwards: exactly the cold-restart order the shell observes.
         with_history(
             &mut runtime,
-            Target::Root(workspace),
-            vec![super::InterruptedTab {
-                session_id: None,
-                ..history.clone()
-            }],
+            Target::Session(session),
+            vec![history.clone()],
         );
         assert!(matches!(
             runtime.state().route(),
@@ -2697,23 +2718,18 @@ mod tests {
     }
 
     #[test]
-    fn a_root_history_tab_resumes_with_the_same_ux_as_a_managed_session() {
+    fn a_second_session_history_tab_resumes_with_the_same_ux() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let mut runtime = closeup_on(workspace, session);
-        // Move back to the workspace root and open its Closeup surface.
-        let _ = runtime.apply_event(AppEvent::Key(AppKey::CtrlO));
-        let _ = runtime.handle_key(Key::Up);
-        let _ = runtime.handle_key(Key::Enter);
-        assert_eq!(runtime.panes().active(), Target::Root(workspace));
+        assert_eq!(runtime.panes().active(), Some(Target::Session(session)));
 
-        let mut history = interrupted_tab(workspace, session, true);
-        history.session_id = None;
-        history.last_terminal.session_id = None;
-        let target = history.target.as_mut().unwrap();
-        target.session_id = None;
-        let history = history;
-        with_history(&mut runtime, Target::Root(workspace), vec![history.clone()]);
+        let history = interrupted_tab(workspace, session, true);
+        with_history(
+            &mut runtime,
+            Target::Session(session),
+            vec![history.clone()],
+        );
         let _ = runtime.select_tab(TabDirection::Next);
 
         let command = runtime.resume_selected_tab(OperationId::new()).unwrap();
@@ -2803,5 +2819,30 @@ mod tests {
                 .iter()
                 .any(|tab| matches!(tab, PaneTab::Live(live) if live.terminal == generic))
         );
+    }
+
+    #[test]
+    fn resume_entry_points_are_inert_without_an_active_managed_target() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let continuation = AgentContinuationRef::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+
+        assert_eq!(
+            runtime.resume_selected_tab(OperationId::new()),
+            Err(ResumeRejection::NotResumable)
+        );
+        assert_eq!(
+            runtime.complete_tab_resume(
+                continuation,
+                OperationId::new(),
+                Some(continuation),
+                None,
+                &terminal_ref(workspace, session),
+            ),
+            Err(ResumeRejection::NotResumable)
+        );
+        runtime.fail_tab_resume(continuation, None, "ignored".to_owned());
+        assert_eq!(runtime.panes().active(), None);
     }
 }

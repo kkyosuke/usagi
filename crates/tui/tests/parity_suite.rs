@@ -342,7 +342,6 @@ fn home_frame_golden_covers_ansi_cjk_wide_and_tiny_geometry() {
     // frame clock. Keep this layout fixture independent of the calendar.
     projected_session.last_modified = Utc::now();
     let mut state = AppState::home(workspace, vec![session]);
-    let _ = update(&mut state, AppEvent::Key(AppKey::Down));
     let switch_projection = HomeProjection::from_state(
         &state,
         "東京",
@@ -400,7 +399,6 @@ fn controller_closeup_prefix_and_tab_gating_match_live_model() {
     let mut state = AppState::home(workspace, vec![session]);
 
     // 1/3: Enter reaches Closeup and a tab-less Closeup owns the action modal.
-    let _ = update(&mut state, AppEvent::Key(AppKey::Down));
     let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
     assert_eq!(
         state.route(),
@@ -692,7 +690,6 @@ fn home_frame_golden_covers_live_terminal_viewport() {
         PaneEvent::Select(PaneSelection::Tab(TabSelection::Live(term))),
     );
     let mut state = AppState::home(workspace, vec![session]);
-    let _ = update(&mut state, AppEvent::Key(AppKey::Down));
     let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
     let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
     let view = TerminalViewProjection {
