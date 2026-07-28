@@ -60,7 +60,7 @@ use crate::usecase::resources::retention::{
     GcReport, LogicalClock, RetentionLimits, collect_garbage,
 };
 use crate::usecase::resources::shard::{
-    OwnerShard, ShardDocument, ShardResource, retired_collectable,
+    CollectionBlocker, OwnerShard, ShardDocument, ShardResource, collectable, retired_collectable,
 };
 use crate::usecase::resources::{CasDocument, CasFile, ResourceError, ResourceFailure};
 use crate::usecase::runtime::{DurableRuntimeRecord, RuntimeStore, RuntimeStoreSnapshot};
@@ -489,6 +489,35 @@ impl ShardedRuntimeState {
         let ledger = collect_garbage(&self.allocator, limits, self.clock.as_ref())?;
         let shards = self.collect_retired(retained)?;
         Ok((ledger, shards))
+    }
+
+    /// Whether this generation's own runtime state is fully drained, so a
+    /// draining owner may retire itself.
+    ///
+    /// A draining generation keeps its process, socket, registry entry, and
+    /// every capacity claim until the last resource it owns is gone. This is the
+    /// observation that ends it: it reads this owner's shard and the shared
+    /// allocator and reports the first [`CollectionBlocker`] that still holds, or
+    /// `None` when a live resource, an in-flight command, an unconsumed outbox
+    /// event, and a capacity claim are all absent.
+    ///
+    /// The active successor records consumed events in the allocator, and this
+    /// owner then sweeps exactly those entries from its own outbox before the
+    /// check. Collection therefore requires a literal outbox count of zero; an
+    /// ACK in another document is evidence that permits this owner-local cleanup,
+    /// not a substitute for it. A draining owner issues no new claims — control
+    /// and spawn are refused for its role — so every count observed here only
+    /// ever falls, which is what lets the shard and the allocator be read
+    /// separately without a zero being taken back.
+    ///
+    /// # Errors
+    /// Returns the shard or allocator read failure.
+    pub fn self_collectable(&self) -> Result<Option<CollectionBlocker>, ResourceFailure> {
+        let allocator = self.allocator.load()?.to_document();
+        let (_, swept) = self
+            .shard
+            .update(|document| Ok(document.reclaim(&allocator)))?;
+        Ok(collectable(swept.document(), &allocator).err())
     }
 
     /// L1: every record that holds capacity has a durable claim first.

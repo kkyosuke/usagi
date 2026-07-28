@@ -12,13 +12,14 @@ use usagi_core::domain::terminal_launch::{
 };
 
 use super::*;
+use crate::usecase::authority::collection::DrainObservation;
 use crate::usecase::resources::allocator::{ClaimState, OperationOutcome};
 use crate::usecase::resources::fixture::{
     FakeClock, FileFault, MemoryArchive, MemoryFile, ObservedChildren, SharedBytes, policy,
     terminal, verified,
 };
 use crate::usecase::resources::migration::AdoptionRefusal;
-use crate::usecase::resources::shard::ResourceState;
+use crate::usecase::resources::shard::{CollectionBlocker, ResourceState};
 use crate::usecase::runtime::{DurableOperationOutcome, RuntimeState};
 use crate::usecase::terminal::TerminalReconcileState;
 
@@ -1095,6 +1096,34 @@ fn a_retired_shard_is_collected_only_once_nothing_retains_it() {
 }
 
 #[test]
+fn a_draining_owner_observes_its_own_shard_and_global_claim_together() {
+    let world = World::new();
+    let owner = DaemonGeneration::new();
+    let resource = terminal(owner);
+    let operation = OperationId::new();
+    let empty = world.role(owner, GenerationRole::Draining, ObservedChildren::new());
+    assert_eq!(DrainObservation::blocker(&empty).unwrap(), None);
+
+    let mut store = ShardedTerminalStore::new(world.role(
+        owner,
+        GenerationRole::Draining,
+        ObservedChildren::new().with(71, "start-71"),
+    ));
+    store
+        .save(terminal_snapshot(vec![terminal_record(
+            &resource,
+            operation,
+            TerminalRuntimeState::Running,
+            Some(process(71, "start-71")),
+        )]))
+        .unwrap();
+    assert_eq!(
+        empty.self_collectable().unwrap(),
+        Some(CollectionBlocker::LiveResource)
+    );
+}
+
+#[test]
 fn a_crashed_owners_published_exit_is_still_consumed_once() {
     let world = World::new();
     let old = DaemonGeneration::new();
@@ -1227,6 +1256,7 @@ fn a_store_failure_is_reported_as_a_refused_save() {
             .is_err()
     );
     assert!(unreadable().collect_retired(&BTreeSet::new()).is_err());
+    assert!(unreadable().self_collectable().is_err());
 }
 
 #[test]
