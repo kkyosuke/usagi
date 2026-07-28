@@ -1791,8 +1791,9 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 mod tests {
     use super::{
         CHROME_ROWS, CREATE_SKELETON_ROWS, CreateDraft, GIBIBYTE, GitDiff, HomeProjection,
-        LEFT_WIDTH, MEBIBYTE, ProjectedSession, TerminalViewProjection, Workspace,
-        abnormal_daemon_speech, create_skeleton_lines, feedback_label, format_memory, load_style,
+        LEFT_WIDTH, MEBIBYTE, ProjectedSession, SidebarDiffColumns, TerminalViewProjection,
+        Workspace, abnormal_daemon_speech, create_skeleton_lines, feedback_label, format_memory,
+        home_left_pane, home_row_lines_at, home_viewport_start, load_style,
         new_session_input_lines, pane_tab_label, pane_tab_selected, phase_label, render_home,
         resume_label, terminal_point_at, with_footer_gap,
     };
@@ -3860,5 +3861,35 @@ mod tests {
             .clone()
             .unwrap();
         assert!(detail.contains("resuming"), "{detail}");
+    }
+
+    #[test]
+    fn rootless_sidebar_handles_rows_that_do_not_fit_and_stale_root_projection() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let state = AppState::home(workspace, vec![session]);
+        let sessions = [projected_session(session, "session", "/work/session")];
+        let home = HomeProjection::from_state(&state, "repo", Path::new("/repo"), &sessions);
+
+        // One content line cannot fit the first two-line session row; the footer
+        // still occupies the final line without partial-row rendering.
+        let pane = home_left_pane(2, LEFT_WIDTH, &home, now());
+        assert_eq!(pane.len(), 2);
+        assert!(!pane.iter().any(|line| strip(line).contains("session")));
+
+        let rows = home.rows();
+        assert_eq!(home_viewport_start(LEFT_WIDTH, &home, &rows, 1, 1), 1);
+
+        // Root is no longer a row, but a stale synthetic projection stays total
+        // and cannot reveal a hidden `main` action.
+        let stale_lines = home_row_lines_at(
+            LEFT_WIDTH,
+            &home,
+            Selection::Target(Target::Root(workspace)),
+            SidebarDiffColumns::default(),
+            now(),
+        );
+        assert_eq!(stale_lines.len(), 1);
+        assert!(!strip(&stale_lines[0]).contains("main"));
     }
 }

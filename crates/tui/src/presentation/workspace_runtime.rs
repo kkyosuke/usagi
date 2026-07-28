@@ -1122,7 +1122,8 @@ mod tests {
     use chrono::Utc;
     use std::collections::BTreeMap;
     use usagi_core::domain::id::{
-        DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
+        AgentContinuationRef, DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef,
+        WorkspaceId, WorktreeId,
     };
     use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
 
@@ -2773,5 +2774,30 @@ mod tests {
                 .iter()
                 .any(|tab| matches!(tab, PaneTab::Live(live) if live.terminal == generic))
         );
+    }
+
+    #[test]
+    fn resume_entry_points_are_inert_without_an_active_managed_target() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let continuation = AgentContinuationRef::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+
+        assert_eq!(
+            runtime.resume_selected_tab(OperationId::new()),
+            Err(ResumeRejection::NotResumable)
+        );
+        assert_eq!(
+            runtime.complete_tab_resume(
+                continuation,
+                OperationId::new(),
+                Some(continuation),
+                None,
+                &terminal_ref(workspace, session),
+            ),
+            Err(ResumeRejection::NotResumable)
+        );
+        runtime.fail_tab_resume(continuation, None, "ignored".to_owned());
+        assert_eq!(runtime.panes().active(), None);
     }
 }

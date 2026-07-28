@@ -1323,4 +1323,45 @@ mod tests {
             assert!(!encoded.contains(forbidden));
         }
     }
+
+    #[test]
+    fn inventory_only_discovery_sorts_root_and_managed_scopes_deterministically() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let root_continuation = AgentContinuationRef::new();
+        let session_continuation = AgentContinuationRef::new();
+        let root_terminal = terminal(workspace, None, WorktreeId::new());
+        let session_terminal = terminal(workspace, Some(session), WorktreeId::new());
+        let inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![
+                runtime(
+                    session_continuation,
+                    &session_terminal,
+                    AgentRuntimeInventoryState::Live,
+                ),
+                runtime(
+                    root_continuation,
+                    &root_terminal,
+                    AgentRuntimeInventoryState::Live,
+                ),
+            ],
+            resumable: Vec::new(),
+        };
+        let mut intent = AgentTabIntent::empty(workspace);
+        let projection = intent.reconcile(
+            &[live_entry(session_terminal), live_entry(root_terminal)],
+            &inventory,
+            &BTreeSet::from([session]),
+        );
+
+        assert_eq!(
+            projection
+                .targets
+                .iter()
+                .map(|target| target.session_id)
+                .collect::<Vec<_>>(),
+            [None, Some(session)]
+        );
+    }
 }

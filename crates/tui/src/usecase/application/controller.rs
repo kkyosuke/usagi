@@ -7386,4 +7386,55 @@ mod tests {
             let _ = update_editor_key(&mut state, &key);
         }
     }
+
+    #[test]
+    fn managed_navigation_defensive_boundaries_never_create_a_root_target() {
+        let (workspace, session, dropped) = ids();
+
+        // A viewport with only one content line cannot fit a two-line session
+        // row. Hit-testing follows the renderer and stops before that row.
+        let narrow = sized_home(workspace, vec![session], 100, 4);
+        assert_eq!(narrow.sidebar_selection_at(5, 2), None);
+
+        // A synthetic stale root cursor is repaired to the first managed row.
+        let mut state = AppState::home(workspace, vec![session]);
+        state.selected = Selection::Target(Target::Root(workspace));
+        state.reconcile_sessions(&[]);
+        assert_eq!(
+            state.selected(),
+            Selection::Target(Target::Session(session))
+        );
+
+        // Losing the active session while its launcher is open returns to
+        // Switch and clears the stale launcher state.
+        state.active = Some(dropped);
+        state.route = Route::Home(HomeMode::Closeup);
+        state.overlay = Some(Overlay::Closeup);
+        state.closeup_action_forced = true;
+        state.reconcile_sessions(&[dropped]);
+        assert_eq!(state.active(), Some(session));
+        state.active = None;
+        state.reconcile_sessions(&[session]);
+        assert_eq!(state.route(), Route::Home(HomeMode::Switch));
+        assert_eq!(state.overlay(), None);
+        assert!(!state.closeup_action_forced);
+
+        // Even an internally stale Closeup cannot reopen actions or target-scoped
+        // overlays, and synthetic root/stale selections cannot activate.
+        state.route = Route::Home(HomeMode::Closeup);
+        assert!(update_management_key(&mut state, AppKey::CtrlA).is_empty());
+        assert_eq!(state.route(), Route::Home(HomeMode::Switch));
+        for key in [AppKey::OpenNotes, AppKey::OpenPrs, AppKey::OpenPreview] {
+            assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+            assert_eq!(state.overlay(), None);
+        }
+        for selection in [
+            Selection::Target(Target::Root(workspace)),
+            Selection::Target(Target::Session(dropped)),
+        ] {
+            state.selected = selection;
+            assert!(activate_selected(&mut state).is_empty());
+            assert_eq!(state.active(), None);
+        }
+    }
 }

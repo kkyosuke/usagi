@@ -2959,6 +2959,23 @@ mod tests {
 
     // ---- tests ---------------------------------------------------------------
 
+    #[test]
+    fn retained_resources_lists_live_agent_terminals() {
+        let mut runtime = runtime();
+        let admission = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &intent(None),
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+
+        assert_eq!(
+            runtime.retained_resources(),
+            std::iter::once(admission.terminal.terminal_id.as_str()).collect()
+        );
+    }
+
     /// #522: every admission and every final — direct, replayed, or hydrated after
     /// a restart — states the operation it belongs to and the digest of the intent
     /// it was admitted for, so a client can refuse an answer that means something

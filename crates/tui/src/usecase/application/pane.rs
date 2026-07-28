@@ -388,6 +388,11 @@ pub fn reduce_registry(
 }
 
 /// Route a tab command only when the active target's tab owns input.
+///
+/// # Panics
+///
+/// Panics if the registry reports a tab input owner without an active target,
+/// which the [`PaneRegistry::input_owner`] contract makes unreachable.
 #[must_use]
 pub fn route_tab_command(
     registry: &mut PaneRegistry,
@@ -396,9 +401,9 @@ pub fn route_tab_command(
     if registry.input_owner() != PaneInputOwner::Tab {
         return Vec::new();
     }
-    let Some(target) = registry.active else {
-        return Vec::new();
-    };
+    let target = registry
+        .active
+        .expect("tab input owner always has an active target");
     match command {
         PaneTabCommand::Select(selection) => reduce_registry(
             registry,
@@ -2559,6 +2564,61 @@ mod tests {
         assert_eq!(
             registry.active_pane().selected(),
             &PaneSelection::Target(target)
+        );
+    }
+
+    #[test]
+    fn optional_registry_state_is_inert_and_live_inventory_skips_non_live_tabs() {
+        let target = target();
+        let operation = OperationId::new();
+        let live = terminal(target);
+        let history = interrupted(target, true);
+        let mut registry = PaneRegistry::new(target);
+        registry.entries[0].pane.tabs = vec![
+            PaneTab::Pending(PendingPane {
+                operation,
+                target,
+                kind: PaneKind::Terminal,
+            }),
+            PaneTab::Ready(PendingPane {
+                operation: OperationId::new(),
+                target,
+                kind: PaneKind::Diff,
+            }),
+            PaneTab::Interrupted(InterruptedPane {
+                tab: history,
+                resuming: None,
+            }),
+            PaneTab::Live(LivePane {
+                terminal: live.clone(),
+                kind: PaneKind::Agent,
+            }),
+        ];
+        assert_eq!(registry.live_terminals(), vec![live]);
+
+        assert!(
+            reduce_registry(
+                &mut registry,
+                PaneRegistryEvent::Pane {
+                    target,
+                    event: PaneEvent::Select(PaneSelection::None),
+                },
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "target-scoped pane restore has an active target")]
+    fn target_scoped_restore_rejects_an_impossible_none_selection() {
+        let mut state = PaneState::new(PaneSelection::None);
+        let _ = reduce(
+            &mut state,
+            PaneEvent::RestoreBatch {
+                panes: Vec::new(),
+                selected: None,
+                replace_order: true,
+            },
         );
     }
 }
