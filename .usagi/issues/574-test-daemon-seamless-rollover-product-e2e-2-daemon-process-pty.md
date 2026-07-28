@@ -1,14 +1,14 @@
 ---
 number: 574
 title: test(daemon): seamless rollover の product E2E を 2 daemon process と実 PTY で固定する
-status: in-progress
+status: done
 priority: high
 labels: [review, v2, daemon, lifecycle, test]
 dependson: [572, 573]
 related: [508, 516, 559, 572, 573]
 parent: 559
 created_at: 2026-07-27T22:58:43.948747+00:00
-updated_at: 2026-07-28T23:24:23.510218+00:00
+updated_at: 2026-07-28T23:44:51.304835+00:00
 ---
 
 ## 問題・根拠
