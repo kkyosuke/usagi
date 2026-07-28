@@ -174,7 +174,7 @@ pub fn run<
             writeln!(out, "{line}")
         }
         DaemonCommand::Replace { operation, mode } => {
-            let line = usecase::replacement::replace_daemon_with_rollover(
+            let line = usecase::replacement::replace_daemon(
                 env.store,
                 env.probe,
                 env.terminator,
@@ -386,6 +386,57 @@ mod tests {
             run(&mut buf, command, &info(), &env).unwrap();
             assert_eq!(String::from_utf8(buf).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn run_routes_a_live_planned_replacement_to_the_rollover_port() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        store.save(&DaemonRecord::new(4321)).unwrap();
+        let (probe, terminator, shutdown, sleeper) = (
+            FixedProbe(true),
+            RecordingTerminator::default(),
+            ImmediateShutdown,
+            NoopSleeper,
+        );
+        let launcher = TestLauncher::idle(&store);
+        let ready = NoopReady;
+        let env = DaemonEnv {
+            authority: &FakeAuthority::default(),
+            standby_endpoint: &NoopStandbyEndpoint,
+            standby_authority: &CountingStandbyAuthority::default(),
+            store: &store,
+            probe: &probe,
+            terminator: &terminator,
+            ready: &ready,
+            shutdown: &shutdown,
+            launcher: &launcher,
+            sleeper: &sleeper,
+            lock: &FakeLock::Acquired,
+            workspace: &FakeWorkspaceFence::Acquired,
+            pid: 4321,
+            census: &Owning(1),
+            seamless: None,
+            rollover: &NoopRollover,
+        };
+        let mut buf = Vec::new();
+        run(
+            &mut buf,
+            DaemonCommand::Replace {
+                operation: Some(usagi_core::infrastructure::ipc::OperationId(
+                    "build-rollover-v1-live".into(),
+                )),
+                mode: TransitionMode::Planned,
+            },
+            &info(),
+            &env,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "rolled over build-rollover-v1-live\n"
+        );
+        assert!(terminator.terminated().is_empty());
+        assert_eq!(launcher.launches(), 0);
     }
 
     #[test]

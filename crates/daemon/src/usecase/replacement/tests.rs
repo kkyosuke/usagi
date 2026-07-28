@@ -8,9 +8,9 @@ use usagi_core::infrastructure::daemon::DaemonRecordStore;
 use usagi_core::infrastructure::ipc::{BuildIdentity, OperationId, build_identity};
 
 use super::{
-    LiveResources, ReplacementPlan, ResourceCensus, SeamlessRefusal, StopPlan, TransitionMode,
-    manual_operation_id, plan_replacement, plan_stop, replace_daemon, seamless_refusal,
-    stop_daemon,
+    LiveResources, ReplacementPlan, ResourceCensus, RolloverRequester, SeamlessRefusal, StopPlan,
+    TransitionMode, manual_operation_id, plan_replacement, plan_stop, replace_daemon,
+    seamless_refusal, stop_daemon,
 };
 use crate::test_support::{
     FixedProbe, InMemoryRecordFile, NoopReady, NoopSleeper, RecordingTerminator, TestLauncher,
@@ -85,6 +85,22 @@ struct FailingCensus;
 impl ResourceCensus for FailingCensus {
     fn live(&self) -> io::Result<LiveResources> {
         Err(io::Error::other("runtime store unreadable"))
+    }
+}
+
+struct NeverRollover;
+
+impl RolloverRequester for NeverRollover {
+    fn rollover(&self, _operation: &OperationId) -> io::Result<String> {
+        panic!("this replacement plan must not request a rollover")
+    }
+}
+
+struct SuccessfulRollover;
+
+impl RolloverRequester for SuccessfulRollover {
+    fn rollover(&self, operation: &OperationId) -> io::Result<String> {
+        Ok(format!("rolled over {}", operation.0))
     }
 }
 
@@ -345,7 +361,8 @@ fn no_live_owner_is_never_censused_and_never_blocks_a_transition() {
             &NoopSleeper,
             &NoopReady,
             &census,
-            &SeamlessRefusal::NoGenerationRegistry,
+            Some(&SeamlessRefusal::NoGenerationRegistry),
+            &NeverRollover,
             TransitionMode::Planned,
             None,
             &info(),
@@ -468,7 +485,8 @@ fn a_census_failure_stops_a_transition_before_it_signals_anything() {
         &NoopSleeper,
         &NoopReady,
         &FailingCensus,
-        &SeamlessRefusal::NoGenerationRegistry,
+        Some(&SeamlessRefusal::NoGenerationRegistry),
+        &NeverRollover,
         TransitionMode::Cold,
         None,
         &info(),
@@ -497,7 +515,8 @@ fn replacing_an_idle_daemon_performs_the_cold_transition_under_its_operation() {
             &NoopSleeper,
             &NoopReady,
             &FixedCensus::of(0, 0),
-            &SeamlessRefusal::NoGenerationRegistry,
+            Some(&SeamlessRefusal::NoGenerationRegistry),
+            &NeverRollover,
             TransitionMode::Planned,
             Some(&operation),
             &info(),
@@ -523,7 +542,8 @@ fn a_replacement_without_a_safe_operation_key_still_reports_the_transition() {
             &NoopSleeper,
             &NoopReady,
             &FixedCensus::of(0, 0),
-            &SeamlessRefusal::NoGenerationRegistry,
+            Some(&SeamlessRefusal::NoGenerationRegistry),
+            &NeverRollover,
             TransitionMode::Planned,
             None,
             &info(),
@@ -551,7 +571,8 @@ fn a_failed_cold_transition_propagates_its_own_error() {
         &NoopSleeper,
         &NoopReady,
         &FixedCensus::of(0, 0),
-        &SeamlessRefusal::NoGenerationRegistry,
+        Some(&SeamlessRefusal::NoGenerationRegistry),
+        &NeverRollover,
         TransitionMode::Planned,
         Some(&operation),
         &info(),
@@ -578,7 +599,8 @@ fn replacing_a_busy_daemon_is_refused_and_names_the_missing_prerequisite() {
         &NoopSleeper,
         &NoopReady,
         &FixedCensus::of(0, 3),
-        &SeamlessRefusal::NoGenerationRegistry,
+        Some(&SeamlessRefusal::NoGenerationRegistry),
+        &NeverRollover,
         TransitionMode::Planned,
         None,
         &info(),
@@ -589,6 +611,55 @@ fn replacing_a_busy_daemon_is_refused_and_names_the_missing_prerequisite() {
     assert!(error.to_string().contains("3 generic terminal(s)"));
     assert!(error.to_string().contains("no generation registry exists"));
     // Effect zero: the old daemon is untouched and no successor was launched.
+    assert!(terminator.terminated().is_empty());
+    assert_eq!(launcher.launches(), 0);
+    assert_eq!(store.load().unwrap(), Some(running));
+}
+
+#[test]
+fn seamless_rollover_requires_and_forwards_the_durable_operation() {
+    let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+    let running = DaemonRecord::new(1111);
+    store.save(&running).unwrap();
+    let launcher = TestLauncher::idle(&store);
+    let terminator = RecordingTerminator::default();
+
+    let missing = replace_daemon(
+        &store,
+        &FixedProbe(true),
+        &terminator,
+        &launcher,
+        &NoopSleeper,
+        &NoopReady,
+        &FixedCensus::of(1, 0),
+        None,
+        &SuccessfulRollover,
+        TransitionMode::Planned,
+        None,
+        &info(),
+    )
+    .unwrap_err();
+    assert!(missing.to_string().contains("durable rollover operation"));
+
+    let operation = OperationId("build-rollover-v1-seamless".into());
+    assert_eq!(
+        replace_daemon(
+            &store,
+            &FixedProbe(true),
+            &terminator,
+            &launcher,
+            &NoopSleeper,
+            &NoopReady,
+            &FixedCensus::of(1, 0),
+            None,
+            &SuccessfulRollover,
+            TransitionMode::Planned,
+            Some(&operation),
+            &info(),
+        )
+        .unwrap(),
+        "rolled over build-rollover-v1-seamless"
+    );
     assert!(terminator.terminated().is_empty());
     assert_eq!(launcher.launches(), 0);
     assert_eq!(store.load().unwrap(), Some(running));

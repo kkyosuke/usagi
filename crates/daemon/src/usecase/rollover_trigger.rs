@@ -7,7 +7,6 @@
 
 use std::fmt;
 
-use usagi_core::domain::id::DaemonGeneration;
 use usagi_core::infrastructure::ipc::{OperationId, ServerHello};
 
 use super::authority::admission::AdmissionGate;
@@ -119,12 +118,6 @@ pub fn execute(
     .map_err(Into::into)
 }
 
-/// Extract a canonical generation from the successor hello for tests/adapters.
-#[must_use]
-pub fn successor_generation(hello: &ServerHello) -> Option<DaemonGeneration> {
-    DaemonGeneration::parse(&hello.daemon_generation.0).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use usagi_core::domain::id::{ConnectionId, DaemonGeneration};
@@ -137,6 +130,7 @@ mod tests {
     };
     use crate::usecase::authority::handoff::PublishedLocator;
     use crate::usecase::authority::registry::GenerationEntry;
+    use crate::usecase::authority::registry::{RegistryError, RegistryFailure};
     use crate::usecase::authority::routing::RolloverRefusal;
     use crate::usecase::authority::routing::RoutingLedger;
     use crate::usecase::authority::standby::StandbyProbe;
@@ -195,6 +189,143 @@ mod tests {
             ledger: RoutingLedger::new(),
             next,
         }
+    }
+
+    #[test]
+    fn every_failure_has_a_stable_display_message() {
+        let failures = [
+            RolloverTriggerFailure::Registry(RegistryFailure::from(RegistryError::UnknownSchema)),
+            RolloverTriggerFailure::NoActiveGeneration,
+            RolloverTriggerFailure::ActiveGenerationMismatch,
+            RolloverTriggerFailure::NoVerifiedStandby,
+            RolloverTriggerFailure::MultipleVerifiedStandbys,
+            RolloverTriggerFailure::Probe(std::io::Error::other("offline")),
+            RolloverTriggerFailure::Readiness(ReadinessRefusal::IdentityMismatch),
+            RolloverTriggerFailure::Handoff(HandoffFailure::from(RegistryError::StaleRevision)),
+        ];
+        for failure in failures {
+            assert!(!failure.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn registry_load_failure_is_typed_without_a_probe() {
+        let world = world();
+        world.file.fail_read(true);
+        let probe = RecordingProbe::new(ProbeReply::Failure("must not probe"));
+        assert!(matches!(
+            execute(
+                &world.registry,
+                &world.locator,
+                &world.gate,
+                &world.ledger,
+                &probe,
+                &operation("registry"),
+            ),
+            Err(RolloverTriggerFailure::Registry(_))
+        ));
+        assert!(probe.calls().is_empty());
+    }
+
+    #[test]
+    fn missing_or_mismatched_active_and_missing_successor_are_typed() {
+        let empty = registry(2).0;
+        let probe = RecordingProbe::new(ProbeReply::Failure("must not probe"));
+        let gate = AdmissionGate::new(DaemonGeneration::new(), GenerationRole::Active);
+        assert!(matches!(
+            execute(
+                &empty,
+                &MemoryLocator::default(),
+                &gate,
+                &RoutingLedger::new(),
+                &probe,
+                &operation("empty"),
+            ),
+            Err(RolloverTriggerFailure::NoActiveGeneration)
+        ));
+
+        let world = world();
+        let wrong_gate = AdmissionGate::new(DaemonGeneration::new(), GenerationRole::Active);
+        assert!(matches!(
+            execute(
+                &world.registry,
+                &world.locator,
+                &wrong_gate,
+                &world.ledger,
+                &probe,
+                &operation("wrong-active"),
+            ),
+            Err(RolloverTriggerFailure::ActiveGenerationMismatch)
+        ));
+
+        world
+            .registry
+            .update(|document| document.transition(world.next, GenerationRole::Retired))
+            .unwrap();
+        assert!(matches!(
+            execute(
+                &world.registry,
+                &world.locator,
+                &world.gate,
+                &world.ledger,
+                &probe,
+                &operation("no-successor"),
+            ),
+            Err(RolloverTriggerFailure::NoVerifiedStandby)
+        ));
+        assert!(probe.calls().is_empty());
+    }
+
+    #[test]
+    fn multiple_verified_standbys_are_refused_before_probe() {
+        let (registry, _) = registry(3);
+        let old = DaemonGeneration::new();
+        let first = DaemonGeneration::new();
+        let second = DaemonGeneration::new();
+        registry
+            .update(|document| {
+                document.generations.push(GenerationEntry {
+                    generation: old,
+                    role: GenerationRole::Active,
+                    endpoint: "generations/old/sock".into(),
+                    process: process(1),
+                    expected_build: build("old"),
+                    verified_build: Some(build("old")),
+                    revision: 1,
+                });
+                document.current = Some(old);
+                Ok(())
+            })
+            .unwrap();
+        for (generation, pid) in [(first, 2), (second, 3)] {
+            registry
+                .update(|document| {
+                    document.register_standby(
+                        3,
+                        generation,
+                        format!("generations/{generation}/sock"),
+                        process(pid),
+                        build("next"),
+                    )
+                })
+                .unwrap();
+            registry
+                .update(|document| document.verify_standby_build(generation, &build("next")))
+                .unwrap();
+        }
+        let probe = RecordingProbe::new(ProbeReply::Failure("must not probe"));
+        assert!(matches!(
+            execute(
+                &registry,
+                &MemoryLocator::default(),
+                &AdmissionGate::new(old, GenerationRole::Active),
+                &RoutingLedger::new(),
+                &probe,
+                &operation("multiple"),
+            ),
+            Err(RolloverTriggerFailure::MultipleVerifiedStandbys)
+        ));
+        assert!(probe.calls().is_empty());
     }
 
     #[test]

@@ -367,7 +367,7 @@ pub fn stop_daemon<F: RecordFile, P: LivenessProbe, T: Terminator, K: Sleeper>(
 // terminator, launcher, sleeper, stale cleanup, census) plus the operation
 // identity and app info; grouping them would only hide the composition wiring.
 #[allow(clippy::too_many_arguments)]
-pub fn replace_daemon_with_rollover<
+pub fn replace_daemon<
     F: RecordFile,
     P: LivenessProbe,
     T: Terminator,
@@ -416,55 +416,6 @@ pub fn replace_daemon_with_rollover<
             Err(refuse_live("replace the daemon", live, Some(&seamless)))
         }
     }
-}
-
-struct UnavailableRollover;
-
-impl RolloverRequester for UnavailableRollover {
-    fn rollover(&self, _operation: &OperationId) -> io::Result<String> {
-        Err(io::Error::other("seamless rollover is unavailable"))
-    }
-}
-
-/// Compatibility entry point for callers that can only perform cold/refused
-/// replacement. Shipping composition uses [`replace_daemon_with_rollover`].
-///
-/// # Errors
-/// Returns the census, refusal, or cold replacement failure.
-#[allow(clippy::too_many_arguments)]
-pub fn replace_daemon<
-    F: RecordFile,
-    P: LivenessProbe,
-    T: Terminator,
-    L: DaemonLauncher,
-    K: Sleeper,
->(
-    store: &DaemonRecordStore<F>,
-    probe: &P,
-    terminator: &T,
-    launcher: &L,
-    sleeper: &K,
-    stale_cleanup: &dyn StaleDaemonCleanup,
-    census: &dyn ResourceCensus,
-    seamless: &SeamlessRefusal,
-    mode: TransitionMode,
-    operation: Option<&OperationId>,
-    info: &AppInfo,
-) -> io::Result<String> {
-    replace_daemon_with_rollover(
-        store,
-        probe,
-        terminator,
-        launcher,
-        sleeper,
-        stale_cleanup,
-        census,
-        Some(seamless),
-        &UnavailableRollover,
-        mode,
-        operation,
-        info,
-    )
 }
 
 #[cfg(test)]
