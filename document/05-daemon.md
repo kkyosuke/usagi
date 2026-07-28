@@ -136,7 +136,7 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 | `usagi daemon start` | detached `serve` を起動し、`daemon.json` に稼働中の pid が登録されるまで待つ。すでに稼働中なら新しい process を起動しない |
 | `usagi daemon status` | lifecycle record と exact process-start identity の観測から running / stale / unverified / absent を表示する。stale は owner 消滅と PID 再利用を区別した文言で報告し、どちらも reclaimable であることを示す |
 | `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。live runtime を持つ daemon は `--force` なしでは拒否する（[planned replacement](#planned-replacement)）。stale record（owner 消滅・PID 再利用のいずれも）は process に signal を送らず、singleton lock 下で stale endpoint を回収してから消去する。unverified record は signal・回収とも拒否する |
-| `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime を持つ daemon は `--force` なしでは拒否する。実行される transition は cold であり、active / draining handoff は行わない |
+| `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime が無ければ cold transition、live runtime があれば standby を起動し、old active へ `rollover` IPC verb を送って gated handoff を行う。`--force` は live runtime を明示的に破棄する cold transition |
 | `usagi daemon replace` | exact artifact の意図的な replacement trigger を要求し、その operation で `restart` と同じ transition を実行する。同じ artifact pair / channel は同じ operation ID へ収束する |
 | `usagi daemon` / `usagi daemon serve` | 前景で daemon を active role で serve する。`serve` は内部用の subcommand であり、[workspace / data directory の 2 段 fence](#単一-daemon-の-2-段-fence)を取得してから公開し、[custody を失うと自主終了する](#custody-喪失による-self-shutdown) |
 | `usagi daemon serve --standby` | 前景で daemon を standby role で常駐させる（内部用）。fence を取らず、`daemon.json` も `current.json` も書かず、private endpoint だけを bind して registry に standby として登録する（[standby process の lifecycle](#standby-process-の-lifecycle)） |
@@ -394,14 +394,14 @@ seamless rollover は old process を draining generation として生かした�
 replacement 後も維持する。2 process を安全に運用する authority は
 [cross-process generation authority](#cross-process-generation-authority) と
 [owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
-に実装済みである。前提のうち次の 3 つは production に配線済みで、残るのは handoff を**起動する** lifecycle だけである。
+に実装済みである。shipping replacement は次の配線をすべて使う。
 
 | 前提 | 状態 |
 |---|---|
 | authority を渡す**元**（active generation）が registry に登録される | `serve` が起動時に登録する（[first activation](#first-activation)） |
 | authority を渡す**先**（standby process）が起動して registry に登録される | `serve --standby` が登録し readiness 後に `verified_build` を立てる（[standby process の lifecycle](#standby-process-の-lifecycle)） |
 | active generation が request ごとに role を決め直し、rollover の routing 前提を判定できる | active generation が [admission fence](#admission-fence) と [routing 前提条件](#rollover-の-routing-前提条件)の ledger を通して serve する |
-| 検証済み standby を active へ昇格させる handoff の起動 | **未実装**。`standby not admitted` がこれを名指す |
+| 検証済み standby を active へ昇格させる handoff の起動 | CLI が standby を stage し、old active へ durable operation ID 付き `rollover` IPC verb を送る。old active が successor hello を再検証し、自 process の gate で `execute_gated_rollover` を駆動する |
 
 seamless refusal は registry を読み、欠けている前提を名前で示す。
 
@@ -410,8 +410,8 @@ seamless refusal は registry を読み、欠けている前提を名前で示�
 | `no generation registry` | registry が存在しない。この data directory で daemon が一度も起動していない状態だけがこれに該当する |
 | `registry schema unsupported` | registry がこの build の書く schema ではない |
 | `registry unreadable` | registry を読めない / parse できない。fail closed |
-| `no verified standby` | readiness 後に artifact identity を検証済みの standby が居ない。standby process が起動していない稼働中 daemon に対する答えはこれである |
-| `standby not admitted` | 検証済み standby は居るが、この build には serve 中の standby を admit する lifecycle が無い。[standby process](#standby-process-の-lifecycle) が readiness を通した状態に対する答えはこれである |
+| `no live registered active` | registry の active と exact process identity の生存を一致させられない |
+| `generation limit` | retained generation が上限に達しており、standby を追加できない |
 
 registry へ登録された active generation 自身は standby として数えない。`verified_build` は
 「その generation の hello がこの artifact を証明した」という意味であり、active は standby role を抜けた
@@ -423,6 +423,9 @@ generation なので、seamless の successor 候補にはならない。
 | live runtime | 要求 | 結果 |
 |---|---|---|
 | 0 | planned | cold transition |
+| 1 以上 | planned、seamless refusal なし | standby を stage し、old active の gate を通した seamless rollover |
+| 1 以上 | planned、seamless refusal あり | typed refusal。old active / current / PTY は維持 |
+| 1 以上 | `--force` | 明示的な cold transition |
 | 1 以上 | planned | 拒否。signal を送らず、`current` も PTY も registry も変更しない |
 | 1 以上 | `--force`（明示 cold transition） | cold transition |
 
@@ -1410,6 +1413,7 @@ wire request をこの表の縦軸（work の種類）へ写す分類は 1 か�
 
 | wire の `kind`（terminal は `action`） | work の種類 | runtime を名指すか |
 |---|---|---|
+| `rollover` | active 自身の barrier trigger（lease なし） | no |
 | `terminal` / `launch`、`agent`、`resume_agent` | spawn | no |
 | `terminal` / `inventory`・`completed_inventory`、`agent_inventory` | inventory | no |
 | `terminal` / `input_outcome` | read | yes |
@@ -1426,7 +1430,9 @@ wire request をこの表の縦軸（work の種類）へ写す分類は 1 か�
 terminal へ解決されることはない。fence が担うのは **role の可否と lease** であり、記録を持たない層で
 staleness を再判定しない。
 
-active-only の work は durable reservation より前に role / revision 付きの RAII admission lease を取り、external effect と
+`rollover` 自身は active role だけが受理するが、閉じようとしている `ActiveControl` lease は取らない。自身の
+lease を待つ deadlock を避けつつ、standby / draining / retired からの trigger は effect zero で拒否する。
+その他の active-only work は durable reservation より前に role / revision 付きの RAII admission lease を取り、external effect と
 durable commit が終わるまで保持する。lease は request が admit された時点で発行し、**その reply を書き終えるまで
 保持する**。認可の後・effect の前に lease が落ちる隙間は作らない。`active → draining` は
 **lease の新規発行を止め、既存 lease と active-only background worker が 0 になるまで待ってから** registry /
@@ -1469,14 +1475,8 @@ active generation は connection ごとに `ClientHello` の routing 回答を�
 
 client 側の routing 契約は [4. IPC の owner generation routing](04-ipc.md#owner-generation-routing) が正本である。
 capability は connection 単位で記録するため、旧 build の client が切断すれば refusal は解け、同じ client が
-新しい build で再接続すれば自分の答えを更新する。この gate は実装済みだが、それを駆動する shipping の
-`daemon restart` はまだ存在しない（[planned replacement](#planned-replacement)）。
-
-**この gate は client の広告を根拠に判断する。** shipping の client は
-`owner-generation-routing.v1` を広告しているが、合成ルートと TUI はまだ owner generation で routing しない。
-広告と実装を一致させるのは
-[#560](../.usagi/issues/560-feat-tui-client-ownerrouter-owner-generation-routing.md) であり、rollover の有効化
-（[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md)）はそれを前提条件に持つ。
+新しい build で再接続すれば自分の答えを更新する。shipping `daemon restart` はこの gate を最初の durable
+handoff write より前に評価する。
 
 ### legacy migration
 

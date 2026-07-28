@@ -15,6 +15,7 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
   - [bootstrap section の bounded wait](#bootstrap-section-の-bounded-wait)
 - [envelope とエラー](#envelope-とエラー)
 - [owner generation routing](#owner-generation-routing)
+- [daemon rollover request](#daemon-rollover-request)
 - [Unix transport](#unix-transport)
 - [client の失敗処理](#client-の失敗処理)
   - [stream connection の共有と subscription の無効化](#stream-connection-の共有と-subscription-の無効化)
@@ -92,14 +93,29 @@ replacement の exact artifact を再接続時の handshake で確認する。�
 version / target 一致へ昇格せず、typed `BuildIdentityUnavailable` として old daemon を維持する。
 
 trigger の生成自体は effect-free だが、`usagi daemon replace` はその trigger を自ら消費し、
-`usagi daemon restart` と同じ経路で replacement を実行する。live runtime を持つ daemon はそこで拒否されるため、
-この verb が PTY を暗黙に破棄することはない（[5. daemon の planned replacement](05-daemon.md#planned-replacement)）。
+`usagi daemon restart` と同じ経路で replacement を実行する。live runtime があれば standby readiness 後に
+old active へ `rollover` request を送り、live runtime が無い場合だけ cold transition を行う
+（[5. daemon の planned replacement](05-daemon.md#planned-replacement)）。
 
 private standby の起動・登録・readiness は shipping の `daemon serve --standby` が駆動する
-（[5. daemon の standby process の lifecycle](05-daemon.md#standby-process-の-lifecycle)）。generation limit /
-draining admission と authority handoff を駆動する consumer はまだ接続されていないため、production / local は
-trigger を typed outcome として返すだけで、blind cold replacement や二重 daemon spawn を行わない。development の cold restart でも singleton lifecycle lock を維持し、二重 daemon を
-spawn しない。通常 envelope は handshake の成功後だけ受理する。
+（[5. daemon の standby process の lifecycle](05-daemon.md#standby-process-の-lifecycle)）。CLI は verified
+standby を確認してから old active へ request を送り、commit 前の failure では staged standby を停止する。
+通常 envelope は handshake の成功後だけ受理する。
+
+## daemon rollover request
+
+`DaemonRequest` の lifecycle verb は
+`{"kind":"rollover","operation_id":"<durable operation>"}` である。CLI は authority を直接書き換えず、
+current old active へこの request を送る。old active は registry の active が自 generation であることを確認し、
+登録済み successor の private endpoint へ read-only hello を行い、artifact / handoff / owner-routing capability を
+再検証する。その後、connection ledger と planned registry revision を `RolloverPlan` に束ね、自 process の
+`AdmissionGate` で gated handoff を実行する。
+
+`rollover` request は active role だけが受理するが `ActiveControl` lease は取らない。trigger 自身がその lease class を
+close して drain を待つためである。routing 非対応 client、successor capability 不足、revision mismatch、
+readiness failure は最初の handoff write より前に typed error / `side_effect: none` で返り、old active と current を
+維持する。registry commit 後の partial phase は durable operation と handoff phase を使って roll-forward / fail closed
+へ収束する。
 
 ## workspace fence
 
@@ -1011,12 +1027,10 @@ owner-generation runtime shard は
 [#518](../.usagi/issues/518-refactor-daemon-owner-generation-runtime-shard-global-resource-allocator.md) が
 提供し、client 側の owner routing は本節の契約として実装済みである。shipping の `serve` は自分の
 generation を durable registry の active として登録するため、`generations.json` は production に存在する
-（[5. daemon の first activation](05-daemon.md#first-activation)）。ただし合成ルートと TUI の client は
-まだ `OwnerRouter` を通らず active locator だけで接続し、standby process を起動する lifecycle も無いため、
-shipping の `daemon restart` から rollover を起動する経路はまだ存在しない。
-shipping の replacement は 1 本の durable operation に集約済みで、seamless に保てない live runtime を
-既定で拒否する（[5. daemon の planned replacement](05-daemon.md#planned-replacement)）。最終 enable /
-handoff / product E2E は [#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) が担当する。
+（[5. daemon の first activation](05-daemon.md#first-activation)）。shipping の `daemon restart` は live runtime が
+あれば standby を stage し、old active へ [`rollover` request](#daemon-rollover-request) を送って gated handoff を
+起動する。shipping の replacement は 1 本の durable operation に集約され、old active が IPC request から gated
+handoff を駆動する（[5. daemon の planned replacement](05-daemon.md#planned-replacement)）。
 
 ## client の失敗処理
 

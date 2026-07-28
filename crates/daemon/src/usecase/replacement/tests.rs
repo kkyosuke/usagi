@@ -173,8 +173,8 @@ fn only_states_that_still_hold_a_pty_master_are_counted_as_live() {
 #[test]
 fn an_absent_registry_has_no_successor_to_hand_authority_to() {
     assert_eq!(
-        seamless_refusal(None),
-        SeamlessRefusal::NoGenerationRegistry
+        seamless_refusal(None, false, 2),
+        Some(SeamlessRefusal::NoGenerationRegistry)
     );
 }
 
@@ -188,28 +188,26 @@ fn a_foreign_registry_schema_is_refused_before_it_is_interpreted() {
         ..RegistryDocument::default()
     };
     assert_eq!(
-        seamless_refusal(Some(&foreign)),
-        SeamlessRefusal::RegistrySchemaUnsupported
+        seamless_refusal(Some(&foreign), true, 2),
+        Some(SeamlessRefusal::RegistrySchemaUnsupported)
     );
 }
 
 #[test]
-fn only_a_verified_standby_counts_as_a_successor() {
-    // Nothing registered, an unverified standby, and a live active generation
-    // are all the same answer: there is no successor.
-    for entries in [
-        vec![],
-        vec![entry(GenerationRole::Standby, false)],
-        vec![entry(GenerationRole::Draining, true)],
-    ] {
-        assert_eq!(
-            seamless_refusal(Some(&document(entries))),
-            SeamlessRefusal::NoVerifiedStandby
-        );
-    }
+fn a_live_active_and_one_free_generation_slot_enable_rollover() {
+    let active = entry(GenerationRole::Active, true);
+    let current = active.generation;
+    let mut ready = document(vec![active]);
+    ready.current = Some(current);
+    assert_eq!(seamless_refusal(Some(&ready), true, 2), None);
     assert_eq!(
-        seamless_refusal(Some(&document(vec![entry(GenerationRole::Standby, true)]))),
-        SeamlessRefusal::StandbyNotAdmitted
+        seamless_refusal(Some(&ready), false, 2),
+        Some(SeamlessRefusal::NoLiveRegisteredActive)
+    );
+    ready.generations.push(entry(GenerationRole::Standby, true));
+    assert_eq!(
+        seamless_refusal(Some(&ready), true, 2),
+        Some(SeamlessRefusal::GenerationLimit)
     );
 }
 
@@ -229,13 +227,10 @@ fn every_refusal_names_the_prerequisite_it_is_missing() {
             "cannot be trusted: corrupt",
         ),
         (
-            SeamlessRefusal::NoVerifiedStandby,
-            "no verified standby generation",
+            SeamlessRefusal::NoLiveRegisteredActive,
+            "no live registered active generation",
         ),
-        (
-            SeamlessRefusal::StandbyNotAdmitted,
-            "cannot admit a standby generation",
-        ),
+        (SeamlessRefusal::GenerationLimit, "generation limit"),
     ] {
         assert!(
             refusal.to_string().contains(expected),
@@ -250,7 +245,7 @@ fn an_idle_daemon_is_replaced_and_stopped_without_being_forced() {
     assert_eq!(
         plan_replacement(
             TransitionMode::Planned,
-            &SeamlessRefusal::NoGenerationRegistry,
+            Some(&SeamlessRefusal::NoGenerationRegistry),
             idle
         ),
         ReplacementPlan::ColdTransition
@@ -262,21 +257,14 @@ fn an_idle_daemon_is_replaced_and_stopped_without_being_forced() {
 }
 
 #[test]
-fn live_runtime_refuses_a_planned_transition_and_reports_what_it_saved() {
+fn live_runtime_uses_a_seamless_rollover_when_available() {
     let live = LiveResources {
         agents: 1,
         terminals: 2,
     };
     assert_eq!(
-        plan_replacement(
-            TransitionMode::Planned,
-            &SeamlessRefusal::NoVerifiedStandby,
-            live
-        ),
-        ReplacementPlan::Refused {
-            seamless: SeamlessRefusal::NoVerifiedStandby,
-            live,
-        }
+        plan_replacement(TransitionMode::Planned, None, live),
+        ReplacementPlan::SeamlessRollover
     );
     assert_eq!(
         plan_stop(TransitionMode::Planned, live),
@@ -293,7 +281,7 @@ fn an_explicit_cold_transition_gives_the_live_runtime_up() {
     assert_eq!(
         plan_replacement(
             TransitionMode::Cold,
-            &SeamlessRefusal::NoVerifiedStandby,
+            Some(&SeamlessRefusal::NoLiveRegisteredActive),
             live
         ),
         ReplacementPlan::ColdTransition

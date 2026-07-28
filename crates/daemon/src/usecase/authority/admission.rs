@@ -43,6 +43,9 @@ pub enum LeaseClass {
 /// new request type cannot silently default into "control".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestClass {
+    /// The active daemon's own handoff trigger. It must not take the
+    /// `ActiveControl` lease whose drain it is about to wait for.
+    Rollover,
     /// Session/agent lifecycle and any other control-plane mutation.
     Control,
     /// Creating a new daemon-owned runtime.
@@ -131,10 +134,12 @@ pub fn classify(
             // An unscoped terminal request cannot prove ownership, so it is
             // refused rather than resolved against the whole registry.
             RequestClass::TerminalIo => Err(AdmissionRefusal::NotOwner),
-            RequestClass::Control | RequestClass::Spawn => Err(AdmissionRefusal::NotActive),
+            RequestClass::Rollover | RequestClass::Control | RequestClass::Spawn => {
+                Err(AdmissionRefusal::NotActive)
+            }
         },
         GenerationRole::Active => match request {
-            RequestClass::Read | RequestClass::Inventory => Ok(None),
+            RequestClass::Rollover | RequestClass::Read | RequestClass::Inventory => Ok(None),
             RequestClass::TerminalIo if owner == ResourceOwner::SelfGeneration => {
                 Ok(Some(LeaseClass::OwnerTerminal))
             }

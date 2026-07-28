@@ -698,11 +698,15 @@ fn a_standby_registers_beside_the_active_generation_without_publishing_a_locator
     // rather than the constant it used to be. Naming a verified standby is the
     // whole point of registering one; enabling the rollover itself is #559.
     assert_eq!(
-        seamless_refusal(Some(
-            &serde_json::from_slice::<RegistryDocument>(&std::fs::read(&registry).unwrap())
-                .expect("the shipping daemon writes a registry this build understands")
-        )),
-        SeamlessRefusal::StandbyNotAdmitted
+        seamless_refusal(
+            Some(
+                &serde_json::from_slice::<RegistryDocument>(&std::fs::read(&registry).unwrap())
+                    .expect("the shipping daemon writes a registry this build understands")
+            ),
+            true,
+            2
+        ),
+        Some(SeamlessRefusal::GenerationLimit)
     );
 
     // Standing the standby down gives up the entry and the socket, and leaves the

@@ -31,7 +31,7 @@
 //! crash boundaries are stated once, in [`handoff`].
 
 #[cfg(test)]
-mod fixture;
+pub(crate) mod fixture;
 
 pub mod activation;
 pub mod admission;

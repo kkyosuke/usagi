@@ -91,7 +91,9 @@ pub struct DaemonEnv<'a, F, P, T, R, S, L, K, M, W> {
     pub census: &'a dyn usecase::replacement::ResourceCensus,
     /// この build が live successor へ authority を渡せない理由。durable な
     /// generation registry の観測から導く。
-    pub seamless: usecase::replacement::SeamlessRefusal,
+    pub seamless: Option<usecase::replacement::SeamlessRefusal>,
+    /// standby の staging と old active への rollover IPC 要求。
+    pub rollover: &'a dyn usecase::replacement::RolloverRequester,
 }
 
 /// daemon 面の entry point。合成ルートが `usagi daemon` の argv を検証して構築した
@@ -172,7 +174,7 @@ pub fn run<
             writeln!(out, "{line}")
         }
         DaemonCommand::Replace { operation, mode } => {
-            let line = usecase::replacement::replace_daemon(
+            let line = usecase::replacement::replace_daemon_with_rollover(
                 env.store,
                 env.probe,
                 env.terminator,
@@ -180,7 +182,8 @@ pub fn run<
                 env.sleeper,
                 env.ready,
                 env.census,
-                &env.seamless,
+                env.seamless.as_ref(),
+                env.rollover,
                 mode,
                 operation.as_ref(),
                 info,
@@ -199,7 +202,7 @@ mod tests {
         RecordingTerminator, TestLauncher,
     };
     use crate::usecase::replacement::{
-        LiveResources, ResourceCensus, SeamlessRefusal, TransitionMode,
+        LiveResources, ResourceCensus, RolloverRequester, SeamlessRefusal, TransitionMode,
     };
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::daemon::DaemonRecord;
@@ -220,6 +223,15 @@ mod tests {
                 agents: self.0,
                 terminals: 0,
             })
+        }
+    }
+    struct NoopRollover;
+    impl RolloverRequester for NoopRollover {
+        fn rollover(
+            &self,
+            operation: &usagi_core::infrastructure::ipc::OperationId,
+        ) -> std::io::Result<String> {
+            Ok(format!("rolled over {}", operation.0))
         }
     }
 
@@ -262,7 +274,8 @@ mod tests {
             workspace: &FakeWorkspaceFence::Acquired,
             pid: 4321,
             census: &Owning(0),
-            seamless: SeamlessRefusal::NoGenerationRegistry,
+            seamless: Some(SeamlessRefusal::NoGenerationRegistry),
+            rollover: &NoopRollover,
         };
         let mut buf = Vec::new();
         run(&mut buf, command, &info(), &env).unwrap();
@@ -313,7 +326,8 @@ mod tests {
             workspace: &FakeWorkspaceFence::Held(1111),
             pid: 4321,
             census: &Owning(0),
-            seamless: SeamlessRefusal::NoVerifiedStandby,
+            seamless: Some(SeamlessRefusal::NoLiveRegisteredActive),
+            rollover: &NoopRollover,
         };
         let mut buf = Vec::new();
         run(
@@ -365,7 +379,8 @@ mod tests {
                 workspace: &FakeWorkspaceFence::Acquired,
                 pid: 4321,
                 census: &Owning(0),
-                seamless: SeamlessRefusal::NoGenerationRegistry,
+                seamless: Some(SeamlessRefusal::NoGenerationRegistry),
+                rollover: &NoopRollover,
             };
             let mut buf = Vec::new();
             run(&mut buf, command, &info(), &env).unwrap();
@@ -412,7 +427,8 @@ mod tests {
             workspace: &FakeWorkspaceFence::Acquired,
             pid: 4321,
             census: &Owning(1),
-            seamless: SeamlessRefusal::NoGenerationRegistry,
+            seamless: Some(SeamlessRefusal::NoGenerationRegistry),
+            rollover: &NoopRollover,
         };
         for command in [stop(), replace()] {
             let error = run(&mut Vec::new(), command, &info(), &env).unwrap_err();
@@ -473,7 +489,8 @@ mod tests {
                 workspace: &FakeWorkspaceFence::Acquired,
                 pid: 4321,
                 census: &Owning(0),
-                seamless: SeamlessRefusal::NoGenerationRegistry,
+                seamless: Some(SeamlessRefusal::NoGenerationRegistry),
+                rollover: &NoopRollover,
             };
             let mut buf = Vec::new();
             assert!(run(&mut buf, command, &info(), &env).is_err());

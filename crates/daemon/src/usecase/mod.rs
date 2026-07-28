@@ -28,6 +28,7 @@ pub mod pr_projection;
 pub mod replacement;
 pub mod resources;
 pub mod restart;
+pub mod rollover_trigger;
 pub mod runtime;
 pub mod serve;
 pub mod serve_standby;

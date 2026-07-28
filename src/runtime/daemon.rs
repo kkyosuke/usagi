@@ -29,7 +29,7 @@ use usagi_core::infrastructure::daemon::{
 use usagi_core::infrastructure::env_resolver::OpCli;
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::ipc::{
-    BuildArtifactDecision, BuildIdentity, BuildRolloverTrigger, ClientWorkspace,
+    BuildArtifactDecision, BuildIdentity, BuildRolloverTrigger, ClientWorkspace, OperationId,
     build_artifact_decision, build_rollover_trigger,
 };
 use usagi_core::infrastructure::paths;
@@ -97,8 +97,8 @@ use usagi_daemon::usecase::pr_projection::{
     PrProjection, PrProjectionQueue, pr_projection_counters,
 };
 use usagi_daemon::usecase::replacement::{
-    LiveResources, ResourceCensus, SeamlessRefusal, TransitionMode, manual_operation_id,
-    seamless_refusal,
+    LiveResources, ResourceCensus, RolloverRequester, SeamlessRefusal, TransitionMode,
+    manual_operation_id, seamless_refusal,
 };
 use usagi_daemon::usecase::resources::allocator::{CapacityPolicy, ResourceAllocator};
 use usagi_daemon::usecase::resources::durable::{
@@ -108,6 +108,7 @@ use usagi_daemon::usecase::resources::durable::{
 use usagi_daemon::usecase::resources::fence::FencedPrInventory;
 use usagi_daemon::usecase::resources::identity::{ChildIdentity, ChildProcessProbe, record_child};
 use usagi_daemon::usecase::resources::retention::LogicalClock;
+use usagi_daemon::usecase::rollover_trigger;
 use usagi_daemon::usecase::runtime::{
     OutputJournal, ProvisionContext, PtySpawner, SandboxLauncher, SpawnProvision,
     TerminateReapError,
@@ -346,10 +347,19 @@ impl ResourceCensus for DurableResourceCensus {
 /// An unreadable or unparsable registry is reported as such rather than treated
 /// as absent, so an operator sees the difference between "no daemon ever
 /// registered a generation" and "the registry cannot be trusted".
-fn observed_seamless_refusal(data_dir: &Path) -> SeamlessRefusal {
+fn observed_seamless_refusal(data_dir: &Path) -> Option<SeamlessRefusal> {
     match usagi_daemon::infrastructure::generation_registry::read_registry_document(data_dir) {
-        Ok(document) => seamless_refusal(document.as_ref()),
-        Err(error) => SeamlessRefusal::RegistryUnreadable(error.to_string()),
+        Ok(document) => {
+            let active_is_alive = document
+                .as_ref()
+                .and_then(RegistryDocument::active)
+                .is_some_and(|entry| {
+                    observe_generation_process(&entry.process)
+                        == ProcessObservation::VerifiedAlive(entry.process.clone())
+                });
+            seamless_refusal(document.as_ref(), active_is_alive, DEFAULT_GENERATION_LIMIT)
+        }
+        Err(error) => Some(SeamlessRefusal::RegistryUnreadable(error.to_string())),
     }
 }
 
@@ -1626,6 +1636,7 @@ fn spawn_ipc_server(
     start_ipc_accept_loop(
         listener,
         server,
+        data_dir.to_path_buf(),
         runtime,
         teardown,
         terminal,
@@ -2277,10 +2288,11 @@ where
         .map(|_| ())
 }
 
-#[allow(clippy::too_many_arguments)] // Composition owns the independently injected daemon services.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Composition owns the independently injected daemon services.
 fn start_ipc_accept_loop(
     listener: SecureUnixListener,
     server: usagi_core::infrastructure::ipc::ServerProtocol,
+    data_dir: PathBuf,
     runtime: SharedSessionRuntime,
     teardown: Arc<TeardownSignal>,
     terminal: SharedTerminalRuntime,
@@ -2353,6 +2365,7 @@ fn start_ipc_accept_loop(
                         let pipeline_metrics = Arc::clone(&pipeline_metrics);
                         let supervisor = Arc::clone(&supervisor);
                         let connection_fence = Arc::clone(&fence);
+                        let connection_data_dir = data_dir.clone();
                         // Retained before the worker starts so a collection that
                         // begins while this connection is still being set up
                         // cannot miss it. Reaping first keeps the retained set
@@ -2386,6 +2399,7 @@ fn start_ipc_accept_loop(
                                         .get("kind")
                                         .and_then(serde_json::Value::as_str)
                                     {
+                                        Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
                                         Some("session") => dispatch_session(&session, &teardown, &agent_launch, &pr_inventory, request_id, &body, hello),
                                         Some("agent" | "agent_inventory" | "resume_agent") => dispatch_agent(&agent_launch, &scope_sessions, request_id, &body, hello),
                                         Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, request_id, &body, hello),
@@ -3628,6 +3642,60 @@ fn session_id_by_name(snapshot: &serde_json::Value, name: &str) -> Option<Sessio
                 && session.get("lifecycle").and_then(serde_json::Value::as_str) == Some("available")
         })
         .and_then(|session| serde_json::from_value(session.get("session_id")?.clone()).ok())
+}
+
+fn dispatch_rollover(
+    data_dir: &Path,
+    fence: &GenerationFence,
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    body: &serde_json::Value,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
+
+    let operation = serde_json::from_value::<DaemonRequest>(body.clone())
+        .ok()
+        .and_then(|request| match request {
+            DaemonRequest::Rollover { operation_id } => Some(OperationId(operation_id)),
+            _ => None,
+        });
+    let Some(operation) = operation else {
+        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+    };
+    let result = GenerationRegistryFile::new(data_dir)
+        .map(|file| GenerationRegistry::new(file, DEFAULT_GENERATION_LIMIT))
+        .map_err(|error| error.to_string())
+        .and_then(|registry| {
+            rollover_trigger::execute(
+                &registry,
+                &CurrentLocatorFile::new(data_dir),
+                &fence.gate,
+                &fence.ledger,
+                &UnixStandbyProbe {
+                    data_dir,
+                    build: current_build(),
+                },
+                &operation,
+            )
+            .map_err(|error| error.to_string())
+        });
+    match result {
+        Ok(outcome) => envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Accepted {
+                operation_id: operation,
+                operation_revision: 1,
+            },
+            serde_json::json!({"outcome": format!("{outcome:?}")}),
+        ),
+        Err(message) => envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Error(ProtocolError::new(ErrorCode::Busy, message)),
+            serde_json::Value::Null,
+        ),
+    }
 }
 
 fn dispatch_metrics(
@@ -6362,6 +6430,19 @@ impl ShutdownSignal for SignalShutdown {
 struct ServeLauncher {
     exe: PathBuf,
 }
+impl ServeLauncher {
+    fn launch_standby(&self) -> std::io::Result<u32> {
+        let mut command = std::process::Command::new(&self.exe);
+        command
+            .args(["daemon", "serve", "--standby"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        command.spawn().map(|child| child.id())
+    }
+}
 impl DaemonLauncher for ServeLauncher {
     fn launch(&self) -> std::io::Result<()> {
         let mut command = std::process::Command::new(&self.exe);
@@ -6374,6 +6455,87 @@ impl DaemonLauncher for ServeLauncher {
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
         command.spawn()?;
         Ok(())
+    }
+}
+
+struct IpcRolloverRequester<'a> {
+    data_dir: &'a Path,
+    launcher: &'a ServeLauncher,
+}
+
+impl IpcRolloverRequester<'_> {
+    fn committed(&self, operation: &OperationId, standby_pid: u32) -> bool {
+        read_registry_document(self.data_dir)
+            .ok()
+            .flatten()
+            .is_some_and(|document| {
+                document.completed_operation.as_ref() == Some(operation)
+                    || document.handoff.as_ref().is_some_and(|handoff| {
+                        handoff.operation == *operation
+                            && handoff.phase
+                                == usagi_daemon::usecase::authority::registry::HandoffPhase::Committed
+                    })
+                    || document.generations.iter().any(|entry| {
+                        entry.process.pid == standby_pid && entry.role == GenerationRole::Active
+                    })
+            })
+    }
+
+    fn stop_standby(pid: u32) {
+        let Ok(identity) = process_start_identity(pid) else {
+            return;
+        };
+        let record = DaemonRecord::identified(pid, identity);
+        let _ = Terminator::terminate(&SigtermTerminator, &record);
+    }
+
+    fn wait_until_verified(&self, pid: u32) -> std::io::Result<()> {
+        for _ in 0..40 {
+            if read_registry_document(self.data_dir)
+                .ok()
+                .flatten()
+                .is_some_and(|document| {
+                    document.generations.iter().any(|entry| {
+                        entry.process.pid == pid
+                            && entry.role == GenerationRole::Standby
+                            && entry.is_build_verified()
+                    })
+                })
+            {
+                return Ok(());
+            }
+            RealSleeper.sleep();
+        }
+        Err(std::io::Error::other(
+            "standby did not reach verified readiness within the startup window",
+        ))
+    }
+}
+
+impl RolloverRequester for IpcRolloverRequester<'_> {
+    fn rollover(&self, operation: &OperationId) -> std::io::Result<String> {
+        let pid = self.launcher.launch_standby()?;
+        if let Err(error) = self.wait_until_verified(pid) {
+            Self::stop_standby(pid);
+            return Err(error);
+        }
+        let result = policy_client(ClientPolicy::cli()).and_then(|mut client| {
+            client.request(DaemonRequest::Rollover {
+                operation_id: operation.0.clone(),
+            })
+        });
+        match result {
+            Ok(_) => Ok(format!(
+                "daemon authority handed off (operation {})",
+                operation.0
+            )),
+            Err(error) => {
+                if !self.committed(operation, pid) {
+                    Self::stop_standby(pid);
+                }
+                Err(std::io::Error::other(error.to_string()))
+            }
+        }
     }
 }
 
@@ -6637,6 +6799,10 @@ fn run_inner(
     let launcher = ServeLauncher {
         exe: std::env::current_exe()?,
     };
+    let rollover = IpcRolloverRequester {
+        data_dir: &data_dir,
+        launcher: &launcher,
+    };
     let lock = FileInstanceLock {
         path: daemon_dir.join("daemon.lock"),
         held: RefCell::new(None),
@@ -6685,6 +6851,7 @@ fn run_inner(
         pid,
         census: &census,
         seamless: observed_seamless_refusal(&data_dir),
+        rollover: &rollover,
     };
     usagi_daemon::presentation::run(out, command, info, &env)
 }
