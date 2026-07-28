@@ -13,6 +13,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [settings scope と workspace entry](#settings-scope-と-workspace-entry)
 - [workspace の選択と daemon](#workspace-の選択と-daemon)
 - [Home と target](#home-と-target)
+- [Workspace Agent drawer](#workspace-agent-drawer)
 - [Home frame loop と背景観測 lane](#home-frame-loop-と背景観測-lane)
 - [frame 予算](#frame-予算)
 - [Session sidebar rows](#session-sidebar-rows)
@@ -345,6 +346,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `Ctrl-A` | OpenCloseupModal | Switch では選択 target の Closeup action を開く。Closeup では tab があっても action modal を前面に出す |
 | `Ctrl-O` `Ctrl-N` | NextTab | 次の tab を選ぶ |
 | `Ctrl-O` `Ctrl-P` | PreviousTab | 前の tab を選ぶ |
+| `Ctrl-O` `g` | WorkspaceAgent | [Workspace Agent drawer](#workspace-agent-drawer) を toggle する |
 | `Ctrl-O` `]` | MoveTabNext | 選択 tab を次の表示 slot へ移動し、Agent 順序を commit する |
 | `Ctrl-O` `[` | MoveTabPrevious | 選択 tab を前の表示 slot へ移動し、Agent 順序を commit する |
 | macOS: Command+C / Linux: Ctrl+Shift+C / Windows: Ctrl+C | Copy selected output | 保持中の terminal 出力選択を OS clipboard へ再コピーする |
@@ -353,12 +355,37 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `u` / `↑` | ScrollUp | 右ペインの scrollback を 1 行古い方向へ |
 | `Ctrl-O` `d` / `↓` | ScrollDown | 右ペインの scrollback を 1 行 live bottom 方向へ |
 
-follow-up の `x` / `Ctrl-X` / `[` / `]` / `u` / `d` / `↑` / `↓` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
+follow-up の `g` / `x` / `Ctrl-X` / `[` / `]` / `u` / `d` / `↑` / `↓` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
 leader は 1 秒で失効し、未知の follow-up、key release、raw byte を含む次の入力を 1 件だけ握って捨て、その時点で必ず reset する。
 auto-repeat は press と同じ follow-up として 1 件だけ解決する。ちょうど 1 秒の timeout 境界では leader は失効済みであり、単一 raw
 control byte と semantic control event は同じ global shortcut に解決する。
 
 Windows の `Ctrl+C` は terminal 出力を選択中なら copy とし、選択が無い場合は PTY へ SIGINT として送る。
+
+## Workspace Agent drawer
+
+Home header の右端には `[ Workspace Agent ]` button を表示する。workspace breadcrumb、mode toggle、
+pending decision の notice badge、button は 1 つの header layout が表示幅と click range を同時に計算する。
+そのため CJK workspace 名や notice の有無、狭幅による breadcrumb の clip があっても、描画された button / badge
+と hit-test は同じ terminal cell を指す。
+
+button または `Ctrl-O g` は、Switch、managed-session Closeup、live pane のいずれからも同じ
+Workspace Agent drawer state を toggle する。drawer は Home header の下から右端へ重なる。通常幅は端末幅の
+60% とし、56 columns 以上 96 columns 以下へ clamp する。56 columns の drawer と 24 columns の背景を
+同時に保てない幅では全幅へ縮退する。背景 Home は ANSI span ごと dim にし、header は表示したままにする。
+drawer 内の terminal viewport は drawer の border、conversation selector、spacer、footer を除いて計算し、
+managed-session Closeup の right pane viewport とは別の pure geometry とする。
+
+drawer は conversation selector の `No conversations` placeholder、disabled な `[ New ]`、empty state、
+footer を表示する。現在の drawer shell は Agent inventory、terminal attach/input/resize/resume、picker、
+launch を実行しない。描画 projection は conversation choice と terminal row を受け取れるが、empty projection
+から Agent を自動起動・resume せず、`New` click / Enter も request を発行しない。
+
+drawer open 中は drawer が sidebar、managed pane、Home header の別 action、通常の global action の入力を所有し、
+それらへ key / click / pointer を伝播しない。`Esc` または再度の `Ctrl-O g` だけが drawer を閉じる。開閉は
+Home mode、selected cursor、active managed session、selected pane tab、terminal scroll / text selection を
+変更しない。既存 modal が前面にある間は drawer shortcut と header button を受理しない。非同期 completion で
+既存 modal が drawer より後に開いた場合も modal が描画・入力の優先権を持ち、drawer から modal を暗黙に開かない。
 
 ## Home frame loop と背景観測 lane
 

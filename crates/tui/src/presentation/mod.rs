@@ -49,8 +49,9 @@ use crate::presentation::views::quit_modal;
 use crate::presentation::views::splash;
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{
-    self, GitDiff, HomeProjection, ProjectedSession, TerminalViewProjection,
-    Workspace as WorkspaceView, render_home, render_home_at, terminal_point_at,
+    self, GitDiff, HomeHeaderAction, HomeProjection, ProjectedSession, TerminalViewProjection,
+    Workspace as WorkspaceView, home_header_action_at, render_home, render_home_at,
+    terminal_point_at,
 };
 use crate::presentation::widgets::modal::{self, ConfirmationView};
 use crate::presentation::workspace_runtime::{
@@ -3084,6 +3085,7 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
         LiveTerminalAction::NextTab => Some(AppKey::CtrlN),
         LiveTerminalAction::PreviousTab => Some(AppKey::CtrlP),
         LiveTerminalAction::Agent => Some(AppKey::CtrlA),
+        LiveTerminalAction::WorkspaceAgent => Some(AppKey::ToggleWorkspaceAgentDrawer),
         LiveTerminalAction::QuitConfirmation => Some(AppKey::OpenQuitConfirmation),
         LiveTerminalAction::CloseTab
         | LiveTerminalAction::ResumeTab
@@ -4885,16 +4887,22 @@ fn drive_workspace_controller(
             continue;
         }
         let effects = if let Key::Click { column, row } = key {
-            // The notice centre occupies the right side of Home's top header.
-            // Keep it above the sidebar hit-test so a header click never moves
-            // the background selection, and let an open modal retain ownership.
-            if row == 0
-                && !runtime.state().unread_decision_ids().is_empty()
-                && usize::from(column) >= width.saturating_sub(28)
-            {
-                runtime.apply_event(AppEvent::Key(AppKey::OpenDecisions))
-            } else {
-                runtime.apply_event(sidebar_pointer_event(column, row, pointer_clock.elapsed()))
+            // Header rendering and hit-testing share one layout projection, so
+            // CJK breadcrumbs, notice presence, and narrow clipping cannot move
+            // an action away from its clickable cells.
+            let header_action = drawn_material.as_ref().and_then(|material| {
+                home_header_action_at(width, &material.projection, column, row)
+            });
+            match header_action {
+                Some(HomeHeaderAction::WorkspaceAgent) => {
+                    runtime.apply_event(AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer))
+                }
+                Some(HomeHeaderAction::Decisions) => {
+                    runtime.apply_event(AppEvent::Key(AppKey::OpenDecisions))
+                }
+                None => {
+                    runtime.apply_event(sidebar_pointer_event(column, row, pointer_clock.elapsed()))
+                }
             }
         } else {
             runtime.handle_key(key)
@@ -6056,6 +6064,10 @@ mod tests {
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::Agent)),
             Some(AppEvent::Key(AppKey::CtrlA))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::WorkspaceAgent)),
+            Some(AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer))
         );
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::QuitConfirmation)),
@@ -11176,6 +11188,67 @@ mod tests {
         assert!(!controls.has_selection());
         assert_eq!(runtime.active_pane().tabs(), tabs_before.as_slice());
         assert!(detaches.lock().unwrap().is_empty());
+        assert!(term.copied.is_empty());
+        assert!(browser.opened.is_empty());
+    }
+
+    #[test]
+    fn workspace_agent_drawer_consumes_shell_pane_controls_without_background_mutation() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let (mut ui, mut runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(ScriptedAgentPort {
+                terminal,
+                subscription: 181,
+                replay: b"one\ntwo\nthree".to_vec(),
+                poll_error: None,
+                detaches: Arc::new(Mutex::new(Vec::new())),
+            }),
+        );
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        assert!(runtime.state().workspace_agent_drawer_open());
+        let tabs_before = runtime.active_pane().tabs().to_vec();
+        let mut controls = LiveTerminalControls::default();
+        let rows = vec!["one".to_owned(), "two".to_owned(), "three".to_owned()];
+        let _ = controls.project(rows.clone(), 1);
+        controls.scroll_up();
+        let scroll_before = controls.project(rows.clone(), 1).scroll;
+        let mut term = FakeTerminal::default();
+        let mut browser = RecordingBrowser::default();
+        let mut pending = std::collections::HashMap::new();
+
+        for key in [
+            Key::Live(LiveTerminalAction::ScrollUp),
+            Key::Live(LiveTerminalAction::ScrollDown),
+            Key::Live(LiveTerminalAction::CloseTab),
+            Key::Live(LiveTerminalAction::MoveTabNext),
+            Key::Live(LiveTerminalAction::MoveTabPrevious),
+            Key::Pointer(PointerEvent {
+                kind: PointerKind::Drag,
+                column: 41,
+                row: 5,
+            }),
+        ] {
+            assert!(intercept_live_terminal_control(
+                &key,
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &mut browser,
+                &mut pending,
+                20,
+                80,
+                3,
+                scroll_before,
+            ));
+        }
+        assert_eq!(controls.project(rows, 1).scroll, scroll_before);
+        assert_eq!(runtime.active_pane().tabs(), tabs_before.as_slice());
         assert!(term.copied.is_empty());
         assert!(browser.opened.is_empty());
     }
@@ -18271,6 +18344,81 @@ mod tests {
                 "{key:?}"
             );
         }
+    }
+
+    fn has_workspace_agent_drawer(frames: &[Vec<String>]) -> bool {
+        frames.iter().any(|frame| {
+            let text = frame.join("\n");
+            text.contains("Workspace Agent")
+                && text.contains("No conversations yet")
+                && text.contains("[ New ]")
+        })
+    }
+
+    #[test]
+    fn direct_welcome_recent_and_open_entries_share_the_workspace_agent_drawer_shell() {
+        let mut direct = FakeTerminal::with_keys(&[
+            Key::Live(LiveTerminalAction::WorkspaceAgent),
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        let mut direct_factory = FixedBackendFactory {
+            sessions: Some(Box::new(UnavailableSessionCommandPort)),
+            agent: Some(Box::new(UnavailableAgentCommandPort)),
+            launch: None,
+            restore: None,
+            metrics: Some(Box::new(NoMetrics)),
+            browser: Some(Box::new(UnavailableBrowserOpener)),
+            session_refresh: None,
+            decisions: None,
+            session_worktrees: None,
+        };
+        assert_eq!(
+            run_workspace_controller_with_backend(
+                &mut direct,
+                snapshot("direct"),
+                &mut direct_factory,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+        assert!(has_workspace_agent_drawer(&direct.frames));
+
+        let mut recent_term = FakeTerminal::with_keys(&[
+            Key::Char('1'),
+            Key::Live(LiveTerminalAction::WorkspaceAgent),
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        run(
+            &mut recent_term,
+            Vec::new(),
+            vec![recent("recent")],
+            now(),
+            &mut FakeLoader::default(),
+        )
+        .unwrap();
+        assert!(has_workspace_agent_drawer(&recent_term.frames));
+
+        let mut open_term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Live(LiveTerminalAction::WorkspaceAgent),
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        run(
+            &mut open_term,
+            vec![ws("open")],
+            Vec::new(),
+            now(),
+            &mut FakeLoader::default(),
+        )
+        .unwrap();
+        assert!(has_workspace_agent_drawer(&open_term.frames));
     }
 
     /// A terminal that only implements the required port methods keeps the old

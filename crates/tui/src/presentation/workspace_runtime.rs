@@ -284,6 +284,18 @@ impl WorkspaceRuntime {
         if self.state.overlay() == Some(Overlay::Closeup) && self.closeup_modal.is_some() {
             return self.handle_closeup_key(key);
         }
+        // With no existing modal in front, the drawer owns every Home input.
+        // Only Escape and the resolved `Ctrl-O g` toggle can close it; every
+        // other key is consumed without reaching sidebar, pane, or globals.
+        if self.state.workspace_agent_drawer_open() {
+            return match key {
+                Key::Escape => self.apply_event(AppEvent::Key(AppKey::Escape)),
+                Key::Live(crate::usecase::terminal_input::LiveTerminalAction::WorkspaceAgent) => {
+                    self.apply_event(AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer))
+                }
+                _ => Vec::new(),
+            };
+        }
         match app_event_from_key(key) {
             Some(event) => self.apply_event(event),
             None => Vec::new(),
@@ -511,6 +523,7 @@ impl WorkspaceRuntime {
         matches!(self.state.route(), Route::Home(HomeMode::Closeup))
             && self.state.has_live_pane()
             && self.state.overlay().is_none()
+            && !self.state.workspace_agent_drawer_open()
             && matches!(self.panes.input_owner(), PaneInputOwner::Tab)
     }
 
@@ -522,6 +535,7 @@ impl WorkspaceRuntime {
     pub fn wants_pane_control_input(&self) -> bool {
         matches!(self.state.route(), Route::Home(HomeMode::Closeup))
             && self.state.overlay().is_none()
+            && !self.state.workspace_agent_drawer_open()
     }
 
     /// The terminal the active pane's selected tab attaches to, if the selection
@@ -2062,6 +2076,77 @@ mod tests {
         // Backend/tick events flow through apply_event.
         let _ = runtime.apply_event(AppEvent::Tick);
         let _ = runtime.apply_event(AppEvent::Key(AppKey::Down));
+    }
+
+    #[test]
+    fn workspace_agent_live_action_toggles_from_switch_and_closeup_without_pane_drift() {
+        let workspace = WorkspaceId::new();
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![first, second]);
+
+        let switch_background = (
+            runtime.state().route(),
+            runtime.state().selected(),
+            runtime.state().active(),
+            runtime.active_pane().clone(),
+        );
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        assert!(runtime.state().workspace_agent_drawer_open());
+        let _ = runtime.handle_key(Key::Down);
+        let _ = runtime.handle_key(Key::Enter);
+        assert_eq!(
+            (
+                runtime.state().route(),
+                runtime.state().selected(),
+                runtime.state().active(),
+                runtime.active_pane().clone(),
+            ),
+            switch_background
+        );
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        assert!(!runtime.state().workspace_agent_drawer_open());
+
+        let _ = runtime.handle_key(Key::Down);
+        let _ = runtime.handle_key(Key::Enter);
+        let target = Target::Session(second);
+        let first_operation = OperationId::new();
+        let second_operation = OperationId::new();
+        let _ = runtime.request_pane(target, first_operation, PaneKind::Terminal);
+        let _ = runtime.request_pane(target, second_operation, PaneKind::Agent);
+        let _ = runtime.select_tab(TabDirection::Previous);
+        let closeup_background = (
+            runtime.state().route(),
+            runtime.state().selected(),
+            runtime.state().active(),
+            runtime.active_pane().clone(),
+        );
+
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        assert!(runtime.state().workspace_agent_drawer_open());
+        assert!(!runtime.wants_live_input());
+        assert!(!runtime.wants_pane_control_input());
+        for key in [
+            Key::Live(LiveTerminalAction::NextTab),
+            Key::Live(LiveTerminalAction::CloseTab),
+            Key::Up,
+            Key::CtrlQ,
+            Key::Char(':'),
+        ] {
+            assert!(runtime.handle_key(key).is_empty());
+        }
+        assert_eq!(
+            (
+                runtime.state().route(),
+                runtime.state().selected(),
+                runtime.state().active(),
+                runtime.active_pane().clone(),
+            ),
+            closeup_background
+        );
+        let _ = runtime.handle_key(Key::Escape);
+        assert!(!runtime.state().workspace_agent_drawer_open());
+        assert_eq!(runtime.active_pane(), &closeup_background.3);
     }
 
     #[test]

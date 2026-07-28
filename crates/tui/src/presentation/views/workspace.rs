@@ -27,6 +27,7 @@ use crate::presentation::views::decision_modal;
 use crate::presentation::views::overview_modal::{self, OverviewModal};
 use crate::presentation::views::pr_modal::{self, PrModal};
 use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
+use crate::presentation::views::workspace_agent_drawer::{self, WorkspaceAgentDrawerProjection};
 use crate::presentation::widgets;
 use crate::usecase::application::controller::{
     AppState, CreateSessionForm, Feedback, HomeMode, Notice, PrOverlay, PreviewOverlay, Selection,
@@ -231,6 +232,11 @@ pub struct HomeProjection {
     /// loading skeleton just above `+ new session` (`document/03-tui.md`) until
     /// the daemon's `session.created` row replaces it.
     create_pending: Option<String>,
+    /// Frontmost Workspace Agent drawer material. The empty default is the only
+    /// projection currently connected; later runtime work can populate its
+    /// conversation selector and terminal rows through
+    /// [`Self::with_workspace_agent_drawer`].
+    workspace_agent_drawer: Option<WorkspaceAgentDrawerProjection>,
 }
 
 /// Left-sidebar draft for the inline new-session input.
@@ -337,6 +343,9 @@ impl HomeProjection {
             // the reducer never owns the pending name because its snapshot arrives
             // through the daemon transport, not `AppState`.
             create_pending: None,
+            workspace_agent_drawer: state
+                .workspace_agent_drawer_open()
+                .then(WorkspaceAgentDrawerProjection::default),
         }
     }
 
@@ -431,6 +440,20 @@ impl HomeProjection {
     #[must_use]
     pub fn with_terminal_view(mut self, view: Option<TerminalViewProjection>) -> Self {
         self.terminal_view = view;
+        self
+    }
+
+    /// Replace the open drawer's presentation material without changing its
+    /// controller-owned open/closed state. A closed drawer ignores supplied
+    /// material, keeping runtime inventory from opening UI implicitly.
+    #[must_use]
+    pub fn with_workspace_agent_drawer(
+        mut self,
+        projection: WorkspaceAgentDrawerProjection,
+    ) -> Self {
+        if self.workspace_agent_drawer.is_some() {
+            self.workspace_agent_drawer = Some(projection);
+        }
         self
     }
 
@@ -725,16 +748,115 @@ fn mode_toggle(current: Mode) -> String {
         .join("  ")
 }
 
-/// 左の breadcrumb を必要な分だけ切り、mode toggle の右端位置を常に保つ。
-fn header_with_mode_toggle(width: usize, left: &str, mode: Mode) -> String {
-    let toggle = mode_toggle(mode);
-    let toggle = widgets::clip_to_width(&toggle, width);
-    let left_width = width.saturating_sub(widgets::display_width(&toggle));
-    let left = widgets::clip_to_width(left, left_width);
-    let gap = width
-        .saturating_sub(widgets::display_width(&left))
-        .saturating_sub(widgets::display_width(&toggle));
-    format!("{left}{}{toggle}", " ".repeat(gap))
+/// Clickable Home-header actions. Rendering and hit-testing are projected by the
+/// same [`HomeHeaderLayout`], so notice/button ranges cannot drift from CJK or
+/// narrow-width clipping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HomeHeaderAction {
+    WorkspaceAgent,
+    Decisions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HomeHeaderLayout {
+    line: String,
+    actions: Vec<(HomeHeaderAction, std::ops::Range<usize>)>,
+}
+
+impl HomeHeaderLayout {
+    fn action_at(&self, column: usize) -> Option<HomeHeaderAction> {
+        self.actions
+            .iter()
+            .find_map(|(action, range)| range.contains(&column).then_some(*action))
+    }
+}
+
+/// Resolve a header click with the exact layout used by [`render_home`].
+#[must_use]
+pub fn home_header_action_at(
+    width: usize,
+    home: &HomeProjection,
+    column: u16,
+    row: u16,
+) -> Option<HomeHeaderAction> {
+    (row == 0)
+        .then(|| home_header_layout(width, home).action_at(usize::from(column)))
+        .flatten()
+}
+
+fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
+    let mode = match home.mode {
+        HomeMode::Switch => Mode::Switch,
+        HomeMode::Closeup => Mode::Closeup,
+    };
+    let breadcrumb = format!(
+        " {}{}{}",
+        Role::Success.style().bold().paint("USAGI"),
+        Style::new().dim().paint(" > "),
+        Role::Success.style().bold().paint(&home.workspace_name),
+    );
+    let workspace_agent = if home.workspace_agent_drawer.is_some() {
+        Role::Accent
+            .style()
+            .bold()
+            .reverse()
+            .paint("[ Workspace Agent ]")
+    } else {
+        Role::Accent.style().bold().paint("[ Workspace Agent ]")
+    };
+    let notice = (!home.unread_decision_ids.is_empty())
+        .then(|| format!("🔔 {} notice", home.unread_decision_ids.len()));
+    let mode = mode_toggle(mode);
+
+    // Preserve the drawer entry first, then the mode indicator, then the notice.
+    // Whole optional segments are admitted only when they fit; the breadcrumb
+    // receives the remaining cells and is the only normal-width clipped field.
+    let mut right_segments = vec![(Some(HomeHeaderAction::WorkspaceAgent), workspace_agent)];
+    let mut used = widgets::display_width(&right_segments[0].1);
+    let mode_width = widgets::display_width(&mode);
+    if used.saturating_add(2).saturating_add(mode_width) <= width {
+        right_segments.insert(0, (None, mode));
+        used += 2 + mode_width;
+    }
+    if let Some(notice) = notice {
+        let notice_width = widgets::display_width(&notice);
+        if used.saturating_add(2).saturating_add(notice_width) <= width {
+            right_segments.insert(0, (Some(HomeHeaderAction::Decisions), notice));
+            used += 2 + notice_width;
+        }
+    }
+
+    if used > width {
+        let button = widgets::clip_to_width(&right_segments.last().expect("button").1, width);
+        let button_width = widgets::display_width(&button);
+        return HomeHeaderLayout {
+            line: widgets::pad_to_width(&button, width),
+            actions: (button_width > 0)
+                .then_some((HomeHeaderAction::WorkspaceAgent, 0..button_width))
+                .into_iter()
+                .collect(),
+        };
+    }
+
+    let right_width = used;
+    let left_width = width.saturating_sub(right_width);
+    let mut line =
+        widgets::pad_to_width(&widgets::clip_to_width(&breadcrumb, left_width), left_width);
+    let mut actions = Vec::new();
+    let mut cursor = left_width;
+    for (index, (action, segment)) in right_segments.into_iter().enumerate() {
+        if index > 0 {
+            line.push_str("  ");
+            cursor += 2;
+        }
+        let segment_width = widgets::display_width(&segment);
+        if let Some(action) = action {
+            actions.push((action, cursor..cursor + segment_width));
+        }
+        line.push_str(&segment);
+        cursor += segment_width;
+    }
+    HomeHeaderLayout { line, actions }
 }
 
 /// Header の下に呼吸できる余白を作る全幅の空行。
@@ -1043,6 +1165,11 @@ pub fn render_home_at(
         split,
     ));
     frame.truncate(height);
+    let frame = if let Some(drawer) = &home.workspace_agent_drawer {
+        workspace_agent_drawer::render_over(height, width, &frame, drawer)
+    } else {
+        frame
+    };
     if let Some(modal) = &home.overview_modal {
         overview_modal::render_over(height, width, &frame, modal)
     } else if let Some(overlay) = &home.pr_overlay {
@@ -1127,31 +1254,7 @@ fn dim_inactive_right_pane(inactive: bool, right: Vec<String>) -> Vec<String> {
 }
 
 fn home_header_line(width: usize, home: &HomeProjection) -> String {
-    let mode = match home.mode {
-        HomeMode::Switch => Mode::Switch,
-        HomeMode::Closeup => Mode::Closeup,
-    };
-    let left = format!(
-        " {}{}{}",
-        Role::Success.style().bold().paint("USAGI"),
-        Style::new().dim().paint(" > "),
-        Role::Success.style().bold().paint(&home.workspace_name),
-    );
-    if home.unread_decision_ids.is_empty() {
-        return header_with_mode_toggle(width, &left, mode);
-    }
-    let right = format!(
-        " 🔔 {} notice {}",
-        home.unread_decision_ids.len(),
-        mode_toggle(mode)
-    );
-    let right = widgets::clip_to_width(&right, width);
-    let left_width = width.saturating_sub(widgets::display_width(&right));
-    format!(
-        "{}{}",
-        widgets::pad_to_width(&widgets::clip_to_width(&left, left_width), left_width),
-        right
-    )
+    home_header_layout(width, home).line
 }
 
 fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
@@ -1790,14 +1893,18 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHROME_ROWS, CREATE_SKELETON_ROWS, CreateDraft, GIBIBYTE, GitDiff, HomeProjection,
-        LEFT_WIDTH, MEBIBYTE, ProjectedSession, SidebarDiffColumns, TerminalViewProjection,
-        Workspace, abnormal_daemon_speech, create_skeleton_lines, feedback_label, format_memory,
-        home_left_pane, home_row_lines_at, home_viewport_start, load_style,
-        new_session_input_lines, pane_tab_label, pane_tab_selected, phase_label, render_home,
-        resume_label, terminal_point_at, with_footer_gap,
+        CHROME_ROWS, CREATE_SKELETON_ROWS, CreateDraft, GIBIBYTE, GitDiff, HomeHeaderAction,
+        HomeProjection, LEFT_WIDTH, MEBIBYTE, ProjectedSession, SidebarDiffColumns,
+        TerminalViewProjection, Workspace, abnormal_daemon_speech, create_skeleton_lines,
+        feedback_label, format_memory, home_header_action_at, home_header_layout, home_left_pane,
+        home_row_lines_at, home_viewport_start, load_style, new_session_input_lines,
+        pane_tab_label, pane_tab_selected, phase_label, render_home, resume_label,
+        terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Style};
+    use crate::presentation::views::workspace_agent_drawer::{
+        WorkspaceAgentConversation, WorkspaceAgentDrawerProjection,
+    };
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{display_width, modal, wrap_to_width};
     use crate::usecase::application::controller::{
@@ -1815,7 +1922,8 @@ mod tests {
     use std::path::PathBuf;
     use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
     use usagi_core::domain::id::{
-        DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
+        DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, UserDecisionId,
+        WorkspaceId, WorktreeId,
     };
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::pullrequest::{PrLink, PrState};
@@ -1938,6 +2046,142 @@ mod tests {
             .map(|line| strip(line))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn home_header_layout_and_hit_test_share_cjk_notice_and_drawer_geometry() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        // A pending decision makes the notice badge unread; closing its
+        // auto-opened overlay leaves the badge on the header without an overlay.
+        let decision = usagi_core::domain::user_decision::UserDecision {
+            decision_id: UserDecisionId::new(),
+            owner: usagi_core::domain::user_decision::UserDecisionOwner {
+                workspace_id: workspace,
+                session_id: None,
+                caller: usagi_core::domain::agent::CallerRef {
+                    session_id: None,
+                    agent_id: usagi_core::domain::id::AgentId::new(),
+                },
+                run_id: OperationId::new(),
+            },
+            title: "confirm".to_owned(),
+            prompt: String::new(),
+            options: vec![usagi_core::domain::user_decision::UserDecisionOption {
+                id: "ok".to_owned(),
+                label: "ok".to_owned(),
+                description: None,
+            }],
+            allow_freeform: false,
+            expires_at: None,
+            idempotency_key: None,
+            status: usagi_core::domain::user_decision::UserDecisionStatus::Pending,
+            answer: None,
+            created_at: now(),
+            resolved_at: None,
+        };
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![decision],
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        assert_eq!(state.overlay(), None);
+        let mut home =
+            HomeProjection::from_state(&state, "日本語 workspace", Path::new("/work"), &[]);
+
+        let layout = home_header_layout(100, &home);
+        assert_eq!(display_width(&layout.line), 100);
+        assert!(strip(&layout.line).contains("Workspace Agent"));
+        assert!(strip(&layout.line).contains("notice"));
+        let workspace_columns = (0..100)
+            .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::WorkspaceAgent))
+            .collect::<Vec<_>>();
+        let notice_columns = (0..100)
+            .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::Decisions))
+            .collect::<Vec<_>>();
+        assert!(!workspace_columns.is_empty());
+        assert!(!notice_columns.is_empty());
+        for column in workspace_columns {
+            assert_eq!(
+                home_header_action_at(100, &home, u16::try_from(column).unwrap(), 0),
+                Some(HomeHeaderAction::WorkspaceAgent)
+            );
+        }
+        for column in notice_columns {
+            assert_eq!(
+                home_header_action_at(100, &home, u16::try_from(column).unwrap(), 0),
+                Some(HomeHeaderAction::Decisions)
+            );
+        }
+        assert_eq!(home_header_action_at(100, &home, 99, 1), None);
+        let closed_line = home_header_layout(100, &home).line;
+
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer),
+        );
+        home = HomeProjection::from_state(&state, "日本語 workspace", Path::new("/work"), &[]);
+        // The open drawer highlights the header button (adds the reverse SGR
+        // attribute), so its rendered header differs from the closed one.
+        let open_line = home_header_layout(100, &home).line;
+        assert_ne!(open_line, closed_line);
+        assert!(open_line.contains("1;7"));
+    }
+
+    #[test]
+    fn home_header_narrow_width_clips_button_and_never_exposes_phantom_hits() {
+        let state = AppState::home(WorkspaceId::new(), Vec::new());
+        let home =
+            HomeProjection::from_state(&state, "非常に長い workspace 名", Path::new("/work"), &[]);
+        for width in [0usize, 1, 8, 18, 56, 80] {
+            let normalized = if width == 0 { 80 } else { width };
+            let layout = home_header_layout(normalized, &home);
+            assert_eq!(display_width(&layout.line), normalized);
+            for column in 0..normalized {
+                assert_eq!(
+                    home_header_action_at(normalized, &home, u16::try_from(column).unwrap(), 0),
+                    layout.action_at(column)
+                );
+            }
+            assert_eq!(
+                home_header_action_at(normalized, &home, u16::try_from(normalized).unwrap(), 0),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn drawer_projection_seam_only_replaces_material_while_the_drawer_is_open() {
+        let workspace = WorkspaceId::new();
+        let material = WorkspaceAgentDrawerProjection {
+            conversations: vec![WorkspaceAgentConversation {
+                label: "root conversation".to_owned(),
+                selected: true,
+            }],
+            terminal_rows: vec!["workspace agent output".to_owned()],
+        };
+
+        let closed_state = AppState::home(workspace, Vec::new());
+        let closed = HomeProjection::from_state(&closed_state, "atlas", Path::new("/work"), &[])
+            .with_workspace_agent_drawer(material.clone());
+        let closed_text = render_home(20, 100, &closed).join("\n");
+        assert!(!closed_text.contains("root conversation"));
+        assert!(!closed_text.contains("workspace agent output"));
+
+        let mut open_state = AppState::home(workspace, Vec::new());
+        let _ = update(
+            &mut open_state,
+            AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer),
+        );
+        let open = HomeProjection::from_state(&open_state, "atlas", Path::new("/work"), &[])
+            .with_workspace_agent_drawer(material);
+        let open_text = render_home(20, 100, &open).join("\n");
+        assert!(open_text.contains("root conversation"));
+        assert!(open_text.contains("workspace agent output"));
     }
 
     #[test]

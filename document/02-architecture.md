@@ -102,6 +102,7 @@ v2 ではこの 4 分割をクレートとして表現し、「TUI が daemon �
 │               │   ├── new                 # 新規 workspace 作成フォーム（Clone/Existing 切替・入力フィールド・自動導出）の状態と描画
 │               │   ├── config             # 設定画面（global/workspace scope の draft・明示 save・失敗時 retry）の状態と描画
 │               │   ├── workspace          # ホーム画面（Switch／Closeup mode ＋ state-backed な左 session menu／右 tab pane）の状態と描画
+│               │   ├── workspace_agent_drawer # Home 右端の Workspace Agent drawer shell（pure geometry・empty projection・overlay 合成）
 │               │   ├── overview_modal      # Overview コマンドパレット `:`（入力の前方一致で候補を絞る中央モーダル）の状態と描画
 │               │   ├── closeup_modal       # Closeup コマンドメニュー（フォーカス中セッションへの操作を選ぶ中央モーダル）の状態と描画
 │               │   └── pr_modal            # Pull Request ポップアップ（PrLink 一覧＋選択中の詳細を出す中央モーダル）の状態と描画
@@ -158,7 +159,10 @@ pointer クリックは `Key::Click` を `AppEvent::Pointer`（座標＋種別�
 描画と同じ viewport 幾何で `Selection` へ hit-test して選択（single click）または
 活性化（double click）する。shell は行の hit-test を持たず、double click の判定窓だけを
 追跡する。terminal pane 内の drag / copy は Home 行契約と無関係なので shell +
-`TerminalSession` に残る。前面の Pull Request
+`TerminalSession` に残る。Workspace Agent drawer は `AppState` の専用 open/closed state が
+所有し、既存 modal が無いときだけ `Ctrl-O g` / header button で toggle する。描画は
+`workspace_agent_drawer` の right-anchored geometry と drawer 専用 terminal viewport を使い、
+open 中は background key / pointer / pane control を遮断する。前面の Pull Request
 一覧・Markdown preview は controller の `Overlay::Prs` / `Overlay::Preview` が所有し、
 素材は `Effect::LoadPullRequests` / `LoadPreview` で要求して
 `BackendEvent::PullRequestsLoaded` / `PreviewLoaded`（失敗は対応する `*Error`）として

@@ -587,7 +587,7 @@ fn is_escape_final(ch: char) -> bool {
 /// `text` から表示列 `start..start + width` を取り出し、ちょうど `width` 桁に
 /// そろえる。ANSI escape は 0 桁として保存する。境界が全角文字の 2 桁の中間に
 /// 入った場合は、片側だけを描けないため重なる列を空白にする。
-fn columns(text: &str, start: usize, width: usize) -> String {
+pub(crate) fn columns(text: &str, start: usize, width: usize) -> String {
     if width == 0 {
         return String::new();
     }

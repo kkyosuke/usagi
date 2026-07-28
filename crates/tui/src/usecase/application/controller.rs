@@ -722,6 +722,11 @@ pub enum Feedback {
 pub struct AppState {
     route: Route,
     overlay: Option<Overlay>,
+    /// Home's right-anchored Workspace Agent drawer. It is deliberately not an
+    /// [`Overlay`] variant: existing modal overlays retain entry precedence,
+    /// while an already-open drawer is the frontmost input owner and swallows
+    /// every background action until Escape or its toggle closes it.
+    workspace_agent_drawer_open: bool,
     note_editor: Option<NoteEditor>,
     environment_editor: Option<EnvironmentEditor>,
     decisions: Vec<UserDecision>,
@@ -842,6 +847,7 @@ impl AppState {
         Self {
             route: Route::Home(HomeMode::Switch),
             overlay: None,
+            workspace_agent_drawer_open: false,
             note_editor: None,
             environment_editor: None,
             decisions: Vec::new(),
@@ -885,6 +891,11 @@ impl AppState {
     #[must_use]
     pub const fn overlay(&self) -> Option<Overlay> {
         self.overlay
+    }
+    /// Whether the frontmost Workspace Agent drawer owns Home input.
+    #[must_use]
+    pub const fn workspace_agent_drawer_open(&self) -> bool {
+        self.workspace_agent_drawer_open
     }
     /// Home sidebar mascot animation frame. Only [`AppEvent::Tick`] advances it.
     #[must_use]
@@ -1324,6 +1335,10 @@ pub enum AppKey {
     CtrlQ,
     /// Open the detach confirmation from a reserved live-pane action.
     OpenQuitConfirmation,
+    /// Toggle the frontmost Workspace Agent drawer. Opening is ignored while an
+    /// existing modal overlay owns input; while open, this and Escape are the
+    /// only keys that mutate Home state.
+    ToggleWorkspaceAgentDrawer,
     /// workspace scope overlay を開く。
     OpenOverview,
     /// target scope overlay を開く。
@@ -2334,6 +2349,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             // Reconnect snapshots contain only known rows, so they preserve a
             // deliberate dismiss and never steal focus.
             if state.overlay.is_none()
+                && !state.workspace_agent_drawer_open
                 && let Some(decision) = state
                     .decisions
                     .iter()
@@ -2664,8 +2680,20 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
 
 fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     state.interaction_count = state.interaction_count.saturating_add(1);
+    // Existing modal overlays have precedence even if an asynchronous
+    // completion opened one while the drawer was already visible.
     if let Some(overlay) = state.overlay {
         return update_overlay(state, overlay, key);
+    }
+    if state.workspace_agent_drawer_open {
+        if matches!(key, AppKey::Escape | AppKey::ToggleWorkspaceAgentDrawer) {
+            state.workspace_agent_drawer_open = false;
+        }
+        return Vec::new();
+    }
+    if matches!(key, AppKey::ToggleWorkspaceAgentDrawer) {
+        state.workspace_agent_drawer_open = true;
+        return Vec::new();
     }
     if !matches!(key, AppKey::CtrlC) {
         state.ctrl_c_grace = false;
@@ -3024,6 +3052,7 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         | AppKey::CtrlC
         | AppKey::CtrlQ
         | AppKey::OpenQuitConfirmation
+        | AppKey::ToggleWorkspaceAgentDrawer
         | AppKey::OpenNotes
         | AppKey::OpenEnvironment
         | AppKey::SelectNoteSection(_)
@@ -3647,7 +3676,7 @@ fn update_pointer(
     row: u16,
     at: std::time::Duration,
 ) -> Vec<Effect> {
-    if state.overlay.is_some() {
+    if state.overlay.is_some() || state.workspace_agent_drawer_open {
         state.pending_session_click = None;
         return Vec::new();
     }
@@ -4662,6 +4691,159 @@ mod tests {
             }
             assert_eq!(state.route(), case.route, "{}", case.name);
             assert_eq!(state.overlay(), case.overlay, "{}", case.name);
+        }
+    }
+
+    #[test]
+    fn workspace_agent_drawer_toggle_preserves_background_state_and_owns_input() {
+        let (workspace, first, second) = ids();
+        let mut state = AppState::home(workspace, vec![first, second]);
+        let _ = update(
+            &mut state,
+            AppEvent::Resize {
+                width: 100,
+                height: 30,
+            },
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert_eq!(state.active(), Some(second));
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+        // A tab-owning Closeup has no launcher modal, leaving the drawer entry
+        // available without changing the active managed-session surface.
+        let _ = update(&mut state, AppEvent::PaneTabAvailability(true));
+        assert_eq!(state.overlay(), None);
+        let background = (
+            state.route(),
+            state.overlay(),
+            state.selected(),
+            state.active(),
+            state.size(),
+            state.has_live_pane(),
+            state.has_pane_tab,
+            state.closeup_action_forced,
+        );
+
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer)
+            )
+            .is_empty()
+        );
+        assert!(state.workspace_agent_drawer_open());
+        for event in [
+            AppEvent::Key(AppKey::Up),
+            AppEvent::Key(AppKey::CtrlA),
+            AppEvent::Key(AppKey::OpenOverview),
+            AppEvent::Key(AppKey::CtrlQ),
+            AppEvent::Key(AppKey::Char('x')),
+            AppEvent::Pointer {
+                column: 1,
+                row: 2,
+                at: std::time::Duration::from_millis(1),
+            },
+        ] {
+            assert!(update(&mut state, event).is_empty());
+            assert!(state.workspace_agent_drawer_open());
+            assert_eq!(
+                (
+                    state.route(),
+                    state.overlay(),
+                    state.selected(),
+                    state.active(),
+                    state.size(),
+                    state.has_live_pane(),
+                    state.has_pane_tab,
+                    state.closeup_action_forced,
+                ),
+                background
+            );
+        }
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        assert!(!state.workspace_agent_drawer_open());
+        assert_eq!(
+            (
+                state.route(),
+                state.overlay(),
+                state.selected(),
+                state.active(),
+                state.size(),
+                state.has_live_pane(),
+                state.has_pane_tab,
+                state.closeup_action_forced,
+            ),
+            background
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer),
+        );
+        assert!(!state.workspace_agent_drawer_open());
+    }
+
+    #[test]
+    fn every_existing_modal_blocks_workspace_agent_drawer_entry() {
+        let (workspace, first, _) = ids();
+        for overlay in [
+            Overlay::Overview,
+            Overlay::Closeup,
+            Overlay::QuitConfirmation,
+            Overlay::Notes,
+            Overlay::Environment,
+            Overlay::CreateSession,
+            Overlay::Decisions,
+            Overlay::Prs,
+            Overlay::Preview,
+            Overlay::CreateSessionError,
+        ] {
+            let mut state = AppState::home(workspace, vec![first]);
+            state.overlay = Some(overlay);
+            // Give each overlay the backing state its reducer requires, so a key
+            // it does not recognise stays inert instead of closing a half-built
+            // modal.
+            match overlay {
+                Overlay::CreateSession => {
+                    state.create_session = Some(CreateSessionForm::new(Vec::new()));
+                }
+                Overlay::Prs => {
+                    state.pr_overlay = Some(PrOverlay::loading(Target::Session(first)));
+                }
+                Overlay::Preview => {
+                    state.preview_overlay = Some(PreviewOverlay::loading(Target::Session(first)));
+                }
+                Overlay::Notes => {
+                    state.note_editor = Some(NoteEditor::loading(Target::Session(first)));
+                }
+                Overlay::Environment => {
+                    state.environment_editor =
+                        Some(EnvironmentEditor::loading(EnvScope::Workspace));
+                }
+                Overlay::Decisions => {
+                    state.decision_overlay = Some(DecisionOverlayState {
+                        selected: 0,
+                        editor: None,
+                    });
+                }
+                Overlay::Overview
+                | Overlay::Closeup
+                | Overlay::QuitConfirmation
+                | Overlay::CreateSessionError => {}
+            }
+            assert!(
+                update(
+                    &mut state,
+                    AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer)
+                )
+                .is_empty()
+            );
+            assert_eq!(state.overlay(), Some(overlay));
+            assert!(!state.workspace_agent_drawer_open());
         }
     }
 
