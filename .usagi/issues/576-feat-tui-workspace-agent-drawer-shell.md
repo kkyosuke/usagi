@@ -1,14 +1,14 @@
 ---
 number: 576
 title: feat(tui): Workspace Agent の右 drawer shell と入力導線を追加する
-status: todo
+status: done
 priority: high
 labels: [v2, tui, ux, drawer]
 dependson: [575]
 related: [388, 506, 510, 545]
 parent: 571
 created_at: 2026-07-27T23:03:34.156850+00:00
-updated_at: 2026-07-27T23:03:34.156850+00:00
+updated_at: 2026-07-28T12:44:27.941711+00:00
 ---
 
 ## 背景

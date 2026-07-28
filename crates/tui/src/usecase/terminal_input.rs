@@ -177,6 +177,10 @@ pub enum LiveTerminalAction {
     MoveTabPrevious,
     /// Open or reattach the agent pane.
     Agent,
+    /// Toggle the Home Workspace Agent drawer (`Ctrl-O g`). It is the frontmost
+    /// Home surface: opening it never mutates the background route, selection, or
+    /// active managed session, and re-issuing it closes the drawer.
+    WorkspaceAgent,
     /// Close the active tab.
     CloseTab,
     /// Explicitly resume the selected interrupted Agent tab (#510). Nothing else
@@ -385,6 +389,7 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
         return None;
     }
     match key.code {
+        KeyCode::Char('g') => Some(LiveTerminalAction::WorkspaceAgent),
         KeyCode::Char('x') => Some(LiveTerminalAction::CloseTab),
         KeyCode::Char('r') => Some(LiveTerminalAction::ResumeTab),
         KeyCode::Char(']') => Some(LiveTerminalAction::MoveTabNext),
@@ -675,6 +680,10 @@ mod tests {
                 follow_up: ctrl('p'),
                 action: LiveTerminalAction::PreviousTab,
             },
+            Case {
+                follow_up: key(KeyCode::Char('g')),
+                action: LiveTerminalAction::WorkspaceAgent,
+            },
             // View controls the reducer does not own: tab close and scroll.
             Case {
                 follow_up: key(KeyCode::Char('x')),
@@ -840,6 +849,19 @@ mod tests {
             LiveInputOutput::Passthrough(b"q".to_vec())
         );
         assert!(!classifier.leader_pending(LEADER_TIMEOUT));
+    }
+
+    #[test]
+    fn workspace_agent_follow_up_is_plain_terminal_input_after_leader_timeout() {
+        let mut classifier = LiveInputClassifier::default();
+        assert_eq!(
+            classifier.classify(T0, ctrl('o')),
+            LiveInputOutput::Swallowed
+        );
+        assert_eq!(
+            classifier.classify(LEADER_TIMEOUT, key(KeyCode::Char('g'))),
+            LiveInputOutput::Passthrough(b"g".to_vec())
+        );
     }
 
     #[test]

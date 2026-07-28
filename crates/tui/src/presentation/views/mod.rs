@@ -19,3 +19,4 @@ pub mod splash;
 pub mod text_overlay;
 pub mod welcome;
 pub mod workspace;
+pub mod workspace_agent_drawer;
