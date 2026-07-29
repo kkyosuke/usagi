@@ -27,12 +27,14 @@ use crate::presentation::views::overview_modal::OverviewModal;
 use crate::presentation::views::workspace::{
     GitDiff, HomeProjection, ProjectedSession, TerminalViewProjection, render_home,
 };
+use crate::presentation::views::workspace_agent_drawer::WorkspaceAgentDrawerProjection;
 use crate::usecase::application::Key;
 use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, Effect, HomeMode, Overlay, Route, TabDirection, Target, update,
 };
 use crate::usecase::application::interrupted_tab::{
-    InterruptedTab, ResumeCommand, ResumeRejection, accept_replacement, resume_command,
+    InterruptedTab, ResumeCommand, ResumeRejection, ResumeReplacement, accept_replacement,
+    resume_command,
 };
 use crate::usecase::application::pane::{
     InterruptedPane, LivePane, PaneEvent, PaneInputOwner, PaneKind, PaneRegistry,
@@ -67,6 +69,9 @@ pub struct PaneRestoreTarget {
     pub target: Target,
     pub panes: Vec<LivePane>,
     pub selected: Option<TerminalRef>,
+    /// Saved interrupted selection for this target. It is applied only after
+    /// the interrupted inventory has been restored, and never starts resume.
+    pub selected_interrupted: Option<AgentContinuationRef>,
     /// Interrupted conversations of this target, in display order. They are
     /// read-only tabs until the user explicitly resumes one.
     pub interrupted: Vec<InterruptedTab>,
@@ -91,6 +96,7 @@ pub struct WorkspaceRuntime {
     /// The entry is dropped when the launch completes, fails, or is cancelled.
     pane_focus_at_request: BTreeMap<OperationId, u64>,
     reopen_choices: Vec<AgentReopenChoice>,
+    workspace_agent_projection: WorkspaceAgentDrawerProjection,
 }
 
 impl WorkspaceRuntime {
@@ -120,6 +126,7 @@ impl WorkspaceRuntime {
             modal_selection_mode,
             pane_focus_at_request: BTreeMap::new(),
             reopen_choices: Vec::new(),
+            workspace_agent_projection: WorkspaceAgentDrawerProjection::default(),
         }
     }
 
@@ -154,6 +161,14 @@ impl WorkspaceRuntime {
         &self.panes
     }
 
+    /// Bypass runtime admission in tests so presentation tests can prove their
+    /// independent Agent-only filter against an impossible registry state.
+    #[cfg(test)]
+    pub(crate) fn inject_pane_event_for_test(&mut self, target: Target, event: PaneEvent) {
+        let _ = reduce_registry(&mut self.panes, PaneRegistryEvent::Pane { target, event });
+        self.sync_live_pane();
+    }
+
     /// Apply a newly saved workspace setting to future Overview / Closeup
     /// palettes without rebuilding the workspace runtime or its live panes.
     pub fn set_modal_selection_mode(&mut self, mode: ModalSelectionMode) {
@@ -182,6 +197,16 @@ impl WorkspaceRuntime {
         if let Some(modal) = self.closeup_modal.take() {
             self.closeup_modal = Some(modal.with_reopen_choices(self.reopen_choices.clone()));
         }
+    }
+
+    /// Replace presentation-only material for the open root Agent drawer.
+    pub fn set_workspace_agent_projection(&mut self, projection: WorkspaceAgentDrawerProjection) {
+        self.workspace_agent_projection = projection;
+    }
+
+    #[must_use]
+    pub const fn workspace_agent_projection(&self) -> &WorkspaceAgentDrawerProjection {
+        &self.workspace_agent_projection
     }
 
     /// Apply one completed inventory projection. Only a result matching both
@@ -234,12 +259,22 @@ impl WorkspaceRuntime {
         }
         for target in targets {
             let entry = target.target;
+            let root = matches!(entry, Target::Root(_));
+            let panes = if root {
+                target
+                    .panes
+                    .into_iter()
+                    .filter(|pane| pane.kind == PaneKind::Agent)
+                    .collect()
+            } else {
+                target.panes
+            };
             let _ = reduce_registry(
                 &mut self.panes,
                 PaneRegistryEvent::Pane {
                     target: entry,
                     event: PaneEvent::RestoreBatch {
-                        panes: target.panes,
+                        panes,
                         selected: target.selected,
                         replace_order,
                     },
@@ -261,6 +296,27 @@ impl WorkspaceRuntime {
                         },
                     },
                 );
+                if let Some(continuation) = target.selected_interrupted
+                    && self.panes.pane(entry).is_some_and(|pane| {
+                        pane.tabs().iter().any(|tab| {
+                            matches!(
+                                tab,
+                                PaneTab::Interrupted(interrupted)
+                                    if interrupted.tab.continuation == continuation
+                            )
+                        })
+                    })
+                {
+                    let _ = reduce_registry(
+                        &mut self.panes,
+                        PaneRegistryEvent::Pane {
+                            target: entry,
+                            event: PaneEvent::Select(PaneSelection::Tab(
+                                TabSelection::Interrupted(continuation),
+                            )),
+                        },
+                    );
+                }
             }
         }
         self.sync_live_pane();
@@ -520,10 +576,10 @@ impl WorkspaceRuntime {
     /// modal) owns input.
     #[must_use]
     pub fn wants_live_input(&self) -> bool {
-        matches!(self.state.route(), Route::Home(HomeMode::Closeup))
+        (matches!(self.state.route(), Route::Home(HomeMode::Closeup))
+            || self.state.workspace_agent_drawer_open())
             && self.state.has_live_pane()
             && self.state.overlay().is_none()
-            && !self.state.workspace_agent_drawer_open()
             && matches!(self.panes.input_owner(), PaneInputOwner::Tab)
     }
 
@@ -533,9 +589,9 @@ impl WorkspaceRuntime {
     /// input. Switch and foreground overlays leave the pane visible but inert.
     #[must_use]
     pub fn wants_pane_control_input(&self) -> bool {
-        matches!(self.state.route(), Route::Home(HomeMode::Closeup))
+        (matches!(self.state.route(), Route::Home(HomeMode::Closeup))
+            || self.state.workspace_agent_drawer_open())
             && self.state.overlay().is_none()
-            && !self.state.workspace_agent_drawer_open()
     }
 
     /// The terminal the active pane's selected tab attaches to, if the selection
@@ -581,6 +637,9 @@ impl WorkspaceRuntime {
         operation: OperationId,
         kind: PaneKind,
     ) -> Vec<PaneRegistryEffect> {
+        if matches!(target, Target::Root(_)) && kind != PaneKind::Agent {
+            return Vec::new();
+        }
         let effects = reduce_registry(
             &mut self.panes,
             PaneRegistryEvent::Pane {
@@ -828,44 +887,98 @@ impl WorkspaceRuntime {
         let Some(target) = self.panes.active() else {
             return Err(ResumeRejection::NotResumable);
         };
-        let Some(pane) = self.interrupted_pane(continuation) else {
+        self.complete_tab_resume_for(
+            target,
+            continuation,
+            answered,
+            answered_continuation,
+            relation,
+            terminal,
+        )
+    }
+
+    /// Complete an exact resume in its owning target even if the drawer was
+    /// closed while the daemon request was in flight. A background replacement
+    /// updates only that target and produces no attach effect.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same exact-resume fence rejection as
+    /// [`Self::complete_tab_resume`].
+    pub fn complete_tab_resume_for(
+        &mut self,
+        target: Target,
+        continuation: AgentContinuationRef,
+        answered: OperationId,
+        answered_continuation: Option<AgentContinuationRef>,
+        relation: Option<&AgentResumeRelation>,
+        terminal: &TerminalRef,
+    ) -> Result<Vec<PaneRegistryEffect>, ResumeRejection> {
+        let replacement = match self.validate_tab_resume_for(
+            target,
+            continuation,
+            answered,
+            answered_continuation,
+            relation,
+            terminal,
+        ) {
+            Ok(replacement) => replacement,
+            Err(rejection) => {
+                let operation = self
+                    .interrupted_pane_for(target, continuation)
+                    .and_then(|pane| pane.resuming);
+                self.fail_tab_resume_for(
+                    target,
+                    continuation,
+                    operation,
+                    rejection.safe_message().to_owned(),
+                );
+                return Err(rejection);
+            }
+        };
+        let effects = reduce_registry(
+            &mut self.panes,
+            PaneRegistryEvent::Pane {
+                target,
+                event: PaneEvent::ResumeReplaced {
+                    continuation: replacement.continuation,
+                    terminal: replacement.terminal,
+                },
+            },
+        );
+        self.sync_live_pane();
+        Ok(effects)
+    }
+
+    /// Validate an exact resume answer without changing the visible pane.
+    ///
+    /// # Errors
+    ///
+    /// Returns the exact operation/source/relation/lineage/scope fence that
+    /// rejected the answer.
+    pub fn validate_tab_resume_for(
+        &self,
+        target: Target,
+        continuation: AgentContinuationRef,
+        answered: OperationId,
+        answered_continuation: Option<AgentContinuationRef>,
+        relation: Option<&AgentResumeRelation>,
+        terminal: &TerminalRef,
+    ) -> Result<ResumeReplacement, ResumeRejection> {
+        let Some(pane) = self.interrupted_pane_for(target, continuation) else {
             return Err(ResumeRejection::NotResumable);
         };
         let Some(in_flight) = pane.resuming else {
             return Err(ResumeRejection::OperationMismatch);
         };
-        let accepted = accept_replacement(
+        accept_replacement(
             &pane.tab,
             in_flight,
             answered,
             answered_continuation,
             relation,
             terminal,
-        );
-        match accepted {
-            Ok(replacement) => {
-                let effects = reduce_registry(
-                    &mut self.panes,
-                    PaneRegistryEvent::Pane {
-                        target,
-                        event: PaneEvent::ResumeReplaced {
-                            continuation: replacement.continuation,
-                            terminal: replacement.terminal,
-                        },
-                    },
-                );
-                self.sync_live_pane();
-                Ok(effects)
-            }
-            Err(rejection) => {
-                self.fail_tab_resume(
-                    continuation,
-                    Some(in_flight),
-                    rejection.safe_message().to_owned(),
-                );
-                Err(rejection)
-            }
-        }
+        )
     }
 
     /// Leave one interrupted tab in place after a refused or failed resume and
@@ -883,6 +996,16 @@ impl WorkspaceRuntime {
         let Some(target) = self.panes.active() else {
             return;
         };
+        self.fail_tab_resume_for(target, continuation, operation, message);
+    }
+
+    pub fn fail_tab_resume_for(
+        &mut self,
+        target: Target,
+        continuation: AgentContinuationRef,
+        operation: Option<OperationId>,
+        message: String,
+    ) {
         let _ = reduce_registry(
             &mut self.panes,
             PaneRegistryEvent::Pane {
@@ -906,8 +1029,17 @@ impl WorkspaceRuntime {
     }
 
     fn interrupted_pane(&self, continuation: AgentContinuationRef) -> Option<&InterruptedPane> {
+        let target = self.panes.active()?;
+        self.interrupted_pane_for(target, continuation)
+    }
+
+    fn interrupted_pane_for(
+        &self,
+        target: Target,
+        continuation: AgentContinuationRef,
+    ) -> Option<&InterruptedPane> {
         self.panes
-            .active_pane()
+            .pane(target)?
             .tabs()
             .iter()
             .find_map(|tab| match tab {
@@ -947,6 +1079,27 @@ impl WorkspaceRuntime {
         })
     }
 
+    /// Preview the stable selection chosen after closing any selected tab.
+    #[must_use]
+    pub fn selection_after_close(&self) -> Option<Option<TabSelection>> {
+        let PaneSelection::Tab(selected) = self.panes.active_pane().selected() else {
+            return None;
+        };
+        let tabs = self.panes.active_pane().tabs();
+        let index = tabs
+            .iter()
+            .position(|tab| tab_selection(tab) == *selected)?;
+        if tabs.len() == 1 {
+            return Some(None);
+        }
+        let successor = if index + 1 < tabs.len() {
+            &tabs[index + 1]
+        } else {
+            &tabs[index - 1]
+        };
+        Some(Some(tab_selection(successor)))
+    }
+
     /// Cycle the active pane's selected tab for an `Effect::SelectTab`. Only the
     /// tab owner (not the action modal) reacts, matching the reducer contract.
     pub fn select_tab(&mut self, direction: TabDirection) -> Vec<PaneRegistryEffect> {
@@ -963,13 +1116,19 @@ impl WorkspaceRuntime {
     /// tab to select; the inner `None` is a pending/ready non-terminal tab.
     #[must_use]
     pub fn terminal_after_select(&self, direction: TabDirection) -> Option<Option<TerminalRef>> {
-        self.adjacent_tab(direction)
+        self.selection_after_select(direction)
             .map(|selection| match selection {
                 TabSelection::Live(terminal) => Some(terminal),
                 TabSelection::Pending(_)
                 | TabSelection::Ready(_)
                 | TabSelection::Interrupted(_) => None,
             })
+    }
+
+    /// Preview the stable selection produced by a tab cycle.
+    #[must_use]
+    pub fn selection_after_select(&self, direction: TabDirection) -> Option<TabSelection> {
+        self.adjacent_tab(direction)
     }
 
     /// Move the selected tab in the active target while retaining its stable
@@ -995,6 +1154,31 @@ impl WorkspaceRuntime {
                 PaneTab::Pending(_) | PaneTab::Ready(_) | PaneTab::Interrupted(_) => None,
             })
             .collect()
+    }
+
+    /// Preview the current and next stable tab identities around a move,
+    /// including interrupted lineages used by the root Agent drawer.
+    #[must_use]
+    pub fn tab_order_after_reorder(
+        &self,
+        direction: TabDirection,
+    ) -> (Vec<TabSelection>, Vec<TabSelection>) {
+        let current = self
+            .panes
+            .active_pane()
+            .tabs()
+            .iter()
+            .map(tab_selection)
+            .collect();
+        let mut panes = self.panes.clone();
+        let _ = route_tab_command(&mut panes, PaneTabCommand::Reorder(direction));
+        let next = panes
+            .active_pane()
+            .tabs()
+            .iter()
+            .map(tab_selection)
+            .collect();
+        (current, next)
     }
 
     /// Mirror a controller [`Effect`]'s pane-visible intent into the registry
@@ -1053,7 +1237,11 @@ impl WorkspaceRuntime {
     }
 
     fn follow_active_target(&mut self) {
-        let active = self.state.active().map(Target::Session);
+        let active = if self.state.workspace_agent_drawer_open() {
+            Some(Target::Root(self.state.workspace()))
+        } else {
+            self.state.active().map(Target::Session)
+        };
         if self.panes.active() != active {
             let event = active.map_or(
                 PaneRegistryEvent::ClearTarget,
@@ -1115,6 +1303,7 @@ impl WorkspaceRuntime {
                 .with_metrics(metrics)
                 .with_git_diffs(git_diffs)
                 .with_terminal_view(terminal_view)
+                .with_workspace_agent_drawer(self.workspace_agent_projection.clone())
                 .with_overlay_modals(self.overview_modal.clone(), self.closeup_modal.clone());
         render_home(height, width, &projection)
     }
@@ -1689,6 +1878,7 @@ mod tests {
                         kind: PaneKind::Terminal,
                     }],
                     selected: None,
+                    selected_interrupted: None,
                     interrupted: Vec::new(),
                 },
                 PaneRestoreTarget {
@@ -1698,6 +1888,7 @@ mod tests {
                         kind: PaneKind::Agent,
                     }],
                     selected: None,
+                    selected_interrupted: None,
                     interrupted: Vec::new(),
                 },
             ],
@@ -1929,6 +2120,7 @@ mod tests {
                     },
                 ],
                 selected: Some(discovered),
+                selected_interrupted: None,
                 interrupted: Vec::new(),
             }],
         );
@@ -2100,10 +2292,16 @@ mod tests {
                 runtime.state().route(),
                 runtime.state().selected(),
                 runtime.state().active(),
-                runtime.active_pane().clone(),
+                runtime.panes().pane(Target::Session(first)).cloned(),
             ),
-            switch_background
+            (
+                switch_background.0,
+                switch_background.1,
+                switch_background.2,
+                Some(switch_background.3),
+            )
         );
+        assert_eq!(runtime.panes().active(), Some(Target::Root(workspace)));
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
         assert!(!runtime.state().workspace_agent_drawer_open());
 
@@ -2140,13 +2338,169 @@ mod tests {
                 runtime.state().route(),
                 runtime.state().selected(),
                 runtime.state().active(),
-                runtime.active_pane().clone(),
+                runtime.panes().pane(target).cloned(),
             ),
-            closeup_background
+            (
+                closeup_background.0,
+                closeup_background.1,
+                closeup_background.2,
+                Some(closeup_background.3.clone()),
+            )
         );
+        let _ = runtime.handle_key(Key::Escape);
+        assert!(runtime.state().workspace_agent_drawer_open());
         let _ = runtime.handle_key(Key::Escape);
         assert!(!runtime.state().workspace_agent_drawer_open());
         assert_eq!(runtime.active_pane(), &closeup_background.3);
+    }
+
+    #[test]
+    fn workspace_agent_drawer_hands_foreground_to_agent_only_root_and_back() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let managed = terminal_ref(workspace, session);
+        let root_agent = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: None,
+            worktree_id: WorktreeId::new(),
+        };
+        let root_generic = TerminalRef {
+            terminal_id: TerminalId::new(),
+            ..root_agent.clone()
+        };
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let fence = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            fence.0,
+            fence.1,
+            vec![
+                PaneRestoreTarget {
+                    target: Target::Session(session),
+                    panes: vec![LivePane {
+                        terminal: managed.clone(),
+                        kind: PaneKind::Terminal,
+                    }],
+                    selected: Some(managed.clone()),
+                    selected_interrupted: None,
+                    interrupted: Vec::new(),
+                },
+                PaneRestoreTarget {
+                    target: Target::Root(workspace),
+                    panes: vec![
+                        LivePane {
+                            terminal: root_agent.clone(),
+                            kind: PaneKind::Agent,
+                        },
+                        LivePane {
+                            terminal: root_generic,
+                            kind: PaneKind::Terminal,
+                        },
+                    ],
+                    selected: Some(root_agent.clone()),
+                    selected_interrupted: None,
+                    interrupted: Vec::new(),
+                },
+            ],
+        ));
+        assert_eq!(runtime.focused_terminal(), Some(managed.clone()));
+
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        assert_eq!(runtime.panes().active(), Some(Target::Root(workspace)));
+        assert_eq!(runtime.focused_terminal(), Some(root_agent));
+        assert!(runtime.wants_live_input());
+        assert!(
+            runtime
+                .active_pane()
+                .tabs()
+                .iter()
+                .all(|tab| matches!(tab, PaneTab::Live(live) if live.kind == PaneKind::Agent))
+        );
+        assert!(
+            runtime
+                .request_pane(
+                    Target::Root(workspace),
+                    OperationId::new(),
+                    PaneKind::Terminal,
+                )
+                .is_empty()
+        );
+        assert!(
+            runtime
+                .request_pane(Target::Root(workspace), OperationId::new(), PaneKind::Diff)
+                .is_empty()
+        );
+
+        let _ = runtime.handle_key(Key::Escape);
+        assert_eq!(runtime.panes().active(), Some(Target::Session(session)));
+        assert_eq!(runtime.focused_terminal(), Some(managed));
+    }
+
+    #[test]
+    fn workspace_agent_restore_selects_interrupted_root_without_resuming() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut history = interrupted_tab(workspace, session, true);
+        history.session_id = None;
+        history.last_terminal.session_id = None;
+        if let Some(target) = history.target.as_mut() {
+            target.session_id = None;
+        }
+        let continuation = history.continuation;
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let fence = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            fence.0,
+            fence.1,
+            vec![PaneRestoreTarget {
+                target: Target::Root(workspace),
+                panes: Vec::new(),
+                selected: None,
+                selected_interrupted: Some(continuation),
+                interrupted: vec![history],
+            }],
+        ));
+
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        assert_eq!(
+            runtime.active_pane().selected(),
+            &PaneSelection::Tab(TabSelection::Interrupted(continuation))
+        );
+        assert_eq!(
+            runtime.focused_interrupted().map(|tab| tab.continuation),
+            Some(continuation)
+        );
+        assert!(runtime.focused_terminal().is_none());
+    }
+
+    #[test]
+    fn stable_selection_previews_cover_empty_and_previous_slot_fallbacks() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+
+        let inactive = WorkspaceRuntime::new(workspace, Vec::new());
+        assert_eq!(inactive.selection_after_close(), None);
+
+        let mut single = closeup_on(workspace, session);
+        let only_operation = OperationId::new();
+        let only_terminal = terminal_ref(workspace, session);
+        let _ = single.request_pane(target, only_operation, PaneKind::Agent);
+        let _ = single.complete_pane(target, only_operation, only_terminal.clone());
+        let _ = single.focus_terminal(target, only_terminal.clone());
+        assert_eq!(single.terminal_after_close(), Some(None));
+        assert_eq!(single.selection_after_close(), Some(None));
+
+        let second_operation = OperationId::new();
+        let second_terminal = terminal_ref(workspace, session);
+        let _ = single.request_pane(target, second_operation, PaneKind::Agent);
+        let _ = single.complete_pane(target, second_operation, second_terminal.clone());
+        let _ = single.focus_terminal(target, second_terminal);
+        assert_eq!(
+            single.selection_after_close(),
+            Some(Some(TabSelection::Live(only_terminal)))
+        );
     }
 
     #[test]
@@ -2539,6 +2893,7 @@ mod tests {
                 target,
                 panes: Vec::new(),
                 selected: None,
+                selected_interrupted: None,
                 interrupted: tabs,
             }],
         ));
@@ -2612,6 +2967,7 @@ mod tests {
                     kind: PaneKind::Agent,
                 }],
                 selected: Some(live),
+                selected_interrupted: None,
                 interrupted: vec![history.clone()],
             }],
         ));
@@ -2885,6 +3241,7 @@ mod tests {
                     kind: PaneKind::Terminal,
                 }],
                 selected: None,
+                selected_interrupted: None,
                 interrupted: Vec::new(),
             }],
         ));

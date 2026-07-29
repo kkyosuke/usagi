@@ -1,14 +1,14 @@
 ---
 number: 577
 title: feat(tui): Workspace Agent drawer に root Agent conversation を復元・接続する
-status: todo
+status: done
 priority: high
 labels: [v2, tui, agent, recovery, persistence]
 dependson: [576]
 related: [388, 506, 510, 545]
 parent: 571
 created_at: 2026-07-27T23:04:06.141688+00:00
-updated_at: 2026-07-27T23:04:06.141688+00:00
+updated_at: 2026-07-28T23:53:07.791529+00:00
 ---
 
 ## 背景
