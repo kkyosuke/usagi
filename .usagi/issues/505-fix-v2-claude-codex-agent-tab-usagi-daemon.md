@@ -1,13 +1,13 @@
 ---
 number: 505
 title: fix(v2): Claude/Codex Agent tab を usagi 終了・daemon 再起動後に復帰可能にする
-status: todo
+status: done
 priority: high
 labels: [review, v2, epic, tui, daemon, agent, recovery]
 dependson: [504]
 related: [209, 350, 388, 492, 503]
 created_at: 2026-07-21T21:20:29.599700+00:00
-updated_at: 2026-07-24T21:41:55.959245+00:00
+updated_at: 2026-07-29T10:49:51.109315+00:00
 ---
 
 ## レビュー結果
@@ -47,13 +47,13 @@ TUI open、inventory restore、daemon restart を理由に Agent の作業を自
 
 ## 受入条件
 
-- [ ] Claude と Codex を同時に起動した workspace で TUI を正常終了して開き直すと、元の Agent tab が exact identity・順序・選択で一度だけ復元され、process / spawn count は変わらない。
-- [ ] shipping `usagi daemon restart` 後も、旧 generation の Agent tab に双方向 IO でき、provider resume argv や replacement spawn が発生しない。restart 後の新規 Agent は新 active generation が所有する。
-- [ ] old generation は最後の owned terminal が終了した後だけ回収され、stale / wrong-generation request は effect zero になる。
-- [ ] crash / cold restart では旧 PTY を live と表示せず、root と managed session、同一 scope の複数履歴を別々の interrupted tab として表示する。
-- [ ] 利用者が選択した exact interrupted tab だけを新 runtime へ resume し、TUI open / reconnect / restart から自動 resume しない。
-- [ ] Claude は daemon 発行 ID、Codex は #504 の正式 structured capture で得た ID のみを使い、raw provider ID・argv・cwd を client 入力にしない。
-- [ ] daemon 不通、corrupt/stale local state、scope / generation / adapter mismatch、provider metadata 不足を fail-closed に扱い、誤 attach・空会話・二重 spawn・二重 tab を発生させない。
+- [x] Claude と Codex を同時に起動した workspace で TUI を正常終了して開き直すと、元の Agent tab が exact identity・順序・選択で一度だけ復元され、process / spawn count は変わらない。
+- [x] shipping `usagi daemon restart` 後も、旧 generation の Agent tab に双方向 IO でき、provider resume argv や replacement spawn が発生しない。restart 後の新規 Agent は新 active generation が所有する。
+- [x] old generation は最後の owned terminal が終了した後だけ回収され、stale / wrong-generation request は effect zero になる。
+- [x] crash / cold restart では旧 PTY を live と表示せず、root と managed session、同一 scope の複数履歴を別々の interrupted tab として表示する。
+- [x] 利用者が選択した exact interrupted tab だけを新 runtime へ resume し、TUI open / reconnect / restart から自動 resume しない。
+- [x] Claude は daemon 発行 ID、Codex は #504 の正式 structured capture で得た ID のみを使い、raw provider ID・argv・cwd を client 入力にしない。
+- [x] daemon 不通、corrupt/stale local state、scope / generation / adapter mismatch、provider metadata 不足を fail-closed に扱い、誤 attach・空会話・二重 spawn・二重 tab を発生させない。
 
 ## 必須 product E2E
 
@@ -72,19 +72,8 @@ in-process coordinator の再構築だけで完了とせず、shipping binary、
 
 daemon crash 後も同じ PTY master fd を維持する broker / FD handoff は #221 の将来設計であり、本 epic の非目標とする。crash / reboot は provider-native explicit resume による新 runtime 復帰を保証する。
 
-## 進捗（2026-07-25 時点）
+## 完了（2026-07-29）
 
-epic は未完である。子 issue の状況は次のとおり。
-
-| 子 issue | 状況 |
-|---|---|
-| #506 live tab intent の durable 化 | done |
-| #509 interrupted runtime の exact-target resume contract | done |
-| #504 Codex structured capture の production 配線 | done |
-| #510 interrupted tab 単位の選択 resume | 進行中。projection / 明示 resume 検証 reducer と daemon の safe provider vocabulary が landed（`crates/tui/src/usecase/application/interrupted_tab.rs`）。pane registry / tab strip / resume worker への配線と product E2E が残る |
-| #507 planned restart の active/draining rollover | 未着手。依存 #508 が未完 |
-| #508 draining generation inventory と owner routing | 未着手。依存 #518 → #516（cross-process generation registry）が未実装のため、この epic の planned-restart 受入条件は現時点で達成できない |
-
-したがって受入条件のうち「shipping `daemon restart` 後も旧 generation の Agent tab に双方向 IO できる」「old generation は最後の
-owned terminal 終了後だけ回収される」は #516 → #518 → #508 → #507 の順序で解消する必要がある。crash / cold restart 側
-（interrupted tab の表示と明示 resume）は #510 で閉じる。
+#504、#506〜#510 と、それらから分割した lifecycle / owner routing / Workspace Agent drawer の実装・product E2E が
+すべて main に統合された。same-daemon reopen、planned seamless rollover、SIGKILL 後の interrupted tab と exact
+explicit resume の shipping E2E が通ることを確認し、本 epic を完了とする。
