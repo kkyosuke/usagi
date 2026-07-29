@@ -2592,6 +2592,40 @@ mod tests {
     }
 
     #[test]
+    fn mismatched_completion_scope_is_rejected_by_both_runtime_entry_points() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Root(workspace);
+        let managed_terminal = terminal_ref(workspace, session);
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+
+        let direct_operation = OperationId::new();
+        let _ = runtime.request_pane(target, direct_operation, PaneKind::Agent);
+        assert!(
+            runtime
+                .complete_pane(target, direct_operation, managed_terminal.clone(),)
+                .is_empty()
+        );
+
+        let focus_operation = OperationId::new();
+        let _ = runtime.request_pane(target, focus_operation, PaneKind::Agent);
+        assert!(
+            runtime
+                .complete_pane_focus_if_uninterrupted(target, focus_operation, managed_terminal)
+                .is_empty()
+        );
+
+        let root_pane = runtime.panes().pane(target).unwrap();
+        assert_eq!(root_pane.tabs().len(), 2);
+        assert!(
+            root_pane
+                .tabs()
+                .iter()
+                .all(|tab| matches!(tab, PaneTab::Pending(_)))
+        );
+    }
+
+    #[test]
     fn workspace_agent_restore_selects_interrupted_root_without_resuming() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
