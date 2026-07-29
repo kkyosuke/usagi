@@ -3464,8 +3464,9 @@ fn workspace_agent_drawer_projection(
     {
         terminal_rows.push(interrupted.safe_detail().to_owned());
     }
-    if let Some(view) = terminal_view
-        && let Some(feedback) = view.feedback.as_ref()
+    if let Some(feedback) = terminal_view
+        .and_then(|view| view.feedback.as_deref())
+        .or_else(|| pane.error())
     {
         terminal_rows.push(feedback.to_owned());
     }
@@ -11778,6 +11779,19 @@ mod tests {
         let interrupted_projection = super::workspace_agent_drawer_projection(&ui, &runtime, None);
         assert!(interrupted_projection.conversations[0].selected);
         assert_eq!(interrupted_projection.terminal_rows.len(), 1);
+        runtime.fail_tab_resume_for(
+            Target::Root(workspace),
+            interrupted_continuation,
+            None,
+            "safe retry feedback".to_owned(),
+        );
+        assert_eq!(
+            super::workspace_agent_drawer_projection(&ui, &runtime, None).terminal_rows,
+            vec![
+                interrupted.safe_detail().to_owned(),
+                "safe retry feedback".to_owned()
+            ]
+        );
         assert!(super::select_workspace_agent_tab(
             &Key::Live(LiveTerminalAction::NextTab),
             &mut ui,

@@ -242,6 +242,18 @@ fn send(master: &mut File, input: &[u8]) {
     master.flush().unwrap();
 }
 
+/// 100-column Home header の右端にある Workspace Agent button を実 mouse event で押す。
+///
+/// SGR mouse coordinates are one-based. The button is the rightmost 19 cells, so
+/// column 90 is safely inside it even when the mode segment is also present.
+fn click_workspace_agent_button(master: &mut File) {
+    send(master, b"\x1b[<0;91;1M\x1b[<0;91;1m");
+}
+
+fn toggle_workspace_agent_with_key(master: &mut File) {
+    send(master, b"\x0fg");
+}
+
 fn short_home() -> DaemonHome {
     DaemonHome::new()
 }
@@ -923,6 +935,33 @@ fn select_tab_by_label(
     }
 }
 
+/// Workspace Agent drawer の conversation selector を実キーで巡回する。
+///
+/// Drawer は Closeup の tab strip ではなく、選択中 conversation だけを
+/// `Conversation  [label]` として描くため、marker ではなく selector の closed
+/// vocabulary を観測する。
+fn select_drawer_conversation_by_label(
+    master: &mut File,
+    output: &Arc<Mutex<Vec<u8>>>,
+    baseline: usize,
+    label: &str,
+) {
+    let selected = format!("[{label}]");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let screen = screen_since(output, baseline).unwrap_or_default();
+        if screen.contains(&selected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "drawer conversation {label} was never selected; screen={screen:?}"
+        );
+        send(master, b"\x0f\x0e");
+        thread::sleep(Duration::from_millis(150));
+    }
+}
+
 /// `count` が `expected` に達し、そのまま留まることを確認する。
 ///
 /// 「double click が child spawn 1 件へ収束する」のように「増えない」ことが主張の中身である
@@ -1225,7 +1264,6 @@ fn real_pty_leaving_a_workspace_returns_to_welcome_and_re_entry_does_not_hang() 
 }
 
 #[test]
-#[ignore = "workspace-root pane interaction moves to #577"]
 #[allow(clippy::too_many_lines)] // The normal-exit and SIGKILL lifecycle is intentionally chronological.
 fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respawn() {
     let _serial = serial();
@@ -1259,6 +1297,7 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
         .output()
         .expect("workspace registers with fixture login shell");
     assert!(registered.status.success());
+    let _ = create_session(home.path(), "generic-terminal");
 
     let (mut master, slave) = open_pty().unwrap();
     let reader_master = master.try_clone().unwrap();
@@ -1292,8 +1331,8 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
     let killed_baseline = capture_len(&captured);
     let mut killed_tui = spawn_hop(&home, &workspace, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, killed_baseline);
-    wait_for_screen_since(&captured, killed_baseline, "generic-input:generic-initial");
     activate_selected_live_pane(&mut master, &captured, killed_baseline);
+    wait_for_screen_since(&captured, killed_baseline, "generic-input:generic-initial");
     send(&mut master, b"generic-before-kill\r");
     wait_for_screen_since(
         &captured,
@@ -1313,12 +1352,12 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
     let after_kill_baseline = capture_len(&captured);
     let mut after_kill = spawn_hop(&home, &workspace, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, after_kill_baseline);
+    activate_selected_live_pane(&mut master, &captured, after_kill_baseline);
     wait_for_screen_since(
         &captured,
         after_kill_baseline,
         "generic-input:generic-before-kill",
     );
-    activate_selected_live_pane(&mut master, &captured, after_kill_baseline);
     send(&mut master, b"generic-after-kill\r");
     wait_for_screen_since(
         &captured,
@@ -1332,12 +1371,12 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
     let second_reopen_baseline = capture_len(&captured);
     let mut second_reopen = spawn_hop(&home, &workspace, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, second_reopen_baseline);
+    activate_selected_live_pane(&mut master, &captured, second_reopen_baseline);
     wait_for_screen_since(
         &captured,
         second_reopen_baseline,
         "generic-input:generic-after-kill",
     );
-    activate_selected_live_pane(&mut master, &captured, second_reopen_baseline);
     send(&mut master, b"generic-second-reopen\r");
     wait_for_screen_since(
         &captured,
@@ -1377,7 +1416,6 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
 /// socket は生きている、hung daemon そのものの形）に対しても、live pane へのキー入力・switch
 /// overlay の描画・quit がすべて wall-clock で有界に戻る。修正前はこのテストが timeout する。
 #[test]
-#[ignore = "workspace-root pane interaction moves to #577"]
 fn real_pty_hung_daemon_bounds_redraw_and_quit_with_an_attached_pane() {
     /// 全体の wall-clock 上限。frame ごとの lane budget そのものは real socket + real clock の
     /// unit test（`a_hung_daemon_bounds_one_keystroke_and_resolves_it_by_ledger_query` ほか）が
@@ -1416,6 +1454,7 @@ fn real_pty_hung_daemon_bounds_redraw_and_quit_with_an_attached_pane() {
         .output()
         .expect("workspace registers with fixture login shell");
     assert!(registered.status.success());
+    let _ = create_session(home.path(), "hung-daemon");
 
     let (mut master, slave) = open_pty().unwrap();
     let reader_master = master.try_clone().unwrap();
@@ -1482,7 +1521,6 @@ fn real_pty_hung_daemon_bounds_redraw_and_quit_with_an_attached_pane() {
 }
 
 #[test]
-#[ignore = "workspace-root pane interaction moves to #577"]
 fn real_pty_background_terminal_exit_closes_its_tab_through_scope_inventory() {
     let _serial = serial();
     let home = short_home();
@@ -1515,6 +1553,7 @@ fn real_pty_background_terminal_exit_closes_its_tab_through_scope_inventory() {
         .output()
         .expect("workspace registers with fixture login shell");
     assert!(registered.status.success());
+    let _ = create_session(home.path(), "background-exit");
 
     let (mut master, slave) = open_pty().unwrap();
     let reader_master = master.try_clone().unwrap();
@@ -1542,6 +1581,7 @@ fn real_pty_background_terminal_exit_closes_its_tab_through_scope_inventory() {
     let baseline = capture_len(&captured);
     let mut tui = spawn_hop(&home, &workspace, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, baseline);
+    activate_selected_live_pane(&mut master, &captured, baseline);
     wait_for_tab_count(&captured, baseline, 2);
     // The right pane replays the selected terminal, so the marker on screen names
     // the foreground process; the other one is the detached background tab.
@@ -1577,8 +1617,10 @@ fn real_pty_background_terminal_exit_closes_its_tab_through_scope_inventory() {
     reader.join().unwrap();
 }
 
+/// #575 root-target separation, #576 drawer entry/input ownership, #577
+/// root-Agent projection/intent, and #578 picker launch converge here through
+/// the shipping composition rather than their reducer seams.
 #[test]
-#[ignore = "workspace-root pane interaction moves to #577"]
 #[allow(clippy::too_many_lines)] // One chronological multi-open PTY lifecycle is easier to audit intact.
 fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_respawn() {
     let _serial = serial();
@@ -1625,15 +1667,25 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     let reader_capture = Arc::clone(&captured);
     let reader = thread::spawn(move || read_pty_shared(reader_master, &reader_capture));
 
-    // First shipping TUI: launch root Codex, prove its PTY accepts input, then
-    // quit normally. Two Claude runtimes are launched below by another real IPC
-    // client so the next TUI open covers inventory-only deterministic append in
-    // both root and managed-session scopes.
+    // First shipping TUI: open the root drawer from the real header button,
+    // launch root Codex from the injected CLI picker, prove its PTY accepts
+    // input, then close the drawer with the real key path and quit normally.
+    // Two Claude runtimes are launched below by another real IPC client so the
+    // next TUI open covers inventory-only deterministic append in both root and
+    // managed-session scopes.
     let first_baseline = capture_len(&captured);
     let mut first = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, first_baseline);
-    submit_closeup_command(&mut master, &captured, first_baseline, "agent codex");
+    click_workspace_agent_button(&mut master);
+    wait_for_screen_since(&captured, first_baseline, "Workspace Agent");
+    send(&mut master, b"\r");
+    wait_for_screen_since(&captured, first_baseline, "↑↓: select");
+    // The configured OpenAI default explicitly highlights installed Codex.
+    // Confirm it through the picker. Replay/idempotency is asserted below from
+    // the durable one-tab/one-spawn result across repeated TUI opens.
+    send(&mut master, b"\r");
     wait_for_screen_since(&captured, first_baseline, "codex-ready-unique:");
+    assert_spawns_settle(&codex_count, 1);
     let first_intent = wait_for_agent_tabs(home.path(), 1);
     assert_eq!(first_intent.workspace_id, workspace_id);
     assert!(first_intent.dismissed.is_empty());
@@ -1661,7 +1713,9 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     );
     send(&mut master, b"codex-initial\r");
     wait_for_screen_since(&captured, first_baseline, "codex-input:codex-initial");
-    let status = quit_workspace(&mut master, &mut first, &captured, first_baseline);
+    toggle_workspace_agent_with_key(&mut master);
+    wait_for_screen_since(&captured, first_baseline, "[switch]");
+    let status = quit_from_switch(&mut master, &mut first, &captured, first_baseline);
     assert!(
         status.success(),
         "first TUI {status}: {}",
@@ -1719,6 +1773,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     let reopened_baseline = capture_len(&captured);
     let mut reopened = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, reopened_baseline);
+    toggle_workspace_agent_with_key(&mut master);
     wait_for_screen_since(&captured, reopened_baseline, "codex-input:codex-initial");
     let observed = wait_for_agent_tabs(home.path(), 3);
     let codex = continuation_for(&observed, &codex_terminal);
@@ -1747,7 +1802,6 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
         .collect::<std::collections::BTreeMap<_, _>>();
     assert_eq!(first_refs.len(), 3);
 
-    activate_selected_live_pane(&mut master, &captured, reopened_baseline);
     send(&mut master, b"codex-one\r");
     wait_for_screen_since(&captured, reopened_baseline, "codex-input:codex-one");
 
@@ -1788,11 +1842,12 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
         })
     });
 
-    // Switch to the managed session. Only its selected Claude attaches; closing
+    // Close the drawer to restore Switch, then enter the managed session. Only
+    // its selected Claude attaches; closing
     // the tab writes a continuation-scoped dismissal and leaves its PTY alive.
-    send(&mut master, b"\x0f\x0f");
+    toggle_workspace_agent_with_key(&mut master);
     wait_for_screen_since(&captured, reopened_baseline, "[switch]");
-    send(&mut master, b"\x1b[B\r");
+    send(&mut master, b"\r");
     wait_for_screen_since(&captured, reopened_baseline, "[closeup]");
     wait_for_screen_since(&captured, reopened_baseline, &session_claude_ready);
     send(&mut master, b"claude-session-one\r");
@@ -1801,6 +1856,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
         reopened_baseline,
         "claude-input:claude-session-one",
     );
+
     send(&mut master, b"\x0fx");
     let dismissed = wait_for_agent_intent(home.path(), |intent| {
         intent.dismissed.contains(&session_claude)
@@ -1823,6 +1879,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     let mut reopened_for_kill =
         spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, reopened_for_kill_baseline);
+    toggle_workspace_agent_with_key(&mut master);
     wait_for_screen_since(
         &captured,
         reopened_for_kill_baseline,
@@ -1831,7 +1888,6 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     // Reorder the restored selected tab once in each direction. The first
     // persisted result is possible only if the fresh UI projected the saved
     // [root Claude, Codex] order; the second restores that durable order.
-    activate_selected_live_pane(&mut master, &captured, reopened_for_kill_baseline);
     send(&mut master, b"\x0f[");
     let _ = wait_for_agent_intent(home.path(), |intent| {
         intent.targets.iter().any(|target| {
@@ -1858,9 +1914,9 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
                     == [root_claude, codex]
         })
     });
-    send(&mut master, b"\x0f\x0f");
+    toggle_workspace_agent_with_key(&mut master);
     wait_for_screen_since(&captured, reopened_for_kill_baseline, "[switch]");
-    send(&mut master, b"\x1b[B\r");
+    send(&mut master, b"\r");
     wait_for_screen_since(&captured, reopened_for_kill_baseline, "Type a command:");
     send(
         &mut master,
@@ -1913,8 +1969,11 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     let after_kill_baseline = capture_len(&captured);
     let mut after_kill = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, after_kill_baseline);
+    toggle_workspace_agent_with_key(&mut master);
     wait_for_screen_since(&captured, after_kill_baseline, "codex-input:codex-one");
-    send(&mut master, b"\x1b[B\r");
+    toggle_workspace_agent_with_key(&mut master);
+    wait_for_screen_since(&captured, after_kill_baseline, "[switch]");
+    send(&mut master, b"\r");
     wait_for_screen_since(&captured, after_kill_baseline, "[closeup]");
     wait_for_screen_since(
         &captured,
@@ -1936,8 +1995,11 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     let second_reopen_baseline = capture_len(&captured);
     let mut second_reopen = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, second_reopen_baseline);
+    toggle_workspace_agent_with_key(&mut master);
     wait_for_screen_since(&captured, second_reopen_baseline, "codex-input:codex-one");
-    send(&mut master, b"\x1b[B\r");
+    toggle_workspace_agent_with_key(&mut master);
+    wait_for_screen_since(&captured, second_reopen_baseline, "[switch]");
+    send(&mut master, b"\r");
     wait_for_screen_since(&captured, second_reopen_baseline, "[closeup]");
     wait_for_screen_since(
         &captured,
@@ -2024,7 +2086,6 @@ fn agent_process_for(processes: &[(TerminalRef, u64)], terminal: &TerminalRef) -
 /// * provider が使えない間の resume は tab を interrupted のまま残し、retry が成功する。
 /// * provider ID・argv・cwd・transcript は描画 frame と log（同じ PTY へ落ちる stderr）に出ない。
 #[test]
-#[ignore = "workspace-root pane interaction moves to #577"]
 #[allow(clippy::too_many_lines)] // 1 本の cold-restart product flow を時系列のまま検証する。
 fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_keys() {
     let _serial = serial();
@@ -2150,8 +2211,19 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
     let cold_baseline = capture_len(&captured);
     let mut cold = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, cold_baseline);
-    wait_for_screen_since(&captured, cold_baseline, "Codex (interrupted)");
-    wait_for_screen_since(&captured, cold_baseline, "Claude (interrupted)");
+    toggle_workspace_agent_with_key(&mut master);
+    select_drawer_conversation_by_label(
+        &mut master,
+        &captured,
+        cold_baseline,
+        "Codex (interrupted)",
+    );
+    select_drawer_conversation_by_label(
+        &mut master,
+        &captured,
+        cold_baseline,
+        "Claude (interrupted)",
+    );
     let fresh_daemon = daemon_pid(home.path());
     let fresh_generation = daemon_generation(home.path());
     assert_ne!(
@@ -2175,23 +2247,22 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
     .iter()
     .map(|label| cold_screen.matches(label).count())
     .sum::<usize>();
-    assert_eq!(
-        cold_screen.matches("(interrupted)").count(),
-        safe_labels,
-        "{cold_screen}"
-    );
+    assert_eq!(cold_screen.matches("(interrupted)").count(), safe_labels);
     assert_no_sensitive_output(&captured, cold_baseline, &secrets);
 
-    // ── 4. Enter Closeup on the root scope, select the Codex history with real
-    // keys, and press `Ctrl-O r` twice. The double activation must converge onto
+    // ── 4. The root drawer is already open. Select the Codex history with real
+    // keys and press `Ctrl-O r` twice. The double activation must converge onto
     // one operation, one child, and one live tab for that lineage alone.
-    send(&mut master, b"\r");
-    wait_for_screen_since(&captured, cold_baseline, "[closeup]");
-    select_tab_by_label(&mut master, &captured, cold_baseline, "Codex (interrupted)");
+    select_drawer_conversation_by_label(
+        &mut master,
+        &captured,
+        cold_baseline,
+        "Codex (interrupted)",
+    );
     wait_for_screen_since(
         &captured,
         cold_baseline,
-        "interrupted — Ctrl-O r resumes it",
+        "This conversation was interrupted",
     );
     send(&mut master, b"\x0fr");
     send(&mut master, b"\x0fr");
@@ -2231,9 +2302,11 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
         !after_codex.contains("Codex (interrupted)"),
         "{after_codex}"
     );
-    assert!(
-        after_codex.contains("Claude (interrupted)"),
-        "{after_codex}"
+    select_drawer_conversation_by_label(
+        &mut master,
+        &captured,
+        cold_baseline,
+        "Claude (interrupted)",
     );
 
     // ── 5. A resume that the daemon refuses (the provider CLI is unavailable)
@@ -2241,7 +2314,7 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
     // then succeeds against the same lineage.
     let hidden = fixtures.bin.join("claude.unavailable");
     fs::rename(fixtures.bin.join("claude"), &hidden).unwrap();
-    select_tab_by_label(
+    select_drawer_conversation_by_label(
         &mut master,
         &captured,
         cold_baseline,
@@ -2251,7 +2324,7 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
     wait_for_screen_since(
         &captured,
         cold_baseline,
-        "feedback: provider resume failed; refresh Agent inventory",
+        "provider resume failed; refresh Agent inventory",
     );
     assert_eq!(
         fixtures.claude_spawns(),
@@ -2259,11 +2332,7 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
         "a refused resume must not spawn a provider"
     );
     let refused = screen_since(&captured, cold_baseline).unwrap_or_default();
-    assert_eq!(
-        selected_tab_label(&refused).as_deref(),
-        Some("Claude (interrupted)"),
-        "{refused}"
-    );
+    assert!(refused.contains("[Claude (interrupted)]"), "{refused}");
 
     fs::rename(&hidden, fixtures.bin.join("claude")).unwrap();
     send(&mut master, b"\x0fr");
@@ -2296,9 +2365,9 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
     // ── 6. The managed session resumes through the same UX and fencing. Its
     // history is closed with `Ctrl-O x` (a continuation-scoped dismissal) and
     // brought back with `reopen`; neither starts a provider.
-    send(&mut master, b"\x0f\x0f");
+    toggle_workspace_agent_with_key(&mut master);
     wait_for_screen_since(&captured, cold_baseline, "[switch]");
-    send(&mut master, b"\x1b[B\r");
+    send(&mut master, b"\r");
     wait_for_screen_since(&captured, cold_baseline, "[closeup]");
     select_tab_by_label(
         &mut master,
@@ -2371,7 +2440,7 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
     let reconnect_baseline = capture_len(&captured);
     let mut reconnected = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, reconnect_baseline);
-    send(&mut master, b"\x1b[B\r");
+    send(&mut master, b"\r");
     wait_for_screen_since(&captured, reconnect_baseline, "[closeup]");
     wait_for_screen_since(
         &captured,
@@ -2408,6 +2477,72 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
     // retire it explicitly before the pair closes: a daemon that outlived the test
     // while holding an inherited descriptor would leave the reader without EOF.
     stop_daemon(&home);
+    drop(slave);
+    drop(master);
+    reader.join().unwrap();
+}
+
+#[test]
+fn real_pty_empty_workspace_drawer_is_safe_without_agent_clis_at_narrow_width() {
+    let _serial = serial();
+    let home = short_home();
+    let workspace_root = tempfile::tempdir().unwrap();
+    let workspace = workspace_root.path().join("empty-drawer-workspace");
+    fs::create_dir(&workspace).unwrap();
+    let empty_bin = tempfile::tempdir().unwrap();
+    let fixture_path = format!("{}:/usr/bin:/bin", empty_bin.path().display());
+
+    let registered = home
+        .command_at(
+            Channel::Local,
+            &workspace,
+            &["open".as_ref(), workspace.as_os_str()],
+        )
+        .env("PATH", &fixture_path)
+        .output()
+        .expect("empty workspace registers");
+    assert!(registered.status.success());
+
+    let (mut master, slave) = open_pty().unwrap();
+    let reader_master = master.try_clone().unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let reader_capture = Arc::clone(&captured);
+    let reader = thread::spawn(move || read_pty_shared(reader_master, &reader_capture));
+    let baseline = capture_len(&captured);
+    let mut tui = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
+    open_registered_workspace(&mut master, &captured, baseline);
+
+    toggle_workspace_agent_with_key(&mut master);
+    wait_for_screen_since(&captured, baseline, "No conversations yet");
+    send(&mut master, b"\r");
+    wait_for_screen_since(&captured, baseline, "No Agent CLI installed");
+    assert!(agent_processes(home.path(), 0).is_empty());
+
+    // The drawer falls back to full width below its normal minimum and keeps
+    // ownership of global input. Ctrl-Q therefore cannot leak through and open
+    // the workspace-leave confirmation behind it.
+    resize_pty(&master, 70, 16).unwrap();
+    send(&mut master, b"x");
+    wait_for_screen_since(&captured, baseline, "No Agent CLI installed");
+    send(&mut master, b"\x11");
+    thread::sleep(Duration::from_millis(200));
+    let narrow = screen_since(&captured, baseline).unwrap_or_default();
+    assert!(narrow.contains("Workspace Agent"), "{narrow}");
+    assert!(!narrow.contains("Leave this workspace?"), "{narrow}");
+
+    send(&mut master, b"\x1b");
+    wait_for_screen_since(&captured, baseline, "No conversations yet");
+    send(&mut master, b"\x1b");
+    wait_for_screen_absent_since(&captured, baseline, "No conversations yet");
+    send(&mut master, b"\x11");
+    wait_for_screen_since(&captured, baseline, "Leave this workspace?");
+    send(&mut master, b"\r");
+    assert!(
+        wait_with_timeout(&mut tui, Duration::from_secs(10))
+            .unwrap()
+            .success()
+    );
+
     drop(slave);
     drop(master);
     reader.join().unwrap();

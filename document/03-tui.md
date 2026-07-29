@@ -1138,16 +1138,17 @@ runtime bridge を確認する手順である。profile の install 状態、認
 ## workspace open 時の pane 復元
 
 daemon は terminal / Agent runtime の権威 owner であり、TUI を閉じても runtime は daemon 内で継続する。
-そのため workspace を開き直した（同じ client の再 open、または 2 つ目の client の open）とき、その
-workspace の root scope と各 available session scope に属する **live**（いずれかの trusted generation が所有し
-attach 可能）な Agent / Terminal を pane tab に復元する。planned restart 中は active と draining の両 generation が
-inventory に答え、完全な `TerminalRef` で merge / dedup した結果を投影する
+そのため workspace を開き直した（同じ client の再 open、または 2 つ目の client の open）とき、root scope の
+**live Agent** は Workspace Agent drawer、各 available session scope の **live Agent / Terminal** は Closeup の
+pane tab に復元する。root scope の generic Terminal / Diff は復元しない。planned restart 中は active と draining の
+両 generation が inventory に答え、完全な `TerminalRef` で merge / dedup した結果を投影する
 （[4. IPC の owner generation routing](04-ipc.md#owner-generation-routing)）。
 
-この inventory 復元は provider conversation resume を開始しない。`identity_unknown` / interrupted Agent は
-sidebar の第 2 行に `interrupted · resume available` または ID を含まない safe reason を表示するが、
-TUI 起動、workspace open、daemon reconnect から `ResumeAgent` を自動送信せず、
-利用者の `session resume <name>` 操作を必須とする。
+この inventory 復元は provider conversation resume を開始しない。managed session の `identity_unknown` /
+interrupted Agent は sidebar の第 2 行、root scope の interrupted Agent は Workspace Agent drawer の選択中
+conversation body に、ID を含まない safe reason を表示する。TUI 起動、workspace open、daemon reconnect は
+resume を自動送信せず、managed session は `session resume <name>`、root scope は drawer で選択した tab の
+`Ctrl-O r` を必須とする。
 
 - **two-source reconciliation**: daemon の unified terminal / Agent inventory が liveness・PTY ownership の正本、
   `<data-dir>/tui/workspaces/<workspace-id>/agent-tabs.json` の `AgentTabIntent` が Agent tab の表示順・target ごとの選択・
@@ -1165,8 +1166,9 @@ TUI 起動、workspace open、daemon reconnect から `ResumeAgent` を自動送
   そのものは [#521](../.usagi/issues/521-fix-ipc-clientpolicy-request-deadline-reconnect-budget.md) の責務である。
 - **投影**: saved Agent は完全な `TerminalRef` が両 inventory で trusted live と確認できたときだけ保存順で復元する。
   inventory にだけある live Agent は continuation / terminal fence の決定的順序で末尾へ追加し、duplicate snapshot は
-  exact ref で 1 枚へ収束する。generic Terminal はその後ろへ決定的に追加する。saved ref が non-live でも同じ continuation
-  が resumable なら slot intent は保持し、interrupted pane への投影は行わない。表示中 active target の selected foreground
+  exact ref で 1 枚へ収束する。managed session の generic Terminal はその後ろへ決定的に追加し、root scope の generic
+  Terminal は拒否する。saved ref が non-live でも同じ continuation が resumable なら slot intent を保持し、
+  interrupted tab として root drawer または managed-session Closeup へ投影する。表示中 surface の selected foreground
   tab だけを attach / resync し、background target と選択外 tab は detached のまま保持する。
 - **遅延応答 fence**: restore dispatch 時の UI interaction count と pane-registry revision を結果に持たせる。双方が一致する
   結果だけが durable Observe と pane projection を適用できる。遅延・順序外の結果は全体を拒否し、専用 port が戻り次第、
@@ -1292,7 +1294,7 @@ label・detail・feedback・log のいずれにも出さない。
 
 | inventory の入力 | 判定 | 投影 |
 |---|---|---|
-| runtime state = `interrupted`、scope が current workspace と refresh 済み session 集合の内側 | 復帰候補 | continuation ごとに interrupted tab を 1 枚作る（root も managed session と同じ扱い） |
+| runtime state = `interrupted`、scope が current workspace root または refresh 済み session 集合の内側 | 復帰候補 | continuation ごとに interrupted tab を 1 枚作り、root は drawer、managed session は Closeup へ投影する |
 | 同じ continuation を `live` / `reserved` runtime が保持している | live が authority | interrupted tab を作らず live tab へ収束する |
 | runtime state = `exited` / `reclaimed` | 完了 history | interrupted tab にしない（[completed entry](#exited-terminal-の-completed-entry) の責務） |
 | 同じ continuation の interrupted record が複数 | resume 可能な 1 件が上位、次に exact ref 順 | 決定的に 1 枚へ畳む |
@@ -1325,19 +1327,21 @@ planned restart は resume request を作らない。要求は選択中の exact
 拒否・失敗は interrupted tab をそのまま残し、provider ID を含まない safe reason と retry 可否だけを表示する。
 他の tab、他の history、selection、provider conversation、runtime record は変更しない。
 
-### tab strip の表示と操作
+### surface ごとの表示と操作
 
-投影された interrupted tab は live tab と同じ tab strip に並ぶ。target ごとの pane registry entry に入るため、
-root と managed session の history は互いに混ざらない。live restore は live membership だけを所有し、
-interrupted tab の membership・順序・selection は projection だけが所有する。
+投影された interrupted tab は target ごとの pane registry entry に入り、root と managed session の history は
+互いに混ざらない。root は Workspace Agent drawer の conversation selector、managed session は Closeup の live tab と
+同じ tab strip に表示する。live restore は live membership だけを所有し、interrupted tab の membership・順序・
+selection は projection だけが所有する。
 
-cold restart 直後のように **interrupted tab しか無い target** でも、Closeup は action launcher ではなく tab strip へ
-着地する（[Closeup pane](#closeup-pane) の入力所有者は live PTY の有無ではなく tab の有無で決まる）。
-したがって `Ctrl-O Ctrl-N` / `Ctrl-O Ctrl-P` で history tab を選び、`Ctrl-O r` で resume できる。
+cold restart 直後のように **interrupted tab しか無い target** でも、root drawer は conversation surface、
+managed-session Closeup は action launcher ではなく tab strip へ着地する（[Closeup pane](#closeup-pane) の入力所有者は
+live PTY の有無ではなく tab の有無で決まる）。どちらも `Ctrl-O Ctrl-N` / `Ctrl-O Ctrl-P` で history tab を選び、
+`Ctrl-O r` で resume できる。
 
 | 状態 | tab label | 選択時の body |
 |---|---|---|
-| resume 可能 | `Claude (interrupted)` / `Codex (interrupted)`（metadata 無しは `Agent (interrupted)`） | `interrupted — Ctrl-O r resumes it` |
+| resume 可能 | `Claude (interrupted)` / `Codex (interrupted)`（metadata 無しは `Agent (interrupted)`） | `This conversation was interrupted. Resume starts a new Agent for it.` |
 | resume 不可 | 同上 | 当該 [safe reason](#投影規則)（provider ID を含まない 1 行） |
 | resume 中 | `Claude (resuming)` | `resuming this conversation` |
 
