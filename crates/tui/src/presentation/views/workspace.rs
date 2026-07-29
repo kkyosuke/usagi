@@ -1903,7 +1903,7 @@ mod tests {
     };
     use crate::presentation::theme::{Color, Style};
     use crate::presentation::views::workspace_agent_drawer::{
-        WorkspaceAgentConversation, WorkspaceAgentDrawerProjection,
+        WorkspaceAgentConversation, WorkspaceAgentDrawerProjection, WorkspaceAgentNewProjection,
     };
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{display_width, modal, wrap_to_width};
@@ -2163,6 +2163,7 @@ mod tests {
                 selected: true,
             }],
             terminal_rows: vec!["workspace agent output".to_owned()],
+            new: WorkspaceAgentNewProjection::default(),
         };
 
         let closed_state = AppState::home(workspace, Vec::new());

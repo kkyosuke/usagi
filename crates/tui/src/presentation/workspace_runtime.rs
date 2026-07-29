@@ -341,10 +341,14 @@ impl WorkspaceRuntime {
             return self.handle_closeup_key(key);
         }
         // With no existing modal in front, the drawer owns every Home input.
-        // Only Escape and the resolved `Ctrl-O g` toggle can close it; every
-        // other key is consumed without reaching sidebar, pane, or globals.
+        // Its local New picker accepts only selection/confirmation/cancel keys;
+        // everything else is consumed without reaching sidebar, pane, or
+        // globals.
         if self.state.workspace_agent_drawer_open() {
             return match key {
+                Key::Up => self.apply_event(AppEvent::Key(AppKey::Up)),
+                Key::Down => self.apply_event(AppEvent::Key(AppKey::Down)),
+                Key::Enter => self.apply_event(AppEvent::Key(AppKey::Enter)),
                 Key::Escape => self.apply_event(AppEvent::Key(AppKey::Escape)),
                 Key::Live(crate::usecase::terminal_input::LiveTerminalAction::WorkspaceAgent) => {
                     self.apply_event(AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer))
@@ -2352,6 +2356,16 @@ mod tests {
         let _ = runtime.handle_key(Key::Escape);
         assert!(!runtime.state().workspace_agent_drawer_open());
         assert_eq!(runtime.active_pane(), &closeup_background.3);
+    }
+
+    #[test]
+    fn workspace_agent_drawer_routes_picker_navigation_and_swallows_other_keys() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        assert!(runtime.handle_key(Key::Up).is_empty());
+        assert!(runtime.handle_key(Key::Char('x')).is_empty());
+        assert!(runtime.state().workspace_agent_drawer_open());
     }
 
     #[test]

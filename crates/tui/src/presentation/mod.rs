@@ -54,7 +54,7 @@ use crate::presentation::views::workspace::{
     terminal_point_at,
 };
 use crate::presentation::views::workspace_agent_drawer::{
-    self, WorkspaceAgentConversation, WorkspaceAgentDrawerProjection,
+    self, WorkspaceAgentConversation, WorkspaceAgentDrawerProjection, WorkspaceAgentNewProjection,
 };
 use crate::presentation::widgets::modal::{self, ConfirmationView};
 use crate::presentation::workspace_runtime::{
@@ -66,7 +66,7 @@ use crate::usecase::application::agent_tab_intent::{
 };
 use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, Effect, EnvironmentEntry, ExitChoice, Feedback,
-    NewRequest, Notice, OperationResult, Overlay, PendingToken, Target,
+    NewRequest, Notice, OperationResult, Overlay, PendingToken, Target, WorkspaceAgentNew,
 };
 #[cfg(test)]
 use crate::usecase::application::controller::{SafeError, SafeMessage};
@@ -3472,6 +3472,32 @@ fn workspace_agent_drawer_projection(
     WorkspaceAgentDrawerProjection {
         conversations,
         terminal_rows,
+        new: if runtime.state().workspace_agent_launching().is_some() {
+            WorkspaceAgentNewProjection::Launching
+        } else {
+            match runtime.state().workspace_agent_new() {
+                WorkspaceAgentNew::Idle => WorkspaceAgentNewProjection::Ready,
+                WorkspaceAgentNew::Empty => WorkspaceAgentNewProjection::Empty,
+                WorkspaceAgentNew::Choosing(selected) => {
+                    let candidates = runtime
+                        .state()
+                        .available_models()
+                        .iter()
+                        .map(|model| model.selector().to_owned())
+                        .collect::<Vec<_>>();
+                    let selected = runtime
+                        .state()
+                        .available_models()
+                        .iter()
+                        .position(|model| model == selected)
+                        .unwrap_or(0);
+                    WorkspaceAgentNewProjection::Choosing {
+                        candidates,
+                        selected,
+                    }
+                }
+            }
+        },
     }
 }
 
@@ -4161,11 +4187,30 @@ fn select_workspace_agent_tab(
     true
 }
 
+fn is_workspace_agent_new_click(
+    key: &Key,
+    runtime: &WorkspaceRuntime,
+    height: usize,
+    width: usize,
+) -> bool {
+    let Key::Click { column, row } = key else {
+        return false;
+    };
+    runtime.state().workspace_agent_drawer_open()
+        && workspace_agent_drawer::new_button_at(
+            height,
+            width,
+            *column,
+            *row,
+            runtime.state().workspace_agent_launching().is_some(),
+        )
+}
+
 /// Intercept the live-terminal view controls the Home reducer does not own —
 /// copy, scroll, tab close, and pointer drag — returning `true` when the key was
 /// consumed here so the shell loop skips reducer dispatch. `rows_len` / `scroll`
 /// describe the frame's projected viewport for pointer mapping.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn intercept_live_terminal_control(
     key: &Key,
     ui: &mut WorkspaceUi,
@@ -4179,6 +4224,11 @@ fn intercept_live_terminal_control(
     rows_len: usize,
     scroll: usize,
 ) -> bool {
+    if is_workspace_agent_new_click(key, runtime, height, width) {
+        // Let the frame-loop action branch return the resulting launch effect
+        // to the normal backend dispatcher.
+        return false;
+    }
     // The right pane is interactive only on the unobscured Closeup surface.
     // Pending/ready tabs still need Closeup tab controls even though they do not
     // own PTY input yet. Consume pane-only controls while Switch or a foreground
@@ -4642,7 +4692,13 @@ fn drain_pane_completions_into_runtime(
                     Ok(admission) => {
                         let terminal = admission.terminal;
                         if let Some(continuation) = admission.continuation {
-                            let select = runtime.pane_completion_will_focus(operation);
+                            // A confirmed drawer New always becomes the root
+                            // conversation selection. This durable selection is
+                            // committed atomically with its order slot before
+                            // the pending runtime is promoted. Managed-session
+                            // launches retain the existing no-focus-steal gate.
+                            let select = matches!(target, Target::Root(_))
+                                || runtime.pane_completion_will_focus(operation);
                             match ui.mutate_agent_intent(AgentTabIntentMutation::Upsert {
                                 session_id: target.session_id(),
                                 continuation,
@@ -4664,6 +4720,18 @@ fn drain_pane_completions_into_runtime(
                                 }
                             }
                             runtime.set_reopen_choices(ui.agent_reopen_choices());
+                        } else if matches!(target, Target::Root(_)) && ui.agent_tab_intent.is_some()
+                        {
+                            // A production root conversation must have the
+                            // daemon-issued continuation needed to atomically
+                            // persist its order/selection. Compatibility
+                            // embedders without an intent port retain their
+                            // pre-intent pane behaviour.
+                            let _ = runtime.fail_pane(
+                                target,
+                                operation,
+                                "daemon did not return a root Agent conversation".to_owned(),
+                            );
                         } else {
                             let _ = runtime
                                 .complete_pane_focus_if_uninterrupted(target, operation, terminal);
@@ -4672,6 +4740,9 @@ fn drain_pane_completions_into_runtime(
                     Err(message) => {
                         let _ = runtime.fail_pane(target, operation, message);
                     }
+                }
+                if matches!(target, Target::Root(_)) {
+                    let _ = runtime.apply_event(AppEvent::WorkspaceAgentLaunchFinished(operation));
                 }
             }
             PaneLaunchOutcome::ResumeExact {
@@ -5072,21 +5143,35 @@ fn drive_workspace_controller(
             continue;
         }
         let effects = if let Key::Click { column, row } = key {
-            // Header rendering and hit-testing share one layout projection, so
-            // CJK breadcrumbs, notice presence, and narrow clipping cannot move
-            // an action away from its clickable cells.
-            let header_action = drawn_material.as_ref().and_then(|material| {
-                home_header_action_at(width, &material.projection, column, row)
-            });
-            match header_action {
-                Some(HomeHeaderAction::WorkspaceAgent) => {
-                    runtime.apply_event(AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer))
-                }
-                Some(HomeHeaderAction::Decisions) => {
-                    runtime.apply_event(AppEvent::Key(AppKey::OpenDecisions))
-                }
-                None => {
-                    runtime.apply_event(sidebar_pointer_event(column, row, pointer_clock.elapsed()))
+            if runtime.state().workspace_agent_drawer_open()
+                && workspace_agent_drawer::new_button_at(
+                    height,
+                    width,
+                    column,
+                    row,
+                    runtime.state().workspace_agent_launching().is_some(),
+                )
+            {
+                runtime.apply_event(AppEvent::Key(AppKey::Enter))
+            } else {
+                // Header rendering and hit-testing share one layout projection, so
+                // CJK breadcrumbs, notice presence, and narrow clipping cannot move
+                // an action away from its clickable cells.
+                let header_action = drawn_material.as_ref().and_then(|material| {
+                    home_header_action_at(width, &material.projection, column, row)
+                });
+                match header_action {
+                    Some(HomeHeaderAction::WorkspaceAgent) => {
+                        runtime.apply_event(AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer))
+                    }
+                    Some(HomeHeaderAction::Decisions) => {
+                        runtime.apply_event(AppEvent::Key(AppKey::OpenDecisions))
+                    }
+                    None => runtime.apply_event(sidebar_pointer_event(
+                        column,
+                        row,
+                        pointer_clock.elapsed(),
+                    )),
                 }
             }
         } else {
@@ -6094,7 +6179,7 @@ mod tests {
         SessionId, TerminalId, TerminalRef, UserDecisionId, WorkspaceId, WorktreeId,
     };
     use usagi_core::domain::note::Scratchpad;
-    use usagi_core::domain::settings::Settings;
+    use usagi_core::domain::settings::{AvailableModels, DefaultModel, Settings};
     use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
     use usagi_core::domain::user_decision::UserDecisionAnswer;
     use usagi_core::usecase::env::EnvScope;
@@ -7919,6 +8004,152 @@ mod tests {
                 continuation: Some(actual_continuation),
             }) if *actual == session && *actual_continuation == continuation
         ));
+    }
+
+    #[test]
+    fn drawer_new_root_completion_commits_one_selected_exact_tab_across_reopen() {
+        let workspace = WorkspaceId::new();
+        let terminal = scoped_terminal_ref(workspace, None);
+        let continuation = AgentContinuationRef::new();
+        let durable = Arc::new(Mutex::new(AgentTabIntent::empty(workspace)));
+        let mutations = Arc::new(Mutex::new(Vec::new()));
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort))
+            .with_agent_tab_intent(
+                workspace,
+                BTreeSet::new(),
+                Box::new(MemoryIntentPort {
+                    state: Arc::clone(&durable),
+                    mutations: Arc::clone(&mutations),
+                }),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        runtime.set_agent_models(
+            AvailableModels::new([DefaultModel::Claude]),
+            DefaultModel::Claude,
+        );
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        assert!(runtime.handle_key(Key::Enter).is_empty());
+        let effects = runtime.handle_key(Key::Enter);
+        let [
+            effect @ Effect::LaunchAgent {
+                session: None,
+                operation_id,
+                profile: Some(profile),
+                ..
+            },
+        ] = effects.as_slice()
+        else {
+            panic!("drawer confirmation must emit one explicit root launch: {effects:?}");
+        };
+        assert_eq!(profile.as_str(), "claude");
+        runtime.on_effect(effect);
+        let mut pending =
+            std::collections::HashMap::from([(*operation_id, Target::Root(workspace))]);
+
+        ui.pane_completion_sender
+            .send(super::PaneLaunchCompletion {
+                launch_id: super::PANE_LAUNCH_UNADMITTED,
+                outcome: super::PaneLaunchOutcome::Agent {
+                    operation: *operation_id,
+                    result: Ok(AgentPaneAdmission {
+                        terminal: terminal.clone(),
+                        continuation: Some(continuation),
+                    }),
+                },
+            })
+            .unwrap();
+        super::drain_pane_completions_into_runtime(
+            &mut ui,
+            &mut runtime,
+            &mut pending,
+            Geometry { cols: 20, rows: 5 },
+        );
+
+        assert!(pending.is_empty());
+        assert_eq!(runtime.state().workspace_agent_launching(), None);
+        assert_eq!(runtime.focused_terminal(), Some(terminal.clone()));
+        let intent = durable.lock().unwrap();
+        assert_eq!(intent.targets.len(), 1);
+        assert_eq!(intent.targets[0].session_id, None);
+        assert_eq!(intent.targets[0].selected, Some(continuation));
+        assert_eq!(intent.targets[0].tabs.len(), 1);
+        assert!(intent.targets[0].tabs[0].terminal.fences(&terminal));
+        drop(intent);
+
+        let tabs = runtime.active_pane().tabs().to_vec();
+        let _ = runtime.handle_key(Key::Escape);
+        assert!(!runtime.state().workspace_agent_drawer_open());
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        assert_eq!(runtime.active_pane().tabs(), tabs.as_slice());
+        assert_eq!(
+            mutations
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|mutation| matches!(
+                    mutation,
+                    AgentTabIntentMutation::Upsert {
+                        session_id: None,
+                        continuation: actual,
+                        select: true,
+                        ..
+                    } if *actual == continuation
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn drawer_root_final_without_conversation_identity_fails_closed() {
+        let workspace = WorkspaceId::new();
+        let durable = Arc::new(Mutex::new(AgentTabIntent::empty(workspace)));
+        let mutations = Arc::new(Mutex::new(Vec::new()));
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_tab_intent(
+                workspace,
+                BTreeSet::new(),
+                Box::new(MemoryIntentPort {
+                    state: Arc::clone(&durable),
+                    mutations: Arc::clone(&mutations),
+                }),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let operation = OperationId::new();
+        let target = Target::Root(workspace);
+        runtime.on_effect(&Effect::LaunchAgent {
+            workspace,
+            session: None,
+            operation_id: operation,
+            profile: Some(AgentProfileId::new("codex").unwrap()),
+        });
+        let mut pending = std::collections::HashMap::from([(operation, target)]);
+        ui.pane_completion_sender
+            .send(super::PaneLaunchCompletion {
+                launch_id: super::PANE_LAUNCH_UNADMITTED,
+                outcome: super::PaneLaunchOutcome::Agent {
+                    operation,
+                    result: Ok(AgentPaneAdmission {
+                        terminal: scoped_terminal_ref(workspace, None),
+                        continuation: None,
+                    }),
+                },
+            })
+            .unwrap();
+        super::drain_pane_completions_into_runtime(
+            &mut ui,
+            &mut runtime,
+            &mut pending,
+            Geometry { cols: 20, rows: 5 },
+        );
+
+        assert!(pending.is_empty());
+        assert!(live_tab_terminals(&runtime, target).is_empty());
+        assert!(durable.lock().unwrap().targets.is_empty());
+        assert!(mutations.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -11405,6 +11636,27 @@ mod tests {
         let mut term = FakeTerminal::default();
         let mut browser = RecordingBrowser::default();
         let mut pending = std::collections::HashMap::new();
+        let drawer = super::workspace_agent_drawer::geometry(20, 80);
+        let new_click = Key::Click {
+            column: u16::try_from(drawer.left + drawer.width - 3).unwrap(),
+            row: u16::try_from(drawer.top + 1).unwrap(),
+        };
+        assert!(super::is_workspace_agent_new_click(
+            &new_click, &runtime, 20, 80
+        ));
+        assert!(!intercept_live_terminal_control(
+            &new_click,
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending,
+            20,
+            80,
+            3,
+            scroll_before,
+        ));
 
         for key in [
             Key::Live(LiveTerminalAction::NextTab),
@@ -11635,6 +11887,48 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn workspace_agent_projection_covers_picker_empty_and_launching_states() {
+        let workspace = WorkspaceId::new();
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        runtime.set_agent_models(
+            AvailableModels::new([DefaultModel::Claude, DefaultModel::SakanaAi]),
+            DefaultModel::SakanaAi,
+        );
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        let _ = runtime.handle_key(Key::Enter);
+        assert_eq!(
+            super::workspace_agent_drawer_projection(&ui, &runtime, None).new,
+            super::WorkspaceAgentNewProjection::Choosing {
+                candidates: vec!["claude".to_owned(), "sakana.ai".to_owned()],
+                selected: 1,
+            }
+        );
+
+        let _ = runtime.handle_key(Key::Escape);
+        runtime.set_agent_models(AvailableModels::default(), DefaultModel::OpenAi);
+        let _ = runtime.handle_key(Key::Enter);
+        assert_eq!(
+            super::workspace_agent_drawer_projection(&ui, &runtime, None).new,
+            super::WorkspaceAgentNewProjection::Empty
+        );
+
+        let _ = runtime.handle_key(Key::Escape);
+        runtime.set_agent_models(
+            AvailableModels::new([DefaultModel::Claude]),
+            DefaultModel::Claude,
+        );
+        let _ = runtime.handle_key(Key::Enter);
+        let effects = runtime.handle_key(Key::Enter);
+        assert!(matches!(effects.as_slice(), [Effect::LaunchAgent { .. }]));
+        assert_eq!(
+            super::workspace_agent_drawer_projection(&ui, &runtime, None).new,
+            super::WorkspaceAgentNewProjection::Launching
+        );
     }
 
     #[test]
