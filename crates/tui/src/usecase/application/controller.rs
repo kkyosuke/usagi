@@ -727,6 +727,14 @@ pub struct AppState {
     /// while an already-open drawer is the frontmost input owner and swallows
     /// every background action until Escape or its toggle closes it.
     workspace_agent_drawer_open: bool,
+    /// Local `New` flow inside the Workspace Agent drawer. Candidate
+    /// availability is injected with [`AvailableModels`]; opening and moving
+    /// this picker performs no daemon work.
+    workspace_agent_new: WorkspaceAgentNew,
+    /// One root launch submitted from the picker. It remains fenced until the
+    /// shell reports the matching completion, so repeated Enter cannot mint a
+    /// second operation while the first request is in flight.
+    workspace_agent_launching: Option<OperationId>,
     note_editor: Option<NoteEditor>,
     environment_editor: Option<EnvironmentEditor>,
     decisions: Vec<UserDecision>,
@@ -798,6 +806,22 @@ pub enum ExitChoice {
     Stay,
 }
 
+/// The drawer-local `New` flow.
+///
+/// `Empty` is deliberately distinct from `Choosing`: a machine with no
+/// installed CLI never opens a zero-row picker and therefore cannot submit a
+/// daemon request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkspaceAgentNew {
+    /// The conversation drawer is visible without its CLI chooser.
+    #[default]
+    Idle,
+    /// An installed provider is highlighted but not yet confirmed.
+    Choosing(DefaultModel),
+    /// No supported Agent CLI is installed.
+    Empty,
+}
+
 impl ExitChoice {
     /// The prompt's buttons in display order. `Stay` is the cancel button and is
     /// therefore last, matching the `[ yes ] [ no ]` ordering of the two-choice
@@ -848,6 +872,8 @@ impl AppState {
             route: Route::Home(HomeMode::Switch),
             overlay: None,
             workspace_agent_drawer_open: false,
+            workspace_agent_new: WorkspaceAgentNew::Idle,
+            workspace_agent_launching: None,
             note_editor: None,
             environment_editor: None,
             decisions: Vec::new(),
@@ -896,6 +922,16 @@ impl AppState {
     #[must_use]
     pub const fn workspace_agent_drawer_open(&self) -> bool {
         self.workspace_agent_drawer_open
+    }
+    /// Current local state of the drawer's explicit Agent CLI chooser.
+    #[must_use]
+    pub const fn workspace_agent_new(&self) -> WorkspaceAgentNew {
+        self.workspace_agent_new
+    }
+    /// Operation currently fenced by the drawer's root launch flow.
+    #[must_use]
+    pub const fn workspace_agent_launching(&self) -> Option<OperationId> {
+        self.workspace_agent_launching
     }
     /// Home sidebar mascot animation frame. Only [`AppEvent::Tick`] advances it.
     #[must_use]
@@ -1485,6 +1521,10 @@ pub enum AppEvent {
     Backend(BackendEvent),
     /// request completion。
     OperationResult(OperationResult),
+    /// The shell finished exactly one drawer-originated workspace-root Agent
+    /// launch. A mismatched operation is ignored, preserving the in-flight
+    /// fence against stale or replayed completions.
+    WorkspaceAgentLaunchFinished(OperationId),
     /// A pointer gesture over the Home sidebar, in 0-based terminal cells. The
     /// reducer resolves the row with the same viewport geometry the frame draws
     /// and either moves the cursor or, for two presses on the same stable
@@ -2545,6 +2585,12 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state.feedback = Some(feedback);
             Vec::new()
         }
+        AppEvent::WorkspaceAgentLaunchFinished(operation) => {
+            if state.workspace_agent_launching == Some(operation) {
+                state.workspace_agent_launching = None;
+            }
+            Vec::new()
+        }
         AppEvent::OperationResult(result) => {
             let pending = state
                 .pending
@@ -2686,13 +2732,11 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         return update_overlay(state, overlay, key);
     }
     if state.workspace_agent_drawer_open {
-        if matches!(key, AppKey::Escape | AppKey::ToggleWorkspaceAgentDrawer) {
-            state.workspace_agent_drawer_open = false;
-        }
-        return Vec::new();
+        return update_workspace_agent_drawer_key(state, key);
     }
     if matches!(key, AppKey::ToggleWorkspaceAgentDrawer) {
         state.workspace_agent_drawer_open = true;
+        state.workspace_agent_new = WorkspaceAgentNew::Idle;
         return Vec::new();
     }
     if !matches!(key, AppKey::CtrlC) {
@@ -2723,6 +2767,86 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
             update_editor_key(state, &key).unwrap_or_default()
         }
         key => update_management_key(state, key),
+    }
+}
+
+fn update_workspace_agent_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
+    if matches!(key, AppKey::ToggleWorkspaceAgentDrawer) {
+        state.workspace_agent_drawer_open = false;
+        state.workspace_agent_new = WorkspaceAgentNew::Idle;
+        return Vec::new();
+    }
+    match (state.workspace_agent_new, key) {
+        (WorkspaceAgentNew::Idle, AppKey::Escape) => {
+            state.workspace_agent_drawer_open = false;
+            Vec::new()
+        }
+        (WorkspaceAgentNew::Choosing(_) | WorkspaceAgentNew::Empty, AppKey::Escape) => {
+            state.workspace_agent_new = WorkspaceAgentNew::Idle;
+            Vec::new()
+        }
+        (WorkspaceAgentNew::Idle, AppKey::Enter) if state.workspace_agent_launching.is_none() => {
+            state.workspace_agent_new = if state.available_models.is_empty() {
+                WorkspaceAgentNew::Empty
+            } else {
+                let selected = if state.available_models.contains(state.default_model) {
+                    state.default_model
+                } else {
+                    state
+                        .available_models
+                        .iter()
+                        .next()
+                        .expect("non-empty availability has a first candidate")
+                };
+                WorkspaceAgentNew::Choosing(selected)
+            };
+            Vec::new()
+        }
+        (WorkspaceAgentNew::Choosing(selected), AppKey::Up) => {
+            let candidates = state.available_models.iter().collect::<Vec<_>>();
+            if candidates.is_empty() {
+                state.workspace_agent_new = WorkspaceAgentNew::Empty;
+                return Vec::new();
+            }
+            let index = candidates
+                .iter()
+                .position(|candidate| *candidate == selected)
+                .unwrap_or(0);
+            let previous = (index + candidates.len() - 1) % candidates.len();
+            state.workspace_agent_new = WorkspaceAgentNew::Choosing(candidates[previous]);
+            Vec::new()
+        }
+        (WorkspaceAgentNew::Choosing(selected), AppKey::Down) => {
+            let candidates = state.available_models.iter().collect::<Vec<_>>();
+            if candidates.is_empty() {
+                state.workspace_agent_new = WorkspaceAgentNew::Empty;
+                return Vec::new();
+            }
+            let index = candidates
+                .iter()
+                .position(|candidate| *candidate == selected)
+                .unwrap_or(0);
+            let next = (index + 1) % candidates.len();
+            state.workspace_agent_new = WorkspaceAgentNew::Choosing(candidates[next]);
+            Vec::new()
+        }
+        (WorkspaceAgentNew::Choosing(selected), AppKey::Enter)
+            if state.workspace_agent_launching.is_none() =>
+        {
+            let operation_id = OperationId::new();
+            state.workspace_agent_new = WorkspaceAgentNew::Idle;
+            state.workspace_agent_launching = Some(operation_id);
+            vec![Effect::LaunchAgent {
+                workspace: state.workspace,
+                session: None,
+                operation_id,
+                profile: Some(profile_for(selected)),
+            }]
+        }
+        // Empty, submitted, and unsupported drawer input are all inert. In
+        // particular Enter while a root launch is fenced cannot mint a second
+        // operation.
+        _ => Vec::new(),
     }
 }
 
@@ -4785,6 +4909,173 @@ mod tests {
             AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer),
         );
         assert!(!state.workspace_agent_drawer_open());
+    }
+
+    #[test]
+    fn workspace_agent_new_picker_has_deterministic_candidates_and_cancel() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        state.set_agent_models(
+            AvailableModels::new([DefaultModel::Claude, DefaultModel::SakanaAi]),
+            DefaultModel::OpenAi,
+        );
+        let background = (state.selected(), state.active(), state.route());
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer),
+        );
+
+        // A missing configured default highlights the first installed candidate
+        // in vocabulary order without confirming it.
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(
+            state.workspace_agent_new(),
+            WorkspaceAgentNew::Choosing(DefaultModel::Claude)
+        );
+        assert_eq!(
+            (state.selected(), state.active(), state.route()),
+            background
+        );
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        assert_eq!(
+            state.workspace_agent_new(),
+            WorkspaceAgentNew::Choosing(DefaultModel::SakanaAi)
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        assert_eq!(
+            state.workspace_agent_new(),
+            WorkspaceAgentNew::Choosing(DefaultModel::Claude)
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        assert_eq!(
+            state.workspace_agent_new(),
+            WorkspaceAgentNew::Choosing(DefaultModel::SakanaAi)
+        );
+
+        // Escape cancels only the chooser; the drawer and every background
+        // selection remain unchanged.
+        assert!(update(&mut state, AppEvent::Key(AppKey::Escape)).is_empty());
+        assert_eq!(state.workspace_agent_new(), WorkspaceAgentNew::Idle);
+        assert!(state.workspace_agent_drawer_open());
+        assert_eq!(
+            (state.selected(), state.active(), state.route()),
+            background
+        );
+    }
+
+    #[test]
+    fn workspace_agent_new_picker_covers_default_single_and_empty_availability() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer),
+        );
+
+        state.set_agent_models(AvailableModels::all(), DefaultModel::SakanaAi);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert_eq!(
+            state.workspace_agent_new(),
+            WorkspaceAgentNew::Choosing(DefaultModel::SakanaAi)
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+
+        state.set_agent_models(
+            AvailableModels::new([DefaultModel::OpenAi]),
+            DefaultModel::Claude,
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert_eq!(
+            state.workspace_agent_new(),
+            WorkspaceAgentNew::Choosing(DefaultModel::OpenAi)
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        assert_eq!(
+            state.workspace_agent_new(),
+            WorkspaceAgentNew::Choosing(DefaultModel::OpenAi)
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+
+        state.set_agent_models(AvailableModels::default(), DefaultModel::OpenAi);
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(state.workspace_agent_new(), WorkspaceAgentNew::Empty);
+        assert_eq!(state.workspace_agent_launching(), None);
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    }
+
+    #[test]
+    fn workspace_agent_picker_submits_one_explicit_root_launch_until_matching_finish() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        state.set_agent_models(
+            AvailableModels::new([DefaultModel::SakanaAi]),
+            DefaultModel::SakanaAi,
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let [
+            Effect::LaunchAgent {
+                workspace: launched_workspace,
+                session,
+                operation_id,
+                profile,
+            },
+        ] = effects.as_slice()
+        else {
+            panic!("picker confirmation must emit exactly one launch: {effects:?}");
+        };
+        assert_eq!(*launched_workspace, workspace);
+        assert_eq!(*session, None);
+        assert_eq!(
+            profile.as_ref().map(AgentProfileId::as_str),
+            Some("sakana-ai")
+        );
+        assert_eq!(state.workspace_agent_launching(), Some(*operation_id));
+
+        // Double Enter and a stale completion cannot cross the operation fence.
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        let _ = update(
+            &mut state,
+            AppEvent::WorkspaceAgentLaunchFinished(OperationId::new()),
+        );
+        assert_eq!(state.workspace_agent_launching(), Some(*operation_id));
+        let _ = update(
+            &mut state,
+            AppEvent::WorkspaceAgentLaunchFinished(*operation_id),
+        );
+        assert_eq!(state.workspace_agent_launching(), None);
+    }
+
+    #[test]
+    fn workspace_agent_picker_maps_each_cli_fixture_to_one_explicit_profile() {
+        let workspace = WorkspaceId::new();
+        for (model, expected) in [
+            (DefaultModel::Claude, "claude"),
+            (DefaultModel::OpenAi, "codex"),
+            (DefaultModel::SakanaAi, "sakana-ai"),
+        ] {
+            let mut state = AppState::home(workspace, Vec::new());
+            state.set_agent_models(AvailableModels::new([model]), model);
+            let _ = update(
+                &mut state,
+                AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer),
+            );
+            let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+            let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
+            assert!(matches!(
+                effects.as_slice(),
+                [Effect::LaunchAgent {
+                    session: None,
+                    profile: Some(profile),
+                    ..
+                }] if profile.as_str() == expected
+            ));
+        }
     }
 
     #[test]

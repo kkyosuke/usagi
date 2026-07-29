@@ -1,14 +1,14 @@
 ---
 number: 578
 title: feat(tui): Workspace Agent の New CLI picker と root Agent launch を追加する
-status: todo
+status: in-progress
 priority: high
 labels: [v2, tui, agent, ux]
 dependson: [577]
 related: [388, 506, 510, 545]
 parent: 571
 created_at: 2026-07-27T23:04:31.429786+00:00
-updated_at: 2026-07-27T23:04:31.429786+00:00
+updated_at: 2026-07-29T00:59:31.399847+00:00
 ---
 
 ## 背景

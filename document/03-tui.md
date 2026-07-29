@@ -378,8 +378,24 @@ managed-session Closeup の right pane viewport とは別の pure geometry と�
 
 drawer は root scope（`session_id: None`）の live / pending / interrupted Agent conversation だけを
 conversation selector に表示する。generic Terminal、Diff、Terminal pending/action は restore projection と pane
-admission の両方で拒否する。`[ New ]` は disabled のままで、empty state や drawer open を契機に Agent を自動起動・
-resume せず、`New` click / Enter も request を発行しない。
+admission の両方で拒否する。`[ New ]` の click または drawer の conversation surface で `Enter` を押すと、
+合成ルートから注入された install 済み CLI だけを `claude`、`codex`、`sakana.ai` の順で picker に表示する。
+設定済み default が候補ならそこを、なければ先頭候補を highlight するが、自動確定はしない。`↑↓` は循環選択し、
+`Enter` は選択した CLI の explicit profile を確定する。`Esc` は conversation order / selection と drawer open
+状態を変えず picker だけを閉じる。候補が 0 件なら picker を開かず、installation と Config の確認を促す
+safe empty state を表示し、daemon request を発行しない。
+
+picker の確定は fresh `OperationId`、`session_id: None`、選択した explicit profile を持つ既存 daemon Agent
+launch path を 1 回だけ呼ぶ。TUI は argv / cwd / provider model path / secret を組み立てない。request 前に root
+pending slot を 1 枚作り、同じ operation・semantic digest・root scope を持つ successful final の exact
+`TerminalRef` と continuation だけを live conversation へ昇格する。operation が完了するまで New を fence するため、
+double Enter、duplicate completion、reconnect replay は 1 request / 1 tab へ収束する。
+
+成功時は root `AgentTabIntent` の order への追加と新 conversation の selection を 1 回の CAS mutation で commit
+してから pending slot を live にする。write / CAS / future-schema failure、profile rejection、daemon 不通、
+wrong workspace / session / operation / semantic final は pending を失敗表示へ遷移させ、既存 conversation・selection・
+terminal bytes を変更しない。daemon runtime が既に成功していて intent の commit だけが失敗した場合も、TUI は
+local success を捏造せず、既存 intent contract の safe error を表示する。
 
 coherent inventory は drawer が閉じていても root target の `AgentTabIntent` と reconcile し、保存済み order /
 selection / dismissal を準備する。保存済み exact ref が trusted live なら同じ `TerminalRef`、同 lineage が
@@ -400,7 +416,8 @@ new exact `TerminalRef` がすべて一致した成功だけを同 slot の live
 
 drawer open 中は drawer が sidebar、managed pane、Home header の別 action、通常の global action の入力を所有し、
 それらへ key / click / pointer を伝播しない。root Agent tab の terminal input と `Ctrl-O` tab controls、および
-`Esc` / `Ctrl-O g` の close だけを受理する。開閉は Home mode、selected cursor、active managed session、
+New picker の `↑↓` / `Enter` / `Esc`、`Ctrl-O g` の close だけを受理する。picker が閉じているときの `Esc` は
+drawer を閉じる。開閉は Home mode、selected cursor、active managed session、
 managed pane の selected tab、terminal scroll / text selection を変更しない。既存 modal が前面にある間は drawer
 shortcut と header button を受理しない。非同期 completion で
 既存 modal が drawer より後に開いた場合も modal が描画・入力の優先権を持ち、drawer から modal を暗黙に開かない。
