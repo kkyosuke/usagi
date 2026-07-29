@@ -2471,6 +2471,9 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             }
             state.ctrl_c_grace = state.has_live_pane && !has_live_pane;
             state.has_live_pane = has_live_pane;
+            if state.workspace_agent_drawer_open {
+                return Vec::new();
+            }
             if matches!(state.route, Route::Home(HomeMode::Closeup)) {
                 if has_live_pane {
                     if !state.closeup_action_forced {
@@ -2491,6 +2494,9 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 return Vec::new();
             }
             state.has_pane_tab = has_pane_tab;
+            if state.workspace_agent_drawer_open {
+                return Vec::new();
+            }
             if !matches!(state.route, Route::Home(HomeMode::Closeup)) {
                 return Vec::new();
             }
@@ -2616,6 +2622,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 }
             } else if pending.is_some_and(|pending| pending.kind == PendingKind::CreateSession)
                 && state.overlay.is_none()
+                && !state.workspace_agent_drawer_open
             {
                 // A create accepted by the daemon later failed. Surface the safe
                 // message as a dismissible dialog over Home. The form was already
@@ -4962,6 +4969,105 @@ mod tests {
             (state.selected(), state.active(), state.route()),
             background
         );
+    }
+
+    #[test]
+    fn workspace_agent_frontmost_transition_table_keeps_modal_and_background_ownership_unique() {
+        struct Case {
+            name: &'static str,
+            modal: bool,
+            events: Vec<AppKey>,
+            drawer_open: bool,
+            picker_open: bool,
+            launches: usize,
+        }
+        let workspace = WorkspaceId::new();
+        let cases = [
+            Case {
+                name: "modal blocks drawer entry",
+                modal: true,
+                events: vec![AppKey::ToggleWorkspaceAgentDrawer],
+                drawer_open: false,
+                picker_open: false,
+                launches: 0,
+            },
+            Case {
+                name: "toggle closes drawer",
+                modal: false,
+                events: vec![
+                    AppKey::ToggleWorkspaceAgentDrawer,
+                    AppKey::ToggleWorkspaceAgentDrawer,
+                ],
+                drawer_open: false,
+                picker_open: false,
+                launches: 0,
+            },
+            Case {
+                name: "picker escape returns to drawer",
+                modal: false,
+                events: vec![
+                    AppKey::ToggleWorkspaceAgentDrawer,
+                    AppKey::Enter,
+                    AppKey::Escape,
+                ],
+                drawer_open: true,
+                picker_open: false,
+                launches: 0,
+            },
+            Case {
+                name: "picker confirmation launches root only",
+                modal: false,
+                events: vec![
+                    AppKey::ToggleWorkspaceAgentDrawer,
+                    AppKey::Enter,
+                    AppKey::Enter,
+                ],
+                drawer_open: true,
+                picker_open: false,
+                launches: 1,
+            },
+        ];
+        for case in cases {
+            let mut state = AppState::home(workspace, Vec::new());
+            state.set_agent_models(
+                AvailableModels::new([DefaultModel::OpenAi]),
+                DefaultModel::OpenAi,
+            );
+            if case.modal {
+                state.overlay = Some(Overlay::Overview);
+            }
+            let effects = case
+                .events
+                .into_iter()
+                .flat_map(|key| update(&mut state, AppEvent::Key(key)))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                state.workspace_agent_drawer_open(),
+                case.drawer_open,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                matches!(state.workspace_agent_new(), WorkspaceAgentNew::Choosing(_)),
+                case.picker_open,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                effects
+                    .iter()
+                    .filter(|effect| matches!(effect, Effect::LaunchAgent { session: None, .. }))
+                    .count(),
+                case.launches,
+                "{}",
+                case.name
+            );
+            assert!(
+                state.overlay().is_none() || !state.workspace_agent_drawer_open(),
+                "{}",
+                case.name
+            );
+        }
     }
 
     #[test]

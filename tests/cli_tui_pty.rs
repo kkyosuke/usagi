@@ -250,8 +250,13 @@ fn click_workspace_agent_button(master: &mut File) {
     send(master, b"\x1b[<0;91;1M\x1b[<0;91;1m");
 }
 
+/// Click `[ New ]` in the 100-column drawer selector row.
+fn click_workspace_agent_new(master: &mut File) {
+    send(master, b"\x1b[<0;96;3M\x1b[<0;96;3m");
+}
+
 fn toggle_workspace_agent_with_key(master: &mut File) {
-    send(master, b"\x0fg");
+    send(master, b"\x0f\x07");
 }
 
 fn short_home() -> DaemonHome {
@@ -1677,7 +1682,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     let mut first = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, first_baseline);
     click_workspace_agent_button(&mut master);
-    wait_for_screen_since(&captured, first_baseline, "Workspace Agent");
+    wait_for_screen_since(&captured, first_baseline, "󰚩 chat");
     send(&mut master, b"\r");
     wait_for_screen_since(&captured, first_baseline, "↑↓: select");
     // The configured OpenAI default explicitly highlights installed Codex.
@@ -2513,8 +2518,8 @@ fn real_pty_empty_workspace_drawer_is_safe_without_agent_clis_at_narrow_width() 
     open_registered_workspace(&mut master, &captured, baseline);
 
     toggle_workspace_agent_with_key(&mut master);
-    wait_for_screen_since(&captured, baseline, "No conversations yet");
-    send(&mut master, b"\r");
+    wait_for_screen_since(&captured, baseline, "No chat conversations yet");
+    click_workspace_agent_new(&mut master);
     wait_for_screen_since(&captured, baseline, "No Agent CLI installed");
     assert!(agent_processes(home.path(), 0).is_empty());
 
@@ -2527,13 +2532,13 @@ fn real_pty_empty_workspace_drawer_is_safe_without_agent_clis_at_narrow_width() 
     send(&mut master, b"\x11");
     thread::sleep(Duration::from_millis(200));
     let narrow = screen_since(&captured, baseline).unwrap_or_default();
-    assert!(narrow.contains("Workspace Agent"), "{narrow}");
+    assert!(narrow.contains("󰚩 chat"), "{narrow}");
     assert!(!narrow.contains("Leave this workspace?"), "{narrow}");
 
     send(&mut master, b"\x1b");
-    wait_for_screen_since(&captured, baseline, "No conversations yet");
+    wait_for_screen_since(&captured, baseline, "No chat conversations yet");
     send(&mut master, b"\x1b");
-    wait_for_screen_absent_since(&captured, baseline, "No conversations yet");
+    wait_for_screen_absent_since(&captured, baseline, "No chat conversations yet");
     send(&mut master, b"\x11");
     wait_for_screen_since(&captured, baseline, "Leave this workspace?");
     send(&mut master, b"\r");

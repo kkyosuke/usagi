@@ -4194,15 +4194,21 @@ fn is_workspace_agent_new_click(
     height: usize,
     width: usize,
 ) -> bool {
-    let Key::Click { column, row } = key else {
-        return false;
+    let (column, row) = match key {
+        Key::Click { column, row }
+        | Key::Pointer(PointerEvent {
+            kind: PointerKind::Down,
+            column,
+            row,
+        }) => (*column, *row),
+        _ => return false,
     };
     runtime.state().workspace_agent_drawer_open()
         && workspace_agent_drawer::new_button_at(
             height,
             width,
-            *column,
-            *row,
+            column,
+            row,
             runtime.state().workspace_agent_launching().is_some(),
         )
 }
@@ -4382,10 +4388,14 @@ fn home_frame_material(
 ) -> HomeFrameMaterial {
     let projection =
         HomeProjection::from_state(runtime.state(), workspace_name, root_cwd, sessions)
-            .with_pane(runtime.active_pane())
+            .with_pane(runtime.managed_pane())
             .with_metrics(metrics)
             .with_git_diffs(git_diffs)
-            .with_terminal_view(terminal_view)
+            .with_terminal_view(
+                (!runtime.state().workspace_agent_drawer_open())
+                    .then_some(terminal_view)
+                    .flatten(),
+            )
             .with_workspace_agent_drawer(runtime.workspace_agent_projection().clone())
             .with_create_pending(create_pending.map(str::to_owned))
             .with_overlay_modals(
@@ -4592,7 +4602,10 @@ fn drain_controller_host_actions(
                 // daemon work; managed-session Closeup remains unchanged.
                 if matches!(request.target, Target::Root(_)) {
                     let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
-                        Notice::new("Workspace Agent accepts Agent conversations only"),
+                        Notice::new(format!(
+                            "{} chat accepts Agent conversations only",
+                            workspace_agent_drawer::CHAT_ICON
+                        )),
                     )));
                     continue;
                 }
@@ -5143,36 +5156,24 @@ fn drive_workspace_controller(
         ) {
             continue;
         }
-        let effects = if let Key::Click { column, row } = key {
-            if runtime.state().workspace_agent_drawer_open()
-                && workspace_agent_drawer::new_button_at(
-                    height,
-                    width,
-                    column,
-                    row,
-                    runtime.state().workspace_agent_launching().is_some(),
-                )
-            {
-                runtime.apply_event(AppEvent::Key(AppKey::Enter))
-            } else {
-                // Header rendering and hit-testing share one layout projection, so
-                // CJK breadcrumbs, notice presence, and narrow clipping cannot move
-                // an action away from its clickable cells.
-                let header_action = drawn_material.as_ref().and_then(|material| {
-                    home_header_action_at(width, &material.projection, column, row)
-                });
-                match header_action {
-                    Some(HomeHeaderAction::WorkspaceAgent) => {
-                        runtime.apply_event(AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer))
-                    }
-                    Some(HomeHeaderAction::Decisions) => {
-                        runtime.apply_event(AppEvent::Key(AppKey::OpenDecisions))
-                    }
-                    None => runtime.apply_event(sidebar_pointer_event(
-                        column,
-                        row,
-                        pointer_clock.elapsed(),
-                    )),
+        let effects = if is_workspace_agent_new_click(&key, &runtime, height, width) {
+            runtime.apply_event(AppEvent::Key(AppKey::Enter))
+        } else if let Key::Click { column, row } = key {
+            // Header rendering and hit-testing share one layout projection, so
+            // CJK breadcrumbs, notice presence, and narrow clipping cannot move
+            // an action away from its clickable cells.
+            let header_action = drawn_material.as_ref().and_then(|material| {
+                home_header_action_at(width, &material.projection, column, row)
+            });
+            match header_action {
+                Some(HomeHeaderAction::WorkspaceAgent) => {
+                    runtime.apply_event(AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer))
+                }
+                Some(HomeHeaderAction::Decisions) => {
+                    runtime.apply_event(AppEvent::Key(AppKey::OpenDecisions))
+                }
+                None => {
+                    runtime.apply_event(sidebar_pointer_event(column, row, pointer_clock.elapsed()))
                 }
             }
         } else {
@@ -6150,7 +6151,7 @@ mod tests {
     };
     use crate::usecase::application::controller::{
         AppEvent, AppKey, BackendEvent, Effect, EnvironmentEntry, NewRequest, Overlay,
-        PendingToken, SessionCreateIntent, TabDirection, Target,
+        PendingToken, SessionCreateIntent, TabDirection, Target, WorkspaceAgentNew,
     };
     use crate::usecase::application::daemon_backend::{
         Completions, DaemonBackend, DecisionPort as BackendDecisionPort, ReopenAgentRequest,
@@ -11610,6 +11611,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One shell matrix fixes drawer mouse and pane ownership.
     fn workspace_agent_drawer_consumes_shell_pane_controls_without_background_mutation() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -11645,8 +11647,19 @@ mod tests {
         assert!(super::is_workspace_agent_new_click(
             &new_click, &runtime, 20, 80
         ));
+        let new_pointer = Key::Pointer(PointerEvent {
+            kind: PointerKind::Down,
+            column: u16::try_from(drawer.left + drawer.width - 3).unwrap(),
+            row: u16::try_from(drawer.top + 1).unwrap(),
+        });
+        assert!(super::is_workspace_agent_new_click(
+            &new_pointer,
+            &runtime,
+            20,
+            80
+        ));
         assert!(!intercept_live_terminal_control(
-            &new_click,
+            &new_pointer,
             &mut ui,
             &mut runtime,
             &mut controls,
@@ -11658,6 +11671,26 @@ mod tests {
             3,
             scroll_before,
         ));
+        let managed_before = runtime
+            .panes()
+            .pane(Target::Session(session))
+            .unwrap()
+            .tabs()
+            .to_vec();
+        assert!(runtime.apply_event(AppEvent::Key(AppKey::Enter)).is_empty());
+        assert!(matches!(
+            runtime.state().workspace_agent_new(),
+            WorkspaceAgentNew::Choosing(_)
+        ));
+        assert_eq!(runtime.panes().active(), Some(Target::Root(workspace)));
+        assert_eq!(
+            runtime
+                .panes()
+                .pane(Target::Session(session))
+                .unwrap()
+                .tabs(),
+            managed_before.as_slice()
+        );
 
         for key in [
             Key::Live(LiveTerminalAction::NextTab),
@@ -12101,7 +12134,7 @@ mod tests {
                 .state()
                 .notice()
                 .map(|notice| notice.message.as_str()),
-            Some("Workspace Agent accepts Agent conversations only")
+            Some("󰚩 chat accepts Agent conversations only")
         );
 
         ui.pane_completion_sender
@@ -19286,8 +19319,8 @@ mod tests {
     fn has_workspace_agent_drawer(frames: &[Vec<String>]) -> bool {
         frames.iter().any(|frame| {
             let text = frame.join("\n");
-            text.contains("Workspace Agent")
-                && text.contains("No conversations yet")
+            text.contains("󰚩 chat")
+                && text.contains("No chat conversations yet")
                 && text.contains("[ New ]")
         })
     }

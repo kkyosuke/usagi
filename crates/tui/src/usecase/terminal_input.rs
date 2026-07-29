@@ -177,7 +177,7 @@ pub enum LiveTerminalAction {
     MoveTabPrevious,
     /// Open or reattach the agent pane.
     Agent,
-    /// Toggle the Home Workspace Agent drawer (`Ctrl-O g`). It is the frontmost
+    /// Toggle the Home Workspace Agent drawer (`Ctrl-O Ctrl-G`). It is the frontmost
     /// Home surface: opening it never mutates the background route, selection, or
     /// active managed session, and re-issuing it closes the drawer.
     WorkspaceAgent,
@@ -277,6 +277,9 @@ impl LiveInputClassifier {
     fn classify_bytes(&mut self, leader_alive: bool, bytes: Vec<u8>) -> LiveInputOutput {
         self.leader_at = None;
         if leader_alive {
+            if bytes == [7] {
+                return LiveInputOutput::Action(LiveTerminalAction::WorkspaceAgent);
+            }
             return LiveInputOutput::Swallowed;
         }
         global_control_bytes(&bytes).map_or(
@@ -297,6 +300,9 @@ impl LiveInputClassifier {
         }
         if leader_alive {
             self.leader_at = None;
+            if matches!(key.code, KeyCode::Char('g')) && key.modifiers == Modifiers::default() {
+                return LiveInputOutput::Passthrough(encode_key(key));
+            }
             return prefix_action(key).map_or(LiveInputOutput::Swallowed, LiveInputOutput::Action);
         }
         if is_ctrl_o(key) {
@@ -365,6 +371,11 @@ fn is_ctrl_x(key: &KeyEvent) -> bool {
         || (matches!(key.code, KeyCode::Char('x')) && is_only_control(key.modifiers))
 }
 
+fn is_ctrl_g(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('\u{7}'))
+        || (matches!(key.code, KeyCode::Char('g')) && is_only_control(key.modifiers))
+}
+
 fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
     if is_ctrl_o(key) {
         return Some(LiveTerminalAction::Switch);
@@ -381,6 +392,9 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
     if is_ctrl_x(key) {
         return Some(LiveTerminalAction::CloseTab);
     }
+    if is_ctrl_g(key) {
+        return Some(LiveTerminalAction::WorkspaceAgent);
+    }
     // Plain follow-ups for the live-terminal view controls the Home reducer does
     // not own: scroll the PTY output and close the focused tab. A
     // modified variant (other than the control chords above) is not a prefix
@@ -389,7 +403,6 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
         return None;
     }
     match key.code {
-        KeyCode::Char('g') => Some(LiveTerminalAction::WorkspaceAgent),
         KeyCode::Char('x') => Some(LiveTerminalAction::CloseTab),
         KeyCode::Char('r') => Some(LiveTerminalAction::ResumeTab),
         KeyCode::Char(']') => Some(LiveTerminalAction::MoveTabNext),
@@ -681,7 +694,11 @@ mod tests {
                 action: LiveTerminalAction::PreviousTab,
             },
             Case {
-                follow_up: key(KeyCode::Char('g')),
+                follow_up: ctrl('g'),
+                action: LiveTerminalAction::WorkspaceAgent,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('\u{7}')),
                 action: LiveTerminalAction::WorkspaceAgent,
             },
             // View controls the reducer does not own: tab close and scroll.
@@ -738,6 +755,35 @@ mod tests {
                 LiveInputOutput::Action(case.action)
             );
         }
+    }
+
+    #[test]
+    fn workspace_agent_chord_distinguishes_ctrl_g_from_plain_g() {
+        for follow_up in [
+            ctrl('g'),
+            key(KeyCode::Char('\u{7}')),
+            LiveInput::Raw(vec![7]),
+        ] {
+            let mut classifier = LiveInputClassifier::default();
+            assert_eq!(
+                classifier.classify(T0, ctrl('o')),
+                LiveInputOutput::Swallowed
+            );
+            assert_eq!(
+                classifier.classify(Duration::from_millis(1), follow_up),
+                LiveInputOutput::Action(LiveTerminalAction::WorkspaceAgent)
+            );
+        }
+
+        let mut classifier = LiveInputClassifier::default();
+        assert_eq!(
+            classifier.classify(T0, ctrl('o')),
+            LiveInputOutput::Swallowed
+        );
+        assert_eq!(
+            classifier.classify(Duration::from_millis(1), key(KeyCode::Char('g'))),
+            LiveInputOutput::Passthrough(b"g".to_vec())
+        );
     }
 
     #[test]

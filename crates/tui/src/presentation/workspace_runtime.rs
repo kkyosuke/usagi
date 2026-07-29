@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use usagi_core::domain::agent::AgentResumeRelation;
 use usagi_core::domain::id::AgentContinuationRef;
-use usagi_core::domain::id::{OperationId, SessionId, TerminalRef};
+use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId};
 use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
 use usagi_core::usecase::client::DaemonMetrics;
 
@@ -153,6 +153,19 @@ impl WorkspaceRuntime {
     #[must_use]
     pub fn active_pane(&self) -> &PaneState {
         self.panes.active_pane()
+    }
+
+    /// The managed-session pane projected behind the root drawer.
+    ///
+    /// Drawer foreground handoff changes the registry's active entry to
+    /// `Target::Root`, but it must never make that root entry the Closeup
+    /// background material.
+    #[must_use]
+    pub fn managed_pane(&self) -> &PaneState {
+        self.state
+            .active()
+            .and_then(|session| self.panes.pane(Target::Session(session)))
+            .unwrap_or_else(|| self.panes.inactive_pane())
     }
 
     /// The pane registry, for callers that need per-target tab state.
@@ -675,6 +688,9 @@ impl WorkspaceRuntime {
         operation: OperationId,
         terminal: TerminalRef,
     ) -> Vec<PaneRegistryEffect> {
+        if !terminal_belongs_to_target(&terminal, target, self.state.workspace()) {
+            return Vec::new();
+        }
         let accepted_at = self.pane_focus_at_request.remove(&operation);
         let mut effects = self.complete_pane(target, operation, terminal.clone());
         if accepted_at == Some(self.state.interaction_count()) {
@@ -699,6 +715,9 @@ impl WorkspaceRuntime {
         operation: OperationId,
         terminal: TerminalRef,
     ) -> Vec<PaneRegistryEffect> {
+        if !terminal_belongs_to_target(&terminal, target, self.state.workspace()) {
+            return Vec::new();
+        }
         let effects = reduce_registry(
             &mut self.panes,
             PaneRegistryEvent::Pane {
@@ -1303,14 +1322,26 @@ impl WorkspaceRuntime {
         let root_cwd = root_cwd.into();
         let projection =
             HomeProjection::from_state(&self.state, workspace_name, &root_cwd, sessions)
-                .with_pane(self.panes.active_pane())
+                .with_pane(self.managed_pane())
                 .with_metrics(metrics)
                 .with_git_diffs(git_diffs)
-                .with_terminal_view(terminal_view)
+                .with_terminal_view(
+                    (!self.state.workspace_agent_drawer_open())
+                        .then_some(terminal_view)
+                        .flatten(),
+                )
                 .with_workspace_agent_drawer(self.workspace_agent_projection.clone())
                 .with_overlay_modals(self.overview_modal.clone(), self.closeup_modal.clone());
         render_home(height, width, &projection)
     }
+}
+
+fn terminal_belongs_to_target(
+    terminal: &TerminalRef,
+    target: Target,
+    workspace: WorkspaceId,
+) -> bool {
+    terminal.workspace_id == workspace && terminal.session_id == target.session_id()
 }
 
 fn tab_selection(tab: &PaneTab) -> TabSelection {
@@ -2326,8 +2357,9 @@ mod tests {
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
         assert!(runtime.state().workspace_agent_drawer_open());
+        assert_eq!(runtime.state().overlay(), None);
         assert!(!runtime.wants_live_input());
-        assert!(!runtime.wants_pane_control_input());
+        assert!(runtime.wants_pane_control_input());
         for key in [
             Key::Live(LiveTerminalAction::NextTab),
             Key::Live(LiveTerminalAction::CloseTab),
@@ -2351,8 +2383,6 @@ mod tests {
                 Some(closeup_background.3.clone()),
             )
         );
-        let _ = runtime.handle_key(Key::Escape);
-        assert!(runtime.state().workspace_agent_drawer_open());
         let _ = runtime.handle_key(Key::Escape);
         assert!(!runtime.state().workspace_agent_drawer_open());
         assert_eq!(runtime.active_pane(), &closeup_background.3);
@@ -2449,6 +2479,116 @@ mod tests {
         let _ = runtime.handle_key(Key::Escape);
         assert_eq!(runtime.panes().active(), Some(Target::Session(session)));
         assert_eq!(runtime.focused_terminal(), Some(managed));
+    }
+
+    #[test]
+    fn workspace_agent_drawer_keeps_managed_closeup_pane_in_the_background_projection() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let managed = terminal_ref(workspace, session);
+        let root_agent = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: None,
+            worktree_id: WorktreeId::new(),
+        };
+        let mut runtime = closeup_on(workspace, session);
+        let fence = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            fence.0,
+            fence.1,
+            vec![
+                PaneRestoreTarget {
+                    target: Target::Session(session),
+                    panes: vec![LivePane {
+                        terminal: managed.clone(),
+                        kind: PaneKind::Terminal,
+                    }],
+                    selected: Some(managed),
+                    selected_interrupted: None,
+                    interrupted: Vec::new(),
+                },
+                PaneRestoreTarget {
+                    target: Target::Root(workspace),
+                    panes: vec![LivePane {
+                        terminal: root_agent.clone(),
+                        kind: PaneKind::Agent,
+                    }],
+                    selected: Some(root_agent),
+                    selected_interrupted: None,
+                    interrupted: Vec::new(),
+                },
+            ],
+        ));
+
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        assert_eq!(runtime.panes().active(), Some(Target::Root(workspace)));
+        let frame = runtime.render(
+            24,
+            200,
+            "workspace",
+            "/workspace",
+            &[],
+            None,
+            &BTreeMap::new(),
+            None,
+        );
+        let text = frame.join("\n");
+        assert!(text.contains("Terminal"), "{text}");
+    }
+
+    #[test]
+    fn repeated_root_new_admission_never_mutates_the_managed_pane_registry() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let managed = terminal_ref(workspace, session);
+        let mut runtime = closeup_on(workspace, session);
+        let managed_operation = OperationId::new();
+        let _ = runtime.request_pane(
+            Target::Session(session),
+            managed_operation,
+            PaneKind::Terminal,
+        );
+        let _ = runtime.complete_pane(Target::Session(session), managed_operation, managed.clone());
+        let managed_before = runtime
+            .panes()
+            .pane(Target::Session(session))
+            .unwrap()
+            .tabs()
+            .to_vec();
+
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        for _ in 0..2 {
+            let operation = OperationId::new();
+            let root = TerminalRef {
+                daemon_generation: DaemonGeneration::new(),
+                terminal_id: TerminalId::new(),
+                workspace_id: workspace,
+                session_id: None,
+                worktree_id: WorktreeId::new(),
+            };
+            let _ = runtime.request_pane(Target::Root(workspace), operation, PaneKind::Agent);
+            let _ = runtime.complete_pane(Target::Root(workspace), operation, root);
+        }
+
+        assert_eq!(
+            runtime
+                .panes()
+                .pane(Target::Session(session))
+                .unwrap()
+                .tabs(),
+            managed_before.as_slice()
+        );
+        assert_eq!(
+            runtime
+                .panes()
+                .pane(Target::Root(workspace))
+                .unwrap()
+                .tabs()
+                .len(),
+            2
+        );
     }
 
     #[test]

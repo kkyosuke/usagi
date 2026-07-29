@@ -27,7 +27,9 @@ use crate::presentation::views::decision_modal;
 use crate::presentation::views::overview_modal::{self, OverviewModal};
 use crate::presentation::views::pr_modal::{self, PrModal};
 use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
-use crate::presentation::views::workspace_agent_drawer::{self, WorkspaceAgentDrawerProjection};
+use crate::presentation::views::workspace_agent_drawer::{
+    self, CHAT_ICON, WorkspaceAgentDrawerProjection,
+};
 use crate::presentation::widgets;
 use crate::usecase::application::controller::{
     AppState, CreateSessionForm, Feedback, HomeMode, Notice, PrOverlay, PreviewOverlay, Selection,
@@ -800,9 +802,12 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
             .style()
             .bold()
             .reverse()
-            .paint("[ Workspace Agent ]")
+            .paint(&format!("[ {CHAT_ICON} chat ]"))
     } else {
-        Role::Accent.style().bold().paint("[ Workspace Agent ]")
+        Role::Accent
+            .style()
+            .bold()
+            .paint(&format!("[ {CHAT_ICON} chat ]"))
     };
     let notice = (!home.unread_decision_ids.is_empty())
         .then(|| format!("🔔 {} notice", home.unread_decision_ids.len()));
@@ -1903,7 +1908,8 @@ mod tests {
     };
     use crate::presentation::theme::{Color, Style};
     use crate::presentation::views::workspace_agent_drawer::{
-        WorkspaceAgentConversation, WorkspaceAgentDrawerProjection, WorkspaceAgentNewProjection,
+        CHAT_ICON, WorkspaceAgentConversation, WorkspaceAgentDrawerProjection,
+        WorkspaceAgentNewProjection,
     };
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{display_width, modal, wrap_to_width};
@@ -2095,7 +2101,7 @@ mod tests {
 
         let layout = home_header_layout(100, &home);
         assert_eq!(display_width(&layout.line), 100);
-        assert!(strip(&layout.line).contains("Workspace Agent"));
+        assert!(strip(&layout.line).contains(&format!("{CHAT_ICON} chat")));
         assert!(strip(&layout.line).contains("notice"));
         let workspace_columns = (0..100)
             .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::WorkspaceAgent))

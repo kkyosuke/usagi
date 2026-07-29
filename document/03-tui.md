@@ -346,7 +346,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `Ctrl-A` | OpenCloseupModal | Switch では選択 target の Closeup action を開く。Closeup では tab があっても action modal を前面に出す |
 | `Ctrl-O` `Ctrl-N` | NextTab | 次の tab を選ぶ |
 | `Ctrl-O` `Ctrl-P` | PreviousTab | 前の tab を選ぶ |
-| `Ctrl-O` `g` | WorkspaceAgent | [Workspace Agent drawer](#workspace-agent-drawer) を toggle する |
+| `Ctrl-O` `Ctrl-G` | WorkspaceAgent | [Workspace Agent drawer](#workspace-agent-drawer) を toggle する |
 | `Ctrl-O` `]` | MoveTabNext | 選択 tab を次の表示 slot へ移動し、Agent 順序を commit する |
 | `Ctrl-O` `[` | MoveTabPrevious | 選択 tab を前の表示 slot へ移動し、Agent 順序を commit する |
 | macOS: Command+C / Linux: Ctrl+Shift+C / Windows: Ctrl+C | Copy selected output | 保持中の terminal 出力選択を OS clipboard へ再コピーする |
@@ -355,8 +355,9 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `u` / `↑` | ScrollUp | 右ペインの scrollback を 1 行古い方向へ |
 | `Ctrl-O` `d` / `↓` | ScrollDown | 右ペインの scrollback を 1 行 live bottom 方向へ |
 
-follow-up の `g` / `x` / `Ctrl-X` / `[` / `]` / `u` / `d` / `↑` / `↓` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
-leader は 1 秒で失効し、未知の follow-up、key release、raw byte を含む次の入力を 1 件だけ握って捨て、その時点で必ず reset する。
+follow-up の `Ctrl-G` / `x` / `Ctrl-X` / `[` / `]` / `u` / `d` / `↑` / `↓` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
+`Ctrl-O` 後の plain `g` は drawer action ではなく PTY へ 1 回だけ送る。leader は 1 秒で失効し、その他の未知の
+follow-up、key release、raw byte を含む次の入力を 1 件だけ握って捨て、その時点で必ず reset する。
 auto-repeat は press と同じ follow-up として 1 件だけ解決する。ちょうど 1 秒の timeout 境界では leader は失効済みであり、単一 raw
 control byte と semantic control event は同じ global shortcut に解決する。
 
@@ -364,12 +365,14 @@ Windows の `Ctrl+C` は terminal 出力を選択中なら copy とし、選択�
 
 ## Workspace Agent drawer
 
-Home header の右端には `[ Workspace Agent ]` button を表示する。workspace breadcrumb、mode toggle、
+Home header の右端には Nerd Font の robot glyph を使う `[ 󰚩 chat ]` button を表示し、drawer title も
+`󰚩 chat` とする。glyph は既存の CPU / memory / mode icon と同じく直接描画し、対応しない font や狭幅でも
+Unicode display width による clip と hit-test を維持する。workspace breadcrumb、mode toggle、
 pending decision の notice badge、button は 1 つの header layout が表示幅と click range を同時に計算する。
 そのため CJK workspace 名や notice の有無、狭幅による breadcrumb の clip があっても、描画された button / badge
 と hit-test は同じ terminal cell を指す。
 
-button または `Ctrl-O g` は、Switch、managed-session Closeup、live pane のいずれからも同じ
+button または `Ctrl-O Ctrl-G` は、Switch、managed-session Closeup、live pane のいずれからも同じ
 Workspace Agent drawer state を toggle する。drawer は Home header の下から右端へ重なる。通常幅は端末幅の
 60% とし、56 columns 以上 96 columns 以下へ clamp する。56 columns の drawer と 24 columns の背景を
 同時に保てない幅では全幅へ縮退する。背景 Home は ANSI span ごと dim にし、header は表示したままにする。
@@ -378,7 +381,7 @@ managed-session Closeup の right pane viewport とは別の pure geometry と�
 
 drawer は root scope（`session_id: None`）の live / pending / interrupted Agent conversation だけを
 conversation selector に表示する。generic Terminal、Diff、Terminal pending/action は restore projection と pane
-admission の両方で拒否する。`[ New ]` の click または drawer の conversation surface で `Enter` を押すと、
+admission の両方で拒否する。`[ New ]` の mouse-down hit または drawer の conversation surface で `Enter` を押すと、
 合成ルートから注入された install 済み CLI だけを `claude`、`codex`、`sakana.ai` の順で picker に表示する。
 設定済み default が候補ならそこを、なければ先頭候補を highlight するが、自動確定はしない。`↑↓` は循環選択し、
 `Enter` は選択した CLI の explicit profile を確定する。`Esc` は conversation order / selection と drawer open
@@ -390,6 +393,10 @@ launch path を 1 回だけ呼ぶ。TUI は argv / cwd / provider model path / s
 pending slot を 1 枚作り、同じ operation・semantic digest・root scope を持つ successful final の exact
 `TerminalRef` と continuation だけを live conversation へ昇格する。operation が完了するまで New を fence するため、
 double Enter、duplicate completion、reconnect replay は 1 request / 1 tab へ収束する。
+root New の pending / completion は terminal の `workspace_id` と `session_id: None` を
+`Target::Root` に照合してから root registry entry だけへ admit する。scope が一致しない completion は拒否し、
+現在 active / selected な managed-session entry へ fallback しない。New を繰り返しても増えるのは drawer の
+conversation だけで、managed Closeup の tab count・identity・selection は変わらない。
 
 成功時は root `AgentTabIntent` の order への追加と新 conversation の selection を 1 回の CAS mutation で commit
 してから pending slot を live にする。write / CAS / future-schema failure、profile rejection、daemon 不通、
@@ -416,11 +423,24 @@ new exact `TerminalRef` がすべて一致した成功だけを同 slot の live
 
 drawer open 中は drawer が sidebar、managed pane、Home header の別 action、通常の global action の入力を所有し、
 それらへ key / click / pointer を伝播しない。root Agent tab の terminal input と `Ctrl-O` tab controls、および
-New picker の `↑↓` / `Enter` / `Esc`、`Ctrl-O g` の close だけを受理する。picker が閉じているときの `Esc` は
+New picker の `↑↓` / `Enter` / `Esc`、`Ctrl-O Ctrl-G` の close だけを受理する。`[ New ]` の mouse-down は
+drawer が先に消費して picker を開き、同じ pointer gesture を背景 Closeup の click / focus / attach 選択へ
+fallthrough させない。picker が閉じているときの `Esc` は
 drawer を閉じる。開閉は Home mode、selected cursor、active managed session、
 managed pane の selected tab、terminal scroll / text selection を変更しない。既存 modal が前面にある間は drawer
-shortcut と header button を受理しない。非同期 completion で
-既存 modal が drawer より後に開いた場合も modal が描画・入力の優先権を持ち、drawer から modal を暗黙に開かない。
+shortcut と header button を受理しない。drawer open 中の root foreground availability は背景 Closeup modal を
+開かず、modal と drawer は同時に visible にならない。
+
+入力 context の優先順位と遷移は次のとおりである。
+
+| 現在の context | 入力 | 次の context / effect |
+|---|---|---|
+| modal | drawer chord / button | modal を維持し、drawer は開かない |
+| drawer conversation | drawer chord / `Esc` | drawer を閉じ、元の route / managed pane selection / focus を復元する |
+| drawer conversation | `[ New ]` click / `Enter` | drawer picker。背景への pointer / key effect は発行しない |
+| drawer picker | `↑` / `↓` | picker 内の CLI 選択だけを循環する |
+| drawer picker | `Esc` | picker だけを閉じ、drawer conversation に戻る |
+| drawer picker | `Enter` | root scope launch を 1 件発行し、drawer を最前面に保つ |
 
 ## Home frame loop と背景観測 lane
 
@@ -1139,7 +1159,7 @@ runtime bridge を確認する手順である。profile の install 状態、認
 
 daemon は terminal / Agent runtime の権威 owner であり、TUI を閉じても runtime は daemon 内で継続する。
 そのため workspace を開き直した（同じ client の再 open、または 2 つ目の client の open）とき、root scope の
-**live Agent** は Workspace Agent drawer、各 available session scope の **live Agent / Terminal** は Closeup の
+**live Agent** は Workspace Agent drawer（ユーザー向け表示は `󰚩 chat`）、各 available session scope の **live Agent / Terminal** は Closeup の
 pane tab に復元する。root scope の generic Terminal / Diff は復元しない。planned restart 中は active と draining の
 両 generation が inventory に答え、完全な `TerminalRef` で merge / dedup した結果を投影する
 （[4. IPC の owner generation routing](04-ipc.md#owner-generation-routing)）。
