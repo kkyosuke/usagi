@@ -2145,56 +2145,6 @@ impl WorkspaceUi {
             .map_or_else(BTreeSet::new, |context| context.state.dismissed.clone())
     }
 
-    /// Saved per-target Agent selections, including interrupted lineages that
-    /// the live projection deliberately cannot select.
-    fn agent_saved_selections(&self) -> BTreeMap<Option<SessionId>, AgentContinuationRef> {
-        self.agent_tab_intent
-            .as_ref()
-            .map_or_else(BTreeMap::new, |context| {
-                context
-                    .state
-                    .targets
-                    .iter()
-                    .filter_map(|target| {
-                        target
-                            .selected
-                            .map(|selected| (target.session_id, selected))
-                    })
-                    .collect()
-            })
-    }
-
-    fn continuation_for_selection(&self, selection: &TabSelection) -> Option<AgentContinuationRef> {
-        match selection {
-            TabSelection::Live(terminal) => self.agent_continuation_for(terminal),
-            TabSelection::Interrupted(continuation) => Some(*continuation),
-            TabSelection::Pending(_) | TabSelection::Ready(_) => None,
-        }
-    }
-
-    fn persist_agent_tab_order(
-        &mut self,
-        session_id: Option<SessionId>,
-        current: &[TabSelection],
-        next: &[TabSelection],
-    ) -> Result<(), AgentTabIntentError> {
-        let current = current
-            .iter()
-            .filter_map(|selection| self.continuation_for_selection(selection))
-            .collect::<Vec<_>>();
-        let continuations = next
-            .iter()
-            .filter_map(|selection| self.continuation_for_selection(selection))
-            .collect::<Vec<_>>();
-        if current == continuations {
-            return Ok(());
-        }
-        self.mutate_agent_intent(AgentTabIntentMutation::Reorder {
-            session_id,
-            continuations,
-        })
-    }
-
     fn has_agent_intent_for(&self, session_id: Option<SessionId>) -> bool {
         self.agent_tab_intent.as_ref().is_some_and(|context| {
             context
@@ -3136,23 +3086,19 @@ fn terminal_geometry(height: usize, width: usize) -> Geometry {
     }
 }
 
-fn workspace_agent_terminal_geometry(height: usize, width: usize) -> Geometry {
-    let viewport = workspace_agent_drawer::terminal_viewport(height, width);
-    Geometry {
-        cols: u16::try_from(viewport.cols.min(usize::from(u16::MAX)))
-            .expect("clamped drawer terminal width fits u16"),
-        rows: u16::try_from(viewport.rows.min(usize::from(u16::MAX)))
-            .expect("clamped drawer terminal height fits u16"),
-    }
-}
-
 fn foreground_terminal_geometry(
     height: usize,
     width: usize,
     workspace_agent_open: bool,
 ) -> Geometry {
     if workspace_agent_open {
-        workspace_agent_terminal_geometry(height, width)
+        let viewport = workspace_agent_drawer::terminal_viewport(height, width);
+        Geometry {
+            cols: u16::try_from(viewport.cols.min(usize::from(u16::MAX)))
+                .expect("clamped drawer terminal width fits u16"),
+            rows: u16::try_from(viewport.rows.min(usize::from(u16::MAX)))
+                .expect("clamped drawer terminal height fits u16"),
+        }
     } else {
         terminal_geometry(height, width)
     }
@@ -3468,12 +3414,13 @@ fn workspace_agent_drawer_projection(
     }
     let pane = runtime.active_pane();
     let selected = pane.selected();
-    let conversations = pane
-        .tabs()
-        .iter()
-        .filter_map(|tab| match tab {
+    let mut conversations = Vec::new();
+    for tab in pane.tabs() {
+        let conversation = match tab {
             PaneTab::Live(live) if live.kind == PaneKind::Agent => {
-                let continuation = ui.agent_continuation_for(&live.terminal)?;
+                let Some(continuation) = ui.agent_continuation_for(&live.terminal) else {
+                    continue;
+                };
                 Some(WorkspaceAgentConversation {
                     label: AgentTabIntent::safe_label(continuation),
                     selected: matches!(
@@ -3502,16 +3449,25 @@ fn workspace_agent_drawer_projection(
                 })
             }
             PaneTab::Live(_) | PaneTab::Pending(_) | PaneTab::Ready(_) => None,
-        })
-        .collect();
-    let mut terminal_rows = terminal_view.map_or_else(Vec::new, |view| view.rows.clone());
+        };
+        if let Some(conversation) = conversation {
+            conversations.push(conversation);
+        }
+    }
+    let mut terminal_rows = if let Some(view) = terminal_view {
+        view.rows.clone()
+    } else {
+        Vec::new()
+    };
     if terminal_rows.is_empty()
         && let Some(interrupted) = runtime.focused_interrupted()
     {
         terminal_rows.push(interrupted.safe_detail().to_owned());
     }
-    if let Some(feedback) = terminal_view.and_then(|view| view.feedback.as_ref()) {
-        terminal_rows.push(feedback.clone());
+    if let Some(view) = terminal_view
+        && let Some(feedback) = view.feedback.as_ref()
+    {
+        terminal_rows.push(feedback.to_owned());
     }
     WorkspaceAgentDrawerProjection {
         conversations,
@@ -3794,10 +3750,19 @@ fn pane_restore_targets(
         .into_iter()
         .map(|(session, (panes, selected))| {
             let interrupted = histories.remove(&session).unwrap_or_default();
-            let selected_interrupted = saved_selections
-                .get(&session)
-                .copied()
-                .filter(|selected| interrupted.iter().any(|tab| tab.continuation == *selected));
+            let selected_interrupted = if let Some(saved) = saved_selections.get(&session).copied()
+            {
+                let mut present = false;
+                for tab in &interrupted {
+                    if tab.continuation == saved {
+                        present = true;
+                        break;
+                    }
+                }
+                present.then_some(saved)
+            } else {
+                None
+            };
             let selected = selected
                 .or_else(|| {
                     current_selected
@@ -3933,6 +3898,14 @@ fn apply_restore_completion(
         };
     }
     let selected = runtime.focused_terminal();
+    let mut saved_selections = BTreeMap::new();
+    if let Some(context) = ui.agent_tab_intent.as_ref() {
+        for target in &context.state.targets {
+            if let Some(selected) = target.selected {
+                saved_selections.insert(target.session_id, selected);
+            }
+        }
+    }
     let targets = pane_restore_targets(
         workspace,
         allowed_sessions,
@@ -3940,7 +3913,7 @@ fn apply_restore_completion(
         &terminals,
         selected.as_ref(),
         interrupted,
-        &ui.agent_saved_selections(),
+        &saved_selections,
     );
     let fence_accepted = runtime.restore_snapshot(
         dispatched_interaction,
@@ -4023,11 +3996,12 @@ fn close_focused_terminal_pane(
                 .and_then(|terminal| ui.agent_continuation_for(terminal))
         });
     if let Some(continuation) = dismissed {
-        let selected = runtime
-            .selection_after_close()
-            .flatten()
-            .as_ref()
-            .and_then(|selection| ui.continuation_for_selection(selection));
+        let selected = runtime.selection_after_close().flatten();
+        let selected = match selected.as_ref() {
+            Some(TabSelection::Live(terminal)) => ui.agent_continuation_for(terminal),
+            Some(TabSelection::Interrupted(continuation)) => Some(*continuation),
+            Some(TabSelection::Pending(_) | TabSelection::Ready(_)) | None => None,
+        };
         if let Err(error) = ui.mutate_agent_intent(AgentTabIntentMutation::DismissAndSelect {
             continuation,
             session_id: runtime.panes().active().and_then(Target::session_id),
@@ -4150,17 +4124,6 @@ fn copy_terminal_selection(controls: &mut LiveTerminalControls, term: &mut dyn T
     controls.record_copy(&text, result);
 }
 
-fn shell_tab_selection(tab: &PaneTab) -> TabSelection {
-    match tab {
-        PaneTab::Pending(pending) => TabSelection::Pending(pending.operation),
-        PaneTab::Live(live) => TabSelection::Live(live.terminal.clone()),
-        PaneTab::Ready(ready) => TabSelection::Ready(ready.operation),
-        PaneTab::Interrupted(interrupted) => {
-            TabSelection::Interrupted(interrupted.tab.continuation)
-        }
-    }
-}
-
 fn select_workspace_agent_tab(
     key: &Key,
     ui: &mut WorkspaceUi,
@@ -4181,7 +4144,11 @@ fn select_workspace_agent_tab(
     let Some(selection) = runtime.selection_after_select(direction) else {
         return true;
     };
-    let continuation = ui.continuation_for_selection(&selection);
+    let continuation = match &selection {
+        TabSelection::Live(terminal) => ui.agent_continuation_for(terminal),
+        TabSelection::Interrupted(continuation) => Some(*continuation),
+        TabSelection::Pending(_) | TabSelection::Ready(_) => None,
+    };
     match ui.mutate_agent_intent(AgentTabIntentMutation::Select {
         session_id: None,
         continuation,
@@ -4232,82 +4199,89 @@ fn intercept_live_terminal_control(
     if !runtime.wants_pane_control_input() && pane_only_control {
         return true;
     }
-    if select_workspace_agent_tab(key, ui, runtime) {
-        return true;
-    }
-    match key {
-        Key::Live(LiveTerminalAction::ScrollUp) => controls.scroll_up(),
-        Key::Live(LiveTerminalAction::ScrollDown) => controls.scroll_down(),
-        Key::Live(LiveTerminalAction::CloseTab) => {
-            close_focused_terminal_pane(ui, runtime, pending_targets);
-        }
-        Key::Live(LiveTerminalAction::ResumeTab) => {
-            resume_focused_interrupted_tab(ui, runtime, pending_targets);
-        }
-        Key::Live(LiveTerminalAction::MoveTabNext) => {
-            let direction = crate::usecase::application::controller::TabDirection::Next;
-            let current_tabs = runtime
-                .active_pane()
-                .tabs()
-                .iter()
-                .map(shell_tab_selection)
-                .collect::<Vec<_>>();
-            let next_tabs = runtime.tab_order_after_reorder(direction);
-            match ui.persist_agent_tab_order(
-                runtime.panes().active().and_then(Target::session_id),
-                &current_tabs,
-                &next_tabs,
-            ) {
-                Ok(()) => {
-                    let _ = runtime.reorder_tab(direction);
-                }
-                Err(error) => surface_agent_tab_intent_error(runtime, error),
+    if !select_workspace_agent_tab(key, ui, runtime) {
+        match key {
+            Key::Live(LiveTerminalAction::ScrollUp) => controls.scroll_up(),
+            Key::Live(LiveTerminalAction::ScrollDown) => controls.scroll_down(),
+            Key::Live(LiveTerminalAction::CloseTab) => {
+                close_focused_terminal_pane(ui, runtime, pending_targets);
             }
-        }
-        Key::Live(LiveTerminalAction::MoveTabPrevious) => {
-            let direction = crate::usecase::application::controller::TabDirection::Previous;
-            let current_tabs = runtime
-                .active_pane()
-                .tabs()
-                .iter()
-                .map(shell_tab_selection)
-                .collect::<Vec<_>>();
-            let next_tabs = runtime.tab_order_after_reorder(direction);
-            match ui.persist_agent_tab_order(
-                runtime.panes().active().and_then(Target::session_id),
-                &current_tabs,
-                &next_tabs,
-            ) {
-                Ok(()) => {
-                    let _ = runtime.reorder_tab(direction);
-                }
-                Err(error) => surface_agent_tab_intent_error(runtime, error),
+            Key::Live(LiveTerminalAction::ResumeTab) => {
+                resume_focused_interrupted_tab(ui, runtime, pending_targets);
             }
+            Key::Live(
+                action @ (LiveTerminalAction::MoveTabNext | LiveTerminalAction::MoveTabPrevious),
+            ) => {
+                let direction = if *action == LiveTerminalAction::MoveTabNext {
+                    crate::usecase::application::controller::TabDirection::Next
+                } else {
+                    crate::usecase::application::controller::TabDirection::Previous
+                };
+                let (current_tabs, next_tabs) = runtime.tab_order_after_reorder(direction);
+                let mut current = Vec::new();
+                for selection in current_tabs {
+                    match selection {
+                        TabSelection::Live(terminal) => {
+                            if let Some(continuation) = ui.agent_continuation_for(&terminal) {
+                                current.push(continuation);
+                            }
+                        }
+                        TabSelection::Interrupted(continuation) => current.push(continuation),
+                        TabSelection::Pending(_) | TabSelection::Ready(_) => {}
+                    }
+                }
+                let mut continuations = Vec::new();
+                for selection in next_tabs {
+                    match selection {
+                        TabSelection::Live(terminal) => {
+                            if let Some(continuation) = ui.agent_continuation_for(&terminal) {
+                                continuations.push(continuation);
+                            }
+                        }
+                        TabSelection::Interrupted(continuation) => continuations.push(continuation),
+                        TabSelection::Pending(_) | TabSelection::Ready(_) => {}
+                    }
+                }
+                let persisted = if current == continuations {
+                    Ok(())
+                } else {
+                    ui.mutate_agent_intent(AgentTabIntentMutation::Reorder {
+                        session_id: runtime.panes().active().and_then(Target::session_id),
+                        continuations,
+                    })
+                };
+                match persisted {
+                    Ok(()) => {
+                        let _ = runtime.reorder_tab(direction);
+                    }
+                    Err(error) => surface_agent_tab_intent_error(runtime, error),
+                }
+            }
+            Key::Pointer(pointer) => {
+                return handle_terminal_pointer(
+                    ui, runtime, controls, term, browser, height, width, rows_len, scroll, *pointer,
+                );
+            }
+            Key::Click { column, row } => {
+                return handle_terminal_pointer(
+                    ui,
+                    runtime,
+                    controls,
+                    term,
+                    browser,
+                    height,
+                    width,
+                    rows_len,
+                    scroll,
+                    PointerEvent {
+                        kind: PointerKind::Down,
+                        column: *column,
+                        row: *row,
+                    },
+                );
+            }
+            _ => return false,
         }
-        Key::Pointer(pointer) => {
-            return handle_terminal_pointer(
-                ui, runtime, controls, term, browser, height, width, rows_len, scroll, *pointer,
-            );
-        }
-        Key::Click { column, row } => {
-            return handle_terminal_pointer(
-                ui,
-                runtime,
-                controls,
-                term,
-                browser,
-                height,
-                width,
-                rows_len,
-                scroll,
-                PointerEvent {
-                    kind: PointerKind::Down,
-                    column: *column,
-                    row: *row,
-                },
-            );
-        }
-        _ => return false,
     }
     true
 }
@@ -6095,7 +6069,7 @@ mod tests {
     use crate::usecase::application::daemon_backend::{
         Completions, DaemonBackend, DecisionPort as BackendDecisionPort, ReopenAgentRequest,
     };
-    use crate::usecase::application::pane::{LivePane, PaneKind, PaneTab};
+    use crate::usecase::application::pane::{LivePane, PaneKind, PaneTab, TabSelection};
     use crate::usecase::application::pr::PrSnapshotPort;
     use crate::usecase::application::run as dispatch;
     use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
@@ -11433,6 +11407,7 @@ mod tests {
         let mut pending = std::collections::HashMap::new();
 
         for key in [
+            Key::Live(LiveTerminalAction::NextTab),
             Key::Live(LiveTerminalAction::ScrollUp),
             Key::Live(LiveTerminalAction::ScrollDown),
             Key::Live(LiveTerminalAction::CloseTab),
@@ -11462,6 +11437,412 @@ mod tests {
         assert_eq!(runtime.active_pane().tabs(), tabs_before.as_slice());
         assert!(term.copied.is_empty());
         assert!(browser.opened.is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One fixture covers every admitted and refused drawer slot.
+    fn workspace_agent_projection_and_tab_cycle_cover_every_agent_only_slot() {
+        let workspace = WorkspaceId::new();
+        let live = scoped_terminal_ref(workspace, None);
+        let live_continuation = AgentContinuationRef::new();
+        let interrupted = interrupted_history(workspace, None, true);
+        let interrupted_continuation = interrupted.continuation;
+        let mut intent = AgentTabIntent::empty(workspace);
+        intent.apply(AgentTabIntentMutation::Upsert {
+            session_id: None,
+            continuation: live_continuation,
+            terminal: live.clone(),
+            select: true,
+        });
+        intent.apply(AgentTabIntentMutation::Upsert {
+            session_id: None,
+            continuation: interrupted_continuation,
+            terminal: interrupted.last_terminal.clone(),
+            select: false,
+        });
+        let durable = Arc::new(Mutex::new(intent));
+        let mutations = Arc::new(Mutex::new(Vec::new()));
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort))
+            .with_agent_tab_intent(
+                workspace,
+                BTreeSet::new(),
+                Box::new(MemoryIntentPort {
+                    state: Arc::clone(&durable),
+                    mutations: Arc::clone(&mutations),
+                }),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        assert!(super::select_workspace_agent_tab(
+            &Key::Live(LiveTerminalAction::NextTab),
+            &mut ui,
+            &mut runtime,
+        ));
+        let _ = runtime.handle_key(Key::Escape);
+        let fence = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            fence.0,
+            fence.1,
+            vec![super::PaneRestoreTarget {
+                target: Target::Root(workspace),
+                panes: vec![LivePane {
+                    terminal: live.clone(),
+                    kind: PaneKind::Agent,
+                }],
+                selected: Some(live.clone()),
+                selected_interrupted: None,
+                interrupted: vec![interrupted.clone()],
+            }],
+        ));
+
+        // Closed drawers deliberately project nothing.
+        assert_eq!(
+            super::workspace_agent_drawer_projection(&ui, &runtime, None),
+            super::WorkspaceAgentDrawerProjection::default()
+        );
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        let terminal_view = TerminalViewProjection {
+            rows: vec!["retained output".to_owned()],
+            row_offset: 0,
+            total_rows: 1,
+            scroll: 0,
+            feedback: Some("reconnecting".to_owned()),
+        };
+        let projected =
+            super::workspace_agent_drawer_projection(&ui, &runtime, Some(&terminal_view));
+        assert_eq!(projected.conversations.len(), 2);
+        assert!(projected.conversations[0].selected);
+        assert_eq!(
+            projected.terminal_rows,
+            vec!["retained output".to_owned(), "reconnecting".to_owned()]
+        );
+
+        // Closing the selected live slot durably chooses the interrupted
+        // successor. That selection owns no VT, so its safe detail is rendered.
+        let mut pending_targets = std::collections::HashMap::new();
+        super::close_focused_terminal_pane(&mut ui, &mut runtime, &mut pending_targets);
+        let interrupted_projection = super::workspace_agent_drawer_projection(&ui, &runtime, None);
+        assert!(interrupted_projection.conversations[0].selected);
+        assert_eq!(interrupted_projection.terminal_rows.len(), 1);
+        assert!(super::select_workspace_agent_tab(
+            &Key::Live(LiveTerminalAction::NextTab),
+            &mut ui,
+            &mut runtime,
+        ));
+        let pending = OperationId::new();
+        let _ = runtime.request_pane(Target::Root(workspace), pending, PaneKind::Agent);
+        runtime.inject_pane_event_for_test(
+            Target::Root(workspace),
+            crate::usecase::application::pane::PaneEvent::Select(
+                crate::usecase::application::pane::PaneSelection::Tab(TabSelection::Pending(
+                    pending,
+                )),
+            ),
+        );
+        let pending_projection = super::workspace_agent_drawer_projection(&ui, &runtime, None);
+        assert!(
+            pending_projection
+                .conversations
+                .iter()
+                .any(|conversation| conversation.label == "Agent (starting)"
+                    && conversation.selected)
+        );
+
+        // Bypass runtime admission to prove the projection independently drops
+        // every generic/diff shape if an impossible state reaches it.
+        let generic = scoped_terminal_ref(workspace, None);
+        runtime.inject_pane_event_for_test(
+            Target::Root(workspace),
+            crate::usecase::application::pane::PaneEvent::Restore(LivePane {
+                terminal: generic,
+                kind: PaneKind::Terminal,
+            }),
+        );
+        runtime.inject_pane_event_for_test(
+            Target::Root(workspace),
+            crate::usecase::application::pane::PaneEvent::Restore(LivePane {
+                terminal: scoped_terminal_ref(workspace, None),
+                kind: PaneKind::Agent,
+            }),
+        );
+        let generic_pending = OperationId::new();
+        runtime.inject_pane_event_for_test(
+            Target::Root(workspace),
+            crate::usecase::application::pane::PaneEvent::Request {
+                operation: generic_pending,
+                target: Target::Root(workspace),
+                kind: PaneKind::Terminal,
+            },
+        );
+        let diff = OperationId::new();
+        runtime.inject_pane_event_for_test(
+            Target::Root(workspace),
+            crate::usecase::application::pane::PaneEvent::Request {
+                operation: diff,
+                target: Target::Root(workspace),
+                kind: PaneKind::Diff,
+            },
+        );
+        runtime.inject_pane_event_for_test(
+            Target::Root(workspace),
+            crate::usecase::application::pane::PaneEvent::Resolved { operation: diff },
+        );
+        let filtered = super::workspace_agent_drawer_projection(&ui, &runtime, None);
+        assert_eq!(filtered.conversations.len(), 2);
+
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        let mut browser = UnavailableBrowserOpener;
+        for action in [
+            LiveTerminalAction::MoveTabNext,
+            LiveTerminalAction::MoveTabPrevious,
+        ] {
+            assert!(intercept_live_terminal_control(
+                &Key::Live(action),
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &mut browser,
+                &mut pending_targets,
+                20,
+                80,
+                0,
+                0,
+            ));
+        }
+        assert!(!super::select_workspace_agent_tab(
+            &Key::Char('x'),
+            &mut ui,
+            &mut runtime,
+        ));
+        assert!(super::select_workspace_agent_tab(
+            &Key::Live(LiveTerminalAction::NextTab),
+            &mut ui,
+            &mut runtime,
+        ));
+        assert!(super::select_workspace_agent_tab(
+            &Key::Live(LiveTerminalAction::PreviousTab),
+            &mut ui,
+            &mut runtime,
+        ));
+        assert!(mutations.lock().unwrap().iter().any(|mutation| matches!(
+            mutation,
+            AgentTabIntentMutation::Select {
+                session_id: None,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn workspace_agent_tab_cycle_fails_closed_when_intent_cannot_commit() {
+        let workspace = WorkspaceId::new();
+        let first = scoped_terminal_ref(workspace, None);
+        let second = scoped_terminal_ref(workspace, None);
+        let first_continuation = AgentContinuationRef::new();
+        let second_continuation = AgentContinuationRef::new();
+        let mut intent = AgentTabIntent::empty(workspace);
+        for (continuation, terminal, select) in [
+            (first_continuation, first.clone(), true),
+            (second_continuation, second.clone(), false),
+        ] {
+            intent.apply(AgentTabIntentMutation::Upsert {
+                session_id: None,
+                continuation,
+                terminal,
+                select,
+            });
+        }
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort))
+            .with_agent_tab_intent(
+                workspace,
+                BTreeSet::new(),
+                Box::new(FailingIntentPort {
+                    state: Arc::new(Mutex::new(intent)),
+                    error: AgentTabIntentError::Unavailable,
+                    attempts: Arc::new(AtomicUsize::new(0)),
+                }),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let fence = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            fence.0,
+            fence.1,
+            vec![super::PaneRestoreTarget {
+                target: Target::Root(workspace),
+                panes: vec![
+                    LivePane {
+                        terminal: first.clone(),
+                        kind: PaneKind::Agent,
+                    },
+                    LivePane {
+                        terminal: second,
+                        kind: PaneKind::Agent,
+                    },
+                ],
+                selected: Some(first.clone()),
+                selected_interrupted: None,
+                interrupted: Vec::new(),
+            }],
+        ));
+        assert!(!super::select_workspace_agent_tab(
+            &Key::Live(LiveTerminalAction::NextTab),
+            &mut ui,
+            &mut runtime,
+        ));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        assert!(super::select_workspace_agent_tab(
+            &Key::Live(LiveTerminalAction::NextTab),
+            &mut ui,
+            &mut runtime,
+        ));
+        assert_eq!(runtime.focused_terminal(), Some(first));
+        assert_eq!(
+            runtime
+                .state()
+                .notice()
+                .map(|notice| notice.message.as_str()),
+            Some(AgentTabIntentError::Unavailable.safe_message())
+        );
+    }
+
+    #[test]
+    fn workspace_agent_pointer_uses_the_drawer_viewport() {
+        let workspace = WorkspaceId::new();
+        let terminal = scoped_terminal_ref(workspace, None);
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(
+                workspace,
+                Vec::new(),
+                Box::new(ScriptedAgentPort {
+                    terminal: terminal.clone(),
+                    subscription: 919,
+                    replay: b"drawer output".to_vec(),
+                    poll_error: None,
+                    detaches: Arc::new(Mutex::new(Vec::new())),
+                }),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let fence = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            fence.0,
+            fence.1,
+            vec![super::PaneRestoreTarget {
+                target: Target::Root(workspace),
+                panes: vec![LivePane {
+                    terminal: terminal.clone(),
+                    kind: PaneKind::Agent,
+                }],
+                selected: Some(terminal.clone()),
+                selected_interrupted: None,
+                interrupted: Vec::new(),
+            }],
+        ));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        ui.start_terminal_session(terminal, foreground_terminal_geometry(20, 80, true));
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        let mut browser = RecordingBrowser::default();
+
+        assert!(handle_terminal_pointer(
+            &ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            20,
+            80,
+            1,
+            0,
+            PointerEvent {
+                kind: PointerKind::Down,
+                column: 26,
+                row: 4,
+            },
+        ));
+    }
+
+    #[test]
+    fn root_generic_host_request_and_untracked_resume_completion_are_inert() {
+        let workspace = WorkspaceId::new();
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let mut pending = std::collections::HashMap::new();
+        let (mut host, actions) = ControllerHost::channel();
+        super::BackendAgentPort::open_terminal(
+            &mut host,
+            crate::usecase::application::daemon_backend::OpenTerminalRequest {
+                target: Target::Root(workspace),
+                operation_id: OperationId::new(),
+                arguments: "new".to_owned(),
+            },
+        );
+        drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
+        assert!(pending.is_empty());
+        assert!(ui.pane_launches.is_empty());
+        assert_eq!(
+            runtime
+                .state()
+                .notice()
+                .map(|notice| notice.message.as_str()),
+            Some("Workspace Agent accepts Agent conversations only")
+        );
+
+        ui.pane_completion_sender
+            .send(super::PaneLaunchCompletion {
+                launch_id: super::PANE_LAUNCH_UNADMITTED,
+                outcome: super::PaneLaunchOutcome::ResumeExact {
+                    operation: OperationId::new(),
+                    continuation: AgentContinuationRef::new(),
+                    result: Err("late answer".to_owned()),
+                },
+            })
+            .unwrap();
+        super::drain_pane_completions_into_runtime(
+            &mut ui,
+            &mut runtime,
+            &mut pending,
+            terminal_geometry(20, 80),
+        );
+        assert!(runtime.active_pane().tabs().is_empty());
+    }
+
+    #[test]
+    fn restore_without_agent_intent_keeps_saved_selection_map_empty() {
+        let workspace = WorkspaceId::new();
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let fence = runtime.restore_fence();
+        let applied = super::apply_restore_completion(
+            super::RestoreCompletion {
+                port: Box::new(UnavailableAgentCommandPort),
+                dispatched_interaction: fence.0,
+                dispatched_registry_revision: fence.1,
+                dispatched_allowed_sessions: BTreeSet::new(),
+                terminals: Ok(Vec::new()),
+                agents: Ok(AgentInventory {
+                    workspace_id: workspace,
+                    runtimes: Vec::new(),
+                    resumable: Vec::new(),
+                }),
+                observation_coherent: true,
+            },
+            &mut ui,
+            &mut runtime,
+            workspace,
+            &BTreeSet::new(),
+        );
+        assert_eq!(applied.outcome, super::RestoreJobOutcome::Applied);
+        assert!(runtime.active_pane().tabs().is_empty());
     }
 
     #[test]
@@ -17633,7 +18014,7 @@ mod tests {
                 session_history.clone(),
                 second_session_history.clone(),
             ],
-            &BTreeMap::new(),
+            &BTreeMap::from([(Some(session), second_session_history.continuation)]),
         );
 
         let root = targets
@@ -17652,6 +18033,10 @@ mod tests {
             .find(|target| target.target == Target::Session(session))
             .unwrap();
         // Several histories in one scope stay separate tabs, in projection order.
+        assert_eq!(
+            managed.selected_interrupted,
+            Some(second_session_history.continuation)
+        );
         assert_eq!(
             managed
                 .interrupted

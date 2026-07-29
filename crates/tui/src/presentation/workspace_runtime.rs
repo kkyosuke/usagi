@@ -33,7 +33,8 @@ use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, Effect, HomeMode, Overlay, Route, TabDirection, Target, update,
 };
 use crate::usecase::application::interrupted_tab::{
-    InterruptedTab, ResumeCommand, ResumeRejection, accept_replacement, resume_command,
+    InterruptedTab, ResumeCommand, ResumeRejection, ResumeReplacement, accept_replacement,
+    resume_command,
 };
 use crate::usecase::application::pane::{
     InterruptedPane, LivePane, PaneEvent, PaneInputOwner, PaneKind, PaneRegistry,
@@ -158,6 +159,14 @@ impl WorkspaceRuntime {
     #[must_use]
     pub const fn panes(&self) -> &PaneRegistry {
         &self.panes
+    }
+
+    /// Bypass runtime admission in tests so presentation tests can prove their
+    /// independent Agent-only filter against an impossible registry state.
+    #[cfg(test)]
+    pub(crate) fn inject_pane_event_for_test(&mut self, target: Target, event: PaneEvent) {
+        let _ = reduce_registry(&mut self.panes, PaneRegistryEvent::Pane { target, event });
+        self.sync_live_pane();
     }
 
     /// Apply a newly saved workspace setting to future Overview / Closeup
@@ -905,7 +914,7 @@ impl WorkspaceRuntime {
         relation: Option<&AgentResumeRelation>,
         terminal: &TerminalRef,
     ) -> Result<Vec<PaneRegistryEffect>, ResumeRejection> {
-        if let Err(rejection) = self.validate_tab_resume_for(
+        let replacement = match self.validate_tab_resume_for(
             target,
             continuation,
             answered,
@@ -913,56 +922,32 @@ impl WorkspaceRuntime {
             relation,
             terminal,
         ) {
-            let operation = self
-                .interrupted_pane_for(target, continuation)
-                .and_then(|pane| pane.resuming);
-            self.fail_tab_resume_for(
-                target,
-                continuation,
-                operation,
-                rejection.safe_message().to_owned(),
-            );
-            return Err(rejection);
-        }
-        let Some(pane) = self.interrupted_pane_for(target, continuation) else {
-            return Err(ResumeRejection::NotResumable);
-        };
-        let Some(in_flight) = pane.resuming else {
-            return Err(ResumeRejection::OperationMismatch);
-        };
-        let accepted = accept_replacement(
-            &pane.tab,
-            in_flight,
-            answered,
-            answered_continuation,
-            relation,
-            terminal,
-        );
-        match accepted {
-            Ok(replacement) => {
-                let effects = reduce_registry(
-                    &mut self.panes,
-                    PaneRegistryEvent::Pane {
-                        target,
-                        event: PaneEvent::ResumeReplaced {
-                            continuation: replacement.continuation,
-                            terminal: replacement.terminal,
-                        },
-                    },
-                );
-                self.sync_live_pane();
-                Ok(effects)
-            }
+            Ok(replacement) => replacement,
             Err(rejection) => {
+                let operation = self
+                    .interrupted_pane_for(target, continuation)
+                    .and_then(|pane| pane.resuming);
                 self.fail_tab_resume_for(
                     target,
                     continuation,
-                    Some(in_flight),
+                    operation,
                     rejection.safe_message().to_owned(),
                 );
-                Err(rejection)
+                return Err(rejection);
             }
-        }
+        };
+        let effects = reduce_registry(
+            &mut self.panes,
+            PaneRegistryEvent::Pane {
+                target,
+                event: PaneEvent::ResumeReplaced {
+                    continuation: replacement.continuation,
+                    terminal: replacement.terminal,
+                },
+            },
+        );
+        self.sync_live_pane();
+        Ok(effects)
     }
 
     /// Validate an exact resume answer without changing the visible pane.
@@ -979,7 +964,7 @@ impl WorkspaceRuntime {
         answered_continuation: Option<AgentContinuationRef>,
         relation: Option<&AgentResumeRelation>,
         terminal: &TerminalRef,
-    ) -> Result<(), ResumeRejection> {
+    ) -> Result<ResumeReplacement, ResumeRejection> {
         let Some(pane) = self.interrupted_pane_for(target, continuation) else {
             return Err(ResumeRejection::NotResumable);
         };
@@ -994,7 +979,6 @@ impl WorkspaceRuntime {
             relation,
             terminal,
         )
-        .map(|_| ())
     }
 
     /// Leave one interrupted tab in place after a refused or failed resume and
@@ -1132,7 +1116,7 @@ impl WorkspaceRuntime {
     /// tab to select; the inner `None` is a pending/ready non-terminal tab.
     #[must_use]
     pub fn terminal_after_select(&self, direction: TabDirection) -> Option<Option<TerminalRef>> {
-        self.adjacent_tab(direction)
+        self.selection_after_select(direction)
             .map(|selection| match selection {
                 TabSelection::Live(terminal) => Some(terminal),
                 TabSelection::Pending(_)
@@ -1172,18 +1156,29 @@ impl WorkspaceRuntime {
             .collect()
     }
 
-    /// Preview all stable tab identities after a move, including interrupted
-    /// lineages used by the root Agent drawer.
+    /// Preview the current and next stable tab identities around a move,
+    /// including interrupted lineages used by the root Agent drawer.
     #[must_use]
-    pub fn tab_order_after_reorder(&self, direction: TabDirection) -> Vec<TabSelection> {
-        let mut panes = self.panes.clone();
-        let _ = route_tab_command(&mut panes, PaneTabCommand::Reorder(direction));
-        panes
+    pub fn tab_order_after_reorder(
+        &self,
+        direction: TabDirection,
+    ) -> (Vec<TabSelection>, Vec<TabSelection>) {
+        let current = self
+            .panes
             .active_pane()
             .tabs()
             .iter()
             .map(tab_selection)
-            .collect()
+            .collect();
+        let mut panes = self.panes.clone();
+        let _ = route_tab_command(&mut panes, PaneTabCommand::Reorder(direction));
+        let next = panes
+            .active_pane()
+            .tabs()
+            .iter()
+            .map(tab_selection)
+            .collect();
+        (current, next)
     }
 
     /// Mirror a controller [`Effect`]'s pane-visible intent into the registry
@@ -2422,6 +2417,20 @@ mod tests {
                 .iter()
                 .all(|tab| matches!(tab, PaneTab::Live(live) if live.kind == PaneKind::Agent))
         );
+        assert!(
+            runtime
+                .request_pane(
+                    Target::Root(workspace),
+                    OperationId::new(),
+                    PaneKind::Terminal,
+                )
+                .is_empty()
+        );
+        assert!(
+            runtime
+                .request_pane(Target::Root(workspace), OperationId::new(), PaneKind::Diff)
+                .is_empty()
+        );
 
         let _ = runtime.handle_key(Key::Escape);
         assert_eq!(runtime.panes().active(), Some(Target::Session(session)));
@@ -2463,6 +2472,35 @@ mod tests {
             Some(continuation)
         );
         assert!(runtime.focused_terminal().is_none());
+    }
+
+    #[test]
+    fn stable_selection_previews_cover_empty_and_previous_slot_fallbacks() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+
+        let inactive = WorkspaceRuntime::new(workspace, Vec::new());
+        assert_eq!(inactive.selection_after_close(), None);
+
+        let mut single = closeup_on(workspace, session);
+        let only_operation = OperationId::new();
+        let only_terminal = terminal_ref(workspace, session);
+        let _ = single.request_pane(target, only_operation, PaneKind::Agent);
+        let _ = single.complete_pane(target, only_operation, only_terminal.clone());
+        let _ = single.focus_terminal(target, only_terminal.clone());
+        assert_eq!(single.terminal_after_close(), Some(None));
+        assert_eq!(single.selection_after_close(), Some(None));
+
+        let second_operation = OperationId::new();
+        let second_terminal = terminal_ref(workspace, session);
+        let _ = single.request_pane(target, second_operation, PaneKind::Agent);
+        let _ = single.complete_pane(target, second_operation, second_terminal.clone());
+        let _ = single.focus_terminal(target, second_terminal);
+        assert_eq!(
+            single.selection_after_close(),
+            Some(Some(TabSelection::Live(only_terminal)))
+        );
     }
 
     #[test]
