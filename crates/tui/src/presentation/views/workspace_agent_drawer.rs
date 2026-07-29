@@ -15,6 +15,11 @@ pub const MIN_DRAWER_WIDTH: usize = 56;
 pub const MAX_DRAWER_WIDTH: usize = 96;
 /// Minimum background strip kept visible beside a non-full-width drawer.
 const MIN_BACKGROUND_WIDTH: usize = 24;
+/// Material Design robot glyph from the repository's Nerd Font vocabulary.
+///
+/// Like the existing CPU/memory/mode glyphs, unsupported fonts may render a
+/// missing-glyph cell; Unicode-width clipping keeps layout and hit-testing safe.
+pub const CHAT_ICON: char = '\u{f06a9}';
 
 /// One presentation-safe conversation choice.
 ///
@@ -183,7 +188,10 @@ pub fn render_over(
     let inner_width = drawer.width.saturating_sub(4);
     let body_height = drawer.height.saturating_sub(2);
     let body = drawer_body(inner_width, body_height, projection);
-    let title = Role::Accent.style().bold().paint("Workspace Agent");
+    let title = Role::Accent
+        .style()
+        .bold()
+        .paint(&format!("{CHAT_ICON} chat"));
     let panel = modal::boxed(&title, inner_width, &body);
 
     // The panel is `drawer.height` rows and is anchored at `drawer.top`, so it
@@ -244,7 +252,7 @@ fn drawer_body(
 
     let footer = Style::new()
         .dim()
-        .paint("Enter / New: choose CLI  ·  Esc / Ctrl-O g: close");
+        .paint("Enter / New: choose CLI  ·  Esc / Ctrl-O Ctrl-G: close");
     let content_capacity = height.saturating_sub(rows.len() + 1);
     if matches!(projection.new, WorkspaceAgentNewProjection::Empty) {
         let before = content_capacity.saturating_sub(3) / 2;
@@ -266,20 +274,21 @@ fn drawer_body(
         let before = content_capacity.saturating_sub(3) / 2;
         rows.extend(std::iter::repeat_n(String::new(), before));
         if content_capacity > before {
-            rows.push(Role::Accent.style().bold().paint("No conversations yet"));
+            rows.push(
+                Role::Accent
+                    .style()
+                    .bold()
+                    .paint("No chat conversations yet"),
+            );
         }
         if content_capacity > before + 1 {
-            rows.push(
-                Style::new()
-                    .dim()
-                    .paint("Workspace Agent inventory is not connected."),
-            );
+            rows.push(Style::new().dim().paint("Chat inventory is not connected."));
         }
         if content_capacity > before + 2 {
             let detail = if matches!(projection.new, WorkspaceAgentNewProjection::Launching) {
-                "Waiting for the daemon to start the Agent."
+                "Waiting for the daemon to start the chat."
             } else {
-                "Choose New to start a workspace Agent."
+                "Choose New to start a chat."
             };
             rows.push(Style::new().dim().paint(detail));
         }
@@ -431,10 +440,10 @@ mod tests {
             .map(|line| strip_ansi(line))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("Workspace Agent"));
+        assert!(text.contains(&format!("{CHAT_ICON} chat")));
         assert!(text.contains("Conversation  [No conversations]"));
         assert!(text.contains("[ New ]"));
-        assert!(text.contains("No conversations yet"));
+        assert!(text.contains("No chat conversations yet"));
         assert!(text.contains("Enter / New: choose CLI"));
         assert!(frame[1].contains("\u{1b}[2m"));
         assert!(!frame[0].contains("\u{1b}[2m"));
@@ -449,7 +458,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(body.len(), 3);
-        assert!(!text.contains("Choose New to start a workspace Agent."));
+        assert!(!text.contains("Choose New to start a chat."));
     }
 
     #[test]
@@ -482,7 +491,7 @@ mod tests {
         assert!(text.contains("agent output one"));
         assert!(text.contains("agent output two"));
         assert!(text.contains("agent output three"));
-        assert!(!text.contains("No conversations yet"));
+        assert!(!text.contains("No chat conversations yet"));
     }
 
     #[test]
@@ -532,7 +541,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("[ Starting… ]"));
-        assert!(text.contains("Waiting for the daemon to start the Agent."));
+        assert!(text.contains("Waiting for the daemon to start the chat."));
     }
 
     #[test]

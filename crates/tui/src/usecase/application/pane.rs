@@ -272,6 +272,12 @@ impl PaneRegistry {
             .unwrap_or(&self.inactive)
     }
 
+    /// Inert empty pane used when no managed-session entry exists.
+    #[must_use]
+    pub const fn inactive_pane(&self) -> &PaneState {
+        &self.inactive
+    }
+
     /// 全 target の live tab を表示順に列挙する。
     ///
     /// selected foreground 以外は detach 済みなので stream を持たない
@@ -438,7 +444,6 @@ fn event_belongs_to_target(event: &PaneEvent, target: Target) -> bool {
         // that owns that tab reacts. Resume progress is keyed by lineage the
         // same way.
         PaneEvent::Select(PaneSelection::Tab(_))
-        | PaneEvent::Succeeded { .. }
         | PaneEvent::Resolved { .. }
         | PaneEvent::Failed { .. }
         | PaneEvent::ReorderSelected(_)
@@ -446,10 +451,12 @@ fn event_belongs_to_target(event: &PaneEvent, target: Target) -> bool {
         | PaneEvent::ResumeStarted { .. }
         | PaneEvent::ResumeReplaced { .. }
         | PaneEvent::ResumeFailed { .. } => true,
+        PaneEvent::Succeeded { terminal, .. } | PaneEvent::Exited(terminal) => {
+            target_for_terminal(terminal) == target
+        }
         PaneEvent::Request {
             target: requested, ..
         } => *requested == target,
-        PaneEvent::Exited(terminal) => target_for_terminal(terminal) == target,
         PaneEvent::Restore(pane) => target_for_terminal(&pane.terminal) == target,
         PaneEvent::RestoreBatch { panes, .. } => panes
             .iter()
@@ -1757,6 +1764,42 @@ mod tests {
             [PaneTab::Live(left), PaneTab::Live(right)]
                 if left.terminal == second && right.terminal == first
         ));
+    }
+
+    #[test]
+    fn registry_rejects_a_completion_whose_terminal_scope_differs_from_its_target() {
+        let workspace = WorkspaceId::new();
+        let managed = target();
+        let root = Target::Root(workspace);
+        let operation = OperationId::new();
+        let mut registry = PaneRegistry::new(managed);
+        let _ = reduce_registry(
+            &mut registry,
+            PaneRegistryEvent::Pane {
+                target: managed,
+                event: PaneEvent::Request {
+                    operation,
+                    target: managed,
+                    kind: PaneKind::Agent,
+                },
+            },
+        );
+        let before = registry.pane(managed).unwrap().clone();
+
+        assert!(
+            reduce_registry(
+                &mut registry,
+                PaneRegistryEvent::Pane {
+                    target: managed,
+                    event: PaneEvent::Succeeded {
+                        operation,
+                        terminal: terminal(root),
+                    },
+                },
+            )
+            .is_empty()
+        );
+        assert_eq!(registry.pane(managed), Some(&before));
     }
 
     #[test]
