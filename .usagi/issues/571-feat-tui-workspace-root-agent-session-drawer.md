@@ -1,13 +1,13 @@
 ---
 number: 571
 title: feat(tui): workspace root Agent を session 一覧から分離して右 drawer に昇格する
-status: todo
+status: done
 priority: high
 labels: [v2, tui, agent, ux, design, epic]
 dependson: [575, 576, 577, 578, 579]
 related: [388, 506, 510, 545]
 created_at: 2026-07-27T22:43:36.804576+00:00
-updated_at: 2026-07-27T23:05:42.278193+00:00
+updated_at: 2026-07-29T10:51:26.365337+00:00
 ---
 
 ## 背景・現状
