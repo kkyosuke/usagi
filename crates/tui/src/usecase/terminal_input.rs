@@ -181,6 +181,10 @@ pub enum LiveTerminalAction {
     /// Home surface: opening it never mutates the background route, selection, or
     /// active managed session, and re-issuing it closes the drawer.
     WorkspaceAgent,
+    /// Open the Home Workspace Agent drawer and its explicit New CLI picker
+    /// (`Ctrl-O n`). Plain `n` is intentionally distinct from `Ctrl-N`, which
+    /// remains [`LiveTerminalAction::NextTab`].
+    WorkspaceAgentNew,
     /// Close the active tab.
     CloseTab,
     /// Explicitly resume the selected interrupted Agent tab (#510). Nothing else
@@ -403,6 +407,7 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
         return None;
     }
     match key.code {
+        KeyCode::Char('n') => Some(LiveTerminalAction::WorkspaceAgentNew),
         KeyCode::Char('x') => Some(LiveTerminalAction::CloseTab),
         KeyCode::Char('r') => Some(LiveTerminalAction::ResumeTab),
         KeyCode::Char(']') => Some(LiveTerminalAction::MoveTabNext),
@@ -567,6 +572,11 @@ mod tests {
                 expected: b"q".to_vec(),
             },
             Case {
+                name: "bare n",
+                input: key(KeyCode::Char('n')),
+                expected: b"n".to_vec(),
+            },
+            Case {
                 name: "escape",
                 input: key(KeyCode::Escape),
                 expected: vec![0x1b],
@@ -688,6 +698,10 @@ mod tests {
             Case {
                 follow_up: ctrl('n'),
                 action: LiveTerminalAction::NextTab,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('n')),
+                action: LiveTerminalAction::WorkspaceAgentNew,
             },
             Case {
                 follow_up: ctrl('p'),
