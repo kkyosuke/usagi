@@ -1,14 +1,14 @@
 ---
 number: 579
 title: test(tui): Workspace Agent drawer の shipping E2E と仕様更新を完了する
-status: in-progress
+status: done
 priority: high
 labels: [v2, tui, test, e2e, docs]
 dependson: [578]
 related: [388, 506, 510, 545]
 parent: 571
 created_at: 2026-07-27T23:05:33.244753+00:00
-updated_at: 2026-07-29T01:36:06.039540+00:00
+updated_at: 2026-07-29T02:03:51.193304+00:00
 ---
 
 ## 背景
