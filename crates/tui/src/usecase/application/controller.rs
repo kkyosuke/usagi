@@ -5002,6 +5002,14 @@ mod tests {
         assert_eq!(state.workspace_agent_new(), WorkspaceAgentNew::Empty);
         assert_eq!(state.workspace_agent_launching(), None);
         assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+
+        // A composition-policy refresh racing an already-open chooser degrades
+        // either movement direction to the same safe empty state.
+        for key in [AppKey::Up, AppKey::Down] {
+            state.workspace_agent_new = WorkspaceAgentNew::Choosing(DefaultModel::Claude);
+            assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+            assert_eq!(state.workspace_agent_new(), WorkspaceAgentNew::Empty);
+        }
     }
 
     #[test]

@@ -11636,6 +11636,27 @@ mod tests {
         let mut term = FakeTerminal::default();
         let mut browser = RecordingBrowser::default();
         let mut pending = std::collections::HashMap::new();
+        let drawer = super::workspace_agent_drawer::geometry(20, 80);
+        let new_click = Key::Click {
+            column: u16::try_from(drawer.left + drawer.width - 3).unwrap(),
+            row: u16::try_from(drawer.top + 1).unwrap(),
+        };
+        assert!(super::is_workspace_agent_new_click(
+            &new_click, &runtime, 20, 80
+        ));
+        assert!(!intercept_live_terminal_control(
+            &new_click,
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending,
+            20,
+            80,
+            3,
+            scroll_before,
+        ));
 
         for key in [
             Key::Live(LiveTerminalAction::NextTab),
@@ -11866,6 +11887,48 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn workspace_agent_projection_covers_picker_empty_and_launching_states() {
+        let workspace = WorkspaceId::new();
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        runtime.set_agent_models(
+            AvailableModels::new([DefaultModel::Claude, DefaultModel::SakanaAi]),
+            DefaultModel::SakanaAi,
+        );
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        let _ = runtime.handle_key(Key::Enter);
+        assert_eq!(
+            super::workspace_agent_drawer_projection(&ui, &runtime, None).new,
+            super::WorkspaceAgentNewProjection::Choosing {
+                candidates: vec!["claude".to_owned(), "sakana.ai".to_owned()],
+                selected: 1,
+            }
+        );
+
+        let _ = runtime.handle_key(Key::Escape);
+        runtime.set_agent_models(AvailableModels::default(), DefaultModel::OpenAi);
+        let _ = runtime.handle_key(Key::Enter);
+        assert_eq!(
+            super::workspace_agent_drawer_projection(&ui, &runtime, None).new,
+            super::WorkspaceAgentNewProjection::Empty
+        );
+
+        let _ = runtime.handle_key(Key::Escape);
+        runtime.set_agent_models(
+            AvailableModels::new([DefaultModel::Claude]),
+            DefaultModel::Claude,
+        );
+        let _ = runtime.handle_key(Key::Enter);
+        let effects = runtime.handle_key(Key::Enter);
+        assert!(matches!(effects.as_slice(), [Effect::LaunchAgent { .. }]));
+        assert_eq!(
+            super::workspace_agent_drawer_projection(&ui, &runtime, None).new,
+            super::WorkspaceAgentNewProjection::Launching
+        );
     }
 
     #[test]

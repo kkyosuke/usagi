@@ -441,6 +441,18 @@ mod tests {
     }
 
     #[test]
+    fn empty_drawer_omits_detail_when_height_is_too_small() {
+        let body = drawer_body(40, 3, &WorkspaceAgentDrawerProjection::default());
+        let text = body
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(body.len(), 3);
+        assert!(!text.contains("Choose New to start a workspace Agent."));
+    }
+
+    #[test]
     fn populated_projection_renders_selected_conversation_and_terminal_rows() {
         let projection = WorkspaceAgentDrawerProjection {
             conversations: vec![
@@ -509,6 +521,18 @@ mod tests {
             .join("\n");
         assert!(text.contains("No Agent CLI installed"));
         assert!(text.contains("Install claude, codex, or sakana.ai"));
+
+        let launching = WorkspaceAgentDrawerProjection {
+            new: WorkspaceAgentNewProjection::Launching,
+            ..WorkspaceAgentDrawerProjection::default()
+        };
+        let text = render_over(12, 56, &[], &launching)
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("[ Starting… ]"));
+        assert!(text.contains("Waiting for the daemon to start the Agent."));
     }
 
     #[test]

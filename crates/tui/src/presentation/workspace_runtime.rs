@@ -2359,6 +2359,16 @@ mod tests {
     }
 
     #[test]
+    fn workspace_agent_drawer_routes_picker_navigation_and_swallows_other_keys() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        assert!(runtime.handle_key(Key::Up).is_empty());
+        assert!(runtime.handle_key(Key::Char('x')).is_empty());
+        assert!(runtime.state().workspace_agent_drawer_open());
+    }
+
+    #[test]
     fn workspace_agent_drawer_hands_foreground_to_agent_only_root_and_back() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
