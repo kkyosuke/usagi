@@ -1355,7 +1355,7 @@ pub enum AppKey {
     CtrlA,
     /// Ctrl-O returns Closeup to Switch. It has no effect while already in Switch.
     CtrlO,
-    /// Ctrl-O n / Ctrl-N selects the next Closeup tab when a live pane owns input.
+    /// Ctrl-O Ctrl-N selects the next Closeup tab when a live pane owns input.
     CtrlN,
     /// Ctrl-O p / Ctrl-P selects the previous Closeup tab when a live pane owns input.
     CtrlP,
@@ -1375,6 +1375,8 @@ pub enum AppKey {
     /// existing modal overlay owns input; while open, this and Escape are the
     /// only keys that mutate Home state.
     ToggleWorkspaceAgentDrawer,
+    /// Open the Workspace Agent drawer and its explicit New CLI picker.
+    OpenWorkspaceAgentNew,
     /// workspace scope overlay を開く。
     OpenOverview,
     /// target scope overlay を開く。
@@ -2746,6 +2748,11 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         state.workspace_agent_new = WorkspaceAgentNew::Idle;
         return Vec::new();
     }
+    if matches!(key, AppKey::OpenWorkspaceAgentNew) {
+        state.workspace_agent_drawer_open = true;
+        open_workspace_agent_new(state);
+        return Vec::new();
+    }
     if !matches!(key, AppKey::CtrlC) {
         state.ctrl_c_grace = false;
     }
@@ -2784,29 +2791,16 @@ fn update_workspace_agent_drawer_key(state: &mut AppState, key: AppKey) -> Vec<E
         return Vec::new();
     }
     match (state.workspace_agent_new, key) {
+        (WorkspaceAgentNew::Idle, AppKey::OpenWorkspaceAgentNew) => {
+            open_workspace_agent_new(state);
+            Vec::new()
+        }
         (WorkspaceAgentNew::Idle, AppKey::Escape) => {
             state.workspace_agent_drawer_open = false;
             Vec::new()
         }
         (WorkspaceAgentNew::Choosing(_) | WorkspaceAgentNew::Empty, AppKey::Escape) => {
             state.workspace_agent_new = WorkspaceAgentNew::Idle;
-            Vec::new()
-        }
-        (WorkspaceAgentNew::Idle, AppKey::Enter) if state.workspace_agent_launching.is_none() => {
-            state.workspace_agent_new = if state.available_models.is_empty() {
-                WorkspaceAgentNew::Empty
-            } else {
-                let selected = if state.available_models.contains(state.default_model) {
-                    state.default_model
-                } else {
-                    state
-                        .available_models
-                        .iter()
-                        .next()
-                        .expect("non-empty availability has a first candidate")
-                };
-                WorkspaceAgentNew::Choosing(selected)
-            };
             Vec::new()
         }
         (WorkspaceAgentNew::Choosing(selected), AppKey::Up) => {
@@ -2855,6 +2849,26 @@ fn update_workspace_agent_drawer_key(state: &mut AppState, key: AppKey) -> Vec<E
         // operation.
         _ => Vec::new(),
     }
+}
+
+fn open_workspace_agent_new(state: &mut AppState) {
+    if state.workspace_agent_launching.is_some() {
+        return;
+    }
+    state.workspace_agent_new = if state.available_models.is_empty() {
+        WorkspaceAgentNew::Empty
+    } else {
+        let selected = if state.available_models.contains(state.default_model) {
+            state.default_model
+        } else {
+            state
+                .available_models
+                .iter()
+                .next()
+                .expect("non-empty availability has a first candidate")
+        };
+        WorkspaceAgentNew::Choosing(selected)
+    };
 }
 
 /// Close the exit prompt and hand its answer to the backend. The overlay always
@@ -3184,6 +3198,7 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         | AppKey::CtrlQ
         | AppKey::OpenQuitConfirmation
         | AppKey::ToggleWorkspaceAgentDrawer
+        | AppKey::OpenWorkspaceAgentNew
         | AppKey::OpenNotes
         | AppKey::OpenEnvironment
         | AppKey::SelectNoteSection(_)
@@ -4934,7 +4949,7 @@ mod tests {
 
         // A missing configured default highlights the first installed candidate
         // in vocabulary order without confirming it.
-        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert!(update(&mut state, AppEvent::Key(AppKey::OpenWorkspaceAgentNew)).is_empty());
         assert_eq!(
             state.workspace_agent_new(),
             WorkspaceAgentNew::Choosing(DefaultModel::Claude)
@@ -5005,11 +5020,7 @@ mod tests {
             Case {
                 name: "picker escape returns to drawer",
                 modal: false,
-                events: vec![
-                    AppKey::ToggleWorkspaceAgentDrawer,
-                    AppKey::Enter,
-                    AppKey::Escape,
-                ],
+                events: vec![AppKey::OpenWorkspaceAgentNew, AppKey::Escape],
                 drawer_open: true,
                 picker_open: false,
                 launches: 0,
@@ -5017,11 +5028,7 @@ mod tests {
             Case {
                 name: "picker confirmation launches root only",
                 modal: false,
-                events: vec![
-                    AppKey::ToggleWorkspaceAgentDrawer,
-                    AppKey::Enter,
-                    AppKey::Enter,
-                ],
+                events: vec![AppKey::OpenWorkspaceAgentNew, AppKey::Enter],
                 drawer_open: true,
                 picker_open: false,
                 launches: 1,
@@ -5080,7 +5087,7 @@ mod tests {
         );
 
         state.set_agent_models(AvailableModels::all(), DefaultModel::SakanaAi);
-        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenWorkspaceAgentNew));
         assert_eq!(
             state.workspace_agent_new(),
             WorkspaceAgentNew::Choosing(DefaultModel::SakanaAi)
@@ -5091,7 +5098,7 @@ mod tests {
             AvailableModels::new([DefaultModel::OpenAi]),
             DefaultModel::Claude,
         );
-        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenWorkspaceAgentNew));
         assert_eq!(
             state.workspace_agent_new(),
             WorkspaceAgentNew::Choosing(DefaultModel::OpenAi)
@@ -5104,7 +5111,7 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
 
         state.set_agent_models(AvailableModels::default(), DefaultModel::OpenAi);
-        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert!(update(&mut state, AppEvent::Key(AppKey::OpenWorkspaceAgentNew)).is_empty());
         assert_eq!(state.workspace_agent_new(), WorkspaceAgentNew::Empty);
         assert_eq!(state.workspace_agent_launching(), None);
         assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
@@ -5130,7 +5137,7 @@ mod tests {
             &mut state,
             AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer),
         );
-        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenWorkspaceAgentNew));
         let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
         let [
             Effect::LaunchAgent {
@@ -5151,7 +5158,9 @@ mod tests {
         );
         assert_eq!(state.workspace_agent_launching(), Some(*operation_id));
 
-        // Double Enter and a stale completion cannot cross the operation fence.
+        // Reopening New, double Enter, and a stale completion cannot cross the
+        // operation fence.
+        assert!(update(&mut state, AppEvent::Key(AppKey::OpenWorkspaceAgentNew)).is_empty());
         assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
         let _ = update(
             &mut state,
@@ -5179,7 +5188,7 @@ mod tests {
                 &mut state,
                 AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer),
             );
-            let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+            let _ = update(&mut state, AppEvent::Key(AppKey::OpenWorkspaceAgentNew));
             let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
             assert!(matches!(
                 effects.as_slice(),
@@ -5240,15 +5249,14 @@ mod tests {
                 | Overlay::QuitConfirmation
                 | Overlay::CreateSessionError => {}
             }
-            assert!(
-                update(
-                    &mut state,
-                    AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer)
-                )
-                .is_empty()
-            );
-            assert_eq!(state.overlay(), Some(overlay));
-            assert!(!state.workspace_agent_drawer_open());
+            for key in [
+                AppKey::ToggleWorkspaceAgentDrawer,
+                AppKey::OpenWorkspaceAgentNew,
+            ] {
+                assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+                assert_eq!(state.overlay(), Some(overlay));
+                assert!(!state.workspace_agent_drawer_open());
+            }
         }
     }
 

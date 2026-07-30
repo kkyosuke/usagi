@@ -30,7 +30,8 @@ use crate::presentation::views::workspace::{
 use crate::presentation::views::workspace_agent_drawer::WorkspaceAgentDrawerProjection;
 use crate::usecase::application::Key;
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, Effect, HomeMode, Overlay, Route, TabDirection, Target, update,
+    AppEvent, AppKey, AppState, Effect, HomeMode, Overlay, Route, TabDirection, Target,
+    WorkspaceAgentNew, update,
 };
 use crate::usecase::application::interrupted_tab::{
     InterruptedTab, ResumeCommand, ResumeRejection, ResumeReplacement, accept_replacement,
@@ -358,14 +359,27 @@ impl WorkspaceRuntime {
         // everything else is consumed without reaching sidebar, pane, or
         // globals.
         if self.state.workspace_agent_drawer_open() {
-            return match key {
-                Key::Up => self.apply_event(AppEvent::Key(AppKey::Up)),
-                Key::Down => self.apply_event(AppEvent::Key(AppKey::Down)),
-                Key::Enter => self.apply_event(AppEvent::Key(AppKey::Enter)),
-                Key::Escape => self.apply_event(AppEvent::Key(AppKey::Escape)),
-                Key::Live(crate::usecase::terminal_input::LiveTerminalAction::WorkspaceAgent) => {
-                    self.apply_event(AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer))
+            return match (self.state.workspace_agent_new(), key) {
+                (WorkspaceAgentNew::Choosing(_) | WorkspaceAgentNew::Empty, Key::Up) => {
+                    self.apply_event(AppEvent::Key(AppKey::Up))
                 }
+                (WorkspaceAgentNew::Choosing(_) | WorkspaceAgentNew::Empty, Key::Down) => {
+                    self.apply_event(AppEvent::Key(AppKey::Down))
+                }
+                (WorkspaceAgentNew::Choosing(_) | WorkspaceAgentNew::Empty, Key::Enter) => {
+                    self.apply_event(AppEvent::Key(AppKey::Enter))
+                }
+                (
+                    _,
+                    Key::Live(
+                        crate::usecase::terminal_input::LiveTerminalAction::WorkspaceAgentNew,
+                    ),
+                ) => self.apply_event(AppEvent::Key(AppKey::OpenWorkspaceAgentNew)),
+                (_, Key::Escape) => self.apply_event(AppEvent::Key(AppKey::Escape)),
+                (
+                    _,
+                    Key::Live(crate::usecase::terminal_input::LiveTerminalAction::WorkspaceAgent),
+                ) => self.apply_event(AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer)),
                 _ => Vec::new(),
             };
         }

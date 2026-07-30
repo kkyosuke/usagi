@@ -6346,6 +6346,42 @@ mod tests {
     }
 
     #[test]
+    fn terminal_adapter_distinguishes_plain_n_new_from_ctrl_n_next_tab() {
+        let classify_follow_up = |follow_up| {
+            let mut classifier = usagi_tui::usecase::terminal_input::LiveInputClassifier::default();
+            assert_eq!(
+                classify_terminal_input(
+                    &mut classifier,
+                    Duration::ZERO,
+                    &live_key(KeyCode::Char('o'), control()),
+                ),
+                None
+            );
+            classify_terminal_input(&mut classifier, Duration::from_millis(1), &follow_up)
+        };
+        assert_eq!(
+            classify_follow_up(live_key(KeyCode::Char('n'), Modifiers::default())),
+            Some(Key::Live(
+                usagi_tui::usecase::terminal_input::LiveTerminalAction::WorkspaceAgentNew
+            ))
+        );
+        assert_eq!(
+            classify_follow_up(live_key(KeyCode::Char('n'), control())),
+            Some(Key::Live(
+                usagi_tui::usecase::terminal_input::LiveTerminalAction::NextTab
+            ))
+        );
+        assert_eq!(
+            classify_terminal_input(
+                &mut usagi_tui::usecase::terminal_input::LiveInputClassifier::default(),
+                Duration::ZERO,
+                &live_key(KeyCode::Char('n'), Modifiers::default()),
+            ),
+            Some(Key::Char('n'))
+        );
+    }
+
+    #[test]
     fn native_terminal_copy_shortcut_is_selection_aware() {
         let modifiers = {
             #[cfg(target_os = "macos")]

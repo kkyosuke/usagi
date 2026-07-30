@@ -347,6 +347,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `Ctrl-N` | NextTab | 次の tab を選ぶ |
 | `Ctrl-O` `Ctrl-P` | PreviousTab | 前の tab を選ぶ |
 | `Ctrl-O` `Ctrl-G` | WorkspaceAgent | [Workspace Agent drawer](#workspace-agent-drawer) を toggle する |
+| `Ctrl-O` `n` | WorkspaceAgentNew | drawer を開き、明示的な New CLI picker を表示する |
 | `Ctrl-O` `]` | MoveTabNext | 選択 tab を次の表示 slot へ移動し、Agent 順序を commit する |
 | `Ctrl-O` `[` | MoveTabPrevious | 選択 tab を前の表示 slot へ移動し、Agent 順序を commit する |
 | macOS: Command+C / Linux: Ctrl+Shift+C / Windows: Ctrl+C | Copy selected output | 保持中の terminal 出力選択を OS clipboard へ再コピーする |
@@ -355,7 +356,8 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `u` / `↑` | ScrollUp | 右ペインの scrollback を 1 行古い方向へ |
 | `Ctrl-O` `d` / `↓` | ScrollDown | 右ペインの scrollback を 1 行 live bottom 方向へ |
 
-follow-up の `Ctrl-G` / `x` / `Ctrl-X` / `[` / `]` / `u` / `d` / `↑` / `↓` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
+follow-up の plain `n` / `Ctrl-G` / `x` / `Ctrl-X` / `[` / `]` / `u` / `d` / `↑` / `↓` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
+plain `n` は New、`Ctrl-N` は NextTab として修飾状態を区別する。
 `Ctrl-O` 後の plain `g` は drawer action ではなく PTY へ 1 回だけ送る。leader は 1 秒で失効し、その他の未知の
 follow-up、key release、raw byte を含む次の入力を 1 件だけ握って捨て、その時点で必ず reset する。
 auto-repeat は press と同じ follow-up として 1 件だけ解決する。ちょうど 1 秒の timeout 境界では leader は失効済みであり、単一 raw
@@ -381,7 +383,7 @@ managed-session Closeup の right pane viewport とは別の pure geometry と�
 
 drawer は root scope（`session_id: None`）の live / pending / interrupted Agent conversation だけを
 conversation selector に表示する。generic Terminal、Diff、Terminal pending/action は restore projection と pane
-admission の両方で拒否する。`[ New ]` の mouse-down hit または drawer の conversation surface で `Enter` を押すと、
+admission の両方で拒否する。`Ctrl-O n` または `[ New ]` の mouse-down hit で drawer を開いて
 合成ルートから注入された install 済み CLI だけを `claude`、`codex`、`sakana.ai` の順で picker に表示する。
 設定済み default が候補ならそこを、なければ先頭候補を highlight するが、自動確定はしない。`↑↓` は循環選択し、
 `Enter` は選択した CLI の explicit profile を確定する。`Esc` は conversation order / selection と drawer open
@@ -423,9 +425,11 @@ new exact `TerminalRef` がすべて一致した成功だけを同 slot の live
 
 drawer open 中は drawer が sidebar、managed pane、Home header の別 action、通常の global action の入力を所有し、
 それらへ key / click / pointer を伝播しない。root Agent tab の terminal input と `Ctrl-O` tab controls、および
-New picker の `↑↓` / `Enter` / `Esc`、`Ctrl-O Ctrl-G` の close だけを受理する。`[ New ]` の mouse-down は
+New picker の `↑↓` / `Enter` / `Esc`、`Ctrl-O n` の New、`Ctrl-O Ctrl-G` の close だけを受理する。picker が閉じている
+間の通常文字と `Enter` は root Agent terminal へ送る。`[ New ]` の mouse-down は
 drawer が先に消費して picker を開き、同じ pointer gesture を背景 Closeup の click / focus / attach 選択へ
-fallthrough させない。picker が閉じているときの `Esc` は
+fallthrough させない。picker Choosing 中の `[ New ]` 再クリックは inert とし、mouse-up も背景へ渡さないため、
+launch は明示的な `Enter` だけが発行する。picker が閉じているときの `Esc` は
 drawer を閉じる。開閉は Home mode、selected cursor、active managed session、
 managed pane の selected tab、terminal scroll / text selection を変更しない。既存 modal が前面にある間は drawer
 shortcut と header button を受理しない。drawer open 中の root foreground availability は背景 Closeup modal を
@@ -437,7 +441,8 @@ shortcut と header button を受理しない。drawer open 中の root foregrou
 |---|---|---|
 | modal | drawer chord / button | modal を維持し、drawer は開かない |
 | drawer conversation | drawer chord / `Esc` | drawer を閉じ、元の route / managed pane selection / focus を復元する |
-| drawer conversation | `[ New ]` click / `Enter` | drawer picker。背景への pointer / key effect は発行しない |
+| drawer conversation | `Ctrl-O n` / `[ New ]` click | drawer picker。背景への pointer / key effect は発行しない |
+| drawer conversation | 通常文字 / `Enter` | selected root Agent PTY。New picker は開かない |
 | drawer picker | `↑` / `↓` | picker 内の CLI 選択だけを循環する |
 | drawer picker | `Esc` | picker だけを閉じ、drawer conversation に戻る |
 | drawer picker | `Enter` | root scope launch を 1 件発行し、drawer を最前面に保つ |

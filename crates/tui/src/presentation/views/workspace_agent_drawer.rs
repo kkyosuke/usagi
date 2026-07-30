@@ -252,7 +252,7 @@ fn drawer_body(
 
     let footer = Style::new()
         .dim()
-        .paint("Enter / New: choose CLI  ·  Esc / Ctrl-O Ctrl-G: close");
+        .paint("Ctrl-O n / New: choose CLI  ·  Esc / Ctrl-O Ctrl-G: close");
     let content_capacity = height.saturating_sub(rows.len() + 1);
     if matches!(projection.new, WorkspaceAgentNewProjection::Empty) {
         let before = content_capacity.saturating_sub(3) / 2;
@@ -444,7 +444,7 @@ mod tests {
         assert!(text.contains("Conversation  [No conversations]"));
         assert!(text.contains("[ New ]"));
         assert!(text.contains("No chat conversations yet"));
-        assert!(text.contains("Enter / New: choose CLI"));
+        assert!(text.contains("Ctrl-O n / New: choose CLI"));
         assert!(frame[1].contains("\u{1b}[2m"));
         assert!(!frame[0].contains("\u{1b}[2m"));
     }

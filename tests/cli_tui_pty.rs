@@ -1683,7 +1683,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     open_registered_workspace(&mut master, &captured, first_baseline);
     click_workspace_agent_button(&mut master);
     wait_for_screen_since(&captured, first_baseline, "󰚩 chat");
-    send(&mut master, b"\r");
+    click_workspace_agent_new(&mut master);
     wait_for_screen_since(&captured, first_baseline, "↑↓: select");
     // The configured OpenAI default explicitly highlights installed Codex.
     // Confirm it through the picker. Replay/idempotency is asserted below from
@@ -1816,6 +1816,14 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     send(&mut master, b"\x0f\x10");
     wait_for_screen_since(&captured, reopened_baseline, &root_claude_ready);
     send(&mut master, b"claude-root-one\r");
+    wait_for_screen_since(&captured, reopened_baseline, "claude-input:claude-root-one");
+    // With a live root Agent selected, the production classifier and frame-loop
+    // priority still reserve Ctrl-O plain n for the drawer picker. Escape
+    // cancels only the picker and sends neither key to the Agent PTY.
+    send(&mut master, b"\x0fn");
+    wait_for_screen_since(&captured, reopened_baseline, "↑↓: select");
+    send(&mut master, b"\x1b");
+    wait_for_screen_absent_since(&captured, reopened_baseline, "↑↓: select");
     wait_for_screen_since(&captured, reopened_baseline, "claude-input:claude-root-one");
     let ordered = wait_for_agent_intent(home.path(), |intent| {
         intent.targets.iter().any(|target| {
