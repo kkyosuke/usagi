@@ -1034,9 +1034,9 @@ fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> 
 
 fn load_style(value: u64, busy: u64, hot: u64) -> Style {
     if value >= hot {
-        Style::new().fg(Color::Red)
+        Role::Danger.style()
     } else if value >= busy {
-        Style::new().fg(Color::Yellow)
+        Role::Warning.style()
     } else {
         // The mascot row is pink. Set white explicitly so a calm metric does
         // not inherit that outer foreground colour before becoming dim.
@@ -1913,7 +1913,7 @@ mod tests {
         pane_tab_label, pane_tab_selected, phase_label, render_home, resume_label,
         terminal_point_at, with_footer_gap,
     };
-    use crate::presentation::theme::{Color, Style};
+    use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::workspace_agent_drawer::{
         CHAT_ICON, WorkspaceAgentConversation, WorkspaceAgentDrawerProjection,
         WorkspaceAgentNewProjection,
@@ -3806,19 +3806,10 @@ mod tests {
             Style::new().fg(Color::White).dim()
         );
         // At (and above) `busy` but below `hot` it warns in yellow.
-        assert_eq!(
-            load_style(3_000, 3_000, 12_000),
-            Style::new().fg(Color::Yellow)
-        );
-        assert_eq!(
-            load_style(11_999, 3_000, 12_000),
-            Style::new().fg(Color::Yellow)
-        );
+        assert_eq!(load_style(3_000, 3_000, 12_000), Role::Warning.style());
+        assert_eq!(load_style(11_999, 3_000, 12_000), Role::Warning.style());
         // At (and above) `hot` it turns red.
-        assert_eq!(
-            load_style(12_000, 3_000, 12_000),
-            Style::new().fg(Color::Red)
-        );
+        assert_eq!(load_style(12_000, 3_000, 12_000), Role::Danger.style());
     }
 
     #[test]

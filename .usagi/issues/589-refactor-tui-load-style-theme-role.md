@@ -1,13 +1,13 @@
 ---
 number: 589
 title: refactor(tui): load_style の色指定を theme Role 経由に統一する
-status: todo
+status: done
 priority: low
 labels: [tui, ssot, theme]
 dependson: []
 related: []
 created_at: 2026-07-30T10:48:07.972770+00:00
-updated_at: 2026-07-30T10:48:07.972770+00:00
+updated_at: 2026-07-30T23:23:40.207231+00:00
 ---
 
 ## 背景
