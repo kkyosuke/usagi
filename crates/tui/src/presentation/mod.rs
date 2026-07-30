@@ -15486,6 +15486,39 @@ mod tests {
         ));
         assert_eq!(runtime.focused_terminal(), Some(root_agent.clone()));
 
+        assert_eq!(
+            route_workspace_input_before_reducer(
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &Key::Live(LiveTerminalAction::WorkspaceAgentNew),
+            ),
+            WorkspaceInputRoute::Drawer(Vec::new())
+        );
+        assert_eq!(
+            route_workspace_input_before_reducer(
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &Key::Live(LiveTerminalAction::WorkspaceAgent),
+            ),
+            WorkspaceInputRoute::Drawer(Vec::new())
+        );
+        assert!(!runtime.state().workspace_agent_drawer_open());
+        let reopen = Key::Live(LiveTerminalAction::WorkspaceAgentNew);
+        assert_eq!(
+            route_workspace_input_before_reducer(
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &reopen,
+            ),
+            WorkspaceInputRoute::Unhandled
+        );
+        assert!(runtime.handle_key(reopen).is_empty());
         for key in [Key::Down, Key::Up] {
             assert_eq!(
                 route_workspace_input_before_reducer(

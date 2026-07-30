@@ -5158,7 +5158,9 @@ mod tests {
         );
         assert_eq!(state.workspace_agent_launching(), Some(*operation_id));
 
-        // Double Enter and a stale completion cannot cross the operation fence.
+        // Reopening New, double Enter, and a stale completion cannot cross the
+        // operation fence.
+        assert!(update(&mut state, AppEvent::Key(AppKey::OpenWorkspaceAgentNew)).is_empty());
         assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
         let _ = update(
             &mut state,
