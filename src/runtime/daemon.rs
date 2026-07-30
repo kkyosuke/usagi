@@ -2169,7 +2169,7 @@ fn open_agent_runtime(
             readiness: Arc::clone(&readiness),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
-            program: "codex",
+            program: usagi_core::domain::settings::DefaultModel::OpenAi.command(),
             environment: Some(Arc::clone(&environment)),
         }),
         CodexAdapter::sakana(RootCodexProvisioner {
@@ -2177,7 +2177,7 @@ fn open_agent_runtime(
             readiness: Arc::clone(&readiness),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
-            program: "codex-fugu",
+            program: usagi_core::domain::settings::DefaultModel::SakanaAi.command(),
             environment: Some(Arc::clone(&environment)),
         }),
         ClaudeAdapter::new(RootClaudeProvisioner {

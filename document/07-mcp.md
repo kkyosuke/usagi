@@ -159,6 +159,9 @@ dispatch 系は credential から caller と current run を復元する。`sess
 
 `session_delegate_brief` も同じ credential/provenance と worker selector を使う。`agent` は既存 worker の
 `id`、または allowlist にある `runtime` と `model` の組のいずれか一方だけであり、混在・部分指定は受理しない。
+runtime の closed vocabulary は daemon の profile catalog と共通で、`claude` / `codex` / `sakana-ai` を扱う。
+workspace の `.usagi/config.toml` に対応する model allowlist があり、profile の実行コマンドが PATH 上にある runtime
+だけが MCP schema に現れる。`sakana-ai` の実行コマンドは `codex-fugu` である。
 
 `supervisor_start` は root task と初期 DAG を snapshot と append-only event journal に保存し、同じ
 `idempotency_key` の再送では同じ run を返す。get/list/events の応答は instruction body を含まない安全な

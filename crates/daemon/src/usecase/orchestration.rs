@@ -15,6 +15,7 @@ use usagi_core::{
         },
         id::{AgentRuntimeRef, CompletionFence},
     },
+    infrastructure::runtime_model::supported_agent_runtimes,
     usecase::agent::{AgentProfileCatalog, validate_snapshot},
 };
 
@@ -66,9 +67,17 @@ impl AdapterRegistry {
         sakana: CodexAdapter<S>,
         claude: ClaudeAdapter<L>,
     ) -> Result<(), RegistryError> {
+        self.register(claude.profile().clone(), Box::new(claude))?;
         self.register(codex.profile().clone(), Box::new(codex))?;
         self.register(sakana.profile().clone(), Box::new(sakana))?;
-        self.register(claude.profile().clone(), Box::new(claude))
+        let matches_catalog = self
+            .profile_ids()
+            .eq(supported_agent_runtimes().map(|runtime| runtime.id));
+        if matches_catalog {
+            Ok(())
+        } else {
+            Err(RegistryError::ProfileCatalogMismatch)
+        }
     }
 
     /// Registers one adapter. Duplicate profile IDs are rejected so a restored
@@ -97,6 +106,12 @@ impl AdapterRegistry {
             .iter()
             .find_map(|(profile, _)| (profile.id == *id).then(|| profile.clone()))
             .ok_or(RegistryError::UnknownProfile)
+    }
+
+    /// Registered profile IDs in registration order.
+    #[must_use]
+    pub fn profile_ids(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.adapters.iter().map(|(profile, _)| profile.id.as_str())
     }
 
     fn adapter_mut(
@@ -130,6 +145,7 @@ impl AgentProfileCatalog for AdapterRegistry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistryError {
     ProfileMismatch,
+    ProfileCatalogMismatch,
     DuplicateProfile,
     UnknownProfile,
 }
@@ -526,6 +542,33 @@ mod tests {
             WorkspaceId, WorktreeId,
         },
     };
+    use usagi_core::infrastructure::runtime_model::supported_agent_runtimes;
+
+    struct CodexNever;
+    impl CodexProvisioner for CodexNever {
+        fn provision(
+            &mut self,
+            _: &crate::usecase::runtime::ProvisionContext,
+        ) -> Result<
+            crate::usecase::codex::CodexProvision,
+            crate::usecase::codex::CodexProvisionFailure,
+        > {
+            Err(crate::usecase::codex::CodexProvisionFailure::ExecutableUnavailable)
+        }
+    }
+
+    struct ClaudeNever;
+    impl ClaudeProvisioner for ClaudeNever {
+        fn provision(
+            &mut self,
+            _: &crate::usecase::runtime::ProvisionContext,
+        ) -> Result<
+            crate::usecase::claude::ClaudeProvision,
+            crate::usecase::claude::ClaudeProvisionFailure,
+        > {
+            Err(crate::usecase::claude::ClaudeProvisionFailure::ExecutableUnavailable)
+        }
+    }
 
     struct Adapter {
         profile: AgentProfile,
@@ -592,6 +635,44 @@ mod tests {
     #[test]
     fn default_orchestrator_has_no_phase_leases() {
         assert!(Orchestrator::default().phases.is_empty());
+    }
+
+    #[test]
+    fn supported_registry_profiles_match_the_shared_runtime_catalog() {
+        let mut registry = AdapterRegistry::new();
+        registry
+            .register_supported(
+                CodexAdapter::new(CodexNever),
+                CodexAdapter::sakana(CodexNever),
+                ClaudeAdapter::new(ClaudeNever),
+            )
+            .unwrap();
+        assert_eq!(
+            registry.profile_ids().collect::<Vec<_>>(),
+            supported_agent_runtimes()
+                .map(|runtime| runtime.id)
+                .collect::<Vec<_>>()
+        );
+
+        let (_, mut registry_with_extra_profile, _, request) = setup();
+        assert_eq!(
+            registry_with_extra_profile.register_supported(
+                CodexAdapter::new(CodexNever),
+                CodexAdapter::sakana(CodexNever),
+                ClaudeAdapter::new(ClaudeNever),
+            ),
+            Err(RegistryError::ProfileCatalogMismatch)
+        );
+
+        let context = crate::usecase::runtime::ProvisionContext::from_request(&request);
+        assert!(matches!(
+            CodexNever.provision(&context),
+            Err(crate::usecase::codex::CodexProvisionFailure::ExecutableUnavailable)
+        ));
+        assert!(matches!(
+            ClaudeNever.provision(&context),
+            Err(crate::usecase::claude::ClaudeProvisionFailure::ExecutableUnavailable)
+        ));
     }
 
     fn setup() -> (

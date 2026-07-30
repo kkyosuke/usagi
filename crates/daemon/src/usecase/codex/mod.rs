@@ -13,6 +13,7 @@ use usagi_core::{
         EnvironmentVariableName, LaunchMode, LaunchPlan, LaunchRequest, LaunchValidationError,
         ProviderKind, ProviderResumePhase, ProviderResumeRef, ProviderResumeStatus,
     },
+    domain::settings::DefaultModel,
     usecase::agent::{AgentProfileCatalog, validate_request, validate_snapshot},
 };
 
@@ -23,14 +24,7 @@ use super::runtime::{
 #[cfg(test)]
 mod fixture;
 
-const PROFILE_NAME: &str = "codex";
 const PROFILE_REVISION: u32 = 1;
-/// Sakana AI ships a Codex-compatible CLI: the same argv grammar, resume form,
-/// and `-c` overrides behind its own executable and rollout store. It is
-/// therefore a second profile over this adapter rather than a second adapter.
-const SAKANA_PROFILE_NAME: &str = "sakana-ai";
-const SAKANA_PROGRAM: &str = "codex-fugu";
-const CODEX_PROGRAM: &str = "codex";
 
 /// The non-secret outcome that the renderer may use to build a durable plan.
 pub struct CodexProvision {
@@ -98,7 +92,13 @@ impl<P> CodexAdapter<P> {
     /// core contract, which is a programmer error.
     #[must_use]
     pub fn with_revision(provisioner: P, revision: u32) -> Self {
-        Self::build(provisioner, revision, PROFILE_NAME, "Codex", CODEX_PROGRAM)
+        Self::build(
+            provisioner,
+            revision,
+            DefaultModel::OpenAi.profile_id(),
+            "Codex",
+            DefaultModel::OpenAi.command(),
+        )
     }
 
     /// # Panics
@@ -110,9 +110,9 @@ impl<P> CodexAdapter<P> {
         Self::build(
             provisioner,
             revision,
-            SAKANA_PROFILE_NAME,
+            DefaultModel::SakanaAi.profile_id(),
             "sakana.ai",
-            SAKANA_PROGRAM,
+            DefaultModel::SakanaAi.command(),
         )
     }
 

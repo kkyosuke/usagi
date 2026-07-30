@@ -3,14 +3,39 @@
 //! Both MCP schema publication and daemon launch admission use this module so
 //! a snapshot can never become an authorization source.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::domain::settings::DefaultModel;
+
 const CONFIG_PATH: &str = ".usagi/config.toml";
+
+/// One code-defined agent runtime exposed by daemon orchestration and MCP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SupportedAgentRuntime {
+    /// Stable daemon profile ID and MCP runtime token.
+    pub id: &'static str,
+    /// Executable whose PATH availability gates this runtime.
+    pub executable: &'static str,
+}
+
+/// The agent runtime catalog shared by daemon registration and MCP dispatch.
+///
+/// [`DefaultModel::ALL`] is the closed-vocabulary `SSoT`; adding a provider there
+/// automatically makes it a candidate on every catalog consumer.
+#[must_use]
+pub fn supported_agent_runtimes() -> impl ExactSizeIterator<Item = SupportedAgentRuntime> {
+    DefaultModel::ALL
+        .into_iter()
+        .map(|model| SupportedAgentRuntime {
+            id: model.profile_id(),
+            executable: model.command(),
+        })
+}
 
 /// PATH lookup boundary. Tests inject this port instead of depending on PATH.
 pub trait ExecutableLocator: Send {
@@ -31,15 +56,7 @@ impl ExecutableLocator for PathExecutableLocator {
 #[derive(Debug, Default, Deserialize)]
 struct WorkspaceConfig {
     #[serde(default)]
-    agents: AgentsConfig,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct AgentsConfig {
-    #[serde(default)]
-    claude: RuntimeConfig,
-    #[serde(default)]
-    codex: RuntimeConfig,
+    agents: BTreeMap<String, RuntimeConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -51,15 +68,28 @@ struct RuntimeConfig {
 /// Runtime/model configuration read from a workspace's `.usagi/config.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WorkspaceAgentConfig {
-    claude: Vec<String>,
-    codex: Vec<String>,
+    runtimes: BTreeMap<String, Vec<String>>,
 }
 
 impl WorkspaceAgentConfig {
     /// Builds an in-memory configuration for injected callers and tests.
     #[must_use]
     pub fn from_allowlists(claude: Vec<String>, codex: Vec<String>) -> Self {
-        Self { claude, codex }
+        Self::from_runtime_allowlists([("claude", claude), ("codex", codex)])
+    }
+
+    /// Builds an in-memory configuration keyed by supported runtime ID.
+    #[must_use]
+    pub fn from_runtime_allowlists<'a>(
+        allowlists: impl IntoIterator<Item = (&'a str, Vec<String>)>,
+    ) -> Self {
+        Self {
+            runtimes: allowlists
+                .into_iter()
+                .filter(|(_, models)| !models.is_empty())
+                .map(|(runtime, models)| (runtime.to_owned(), models))
+                .collect(),
+        }
     }
     /// Read configuration. Missing or malformed input is an empty allowlist.
     #[must_use]
@@ -70,20 +100,25 @@ impl WorkspaceAgentConfig {
         let Ok(parsed) = toml::from_str::<WorkspaceConfig>(&text) else {
             return Self::default();
         };
-        Self {
-            claude: valid_models(parsed.agents.claude.models).unwrap_or_default(),
-            codex: valid_models(parsed.agents.codex.models).unwrap_or_default(),
-        }
+        let runtimes = parsed
+            .agents
+            .into_iter()
+            .filter(|(runtime, _)| supported_agent_runtimes().any(|entry| entry.id == runtime))
+            .filter_map(|(runtime, config)| {
+                valid_models(config.models).map(|models| (runtime, models))
+            })
+            .collect();
+        Self { runtimes }
     }
 
     /// Models allowed for this closed-vocabulary runtime.
     #[must_use]
     pub fn models(&self, runtime: &str) -> &[String] {
-        match runtime {
-            "claude" => &self.claude,
-            "codex" => &self.codex,
-            _ => &[],
-        }
+        supported_agent_runtimes()
+            .any(|entry| entry.id == runtime)
+            .then(|| self.runtimes.get(runtime))
+            .flatten()
+            .map_or(&[], Vec::as_slice)
     }
 
     /// Whether the exact runtime/model pair is currently allowed.
@@ -104,7 +139,9 @@ fn valid_models(models: Vec<String>) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig};
+    use super::{
+        ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig, supported_agent_runtimes,
+    };
     use tempfile::tempdir;
 
     #[test]
@@ -113,18 +150,24 @@ mod tests {
             WorkspaceAgentConfig::from_allowlists(vec!["opus".into()], vec!["gpt-5".into()]);
         assert!(injected.allows("claude", "opus"));
         assert!(injected.allows("codex", "gpt-5"));
+        let injected_sakana = WorkspaceAgentConfig::from_runtime_allowlists([(
+            "sakana-ai",
+            vec!["fugu-model".into()],
+        )]);
+        assert!(injected_sakana.allows("sakana-ai", "fugu-model"));
 
         let workspace = tempdir().unwrap();
         std::fs::create_dir(workspace.path().join(".usagi")).unwrap();
         std::fs::write(
             workspace.path().join(".usagi/config.toml"),
-            "[agents.claude]\nmodels = [\"sonnet\"]\n[agents.codex]\nmodels = [\"\", \"gpt\"]\n",
+            "[agents.claude]\nmodels = [\"sonnet\"]\n[agents.codex]\nmodels = [\"\", \"gpt\"]\n[agents.sakana-ai]\nmodels = [\"fugu-model\"]\n",
         )
         .unwrap();
         let config = WorkspaceAgentConfig::read(workspace.path());
         assert!(config.allows("claude", "sonnet"));
         assert!(!config.allows("claude", "opus"));
         assert!(config.models("codex").is_empty());
+        assert!(config.allows("sakana-ai", "fugu-model"));
 
         assert!(
             WorkspaceAgentConfig::read(workspace.path().join("missing").as_path())
@@ -138,6 +181,21 @@ mod tests {
                 .is_empty()
         );
         assert!(config.models("unknown").is_empty());
+    }
+
+    #[test]
+    fn runtime_catalog_uses_profile_ids_and_executables_from_the_model_ssot() {
+        let actual = supported_agent_runtimes()
+            .map(|runtime| (runtime.id, runtime.executable))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            vec![
+                ("claude", "claude"),
+                ("codex", "codex"),
+                ("sakana-ai", "codex-fugu"),
+            ]
+        );
     }
 
     #[test]
