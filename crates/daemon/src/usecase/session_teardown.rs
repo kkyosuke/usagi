@@ -112,9 +112,9 @@ pub fn drain_pending_teardowns(
 
 /// Wakes the teardown worker as soon as a removal is admitted.
 ///
-/// A missed wake-up is not a correctness problem — the worker re-derives the
-/// pending set on every tick anyway — but it is what makes a small teardown
-/// start immediately instead of on the next tick.
+/// The notification is latched until the worker consumes it, so an admission
+/// racing with the worker's wait cannot be missed. The worker also derives the
+/// pending set once on startup to resume work admitted by a previous daemon.
 #[derive(Debug, Default)]
 pub struct TeardownSignal {
     woken: Mutex<bool>,

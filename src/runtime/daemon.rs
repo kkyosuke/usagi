@@ -1825,28 +1825,37 @@ where
         .spawn(move || {
             let cancel = Arc::clone(&shutdown);
             let cancelled = move || cancel.is_requested();
+            // The first drain resumes a teardown left `Deleting` by a previous
+            // daemon. Afterwards durable state can only gain pending work
+            // through an admission notification. A periodic re-read is needed
+            // only while durable finalization is failing.
+            let mut should_drain = true;
             while !shutdown.is_requested() {
-                for report in drain_pending_teardowns(&journal, &effect, &cancelled) {
-                    if let Some(error) = report.effect_error {
-                        ErrorLog::record(&format!(
-                            "session teardown failed for \"{}\": {error}",
-                            report.name
-                        ));
-                    }
-                    if let Some(error) = report.finalize_error {
-                        ErrorLog::record(&format!(
-                            "session teardown outcome could not be recorded for \"{}\": {error}",
-                            report.name
-                        ));
+                let mut retry_finalization = false;
+                if should_drain {
+                    for report in drain_pending_teardowns(&journal, &effect, &cancelled) {
+                        if let Some(error) = report.effect_error {
+                            ErrorLog::record(&format!(
+                                "session teardown failed for \"{}\": {error}",
+                                report.name
+                            ));
+                        }
+                        if let Some(error) = report.finalize_error {
+                            retry_finalization = true;
+                            ErrorLog::record(&format!(
+                                "session teardown outcome could not be recorded for \"{}\": {error}",
+                                report.name
+                            ));
+                        }
                     }
                 }
                 if shutdown.is_requested() {
                     break;
                 }
                 // An admitted removal wakes this immediately; the tick only
-                // re-derives the pending set so a teardown whose finalization
-                // failed is retried without another request.
-                signal.wait(tick);
+                // re-derives the pending set while a teardown whose
+                // finalization failed still needs retrying.
+                should_drain = signal.wait(tick) || retry_finalization;
             }
         })
 }
@@ -10341,53 +10350,54 @@ mod tests {
     /// scripted effect failure, so the worker's logging arms are both exercised.
     struct FakeTeardownJournal {
         pending: Arc<Mutex<Vec<usagi_daemon::usecase::session_teardown::PendingTeardown>>>,
+        pending_calls: Arc<AtomicUsize>,
         finalize_error: Option<String>,
     }
     impl TeardownJournal for FakeTeardownJournal {
         fn pending(&self) -> Vec<usagi_daemon::usecase::session_teardown::PendingTeardown> {
-            self.pending.lock().unwrap().clone()
+            let pending = self.pending.lock().unwrap().clone();
+            self.pending_calls.fetch_add(1, Ordering::AcqRel);
+            pending
         }
         fn finish(
             &self,
             teardown: &usagi_daemon::usecase::session_teardown::PendingTeardown,
             _outcome: Result<(), String>,
         ) -> Result<(), String> {
+            if let Some(error) = &self.finalize_error {
+                return Err(error.clone());
+            }
             self.pending
                 .lock()
                 .unwrap()
                 .retain(|pending| pending.name != teardown.name);
-            self.finalize_error.clone().map_or(Ok(()), Err)
+            Ok(())
         }
     }
 
     struct FakeTeardownEffect {
         torn_down: Arc<Mutex<Vec<String>>>,
         shutdown: Arc<ShutdownRequest>,
+        shutdown_after: usize,
     }
     impl TeardownEffect for FakeTeardownEffect {
         fn tear_down(
             &self,
             teardown: &usagi_daemon::usecase::session_teardown::PendingTeardown,
         ) -> Result<(), String> {
-            self.torn_down.lock().unwrap().push(teardown.name.clone());
-            // End the worker as soon as it has taken the admitted work, so the
-            // test observes exactly one drain.
-            self.shutdown.request();
+            let mut torn_down = self.torn_down.lock().unwrap();
+            torn_down.push(teardown.name.clone());
+            if torn_down.len() == self.shutdown_after {
+                self.shutdown.request();
+            }
             Err("worktree is busy".into())
         }
     }
 
     #[test]
     fn production_teardown_worker_drains_an_admitted_removal_and_honors_shutdown() {
-        let pending = Arc::new(Mutex::new(vec![
-            usagi_daemon::usecase::session_teardown::PendingTeardown {
-                session_id: SessionId::new(),
-                operation_id: usagi_core::domain::id::OperationId::new(),
-                name: "one".into(),
-                session_root: PathBuf::from("/repo/.usagi/sessions/one"),
-                force: false,
-            },
-        ]));
+        let pending = Arc::new(Mutex::new(Vec::new()));
+        let pending_calls = Arc::new(AtomicUsize::new(0));
         let shutdown = Arc::new(ShutdownRequest::new());
         let torn_down = Arc::new(Mutex::new(Vec::new()));
         let signal = Arc::new(TeardownSignal::new());
@@ -10395,21 +10405,39 @@ mod tests {
         let handle = spawn_session_teardown_worker(
             FakeTeardownJournal {
                 pending: Arc::clone(&pending),
+                pending_calls: Arc::clone(&pending_calls),
                 finalize_error: Some("session lifecycle owner is unavailable".into()),
             },
             FakeTeardownEffect {
                 torn_down: Arc::clone(&torn_down),
                 shutdown: Arc::clone(&shutdown),
+                shutdown_after: 1,
             },
             Arc::clone(&signal),
             Arc::clone(&shutdown),
             Duration::from_millis(1),
         )
         .unwrap();
+
+        while pending_calls.load(Ordering::Acquire) == 0 {
+            std::thread::yield_now();
+        }
+        pending
+            .lock()
+            .unwrap()
+            .push(usagi_daemon::usecase::session_teardown::PendingTeardown {
+                session_id: SessionId::new(),
+                operation_id: usagi_core::domain::id::OperationId::new(),
+                name: "one".into(),
+                session_root: PathBuf::from("/repo/.usagi/sessions/one"),
+                force: false,
+            });
+        signal.notify();
         handle.join().unwrap();
 
         assert_eq!(torn_down.lock().unwrap().as_slice(), ["one"]);
-        assert!(pending.lock().unwrap().is_empty());
+        assert_eq!(pending.lock().unwrap().len(), 1);
+        assert_eq!(pending_calls.load(Ordering::Acquire), 2);
 
         // A worker started under shutdown takes no work at all.
         let already_stopped = Arc::new(ShutdownRequest::new());
@@ -10418,11 +10446,13 @@ mod tests {
         spawn_session_teardown_worker(
             FakeTeardownJournal {
                 pending: Arc::clone(&pending),
+                pending_calls: Arc::new(AtomicUsize::new(0)),
                 finalize_error: None,
             },
             FakeTeardownEffect {
                 torn_down: Arc::clone(&untouched),
                 shutdown: Arc::clone(&already_stopped),
+                shutdown_after: 1,
             },
             signal,
             already_stopped,
@@ -10432,6 +10462,75 @@ mod tests {
         .join()
         .unwrap();
         assert!(untouched.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn production_teardown_worker_does_not_reread_an_idle_journal_on_each_tick() {
+        let pending_calls = Arc::new(AtomicUsize::new(0));
+        let shutdown = Arc::new(ShutdownRequest::new());
+        let handle = spawn_session_teardown_worker(
+            FakeTeardownJournal {
+                pending: Arc::new(Mutex::new(Vec::new())),
+                pending_calls: Arc::clone(&pending_calls),
+                finalize_error: None,
+            },
+            FakeTeardownEffect {
+                torn_down: Arc::new(Mutex::new(Vec::new())),
+                shutdown: Arc::clone(&shutdown),
+                shutdown_after: 1,
+            },
+            Arc::new(TeardownSignal::new()),
+            Arc::clone(&shutdown),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+
+        while pending_calls.load(Ordering::Acquire) == 0 {
+            std::thread::yield_now();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        assert_eq!(pending_calls.load(Ordering::Acquire), 1);
+
+        shutdown.request();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn production_teardown_worker_retries_a_failed_finalization_on_the_tick() {
+        let pending = Arc::new(Mutex::new(vec![
+            usagi_daemon::usecase::session_teardown::PendingTeardown {
+                session_id: SessionId::new(),
+                operation_id: usagi_core::domain::id::OperationId::new(),
+                name: "one".into(),
+                session_root: PathBuf::from("/repo/.usagi/sessions/one"),
+                force: false,
+            },
+        ]));
+        let pending_calls = Arc::new(AtomicUsize::new(0));
+        let shutdown = Arc::new(ShutdownRequest::new());
+        let torn_down = Arc::new(Mutex::new(Vec::new()));
+
+        spawn_session_teardown_worker(
+            FakeTeardownJournal {
+                pending,
+                pending_calls: Arc::clone(&pending_calls),
+                finalize_error: Some("session lifecycle owner is unavailable".into()),
+            },
+            FakeTeardownEffect {
+                torn_down: Arc::clone(&torn_down),
+                shutdown: Arc::clone(&shutdown),
+                shutdown_after: 2,
+            },
+            Arc::new(TeardownSignal::new()),
+            shutdown,
+            Duration::from_millis(1),
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+
+        assert_eq!(torn_down.lock().unwrap().as_slice(), ["one", "one"]);
+        assert_eq!(pending_calls.load(Ordering::Acquire), 2);
     }
 
     /// Prepares `<data>/daemon` with an acquired instance lock and a registered
