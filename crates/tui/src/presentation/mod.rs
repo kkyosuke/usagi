@@ -715,6 +715,9 @@ fn handle_workspace_agent_reserved_input(
     if runtime.state().overlay().is_some() || !runtime.state().workspace_agent_drawer_open() {
         return None;
     }
+    // Keep the state/key matrix explicit: nested `matches!` expansions obscure
+    // the one production branch that the line-coverage gate must observe.
+    #[allow(clippy::match_like_matches_macro)]
     let owns = match (runtime.state().workspace_agent_new(), key) {
         (
             WorkspaceAgentNew::Choosing(_) | WorkspaceAgentNew::Empty,
