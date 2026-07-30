@@ -22,8 +22,10 @@
 //! - [`owner_routing`] — planned restart 中に active / draining の 2 generation が
 //!   並存する間、request を owner generation の endpoint へ配送する client 側の
 //!   routing（trusted endpoint 解決・inventory merge・generation 別 connection）。
+//! - [`agent_phase`] — daemon と TUI が共有する Agent phase の集約分類・順位。
 
 pub mod agent;
+pub mod agent_phase;
 pub mod claude_sandbox;
 pub mod client;
 pub mod env;

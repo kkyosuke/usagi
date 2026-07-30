@@ -77,7 +77,9 @@ pub fn request_from_hook(
     phase: &str,
     credential: Option<String>,
 ) -> Result<DaemonRequest, PhaseInputError> {
-    let phase = ReportedPhase::parse_token(phase).ok_or(PhaseInputError::UnknownPhase)?;
+    let phase = ReportedPhase::parse_token(phase)
+        .filter(|phase| phase.is_reportable())
+        .ok_or(PhaseInputError::UnknownPhase)?;
     let input = serde_json::from_reader::<_, PhaseHookInput>(reader)
         .map_err(|_| PhaseInputError::InvalidPayload)?;
     if ReportedPhase::for_hook_event(&input.hook_event_name) != Some(phase) {
@@ -154,6 +156,12 @@ mod tests {
             (
                 br#"{"hook_event_name":"Stop"}"#.as_slice(),
                 "interrupted",
+                Some("runtime-secret".to_owned()),
+                PhaseInputError::UnknownPhase,
+            ),
+            (
+                br#"{"hook_event_name":"Stop"}"#.as_slice(),
+                "none",
                 Some("runtime-secret".to_owned()),
                 PhaseInputError::UnknownPhase,
             ),
