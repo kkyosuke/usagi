@@ -108,6 +108,8 @@ pub struct SupervisorRuntime {
     state_path: PathBuf,
     apply_fail_at: Cell<Option<usize>>,
     apply_calls: Cell<usize>,
+    #[cfg(test)]
+    dispatch_registry_reads: Cell<usize>,
 }
 
 impl SupervisorRuntime {
@@ -119,6 +121,8 @@ impl SupervisorRuntime {
             state_path: state_dir.join("supervisor-scheduler.json"),
             apply_fail_at: Cell::new(None),
             apply_calls: Cell::new(0),
+            #[cfg(test)]
+            dispatch_registry_reads: Cell::new(0),
         }
     }
 
@@ -390,6 +394,7 @@ impl SupervisorRuntime {
         let Some(mut run) = self.supervisor.load(id)? else {
             return Ok(());
         };
+        let dispatch_runs = self.dispatch_runs()?;
         // Retry eligibility is a persisted deadline, not an in-memory timer.
         // Reconciliation therefore cannot dispatch a retry before its deadline
         // and can resume one after a daemon restart without polling.
@@ -413,7 +418,10 @@ impl SupervisorRuntime {
             )?;
         }
         for (task_id, provenance) in run.provenance.clone() {
-            let Some(dispatch_run) = self.dispatch_run(provenance.dispatch_run_id)? else {
+            let Some(dispatch_run) = dispatch_runs
+                .iter()
+                .find(|run| run.run_id == provenance.dispatch_run_id)
+            else {
                 continue;
             };
             let Some((terminal, kind)) = terminal(dispatch_run.status) else {
@@ -450,15 +458,11 @@ impl SupervisorRuntime {
         self.deliver_reserved(waker)
     }
 
-    fn dispatch_run(
-        &self,
-        id: OperationId,
-    ) -> Result<Option<usagi_core::domain::agent::DispatchRun>> {
-        Ok(self
-            .dispatch
-            .runs()?
-            .into_iter()
-            .find(|run| run.run_id == id))
+    fn dispatch_runs(&self) -> Result<Vec<usagi_core::domain::agent::DispatchRun>> {
+        #[cfg(test)]
+        self.dispatch_registry_reads
+            .set(self.dispatch_registry_reads.get() + 1);
+        self.dispatch.runs()
     }
     fn apply(
         &self,
@@ -978,6 +982,7 @@ mod tests {
         scheduler
             .tick(run.supervisor_run_id, now(), &mut waker)
             .unwrap();
+        assert_eq!(scheduler.dispatch_registry_reads.get(), 1);
         let saved = store.load(run.supervisor_run_id).unwrap().unwrap();
         assert_eq!(saved.tasks[&waiting].state, TaskState::Dispatched);
         assert_eq!(saved.tasks[&child].state, TaskState::Succeeded);
