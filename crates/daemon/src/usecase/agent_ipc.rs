@@ -48,6 +48,7 @@ use usagi_core::{
         AgentAdmissionReservation, CredentialProvenance as DispatchCredentialProvenance,
         DispatchStore,
     },
+    usecase::agent_phase::agent_phase_aggregation_rank,
     usecase::client::{
         AgentLaunchIntent, DispatchAgentIntent, DispatchIntent, TerminalAction, TerminalRequest,
     },
@@ -515,7 +516,7 @@ impl AgentRuntime {
     /// A report therefore never makes a reserved, interrupted, or exited runtime
     /// look alive, and never hides an interruption.
     #[must_use]
-    pub fn session_phase(&self, session: SessionId) -> &'static str {
+    pub fn session_phase(&self, session: SessionId) -> AgentPhase {
         self.coordinator
             .snapshot()
             .records
@@ -523,10 +524,10 @@ impl AgentRuntime {
             .filter(|record| record.runtime.session_id == Some(session))
             .map(|record| self.record_phase(&record))
             .max_by_key(|(priority, _)| *priority)
-            .map_or("none", |(_, phase)| phase)
+            .map_or(AgentPhase::Absent, |(_, phase)| phase)
     }
 
-    fn record_phase(&self, record: &super::runtime::DurableRuntimeRecord) -> (u8, &'static str) {
+    fn record_phase(&self, record: &super::runtime::DurableRuntimeRecord) -> (u8, AgentPhase) {
         if record.state == super::runtime::RuntimeState::Running
             && let Some(phase) = self.reported_phases.get(&record.runtime.agent_runtime_id)
         {
@@ -549,6 +550,12 @@ impl AgentRuntime {
         credential: &str,
         phase: AgentPhase,
     ) -> Result<(), ProtocolError> {
+        if !phase.is_reportable() {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "agent phase is not reportable",
+            ));
+        }
         let caller = self.mcp_callers.get(credential).cloned().ok_or_else(|| {
             ProtocolError::new(
                 ErrorCode::OwnershipUnknown,
@@ -2433,16 +2440,16 @@ fn dispatch_binding_unavailable() -> ProtocolError {
     )
 }
 
-const fn runtime_phase(state: super::runtime::RuntimeState) -> (u8, &'static str) {
+const fn runtime_phase(state: super::runtime::RuntimeState) -> (u8, AgentPhase) {
     use super::runtime::RuntimeState;
     match state {
-        RuntimeState::Running => (4, "running"),
-        RuntimeState::Reserved => (3, "ready"),
+        RuntimeState::Running => (4, AgentPhase::Running),
+        RuntimeState::Reserved => (3, AgentPhase::Ready),
         RuntimeState::ReconcileRequired(super::runtime::ReconcileState::IdentityUnknown) => {
-            (3, "interrupted")
+            (3, AgentPhase::Interrupted)
         }
-        RuntimeState::SpawnFailed | RuntimeState::ReconcileRequired(_) => (2, "exited"),
-        RuntimeState::Exited | RuntimeState::Reclaimed => (1, "ended"),
+        RuntimeState::SpawnFailed | RuntimeState::ReconcileRequired(_) => (2, AgentPhase::Exited),
+        RuntimeState::Exited | RuntimeState::Reclaimed => (1, AgentPhase::Ended),
     }
 }
 
@@ -2452,14 +2459,16 @@ const fn runtime_phase(state: super::runtime::RuntimeState) -> (u8, &'static str
 /// coarse live states it replaces.  Their relative order mirrors the Home
 /// aggregation (`done > waiting > running > ready`), so the most
 /// human-actionable runtime of a session wins the session-wide projection.
-const fn reported_phase(phase: AgentPhase) -> (u8, &'static str) {
-    match phase {
-        AgentPhase::Exited => (8, "exited"),
-        AgentPhase::Ended => (7, "ended"),
-        AgentPhase::Waiting => (6, "waiting"),
-        AgentPhase::Running => (5, "running"),
-        AgentPhase::Ready => (3, "ready"),
-    }
+const fn reported_phase(phase: AgentPhase) -> (u8, AgentPhase) {
+    let aggregation_rank = agent_phase_aggregation_rank(phase);
+    let priority = match phase {
+        AgentPhase::Absent => 0,
+        AgentPhase::Ready => 3,
+        AgentPhase::Running | AgentPhase::Waiting | AgentPhase::Ended => 3 + aggregation_rank,
+        AgentPhase::Exited => 4 + aggregation_rank,
+        AgentPhase::Interrupted => aggregation_rank,
+    };
+    (priority, phase)
 }
 
 /// Maps a reported phase onto the durable safe phase of provider resume
@@ -2475,7 +2484,7 @@ const fn durable_provider_phase(phase: AgentPhase) -> Option<ProviderResumePhase
         AgentPhase::Running | AgentPhase::Waiting | AgentPhase::Ended => {
             Some(ProviderResumePhase::Running)
         }
-        AgentPhase::Exited => None,
+        AgentPhase::Absent | AgentPhase::Exited | AgentPhase::Interrupted => None,
     }
 }
 
@@ -3049,7 +3058,7 @@ mod tests {
             )
             .unwrap();
         let credential = runtime.mcp_callers.keys().next().cloned().unwrap();
-        assert_eq!(runtime.session_phase(session), "running");
+        assert_eq!(runtime.session_phase(session), AgentPhase::Running);
 
         // Only the daemon-minted credential selects the reporting runtime.
         assert_eq!(
@@ -3059,17 +3068,26 @@ mod tests {
                 .code,
             ErrorCode::OwnershipUnknown
         );
-        assert_eq!(runtime.session_phase(session), "running");
+        assert_eq!(runtime.session_phase(session), AgentPhase::Running);
 
-        for (phase, expected) in [
-            (AgentPhase::Ready, "ready"),
-            (AgentPhase::Running, "running"),
-            (AgentPhase::Waiting, "waiting"),
-            (AgentPhase::Ended, "ended"),
-            (AgentPhase::Exited, "exited"),
+        for phase in [
+            AgentPhase::Ready,
+            AgentPhase::Running,
+            AgentPhase::Waiting,
+            AgentPhase::Ended,
+            AgentPhase::Exited,
         ] {
             runtime.report_agent_phase(&credential, phase).unwrap();
-            assert_eq!(runtime.session_phase(session), expected, "{phase:?}");
+            assert_eq!(runtime.session_phase(session), phase);
+        }
+        for phase in [AgentPhase::Absent, AgentPhase::Interrupted] {
+            assert_eq!(
+                runtime
+                    .report_agent_phase(&credential, phase)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidArgument
+            );
         }
 
         // `exited` proves no process death, so the durable safe phase keeps the
@@ -3098,7 +3116,7 @@ mod tests {
             .report_agent_phase(&credential, AgentPhase::Running)
             .unwrap();
         runtime.exit(&launched.terminal, 0).unwrap();
-        assert_eq!(runtime.session_phase(session), "ended");
+        assert_eq!(runtime.session_phase(session), AgentPhase::Ended);
         assert_eq!(
             runtime
                 .report_agent_phase(&credential, AgentPhase::Running)
@@ -3136,7 +3154,7 @@ mod tests {
         runtime
             .report_agent_phase(&credential, AgentPhase::Waiting)
             .unwrap();
-        assert_eq!(runtime.session_phase(session), "waiting");
+        assert_eq!(runtime.session_phase(session), AgentPhase::Waiting);
         assert_eq!(store_mut(&mut runtime).saves, saves);
     }
 
@@ -4023,7 +4041,7 @@ mod tests {
         assert_eq!(interrupted, 1);
 
         let mut second = hydrate_restart_runtime(reconciled);
-        assert_eq!(second.session_phase(session), "interrupted");
+        assert_eq!(second.session_phase(session), AgentPhase::Interrupted);
         assert_eq!(second.coordinator.occupied_slots(), 1);
 
         let target = second.inventory(workspace).resumable[0]
@@ -4096,7 +4114,7 @@ mod tests {
         assert_eq!(double_click.resume_relation, resumed.resume_relation);
         assert_eq!(third.coordinator.snapshot().records.len(), 2);
 
-        assert_eq!(third.session_phase(session), "interrupted");
+        assert_eq!(third.session_phase(session), AgentPhase::Interrupted);
     }
 
     #[test]
@@ -4522,7 +4540,7 @@ mod tests {
         let mut runtime = runtime();
         let launch_intent = intent(None);
         let session = launch_intent.session.unwrap();
-        assert_eq!(runtime.session_phase(session), "none");
+        assert_eq!(runtime.session_phase(session), AgentPhase::Absent);
         assert_eq!(
             runtime
                 .prompt(Some(session), "  ", PromptMode::Auto)
@@ -4557,7 +4575,7 @@ mod tests {
                 &FakeScope(Ok(scope())),
             )
             .unwrap();
-        assert_eq!(runtime.session_phase(session), "running");
+        assert_eq!(runtime.session_phase(session), AgentPhase::Running);
         assert!(
             runtime
                 .dispatch
@@ -6256,25 +6274,51 @@ mod tests {
         use super::super::runtime::{DurableOperationOutcome, ReconcileState};
 
         for (state, expected) in [
-            (super::super::runtime::RuntimeState::Running, "running"),
-            (super::super::runtime::RuntimeState::Reserved, "ready"),
-            (super::super::runtime::RuntimeState::SpawnFailed, "exited"),
+            (
+                super::super::runtime::RuntimeState::Running,
+                AgentPhase::Running,
+            ),
+            (
+                super::super::runtime::RuntimeState::Reserved,
+                AgentPhase::Ready,
+            ),
+            (
+                super::super::runtime::RuntimeState::SpawnFailed,
+                AgentPhase::Exited,
+            ),
             (
                 super::super::runtime::RuntimeState::ReconcileRequired(
                     ReconcileState::IdentityUnknown,
                 ),
-                "interrupted",
+                AgentPhase::Interrupted,
             ),
             (
                 super::super::runtime::RuntimeState::ReconcileRequired(
                     ReconcileState::OrphanRunning,
                 ),
-                "exited",
+                AgentPhase::Exited,
             ),
-            (super::super::runtime::RuntimeState::Exited, "ended"),
-            (super::super::runtime::RuntimeState::Reclaimed, "ended"),
+            (
+                super::super::runtime::RuntimeState::Exited,
+                AgentPhase::Ended,
+            ),
+            (
+                super::super::runtime::RuntimeState::Reclaimed,
+                AgentPhase::Ended,
+            ),
         ] {
             assert_eq!(runtime_phase(state).1, expected);
+        }
+        for (phase, priority) in [
+            (AgentPhase::Absent, 0),
+            (AgentPhase::Ready, 3),
+            (AgentPhase::Running, 5),
+            (AgentPhase::Waiting, 6),
+            (AgentPhase::Ended, 7),
+            (AgentPhase::Exited, 8),
+            (AgentPhase::Interrupted, 4),
+        ] {
+            assert_eq!(reported_phase(phase), (priority, phase));
         }
         assert!(is_resume_source_state(
             super::super::runtime::RuntimeState::Exited

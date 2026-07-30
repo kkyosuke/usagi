@@ -996,6 +996,9 @@ credential、token、設定 path、CLI 出力、OS error を保存・wire・UI�
 daemon は managed session ごとに一つの Agent phase を lifecycle projection（`session_list` / `session_status` /
 overview の `agent_phase`）へ載せる。この phase の authority は **daemon が観測した runtime state** であり、
 エージェントが自分の lifecycle hook で報告した phase はその refinement にすぎない。本節がこの優先順位の正本である。
+projection の closed vocabulary は `none` / `ready` / `running` / `waiting` / `ended` / `exited` /
+`interrupted` で、core の `AgentPhase` が token と parse の正本である。`none` と `interrupted` は daemon
+観測専用であり、agent lifecycle hook からは報告できない。
 
 観測 state 由来の phase は次のとおり。
 
@@ -1021,7 +1024,7 @@ credential で報告元 runtime に束縛される。反映は次の規則に従
 - 報告が効くのは、その runtime が `Running` である間だけである。したがって報告は reserved / interrupted /
   exited な runtime を live に見せられず、interruption を隠せない。observed exit は最後の報告に勝つ。
 - session の phase は、その session に属する runtime のうち集約重みが最大のものを選ぶ。報告 phase の相対順序は
-  Home の集約（`done > waiting > running > ready`。[3. TUI](03-tui.md) が正本）に合わせてあるため、最も人の
+  Home の集約（`done > waiting > running > ready > absent`）と core usecase の共有順位を使うため、最も人の
   対応を要する runtime が session 全体の phase になる。
 - 報告 phase は in-memory であり、caller credential と同じく daemon restart で失効する（restart 後は観測 state
   由来の phase に戻る）。

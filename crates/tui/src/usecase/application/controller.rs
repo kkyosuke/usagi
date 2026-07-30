@@ -17,6 +17,7 @@ use usagi_core::domain::pullrequest::PrLink;
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
 use usagi_core::domain::settings::{AvailableModels, DefaultModel, is_valid_env_name};
 use usagi_core::domain::user_decision::{UserDecision, UserDecisionAnswer, UserDecisionStatus};
+use usagi_core::usecase::agent_phase::AgentPhaseAggregation;
 use usagi_core::usecase::env::EnvScope;
 
 use crate::usecase::terminal_input::{KeyCode, KeyEventKind, LiveInput, RuntimeEvent};
@@ -646,21 +647,26 @@ pub enum TargetPhase {
 
 impl TargetPhase {
     const fn rank(self) -> u8 {
+        self.aggregation().rank()
+    }
+
+    const fn aggregation(self) -> AgentPhaseAggregation {
         match self {
-            Self::Absent => 0,
-            Self::Ready => 1,
-            Self::Running => 2,
-            Self::Waiting => 3,
-            Self::Done => 4,
+            Self::Absent => AgentPhaseAggregation::Absent,
+            Self::Ready => AgentPhaseAggregation::Ready,
+            Self::Running => AgentPhaseAggregation::Running,
+            Self::Waiting => AgentPhaseAggregation::Waiting,
+            Self::Done => AgentPhaseAggregation::Done,
         }
     }
 
     fn from_agent_phase(phase: AgentPhase) -> Self {
-        match phase {
-            AgentPhase::Ready => Self::Ready,
-            AgentPhase::Running => Self::Running,
-            AgentPhase::Waiting => Self::Waiting,
-            AgentPhase::Ended | AgentPhase::Exited => Self::Done,
+        match AgentPhaseAggregation::from_phase(phase) {
+            AgentPhaseAggregation::Absent => Self::Absent,
+            AgentPhaseAggregation::Ready => Self::Ready,
+            AgentPhaseAggregation::Running => Self::Running,
+            AgentPhaseAggregation::Waiting => Self::Waiting,
+            AgentPhaseAggregation::Done => Self::Done,
         }
     }
 }

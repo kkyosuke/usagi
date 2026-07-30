@@ -27,11 +27,16 @@ pub enum SessionLifecycle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentPhase {
+    /// No known Agent runtime belongs to the projected scope.
+    #[serde(rename = "none")]
+    Absent,
     Ready,
     Running,
     Waiting,
     Ended,
     Exited,
+    /// Daemon restart reconciliation could not prove the runtime identity.
+    Interrupted,
 }
 
 /// The documented provider lifecycle hook events usagi wires to a phase report,
@@ -50,16 +55,29 @@ pub const AGENT_PHASE_HOOK_EVENTS: [(&str, AgentPhase); 6] = [
 ];
 
 impl AgentPhase {
+    /// Every token which may appear in an Agent phase projection.
+    pub const ALL: [Self; 7] = [
+        Self::Absent,
+        Self::Ready,
+        Self::Running,
+        Self::Waiting,
+        Self::Ended,
+        Self::Exited,
+        Self::Interrupted,
+    ];
+
     /// Returns the closed, non-sensitive token used for this phase in a hook
     /// argument and in the daemon's phase projection. It equals the wire name.
     #[must_use]
     pub const fn as_token(self) -> &'static str {
         match self {
+            Self::Absent => "none",
             Self::Ready => "ready",
             Self::Running => "running",
             Self::Waiting => "waiting",
             Self::Ended => "ended",
             Self::Exited => "exited",
+            Self::Interrupted => "interrupted",
         }
     }
 
@@ -67,15 +85,18 @@ impl AgentPhase {
     /// default phase, so a caller cannot widen this closed vocabulary.
     #[must_use]
     pub fn parse_token(token: &str) -> Option<Self> {
-        [
-            Self::Ready,
-            Self::Running,
-            Self::Waiting,
-            Self::Ended,
-            Self::Exited,
-        ]
-        .into_iter()
-        .find(|phase| phase.as_token() == token)
+        Self::ALL
+            .into_iter()
+            .find(|phase| phase.as_token() == token)
+    }
+
+    /// Whether this phase may be reported by a wired lifecycle hook.
+    ///
+    /// `Absent` and `Interrupted` are daemon-owned projection states, not
+    /// claims an Agent process may make about itself.
+    #[must_use]
+    pub const fn is_reportable(self) -> bool {
+        !matches!(self, Self::Absent | Self::Interrupted)
     }
 
     /// Returns the phase usagi wires one documented hook event to, if any.
@@ -683,23 +704,24 @@ mod tests {
     }
     #[test]
     fn agent_phase_tokens_and_wired_hook_events_stay_a_closed_vocabulary() {
-        for phase in [
-            AgentPhase::Ready,
-            AgentPhase::Running,
-            AgentPhase::Waiting,
-            AgentPhase::Ended,
-            AgentPhase::Exited,
-        ] {
+        for phase in AgentPhase::ALL {
             // The token is the wire name, so one vocabulary covers the hook
-            // argument, the IPC request, and the daemon phase projection.
+            // subset, the IPC request, and the daemon phase projection.
             assert_eq!(
                 serde_json::to_value(phase).unwrap(),
                 serde_json::json!(phase.as_token())
             );
             assert_eq!(AgentPhase::parse_token(phase.as_token()), Some(phase));
         }
-        assert_eq!(AgentPhase::parse_token("interrupted"), None);
+        assert_eq!(
+            AgentPhase::parse_token("interrupted"),
+            Some(AgentPhase::Interrupted)
+        );
+        assert_eq!(AgentPhase::parse_token("none"), Some(AgentPhase::Absent));
         assert_eq!(AgentPhase::parse_token(""), None);
+        assert!(!AgentPhase::Absent.is_reportable());
+        assert!(!AgentPhase::Interrupted.is_reportable());
+        assert!(AgentPhase::Waiting.is_reportable());
         assert_eq!(
             AgentPhase::for_hook_event("SessionStart"),
             Some(AgentPhase::Ready)

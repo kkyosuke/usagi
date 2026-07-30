@@ -25,7 +25,9 @@ use usagi_core::domain::id::{SessionId, UserDecisionId, WorkspaceId};
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session::{SessionOrigin, SessionRecord};
-use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycleProjection};
+use usagi_core::domain::session_lifecycle::{
+    AgentPhase, ManagedSession, SessionLifecycleProjection,
+};
 use usagi_core::domain::settings::{
     EnvBindings, LocalSettings, Settings, format_env_bindings, parse_env_bindings,
 };
@@ -2754,6 +2756,8 @@ fn provider_resume_projection(
     let phase = phase
         .as_str()
         .ok_or_else(|| "daemon Agent phase is invalid".to_owned())?;
+    let phase =
+        AgentPhase::parse_token(phase).ok_or_else(|| "daemon Agent phase is unknown".to_owned())?;
     let session = item
         .get("session_id")
         .cloned()
@@ -2777,7 +2781,7 @@ fn provider_resume_projection(
     Ok(Some((
         session,
         ProviderResumeProjection {
-            interrupted: phase == "interrupted",
+            interrupted: phase == AgentPhase::Interrupted,
             resumable,
             reason,
         },
@@ -5953,6 +5957,12 @@ mod tests {
         );
         let malformed = [
             json!({ "agent_phase": 1 }),
+            json!({
+                "session_id": session,
+                "agent_phase": "unknown",
+                "agent_resumable": false,
+                "agent_resume_reason": "provider_metadata_unavailable",
+            }),
             json!({ "agent_phase": "interrupted" }),
             json!({
                 "session_id": "not-a-session-id",
