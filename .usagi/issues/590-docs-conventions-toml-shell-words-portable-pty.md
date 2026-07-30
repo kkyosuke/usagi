@@ -1,13 +1,13 @@
 ---
 number: 590
 title: docs(conventions): 依存クレート表に toml/shell-words/portable-pty を追記する
-status: in-progress
+status: done
 priority: low
 labels: [docs, conventions]
 dependson: []
 related: []
 created_at: 2026-07-30T10:48:16.457732+00:00
-updated_at: 2026-07-30T23:18:47.243940+00:00
+updated_at: 2026-07-30T23:20:07.069946+00:00
 ---
 
 ## 背景
