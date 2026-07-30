@@ -553,7 +553,7 @@ mod tests {
             crate::usecase::codex::CodexProvision,
             crate::usecase::codex::CodexProvisionFailure,
         > {
-            unreachable!("catalog test never provisions")
+            Err(crate::usecase::codex::CodexProvisionFailure::ExecutableUnavailable)
         }
     }
 
@@ -566,7 +566,7 @@ mod tests {
             crate::usecase::claude::ClaudeProvision,
             crate::usecase::claude::ClaudeProvisionFailure,
         > {
-            unreachable!("catalog test never provisions")
+            Err(crate::usecase::claude::ClaudeProvisionFailure::ExecutableUnavailable)
         }
     }
 
@@ -653,6 +653,26 @@ mod tests {
                 .map(|runtime| runtime.id)
                 .collect::<Vec<_>>()
         );
+
+        let (_, mut registry_with_extra_profile, _, request) = setup();
+        assert_eq!(
+            registry_with_extra_profile.register_supported(
+                CodexAdapter::new(CodexNever),
+                CodexAdapter::sakana(CodexNever),
+                ClaudeAdapter::new(ClaudeNever),
+            ),
+            Err(RegistryError::ProfileCatalogMismatch)
+        );
+
+        let context = crate::usecase::runtime::ProvisionContext::from_request(&request);
+        assert!(matches!(
+            CodexNever.provision(&context),
+            Err(crate::usecase::codex::CodexProvisionFailure::ExecutableUnavailable)
+        ));
+        assert!(matches!(
+            ClaudeNever.provision(&context),
+            Err(crate::usecase::claude::ClaudeProvisionFailure::ExecutableUnavailable)
+        ));
     }
 
     fn setup() -> (
