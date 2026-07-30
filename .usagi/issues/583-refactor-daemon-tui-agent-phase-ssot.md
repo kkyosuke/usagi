@@ -1,13 +1,13 @@
 ---
 number: 583
 title: refactor(daemon,tui): agent phase 語彙とランキングを共有 SSoT へ統合する
-status: in-progress
+status: done
 priority: high
 labels: [daemon, tui, ssot, refactor]
 dependson: []
 related: []
 created_at: 2026-07-30T10:46:43.943974+00:00
-updated_at: 2026-07-30T22:30:11.927375+00:00
+updated_at: 2026-07-30T22:42:31.254537+00:00
 ---
 
 ## 背景
