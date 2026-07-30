@@ -1,13 +1,13 @@
 ---
 number: 582
 title: fix(cli): MCP dispatch の runtime allowlist に sakana-ai を追加する
-status: in-progress
+status: done
 priority: high
 labels: [cli, mcp, bug, ssot]
 dependson: []
 related: []
 created_at: 2026-07-30T10:46:23.287772+00:00
-updated_at: 2026-07-30T22:32:21.959160+00:00
+updated_at: 2026-07-30T22:43:13.116518+00:00
 ---
 
 ## 背景
