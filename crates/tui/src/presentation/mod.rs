@@ -5175,7 +5175,7 @@ fn drive_workspace_controller(
             &sessions,
             metrics_projection.metrics(),
             metrics_projection.git_diffs(),
-            terminal_view.clone(),
+            terminal_view,
             ui.creating_session
                 .as_ref()
                 .map(|create| create.name.as_str()),
@@ -5269,6 +5269,12 @@ fn drive_workspace_controller(
                 } if *workspace == workspace_id && arguments.trim().is_empty()
             );
             if opens_workspace_config && let Some(context) = workspace_config.as_mut() {
+                // Rebuild after the reducer closed the Overview overlay. The
+                // terminal projection is cloned only on this rare Config path;
+                // the ordinary frame moved it into `HomeFrameMaterial`.
+                let terminal_view = drawn_material
+                    .as_ref()
+                    .and_then(|material| material.projection.terminal_view().cloned());
                 let base = render_controller_frame(
                     height,
                     width,
@@ -5278,7 +5284,7 @@ fn drive_workspace_controller(
                     &sessions,
                     metrics_projection.metrics(),
                     metrics_projection.git_diffs(),
-                    terminal_view.clone(),
+                    terminal_view,
                     ui.creating_session
                         .as_ref()
                         .map(|create| create.name.as_str()),

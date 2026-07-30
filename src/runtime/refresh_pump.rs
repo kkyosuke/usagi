@@ -35,6 +35,8 @@
 //! with an in-process fake so the real daemon IPC — injected as the `fetch`
 //! closure by the composition root — is the only part left as real IO.
 
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -156,14 +158,16 @@ impl<T> RefreshState<T> {
         }
     }
 
-    /// Begin observing, if not already. Idempotent, and cheap enough for a
-    /// caller that reaches it once per frame: an already-active lane keeps its
-    /// current schedule instead of becoming due again.
-    pub fn activate(&mut self) {
+    /// Begin observing, if not already, and report whether the lane changed
+    /// from dormant to active. An already-active lane keeps its current
+    /// schedule instead of becoming due again.
+    pub fn activate(&mut self) -> bool {
         if self.due.is_none() {
             self.due = Some(Duration::ZERO);
             self.woken = true;
+            return true;
         }
+        false
     }
 
     /// Whether a fetch may start at `now`, counting it when it may. A dormant
@@ -228,6 +232,16 @@ impl<T> RefreshState<T> {
 struct Shared<T> {
     state: Mutex<RefreshState<T>>,
     signal: Condvar,
+    #[cfg(test)]
+    notifications: AtomicU64,
+}
+
+impl<T> Shared<T> {
+    fn notify_all(&self) {
+        #[cfg(test)]
+        self.notifications.fetch_add(1, Ordering::Relaxed);
+        self.signal.notify_all();
+    }
 }
 
 /// Locks the lane state, recovering a poisoned lock. An observation snapshot is
@@ -282,6 +296,8 @@ impl<T: Send + 'static> RefreshPump<T> {
         let shared = Arc::new(Shared {
             state: Mutex::new(RefreshState::new(cadence)),
             signal: Condvar::new(),
+            #[cfg(test)]
+            notifications: AtomicU64::new(0),
         });
         let stop = Arc::new(AtomicBool::new(false));
         let thread_shared = Arc::clone(&shared);
@@ -316,15 +332,16 @@ impl<T: Send + 'static> RefreshPump<T> {
     /// Begin observing at the steady cadence (see [`RefreshState::activate`]).
     /// Safe to call every frame.
     pub fn activate(&self) {
-        lock(&self.shared.state).activate();
-        self.shared.signal.notify_all();
+        if lock(&self.shared.state).activate() {
+            self.shared.notify_all();
+        }
     }
 
     /// Ask for an immediate out-of-cadence observation, activating the lane if
     /// it was dormant (see [`RefreshState::wake`]).
     pub fn wake(&self) {
         lock(&self.shared.state).wake();
-        self.shared.signal.notify_all();
+        self.shared.notify_all();
     }
 
     /// Non-blocking drain of the newest observation. This is the only call the
@@ -338,6 +355,11 @@ impl<T: Send + 'static> RefreshPump<T> {
     pub fn metrics(&self) -> RefreshMetrics {
         lock(&self.shared.state).metrics()
     }
+
+    #[cfg(test)]
+    fn notifications(&self) -> u64 {
+        self.shared.notifications.load(Ordering::Relaxed)
+    }
 }
 
 impl<T> Drop for RefreshPump<T> {
@@ -345,7 +367,7 @@ impl<T> Drop for RefreshPump<T> {
         self.stop.store(true, Ordering::Release);
         // Cut a pending wait short so quitting never waits out the cadence.
         lock(&self.shared.state).woken = true;
-        self.shared.signal.notify_all();
+        self.shared.notify_all();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -390,7 +412,7 @@ mod tests {
     #[test]
     fn an_activated_lane_is_due_immediately_and_then_only_once_per_cadence() {
         let mut state = RefreshState::<u32>::new(cadence());
-        state.activate();
+        assert!(state.activate());
         assert!(state.begin(Duration::ZERO));
         state.complete(Duration::ZERO, Ok(1));
         // Every frame of the next half second re-checks and finds nothing due.
@@ -452,7 +474,7 @@ mod tests {
     #[test]
     fn repeated_wakes_inside_one_period_collapse_into_one_fetch() {
         let mut state = RefreshState::<u32>::new(cadence());
-        state.activate();
+        assert!(state.activate());
         state.complete(Duration::ZERO, Ok(1));
         for _ in 0..10 {
             state.wake();
@@ -469,7 +491,7 @@ mod tests {
     #[test]
     fn an_idle_lane_request_count_follows_the_cadence_not_the_frame_rate() {
         let mut state = RefreshState::<u32>::new(cadence());
-        state.activate();
+        assert!(state.activate());
         let mut connects = 0u32;
         // Ten seconds of 16ms frames: 625 frames, 20 cadence periods.
         for frame in 0..625u64 {
@@ -504,6 +526,19 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(pump.metrics().fetches, 1);
+    }
+
+    #[test]
+    fn an_active_lane_does_not_notify_the_worker_again() {
+        let pump = RefreshPump::spawn(cadence(), || Ok(1u32));
+
+        pump.activate();
+        assert_eq!(pump.notifications(), 1);
+
+        for _ in 0..100 {
+            pump.activate();
+        }
+        assert_eq!(pump.notifications(), 1);
     }
 
     #[test]
@@ -592,6 +627,7 @@ mod tests {
         let shared = Shared {
             state: Mutex::new(RefreshState::<u32>::new(cadence())),
             signal: Condvar::new(),
+            notifications: AtomicU64::new(0),
         };
         let started = Instant::now();
         wait_for_next_round(&shared, Duration::ZERO);

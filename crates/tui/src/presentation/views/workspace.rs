@@ -445,6 +445,13 @@ impl HomeProjection {
         self
     }
 
+    /// Borrow the focused live terminal projection for a shell-owned overlay
+    /// that needs to rebuild the current Home frame.
+    #[must_use]
+    pub(crate) const fn terminal_view(&self) -> Option<&TerminalViewProjection> {
+        self.terminal_view.as_ref()
+    }
+
     /// Replace the open drawer's presentation material without changing its
     /// controller-owned open/closed state. A closed drawer ignores supplied
     /// material, keeping runtime inventory from opening UI implicitly.
