@@ -810,9 +810,11 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   session モードは session worktree の外を狙う file 書き込みを拒否し、root モードはコーディネータの
   リポジトリ変更（全 file 書き込みツールと read-only allowlist 外の shell command）を拒否する。malformed・
   未知の呼び出しは fail-closed で拒否し、拒否は Claude の `PreToolUse` 契約どおり stdout の
-  `hookSpecificOutput`（`permissionDecision: "deny"`、終了コード 0）で返す。判定の純粋ロジックは
-  `usagi-core` の [`usecase::workspace_guard`] にあり、`cli/hooks/guard_workspace` はその薄い stdin → stdout
-  シム（実 stdin は合成ルートが束ねる）。`agent-phase <phase>` は phase を daemon へ報告する。引数の phase は
+  `hookSpecificOutput`（`permissionDecision: "deny"`、終了コード 0）で返す。判定ロジックは
+  `usagi-core` の [`usecase::workspace_guard`] にある。ただし session モードの path 判定は、symlink 経由の
+  worktree 脱出を正しく拒否するため、`canonicalize` と path existence の read-only filesystem 照会を
+  usecase 内で直接行うため純粋関数ではない。`cli/hooks/guard_workspace` は stdin → stdout の変換とこの判定の
+  呼び出しを担う薄い adapter で、実 stdin は合成ルートが束ねる。`agent-phase <phase>` は phase を daemon へ報告する。引数の phase は
   core の closed vocabulary（`ready` / `running` / `waiting` / `ended` / `exited`）で、hook の stdin JSON が名乗る
   `hook_event_name` が usagi の配線どおりその phase を意味することも検証する（event と phase の対応表は
   `usagi-core` の `domain::session_lifecycle` が正本で、hook を注入する adapter 側も同じ表を使う）。報告は

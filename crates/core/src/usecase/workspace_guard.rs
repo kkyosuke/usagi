@@ -1,10 +1,12 @@
-//! エージェントのツール呼び出しを「どこで動いているか」に応じて許可判定する純粋ロジック。
+//! エージェントのツール呼び出しを「どこで動いているか」に応じて許可判定するロジック。
 //!
 //! usagi の session worktree はメインリポジトリの **内側**（`<repo>/.usagi/sessions/<name>/`）に
 //! 置かれるため、リポジトリルートや別セッションの worktree がディスク上で 1 つ上の階層に並ぶ。
 //! `<repo>/src/...` を編集したり親リポジトリへ `cd` するエージェントは、意図とは別のツリーを
-//! 触ってしまう。この module はその判定の「純粋な決定部」で、Claude Code の `PreToolUse` フックへ
-//! どう配線するかは [`guard-workspace`](../../../../usagi_cli/cli/hooks/guard_workspace) が持つ。
+//! 触ってしまう。この module はその判定を持ち、Claude Code の `PreToolUse` フックへどう配線するかは
+//! [`guard-workspace`](../../../../usagi_cli/cli/hooks/guard_workspace) が持つ。session モードだけは、
+//! symlink 経由の脱出を正しく拒否するため [`std::fs::canonicalize`] と path existence の read-only
+//! filesystem 照会を行う。
 //!
 //! 判定はエージェントの `cwd` を起点に 2 モードに分かれる。
 //!
