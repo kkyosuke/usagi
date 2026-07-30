@@ -1,13 +1,13 @@
 ---
 number: 586
 title: docs/refactor(core): workspace_guard の実IOと "pure" 記述の不整合を解消する
-status: todo
+status: done
 priority: medium
 labels: [core, architecture, docs]
 dependson: []
 related: []
 created_at: 2026-07-30T10:47:32.234143+00:00
-updated_at: 2026-07-30T10:47:32.234143+00:00
+updated_at: 2026-07-30T23:17:58.396732+00:00
 ---
 
 ## 背景
