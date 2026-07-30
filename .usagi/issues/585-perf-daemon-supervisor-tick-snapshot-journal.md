@@ -1,13 +1,13 @@
 ---
 number: 585
 title: perf(daemon): supervisor tick の冗長な snapshot 二重読込とjournal全再生を無くす
-status: todo
+status: done
 priority: high
 labels: [daemon, performance]
 dependson: []
 related: []
 created_at: 2026-07-30T10:47:19.908125+00:00
-updated_at: 2026-07-30T10:47:19.908125+00:00
+updated_at: 2026-07-30T22:41:12.275974+00:00
 ---
 
 ## 背景

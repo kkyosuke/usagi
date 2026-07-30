@@ -1,11 +1,15 @@
 //! Durable snapshot plus append-only journal for supervisor runs.
 //!
 //! The journal is appended and fsynced before its derived snapshot is atomically
-//! replaced.  On restart a snapshot is replayed from the journal; a torn final
-//! JSONL record is ignored because it was never a durable, complete event.
+//! replaced. A replay checkpoint seeks past history already reflected by the
+//! snapshot while the full journal remains available to the event-history API.
+//! On restart, a torn final JSONL record is ignored because it was never a
+//! durable, complete event.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -17,6 +21,13 @@ use crate::infrastructure::persistence::{json_file, store_lock::StoreLock};
 
 const SNAPSHOT_SUFFIX: &str = ".snapshot.json";
 const JOURNAL_SUFFIX: &str = ".events.jsonl";
+const CHECKPOINT_SUFFIX: &str = ".replay.json";
+
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
+struct ReplayCheckpoint {
+    snapshot_revision: u64,
+    journal_offset: u64,
+}
 
 /// Cursor used to page a run's event history without exposing payload bodies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -35,12 +46,16 @@ pub struct EventQuery {
 /// A daemon-owned durable supervisor store rooted at its state directory.
 pub struct SupervisorStore {
     dir: PathBuf,
+    #[cfg(test)]
+    journal_bytes_read: Cell<u64>,
 }
 impl SupervisorStore {
     #[must_use]
     pub fn new(daemon_state_dir: &Path) -> Self {
         Self {
             dir: daemon_state_dir.join("supervisor-runs"),
+            #[cfg(test)]
+            journal_bytes_read: Cell::new(0),
         }
     }
     #[must_use]
@@ -51,13 +66,17 @@ impl SupervisorStore {
     pub fn journal_path(&self, id: SupervisorRunId) -> PathBuf {
         self.dir.join(format!("{id}{JOURNAL_SUFFIX}"))
     }
+    fn checkpoint_path(&self, id: SupervisorRunId) -> PathBuf {
+        self.dir.join(format!("{id}{CHECKPOINT_SUFFIX}"))
+    }
     /// Creates the initial atomically-written snapshot.
     ///
     /// # Errors
     ///
     /// Returns an error when the state directory or snapshot cannot be written.
     pub fn initialize(&self, run: &SupervisorRun) -> Result<()> {
-        json_file::write_atomic(&self.dir, &self.snapshot_path(run.supervisor_run_id), run)
+        json_file::write_atomic(&self.dir, &self.snapshot_path(run.supervisor_run_id), run)?;
+        self.write_checkpoint(run.supervisor_run_id, run.state_revision, 0)
     }
     /// Loads and reconstructs a run, replaying complete events not yet reflected
     /// by the snapshot.
@@ -66,13 +85,34 @@ impl SupervisorStore {
     ///
     /// Returns an error when a snapshot or a non-final journal record is corrupt.
     pub fn load(&self, id: SupervisorRunId) -> Result<Option<SupervisorRun>> {
-        let Some(mut run) = json_file::read(&self.snapshot_path(id))? else {
+        let Some(run) = json_file::read(&self.snapshot_path(id))? else {
             return Ok(None);
         };
-        for event in self.read_journal(id)? {
+        self.replay_snapshot(run).map(Some)
+    }
+    fn replay_snapshot(&self, mut run: SupervisorRun) -> Result<SupervisorRun> {
+        let snapshot_revision = run.state_revision;
+        let checkpoint: Option<ReplayCheckpoint> =
+            json_file::read(&self.checkpoint_path(run.supervisor_run_id))?;
+        let checkpoint_matches =
+            checkpoint.is_some_and(|checkpoint| checkpoint.snapshot_revision == snapshot_revision);
+        let offset = checkpoint
+            .filter(|checkpoint| checkpoint.snapshot_revision == snapshot_revision)
+            .map_or(0, |checkpoint| checkpoint.journal_offset);
+        let (events, journal_end) = self.read_journal_from(run.supervisor_run_id, offset)?;
+        let journal_was_fully_reflected = events
+            .last()
+            .is_none_or(|event| event.sequence <= snapshot_revision);
+        for event in events {
             reduce(&mut run, &event).map_err(anyhow::Error::msg)?;
         }
-        Ok(Some(run))
+        // Older stores have no checkpoint. Once their snapshot covers the
+        // journal, build the replay cursor so subsequent loads seek directly to
+        // events appended after that snapshot.
+        if !checkpoint_matches && journal_was_fully_reflected {
+            self.write_checkpoint(run.supervisor_run_id, snapshot_revision, journal_end)?;
+        }
+        Ok(run)
     }
     /// Appends an event under the cross-process store lock, requiring exact
     /// sequence CAS. Duplicate event IDs are safely returned as a no-op.
@@ -92,6 +132,7 @@ impl SupervisorStore {
             .load(id)?
             .ok_or_else(|| anyhow::anyhow!("supervisor run does not exist"))?;
         if run.applied_events.contains(&event.event_id) {
+            self.checkpoint_current_journal(id, run.state_revision)?;
             return Ok(run);
         }
         if run.state_revision != expected_revision {
@@ -103,6 +144,7 @@ impl SupervisorStore {
         reduce(&mut run, event).map_err(anyhow::Error::msg)?;
         self.append(id, event)?;
         json_file::write_atomic(&self.dir, &self.snapshot_path(id), &run)?;
+        self.checkpoint_current_journal(id, run.state_revision)?;
         Ok(run)
     }
     /// Returns the redaction-safe aggregate projection.
@@ -137,9 +179,7 @@ impl SupervisorStore {
             }
             let snapshot: SupervisorRun = json_file::read(&path)?
                 .ok_or_else(|| anyhow::anyhow!("supervisor snapshot disappeared"))?;
-            if let Some(run) = self.load(snapshot.supervisor_run_id)? {
-                runs.push(run);
-            }
+            runs.push(self.replay_snapshot(snapshot)?);
         }
         runs.sort_by_key(|run| (run.created_at, run.supervisor_run_id));
         Ok(runs)
@@ -185,26 +225,83 @@ impl SupervisorStore {
         file.sync_all()?;
         Ok(())
     }
+    fn checkpoint_current_journal(
+        &self,
+        id: SupervisorRunId,
+        snapshot_revision: u64,
+    ) -> Result<()> {
+        let journal_offset = match fs::metadata(self.journal_path(id)) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error).context("failed to inspect supervisor event journal"),
+        };
+        self.write_checkpoint(id, snapshot_revision, journal_offset)
+    }
+    fn write_checkpoint(
+        &self,
+        id: SupervisorRunId,
+        snapshot_revision: u64,
+        journal_offset: u64,
+    ) -> Result<()> {
+        json_file::write_atomic(
+            &self.dir,
+            &self.checkpoint_path(id),
+            &ReplayCheckpoint {
+                snapshot_revision,
+                journal_offset,
+            },
+        )
+    }
     fn read_journal(&self, id: SupervisorRunId) -> Result<Vec<SupervisorEvent>> {
+        self.read_journal_from(id, 0).map(|(events, _)| events)
+    }
+    fn read_journal_from(
+        &self,
+        id: SupervisorRunId,
+        offset: u64,
+    ) -> Result<(Vec<SupervisorEvent>, u64)> {
         let path = self.journal_path(id);
-        let file = match fs::File::open(&path) {
+        let mut file = match fs::File::open(&path) {
             Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((vec![], 0)),
             Err(error) => return Err(error).context("failed to open supervisor event journal"),
         };
+        let journal_end = file.metadata()?.len();
+        if offset > journal_end {
+            bail!("supervisor replay checkpoint is beyond the event journal");
+        }
+        if offset > 0 {
+            file.seek(SeekFrom::Start(offset - 1))?;
+            let mut preceding = [0];
+            file.read_exact(&mut preceding)?;
+            if preceding != *b"\n" {
+                bail!("supervisor replay checkpoint is not at an event boundary");
+            }
+        }
+        file.seek(SeekFrom::Start(offset))?;
         let mut result = vec![];
-        let lines: Vec<_> = BufReader::new(file)
-            .lines()
-            .collect::<std::io::Result<_>>()?;
+        let mut reader = BufReader::new(file);
+        let mut lines = Vec::new();
+        loop {
+            let mut line = String::new();
+            let bytes = reader.read_line(&mut line)?;
+            if bytes == 0 {
+                break;
+            }
+            #[cfg(test)]
+            self.journal_bytes_read
+                .set(self.journal_bytes_read.get() + bytes as u64);
+            lines.push(line);
+        }
         for (index, line) in lines.iter().enumerate() {
-            match serde_json::from_str(line) {
+            match serde_json::from_str(line.trim_end_matches('\n')) {
                 Ok(event) => result.push(event),
                 // A crash may leave only the final non-fsynced JSONL bytes.
                 Err(_) if index + 1 == lines.len() => break,
                 Err(error) => return Err(error).context("corrupt supervisor event journal"),
             }
         }
-        Ok(result)
+        Ok((result, journal_end))
     }
 }
 
@@ -267,6 +364,115 @@ mod tests {
             store.load(id).unwrap().unwrap().query().state,
             SupervisorRunState::Running
         );
+    }
+
+    #[test]
+    fn load_reads_only_events_after_the_snapshot_checkpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        let run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let id = run.supervisor_run_id;
+        store.initialize(&run).unwrap();
+        let mut saved = run;
+        for sequence in 1..=20 {
+            saved = store
+                .apply(id, saved.state_revision, &event(sequence))
+                .unwrap();
+        }
+        let pending = event(21);
+        store.append(id, &pending).unwrap();
+        let pending_bytes = serde_json::to_vec(&pending).unwrap().len() as u64 + 1;
+        let full_journal_bytes = fs::metadata(store.journal_path(id)).unwrap().len();
+
+        store.journal_bytes_read.set(0);
+        let loaded = store.load(id).unwrap().unwrap();
+
+        assert_eq!(loaded.state_revision, 21);
+        assert_eq!(store.journal_bytes_read.get(), pending_bytes);
+        assert!(pending_bytes < full_journal_bytes);
+    }
+
+    #[test]
+    fn replay_checkpoint_boundaries_fail_closed_and_missing_journals_use_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        let run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let id = run.supervisor_run_id;
+        store.initialize(&run).unwrap();
+        store
+            .checkpoint_current_journal(id, run.state_revision)
+            .unwrap();
+
+        store.append(id, &event(1)).unwrap();
+        store.write_checkpoint(id, run.state_revision, 1).unwrap();
+        assert!(
+            store
+                .load(id)
+                .unwrap_err()
+                .to_string()
+                .contains("not at an event boundary")
+        );
+        let journal_end = fs::metadata(store.journal_path(id)).unwrap().len();
+        store
+            .write_checkpoint(id, run.state_revision, journal_end + 1)
+            .unwrap();
+        assert!(
+            store
+                .load(id)
+                .unwrap_err()
+                .to_string()
+                .contains("beyond the event journal")
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            fs::remove_file(store.journal_path(id)).unwrap();
+            symlink(store.journal_path(id), store.journal_path(id)).unwrap();
+            assert!(
+                store
+                    .checkpoint_current_journal(id, run.state_revision)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("failed to inspect supervisor event journal")
+            );
+        }
+    }
+
+    #[test]
+    fn load_migrates_a_fully_reflected_legacy_journal_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        let run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let id = run.supervisor_run_id;
+        store.initialize(&run).unwrap();
+        store.apply(id, 0, &event(1)).unwrap();
+        fs::remove_file(store.checkpoint_path(id)).unwrap();
+
+        store.journal_bytes_read.set(0);
+        store.load(id).unwrap();
+        assert!(store.journal_bytes_read.get() > 0);
+        store.journal_bytes_read.set(0);
+        store.load(id).unwrap();
+        assert_eq!(store.journal_bytes_read.get(), 0);
     }
 
     #[test]
