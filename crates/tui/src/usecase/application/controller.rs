@@ -7612,6 +7612,10 @@ mod tests {
         let (workspace, session, _) = ids();
         assert_eq!(TargetPhase::Absent.rank(), 0);
         assert_eq!(
+            TargetPhase::from_agent_phase(AgentPhase::Absent),
+            TargetPhase::Absent
+        );
+        assert_eq!(
             NewValidationError::DirectoryInvalid.message(),
             "directory name must not contain path separators"
         );
