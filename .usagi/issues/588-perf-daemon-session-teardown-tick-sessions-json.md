@@ -1,13 +1,13 @@
 ---
 number: 588
 title: perf(daemon): session teardown tick の毎秒 sessions.json 全体再読込を無くす
-status: todo
+status: in-progress
 priority: low
 labels: [daemon, performance]
 dependson: []
 related: []
 created_at: 2026-07-30T10:48:00.313792+00:00
-updated_at: 2026-07-30T10:48:00.313792+00:00
+updated_at: 2026-07-30T23:13:01.777652+00:00
 ---
 
 ## 背景
